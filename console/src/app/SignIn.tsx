@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { Button } from "@lux/design-system";
+import { Button, Logo } from "@lux/design-system";
 import { signIn } from "../api/index.ts";
 
 /** Asks for an API key. Shown when there is none, or after a 401. */
@@ -14,7 +14,7 @@ export function SignIn({ reason }: { reason?: string }) {
     <div className="signin">
       <form className="signin-card" onSubmit={submit}>
         <div className="brand signin-brand">
-          <span className="brand-mark" aria-hidden="true" />
+          <Logo className="brand-mark" />
           <span className="brand-name">lux</span>
           <span className="brand-sub">console</span>
         </div>

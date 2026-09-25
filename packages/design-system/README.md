@@ -155,6 +155,7 @@ State mapping (`src/states.ts`):
 
 ## Components
 
+Logo (the star, 16–32px; the detailed mark is `docs/brand/lux.svg`),
 Button, IconButton, Badge, StatePill, StatTile, Sparkline, Card, Table, Tabs,
 Tooltip, Select, TenantPicker, TimeRangePicker, TimeSeriesChart (uPlot, with
 optional vertical `marks`; height from `--chart-h` unless given), Timeline

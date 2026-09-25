@@ -8,6 +8,7 @@ export * from "./EmptyState.tsx";
 export * from "./IdChip.tsx";
 export * from "./KeyValue.tsx";
 export * from "./LogView.tsx";
+export * from "./Logo.tsx";
 export * from "./PageHeader.tsx";
 export * from "./Select.tsx";
 export * from "./Sparkline.tsx";

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { IconButton, LiveDot, TenantPicker, TimeRangePicker, useDensity, useTheme, type Tenant } from "@lux/design-system";
+import { IconButton, LiveDot, Logo, TenantPicker, TimeRangePicker, useDensity, useTheme, type Tenant } from "@lux/design-system";
 import { IconClose, IconGrid, IconLayers, IconLogout, IconMenu, IconMoon, IconPlay, IconRows, IconRowsLoose, IconServer, IconSidebar, IconSliders, IconSun, IconUsers } from "@lux/design-system/icons";
 import { liveLabel, signOut, useLiveState, useSession } from "../api/index.ts";
 import { Link, usePath } from "./router.tsx";
@@ -124,7 +124,7 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
 
   const brand = (
     <Link to="/" className="brand" aria-label="lux console">
-      <span className="brand-mark" aria-hidden="true" />
+      <Logo className="brand-mark" />
       <span className="brand-name">lux</span>
       <span className="brand-sub">console</span>
     </Link>

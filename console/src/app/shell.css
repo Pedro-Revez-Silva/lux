@@ -53,11 +53,6 @@
 }
 .brand-mark {
   align-self: center;
-  width: 12px;
-  height: 12px;
-  border-radius: 3px;
-  background: var(--accent);
-  box-shadow: inset 0 0 0 3px var(--bg-surface), inset 0 0 0 4px var(--accent);
   flex: none;
 }
 .brand-name {

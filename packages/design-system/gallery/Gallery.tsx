@@ -19,6 +19,7 @@ import {
   KeyValue,
   LiveDot,
   LogView,
+  Logo,
   PageHeader,
   RUN_STATE_LIST,
   SectionHeader,
@@ -57,7 +58,7 @@ function Section({ id, title, children, note }: { id: string; title: string; not
   );
 }
 
-const SECTIONS = ["colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "tabs", "selects", "charts", "timeline", "logs", "keyvalue", "dialogs", "feedback", "format"];
+const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "tabs", "selects", "charts", "timeline", "logs", "keyvalue", "dialogs", "feedback", "format"];
 
 /** The gallery: a slim bar (brand, theme and density) over the sections. */
 export function Gallery() {
@@ -67,7 +68,7 @@ export function Gallery() {
     <>
       <header className="gallery-bar">
         <span className="gallery-brand">
-          <span className="gallery-mark" aria-hidden="true" />
+          <Logo className="gallery-mark" />
           <span className="gallery-name">lux</span>
           <span className="gallery-sub">design system</span>
         </span>
@@ -99,6 +100,7 @@ function Sections() {
       </nav>
       <div className="sg-body">
         <PageHeader title="Design system" description="Every token and component the lux console is built from, with fake data. Toggle the theme and the density in the bar above." />
+        <LogoDemo />
         <Colors />
         <Type />
         <Spacing />
@@ -143,6 +145,18 @@ function SwatchRow({ names, text }: { names: string[]; text?: boolean }) {
         <Swatch key={n} name={n} text={text} />
       ))}
     </div>
+  );
+}
+
+function LogoDemo() {
+  return (
+    <Section id="logo" title="Logo" note="A four-point star in the chart gold, with a light and a warm facet and a navy outline, the same in both themes. Logo draws the small version (16–32px: the favicon, the sidebar); docs/brand/lux.svg is the detailed one, with glow and facets, for 48px and up.">
+      <div className="sg-row" style={{ alignItems: "end", gap: 24 }}>
+        {[16, 20, 24, 32, 48].map((s) => (
+          <Logo key={s} size={s} />
+        ))}
+      </div>
+    </Section>
   );
 }
 

@@ -1,4 +1,4 @@
-# lux
+# <img src="docs/brand/lux.svg" alt="" width="36" align="top"> lux
 
 lux runs workloads in isolated containers on any host. A workload can be a
 plain command or a coding agent. lux streams what the workload does, lets you

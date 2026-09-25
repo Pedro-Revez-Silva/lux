@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <title>lux</title>
+  <path d="M16 1.5Q17.3 14.7 30.5 16Q17.3 17.3 16 30.5Q14.7 17.3 1.5 16Q14.7 14.7 16 1.5Z" fill="#ffd166" stroke="#163f7a" stroke-width="1.25" stroke-linejoin="round"/>
+  <path d="M16 3Q14.8 14.8 3 16L16 16Z" fill="#fff4cc"/>
+  <path d="M29 16Q17.2 17.2 16 29L16 16Z" fill="#ff9f43"/>
+</svg>
