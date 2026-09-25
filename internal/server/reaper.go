@@ -91,14 +91,18 @@ func (s *Server) reapHosts(ctx context.Context) error {
 	return err
 }
 
-// reapTimeouts stops Runs that exceeded their wall-clock timeout, counted
-// across all placements from first start.
+// reapTimeouts stops Runs that exceeded their timeout: time spent running,
+// summed over placements (each from reaching running to its end, or now).
+// Time stopped, lost or waiting for a host does not count, so a Run parked
+// for days and resumed keeps what it had left. No timeout: no limit.
 func (s *Server) reapTimeouts(ctx context.Context) error {
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT r.id, r.tenant_id, r.current_epoch FROM runs r
 			WHERE r.state IN ('starting', 'running') AND r.first_started_at IS NOT NULL
-			  AND r.first_started_at + ((r.spec->>'timeout')::interval) < now()
+			  AND coalesce(r.spec->>'timeout', '') NOT IN ('', '0s')
+			  AND (SELECT coalesce(sum(coalesce(p.ended_at, now()) - p.started_at), interval '0')
+			       FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) > (r.spec->>'timeout')::interval
 			  AND NOT EXISTS (SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch AND p.stop_requested_at IS NOT NULL)
 			LIMIT 50`)
 		if err != nil {

@@ -898,7 +898,7 @@ components:
             - array
             - "null"
         timeout:
-          description: A Go duration ("4h", "90s"), or a number of seconds. Responses carry the string.
+          description: "The most time the Run may spend running, summed over its placements (time stopped, lost, or waiting for a host does not count). Past it, the Run is stopped and fails. Unset: no limit."
           oneOf:
             - examples:
                 - 4h

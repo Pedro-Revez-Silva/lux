@@ -30,7 +30,7 @@ type RunSpec struct {
 	Git       *Git              `json:"git,omitempty" yaml:"git,omitempty"`
 	Volumes   []Volume          `json:"volumes,omitempty" yaml:"volumes,omitempty"`
 	Resources Resources         `json:"resources" yaml:"resources" doc:"What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, disk 20Gi, pids 1024, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_DISK, LUX_DEFAULT_PIDS). disk bounds the writable layer plus state volumes: a Run over it is stopped and fails."`
-	Timeout   Duration          `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	Timeout   Duration          `json:"timeout,omitempty" yaml:"timeout,omitempty" doc:"The most time the Run may spend running, summed over its placements (time stopped, lost, or waiting for a host does not count). Past it, the Run is stopped and fails. Unset: no limit."`
 	Placement Placement         `json:"placement" yaml:"placement"`
 	Network   Network           `json:"network" yaml:"network"`
 	Sandbox   Sandbox           `json:"sandbox" yaml:"sandbox"`
@@ -314,11 +314,8 @@ var (
 	volumeRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 )
 
-// Defaults applied by Normalize.
-const (
-	DefaultTimeout = 24 * time.Hour
-	DefaultGrace   = 30 * time.Second
-)
+// DefaultGrace is a graceful stop's wait before SIGKILL, when unset.
+const DefaultGrace = 30 * time.Second
 
 // Defaults are the resources a Run gets when its spec leaves them unset.
 // An operator sets them per luxd.
@@ -529,8 +526,8 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	if r.CPUs < 0 || r.Memory < 0 || r.Disk < 0 || r.Pids < 0 {
 		fail("resources must not be negative")
 	}
-	if s.Timeout.Duration == 0 {
-		s.Timeout.Duration = DefaultTimeout
+	if s.Timeout.Duration < 0 {
+		fail("timeout must not be negative")
 	}
 	if s.Placement.Pool == "" {
 		s.Placement.Pool = "default"

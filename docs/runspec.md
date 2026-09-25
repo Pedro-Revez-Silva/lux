@@ -61,7 +61,7 @@ volumes:
   - { name: cache, path: /cache, kind: ephemeral }         # empty on every start
 
 resources: { cpus: 4, memory: 8Gi, disk: 50Gi, pids: 2048 }
-timeout: 4h                     # wall-clock across all placements
+timeout: 4h                     # running time, over all placements; unset: no limit
 
 placement:
   pool: default
