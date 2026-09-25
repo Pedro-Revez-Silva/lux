@@ -313,9 +313,12 @@ def test_a_provisioned_outdated_host_is_replaced(lux, ec2):
                        LUX_RUNNER_BIN_DIR=bin_dir)
     try:
         lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps(ec2.template), "--min", "1", "--max", "1")
-        wait_until(lambda: ec2.running(), 60, 1, "no host launched")
-        [first] = ec2.running()
-        wait_until(lambda: [i for i in ec2.running() if i["id"] != first["id"]], 120, 1, "no replacement launched")
+        # By launches, not by what is running at a poll: an outdated host
+        # lives only a second or two (registered, drained, idle,
+        # terminated), so a poll can miss every one of them on a busy host.
+        wait_until(lambda: ec2.calls.count("RunInstances") >= 1, 60, 0.5, "no host launched")
+        wait_until(lambda: ec2.calls.count("RunInstances") >= 2 and ec2.calls.count("TerminateInstances") >= 1,
+                   120, 0.5, "the outdated host was not replaced")
     finally:
         # Stop churning (every replacement is equally "outdated" while
         # LUX_RUNNER_BIN_DIR stays mismatched) before the pool is removed.
