@@ -125,8 +125,8 @@ data "aws_ami" "debian" {
   }
 }
 
-# The control host's SSM Session Manager attachment lives in iam.tf
-# (control_ssm), alongside its other IAM statements.
+# The control host's SSM agent policy lives in iam.tf
+# (control_ssm_agent), alongside its other IAM statements.
 
 # Survives instance replacement: not attached to the instance's lifecycle,
 # and protected from accidental destroy. To replace the control host,
@@ -218,7 +218,9 @@ resource "aws_instance" "control" {
     http_endpoint = "enabled"
   }
 
-  tags = merge(var.tags, { Name = "${var.name}-control", "lux:managed" = "true" })
+  # No lux:* tags: those mark instances luxd launched, and iam.tf lets
+  # luxd terminate an instance carrying lux:managed and lux:host.
+  tags = merge(var.tags, { Name = "${var.name}-control" })
 
   lifecycle {
     # ami: most_recent on data.aws_ami.debian means a newer Debian image
@@ -234,6 +236,13 @@ resource "aws_instance" "control" {
     # above and ssm.tf's module comment), which lux-render-config.sh
     # re-reads on every deploy run without touching this resource.
     ignore_changes = [ami, user_data_base64]
+
+    # tags_all includes the provider's default_tags, which this module
+    # cannot strip: refuse to create a control host luxd could terminate.
+    postcondition {
+      condition     = !contains(keys(self.tags_all), "lux:host") && lookup(self.tags_all, "lux:managed", "") != "true"
+      error_message = "The control host must not carry lux:host or lux:managed=true (from var.tags or the provider's default_tags): luxd's role may terminate instances with those tags."
+    }
   }
 }
 

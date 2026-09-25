@@ -60,12 +60,18 @@ separate private repo should hold the real values and state.
   `aws ec2 get-console-output`.
 - **IAM** (`aws/iam.tf`): the control host's instance role only —
   `ec2:RunInstances` scoped to the runner launch templates/subnets/SG
-  (including spot-instances-request, for spot pools),
+  (including spot-instances-request, for spot pools) and only from a
+  runner launch template (`ec2:LaunchTemplate` on the instance),
   `ec2:CreateTags` on create, `ec2:TerminateInstances` conditioned on
-  `lux:managed=true`, `ec2:DescribeInstances`, S3 on its own buckets, and
-  `ssm:GetParameter(s)` under its own prefix (the desired lux version and
-  the values `lux-render-config.sh` re-reads on every deploy run — see
-  "Control host" above). Also creates the `AWSServiceRoleForEC2Spot`
+  `lux:managed=true` and a `lux:host` tag (set only by luxd at launch; the
+  control host carries no `lux:*` tag, and a postcondition refuses one
+  arriving through `default_tags`), `ec2:DescribeInstances`, S3 on its own
+  buckets, and `ssm:GetParameter(s)` under its own prefix (the desired lux
+  version and the values `lux-render-config.sh` re-reads on every deploy
+  run — see "Control host" above). The SSM agent gets an inline copy of
+  `AmazonSSMManagedInstanceCore` without its account-wide
+  `ssm:GetParameter(s)` (and `ssm:GetManifest`), not the managed policy
+  itself. Also creates the `AWSServiceRoleForEC2Spot`
   service-linked role, needed before a fresh account's first spot
   launch, behind `create_spot_service_linked_role` (default true — set
   to false, and `terraform import` it, on an account that already has

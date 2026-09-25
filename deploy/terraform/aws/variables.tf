@@ -13,6 +13,13 @@ variable "tags" {
   description = "Tags applied to every resource this module creates."
   type        = map(string)
   default     = {}
+
+  # luxd marks what it launches with lux:* tags and may terminate
+  # instances carrying them (iam.tf): they must never come from here.
+  validation {
+    condition     = length([for k in keys(var.tags) : k if startswith(k, "lux:")]) == 0
+    error_message = "tags must not contain lux:* keys: those mark instances luxd launched and may terminate."
+  }
 }
 
 variable "vpc_cidr" {
