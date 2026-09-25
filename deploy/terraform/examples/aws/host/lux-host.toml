@@ -1,0 +1,20 @@
+# Desired state of the lux control host. The host's lux-reconcile timer
+# applies this file within 5 minutes of it landing on the configured ref.
+# Schema: host/README.md. Secrets never go here.
+
+# A release tag of release_repo, or "none" to install nothing.
+lux_version = "none"
+
+# GitHub "owner/repo" that publishes the releases.
+release_repo = "marcioapm/lux"
+
+# Operator settings passed to /etc/lux/luxd.toml (docs/operations.md);
+# absent keys keep luxd's defaults. The values below are those defaults.
+[luxd]
+debug = false
+scale_down_after = "10m"
+
+[luxd.defaults]
+cpus = 2
+memory = "8Gi"
+disk = "20Gi"

@@ -1,0 +1,326 @@
+"""Fakes for everything the reconciler shells out to, and a host rooted in
+a temporary directory.
+
+`aws`, `systemctl`, the Postgres tools, mount/blkid/mkfs and `luxd migrate`
+are answered by FakeSh from in-memory state. `git` runs for real, against
+bare repositories in the temporary directory: the reconciler's checkout
+logic (fetch, hard reset, detecting a host/ change) is what is under test,
+and a local remote needs no network.
+"""
+import dataclasses
+import hashlib
+import io
+import json
+import os
+import subprocess
+import sys
+import tarfile
+import urllib.error
+
+import pytest
+
+HOST_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, HOST_DIR)
+
+from luxhost import release  # noqa: E402
+from luxhost.host import Host, Paths  # noqa: E402
+
+PREFIX = "/lux"
+REGION = "eu-north-1"
+VOLUME = "vol-0123456789abcdef0"
+
+
+def completed(argv, rc=0, stdout="", stderr=""):
+    return subprocess.CompletedProcess(argv, rc, stdout=stdout, stderr=stderr)
+
+
+@dataclasses.dataclass
+class FakeSh:
+    root: str
+    ssm: dict = dataclasses.field(default_factory=dict)
+    active: set = dataclasses.field(default_factory=set)
+    enabled: set = dataclasses.field(default_factory=set)
+    databases: set = dataclasses.field(default_factory=lambda: {"postgres"})
+    mounted: bool = False
+    has_filesystem: bool = False
+    migrate_rc: int = 0
+    # Whether luxd comes up after a restart, by the version `current` points at.
+    healthy_versions: set = dataclasses.field(default_factory=set)
+    calls: list = dataclasses.field(default_factory=list)
+
+    def __call__(self, argv, input=None, env=None, **kwargs):
+        argv = list(argv)
+        if argv[0] == "git":
+            return subprocess.run(argv, input=input, env=env, capture_output=True, text=True, check=False)
+        self.calls.append(argv)
+        cmd = os.path.basename(argv[0])
+        handler = getattr(self, "_" + cmd.replace("-", "_").replace(".", "_"), None)
+        if cmd == "luxd":
+            return completed(argv, self.migrate_rc, stderr="" if self.migrate_rc == 0 else "migration 7 failed")
+        if handler is None:
+            raise AssertionError(f"unexpected command: {argv}")
+        return handler(argv, input)
+
+    def commands(self, name):
+        return [c for c in self.calls if os.path.basename(c[0]) == name]
+
+    def _aws(self, argv, _input):
+        region = argv[argv.index("--region") + 1]
+        assert region == REGION
+        if argv[1:3] == ["ssm", "get-parameters"]:
+            names = argv[argv.index("--names") + 1:argv.index("--region")]
+            found = [{"Name": n, "Value": self.ssm[n]} for n in names if n in self.ssm]
+            return completed(argv, stdout=json.dumps({"Parameters": found}))
+        if argv[1:3] == ["ssm", "get-parameter"]:
+            name = argv[argv.index("--name") + 1]
+            if name not in self.ssm:
+                return completed(argv, 254, stderr="ParameterNotFound")
+            return completed(argv, stdout=self.ssm[name] + "\n")
+        raise AssertionError(f"unexpected aws call: {argv}")
+
+    def _systemctl(self, argv, _input):
+        args = [a for a in argv[1:] if not a.startswith("--")]
+        verb, units = args[0], [u.removesuffix(".service") for u in args[1:]]
+        if verb == "is-active":
+            ok = units[0] in self.active
+            return completed(argv, 0 if ok else 3, stdout="active\n" if ok else "inactive\n")
+        if verb == "is-enabled":
+            return completed(argv, 0 if units[0] in self.enabled else 1)
+        if verb == "enable":
+            self.enabled.update(units)
+            if "--now" in argv:
+                for u in units:
+                    self._start(u)
+            return completed(argv)
+        if verb == "disable":
+            self.enabled.difference_update(units)
+            self.active.difference_update(units)
+            return completed(argv)
+        if verb in ("restart", "start"):
+            self._start(units[0])
+            return completed(argv)
+        if verb == "daemon-reload":
+            return completed(argv)
+        raise AssertionError(f"unexpected systemctl call: {argv}")
+
+    def _start(self, unit):
+        if unit != "luxd":
+            self.active.add(unit)
+            return
+        current = os.path.join(self.root, "usr/local/lux/current")
+        version = os.path.basename(os.readlink(current)) if os.path.islink(current) else None
+        if version in self.healthy_versions:
+            self.active.add("luxd")
+        else:
+            self.active.discard("luxd")
+
+    def _mountpoint(self, argv, _input):
+        return completed(argv, 0 if self.mounted else 1)
+
+    def _blkid(self, argv, _input):
+        return completed(argv, 0 if self.has_filesystem else 2)
+
+    def _mkfs_ext4(self, argv, _input):
+        assert not self.has_filesystem, "formatted a volume that already has a filesystem"
+        self.has_filesystem = True
+        return completed(argv)
+
+    def _mount(self, argv, _input):
+        self.mounted = True
+        return completed(argv)
+
+    def _pg_dropcluster(self, argv, _input):
+        return completed(argv)
+
+    def _pg_createcluster(self, argv, _input):
+        return completed(argv)
+
+    def _chown(self, argv, _input):
+        return completed(argv)
+
+    def _runuser(self, argv, input):
+        inner = argv[argv.index("--") + 1:]
+        if inner[0] == "createdb":
+            self.databases.add(inner[1])
+            return completed(argv)
+        if inner[0] == "psql":
+            if input.startswith("SELECT 1 FROM pg_database"):
+                name = input.split("'")[1]
+                return completed(argv, stdout="1\n" if name in self.databases else "")
+            if input.startswith("ALTER USER postgres"):
+                return completed(argv)
+        raise AssertionError(f"unexpected runuser call: {argv} {input!r}")
+
+
+class FakeResponse(io.BytesIO):
+    def __init__(self, body: bytes, status: int = 200):
+        super().__init__(body)
+        self.status = status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def make_release(version: str, luxd_body: str | None = None) -> dict:
+    """A release as urlopen would serve it: {filename: bytes}."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, body in [("bin/luxd", luxd_body or f"luxd {version}"), ("bin/lux", f"lux {version}")]:
+            data = body.encode()
+            info = tarfile.TarInfo(name)
+            info.size, info.mode = len(data), 0o755
+            tf.addfile(info, io.BytesIO(data))
+        for arch in release.RUNNER_ARCHES:
+            info = tarfile.TarInfo(f"lib/lux/runner/{arch}")
+            info.type, info.mode = tarfile.DIRTYPE, 0o755
+            tf.addfile(info)
+    tarball = f"lux_{version}_linux_{release.arch()}.tar.gz"
+    body = buf.getvalue()
+    return {tarball: body, "SHA256SUMS": f"{hashlib.sha256(body).hexdigest()}  {tarball}\n".encode()}
+
+
+@dataclasses.dataclass
+class FakeWeb:
+    """urlopen: releases under BASE_URL/<version>/, and luxd's /health."""
+    sh: FakeSh
+    releases: dict = dataclasses.field(default_factory=dict)
+    fetched: list = dataclasses.field(default_factory=list)
+
+    BASE_URL = "https://releases.example.com/lux"
+
+    def __call__(self, url, timeout=None):
+        if url.endswith("/health"):
+            if "luxd" in self.sh.active:
+                return FakeResponse(b'{"status":"ok"}')
+            raise urllib.error.URLError("connection refused")
+        self.fetched.append(url)
+        version, name = url.removeprefix(self.BASE_URL + "/").split("/", 1)
+        try:
+            return FakeResponse(self.releases[version][name])
+        except KeyError:
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None) from None
+
+
+def git(*args, cwd=None):
+    out = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip()
+
+
+class ConfigRepo:
+    """A bare 'origin' plus a working clone to commit to it from."""
+
+    def __init__(self, base: str, host_src: str):
+        self.bare = os.path.join(base, "origin.git")
+        self.work = os.path.join(base, "work")
+        git("init", "-q", "--bare", "-b", "main", self.bare)
+        git("clone", "-q", self.bare, self.work)
+        git("config", "user.email", "ops@example.com", cwd=self.work)
+        git("config", "user.name", "ops", cwd=self.work)
+        # The real host code, so a re-exec runs a working reconciler.
+        subprocess.run(
+            ["cp", "-R", host_src, os.path.join(self.work, "host")], check=True,
+        )
+        subprocess.run(["rm", "-rf", os.path.join(self.work, "host", "tests")], check=True)
+        for dirpath, dirnames, _ in os.walk(os.path.join(self.work, "host")):
+            for d in list(dirnames):
+                if d in ("__pycache__", ".pytest_cache"):
+                    subprocess.run(["rm", "-rf", os.path.join(dirpath, d)], check=True)
+        self.commit("initial")
+
+    def write(self, rel: str, content: str):
+        path = os.path.join(self.work, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(content)
+
+    def commit(self, msg: str):
+        git("add", "-A", cwd=self.work)
+        git("commit", "-q", "--allow-empty", "-m", msg, cwd=self.work)
+        git("push", "-q", "origin", "HEAD:main", cwd=self.work)
+
+    def set_desired(self, text: str):
+        self.write("host/lux-host.toml", text)
+        self.commit("desired state")
+
+
+@dataclasses.dataclass
+class Env:
+    root: str
+    sh: FakeSh
+    web: FakeWeb
+    host: Host
+    repo: ConfigRepo
+    checkout: str
+    bootstrap: str
+    reexecs: list
+
+    def path(self, rel: str) -> str:
+        return os.path.join(self.root, rel)
+
+    def run(self):
+        from luxhost.reconcile import main
+
+        def reexec(exe, argv, env):
+            self.reexecs.append(argv)
+            # Run the new code in-process, as execve would have.
+            raise SystemExit(main(host=self.host, bootstrap_path=self.bootstrap, reexec=reexec, environ=env))
+
+        try:
+            return main(host=self.host, bootstrap_path=self.bootstrap, reexec=reexec,
+                        environ={"LUX_RUNNER_IP": "10.60.0.10"})
+        except SystemExit as e:
+            return e.code
+
+
+def desired(version: str = "none", extra: str = "") -> str:
+    return (
+        f'lux_version = "{version}"\n'
+        f'release_base_url = "{FakeWeb.BASE_URL}"\n'
+        f"{extra}"
+    )
+
+
+@pytest.fixture
+def env(tmp_path):
+    root = str(tmp_path / "root")
+    os.makedirs(root)
+    paths = Paths.under(root)
+    for d in ("etc", paths.dev_by_id, paths.root_home):
+        os.makedirs(os.path.join(root, d) if not os.path.isabs(d) else d, exist_ok=True)
+    open(os.path.join(paths.dev_by_id, "nvme-Amazon_Elastic_Block_Store_" + VOLUME.replace("-", "")), "w").close()
+
+    repo = ConfigRepo(str(tmp_path), HOST_DIR)
+    repo.set_desired(desired())
+    checkout = os.path.join(root, "var/lib/lux/config")
+    git("clone", "-q", "-b", "main", repo.bare, checkout)
+
+    sh = FakeSh(root=root)
+    sh.ssm.update({
+        f"{PREFIX}/public_url": "https://lux.example.com",
+        f"{PREFIX}/blob_bucket": "lux-blobs-123456789012-eu-north-1",
+        f"{PREFIX}/backup_bucket": "lux-pg-backups-123456789012-eu-north-1",
+        f"{PREFIX}/db_name": "lux",
+        f"{PREFIX}/luxd_port": "7070",
+        f"{PREFIX}/pg_data_volume_id": VOLUME,
+        f"{PREFIX}/tunnel_token_parameter": f"{PREFIX}/cloudflare-tunnel-token",
+        f"{PREFIX}/cloudflare-tunnel-token": "tunnel-token",
+        f"{PREFIX}/config_repo_url": repo.bare,
+        f"{PREFIX}/config_repo_ref": "main",
+        f"{PREFIX}/cf_access_team": "acme",
+        f"{PREFIX}/cf_access_aud": "aud-tag",
+    })
+    web = FakeWeb(sh)
+    clock = [0.0]
+    host = Host(
+        sh=sh, paths=paths, urlopen=web, log=lambda m: None,
+        sleep=lambda s: clock.__setitem__(0, clock[0] + s), now=lambda: clock[0],
+    )
+    bootstrap = os.path.join(paths.etc_lux, "host.json")
+    os.makedirs(paths.etc_lux, exist_ok=True)
+    with open(bootstrap, "w") as f:
+        json.dump({"region": REGION, "ssm_prefix": PREFIX, "checkout": checkout, "config_repo_path": ""}, f)
+    return Env(root=root, sh=sh, web=web, host=host, repo=repo, checkout=checkout, bootstrap=bootstrap, reexecs=[])
