@@ -93,7 +93,7 @@ def test_the_console_signs_in_through_access(env, access, browser):
     page = ctx.new_page()
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
-    page.goto(env.luxd_url + "/console/")
+    page.goto(env.luxd_url + "/")
     # No key screen: the person's name, and operator pages.
     page.get_by_text("Grace Hopper", exact=True).wait_for(timeout=15_000)
     assert page.get_by_placeholder("lux_", exact=False).count() == 0

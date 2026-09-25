@@ -1,6 +1,6 @@
 # lux console
 
-Operator UI for lux, served by `luxd` at `/console/`. React + TypeScript, built
+Operator UI for lux, served by `luxd` at `/`. React + TypeScript, built
 with Bun only (no Node, npm or Vite).
 
 ## Develop
@@ -8,15 +8,18 @@ with Bun only (no Node, npm or Vite).
 ```bash
 bun install          # once, at the repository root (a Bun workspace: console + packages/*)
 cd console
-bun run dev          # http://localhost:5173/console/  (Bun HTML-import server, HMR)
+bun run dev          # http://localhost:5173/  (Bun HTML-import server, HMR)
 bun run typecheck    # tsc --noEmit
-bun run build        # static files in dist/, assets under /console/
-bun run preview      # serve dist/ under /console/ with SPA fallback (what luxd does)
+bun run build        # static files in dist/, assets under /
+bun run preview      # serve dist/ at / with SPA fallback (what luxd does)
 ```
 
-`dist/` is what `luxd` embeds (`go:embed`) and serves at `/console/`. Every
-unknown path under `/console/` must return `dist/index.html`; the app routes
-client-side with the History API (`src/app/router.tsx`, base path `/console`).
+`dist/` is what `luxd` embeds (`go:embed`) and serves at `/`. Every path
+outside `/v1/` and `/runner/` that is not a built file returns
+`dist/index.html` (a missing `.js`/`.css`/… asset is a 404 instead); the app
+routes client-side with the History API (`src/app/router.tsx`, at the root).
+`/v1/...` and `/runner/...` keep their own JSON errors and 404s, and luxd
+redirects the old `/console/...` paths to the same page at `/`.
 The tenant and time range live in the query string so links carry their scope.
 
 ### Against a real luxd

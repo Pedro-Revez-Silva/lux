@@ -16,7 +16,7 @@ luxd serve        # as many as you like
 `make build` builds the operator console (`console/`, with
 [Bun](https://bun.sh)) and then the binaries in `bin/`; luxd embeds the
 console. A luxd built with plain `go build` and no console build serves, at
-`/console/`, a page saying how to build it.
+`/`, a page saying how to build it.
 
 ### Postgres
 
@@ -88,7 +88,7 @@ its variable; the table below lists them by variable.
 | `LUX_CF_ACCESS_TEAM`, `LUX_CF_ACCESS_AUD` | — | For `cloudflare-access`: the Access team (`acme` or `acme.cloudflareaccess.com`) and the application's AUD tag. |
 | `LUX_CONFIG` | `/etc/lux/luxd.toml` | The configuration file. |
 
-luxd also serves the operator console at `/console/` ([Operators](operators.md#the-console)).
+luxd also serves the operator console at `/` ([Operators](operators.md#the-console)).
 
 ### Tenants, keys and quotas
 

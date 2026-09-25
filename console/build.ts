@@ -1,6 +1,6 @@
-// Production build: static files in dist/, served by luxd at /console/.
-// Asset paths are absolute (/console/…): the app routes client-side, so a
-// page like /console/runs/x must still find /console/index-….js.
+// Production build: static files in dist/, served by luxd at /.
+// Asset paths are absolute (/…): the app routes client-side, so a page
+// like /runs/x must still find /index-….js.
 import { rm, writeFile } from "node:fs/promises";
 
 const outdir = new URL("./dist/", import.meta.url).pathname;
@@ -12,7 +12,7 @@ const result = await Bun.build({
   target: "browser",
   minify: true,
   sourcemap: "linked",
-  publicPath: "/console/",
+  publicPath: "/",
   naming: { entry: "[name].[ext]", chunk: "[name]-[hash].[ext]", asset: "[name]-[hash].[ext]" },
   define: { "process.env.NODE_ENV": JSON.stringify("production") },
 });

@@ -105,7 +105,8 @@ network bytes) are served as rates.
 
 ## The console
 
-luxd serves a web console at `/console/`, the same origin as the API. It
+luxd serves a web console at `/`, the same origin as the API (every path
+outside `/v1/` and `/runner/`; old `/console/...` links redirect). It
 shows what its user can see: an operator the whole system, with a tenant
 filter at the top; a tenant key, that tenant.
 

@@ -7,6 +7,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -175,11 +176,39 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.newAPI(mux)
 	s.runnerRoutes(mux)
-	// The operator console: static files; it calls the API with the key
-	// its user gives it.
-	mux.Handle("GET /console/", console.Handler())
-	mux.Handle("GET /console", http.RedirectHandler("/console/", http.StatusMovedPermanently))
-	return logMiddleware(s.log, mux)
+	// The console used to live under /console/: old links land on the same
+	// page at the root.
+	mux.HandleFunc("GET /console", redirectConsole)
+	mux.HandleFunc("GET /console/{path...}", redirectConsole)
+	// The operator console is the catch-all: static files; it calls the API
+	// with the key its user gives it. /v1/ and /runner/ never reach it, so
+	// an unknown API path keeps the mux's own 404 or 405.
+	app := console.Handler()
+	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, pattern := mux.Handler(r); pattern == "" && !isAPIPath(r.URL.Path) &&
+			(r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			app.ServeHTTP(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+	return logMiddleware(s.log, root)
+}
+
+func isAPIPath(p string) bool {
+	for _, prefix := range []string{"/v1", "/runner"} {
+		if p == prefix || strings.HasPrefix(p, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func redirectConsole(w http.ResponseWriter, r *http.Request) {
+	u := *r.URL
+	u.Path = "/" + strings.TrimLeft(r.PathValue("path"), "/")
+	u.RawPath = ""
+	http.Redirect(w, r, u.RequestURI(), http.StatusMovedPermanently)
 }
 
 // Run starts the background loops and serves until ctx ends.

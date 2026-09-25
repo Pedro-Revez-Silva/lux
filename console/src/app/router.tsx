@@ -1,9 +1,7 @@
-// Tiny history router with a base path. Routes are matched by pattern
+// Tiny history router at the site root. Routes are matched by pattern
 // ("/runs/:id"); params are returned as a record. One location store backs
 // the path, the query (page filters) and the global scope (scope.tsx).
 import { useMemo, useSyncExternalStore } from "react";
-
-const BASE = "/console";
 
 /** Query keys that make up the global scope; links keep them across pages. */
 const SCOPE_KEYS = ["tenant", "range"] as const;
@@ -19,11 +17,9 @@ function subscribe(cb: () => void) {
   return () => listeners.delete(cb);
 }
 
-/** Current path relative to BASE, always starting with "/". */
+/** Current path, always starting with "/", without a trailing slash. */
 function currentPath(): string {
-  let p = window.location.pathname;
-  if (p.startsWith(BASE)) p = p.slice(BASE.length);
-  if (p === "") p = "/";
+  const p = window.location.pathname || "/";
   return p.length > 1 && p.endsWith("/") ? p.slice(0, -1) : p;
 }
 
@@ -31,7 +27,7 @@ function currentSearch(): string {
   return window.location.search;
 }
 
-/** Go to a path (with an optional query) under BASE. */
+/** Go to a path (with an optional query). */
 function navigate(to: string, opts: { replace?: boolean } = {}) {
   const url = href(to);
   if (opts.replace) history.replaceState(null, "", url);
@@ -53,7 +49,7 @@ export function setSearchParams(updates: Record<string, string | null>, opts: { 
 }
 
 export function href(path: string): string {
-  return BASE + (path.startsWith("/") ? path : "/" + path);
+  return path.startsWith("/") ? path : "/" + path;
 }
 
 /** `to` plus the current scope query (tenant, range), unless `to` sets them. */

@@ -1,5 +1,5 @@
 // Dev server: Bun's HTML import bundles index.html (and its scripts/styles)
-// on the fly. Served under /console/ to match production. /v1/* is proxied
+// on the fly. Served at / to match production. /v1/* is proxied
 // to a luxd (LUX_URL, or the last `run_tests.py --serve` environment) so the
 // console is same-origin with the API, as it is when luxd serves it.
 import index from "./index.html";
@@ -30,14 +30,11 @@ const server = Bun.serve({
   port: Number(process.env.PORT ?? 5173),
   development: { hmr: true, console: true },
   routes: {
-    "/": Response.redirect("/console/"),
-    "/console": Response.redirect("/console/"),
-    "/console/": index,
-    "/console/*": index,
+    "/*": index,
     "/v1/*": proxy,
     "/health": proxy,
   },
 });
 
-console.log(`lux console dev: http://localhost:${server.port}/console/`);
+console.log(`lux console dev: http://localhost:${server.port}/`);
 console.log(target ? `proxying /v1 to ${target}` : "no luxd: set LUX_URL or run `cd tests && uv run python run_tests.py --serve --detach`");
