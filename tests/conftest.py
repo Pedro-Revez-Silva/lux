@@ -13,8 +13,8 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 import uuid
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -31,8 +31,13 @@ def _require(env: TestEnvironment, *binaries: str) -> None:
 
 @pytest.fixture(scope="session")
 def env() -> TestEnvironment:
-    """The environment run_tests.py set up."""
-    return TestEnvironment.load()
+    """The environment run_tests.py set up. Its luxd is started here, as
+    this process's child: stop_luxd can then wait on it (reaping it) rather
+    than poll one that would linger as another process's zombie."""
+    e = TestEnvironment.load()
+    if e.binaries.get("luxd") and not (Path(e.log_dir) / "luxd.pid").exists():
+        e.start_luxd()
+    return e
 
 
 @pytest.fixture(scope="session")
@@ -499,8 +504,8 @@ class RealEC2:
 
 # luxd's provisioning timers against the fake EC2: seconds, not minutes, so
 # tests see a timer fire without waiting out a production default.
-FAKE_EC2_TIMERS = {"LUX_SCALE_DOWN_AFTER": "4s", "LUX_LAUNCH_TIMEOUT": "15s",
-                   "LUX_PROVIDER_CHECK_EVERY": "3s", "LUX_LOST_GRACE": "5s"}
+FAKE_EC2_TIMERS = {"LUX_SCALE_DOWN_AFTER": "3s", "LUX_LAUNCH_TIMEOUT": "8s",
+                   "LUX_PROVIDER_CHECK_EVERY": "2s", "LUX_LOST_GRACE": "4s", "LUX_LISTING_LAG": "4s"}
 
 
 @pytest.fixture

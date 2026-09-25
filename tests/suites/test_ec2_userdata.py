@@ -11,16 +11,10 @@ import json
 import pytest
 
 from conftest import CLIError, fake_only, generic
+from ec2_helpers import _clean  # noqa: F401 (_clean is an autouse fixture)
 from env import ALPINE_IMAGE, wait_until
 
 pytestmark = pytest.mark.ec2
-
-
-@pytest.fixture(autouse=True)
-def _clean(lux, ec2):
-    yield
-    lux.run("pools", "rm", "burst", check=False)
-    wait_until(lambda: not ec2.running(), 90, 1, "the removed pool's instances were not terminated")
 
 
 @pytest.mark.parametrize("user_data", ["ignition", "script", "env", None])

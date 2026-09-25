@@ -299,6 +299,12 @@ class TestEnvironment:
             self.start_luxd()
         self.save()
 
+    def hand_over_luxd(self) -> None:
+        """Stops the luxd setup started, so the process that runs the tests
+        starts its own (conftest's env fixture) and owns it: waiting on its
+        own child is instant, polling another's zombie takes 10s."""
+        self.stop_luxd()
+
     def _shared_services(self) -> None:
         if not container_running(PG_CONTAINER):
             sh("docker", "rm", "-f", PG_CONTAINER, check=False)
@@ -451,7 +457,8 @@ class TestEnvironment:
                     proc.kill()
                     proc.wait()
             else:
-                # Started by another process (a detached dev environment).
+                # Started by another process (a detached dev environment,
+                # re-parented and reaped by init, so this ends).
                 for _ in range(100):
                     os.kill(pid, 0)
                     time.sleep(0.1)

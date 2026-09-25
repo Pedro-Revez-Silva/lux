@@ -10,3 +10,4 @@ __pycache__/
 /lux-fake
 .claude/
 /node_modules/
+.suite-seconds.json

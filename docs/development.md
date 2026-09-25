@@ -165,7 +165,7 @@ without line breaks, as real agents' do.
 
 ### EC2 pools: fake by default, real nightly
 
-`suites/test_ec2.py` runs luxd's real EC2 provider against a **fake EC2**
+`suites/test_ec2_*.py` (scaling, failures, spot) run luxd's real EC2 provider against a **fake EC2**
 (`tests/fake_ec2.py`). The fake is an HTTP server that speaks the three
 EC2 API calls lux makes (RunInstances, TerminateInstances,
 DescribeInstances). Each "instance" is a new simulated host that boots
