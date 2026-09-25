@@ -158,6 +158,7 @@ func serve(ctx context.Context, c config) error {
 		LaunchTimeout:        c.LaunchTimeout.Duration,
 		ProviderCheckEvery:   c.ProviderCheckEvery.Duration,
 		LostGrace:            c.LostGrace.Duration,
+		ListingLag:           c.ListingLag.Duration,
 		OutdatedDrainPercent: c.OutdatedDrainPercent,
 		Defaults:             spec.Defaults{CPUs: c.Defaults.CPUs, Memory: c.Defaults.Memory.Bytes, Disk: c.Defaults.Disk.Bytes, Pids: c.Defaults.Pids},
 		SampleEvery:          c.History.SampleEvery.Duration,

@@ -15,6 +15,7 @@ scale_down_after = "10m"           # LUX_SCALE_DOWN_AFTER
 launch_timeout = "10m"             # LUX_LAUNCH_TIMEOUT
 provider_check_every = "1m"        # LUX_PROVIDER_CHECK_EVERY: list each pool's instances (orphans, vanished)
 lost_grace = "5m"                  # LUX_LOST_GRACE: a lost provisioned host's instance is kept this long
+listing_lag = "1m"                 # LUX_LISTING_LAG: how long after a launch the provider's listings may miss it
 outdated_drain_percent = 10        # LUX_OUTDATED_DRAIN_PERCENT: caps concurrent outdated-binaries drains per pool (of its live hosts; at least 1)
 
 [database]

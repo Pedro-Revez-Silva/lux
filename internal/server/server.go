@@ -20,10 +20,12 @@ import (
 const (
 	DefaultScaleDownAfter = 10 * time.Minute
 	DefaultLaunchTimeout  = 10 * time.Minute
-	// How often each pool's instances are listed with the provider, and how
-	// long a lost provisioned host keeps its instance.
+	// How often each pool's instances are listed with the provider, how
+	// long a lost provisioned host keeps its instance, and how long after a
+	// launch the listings may still miss it.
 	DefaultProviderCheckEvery = time.Minute
 	DefaultLostGrace          = 5 * time.Minute
+	DefaultListingLag         = time.Minute
 	// DefaultOutdatedDrainPercent: 10% of a pool's hosts (at least 1) may
 	// drain for outdated binaries at once.
 	DefaultOutdatedDrainPercent = 10
@@ -55,6 +57,10 @@ type Config struct {
 	// ProviderCheckEvery is how often the provisioner lists each pool's
 	// instances with the provider (orphans, vanished hosts; API limits).
 	ProviderCheckEvery time.Duration
+	// ListingLag is how long after a launch the provider's listings may still
+	// miss the instance (EC2's are eventually consistent): until then, a host
+	// missing from them is not taken for gone.
+	ListingLag time.Duration
 	// LostGrace is how long a lost provisioned host keeps its instance
 	// before it is terminated (a restart or network blip is not a loss).
 	LostGrace time.Duration
@@ -119,6 +125,9 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 	}
 	if cfg.LostGrace == 0 {
 		cfg.LostGrace = DefaultLostGrace
+	}
+	if cfg.ListingLag == 0 {
+		cfg.ListingLag = DefaultListingLag
 	}
 	if cfg.ScaleDownAfter == 0 {
 		cfg.ScaleDownAfter = DefaultScaleDownAfter

@@ -49,10 +49,12 @@ type config struct {
 	Tick           duration `toml:"tick" env:"LUX_TICK"`
 	ScaleDownAfter duration `toml:"scale_down_after" env:"LUX_SCALE_DOWN_AFTER"`
 	LaunchTimeout  duration `toml:"launch_timeout" env:"LUX_LAUNCH_TIMEOUT"`
-	// How often each pool's instances are listed with the provider, and how
-	// long a lost provisioned host keeps its instance.
+	// How often each pool's instances are listed with the provider, how
+	// long a lost provisioned host keeps its instance, and how long after a
+	// launch the listings may still miss it.
 	ProviderCheckEvery duration `toml:"provider_check_every" env:"LUX_PROVIDER_CHECK_EVERY"`
 	LostGrace          duration `toml:"lost_grace" env:"LUX_LOST_GRACE"`
+	ListingLag         duration `toml:"listing_lag" env:"LUX_LISTING_LAG"`
 	// OutdatedDrainPercent caps concurrent outdated-binaries drains per
 	// pool, as a percentage of its live hosts (at least 1). Default 10.
 	OutdatedDrainPercent int `toml:"outdated_drain_percent" env:"LUX_OUTDATED_DRAIN_PERCENT"`
@@ -149,6 +151,7 @@ func defaultConfig() config {
 	c.LaunchTimeout.Duration = server.DefaultLaunchTimeout
 	c.ProviderCheckEvery.Duration = server.DefaultProviderCheckEvery
 	c.LostGrace.Duration = server.DefaultLostGrace
+	c.ListingLag.Duration = server.DefaultListingLag
 	c.OutdatedDrainPercent = server.DefaultOutdatedDrainPercent
 	d := spec.BuiltinDefaults
 	c.Defaults.CPUs, c.Defaults.Memory.Bytes, c.Defaults.Disk.Bytes, c.Defaults.Pids = d.CPUs, d.Memory, d.Disk, d.Pids

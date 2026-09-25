@@ -147,7 +147,7 @@ type poolState struct {
 	// placements, nothing to upload), ones that never registered, and lost
 	// ones (their runner stopped answering; the instance may still run).
 	terminate []hostRef
-	// Hosts the provider should still have (checked once a minute).
+	// Hosts the provider should still have (checked every ProviderCheckEvery).
 	existing []hostRef
 	// Hosts launched whose instance id is not recorded yet, by id.
 	launching map[string]bool
@@ -174,7 +174,7 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 		return err
 	}
 
-	// Once a minute (provider API limits), the provider's view of the
+	// Every ProviderCheckEvery (provider API limits), the provider's view of the
 	// pool, by tag: hosts it terminated behind our back go (their Runs are
 	// lost by the usual heartbeat path); instances of this pool that no
 	// live row claims (a launch whose reply was lost) are terminated.
@@ -355,13 +355,13 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 			coalesce(h.last_placement_ended_at, h.registered_at, h.created_at) < now() - $3::interval,
 			h.provision_requested_at < now() - $4::interval,
 			coalesce(h.lost_at < now() - $6::interval, false),
-			h.tagged AND h.provision_requested_at < now() - interval '1 minute'
+			h.tagged AND h.provision_requested_at < now() - $8::interval
 			  AND coalesce(h.last_heartbeat < now() - $7::interval, true)
 		FROM hosts h
 		WHERE h.pool = $1 AND coalesce(h.tenant_id, '') = coalesce($2, '') AND h.provision_requested_at IS NOT NULL
 		  AND h.state <> 'terminated'
 		ORDER BY coalesce(h.last_placement_ended_at, h.registered_at, h.created_at)`,
-		pl.Name, pl.TenantID, interval(s.scaleDownAfter(pl)), interval(s.cfg.LaunchTimeout), pl.Template, interval(s.cfg.LostGrace), interval(s.cfg.LeaseDuration))
+		pl.Name, pl.TenantID, interval(s.scaleDownAfter(pl)), interval(s.cfg.LaunchTimeout), pl.Template, interval(s.cfg.LostGrace), interval(s.cfg.LeaseDuration), interval(s.cfg.ListingLag))
 	if err != nil {
 		return err
 	}
