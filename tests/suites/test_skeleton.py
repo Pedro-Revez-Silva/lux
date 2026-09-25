@@ -207,16 +207,16 @@ def test_a_timeout_counts_running_time_only(lux, runners, hosts):
     runners.start(hosts[0])
     spec = generic(ALPINE_IMAGE, "sh", "-c", "echo up; trap 'exit 0' TERM; while :; do sleep 1; done",
                    volumes=[{"name": "w", "path": "/w", "kind": "state"}])
-    spec["timeout"] = "25s"
+    spec["timeout"] = "12s"
     run_id = lux.submit(spec)
     lux.wait_output(run_id, "up", timeout=60)
-    time.sleep(8)
+    time.sleep(4)
     lux.run("stop", run_id, "--wait")
-    time.sleep(30)  # parked past the whole timeout: it must not count
+    time.sleep(14)  # parked past the whole timeout: it must not count
     lux.run("resume", run_id, "--wait")
-    time.sleep(8)  # about 16s of running so far
+    time.sleep(3)  # about 8s of running so far
     assert lux.get(run_id)["state"] == "running", "stopped on resume for time it spent parked"
-    run = lux.wait_state(run_id, "failed", timeout=40)
+    run = lux.wait_state(run_id, "failed", timeout=30)
     assert run["stateReason"] == "timeout", run
 
     # No timeout: never stopped for time; nothing else stops it here.

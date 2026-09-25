@@ -201,6 +201,10 @@ class Host:
         sh("docker", "unpause", self.container, check=False)
 
 
+# luxd processes this harness started, by pid: stop_luxd waits on them.
+_luxd_procs: dict[int, subprocess.Popen] = {}
+
+
 @dataclass
 class TestEnvironment:
     __test__ = False  # not a pytest test class
@@ -422,6 +426,7 @@ class TestEnvironment:
             stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
         )
         (Path(self.log_dir) / "luxd.pid").write_text(str(proc.pid))
+        _luxd_procs[proc.pid] = proc
         if not self.wait_healthy(proc):
             raise RuntimeError(f"luxd did not become healthy; see {self.log_dir}/luxd.log")
         return proc
@@ -431,12 +436,23 @@ class TestEnvironment:
         if not pidfile.exists():
             return
         pid = int(pidfile.read_text())
+        proc = _luxd_procs.pop(pid, None)
         try:
             os.kill(pid, 15)
-            for _ in range(100):
-                os.kill(pid, 0)
-                time.sleep(0.1)
-            os.kill(pid, 9)
+            if proc is not None:
+                # Ours: wait on it, which also reaps it. Polling kill(pid, 0)
+                # would see the unreaped zombie as alive for the full 10s.
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            else:
+                # Started by another process (a detached dev environment).
+                for _ in range(100):
+                    os.kill(pid, 0)
+                    time.sleep(0.1)
+                os.kill(pid, 9)
         except ProcessLookupError:
             pass
         pidfile.unlink(missing_ok=True)
