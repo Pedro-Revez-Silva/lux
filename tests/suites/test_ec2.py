@@ -229,3 +229,32 @@ def test_a_spot_interruption_shortens_a_stop_already_under_way(lux, ec2):
     run = lux.wait_state(run_id, "stopped", timeout=55)
     assert run["placements"][-1]["exitReason"] != "lost", run
     wait_until(lambda: (s := lux.json("snapshots", run_id)) and s[-1]["uploaded"], 30, 0.5, "snapshot not uploaded in time")
+
+
+def test_warm_while_active_scales_an_idle_pool_to_zero(lux, ec2):
+    """--warm-while-active keeps the warm host only while the pool is in
+    use: an unused pool has none; after a Run, an idle host is kept for the
+    pool's --scale-down-after (the next Run needs no boot); then the pool
+    goes down to its minimum, 0."""
+    lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps(ec2.template),
+            "--max", "3", "--warm", "1", "--warm-while-active", "--scale-down-after", "20s")
+    pl = next(p for p in lux.json("pools", "ls") if p["name"] == "burst")
+    assert pl["warmWhileActive"] and pl["scaleDownAfter"] == "20s", pl
+    # Idle from the start: no warm host is launched for a pool nobody uses.
+    time.sleep(6)
+    assert not ec2.running(), "a warm host was launched for an unused pool"
+
+    run_id = lux.submit(generic(ALPINE_IMAGE, "echo", "hi", placement={"pool": "burst"}))
+    lux.wait_state(run_id, "succeeded", timeout=180)
+    # In use: an idle host is kept as the warm one (the host that ran it,
+    # or a spare launched while it ran), within the scale-down time.
+    time.sleep(8)
+    ready = {h["name"] for h in ec2_hosts(lux)}
+    assert ready, "no host kept warm within the scale-down time"
+    # Within the scale-down time the hosts stay: the next Run lands on one
+    # of them, with no boot.
+    again = lux.submit(generic(ALPINE_IMAGE, "echo", "again", placement={"pool": "burst"}))
+    lux.wait_state(again, "succeeded", timeout=60)
+    assert lux.get(again)["placements"][0]["hostName"] in ready, "the next Run waited for a new host"
+    # Quiet past the scale-down time: back to zero.
+    wait_until(lambda: not ec2.running(), 120, 1, "the idle pool never scaled to zero")

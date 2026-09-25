@@ -88,6 +88,9 @@ type poolRow struct {
 	Template           json.RawMessage
 	Min, Max, Warm     int
 	Retired            bool
+	// ScaleDownAfterS: the pool's own idle seconds, or nil for luxd's.
+	ScaleDownAfterS *int
+	WarmWhileActive bool
 }
 
 func (s *Server) provision(ctx context.Context) error {
@@ -99,7 +102,8 @@ func (s *Server) provision(ctx context.Context) error {
 	}
 	var pools []poolRow
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id, name, provider, tenant_id, template, min_hosts, max_hosts, warm_hosts, retired
+		rows, err := tx.Query(ctx, `SELECT id, name, provider, tenant_id, template, min_hosts, max_hosts, warm_hosts, retired,
+				scale_down_after_s, warm_while_active
 			FROM pools WHERE provider <> 'static'
 			  AND (NOT retired OR EXISTS (SELECT 1 FROM hosts h WHERE h.pool = pools.name
 			       AND coalesce(h.tenant_id, '') = coalesce(pools.tenant_id, '') AND h.state <> 'terminated'))`)
@@ -135,6 +139,9 @@ func (s *Server) provision(ctx context.Context) error {
 // poolState is what a pool has and needs, counted in one transaction.
 type poolState struct {
 	demand, idle, provisioning, total int
+	// active: a placement started or ended on the pool's hosts within its
+	// scale-down time (warm_while_active keeps warm hosts only then).
+	active bool
 	// Idle hosts that have been idle longer than the cooldown, oldest first.
 	idleExpired []string
 	// Hosts to terminate now: drained ones that are done (no live
@@ -179,7 +186,7 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	// Scale down: drain idle hosts beyond what warm and waiting Runs need
 	// (and never below the minimum), terminate what is done.
 	for _, id := range st.idleExpired {
-		if st.idle <= pl.Warm+st.demand || st.total <= pl.Min {
+		if st.idle <= s.warm(pl, &st)+st.demand || st.total <= pl.Min {
 			break
 		}
 		drained, err := s.drainForScaleDown(ctx, id)
@@ -204,7 +211,7 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	if pl.Retired {
 		return nil
 	}
-	want := max(pl.Min-st.total, pl.Warm+st.demand-st.idle-st.provisioning)
+	want := max(pl.Min-st.total, s.warm(pl, &st)+st.demand-st.idle-st.provisioning)
 	if pl.Max > 0 {
 		want = min(want, pl.Max-st.total)
 	}
@@ -305,6 +312,26 @@ func (s *Server) poolTags(pl poolRow) map[string]string {
 	return map[string]string{tagManaged: "true", tagDeployment: s.deployment, tagPool: pool}
 }
 
+// warm is how many idle hosts the pool keeps ready: its warm count, or
+// with warm_while_active, that only while it is in use (a placement live,
+// or started or ended within its scale-down time); otherwise none, so an
+// idle pool goes down to its minimum. A Run waiting is served by the usual
+// demand; the warm host follows once it runs.
+func (s *Server) warm(pl poolRow, st *poolState) int {
+	if pl.WarmWhileActive && !st.active {
+		return 0
+	}
+	return pl.Warm
+}
+
+// scaleDownAfter is how long the pool's hosts stay idle before release.
+func (s *Server) scaleDownAfter(pl poolRow) time.Duration {
+	if pl.ScaleDownAfterS != nil && *pl.ScaleDownAfterS > 0 {
+		return time.Duration(*pl.ScaleDownAfterS) * time.Second
+	}
+	return s.cfg.ScaleDownAfter
+}
+
 func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolState) error {
 	// Runs waiting for a host in this pool. A tenant pool serves its
 	// tenant; a platform pool anyone whose Runs name it (and who has no
@@ -315,6 +342,12 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 		  AND CASE WHEN $2::text IS NULL
 		           THEN NOT EXISTS (SELECT 1 FROM pools o WHERE o.tenant_id = r.tenant_id AND o.name = $1 AND NOT o.retired)
 		           ELSE r.tenant_id = $2 END`, pl.Name, pl.TenantID).Scan(&st.demand); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM placements p JOIN hosts h ON h.id = p.host_id
+			WHERE h.pool = $1 AND coalesce(h.tenant_id, '') = coalesce($2, '')
+			  AND (p.state IN `+livePlacementStates+` OR coalesce(p.ended_at, p.created_at) > now() - $3::interval))`,
+		pl.Name, pl.TenantID, interval(s.scaleDownAfter(pl))).Scan(&st.active); err != nil {
 		return err
 	}
 	rows, err := tx.Query(ctx, `SELECT h.id, coalesce(h.provider_id, ''), coalesce(h.launch_template, $5), h.state, h.draining,
@@ -329,7 +362,7 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 		WHERE h.pool = $1 AND coalesce(h.tenant_id, '') = coalesce($2, '') AND h.provision_requested_at IS NOT NULL
 		  AND h.state <> 'terminated'
 		ORDER BY coalesce(h.last_placement_ended_at, h.registered_at, h.created_at)`,
-		pl.Name, pl.TenantID, interval(s.cfg.ScaleDownAfter), interval(s.cfg.LaunchTimeout), pl.Template, interval(lostGrace), interval(s.cfg.LeaseDuration))
+		pl.Name, pl.TenantID, interval(s.scaleDownAfter(pl)), interval(s.cfg.LaunchTimeout), pl.Template, interval(lostGrace), interval(s.cfg.LeaseDuration))
 	if err != nil {
 		return err
 	}

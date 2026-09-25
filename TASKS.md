@@ -53,4 +53,5 @@ After v1:
 | Images: registry login (`image.registryAuth`, runner-only), shared build cache (`image.build.cache`), GC of pulled images and under disk pressure (`--image-disk-high`) | ✅ done |
 | Loopback services; MCP servers backed by a service | ✅ done |
 | AWS deployment: `runner_url`, luxd self-serving runner binaries with sha256 verification, outdated-host draining, no-custom-AMI EC2 boot (Ignition/Fedora CoreOS default, cloud-init script, or plain env; `GET /runner/bootstrap.sh` for static hosts), `make dist` release tarballs and `release.yml` — Terraform in `deploy/terraform/` | ✅ done |
+| Per-pool `--scale-down-after`; `--warm-while-active` (scale to zero when idle) | ✅ done |
 | Timeouts: none unless set; count running time only (parked Runs keep theirs) | ✅ done |

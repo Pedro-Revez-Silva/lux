@@ -25,6 +25,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -292,6 +293,8 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		minH := fs.Int("min", 0, "minimum hosts")
 		maxH := fs.Int("max", 0, "maximum hosts")
 		warm := fs.Int("warm", 0, "idle hosts to keep ready")
+		scaleDown := fs.Duration("scale-down-after", 0, "how long a host stays idle before it is released (default: scale_down_after)")
+		warmActive := fs.Bool("warm-while-active", false, "keep --warm hosts only while the pool is in use")
 		template := fs.String("template", "{}", "provider template (JSON)")
 		fs.Parse(args[1:])
 		var tmpl map[string]any
@@ -303,12 +306,14 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		}
 		id := ids.New(ids.Pool)
 		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared)
-				VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9)
+			_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
+					scale_down_after_s, warm_while_active)
+				VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11)
 				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts, shared = EXCLUDED.shared,
+					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
 					retired = false`,
-				id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared)
+				id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive)
 			return err
 		})
 		if err != nil {

@@ -1573,6 +1573,15 @@ func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, cause, stopR
 	return hosts, nil
 }
 
+// scaleDownSeconds is a pool's scale_down_after_s: nil for luxd's default
+// (zero), whole seconds otherwise (nil too when under one).
+func scaleDownSeconds(d time.Duration) *int {
+	if n := int(d / time.Second); n > 0 {
+		return &n
+	}
+	return nil
+}
+
 func (s *Server) notifyAll(hosts []string) {
 	for _, h := range hosts {
 		s.hub.Notify(h)
@@ -1596,8 +1605,12 @@ type Pool struct {
 	MinHosts  int            `json:"minHosts"`
 	MaxHosts  int            `json:"maxHosts"`
 	WarmHosts int            `json:"warmHosts"`
-	Shared    bool           `json:"shared"`
-	Platform  bool           `json:"platform"`
+	// ScaleDownAfter: how long a provisioned host stays idle before it is
+	// released; empty for luxd's default.
+	ScaleDownAfter  spec.Duration `json:"scaleDownAfter,omitempty" doc:"How long a provisioned host stays idle before it is released, e.g. 600s; empty: luxd's scale_down_after (default 10m)."`
+	WarmWhileActive bool          `json:"warmWhileActive,omitempty" doc:"Keep warmHosts only while the pool is in use (a Run placed or ended within scaleDownAfter, or one waiting); an idle pool scales down to minHosts."`
+	Shared          bool          `json:"shared"`
+	Platform        bool          `json:"platform"`
 }
 
 type listPoolsOutput struct {
@@ -1611,6 +1624,7 @@ func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutpu
 	pools := []Pool{}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
+				coalesce(p.scale_down_after_s, 0), p.warm_while_active,
 				p.shared, p.tenant_id IS NULL
 			FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id
 			WHERE ($1 = '' OR p.tenant_id = $1 OR p.tenant_id IS NULL) AND NOT p.retired ORDER BY p.name, t.name NULLS FIRST`, p.TenantID)
@@ -1620,9 +1634,12 @@ func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutpu
 		defer rows.Close()
 		for rows.Next() {
 			var pl Pool
-			if err := rows.Scan(&pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts, &pl.Shared, &pl.Platform); err != nil {
+			var sda int
+			if err := rows.Scan(&pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts,
+				&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform); err != nil {
 				return err
 			}
+			pl.ScaleDownAfter.Duration = time.Duration(sda) * time.Second
 			pools = append(pools, pl)
 		}
 		return rows.Err()
@@ -1699,13 +1716,20 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	if pl.Template == nil {
 		pl.Template = map[string]any{}
 	}
+	sda := scaleDownSeconds(pl.ScaleDownAfter.Duration)
+	if pl.ScaleDownAfter.Duration < 0 || pl.ScaleDownAfter.Duration > 0 && sda == nil {
+		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "scaleDownAfter must be at least 1s")
+	}
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
+				scale_down_after_s, warm_while_active)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 				min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
+				scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
 				retired = false`,
-			ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts)
+			ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
+			sda, pl.WarmWhileActive)
 		return err
 	})
 	if err != nil {

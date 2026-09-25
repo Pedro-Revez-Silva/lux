@@ -282,13 +282,27 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   enough hosts for them, plus `--warm` idle ones kept ready. It keeps at
   least `--min` hosts and never more than `--max`. Launches alternate
   across the template's subnets.
-- **Scale down:** a host idle longer than `LUX_SCALE_DOWN_AFTER` (default
-  10m), above the minimum and warm count, is cordoned. It is terminated once
+- **Scale down:** a host idle longer than the pool's `--scale-down-after`
+  (default `LUX_SCALE_DOWN_AFTER`, 10m), above the minimum and warm count,
+  is cordoned. It is terminated once
   it has no live placements and nothing left to upload. `lux pools rm`
   cordons the pool's hosts the same way, without `--force-evict`: a Run on
   one finishes where it is and the host is terminated once idle; with
   `--force-evict` it is stopped (snapshotted) and resumed elsewhere at once,
   never cut short.
+- **Scale to zero when idle:** `--warm-while-active` keeps the `--warm`
+  hosts only while the pool is in use: a Run live on it, or placed or
+  ended within its `--scale-down-after`. After that the pool drops to
+  `--min`. With `--min 0 --warm 1 --warm-while-active --scale-down-after
+  600s`, someone working keeps a host ready between Runs, and ten quiet
+  minutes after the last one the pool has no hosts at all:
+
+  ```bash
+  lux pools set burst --provider ec2 --template '…' \
+    --min 0 --max 10 --warm 1 --warm-while-active --scale-down-after 600s
+  ```
+
+  Without it, `--warm` hosts are kept at all times.
 - **Failures:** a launch that fails is retried on the next pass. A host
   that never registers within `LUX_LAUNCH_TIMEOUT` (default 10m) is
   terminated. An instance EC2 no longer has is written off and replaced.

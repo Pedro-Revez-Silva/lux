@@ -563,6 +563,8 @@ terminated once idle; their live Runs finish where they are.
 	set.Flags().IntVar(&p.MinHosts, "min", 0, "minimum hosts")
 	set.Flags().IntVar(&p.MaxHosts, "max", 0, "maximum hosts")
 	set.Flags().IntVar(&p.WarmHosts, "warm", 0, "idle hosts to keep ready")
+	set.Flags().DurationVar(&p.ScaleDownAfter.Duration, "scale-down-after", 0, "how long a host stays idle before it is released (default: luxd's scale_down_after, 10m)")
+	set.Flags().BoolVar(&p.WarmWhileActive, "warm-while-active", false, "keep --warm hosts only while the pool is in use; an idle pool scales down to --min")
 	set.Flags().StringVar(&template, "template", "", "provider template (JSON)")
 	cmd.AddCommand(ls, set)
 	return cmd

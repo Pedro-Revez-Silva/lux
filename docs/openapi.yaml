@@ -514,6 +514,13 @@ components:
           type: boolean
         provider:
           type: string
+        scaleDownAfter:
+          description: "How long a provisioned host stays idle before it is released, e.g. 600s; empty: luxd's scale_down_after (default 10m)."
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
         shared:
           type: boolean
         template:
@@ -526,6 +533,9 @@ components:
         warmHosts:
           format: int64
           type: integer
+        warmWhileActive:
+          description: Keep warmHosts only while the pool is in use (a Run placed or ended within scaleDownAfter, or one waiting); an idle pool scales down to minHosts.
+          type: boolean
       type: object
     PoolList:
       additionalProperties: false
