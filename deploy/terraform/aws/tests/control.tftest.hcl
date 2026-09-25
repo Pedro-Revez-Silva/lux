@@ -2,6 +2,9 @@
 # bytes, before base64). Mocked providers: no credentials, no API calls.
 # The rendered cloud-config depends only on this module's templates and
 # variables, so the mocked ids stand in for real ones at the same length.
+# The control host must also carry no lux:* tag, and var.tags must refuse
+# one: luxd's terminate permission keys on lux:* tags (iam.tf), so such a
+# tag would let luxd terminate its own host.
 
 mock_provider "aws" {
   mock_data "aws_availability_zones" {
@@ -74,4 +77,14 @@ run "control_host_has_no_lux_tags" {
     condition     = length([for k in keys(aws_instance.control.tags) : k if startswith(k, "lux:")]) == 0
     error_message = "The control host carries a lux:* tag; luxd's role may terminate instances tagged lux:managed and lux:host."
   }
+}
+
+run "lux_tags_in_var_tags_are_refused" {
+  command = plan
+
+  variables {
+    tags = { "lux:host" = "x" }
+  }
+
+  expect_failures = [var.tags]
 }
