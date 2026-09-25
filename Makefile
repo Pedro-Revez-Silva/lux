@@ -24,8 +24,12 @@ console:
 unit:
 	LUX_TEST_PG=$${LUX_TEST_PG:-postgres://lux:lux@127.0.0.1:55432/postgres?sslmode=disable} go test ./...
 
+# JOBS environments at once (each its own luxd, database and hosts):
+# the whole suite in about 4 minutes at 4. JOBS=1 runs serially.
+JOBS ?= 4
+
 e2e:
-	cd tests && uv run python run_tests.py
+	cd tests && uv run python run_tests.py -j $(JOBS)
 
 infra:
 	cd tests && uv run python run_tests.py --infra-only

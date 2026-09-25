@@ -84,7 +84,8 @@ can see (the database, a host's disk, nftables), and for fault injection.
 
 ```bash
 cd tests
-uv run python run_tests.py                   # build, bring everything up, run all suites
+uv run python run_tests.py -j 4              # all suites, across 4 environments (~4 min; make e2e)
+uv run python run_tests.py                   # all suites in one environment, serially (~13 min)
 uv run python run_tests.py --infra-only      # only check the environment itself
 uv run python run_tests.py suites/test_x.py  # one suite; -x, -k work as in pytest
 uv run python run_tests.py --keep            # keep containers and database to debug
