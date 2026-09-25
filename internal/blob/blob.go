@@ -58,19 +58,21 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("blob: aws config: %w", err)
 	}
-	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-		// Path-style so MinIO and custom endpoints work without DNS tricks.
-		o.UsePathStyle = cfg.Endpoint != ""
-		if cfg.Endpoint != "" {
-			o.BaseEndpoint = aws.String(cfg.Endpoint)
+	// Both clients share every option but the endpoint, so presigned URLs
+	// are built exactly like the uploads they stand for.
+	opts := func(endpoint string) func(*s3.Options) {
+		return func(o *s3.Options) {
+			// Path-style so MinIO and custom endpoints work without DNS tricks.
+			o.UsePathStyle = cfg.Endpoint != ""
+			if endpoint != "" {
+				o.BaseEndpoint = aws.String(endpoint)
+			}
 		}
-	})
+	}
+	client := s3.NewFromConfig(awsCfg, opts(cfg.Endpoint))
 	pub := client
 	if cfg.PublicEndpoint != "" {
-		pub = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-			o.UsePathStyle = cfg.Endpoint != ""
-			o.BaseEndpoint = aws.String(cfg.PublicEndpoint)
-		})
+		pub = s3.NewFromConfig(awsCfg, opts(cfg.PublicEndpoint))
 	}
 	return &Store{s3: client, presign: s3.NewPresignClient(pub), tm: transfermanager.New(client), bucket: cfg.Bucket}, nil
 }
