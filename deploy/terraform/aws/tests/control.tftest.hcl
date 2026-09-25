@@ -34,6 +34,12 @@ mock_provider "aws" {
       id = "i-0123456789abcdef0"
     }
   }
+  # The backup script in user_data embeds the bucket name.
+  mock_resource "aws_s3_bucket" {
+    defaults = {
+      id = "lux-pg-backups-123456789012-eu-north-1"
+    }
+  }
   mock_resource "aws_launch_template" {
     defaults = {
       id = "lt-0123456789abcdef0"
