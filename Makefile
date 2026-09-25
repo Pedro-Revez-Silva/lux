@@ -11,7 +11,12 @@ build: console
 		CGO_ENABLED=0 go build -trimpath -ldflags '$(GO_LDFLAGS)' -o bin/$$b ./cmd/$$b || exit 1; \
 	done
 
+# The per-package node_modules are links bun install makes into the root
+# store. A checkout from before the workspace (console/ had its own install)
+# keeps real copies there, and the console then bundles two Reacts and
+# renders blank: so they are always remade.
 console:
+	rm -rf console/node_modules packages/*/node_modules
 	bun install --frozen-lockfile
 	bun run typecheck
 	cd console && bun run build

@@ -34,6 +34,12 @@ and without a console build serves a page saying how to make one. To work
 on the console, see [console/README.md](../console/README.md); on its design
 system and gallery, [packages/design-system](../packages/design-system/README.md).
 Both are one Bun workspace: `bun install` at the repository root.
+`make console` removes `console/node_modules` and `packages/*/node_modules`
+before installing: a checkout from before the workspace has a stale
+`console/node_modules` with its own React, and a console built with it
+renders blank ("Cannot read properties of null (reading 'useState')"). Run
+by hand, do the same: `rm -rf console/node_modules packages/*/node_modules
+&& bun install`.
 
 The toolchain and every dependency are kept at their latest release.
 
