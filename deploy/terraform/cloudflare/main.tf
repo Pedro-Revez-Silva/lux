@@ -133,7 +133,11 @@ resource "cloudflare_zero_trust_access_application" "lux" {
   session_duration     = var.access_session_duration
   app_launcher_visible = false
 
-  policies = [cloudflare_zero_trust_access_policy.lux.id]
+  # Provider v5: a list of {id, precedence} objects, not bare ids.
+  policies = [{
+    id         = cloudflare_zero_trust_access_policy.lux.id
+    precedence = 1
+  }]
 }
 
 resource "cloudflare_zero_trust_access_policy" "lux" {
@@ -164,7 +168,10 @@ resource "cloudflare_zero_trust_access_application" "api_bypass" {
     { type = "public", uri = "${var.hostname}/runner/*" },
   ]
 
-  policies = [cloudflare_zero_trust_access_policy.api_bypass[0].id]
+  policies = [{
+    id         = cloudflare_zero_trust_access_policy.api_bypass[0].id
+    precedence = 1
+  }]
 }
 
 resource "cloudflare_zero_trust_access_policy" "api_bypass" {
