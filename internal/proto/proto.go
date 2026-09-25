@@ -2,7 +2,7 @@
 // between lux-runner and lux-shim.
 //
 // luxd ↔ runner: JSON frames over one WebSocket per runner (or, in fallback
-// mode, POST /runner/poll and /runner/report). Every luxd→runner message has
+// mode, POST /runner/v1/poll). Every luxd→runner message has
 // an id and is acked; unacked messages are redelivered on reconnect, so the
 // runner handles each idempotently. Everything a runner reports about a Run
 // carries the placement's epoch; luxd rejects stale epochs.
@@ -189,7 +189,7 @@ type ImageResolution struct {
 type ResumeInfo struct {
 	SessionID string `json:"sessionId"`
 	// Snapshot to restore. If the runner does not hold it locally it
-	// downloads each volume with GET /runner/blobs/{blobId}, which redirects
+	// downloads each volume with GET /runner/v1/blobs/{blobId}, which redirects
 	// to a short-lived presigned URL.
 	Snapshot *Manifest `json:"snapshot,omitempty"`
 }
@@ -273,7 +273,7 @@ type AdapterEvent struct {
 
 // SnapshotDone ends every placement, however it exited: its state volumes,
 // output and artifacts are on the host's disk. Uploads (PUT
-// /runner/blobs/{id}) follow in the background.
+// /runner/v1/blobs/{id}) follow in the background.
 type SnapshotDone struct {
 	Manifest Manifest `json:"manifest"`
 	// Error is set when the state could not be saved; Manifest then has no

@@ -71,7 +71,7 @@ go run ./cmd/luxd openapi > docs/openapi.yaml
 
 `TestOpenAPIIsCurrent` fails while the committed copy is stale. A running
 luxd serves the same spec at `/openapi.yaml` and `/openapi.json`. The
-runner's routes (`/runner/...`) are not part of it.
+runner's routes (`/runner/v1/...`) are not part of it.
 
 ## The end-to-end harness
 

@@ -22,7 +22,7 @@ func TestBinariesMatchManifest(t *testing.T) {
 	arch := "linux-" + runtime.GOARCH
 	var manifest map[string]map[string]string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/runner/bin/manifest" {
+		if r.URL.Path != "/runner/v1/bin/manifest" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}

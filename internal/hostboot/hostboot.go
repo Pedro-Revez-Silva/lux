@@ -1,10 +1,10 @@
 // Package hostboot renders what a runner host needs to boot: the
 // environment lux-runner starts with, the systemd unit that runs it, and
 // the script that downloads its binaries and verifies them against luxd
-// (internal/server's /runner/bin/... contract). One source of truth for
+// (internal/server's /runner/v1/bin/... contract). One source of truth for
 // the unit and the fetch script, rendered for EC2 pools (internal/ec2's
 // template.userData: ignition, script, env) and for GET
-// /runner/bootstrap.sh (static hosts).
+// /runner/v1/bootstrap.sh (static hosts).
 package hostboot
 
 import (
@@ -120,7 +120,7 @@ esac
 mkdir -p "$install_dir"
 curl_retry() { curl -fsS --retry 5 --retry-connrefused --retry-delay 2 "$@"; }
 
-manifest=$(curl_retry -H "Authorization: Bearer $LUX_HOST_TOKEN" "$LUX_URL/runner/bin/manifest") \
+manifest=$(curl_retry -H "Authorization: Bearer $LUX_HOST_TOKEN" "$LUX_URL/runner/v1/bin/manifest") \
   || warn_and_keep_running "fetching the manifest failed"
 
 sha_for() {
@@ -146,7 +146,7 @@ for bin in lux-runner lux-shim; do
   fi
   tmp=$(mktemp "$install_dir/.$bin.XXXXXX")
   staged+=("$tmp")
-  url="$LUX_URL/runner/bin/linux-$larch/$bin"
+  url="$LUX_URL/runner/v1/bin/linux-$larch/$bin"
   headers=$(mktemp)
   curl_retry -H "Authorization: Bearer $LUX_HOST_TOKEN" -D "$headers" -o "$tmp" "$url" \
     || warn_and_keep_running "downloading $bin failed"

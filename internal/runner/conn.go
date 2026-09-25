@@ -42,7 +42,7 @@ func (c *conn) wsURL() string {
 	u := strings.TrimRight(c.r.cfg.URL, "/")
 	u = strings.Replace(u, "http://", "ws://", 1)
 	u = strings.Replace(u, "https://", "wss://", 1)
-	return u + "/runner/ws"
+	return u + "/runner/v1/ws"
 }
 
 // loop keeps a connection up until ctx ends.
@@ -284,7 +284,7 @@ func readFrame(ctx context.Context, ws *websocket.Conn, f *proto.Frame) error {
 	return json.Unmarshal(b, f)
 }
 
-// pollLoop is the fallback transport: POST /runner/poll every second with
+// pollLoop is the fallback transport: POST /runner/v1/poll every second with
 // acks and reports; luxd answers with pending messages and replies. Live
 // output is unavailable in this mode (it arrives after exit).
 func (c *conn) pollLoop(ctx context.Context) error {
@@ -308,7 +308,7 @@ func (c *conn) pollLoop(ctx context.Context) error {
 			req["hello"] = hello
 		}
 		var resp proto.PollResponse
-		if err := c.r.api.postJSON(ctx, "/runner/poll?name="+c.r.cfg.Name, req, &resp); err != nil {
+		if err := c.r.api.postJSON(ctx, "/runner/v1/poll?name="+c.r.cfg.Name, req, &resp); err != nil {
 			return err
 		}
 		for _, f := range resp.Replies {

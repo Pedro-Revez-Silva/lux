@@ -23,7 +23,7 @@ import (
 // large snapshot, short enough that a leaked URL is soon useless.
 const presignTTL = 15 * time.Minute
 
-// serveBlobUpload is PUT /runner/blobs/{id}: a runner uploading a blob it
+// serveBlobUpload is PUT /runner/v1/blobs/{id}: a runner uploading a blob it
 // reported in snapshot.done. luxd streams it to S3, verifying its sha256 on
 // the way; runners never hold S3 credentials.
 func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
@@ -89,7 +89,7 @@ func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// serveRunnerBlobDownload is GET /runner/blobs/{id}: a runner fetching a
+// serveRunnerBlobDownload is GET /runner/v1/blobs/{id}: a runner fetching a
 // snapshot volume for a Run assigned to it. Redirects to a presigned URL.
 func (s *Server) serveRunnerBlobDownload(w http.ResponseWriter, r *http.Request) error {
 	tok, err := s.authHostToken(r)

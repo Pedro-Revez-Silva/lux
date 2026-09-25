@@ -67,7 +67,7 @@ def stale_report(env, token: str, host, run_id: str, epoch: int) -> dict:
     import requests
     body = {"acks": [], "reports": [{"type": "status", "id": 1, "runId": run_id, "epoch": epoch,
                                      "data": {"state": "running"}}]}
-    r = requests.post(f"{env.luxd_url}/runner/poll?name={host.name}", json=body,
+    r = requests.post(f"{env.luxd_url}/runner/v1/poll?name={host.name}", json=body,
                       headers={"Authorization": f"Bearer {token}"}, timeout=10)
     r.raise_for_status()
     return r.json()["replies"][0]

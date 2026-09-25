@@ -120,7 +120,7 @@ func TestBinariesMatch(t *testing.T) {
 // would, if it skipped a luxd restart) must not change what luxd serves
 // or its X-Lux-Sha256, since the in-memory copy and its hash were taken
 // together and never re-read. Exercised through s.Handler(), a real
-// GET /runner/bin/linux-arm64/lux-runner with a host token: a handler
+// GET /runner/v1/bin/linux-arm64/lux-runner with a host token: a handler
 // that reopened the path on every request would serve the swapped bytes
 // and would still pass a test that only reads s.bins directly.
 func TestServedBytesSurviveAnInPlaceFileSwap(t *testing.T) {
@@ -153,12 +153,12 @@ func TestServedBytesSurviveAnInPlaceFileSwap(t *testing.T) {
 	}
 
 	h := s.Handler()
-	req := httptest.NewRequest(http.MethodGet, "/runner/bin/linux-arm64/lux-runner", nil)
+	req := httptest.NewRequest(http.MethodGet, "/runner/v1/bin/linux-arm64/lux-runner", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
-		t.Fatalf("GET /runner/bin/linux-arm64/lux-runner: %d %s", w.Code, w.Body)
+		t.Fatalf("GET /runner/v1/bin/linux-arm64/lux-runner: %d %s", w.Code, w.Body)
 	}
 	if got := w.Header().Get("X-Lux-Sha256"); got != wantSHA {
 		t.Fatalf("X-Lux-Sha256 after an in-place swap: %q, want the original %q", got, wantSHA)

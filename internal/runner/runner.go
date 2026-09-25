@@ -492,7 +492,7 @@ func (r *Runner) binariesMatchManifest(ctx context.Context) bool {
 	var manifest map[string]map[string]string
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	if err := r.api.getJSON(ctx, "/runner/bin/manifest", &manifest); err != nil {
+	if err := r.api.getJSON(ctx, "/runner/v1/bin/manifest", &manifest); err != nil {
 		return false
 	}
 	have := manifest["linux-"+runtime.GOARCH]

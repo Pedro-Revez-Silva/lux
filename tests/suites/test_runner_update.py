@@ -1,6 +1,6 @@
 """Step: luxd serving runner binaries for self-update (runner_bin_dir): a
-runner downloads /runner/bin/linux-{arch}/{lux-runner,lux-shim} and checks
-its sha256 against /runner/bin/manifest and the X-Lux-Sha256 header. Also:
+runner downloads /runner/v1/bin/linux-{arch}/{lux-runner,lux-shim} and checks
+its sha256 against /runner/v1/bin/manifest and the X-Lux-Sha256 header. Also:
 luxd drains a host whose runner or shim no longer match what it holds, once,
 and a static host is told to exit once it is drained and idle; a
 provisioned one is terminated and replaced instead (the pool's own path)."""
@@ -47,7 +47,7 @@ def _get(env, path, token):
 
 def test_manifest_lists_every_arch_and_binary(env, runner_bin_dir):
     _, token, content = runner_bin_dir
-    resp = _get(env, "/runner/bin/manifest", token)
+    resp = _get(env, "/runner/v1/bin/manifest", token)
     assert resp.status_code == 200, resp.text
     manifest = resp.json()
     for arch, files in content.items():
@@ -57,10 +57,10 @@ def test_manifest_lists_every_arch_and_binary(env, runner_bin_dir):
 
 def test_binary_download_matches_its_sha256_header_and_the_manifest(env, runner_bin_dir):
     _, token, content = runner_bin_dir
-    manifest = _get(env, "/runner/bin/manifest", token).json()
+    manifest = _get(env, "/runner/v1/bin/manifest", token).json()
     for arch, files in content.items():
         for name, want_sha in files.items():
-            resp = _get(env, f"/runner/bin/linux-{arch}/{name}", token)
+            resp = _get(env, f"/runner/v1/bin/linux-{arch}/{name}", token)
             assert resp.status_code == 200, resp.text
             assert resp.headers["X-Lux-Sha256"] == want_sha == manifest[f"linux-{arch}"][name]
             assert int(resp.headers["Content-Length"]) == len(resp.content)
@@ -68,16 +68,16 @@ def test_binary_download_matches_its_sha256_header_and_the_manifest(env, runner_
 
 
 def test_binary_endpoints_need_a_host_token(env, runner_bin_dir):
-    for path in ("/runner/bin/manifest", "/runner/bin/linux-arm64/lux-runner"):
+    for path in ("/runner/v1/bin/manifest", "/runner/v1/bin/linux-arm64/lux-runner"):
         resp = requests.get(f"{env.luxd_url}{path}", timeout=10)
         assert resp.status_code == 401, (path, resp.status_code)
 
 
 def test_a_missing_arch_or_binary_is_not_offered(env, runner_bin_dir):
     _, token, _ = runner_bin_dir
-    manifest = _get(env, "/runner/bin/manifest", token).json()
+    manifest = _get(env, "/runner/v1/bin/manifest", token).json()
     assert "linux-riscv64" not in manifest
-    resp = _get(env, "/runner/bin/linux-riscv64/lux-runner", token)
+    resp = _get(env, "/runner/v1/bin/linux-riscv64/lux-runner", token)
     assert resp.status_code == 404
 
 
@@ -91,11 +91,11 @@ def test_an_arch_missing_one_of_the_pair_is_not_offered(env, tmp_path_factory):
     env.start_luxd(LUX_RUNNER_BIN_DIR=str(d))
     try:
         token = env.luxd_admin("create-host-token")["token"]
-        manifest = _get(env, "/runner/bin/manifest", token).json()
+        manifest = _get(env, "/runner/v1/bin/manifest", token).json()
         assert "linux-arm64" not in manifest, manifest
         # The binary itself is still servable by name (a partial mirror is
         # not a 404), just never offered or drained for.
-        resp = _get(env, "/runner/bin/linux-arm64/lux-runner", token)
+        resp = _get(env, "/runner/v1/bin/linux-arm64/lux-runner", token)
         assert resp.status_code == 200, resp.text
     finally:
         env.stop_luxd()
@@ -105,13 +105,13 @@ def test_an_arch_missing_one_of_the_pair_is_not_offered(env, tmp_path_factory):
 # ---- bootstrap.sh (static hosts) --------------------------------------------
 
 def test_bootstrap_script_is_served_without_auth(env):
-    resp = requests.get(f"{env.luxd_url}/runner/bootstrap.sh", timeout=10)
+    resp = requests.get(f"{env.luxd_url}/runner/v1/bootstrap.sh", timeout=10)
     assert resp.status_code == 200
     assert resp.text.startswith("#!/bin/bash")
     # Shares the unit and fetch-script text with the EC2 renderings
     # (internal/hostboot): both markers must be present verbatim.
     assert "lux-runner.service" in resp.text
-    assert "/runner/bin/linux-$larch/$bin" in resp.text
+    assert "/runner/v1/bin/linux-$larch/$bin" in resp.text
 
 
 def test_bootstrap_script_fetches_and_verifies_binaries_on_a_host(env, hosts, runner_bin_dir):
@@ -133,7 +133,7 @@ def test_bootstrap_script_fetches_and_verifies_binaries_on_a_host(env, hosts, ru
     larch = {"aarch64": "arm64", "x86_64": "amd64"}.get(arch, arch)
     host.exec("sh", "-c", "printf '#!/bin/sh\\nexit 0\\n' > /usr/local/bin/systemctl && chmod +x /usr/local/bin/systemctl")
     pipeline = (
-        f"curl -fsS {env.luxd_url}/runner/bootstrap.sh | "
+        f"curl -fsS {env.luxd_url}/runner/v1/bootstrap.sh | "
         f"sudo env LUX_URL={env.luxd_url} LUX_HOST_TOKEN={token} LUX_HOST_NAME=bootstrap-test bash"
     )
     run = lambda: host.exec("sh", "-c", pipeline)  # noqa: E731

@@ -117,7 +117,7 @@ Every placement ends with a **snapshot** of its state volumes, its
 **output**, and its **artifacts**, all written to the host's disk. They
 reach S3 in the background:
 
-1. The runner uploads each blob with `PUT /runner/blobs/{id}`. luxd streams
+1. The runner uploads each blob with `PUT /runner/v1/blobs/{id}`. luxd streams
    it into S3 and verifies its sha256 on the way. Runners never hold S3
    credentials.
 2. The host keeps its local copy, so a resume there moves nothing. It
@@ -127,7 +127,7 @@ reach S3 in the background:
 
    A copy is never deleted before its upload finished.
 3. A runner downloads a snapshot through a presigned S3 URL, valid for 15
-   minutes: it asks `GET /runner/blobs/{id}`, and luxd redirects it only
+   minutes: it asks `GET /runner/v1/blobs/{id}`, and luxd redirects it only
    for blobs of a Run placed on that host. Artifacts are downloaded through
    luxd, which decompresses them (blobs are stored zstd) and sends the file
    with its length and sha256 (`X-Lux-SHA256`), so a download cut short is
@@ -171,14 +171,14 @@ LUX_URL=https://luxd.example LUX_HOST_TOKEN=luxh_… lux-runner --name host-a
 A static host set up from a stock distro image can instead run luxd's
 bootstrap script, which checks the host requirements above, installs
 whatever is missing, and installs `lux-runner` as a systemd service
-(`GET /runner/bootstrap.sh`, no auth: it carries no secret). It is a bash
+(`GET /runner/v1/bootstrap.sh`, no auth: it carries no secret). It is a bash
 script (`missing=()` arrays, `set -o pipefail`), so it must run under
 `bash`, not piped into a bare `sh`, which is `dash` on Debian and Ubuntu
 and silently fails on it; `sudo env` is required to pass the environment
 through:
 
 ```bash
-curl -fsS https://luxd.example/runner/bootstrap.sh | sudo env \
+curl -fsS https://luxd.example/runner/v1/bootstrap.sh | sudo env \
   LUX_URL=https://luxd.example LUX_HOST_TOKEN=luxh_… LUX_HOST_NAME=host-a bash
 ```
 
@@ -218,12 +218,12 @@ Host tokens come from `luxd admin create-host-token --tenant T [--pool P]
 luxd serves the runner binaries a host needs, so no custom AMI or
 config-management run has to carry them:
 
-- `GET /runner/bin/manifest` (host-token auth): `{"linux-arm64":
+- `GET /runner/v1/bin/manifest` (host-token auth): `{"linux-arm64":
   {"lux-runner": "<sha256>", "lux-shim": "<sha256>"}, "linux-amd64": {...}}`
   for each arch `LUX_RUNNER_BIN_DIR` holds **both** binaries for; an arch
   missing either file is never listed, and never grounds for a drain (luxd
   never asks a host to update to something it cannot itself serve).
-- `GET /runner/bin/linux-{arch}/{lux-runner|lux-shim}` streams the binary,
+- `GET /runner/v1/bin/linux-{arch}/{lux-runner|lux-shim}` streams the binary,
   with `Content-Length` and its sha256 in `X-Lux-Sha256`.
 
 luxd hashes what it finds under `LUX_RUNNER_BIN_DIR` once at startup. A
@@ -233,7 +233,7 @@ systemd unit's `ExecStartPre`), so an upgrade is: replace luxd's
 patch a running binary in place. **Every luxd instance behind the same
 `runner_url` must serve identical runner binaries before a rolling
 deploy**: otherwise which luxd a host's next heartbeat happens to reach
-decides whether it is "outdated", and `/runner/bin` can serve a different
+decides whether it is "outdated", and `/runner/v1/bin` can serve a different
 build to a host mid-update.
 
 Every `Hello` and `Heartbeat` a runner sends carries the sha256 of its own
@@ -356,7 +356,7 @@ What an instance needs:
     `KEY=value` lines).
 
   Whichever format, the instance downloads `lux-runner` and `lux-shim` from
-  luxd itself (`GET /runner/bin/...`, verified by sha256) rather than
+  luxd itself (`GET /runner/v1/bin/...`, verified by sha256) rather than
   carrying them in the AMI, so a new release needs no new AMI.
 - A launch template (id `lt-…` or name), a security group reaching
   `runner_url`, egress to the package mirrors (the `script` format) and to
@@ -378,7 +378,7 @@ with an unrecognized value is refused, not left to fail at boot:
 
 Every format's token is single-use per host and revoked when the host is
 terminated. A static host (outside any pool) uses the same script as
-`userData: script`, unfilled: `curl <luxd>/runner/bootstrap.sh | sudo env
+`userData: script`, unfilled: `curl <luxd>/runner/v1/bootstrap.sh | sudo env
 LUX_HOST_TOKEN=luxh_… LUX_URL=https://luxd.example bash` (no auth on that
 endpoint: it carries no secret, only how to reach luxd).
 

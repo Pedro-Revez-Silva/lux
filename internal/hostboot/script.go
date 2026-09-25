@@ -6,7 +6,7 @@ import (
 )
 
 // scriptBody backs both userData "script" (Script) and GET
-// /runner/bootstrap.sh (Bootstrap). It checks the host requirements from
+// /runner/v1/bootstrap.sh (Bootstrap). It checks the host requirements from
 // docs/operations.md and installs only what is missing (dnf, else
 // apt-get). Idempotent: a rerun never disturbs a running lux-runner.
 const scriptBody = `#!/bin/bash
@@ -81,7 +81,7 @@ func Script(env Env) string {
 	return b.String()
 }
 
-// Bootstrap renders GET /runner/bootstrap.sh: the same script, taking its
+// Bootstrap renders GET /runner/v1/bootstrap.sh: the same script, taking its
 // env from the environment it runs in (curl ... | sudo env LUX_URL=...
 // LUX_HOST_TOKEN=... bash). Its guard line refuses a bare `sh` (dash on
 // Debian/Ubuntu), which ignores the shebang when piped.

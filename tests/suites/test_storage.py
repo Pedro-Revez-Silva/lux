@@ -48,7 +48,7 @@ def test_another_tenant_cannot_see_snapshots(env, tenant_factory, runners, hosts
 
 
 def test_a_runner_cannot_download_a_run_it_does_not_hold(env, lux, runners, hosts, fake_image):
-    """GET /runner/blobs/{id} only serves blobs of Runs placed on the asking
+    """GET /runner/v1/blobs/{id} only serves blobs of Runs placed on the asking
     host, and redirects to a presigned URL."""
     a, b = hosts[0], hosts[1]
     runners.start(a)
@@ -59,12 +59,12 @@ def test_a_runner_cannot_download_a_run_it_does_not_hold(env, lux, runners, host
     blob = snap["manifest"]["volumes"][0]["blobId"]
     runners.start(b)
     tok_b = runners.tokens[b.name]
-    r = lux.api(f"/runner/blobs/{blob}?host={b.name}", tok_b, allow_redirects=False)
+    r = lux.api(f"/runner/v1/blobs/{blob}?host={b.name}", tok_b, allow_redirects=False)
     assert r.status_code == 404, r.text
     # Once the Run is placed on b, b may fetch it, through a presigned URL.
     runners.stop(a)
     lux.run("resume", run_id, "--wait")
-    r = lux.api(f"/runner/blobs/{blob}?host={b.name}", tok_b, allow_redirects=False)
+    r = lux.api(f"/runner/v1/blobs/{blob}?host={b.name}", tok_b, allow_redirects=False)
     assert r.status_code == 302 and "X-Amz-Signature" in r.headers["Location"], r.status_code
 
 

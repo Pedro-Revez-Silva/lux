@@ -24,7 +24,7 @@
 //     them (the pre-self-update behaviour).
 //
 // Whichever format, the instance downloads lux-runner and lux-shim from
-// luxd (GET /runner/bin/...) rather than carrying them in the AMI.
+// luxd (GET /runner/v1/bin/...) rather than carrying them in the AMI.
 //
 // Credentials and region come from the standard AWS configuration of the
 // luxd process (environment, instance role). LUX_EC2_ENDPOINT points the

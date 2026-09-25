@@ -184,7 +184,7 @@ func (h *Hub) deliveryLoop(ctx context.Context) {
 	}
 }
 
-// serveRunnerWS is GET /runner/ws.
+// serveRunnerWS is GET /runner/v1/ws.
 func (s *Server) serveRunnerWS(w http.ResponseWriter, r *http.Request) error {
 	tok, err := s.authHostToken(r)
 	if err != nil {

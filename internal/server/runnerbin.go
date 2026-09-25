@@ -158,8 +158,8 @@ func (s *Server) runnerBinManifest() map[string]map[string]string {
 	return out
 }
 
-// serveRunnerBinManifest is GET /runner/bin/manifest: host-token auth, like
-// the other /runner/... routes.
+// serveRunnerBinManifest is GET /runner/v1/bin/manifest: host-token auth, like
+// the other /runner/v1/... routes.
 func (s *Server) serveRunnerBinManifest(w http.ResponseWriter, r *http.Request) error {
 	if _, err := s.authHostToken(r); err != nil {
 		return err
@@ -168,7 +168,7 @@ func (s *Server) serveRunnerBinManifest(w http.ResponseWriter, r *http.Request) 
 	return nil
 }
 
-// serveRunnerBin is GET /runner/bin/linux-{arch}/{lux-runner|lux-shim}:
+// serveRunnerBin is GET /runner/v1/bin/linux-{arch}/{lux-runner|lux-shim}:
 // serves the binary (~20MB) held in memory since startup (loadRunnerBinaries),
 // never reopening the path — a release that replaces the file on disk in
 // place can never make this serve bytes whose sha256 differs from what it

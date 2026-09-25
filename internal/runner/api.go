@@ -79,7 +79,7 @@ func (a *api) doJSON(ctx context.Context, method, path string, body io.Reader, o
 
 // upload PUTs a blob; luxd streams it into S3.
 func (a *api) upload(ctx context.Context, blobID string, body io.Reader, size int64) error {
-	r, err := a.req(ctx, http.MethodPut, "/runner/blobs/"+blobID+"?host="+a.host, body)
+	r, err := a.req(ctx, http.MethodPut, "/runner/v1/blobs/"+blobID+"?host="+a.host, body)
 	if err != nil {
 		return err
 	}
@@ -100,7 +100,7 @@ func (a *api) upload(ctx context.Context, blobID string, body io.Reader, size in
 // download returns a blob's body: luxd redirects to a presigned URL, which
 // is fetched without the host token.
 func (a *api) download(ctx context.Context, blobID string) (io.ReadCloser, error) {
-	r, err := a.req(ctx, http.MethodGet, "/runner/blobs/"+blobID+"?host="+a.host, nil)
+	r, err := a.req(ctx, http.MethodGet, "/runner/v1/blobs/"+blobID+"?host="+a.host, nil)
 	if err != nil {
 		return nil, err
 	}

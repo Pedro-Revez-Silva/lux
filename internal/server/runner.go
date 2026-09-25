@@ -19,18 +19,18 @@ import (
 )
 
 func (s *Server) runnerRoutes(mux *http.ServeMux) {
-	mux.Handle("GET /runner/ws", s.wrap(s.serveRunnerWS))
-	mux.Handle("POST /runner/poll", s.wrap(s.servePoll))
-	mux.Handle("PUT /runner/blobs/{id}", s.wrap(s.serveBlobUpload))
-	mux.Handle("GET /runner/blobs/{id}", s.wrap(s.serveRunnerBlobDownload))
-	mux.Handle("GET /runner/bin/manifest", s.wrap(s.serveRunnerBinManifest))
-	mux.Handle("GET /runner/bin/{osArch}/{name}", s.wrap(s.serveRunnerBin))
+	mux.Handle("GET /runner/v1/ws", s.wrap(s.serveRunnerWS))
+	mux.Handle("POST /runner/v1/poll", s.wrap(s.servePoll))
+	mux.Handle("PUT /runner/v1/blobs/{id}", s.wrap(s.serveBlobUpload))
+	mux.Handle("GET /runner/v1/blobs/{id}", s.wrap(s.serveRunnerBlobDownload))
+	mux.Handle("GET /runner/v1/bin/manifest", s.wrap(s.serveRunnerBinManifest))
+	mux.Handle("GET /runner/v1/bin/{osArch}/{name}", s.wrap(s.serveRunnerBin))
 	// No auth: it carries no secret, and a static host needs it before it
 	// has a host token (curl ... | sudo env LUX_HOST_TOKEN=... bash).
-	mux.Handle("GET /runner/bootstrap.sh", s.wrap(s.serveBootstrap))
+	mux.Handle("GET /runner/v1/bootstrap.sh", s.wrap(s.serveBootstrap))
 }
 
-// serveBootstrap is GET /runner/bootstrap.sh: the boot script a static
+// serveBootstrap is GET /runner/v1/bootstrap.sh: the boot script a static
 // host runs to install lux-runner as a systemd service. It takes
 // LUX_URL, LUX_HOST_TOKEN, LUX_HOST_NAME and LUX_EC2_IMDS from its own
 // environment (unauthenticated here: it carries no secret, only how to
