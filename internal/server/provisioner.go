@@ -68,6 +68,9 @@ func (s *Server) provisionerLoop(ctx context.Context) {
 			}
 		}
 	}
+	// A luxd shutting down (a deploy) lets another take over at once
+	// rather than after the lease's expiry.
+	defer s.releaseProvisionLease()
 	t := time.NewTicker(s.cfg.Tick)
 	defer t.Stop()
 	for {
@@ -503,6 +506,19 @@ func (s *Server) provisionLease(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	return ok, err
+}
+
+// releaseProvisionLease gives the lease up, if this luxd holds it.
+func (s *Server) releaseProvisionLease() {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `DELETE FROM leases WHERE name = 'provisioner' AND holder = $1`, instanceID)
+		return err
+	})
+	if err != nil {
+		s.log.Warn("releasing the provisioner lease", "err", err)
+	}
 }
 
 // drainForScaleDown cordons an idle host; the next pass terminates it once
