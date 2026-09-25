@@ -36,6 +36,11 @@ locals {
   # By pool name.
   runner_launch_template_arns = { for k, lt in aws_launch_template.runner : k => "${local.ec2_arn}:launch-template/${lt.id}" }
   ssm_parameter_arn           = "${local.arn_prefix}:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter"
+  # Parameter ARNs carry the name's leading "/" once: arn:...:parameter/lux/x.
+  tunnel_token_parameter_arn = "${local.ssm_parameter_arn}${startswith(local.cloudflare_tunnel_token_parameter, "/") ? "" : "/"}${local.cloudflare_tunnel_token_parameter}"
+  deploy_key_parameter_arns = var.config_repo_deploy_key_parameter == "" ? [] : [
+    "${local.ssm_parameter_arn}${startswith(var.config_repo_deploy_key_parameter, "/") ? "" : "/"}${var.config_repo_deploy_key_parameter}",
+  ]
 }
 
 # --- control host ---------------------------------------------------------
@@ -240,13 +245,16 @@ resource "aws_iam_role_policy" "control_luxd" {
         Sid    = "ReadOwnParameters"
         Effect = "Allow"
         Action = ["ssm:GetParameter", "ssm:GetParameters"]
-        # The tunnel token's parameter may be named outside the prefix
-        # (cloudflare_tunnel_token_parameter), and nothing else grants
+        # The tunnel token's and the config repo deploy key's parameters
+        # may be named outside the prefix, and nothing else grants
         # parameter reads.
-        Resource = [
-          "${local.ssm_parameter_arn}${local.ssm_prefix}/*",
-          "${local.ssm_parameter_arn}${startswith(local.cloudflare_tunnel_token_parameter, "/") ? "" : "/"}${local.cloudflare_tunnel_token_parameter}",
-        ]
+        Resource = concat(
+          [
+            "${local.ssm_parameter_arn}${local.ssm_prefix}/*",
+            local.tunnel_token_parameter_arn,
+          ],
+          local.deploy_key_parameter_arns,
+        )
       },
     ]
   })

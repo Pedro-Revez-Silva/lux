@@ -7,10 +7,17 @@ locals {
 module "aws" {
   source = "../../aws"
 
-  name        = var.name
-  region      = var.region
-  lux_version = var.lux_version
-  public_url  = var.public_url
+  name       = var.name
+  region     = var.region
+  public_url = var.public_url
+
+  # This repo: the control host follows config_repo_ref and runs
+  # <config_repo_path>/host/reconcile.py. The lux version and luxd
+  # settings are in host/lux-host.toml, not here.
+  config_repo_url                  = var.config_repo_url
+  config_repo_ref                  = var.config_repo_ref
+  config_repo_path                 = var.config_repo_path
+  config_repo_deploy_key_parameter = var.config_repo_deploy_key_parameter
 
   cf_access_team = var.cf_access_team
   cf_access_aud  = module.cloudflare.access_application_aud

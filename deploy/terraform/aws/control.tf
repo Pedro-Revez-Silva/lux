@@ -50,10 +50,32 @@ variable "cf_access_aud" {
   default     = ""
 }
 
-variable "lux_repo" {
-  description = "GitHub \"owner/repo\" that publishes lux releases."
+variable "config_repo_url" {
+  description = "Git URL (SSH or HTTPS) of the operator's config repo: the control host clones it and runs <config_repo_path>/host/reconcile.py from it every 5 minutes."
   type        = string
-  default     = "marcioapm/lux"
+
+  validation {
+    condition     = length(trimspace(var.config_repo_url)) > 0
+    error_message = "config_repo_url must be set."
+  }
+}
+
+variable "config_repo_ref" {
+  description = "Branch or tag of the config repo the control host follows."
+  type        = string
+  default     = "main"
+}
+
+variable "config_repo_path" {
+  description = "Subdirectory of the config repo that holds host/ (empty: the repo root)."
+  type        = string
+  default     = ""
+}
+
+variable "config_repo_deploy_key_parameter" {
+  description = "Name of an existing SSM SecureString holding a read-only SSH deploy key for the config repo. Empty: the repo is public (fetched without a key)."
+  type        = string
+  default     = ""
 }
 
 variable "lux_app_db_name" {
@@ -64,13 +86,9 @@ variable "lux_app_db_name" {
 
 # --- values that can change after first boot --------------------------
 # aws_instance.control ignores changes to ami and user_data_base64 (see its
-# lifecycle block below), so cloud-init's write_files/runcmd only ever
-# run once, at first boot. Anything that legitimately changes later
-# (public_url, the Access team/AUD, bucket names) goes through SSM
-# instead: lux-render-config.sh reads these parameters and rewrites
-# /etc/lux/luxd.toml on every lux-deploy.service run (every 5 minutes),
-# so a `terraform apply` that only changes one of these values reaches
-# the box without replacing the instance or rerunning cloud-init.
+# lifecycle block below), so cloud-init only ever runs once, at first
+# boot. Everything the reconciler needs from the infrastructure goes
+# through SSM instead and is re-read on every run (every 5 minutes).
 resource "aws_ssm_parameter" "public_url" {
   name  = "${local.ssm_prefix}/public_url"
   type  = "String"
@@ -99,6 +117,65 @@ resource "aws_ssm_parameter" "blob_bucket" {
   name  = "${local.ssm_prefix}/blob_bucket"
   type  = "String"
   value = aws_s3_bucket.blobs.id
+
+  tags = var.tags
+}
+
+resource "aws_ssm_parameter" "backup_bucket" {
+  name  = "${local.ssm_prefix}/backup_bucket"
+  type  = "String"
+  value = aws_s3_bucket.pg_backups.id
+
+  tags = var.tags
+}
+
+resource "aws_ssm_parameter" "db_name" {
+  name  = "${local.ssm_prefix}/db_name"
+  type  = "String"
+  value = var.lux_app_db_name
+
+  tags = var.tags
+}
+
+resource "aws_ssm_parameter" "luxd_port" {
+  name  = "${local.ssm_prefix}/luxd_port"
+  type  = "String"
+  value = tostring(var.luxd_port)
+
+  tags = var.tags
+}
+
+resource "aws_ssm_parameter" "pg_data_volume_id" {
+  name  = "${local.ssm_prefix}/pg_data_volume_id"
+  type  = "String"
+  value = aws_ebs_volume.pg_data.id
+
+  tags = var.tags
+}
+
+resource "aws_ssm_parameter" "config_repo_url" {
+  name  = "${local.ssm_prefix}/config_repo_url"
+  type  = "String"
+  value = var.config_repo_url
+
+  tags = var.tags
+}
+
+resource "aws_ssm_parameter" "config_repo_ref" {
+  name  = "${local.ssm_prefix}/config_repo_ref"
+  type  = "String"
+  value = var.config_repo_ref
+
+  tags = var.tags
+}
+
+# SSM refuses an empty String value: absent means a public repo.
+resource "aws_ssm_parameter" "config_repo_deploy_key_parameter" {
+  count = var.config_repo_deploy_key_parameter != "" ? 1 : 0
+
+  name  = "${local.ssm_prefix}/config_repo_deploy_key_parameter"
+  type  = "String"
+  value = var.config_repo_deploy_key_parameter
 
   tags = var.tags
 }
@@ -155,25 +232,21 @@ resource "aws_volume_attachment" "pg_data" {
 }
 
 locals {
+  config_checkout = "/var/lib/lux/config"
+  config_host_dir = join("/", compact([local.config_checkout, trim(var.config_repo_path, "/"), "host"]))
   cloud_init = templatefile("${path.module}/templates/control-cloud-init.yaml.tpl", {
-    hostname                 = var.name
-    luxd_port                = var.luxd_port
-    runner_bin_dir           = "/usr/local/lib/lux/runner"
-    region                   = var.region
-    lux_repo                 = var.lux_repo
-    version_parameter        = aws_ssm_parameter.lux_version.name
-    public_url_parameter     = aws_ssm_parameter.public_url.name
-    cf_access_team_parameter = aws_ssm_parameter.cf_access_team.name
-    cf_access_aud_parameter  = aws_ssm_parameter.cf_access_aud.name
-    blob_bucket_parameter    = aws_ssm_parameter.blob_bucket.name
-    tunnel_token_parameter   = local.cloudflare_tunnel_token_parameter
-    db_name                  = var.lux_app_db_name
-    volume_id_nodash         = replace(aws_ebs_volume.pg_data.id, "-", "")
-    deploy_script            = file("${path.module}/templates/scripts/deploy-lux.py")
-    backup_script = templatefile("${path.module}/templates/scripts/pg-backup.sh.tpl", {
-      backup_bucket = aws_s3_bucket.pg_backups.id
-      db_name       = var.lux_app_db_name
-      region        = var.region
+    hostname  = var.name
+    region    = var.region
+    checkout  = local.config_checkout
+    host_dir  = local.config_host_dir
+    repo_url  = var.config_repo_url
+    repo_ref  = var.config_repo_ref
+    key_param = var.config_repo_deploy_key_parameter
+    host_json = jsonencode({
+      region           = var.region
+      ssm_prefix       = local.ssm_prefix
+      checkout         = local.config_checkout
+      config_repo_path = trim(var.config_repo_path, "/")
     })
   })
 }
@@ -191,9 +264,8 @@ resource "aws_instance" "control" {
   # rule from 0.0.0.0/0 — see network.tf), not by withholding the address.
   associate_public_ip_address = true
 
-  # gzip: the rendered cloud-config (with deploy-lux.py inlined) is over
-  # EC2's 16 KiB user_data limit as plain text. cloud-init detects and
-  # decompresses gzipped user data by itself.
+  # gzip: keeps the bootstrap well under EC2's 16 KiB user_data limit.
+  # cloud-init detects and decompresses gzipped user data by itself.
   user_data_base64 = base64gzip(local.cloud_init)
 
   # t4g's default (unlimited) bills sustained load above the 20%
@@ -228,13 +300,11 @@ resource "aws_instance" "control" {
     # (downtime, a full reinstall, new Postgres/luxd passwords). Replace
     # it only deliberately (terraform taint / apply -replace).
     #
-    # user_data: cloud-init runs write_files/runcmd once, at first boot;
-    # changing user_data here wouldn't rerun it, only recreate the
-    # instance (the AWS provider requires a stop/start or replace to
-    # apply a new user_data value). Values that legitimately change
-    # after first boot go through SSM instead (see the parameters
-    # above and ssm.tf's module comment), which lux-render-config.sh
-    # re-reads on every deploy run without touching this resource.
+    # user_data: cloud-init runs once, at first boot, and only bootstraps
+    # the config repo checkout and its reconcile timer. Everything after
+    # that is the reconciler's job: host code and the desired state come
+    # from the config repo, infrastructure values from the SSM parameters
+    # above, so neither needs a new user_data.
     ignore_changes = [ami, user_data_base64]
 
     # tags_all includes the provider's default_tags, which this module

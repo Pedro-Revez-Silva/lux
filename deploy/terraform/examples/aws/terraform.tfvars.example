@@ -3,8 +3,14 @@
 
 region      = "eu-north-1"
 name        = "lux"
-lux_version = "v0.1.0" # the GitHub release tag to deploy; docs/README.md "Upgrading"
 public_url  = "https://lux.example.com"
+
+# This repo, as the control host clones it. The lux version is not set
+# here: it is lux_version in host/lux-host.toml (host/README.md).
+config_repo_url                  = "git@github.com:acme/lux-config.git"
+config_repo_ref                  = "main"
+config_repo_path                 = "" # e.g. "deploy/aws" if host/ is not at the repo root
+config_repo_deploy_key_parameter = "/acme/lux-config-deploy-key" # SecureString; "" for a public repo
 
 amd64_runners_enabled = false
 

@@ -1,27 +1,19 @@
-# SSM Parameter Store: the desired lux version (set by Terraform), the
-# Cloudflare Tunnel token (a SecureString, created only if
-# manage_cloudflare_tunnel_token is true — otherwise Terraform expects it
-# to already exist, e.g. created out of band or by
-# deploy/terraform/cloudflare), and the handful of config values that can
-# change without replacing the control host (public_url, cf_access_team,
-# cf_access_aud, the bucket names — see the lifecycle block on
-# aws_instance.control in control.tf). lux-render-config.sh re-reads
-# those on every deploy run, not just at first boot, so changing one is a
-# plain `terraform apply` — no instance replacement, no cloud-init rerun.
-# Postgres passwords are generated on the control host itself and never
-# touch Terraform state (see control.tf); they may end up under this same
-# prefix as SecureStrings the box writes, which is why iam.tf grants
-# PutParameter there too.
+# SSM Parameter Store: the infrastructure values the control host's
+# reconciler (host/reconcile.py in the config repo) reads on every run —
+# bucket names, public URL, Access team/AUD, the Postgres data volume, the
+# config repo's URL/ref and deploy-key parameter name — and the Cloudflare
+# Tunnel token (a SecureString, created only if
+# manage_cloudflare_tunnel_token is true; otherwise it must already exist).
+# aws_instance.control ignores user_data changes, so changing one of these
+# is a plain `terraform apply` that reaches the host within 5 minutes. The
+# lux version and luxd operator settings are not here: they live in the
+# config repo's host/lux-host.toml. Postgres passwords are generated on
+# the control host and never touch Terraform state or SSM.
 
 variable "ssm_prefix" {
   description = "SSM Parameter Store path prefix for this deployment's parameters."
   type        = string
   default     = "/lux"
-}
-
-variable "lux_version" {
-  description = "lux version to deploy (the GitHub release tag, e.g. \"v0.5.0\"). Written to `<ssm_prefix>/version`; the control host's deploy timer polls it every 5 minutes."
-  type        = string
 }
 
 variable "cloudflare_tunnel_token_parameter" {
@@ -48,10 +40,10 @@ locals {
   cloudflare_tunnel_token_parameter = var.cloudflare_tunnel_token_parameter != "" ? var.cloudflare_tunnel_token_parameter : "${local.ssm_prefix}/cloudflare-tunnel-token"
 }
 
-resource "aws_ssm_parameter" "lux_version" {
-  name  = "${local.ssm_prefix}/version"
+resource "aws_ssm_parameter" "tunnel_token_parameter" {
+  name  = "${local.ssm_prefix}/tunnel_token_parameter"
   type  = "String"
-  value = var.lux_version
+  value = local.cloudflare_tunnel_token_parameter
 
   tags = var.tags
 }
@@ -64,10 +56,6 @@ resource "aws_ssm_parameter" "cloudflare_tunnel_token" {
   value = var.cloudflare_tunnel_token
 
   tags = var.tags
-}
-
-output "lux_version_parameter" {
-  value = aws_ssm_parameter.lux_version.name
 }
 
 output "cloudflare_tunnel_token_parameter" {

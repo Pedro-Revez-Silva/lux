@@ -10,9 +10,27 @@ variable "name" {
   default     = "lux"
 }
 
-variable "lux_version" {
-  description = "lux version to deploy (a GitHub release tag)."
+variable "config_repo_url" {
+  description = "Git URL of this config repo, as the control host clones it (SSH with a deploy key, or HTTPS for a public repo)."
   type        = string
+}
+
+variable "config_repo_ref" {
+  description = "Branch the control host follows."
+  type        = string
+  default     = "main"
+}
+
+variable "config_repo_path" {
+  description = "Subdirectory of this repo that holds host/ (empty: the repo root)."
+  type        = string
+  default     = ""
+}
+
+variable "config_repo_deploy_key_parameter" {
+  description = "SSM SecureString holding a read-only SSH deploy key for this repo; empty for a public repo."
+  type        = string
+  default     = ""
 }
 
 variable "public_url" {
