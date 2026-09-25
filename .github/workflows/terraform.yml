@@ -6,11 +6,17 @@ on:
     paths:
       - "deploy/terraform/**"
       - "scripts/tf-validate.sh"
+      - "scripts/host-smoke.sh"
+      - "scripts/host-smoke/**"
+      - "Makefile"
       - ".github/workflows/terraform.yml"
   pull_request:
     paths:
       - "deploy/terraform/**"
       - "scripts/tf-validate.sh"
+      - "scripts/host-smoke.sh"
+      - "scripts/host-smoke/**"
+      - "Makefile"
       - ".github/workflows/terraform.yml"
 
 permissions:
@@ -41,3 +47,28 @@ jobs:
       # example, and the mocked `terraform test`s (control user_data size).
       - name: make tf-validate
         run: make tf-validate
+
+  # The control host's reconciler: pytest, then the debian:trixie smoke
+  # test against a local config repo and a `make dist` release.
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install pytest
+        run: python -m pip install pytest
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: make host-test
+        run: make host-test PYTHON=python

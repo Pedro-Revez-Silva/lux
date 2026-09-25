@@ -1,4 +1,4 @@
-.PHONY: build console test unit e2e infra lint tf-validate dist clean
+.PHONY: build console test unit e2e infra lint tf-validate host-unit host-test dist clean
 
 GO_LDFLAGS := -s -w -X github.com/marcioapm/lux/internal/version.Version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BINARIES := luxd lux-runner lux-shim lux lux-fake
@@ -45,6 +45,19 @@ lint:
 # Terraform >= 1.10; TERRAFORM=/path/to/terraform to pick one.
 tf-validate:
 	./scripts/tf-validate.sh
+
+# The control host's reconciler (deploy/terraform/examples/aws/host):
+# host-unit is its pytest suite (Python 3.13+, pytest); host-test adds the
+# container smoke test (docker, privileged; builds `make dist` first if
+# dist/ has no VERSION release for the Docker host's arch).
+HOST_DIR := deploy/terraform/examples/aws/host
+PYTHON ?= python3
+
+host-unit:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m pytest -q -p no:cacheprovider $(HOST_DIR)/tests
+
+host-test: host-unit
+	VERSION=$(or $(VERSION),v0.0.0-smoke) ./scripts/host-smoke.sh
 
 # Release tarballs (docs/development.md "Releases"): lux_<version>_linux_
 # {arm64,amd64}.tar.gz (luxd, lux, both runner arches' lux-runner/lux-shim),

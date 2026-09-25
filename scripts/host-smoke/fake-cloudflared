@@ -1,0 +1,4 @@
+#!/bin/sh
+# Stands in for cloudflared: a long-running process the unit can supervise.
+[ -s /etc/cloudflared/token ] || exit 1
+exec sleep infinity

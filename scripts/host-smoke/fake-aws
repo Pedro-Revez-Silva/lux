@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Stands in for the AWS CLI in the host smoke test: SSM parameters come
+from /etc/smoke/ssm.json, and `s3 cp - s3://bucket/key` writes stdin to
+/srv/s3/bucket/key. Anything else is an error."""
+import json
+import os
+import shutil
+import sys
+
+args = sys.argv[1:]
+
+
+def params():
+    with open("/etc/smoke/ssm.json") as f:
+        return json.load(f)
+
+
+if args[:2] == ["ssm", "get-parameters"]:
+    names = args[args.index("--names") + 1:args.index("--region")]
+    p = params()
+    print(json.dumps({
+        "Parameters": [{"Name": n, "Type": "String", "Value": p[n]} for n in names if n in p],
+        "InvalidParameters": [n for n in names if n not in p],
+    }))
+elif args[:2] == ["ssm", "get-parameter"]:
+    name = args[args.index("--name") + 1]
+    p = params()
+    if name not in p:
+        print(f"An error occurred (ParameterNotFound): {name}", file=sys.stderr)
+        sys.exit(254)
+    print(p[name])
+elif args[:3] == ["s3", "cp", "-"] and args[3].startswith("s3://"):
+    dest = os.path.join("/srv/s3", args[3].removeprefix("s3://"))
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with open(dest, "wb") as out:
+        shutil.copyfileobj(sys.stdin.buffer, out)
+else:
+    print(f"fake aws: unsupported: {args}", file=sys.stderr)
+    sys.exit(2)
