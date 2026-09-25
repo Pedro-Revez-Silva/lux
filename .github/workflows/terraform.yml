@@ -1,0 +1,43 @@
+name: terraform
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/terraform/**"
+      - "scripts/tf-validate.sh"
+      - ".github/workflows/terraform.yml"
+  pull_request:
+    paths:
+      - "deploy/terraform/**"
+      - "scripts/tf-validate.sh"
+      - ".github/workflows/terraform.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.16"
+          terraform_wrapper: false
+
+      - name: Create the plugin cache directory
+        run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: terraform-plugins-${{ runner.os }}-${{ hashFiles('deploy/terraform/**/.terraform.lock.hcl') }}
+
+      # fmt -check, init -backend=false, validate for every module and
+      # example, and the mocked `terraform test`s (control user_data size).
+      - name: make tf-validate
+        run: make tf-validate

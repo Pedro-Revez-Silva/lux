@@ -27,7 +27,17 @@ docs/
 make build        # the console (console/dist, needs Bun), then static binaries in bin/
 make lint         # go vet, gofmt
 make unit         # go test ./... (store tests need Postgres; see below)
+make tf-validate  # deploy/terraform: fmt -check, init -backend=false, validate, mocked terraform test
 ```
+
+`make tf-validate` (`scripts/tf-validate.sh`, needs Terraform >= 1.10) is
+also what `.github/workflows/terraform.yml` runs on pushes to main and pull
+requests touching `deploy/terraform/`. It needs no cloud credentials: the
+`terraform test` suites (`deploy/terraform/aws/tests/`) use mocked
+providers, and check, among other things, that the control host's
+user_data stays under EC2's 16 KiB limit. After changing a module's
+providers, refresh its lock file for CI's platform too:
+`terraform providers lock -platform=linux_amd64 -platform=darwin_arm64`.
 
 `go build` alone works too: luxd then embeds whatever `console/dist` holds,
 and without a console build serves a page saying how to make one. To work

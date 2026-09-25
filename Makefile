@@ -1,4 +1,4 @@
-.PHONY: build console test unit e2e infra lint dist clean
+.PHONY: build console test unit e2e infra lint tf-validate dist clean
 
 GO_LDFLAGS := -s -w -X github.com/marcioapm/lux/internal/version.Version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BINARIES := luxd lux-runner lux-shim lux lux-fake
@@ -39,6 +39,12 @@ test: unit e2e
 lint:
 	go vet ./...
 	gofmt -l . | (! grep .)
+
+# fmt, init (no backend, committed lock files), validate and the mocked
+# `terraform test`s of every root under deploy/terraform. Needs
+# Terraform >= 1.10; TERRAFORM=/path/to/terraform to pick one.
+tf-validate:
+	./scripts/tf-validate.sh
 
 # Release tarballs (docs/development.md "Releases"): lux_<version>_linux_
 # {arm64,amd64}.tar.gz (luxd, lux, both runner arches' lux-runner/lux-shim),
