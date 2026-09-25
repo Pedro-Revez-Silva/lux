@@ -20,12 +20,14 @@ separate private repo should hold the real values and state.
   data volume has `prevent_destroy` so replacing the instance does not
   touch it. `lifecycle { ignore_changes = [ami, user_data] }` keeps a
   newer Debian AMI or an edited cloud-init template from triggering an
-  unplanned replacement; values that change after first boot (public
-  URL, the Access team/AUD, the blob bucket) go through SSM instead and
-  are re-read on every deploy run. A systemd timer (`lux-deploy.timer`,
-  every 5 minutes) polls an SSM parameter for the desired lux version
-  and deploys it — see "Upgrading" below. Another timer runs `pg_dump
-  -Fc` daily at 00:00 UTC, streamed to S3. Shell access is SSM Session
+  unplanned replacement. cloud-init is only a bootstrap: it installs
+  packages, clones the operator's **config repo** and starts
+  `lux-reconcile.timer`, which runs `host/reconcile.py` from that
+  checkout every 5 minutes. The reconciler does everything else
+  (Postgres volume and database, `luxd.toml`, the lux release,
+  cloudflared, the daily `pg_dump -Fc` to S3, the systemd units) from
+  the repo's `host/lux-host.toml` plus infrastructure values Terraform
+  writes to SSM — see "Config repo" below. Shell access is SSM Session
   Manager only: no SSH, no key pairs — cloud-init installs the regional
   `amazon-ssm-agent` `.deb`, which the Debian Cloud Image doesn't ship
   (UNVERIFIED: no AWS credentials available to confirm this against a
@@ -66,9 +68,9 @@ separate private repo should hold the real values and state.
   `lux:managed=true` and a `lux:host` tag (set only by luxd at launch; the
   control host carries no `lux:*` tag, and a postcondition refuses one
   arriving through `default_tags`), `ec2:DescribeInstances`, S3 on its own
-  buckets, and `ssm:GetParameter(s)` under its own prefix (the desired lux
-  version and the values `lux-render-config.sh` re-reads on every deploy
-  run — see "Control host" above). The SSM agent gets an inline copy of
+  buckets, and `ssm:GetParameter(s)` under its own prefix, on the tunnel
+  token's parameter, and on the config repo deploy key's parameter when
+  one is set — nothing else. The SSM agent gets an inline copy of
   `AmazonSSMManagedInstanceCore` without its account-wide
   `ssm:GetParameter(s)` (and `ssm:GetManifest`), not the managed policy
   itself. Also creates the `AWSServiceRoleForEC2Spot`
@@ -82,11 +84,14 @@ separate private repo should hold the real values and state.
 - **S3** (`aws/s3.tf`): a blob bucket (snapshots/output/artifacts) and a
   Postgres backup bucket. Both block public access and use SSE-KMS; the
   backup bucket is versioned with a lifecycle expiry (default 30 days).
-- **SSM** (`aws/ssm.tf`): the desired lux version, written by Terraform;
-  the Cloudflare Tunnel token, written by Terraform only when
+- **SSM** (`aws/ssm.tf`, `aws/control.tf`): infrastructure values the
+  reconciler re-reads on every run (`<prefix>/public_url`,
+  `cf_access_team`, `cf_access_aud`, `blob_bucket`, `backup_bucket`,
+  `db_name`, `luxd_port`, `pg_data_volume_id`, `tunnel_token_parameter`,
+  `config_repo_url`, `config_repo_ref`, `config_repo_deploy_key_parameter`),
+  and the Cloudflare Tunnel token, written by Terraform only when
   `manage_cloudflare_tunnel_token = true` (otherwise expected to already
-  exist); and, per "Control host" above, the values `lux-render-config.sh`
-  re-reads on every deploy run.
+  exist). No lux version: that is in the config repo.
 - **Cloudflare** (`cloudflare/`, optional): a Tunnel to the control host
   (`http://localhost:7070`), its DNS record, and two Access applications:
   one gating the console (bare hostname) to the given emails/domains,
@@ -164,20 +169,52 @@ terraform init \
 `use_lockfile = true` is Terraform's native S3 locking (>= 1.10): no
 DynamoDB table needed.
 
+## Config repo
+
+The control host is driven by a Git repo the operator owns (private or
+public). `examples/aws/` is the template for one: copy it as the repo's
+content. It holds
+
+- the Terraform root that calls `aws/` and `cloudflare/` (infrastructure
+  only, applied by hand);
+- `host/`: the reconciler (`reconcile.py`, `backup.py`, `luxhost/`) and
+  its tests;
+- `host/lux-host.toml`: the desired state — `lux_version`, the release
+  repo and luxd operator settings. Schema in `examples/aws/host/README.md`.
+
+The module takes `config_repo_url` (SSH or HTTPS), `config_repo_ref`
+(default `main`), `config_repo_path` (the subdirectory holding `host/`,
+empty for the repo root) and `config_repo_deploy_key_parameter` (the name
+of an SSM SecureString with a read-only SSH deploy key; empty for a public
+repo). Create the key parameter outside Terraform, so the key never
+enters state:
+
+```bash
+ssh-keygen -t ed25519 -N '' -C lux-control-host -f deploy_key
+# add deploy_key.pub to the repo as a read-only deploy key, then:
+aws ssm put-parameter --name /acme/lux-config-deploy-key --type SecureString \
+  --value file://deploy_key
+rm deploy_key deploy_key.pub
+```
+
+Every 5 minutes the host fetches `config_repo_ref`, hard-resets its
+checkout to it and reconciles; a change to the host code re-executes the
+new reconciler within the same run. A merged PR is the deploy.
+`journalctl -u lux-reconcile` shows one summary line per run.
+
 ## First deploy
 
-1. Copy `examples/aws/terraform.tfvars.example` to `terraform.tfvars` in
-   your private repo's root module (which should look like
-   `examples/aws/` here, calling both modules with your own values), and
-   fill in the Cloudflare account/zone ids, allowed emails/domains, and
-   `public_url`.
+1. Create the config repo from `examples/aws/` (above). Copy
+   `terraform.tfvars.example` to `terraform.tfvars` there and fill in the
+   Cloudflare account/zone ids, allowed emails/domains, `public_url` and
+   the `config_repo_*` values; set `lux_version` in `host/lux-host.toml`
+   and push it to `config_repo_ref`.
 2. `terraform init` (with your backend config), `terraform plan`,
    `terraform apply`.
-3. luxd needs a Postgres schema before it will serve: SSM into the
-   control host (`aws ssm start-session --target <instance-id>`) and
-   check `systemctl status lux-deploy.service` — the deploy timer runs
-   `luxd migrate` itself once it has downloaded the version named in SSM,
-   so this is usually automatic within 5 minutes of first boot.
+3. SSM into the control host (`aws ssm start-session --target
+   <instance-id>`) and check `journalctl -u lux-reconcile`: the first run
+   (at the end of cloud-init) prepares Postgres, installs `lux_version`
+   and runs `luxd migrate` before starting luxd.
 4. Create your first tenant and operator key (docs/operations.md):
    `luxd admin create-tenant --name ...`, `luxd admin
    create-operator-key`.
@@ -186,15 +223,37 @@ DynamoDB table needed.
 
 ## Upgrading lux
 
-Bump `lux_version` in your tfvars (a GitHub release tag) and `terraform
-apply`. Terraform only writes the new value to the SSM parameter; the
-control host's `lux-deploy.timer` picks it up within 5 minutes, downloads
-the release, verifies its checksum, and runs `luxd migrate` with the new
-binary before touching anything running. Only once that succeeds does it
-switch to the new version and restart luxd, then poll `systemctl
-is-active` and `/health` for about 30s; on any failure it restores the
-previous version's symlinks, restarts luxd again, and exits non-zero,
-leaving the previous version running. No manual SSH, no rebuild.
+Open a PR in the config repo changing `lux_version` in
+`host/lux-host.toml` to the new release tag, and merge it; no Terraform
+run. Within 5 minutes the reconciler downloads the release, verifies its
+checksum, and runs `luxd migrate` with the new binary before touching
+anything running. Only once that succeeds does it switch to the new
+version and restart luxd, then poll `systemctl is-active` and `/health`
+for about 30s; on any failure it restores the previous version's
+symlinks, restarts luxd again and the run fails (`status=error` in the
+journal; `systemctl status lux-reconcile` shows it), leaving the previous
+version running. It retries every 5 minutes until the file changes.
+Reverting the PR does not downgrade the database: `luxd migrate` has
+already run.
+
+### Upgrade notes: from the SSM version parameter to a config repo
+
+- Removed: the module's `lux_version` and `lux_repo` variables, the
+  `<ssm_prefix>/version` parameter and the `lux_version_parameter`
+  output. The version is `lux_version` in `host/lux-host.toml`; the
+  release repo is `release_repo` there.
+- Added: required `config_repo_url`; optional `config_repo_ref`,
+  `config_repo_path`, `config_repo_deploy_key_parameter`.
+- `terraform apply` destroys the old `/lux/version` parameter and creates
+  the new ones, but does not change a running control host's user_data
+  (ignored). To move it, either replace it (`terraform apply
+  -replace=module.aws.aws_instance.control`; the Postgres volume survives
+  and a volume with a filesystem is never reformatted), or, over Session
+  Manager, write `/etc/lux/host.json` as cloud-init would, clone the repo
+  to `/var/lib/lux/config` and run `python3
+  /var/lib/lux/config/host/reconcile.py` once. That run disables and
+  deletes `lux-deploy.timer`/`.service` and the old scripts under
+  `/usr/local/{lib/lux,sbin}`, and installs `lux-reconcile.timer`.
 
 ## Restore from a backup
 
