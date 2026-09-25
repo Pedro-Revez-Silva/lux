@@ -63,7 +63,7 @@ variable "lux_app_db_name" {
 }
 
 # --- values that can change after first boot --------------------------
-# aws_instance.control ignores changes to ami and user_data (see its
+# aws_instance.control ignores changes to ami and user_data_base64 (see its
 # lifecycle block below), so cloud-init's write_files/runcmd only ever
 # run once, at first boot. Anything that legitimately changes later
 # (public_url, the Access team/AUD, bucket names) goes through SSM
@@ -191,7 +191,10 @@ resource "aws_instance" "control" {
   # rule from 0.0.0.0/0 — see network.tf), not by withholding the address.
   associate_public_ip_address = true
 
-  user_data = local.cloud_init
+  # gzip: the rendered cloud-config (with deploy-lux.py inlined) is over
+  # EC2's 16 KiB user_data limit as plain text. cloud-init detects and
+  # decompresses gzipped user data by itself.
+  user_data_base64 = base64gzip(local.cloud_init)
 
   # t4g's default (unlimited) bills sustained load above the 20%
   # baseline as surplus credits at the instance's hourly rate — cheap
@@ -230,7 +233,7 @@ resource "aws_instance" "control" {
     # after first boot go through SSM instead (see the parameters
     # above and ssm.tf's module comment), which lux-render-config.sh
     # re-reads on every deploy run without touching this resource.
-    ignore_changes = [ami, user_data]
+    ignore_changes = [ami, user_data_base64]
   }
 }
 
