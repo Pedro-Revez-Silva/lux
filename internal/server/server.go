@@ -185,7 +185,10 @@ func (s *Server) Handler() http.Handler {
 	// an unknown API path keeps the mux's own 404 or 405.
 	app := console.Handler()
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isAPIPath(r.URL.Path) && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		p := r.URL.Path
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+			p != "/v1" && !strings.HasPrefix(p, "/v1/") &&
+			p != "/runner" && !strings.HasPrefix(p, "/runner/") {
 			if _, pattern := mux.Handler(r); pattern == "" {
 				app.ServeHTTP(w, r)
 				return
@@ -194,15 +197,6 @@ func (s *Server) Handler() http.Handler {
 		mux.ServeHTTP(w, r)
 	})
 	return logMiddleware(s.log, root)
-}
-
-func isAPIPath(p string) bool {
-	for _, prefix := range []string{"/v1", "/runner"} {
-		if p == prefix || strings.HasPrefix(p, prefix+"/") {
-			return true
-		}
-	}
-	return false
 }
 
 func redirectConsole(w http.ResponseWriter, r *http.Request) {
