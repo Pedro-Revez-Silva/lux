@@ -36,8 +36,8 @@ requests touching `deploy/terraform/`. It needs no cloud credentials: the
 `terraform test` suites (`deploy/terraform/aws/tests/`) use mocked
 providers, and check, among other things, that the control host's
 user_data stays under EC2's 16 KiB limit. After changing a module's
-providers, refresh its lock file for CI's platform too:
-`terraform providers lock -platform=linux_amd64 -platform=darwin_arm64`.
+providers, refresh its lock file for every platform it carries:
+`terraform providers lock -platform=linux_amd64 -platform=linux_arm64 -platform=darwin_arm64 -platform=darwin_amd64`.
 
 `go build` alone works too: luxd then embeds whatever `console/dist` holds,
 and without a console build serves a page saying how to make one. To work
