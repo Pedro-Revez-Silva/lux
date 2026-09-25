@@ -133,7 +133,7 @@ func serve(ctx context.Context, c config) error {
 		return err
 	}
 	defer db.Close()
-	blobs, err := blob.New(blob.Config{
+	blobs, err := blob.New(ctx, blob.Config{
 		Endpoint:       c.S3.Endpoint,
 		PublicEndpoint: c.S3.PublicEndpoint,
 		Region:         c.S3.Region,

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -38,30 +39,38 @@ type Store struct {
 	bucket  string
 }
 
-func New(cfg Config) (*Store, error) {
+// New builds the store. Credentials come from the AWS default chain
+// (environment, shared config, instance role); static keys in cfg, when
+// set, take precedence over it.
+func New(ctx context.Context, cfg Config) (*Store, error) {
 	if cfg.Bucket == "" {
 		return nil, errors.New("blob: bucket is required")
 	}
 	if cfg.Region == "" {
 		cfg.Region = "us-east-1"
 	}
-	opts := s3.Options{
-		Region: cfg.Region,
-		// Path-style so MinIO and custom endpoints work without DNS tricks.
-		UsePathStyle: cfg.Endpoint != "",
-	}
+	load := []func(*config.LoadOptions) error{config.WithRegion(cfg.Region)}
 	if cfg.AccessKey != "" {
-		opts.Credentials = credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, "")
+		load = append(load, config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, "")))
 	}
-	if cfg.Endpoint != "" {
-		opts.BaseEndpoint = aws.String(cfg.Endpoint)
+	awsCfg, err := config.LoadDefaultConfig(ctx, load...)
+	if err != nil {
+		return nil, fmt.Errorf("blob: aws config: %w", err)
 	}
-	client := s3.New(opts)
+	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+		// Path-style so MinIO and custom endpoints work without DNS tricks.
+		o.UsePathStyle = cfg.Endpoint != ""
+		if cfg.Endpoint != "" {
+			o.BaseEndpoint = aws.String(cfg.Endpoint)
+		}
+	})
 	pub := client
 	if cfg.PublicEndpoint != "" {
-		o := opts
-		o.BaseEndpoint = aws.String(cfg.PublicEndpoint)
-		pub = s3.New(o)
+		pub = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+			o.UsePathStyle = cfg.Endpoint != ""
+			o.BaseEndpoint = aws.String(cfg.PublicEndpoint)
+		})
 	}
 	return &Store{s3: client, presign: s3.NewPresignClient(pub), tm: transfermanager.New(client), bucket: cfg.Bucket}, nil
 }
