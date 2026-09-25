@@ -68,10 +68,6 @@ run "control_user_data_fits_ec2_limit" {
     condition     = length(aws_instance.control.user_data_base64) / 4 * 3 - length(regexall("=", aws_instance.control.user_data_base64)) <= 16384
     error_message = "The control host's user_data is over EC2's 16384-byte limit (raw, before base64)."
   }
-}
-
-run "control_host_has_no_lux_tags" {
-  command = apply
 
   assert {
     condition     = length([for k in keys(aws_instance.control.tags) : k if startswith(k, "lux:")]) == 0
