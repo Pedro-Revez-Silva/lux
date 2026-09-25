@@ -63,6 +63,26 @@ resource "aws_s3_bucket_versioning" "blobs" {
   }
 }
 
+# Only incomplete multipart uploads expire here: blob uploads go through
+# the S3 transfer manager (multipart), and an upload luxd abandons (a
+# restart, a runner gone mid-stream) leaves parts that are billed but
+# invisible to listings. No object expiry and no versioning: luxd's
+# reaper (internal/server/reaper.go) owns blob retention.
+resource "aws_s3_bucket_lifecycle_configuration" "blobs" {
+  bucket = aws_s3_bucket.blobs.id
+
+  rule {
+    id     = "abort-incomplete-multipart-uploads"
+    status = "Enabled"
+
+    filter {}
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+}
+
 # pg_dump -Fc, daily via the control host's systemd timer.
 resource "aws_s3_bucket" "pg_backups" {
   bucket = local.backup_bucket_name
@@ -113,6 +133,32 @@ resource "aws_s3_bucket_lifecycle_configuration" "pg_backups" {
 
     noncurrent_version_expiration {
       noncurrent_days = var.backup_retention_days
+    }
+  }
+  # The nightly dump is streamed to `aws s3 cp -`, which uploads multipart
+  # once it passes the CLI's 8 MiB threshold.
+  rule {
+    id     = "abort-incomplete-multipart-uploads"
+    status = "Enabled"
+
+    filter {}
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+
+  # Once expire-backups has removed a backup's last noncurrent version,
+  # only its delete marker is left. S3 refuses expired_object_delete_marker
+  # in an expiration block that also sets days, hence its own rule.
+  rule {
+    id     = "remove-expired-delete-markers"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      expired_object_delete_marker = true
     }
   }
 }
