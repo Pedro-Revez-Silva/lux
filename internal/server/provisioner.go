@@ -45,10 +45,6 @@ const (
 	tagHost       = "lux:host" // the host row's id
 )
 
-// lostGrace: a lost provisioned host is terminated only after this long
-// without its runner (a restart or a network blip is not a loss).
-const lostGrace = 5 * time.Minute
-
 // provisionerLoop keeps provisioned pools the size their demand, minimum
 // and warm settings say. One luxd at a time does it (provisionLease).
 func (s *Server) provisionerLoop(ctx context.Context) {
@@ -119,7 +115,7 @@ func (s *Server) provision(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	checkAlive := time.Since(s.lastAliveCheck) > time.Minute
+	checkAlive := time.Since(s.lastAliveCheck) > s.cfg.ProviderCheckEvery
 	if checkAlive {
 		s.lastAliveCheck = time.Now()
 	}
@@ -365,7 +361,7 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 		WHERE h.pool = $1 AND coalesce(h.tenant_id, '') = coalesce($2, '') AND h.provision_requested_at IS NOT NULL
 		  AND h.state <> 'terminated'
 		ORDER BY coalesce(h.last_placement_ended_at, h.registered_at, h.created_at)`,
-		pl.Name, pl.TenantID, interval(s.scaleDownAfter(pl)), interval(s.cfg.LaunchTimeout), pl.Template, interval(lostGrace), interval(s.cfg.LeaseDuration))
+		pl.Name, pl.TenantID, interval(s.scaleDownAfter(pl)), interval(s.cfg.LaunchTimeout), pl.Template, interval(s.cfg.LostGrace), interval(s.cfg.LeaseDuration))
 	if err != nil {
 		return err
 	}

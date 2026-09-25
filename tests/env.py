@@ -277,6 +277,9 @@ class TestEnvironment:
                 "AWS_ACCESS_KEY_ID": "", "AWS_SECRET_ACCESS_KEY": "", "AWS_SESSION_TOKEN": "", "AWS_PROFILE": ""}),
             # History fills in seconds, not minutes.
             "LUX_SAMPLE_EVERY": "2s",
+            # A 10s lease: heartbeats every ~3s (lease/3), and a host or a
+            # Run's secrets are given up in seconds, not a production 30s.
+            "LUX_LEASE": "10s",
         }
 
     # -- setup --------------------------------------------------------------

@@ -15,7 +15,7 @@ import psycopg
 import pytest
 import requests
 
-from conftest import fake_only
+from conftest import fake_only, FAKE_EC2_TIMERS
 from env import wait_until
 
 
@@ -309,7 +309,7 @@ def test_a_provisioned_outdated_host_is_replaced(lux, ec2):
         _mismatched_bin_dir(bin_dir, arch)
     ec2.env.stop_luxd()
     ec2.env.start_luxd(LUX_EC2_ENDPOINT=ec2.url, AWS_ACCESS_KEY_ID="fake", AWS_SECRET_ACCESS_KEY="fake",
-                       AWS_REGION="us-east-1", LUX_SCALE_DOWN_AFTER="4s", LUX_LAUNCH_TIMEOUT="60s",
+                       AWS_REGION="us-east-1", **FAKE_EC2_TIMERS,
                        LUX_RUNNER_BIN_DIR=bin_dir)
     try:
         lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps(ec2.template), "--min", "1", "--max", "1")
@@ -325,5 +325,5 @@ def test_a_provisioned_outdated_host_is_replaced(lux, ec2):
         lux.run("pools", "rm", "burst", check=False)
         ec2.env.stop_luxd()
         ec2.env.start_luxd(LUX_EC2_ENDPOINT=ec2.url, AWS_ACCESS_KEY_ID="fake", AWS_SECRET_ACCESS_KEY="fake",
-                           AWS_REGION="us-east-1", LUX_SCALE_DOWN_AFTER="4s", LUX_LAUNCH_TIMEOUT="60s")
+                           AWS_REGION="us-east-1", **FAKE_EC2_TIMERS)
         wait_until(lambda: not ec2.running(), 90, 1, "instances left running after the pool was removed")

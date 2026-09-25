@@ -92,7 +92,7 @@ def test_a_host_that_never_registers_is_terminated(lux, ec2):
     pool(lux, ec2, max=1)
     run_id = lux.submit(generic(ALPINE_IMAGE, "true", placement={"pool": "burst"}))
     wait_until(lambda: ec2.calls.count("RunInstances") == 1, 30, 0.5, "never launched")
-    # LUX_LAUNCH_TIMEOUT=60s in this fixture.
+    # LUX_LAUNCH_TIMEOUT is 15s against the fake EC2 (FAKE_EC2_TIMERS).
     wait_until(lambda: "TerminateInstances" in ec2.calls, 120, 1, "the stuck host was never terminated")
     ec2.no_boot = False
     lux.wait_state(run_id, "succeeded", timeout=180)
@@ -225,8 +225,8 @@ def test_a_spot_interruption_shortens_a_stop_already_under_way(lux, ec2):
     (inst,) = ec2.running()
     lux.run("stop", run_id)
     wait_until(lambda: lux.get(run_id)["state"] == "stopping", 30, 0.3, "never stopping")
-    ec2.interrupt(inst["id"], seconds=60)
-    run = lux.wait_state(run_id, "stopped", timeout=55)
+    ec2.interrupt(inst["id"], seconds=30)
+    run = lux.wait_state(run_id, "stopped", timeout=28)
     assert run["placements"][-1]["exitReason"] != "lost", run
     wait_until(lambda: (s := lux.json("snapshots", run_id)) and s[-1]["uploaded"], 30, 0.5, "snapshot not uploaded in time")
 

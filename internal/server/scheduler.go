@@ -90,8 +90,9 @@ type cursorPos struct {
 // its values before they are declared lost. Submit and resume cache them
 // before committing, so a Run this instance accepted always has them; the
 // grace is for Runs accepted by another instance (which schedules them
-// itself) and for this instance having restarted.
-const secretsGrace = 30 * time.Second
+// itself) and for this instance having restarted. It is the host lease:
+// how long luxd waits on anything that may still be in flight elsewhere.
+func (s *Server) secretsGrace() time.Duration { return s.cfg.LeaseDuration }
 
 // scheduleBatch looks at up to 20 waiting Runs after pos, placing what it
 // can and recording why the rest wait. Everything it writes is committed.
@@ -105,7 +106,7 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 			FROM runs WHERE state IN `+queuedRunStates+` AND NOT cancel_requested
 			  AND (updated_at, id) > ($1, $2)
 			ORDER BY updated_at, id FOR UPDATE SKIP LOCKED LIMIT 20`,
-			pos.updated, pos.id, interval(secretsGrace))
+			pos.updated, pos.id, interval(s.secretsGrace()))
 		if err != nil {
 			return err
 		}

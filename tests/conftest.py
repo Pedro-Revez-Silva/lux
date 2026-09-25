@@ -497,6 +497,12 @@ class RealEC2:
         pass
 
 
+# luxd's provisioning timers against the fake EC2: seconds, not minutes, so
+# tests see a timer fire without waiting out a production default.
+FAKE_EC2_TIMERS = {"LUX_SCALE_DOWN_AFTER": "4s", "LUX_LAUNCH_TIMEOUT": "15s",
+                   "LUX_PROVIDER_CHECK_EVERY": "3s", "LUX_LOST_GRACE": "5s"}
+
+
 @pytest.fixture
 def ec2(env: TestEnvironment, require):
     """luxd with its EC2 provider pointed at a fake EC2, or, with
@@ -516,7 +522,7 @@ def ec2(env: TestEnvironment, require):
         from fake_ec2 import FakeEC2
         cloud = FakeEC2(env, EC2_TEMPLATE)
         env.start_luxd(LUX_EC2_ENDPOINT=cloud.url, AWS_ACCESS_KEY_ID="fake", AWS_SECRET_ACCESS_KEY="fake",
-                       AWS_REGION="us-east-1", LUX_SCALE_DOWN_AFTER="4s", LUX_LAUNCH_TIMEOUT="60s")
+                       AWS_REGION="us-east-1", **FAKE_EC2_TIMERS)
     yield cloud
     cloud.close()
     env.stop_luxd()

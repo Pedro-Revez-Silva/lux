@@ -13,6 +13,8 @@ lease = "30s"                      # LUX_LEASE: a host silent this long is lost
 tick = "1s"                        # LUX_TICK: scheduler and reaper interval
 scale_down_after = "10m"           # LUX_SCALE_DOWN_AFTER
 launch_timeout = "10m"             # LUX_LAUNCH_TIMEOUT
+provider_check_every = "1m"        # LUX_PROVIDER_CHECK_EVERY: list each pool's instances (orphans, vanished)
+lost_grace = "5m"                  # LUX_LOST_GRACE: a lost provisioned host's instance is kept this long
 outdated_drain_percent = 10        # LUX_OUTDATED_DRAIN_PERCENT: caps concurrent outdated-binaries drains per pool (of its live hosts; at least 1)
 
 [database]
