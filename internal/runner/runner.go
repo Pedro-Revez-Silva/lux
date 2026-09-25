@@ -71,13 +71,15 @@ type Config struct {
 }
 
 type Runner struct {
-	cfg    Config
-	log    *slog.Logger
-	pm     *podman.Podman
-	conn   *conn
-	api    *api
-	shimV  string
-	leaseS float64
+	cfg   Config
+	log   *slog.Logger
+	pm    *podman.Podman
+	conn  *conn
+	api   *api
+	shimV string
+	// lease is luxd's host lease (its Welcome says), read by the heartbeat
+	// loop: a time.Duration, 0 until then.
+	lease atomic.Int64
 
 	mu         sync.Mutex
 	placements map[string]*placement // by run id
@@ -163,7 +165,6 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 		control:    newSerialQueues(),
 		streams:    streams{m: map[string]*stream{}},
 		git:        gitws.New(cfg.DataDir),
-		leaseS:     30,
 	}
 	r.api = newAPI(cfg.URL, cfg.Token, cfg.Name)
 	r.conn = newConn(r)
@@ -270,7 +271,7 @@ func (r *Runner) hello(ctx context.Context) proto.Hello {
 // stale (its Run moved on while this host was away) and is stopped.
 func (r *Runner) onWelcome(ctx context.Context, w proto.Welcome) {
 	if w.LeaseSeconds > 0 {
-		r.leaseS = w.LeaseSeconds
+		r.lease.Store(int64(w.LeaseSeconds * float64(time.Second)))
 	}
 	want := map[string]int{}
 	for _, l := range w.Live {
@@ -431,16 +432,30 @@ func (r *Runner) handleLive(ctx context.Context, f proto.Frame) {
 	}
 }
 
+// heartbeatEvery is a third of luxd's host lease (30s until its Welcome
+// says), at least a second.
+func (r *Runner) heartbeatEvery() time.Duration {
+	lease := time.Duration(r.lease.Load())
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+	return max(lease/3, time.Second)
+}
+
 func (r *Runner) heartbeatLoop(ctx context.Context) {
 	for {
-		interval := time.Duration(r.leaseS / 3 * float64(time.Second))
-		if interval < time.Second {
-			interval = time.Second
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(interval):
+		// The interval is re-read every second: the first wait starts before
+		// luxd's Welcome says the lease, and must not outlast a shorter one.
+		for start := time.Now(); ; {
+			left := time.Until(start.Add(r.heartbeatEvery()))
+			if left <= 0 {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(min(left, time.Second)):
+			}
 		}
 		hb := proto.Heartbeat{LocalSnapshots: r.localSnapshots(), GitMirrors: r.git.Mirrors(),
 			RunnerSHA256: r.runnerSHA256, ShimSHA256: r.shimSHA256}
