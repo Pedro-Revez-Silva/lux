@@ -29,6 +29,7 @@ func TestHandlerServesAssetsAndFallsBackToIndex(t *testing.T) {
 		{"/main-abc123.css", "200", "text/css; charset=utf-8", "body{}", "public, max-age=31536000, immutable"},
 		{"/logo.svg", "200", "image/svg+xml", "<svg/>", ""},
 		{"/nested/icon-11.png", "200", "image/png", "PNG", "public, max-age=31536000, immutable"},
+		{"/chunk-9f8e.js.map", "200", "text/plain; charset=utf-8", "{}", "public, max-age=31536000, immutable"},
 		{"/main-stale.js", "404", "text/plain; charset=utf-8", "not found", ""},
 		{"/gone.css", "404", "text/plain; charset=utf-8", "not found", ""},
 	} {

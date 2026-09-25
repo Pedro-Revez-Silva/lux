@@ -38,7 +38,9 @@ func TestRunnerRoutesAreVersioned(t *testing.T) {
 	for _, c := range []struct{ method, path string }{
 		{"POST", "/runner/v1/poll"},
 		{"GET", "/runner/v1/blobs/b1"},
+		{"PUT", "/runner/v1/blobs/b1"},
 		{"GET", "/runner/v1/bin/manifest"},
+		{"GET", "/runner/v1/bin/linux-arm64/lux-runner"},
 	} {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest(c.method, c.path, nil))
