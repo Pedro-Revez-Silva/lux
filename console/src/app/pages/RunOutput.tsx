@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
-import { Badge, Button, LogView, Spinner, useToast } from "../../ds/index.ts";
-import { IconSend } from "../../ds/icons.tsx";
+import { Badge, Button, LogView, Spinner, useToast } from "@lux/design-system";
+import { IconSend } from "@lux/design-system/icons";
 import { api, errorText, INPUT_RUN_STATES, type Run } from "../../api/index.ts";
 import { useRunOutput } from "./useRunOutput.ts";
 

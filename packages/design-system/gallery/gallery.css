@@ -1,4 +1,58 @@
-/* Style guide page only. */
+/* The gallery app: its bar and content area, then the section styles. */
+
+/* The document scrolls here (the console scrolls its content area), so
+   the bar can stick. More specific than base.css's height: 100%. */
+html:root,
+html:root body,
+html:root #root {
+  height: auto;
+  min-height: 100%;
+}
+.gallery-bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-6);
+  height: var(--topbar-h);
+  padding: 0 var(--pad-page);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-soft);
+}
+.gallery-brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  white-space: nowrap;
+}
+.gallery-mark {
+  align-self: center;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: var(--accent);
+  box-shadow: inset 0 0 0 3px var(--bg-surface), inset 0 0 0 4px var(--accent);
+}
+.gallery-name {
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-lg);
+  letter-spacing: -0.01em;
+}
+.gallery-sub {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+.gallery-controls {
+  display: flex;
+  gap: var(--sp-2);
+}
+.gallery-content {
+  padding: var(--pad-page);
+  container-type: inline-size;
+  container-name: content;
+}
 
 .sg {
   display: grid;
@@ -9,7 +63,7 @@
 }
 .sg-toc {
   position: sticky;
-  top: 0;
+  top: calc(var(--topbar-h) + var(--pad-page));
   align-self: start;
   display: flex;
   flex-direction: column;
@@ -48,7 +102,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--sp-6);
-  scroll-margin-top: var(--sp-6);
+  scroll-margin-top: calc(var(--topbar-h) + var(--sp-6));
 }
 .sg-section-head {
   display: flex;

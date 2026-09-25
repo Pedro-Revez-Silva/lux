@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
-import { Badge, Button, Card, formatBytes, formatTimestamp, IconButton, IdChip, Table, useToast, type Column } from "../../ds/index.ts";
-import { IconDownload, IconRefresh } from "../../ds/icons.tsx";
+import { Badge, Button, Card, formatBytes, formatTimestamp, IconButton, IdChip, Table, useToast, type Column } from "@lux/design-system";
+import { IconDownload, IconRefresh } from "@lux/design-system/icons";
 import { api, errorText, useQuery, type Artifact, type Event, type Run, type Snapshot } from "../../api/index.ts";
 import { DASH, ErrorBlock, ErrorStrip, JsonBlock } from "./common.tsx";
 import { eventSummary } from "./events.ts";

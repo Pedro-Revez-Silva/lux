@@ -1,7 +1,7 @@
 // Global scope (tenant + time range) shared by every page. Persisted in the URL
 // query (router.tsx's location store) so links carry their scope.
 import { createContext, useCallback, useContext, useMemo, type ReactNode } from "react";
-import { ALL_TENANTS, TIME_RANGES, type TimeRange } from "../ds/index.ts";
+import { ALL_TENANTS, TIME_RANGES, type TimeRange } from "@lux/design-system";
 import { useQuery, useSession, type QueryOptions, type QueryState } from "../api/index.ts";
 import { setSearchParams, useSearchParams } from "./router.tsx";
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Badge, Button, ConfirmDialog, Dialog, formatBytes, IdChip, Select, useToast } from "../../ds/index.ts";
+import { Badge, Button, ConfirmDialog, Dialog, formatBytes, IdChip, Select, useToast } from "@lux/design-system";
 import { api, errorText, isApiError, RESUMABLE_RUN_STATES, TERMINAL_RUN_STATES, useQuery, type MigrateRequest, type ResumeRequest, type Run, type Snapshot } from "../../api/index.ts";
 
 export interface RunActionsProps {

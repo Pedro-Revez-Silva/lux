@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { Button } from "../ds/index.ts";
+import { Button } from "@lux/design-system";
 import { signIn } from "../api/index.ts";
 
 /** Asks for an API key. Shown when there is none, or after a 401. */

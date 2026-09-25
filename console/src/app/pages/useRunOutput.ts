@@ -2,7 +2,7 @@
 // split into lines (a record may end mid-line; the rest waits for the next
 // one); "event" records and lux lifecycle events become system lines.
 import { useEffect, useRef, useState } from "react";
-import type { LogLine } from "../../ds/index.ts";
+import type { LogLine } from "@lux/design-system";
 import { errorText, streamSSE, type Event, type OutputRecord } from "../../api/index.ts";
 import { eventSummary } from "./events.ts";
 

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Badge, Button, Card, ConfirmDialog, formatBytes, formatCores, formatRelative, formatTimestamp, IdChip, KeyValue, PageHeader, StatePill, Table, TimeSeriesChart, Timeline, useToast, type Column, type TimelineStage } from "../../ds/index.ts";
+import { Badge, Button, Card, ConfirmDialog, formatBytes, formatCores, formatRelative, formatTimestamp, IdChip, KeyValue, PageHeader, StatePill, Table, TimeSeriesChart, Timeline, useToast, type Column, type TimelineStage } from "@lux/design-system";
 import { api, errorText, useNow, useQuery, type Host, type HostPlacement, type HostTimeKey, type Run } from "../../api/index.ts";
 import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";

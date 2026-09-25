@@ -1,6 +1,6 @@
 // One-line summaries of lifecycle events, from their data payloads.
 import type { Event } from "../../api/index.ts";
-import { formatBytes } from "../../ds/index.ts";
+import { formatBytes } from "@lux/design-system";
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v !== "" ? v : undefined;

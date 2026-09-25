@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { ToastProvider, type Tenant as PickerTenant } from "../ds/index.ts";
+import { ToastProvider, type Tenant as PickerTenant } from "@lux/design-system";
 import { api, errorText, getSession, isApiError, setRole, signInAs, useQuery, useSession } from "../api/index.ts";
 import { matchPath, usePath } from "./router.tsx";
 import { ScopeProvider, useScope } from "./scope.tsx";
 import { useLiveUpdates } from "./live.ts";
 import { Shell } from "./Shell.tsx";
 import { SignIn } from "./SignIn.tsx";
-import { StyleGuide } from "../styleguide/StyleGuide.tsx";
 import { Overview } from "./pages/Overview.tsx";
 import { Runs } from "./pages/Runs.tsx";
 import { RunPage } from "./pages/RunPage.tsx";
@@ -31,7 +30,6 @@ const ROUTES: Route[] = [
   { pattern: "/hosts/:id", title: "Host", render: (p) => <HostPage id={p.id!} /> },
   { pattern: "/pools", title: "Pools", render: () => <Pools /> },
   { pattern: "/tenants", title: "Tenants", render: () => <Tenants /> },
-  { pattern: "/styleguide", title: "Style guide", render: () => <StyleGuide /> },
 ];
 
 /**
@@ -90,7 +88,7 @@ function Router() {
   );
 
   // Until whoami answers, the role is unknown: do not guess "tenant".
-  if (session.role === "unknown" && role.error && path !== "/styleguide") {
+  if (session.role === "unknown" && role.error) {
     return (
       <Shell tenants={[]} operator={false} title="Cannot reach luxd">
         <div className="page">

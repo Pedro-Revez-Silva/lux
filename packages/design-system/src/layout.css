@@ -1,0 +1,118 @@
+/* Page layout helpers: page widths, grids and stacks. Grids react to
+   the nearest container named "content" (the app's scrolling content
+   area; the gallery's body), so they fit whatever is beside them.
+
+   Page widths: .page (detail, --page-detail-w), .page-list (tables,
+   --page-list-w), .page-wide (dashboards, unbounded). */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-lg);
+  max-width: var(--page-detail-w);
+  margin: 0 auto;
+  width: 100%;
+  min-width: 0;
+}
+.page-wide {
+  max-width: none;
+}
+.page-list {
+  max-width: var(--page-list-w);
+}
+.grid {
+  display: grid;
+  gap: var(--gap);
+  min-width: 0;
+}
+/* Stat tiles: 2, 3 or 6 across, so a row of six never leaves orphans. */
+.grid-stats {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@container content (min-width: 720px) {
+  .grid-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@container content (min-width: 1400px) {
+  .grid-stats {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}
+.grid-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.grid-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+/* Chart cards: one column, then 2, 3 and 4 as their container widens
+   (the content area, or the overview's chart column beside the feed). */
+.grid-charts {
+  grid-template-columns: minmax(0, 1fr);
+}
+@container (min-width: 700px) {
+  .grid-charts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@container (min-width: 1100px) {
+  .grid-charts {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@container (min-width: 1900px) {
+  .grid-charts {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+@container content (max-width: 900px) {
+  .grid-2,
+  .grid-3 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  min-width: 0;
+}
+.stack-tight {
+  gap: var(--sp-4);
+}
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  flex-wrap: wrap;
+  padding: var(--sp-2) 0 0;
+}
+.section-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.section-note {
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+
+/* Links that are names: the text colour, accent on hover. */
+.name-link {
+  color: var(--fg);
+  text-decoration: none;
+}
+.name-link:hover {
+  color: var(--accent-text);
+  text-decoration: none;
+}

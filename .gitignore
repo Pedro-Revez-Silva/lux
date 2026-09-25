@@ -9,3 +9,4 @@ __pycache__/
 /lux-shim
 /lux-fake
 .claude/
+/node_modules/

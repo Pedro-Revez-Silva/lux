@@ -1,4 +1,4 @@
-import { EmptyState } from "../../ds/index.ts";
+import { EmptyState } from "@lux/design-system";
 
 export function NotFound({ path }: { path: string }) {
   return (

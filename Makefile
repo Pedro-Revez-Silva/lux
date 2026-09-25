@@ -12,7 +12,9 @@ build: console
 	done
 
 console:
-	cd console && bun install --frozen-lockfile && bun run typecheck && bun run build
+	bun install --frozen-lockfile
+	bun run typecheck
+	cd console && bun run build
 
 unit:
 	LUX_TEST_PG=$${LUX_TEST_PG:-postgres://lux:lux@127.0.0.1:55432/postgres?sslmode=disable} go test ./...
@@ -37,4 +39,4 @@ dist: console
 	VERSION=$(VERSION) ./scripts/dist.sh
 
 clean:
-	rm -rf bin dist console/node_modules && find console/dist -mindepth 1 ! -name .keep -delete
+	rm -rf bin dist node_modules console/node_modules packages/*/node_modules packages/*/dist && find console/dist -mindepth 1 ! -name .keep -delete

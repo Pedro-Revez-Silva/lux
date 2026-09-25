@@ -1,4 +1,4 @@
-import { Badge, Card, formatBytes, formatDuration, Timeline, type TimelineStage } from "../../ds/index.ts";
+import { Badge, Card, formatBytes, formatDuration, Timeline, type TimelineStage } from "@lux/design-system";
 import type { Placement, Run } from "../../api/index.ts";
 import { HostLink } from "./common.tsx";
 

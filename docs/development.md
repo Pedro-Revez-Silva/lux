@@ -16,6 +16,7 @@ internal/
   spec/         the RunSpec: parsing, validation, defaults
   cli/, client/ the CLI and its API client
 console/        the operator console: React + TypeScript, built with Bun; console.go embeds dist/ in luxd
+packages/design-system/  the console's tokens and components, and their gallery
 tests/          the end-to-end harness (Python, uv, pytest)
 docs/
 ```
@@ -30,7 +31,9 @@ make unit         # go test ./... (store tests need Postgres; see below)
 
 `go build` alone works too: luxd then embeds whatever `console/dist` holds,
 and without a console build serves a page saying how to make one. To work
-on the console, see [console/README.md](../console/README.md).
+on the console, see [console/README.md](../console/README.md); on its design
+system and gallery, [packages/design-system](../packages/design-system/README.md).
+Both are one Bun workspace: `bun install` at the repository root.
 
 The toolchain and every dependency are kept at their latest release.
 

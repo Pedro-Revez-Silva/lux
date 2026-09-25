@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Badge, Card, PageHeader, Table, type Column } from "../../ds/index.ts";
+import { Badge, Card, PageHeader, Table, type Column } from "@lux/design-system";
 import { api, type Pool } from "../../api/index.ts";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, labelsText } from "./common.tsx";

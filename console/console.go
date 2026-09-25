@@ -43,4 +43,4 @@ const notBuilt = `<!doctype html><meta charset="utf-8"><title>lux console</title
 <body style="font: 14px system-ui; margin: 3em">
 <h1>lux console</h1><p>This luxd was built without the console. Build it with
 <code>make build</code> (needs <a href="https://bun.sh">Bun</a>), or
-<code>cd console &amp;&amp; bun install &amp;&amp; bun run build</code> before <code>go build</code>.</p>`
+<code>bun install &amp;&amp; cd console &amp;&amp; bun run build</code> before <code>go build</code>.</p>`

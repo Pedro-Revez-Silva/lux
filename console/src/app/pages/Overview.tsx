@@ -1,4 +1,4 @@
-import { Card, formatBytes, formatCores, formatCount, formatDuration, formatElapsed, PageHeader, SectionHeader, StatTile, TimeSeriesChart } from "../../ds/index.ts";
+import { Card, formatBytes, formatCores, formatCount, formatDuration, formatElapsed, PageHeader, SectionHeader, StatTile, TimeSeriesChart } from "@lux/design-system";
 import { api, useNow } from "../../api/index.ts";
 import { go } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";

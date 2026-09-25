@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { IconButton, LiveDot, TenantPicker, TimeRangePicker, useDensity, useTheme, type Tenant } from "../ds/index.ts";
-import { IconClose, IconGrid, IconLayers, IconLogout, IconMenu, IconMoon, IconPalette, IconPlay, IconRows, IconRowsLoose, IconServer, IconSidebar, IconSliders, IconSun, IconUsers } from "../ds/icons.tsx";
+import { IconButton, LiveDot, TenantPicker, TimeRangePicker, useDensity, useTheme, type Tenant } from "@lux/design-system";
+import { IconClose, IconGrid, IconLayers, IconLogout, IconMenu, IconMoon, IconPlay, IconRows, IconRowsLoose, IconServer, IconSidebar, IconSliders, IconSun, IconUsers } from "@lux/design-system/icons";
 import { liveLabel, signOut, useLiveState, useSession } from "../api/index.ts";
 import { Link, usePath } from "./router.tsx";
 import { useScope } from "./scope.tsx";
@@ -149,12 +149,6 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
           ))}
         </nav>
         <div className="sidebar-foot">
-          <Link to="/styleguide" className={path === "/styleguide" ? "nav-item is-active" : "nav-item"} title="Style guide" aria-label="Style guide">
-            <span className="nav-icon">
-              <IconPalette />
-            </span>
-            <span className="nav-label">Style guide</span>
-          </Link>
           <button type="button" className="nav-item nav-collapse" onClick={toggleRail} title={rail ? "Expand sidebar" : "Collapse sidebar"} aria-label={rail ? "Expand sidebar" : "Collapse sidebar"} aria-pressed={rail}>
             <span className="nav-icon">
               <IconSidebar />

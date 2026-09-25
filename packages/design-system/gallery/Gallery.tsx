@@ -29,6 +29,7 @@ import {
   Spinner,
   StatePill,
   StatTile,
+  TenantPicker,
   Table,
   Tabs,
   TimeRangePicker,
@@ -36,12 +37,13 @@ import {
   Timeline,
   Tooltip,
   useDensity,
+  useTheme,
   useToast,
   type Column,
   type TimeRange,
-} from "../ds/index.ts";
-import { IconDots, IconInfo, IconRefresh } from "../ds/icons.tsx";
-import { fakeHosts, fakeLogs, fakePlacementStages, fakeRuns, fakeSeries, NOW, type FakeHost, type FakeRun } from "./fake.ts";
+} from "../src/index.ts";
+import { IconDots, IconInfo, IconMoon, IconRefresh, IconRows, IconRowsLoose, IconSun } from "../src/icons.tsx";
+import { fakeHosts, fakeLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeTenants, NOW, type FakeHost, type FakeRun } from "./fake.ts";
 
 function Section({ id, title, children, note }: { id: string; title: string; note?: ReactNode; children: ReactNode }) {
   return (
@@ -57,7 +59,35 @@ function Section({ id, title, children, note }: { id: string; title: string; not
 
 const SECTIONS = ["colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "tabs", "selects", "charts", "timeline", "logs", "keyvalue", "dialogs", "feedback", "format"];
 
-export function StyleGuide() {
+/** The gallery: a slim bar (brand, theme and density) over the sections. */
+export function Gallery() {
+  const { resolved, toggle } = useTheme();
+  const { density, toggle: toggleDensity } = useDensity();
+  return (
+    <>
+      <header className="gallery-bar">
+        <span className="gallery-brand">
+          <span className="gallery-mark" aria-hidden="true" />
+          <span className="gallery-name">lux</span>
+          <span className="gallery-sub">design system</span>
+        </span>
+        <span className="gallery-controls">
+          <IconButton size="sm" label={density === "compact" ? "Comfortable density" : "Compact density"} onClick={toggleDensity}>
+            {density === "compact" ? <IconRowsLoose size={15} /> : <IconRows size={15} />}
+          </IconButton>
+          <IconButton size="sm" label={resolved === "dark" ? "Switch to light theme" : "Switch to dark theme"} onClick={toggle}>
+            {resolved === "dark" ? <IconSun size={15} /> : <IconMoon size={15} />}
+          </IconButton>
+        </span>
+      </header>
+      <main className="gallery-content">
+        <Sections />
+      </main>
+    </>
+  );
+}
+
+function Sections() {
   return (
     <div className="sg">
       <nav className="sg-toc" aria-label="Sections">
@@ -68,7 +98,7 @@ export function StyleGuide() {
         ))}
       </nav>
       <div className="sg-body">
-        <PageHeader title="Style guide" description="Every token and component in the lux console design system, with fake data. Toggle the theme and the density in the top bar." />
+        <PageHeader title="Design system" description="Every token and component the lux console is built from, with fake data. Toggle the theme and the density in the bar above." />
         <Colors />
         <Type />
         <Spacing />
@@ -215,7 +245,7 @@ function Layout() {
     ["chart height", "200 · 240 · 280px", "180 · 210 · 240px"],
   ];
   return (
-    <Section id="layout" title="Density, breakpoints, shell" note="Comfortable is the default; compact is the old dense tuning. The setting lives in the top bar and persists like the theme (localStorage lux.density, applied before first paint as <html data-density>). It switches a handful of tokens; every component reads them.">
+    <Section id="layout" title="Density, breakpoints, shell" note="Comfortable is the default; compact is the old dense tuning. In the console the setting lives in the top bar; it persists like the theme (localStorage lux.density, applied before first paint as <html data-density>). It switches a handful of tokens; every component reads them.">
       <div className="sg-row">
         <Button variant={density === "comfortable" ? "primary" : "default"} onClick={() => set("comfortable")}>
           Comfortable
@@ -526,9 +556,11 @@ function TabsDemo() {
 function Selects() {
   const [pool, setPool] = useState("default");
   const [range, setRange] = useState<TimeRange>("24h");
+  const [tenant, setTenant] = useState("*");
   return (
-    <Section id="selects" title="Select, TenantPicker, TimeRangePicker" note="Presets as rows, selection marked by a bold check, hover as a ghost wash. The tenant picker sits in the top bar and scopes every page; it is shown there with fake tenants.">
+    <Section id="selects" title="Select, TenantPicker, TimeRangePicker" note="Presets as rows, selection marked by a bold check, hover as a ghost wash. In the console the tenant and range pickers sit in the top bar and scope every page.">
       <div className="sg-row">
+        <TenantPicker tenants={fakeTenants} value={tenant} onChange={setTenant} />
         <Select
           value={pool}
           onChange={setPool}

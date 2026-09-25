@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Card, TimeSeriesChart, type ChartMark } from "../../ds/index.ts";
+import { Card, TimeSeriesChart, type ChartMark } from "@lux/design-system";
 import { api, useQuery, type Run } from "../../api/index.ts";
 import { ErrorBlock, useSeries } from "./common.tsx";
 

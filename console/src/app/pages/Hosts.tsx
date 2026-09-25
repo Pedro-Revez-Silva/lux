@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Badge, Button, Card, formatBytes, formatCores, HOST_STATE_LIST, PageHeader, Select, Table, type Column } from "../../ds/index.ts";
+import { Badge, Button, Card, formatBytes, formatCores, HOST_STATE_LIST, PageHeader, Select, Table, type Column } from "@lux/design-system";
 import { api, type Host } from "../../api/index.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";

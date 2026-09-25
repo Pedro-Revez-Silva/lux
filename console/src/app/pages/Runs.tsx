@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Button, Card, PageHeader, RUN_STATE_LIST, runStateStyle, Table } from "../../ds/index.ts";
+import { Button, Card, PageHeader, RUN_STATE_LIST, runStateStyle, Table } from "@lux/design-system";
 import { api, errorText, useQuery, type Run, type RunListParams } from "../../api/index.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";

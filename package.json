@@ -1,0 +1,12 @@
+{
+  "name": "lux",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "console",
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "bun run --filter '*' typecheck"
+  }
+}

@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Card, formatBytes, formatCount, IdChip, PageHeader, Table, type Column } from "../../ds/index.ts";
+import { Card, formatBytes, formatCount, IdChip, PageHeader, Table, type Column } from "@lux/design-system";
 import { api, useQuery, type Tenant } from "../../api/index.ts";
 import { go } from "../router.tsx";
 import { useScope } from "../scope.tsx";

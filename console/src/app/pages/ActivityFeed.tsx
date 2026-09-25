@@ -1,5 +1,5 @@
 import { Fragment } from "react";
-import { Card, formatClock, LiveDot, Spinner } from "../../ds/index.ts";
+import { Card, formatClock, LiveDot, Spinner } from "@lux/design-system";
 import { liveLabel, useLiveState, type FeedEvent } from "../../api/index.ts";
 import { Link } from "../router.tsx";
 import { useScope } from "../scope.tsx";
