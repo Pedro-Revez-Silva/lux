@@ -14,7 +14,8 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 arch=$("$docker" version --format '{{.Server.Arch}}')
 
 if [ ! -f "$root/dist/lux_${version}_linux_${arch}.tar.gz" ]; then
-  make -C "$root" dist VERSION="$version"
+  # Only the tarball the container runs; `make dist` alone builds all four.
+  ARCHES="linux_$arch" make -C "$root" dist VERSION="$version"
 fi
 
 image=lux-host-smoke

@@ -9,6 +9,9 @@
 # luxd unpacked from either serves both to runner hosts without a second
 # download. Unpacking a tarball into /usr/local gives the default layout
 # (runner_bin_dir defaults to /usr/local/lib/lux/runner).
+#
+# ARCHES limits which tarballs are built, as <os>_<arch> words (default:
+# all four). The runner binaries are still built for both linux arches.
 set -euo pipefail
 
 VERSION="${VERSION:?set VERSION=vX.Y.Z}"
@@ -20,6 +23,14 @@ LDFLAGS="-s -w -X github.com/marcioapm/lux/internal/version.Version=$VERSION"
 # same tag is byte-identical) rather than each build's wall clock.
 MTIME="$(git -C "$ROOT" log -1 --format=%cI 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
 TAR_REPRO_FLAGS=(--owner=0 --group=0 --numeric-owner --sort=name --mtime="$MTIME")
+ARCHES="${ARCHES:-linux_arm64 linux_amd64 darwin_arm64 darwin_amd64}"
+for target in $ARCHES; do
+  case "$target" in
+    linux_arm64 | linux_amd64 | darwin_arm64 | darwin_amd64) ;;
+    *) echo "dist.sh: ARCHES: unknown target $target" >&2; exit 1 ;;
+  esac
+done
+wanted() { [[ " $ARCHES " == *" $1 "* ]]; }
 
 rm -rf "$DIST"
 mkdir -p "$DIST"
@@ -37,6 +48,7 @@ for rarch in arm64 amd64; do
   build linux "$rarch" lux-shim "$DIST/lib/lux/runner/linux-$rarch/lux-shim"
 done
 for arch in arm64 amd64; do
+  wanted "linux_$arch" || continue
   work="$DIST/work-linux-$arch"
   mkdir -p "$work/bin"
   cp -r "$DIST/lib" "$work/lib"
@@ -50,6 +62,7 @@ rm -rf "${DIST:?}/lib"
 
 # darwin: the CLI only.
 for arch in arm64 amd64; do
+  wanted "darwin_$arch" || continue
   work="$DIST/work-darwin-$arch"
   mkdir -p "$work/bin"
   build darwin "$arch" lux "$work/bin/lux"
