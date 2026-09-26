@@ -114,10 +114,14 @@ def test_pages_update_live_from_events(page, operator, tenant_factory):
 
 def test_control_host_row_is_the_operators_whole_system_view(page, env, operator, tenant_factory):
     a = tenant_factory()
-    page.sign_in(operator.api_key, "/")
+    # An hour's range reads raw samples; the default day's reads minute
+    # rollups, which a freshly started luxd may not have written yet.
+    page.sign_in(operator.api_key, "/?range=1h")
     expect(page.get_by_role("heading", name="Control host", exact=True)).to_have_count(1, timeout=15_000)
     expect(page.get_by_role("heading", name="Disk /", exact=True)).to_have_count(1, timeout=45_000)
     expect(page.get_by_role("heading", name="Postgres size", exact=True)).to_have_count(1, timeout=5_000)
+    # The subtitle carries the latest sampled size once history has loaded.
+    expect(page.get_by_text(re.compile(r"^lux's database · \d"))).to_have_count(1, timeout=5_000)
     # Narrowed to a tenant, the row is gone.
     page.goto(env.luxd_url + f"/?tenant={a.tenant_id}")
     page.get_by_text(re.compile(rf"^tenant {re.escape(a.tenant_id)} · charts over")).wait_for(timeout=15_000)
