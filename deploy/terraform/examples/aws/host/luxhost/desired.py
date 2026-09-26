@@ -72,7 +72,6 @@ _LUXD_TABLES = {
 class Desired:
     # None: install nothing, and leave an existing install alone.
     lux_version: str | None
-    release_repo: str
     release_base_url: str
     # Validated luxd.toml settings: top-level keys, and {table: {key: value}}.
     luxd: dict
@@ -139,7 +138,6 @@ def parse(text: str, source: str = "lux-host.toml") -> Desired:
         raise HostError(f"{source}: " + "; ".join(problems))
     return Desired(
         lux_version=version,
-        release_repo=repo,
         release_base_url=base_url.rstrip("/"),
         luxd=top,
         luxd_tables=tables,

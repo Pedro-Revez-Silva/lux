@@ -385,7 +385,6 @@ def test_desired_state_validation(text, problem):
 def test_desired_state_defaults():
     d = desired_mod.parse("")
     assert d.lux_version is None
-    assert d.release_repo == "marcioapm/lux"
     assert d.release_base_url == "https://github.com/marcioapm/lux/releases/download"
     assert desired_mod.parse('lux_version = "none"').lux_version is None
     assert desired_mod.parse('release_repo = "acme/lux"').release_base_url == "https://github.com/acme/lux/releases/download"

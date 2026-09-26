@@ -90,4 +90,4 @@ def ensure_database(host: Host, db_name: str) -> tuple[dict, list]:
     # Kept for running `luxd migrate` by hand.
     if write_if_changed(os.path.join(home, ".lux-migrate-dsn"), migrate_dsn + "\n", 0o600):
         changed.append("migrate-dsn")
-    return {"owner_password": owner_pw, "app_password": app_pw, "migrate_dsn": migrate_dsn}, changed
+    return {"app_password": app_pw, "migrate_dsn": migrate_dsn}, changed

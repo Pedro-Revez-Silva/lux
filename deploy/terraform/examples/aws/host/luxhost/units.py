@@ -128,10 +128,3 @@ def enable_now(host: Host, unit: str) -> bool:
         return False
     host.run(["systemctl", "enable", "--now", unit])
     return True
-
-
-def enable(host: Host, unit: str) -> bool:
-    if host.ok(["systemctl", "is-enabled", "--quiet", unit]):
-        return False
-    host.run(["systemctl", "enable", unit])
-    return True

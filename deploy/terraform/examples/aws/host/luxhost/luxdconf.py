@@ -7,8 +7,6 @@ import socket
 from .desired import Desired
 from .host import Host, write_if_changed
 
-RUNNER_BIN_DIR = "/usr/local/lib/lux/runner"
-
 
 def primary_ip() -> str:
     # Connecting a UDP socket sends nothing; it only selects the source
