@@ -97,6 +97,7 @@ export function HostPage({ id }: { id: string }) {
             columns={2}
             items={[
               { key: "Provider id", value: h.providerId ? <IdChip value={h.providerId} /> : DASH },
+              { key: "Instance type", value: h.instanceType ? <span className="mono">{h.instanceType}</span> : DASH },
               { key: "Heartbeat", value: h.lastHeartbeat ? `${formatRelative(h.lastHeartbeat, now)} (${formatTimestamp(h.lastHeartbeat)})` : DASH },
               { key: "Capacity", value: `${formatCores(h.capacity.cpus)} · ${formatBytes(h.capacity.memory)} · ${formatBytes(h.capacity.disk)} disk · ${h.capacity.runs} runs` },
               { key: "Allocated", value: `${formatCores(h.allocated.cpus ?? 0)} · ${formatBytes(h.allocated.memory ?? 0)} · ${formatBytes(h.allocated.disk ?? 0)} disk · ${h.liveRuns} live` },
