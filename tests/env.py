@@ -51,6 +51,7 @@ S3_ACCESS_KEY = "luxs3"
 S3_SECRET_KEY = "luxs3-secret"
 S3_REGION = "us-east-1"
 S3_HEALTH_PATH = "/health"
+S3_CONTAINER_PORT = 9000
 
 # Images every host has preloaded, so no test waits on a registry.
 ALPINE_IMAGE = "docker.io/library/alpine:3.24.2"
@@ -76,6 +77,73 @@ def free_port() -> int:
 def container_running(name: str) -> bool:
     out = sh("docker", "inspect", "-f", "{{.State.Running}}", name, check=False)
     return out.strip() == "true"
+
+
+class SharedServiceError(RuntimeError):
+    """A shared service cannot be used as configured; the message says how to proceed."""
+
+
+@dataclass(frozen=True)
+class ContainerState:
+    running: bool
+    image: str
+    host_port: int | None  # published for S3_CONTAINER_PORT, None if unpublished
+
+
+class DockerCLI:
+    """The few docker operations the shared S3 needs; tests substitute a fake."""
+
+    def inspect(self, name: str) -> ContainerState | None:
+        found = json.loads(sh("docker", "inspect", name, check=False).strip() or "[]")
+        if not found:
+            return None
+        info = found[0]
+        bindings = (info.get("HostConfig") or {}).get("PortBindings") or {}
+        published = bindings.get(f"{S3_CONTAINER_PORT}/tcp") or []
+        host_port = int(published[0]["HostPort"]) if published and published[0].get("HostPort") else None
+        return ContainerState(bool(info["State"]["Running"]), info["Config"]["Image"], host_port)
+
+    def remove(self, name: str) -> None:
+        sh("docker", "rm", "-f", name, check=False)
+
+    def run(self, *args: str) -> None:
+        sh("docker", "run", *args)
+
+
+def s3_action(found: ContainerState | None, image: str, port: int) -> str:
+    """Returns "reuse" for a running S3_CONTAINER with this image and port,
+    "start" when none is running. A running one with another image or port
+    is never replaced, since it may serve another developer's run."""
+    if found is None or not found.running:
+        return "start"
+    mismatches = []
+    if found.image != image:
+        mismatches.append(f"it runs image {found.image}, this run wants {image} (LUX_TEST_S3_IMAGE)")
+    if found.host_port != port:
+        mismatches.append(f"it publishes host port {found.host_port}, this run wants {port} (LUX_TEST_S3_PORT)")
+    if mismatches:
+        raise SharedServiceError(
+            f"{S3_CONTAINER} is already running but {'; '.join(mismatches)}. "
+            f"If it is yours, stop it (docker rm -f {S3_CONTAINER}) and rerun; otherwise set "
+            f"LUX_TEST_S3_IMAGE={found.image} LUX_TEST_S3_PORT={found.host_port} to share it as it is."
+        )
+    return "reuse"
+
+
+def ensure_s3(docker, image: str, port: int) -> None:
+    if s3_action(docker.inspect(S3_CONTAINER), image, port) == "reuse":
+        return
+    # A stopped S3_CONTAINER holds nothing; clear it so the name is free.
+    docker.remove(S3_CONTAINER)
+    # Global flags precede the backend subcommand; the image has no
+    # /data, so the posix backend stores under /tmp.
+    docker.run(
+        "-d", "--name", S3_CONTAINER, "--label", LABEL,
+        "-p", f"0.0.0.0:{port}:{S3_CONTAINER_PORT}",
+        "-e", f"ROOT_ACCESS_KEY={S3_ACCESS_KEY}", "-e", f"ROOT_SECRET_KEY={S3_SECRET_KEY}",
+        image, "--port", f":{S3_CONTAINER_PORT}", "--health", S3_HEALTH_PATH, "--region", S3_REGION,
+        "posix", "/tmp",
+    )
 
 
 def wait_until(fn, timeout: float = 30, interval: float = 0.3, message: str = "condition not met"):
@@ -317,16 +385,7 @@ class TestEnvironment:
                 "-e", f"POSTGRES_USER={PG_OWNER}", "-e", f"POSTGRES_PASSWORD={PG_OWNER_PASSWORD}",
                 POSTGRES_IMAGE, "-c", "max_connections=500",
             )
-        if not container_running(S3_CONTAINER):
-            sh("docker", "rm", "-f", S3_CONTAINER, check=False)
-            # Global flags precede the backend subcommand; the image has no
-            # /data, so the posix backend stores under /tmp.
-            sh(
-                "docker", "run", "-d", "--name", S3_CONTAINER, "--label", LABEL,
-                "-p", f"0.0.0.0:{S3_PORT}:9000",
-                "-e", f"ROOT_ACCESS_KEY={S3_ACCESS_KEY}", "-e", f"ROOT_SECRET_KEY={S3_SECRET_KEY}",
-                S3_IMAGE, "--port", ":9000", "--health", S3_HEALTH_PATH, "--region", S3_REGION, "posix", "/tmp",
-            )
+        ensure_s3(DockerCLI(), S3_IMAGE, S3_PORT)
         deadline = time.time() + 60
         while time.time() < deadline:
             try:
