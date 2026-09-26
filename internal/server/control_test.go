@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +24,8 @@ import (
 
 // The system tick also records this machine and its Postgres, at the whole
 // system sample's instant; a tracked path that does not exist is skipped
-// and logged once, and does not fail the tick.
+// and logged once, does not fail the tick, and is sampled again once it
+// exists.
 func TestSampleControlHost(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
@@ -38,6 +41,34 @@ func TestSampleControlHost(t *testing.T) {
 	if n := strings.Count(logs.String(), "disk path skipped"); n != 1 || !strings.Contains(logs.String(), missing) {
 		t.Fatalf("want one log line naming %s, got:\n%s", missing, logs.String())
 	}
+	// Once the path exists, the next ticks sample it again, and say so once.
+	if err := os.Mkdir(missing, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := s.sampleSystem(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := strings.Count(logs.String(), "disk path readable again"); n != 1 {
+		t.Fatalf("want one recovery line, got %d:\n%s", n, logs.String())
+	}
+	var perTick []int
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		r, err := tx.Query(ctx, `SELECT (SELECT count(*) FROM control_disk_samples d WHERE d.res = 0 AND d.at = c.at AND d.path = $1)
+			FROM control_samples c WHERE c.res = 0 ORDER BY c.at`, missing)
+		if err != nil {
+			return err
+		}
+		perTick, err = pgx.CollectRows(r, pgx.RowTo[int])
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(perTick, []int{0, 0, 1, 1}) {
+		t.Fatalf("samples of %s per tick: %v, want [0 0 1 1]", missing, perTick)
+	}
 	type row struct {
 		at                      time.Time
 		cpuS                    float64
@@ -48,7 +79,7 @@ func TestSampleControlHost(t *testing.T) {
 		used, free, total, disk int64
 	}
 	var rows []row
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		r, err := tx.Query(ctx, `SELECT c.at, c.cpu_seconds, c.cpus, c.db_connections, c.mem_bytes, c.mem_total, c.db_bytes,
 				(SELECT at FROM system_samples WHERE tenant_id = '' AND res = 0 AND at = c.at),
 				(SELECT array_agg(path ORDER BY path) FROM control_disk_samples d WHERE d.res = 0 AND d.at = c.at),
@@ -68,10 +99,10 @@ func TestSampleControlHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 2 {
-		t.Fatalf("want 2 control samples, got %+v", rows)
+	if len(rows) != 4 {
+		t.Fatalf("want 4 control samples, got %+v", rows)
 	}
-	for _, x := range rows {
+	for i, x := range rows {
 		if x.sysAt == nil || !x.sysAt.Equal(x.at) {
 			t.Fatalf("control sample at %v has no whole-system sample at the same instant", x.at)
 		}
@@ -82,7 +113,7 @@ func TestSampleControlHost(t *testing.T) {
 		if x.db <= 0 || x.conns < 1 {
 			t.Fatalf("postgres figures: %+v", x)
 		}
-		if len(x.paths) != 1 || x.paths[0] != "/" || x.total <= 0 || x.used <= 0 || x.used+x.free > x.total {
+		if want := map[bool][]string{true: {"/"}, false: {"/", missing}}[i < 2]; !slices.Equal(x.paths, want) || x.total <= 0 || x.used <= 0 || x.used+x.free > x.total {
 			t.Fatalf("disks: %+v", x)
 		}
 	}
@@ -147,6 +178,81 @@ func TestSampleControlPostgresProbeFails(t *testing.T) {
 	}
 	if n := strings.Count(logs.String(), "postgres size and connections readable again"); n != 1 {
 		t.Errorf("want one recovery line, got %d:\n%s", n, logs.String())
+	}
+}
+
+// Unset disk paths track "/"; an explicitly empty list tracks none, and
+// the tick still writes the control sample.
+func TestControlDiskPathsEmpty(t *testing.T) {
+	base := testServer(t)
+	ctx := context.Background()
+	if got := New(Config{}, base.db, nil, base.log).cfg.DiskPaths; !slices.Equal(got, []string{"/"}) {
+		t.Fatalf("unset: %q", got)
+	}
+	s := New(Config{DiskPaths: []string{}}, base.db, nil, base.log)
+	if err := s.sampleSystem(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var samples, disks int
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM control_samples), (SELECT count(*) FROM control_disk_samples)`).Scan(&samples, &disks)
+	})
+	if err != nil || samples != 1 || disks != 0 {
+		t.Fatalf("control samples %d, disk samples %d, err %v", samples, disks, err)
+	}
+}
+
+// Each resolution's control and control disk samples are deleted once
+// older than that resolution's retention; younger ones stay. Each
+// resolution's rows belong to their own instance, so the rollups the same
+// pass writes (into coarser resolutions) are told apart from the fixture.
+func TestControlRetention(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	s.cfg.HistoryRaw, s.cfg.HistoryMinutes, s.cfg.HistoryHours = time.Hour, 3*time.Hour, 10*time.Hour
+	now := time.Now().UTC().Truncate(time.Second)
+	seed := map[string]struct {
+		res           int
+		expired, live time.Duration
+	}{
+		"raw": {0, 2 * time.Hour, 10 * time.Minute},
+		"min": {60, 4 * time.Hour, 2 * time.Hour},
+		"hr":  {3600, 11 * time.Hour, 5 * time.Hour},
+	}
+	for inst, x := range seed {
+		for _, age := range []time.Duration{x.expired, x.live} {
+			execSQL(t, s, ctx, `INSERT INTO control_samples (instance, res, at, cpu_seconds) VALUES ($1, $2, $3, 1)`, inst, x.res, now.Add(-age))
+			execSQL(t, s, ctx, `INSERT INTO control_disk_samples (instance, path, res, at, used_bytes, free_bytes, total_bytes)
+				VALUES ($1, '/', $2, $3, 1, 1, 2)`, inst, x.res, now.Add(-age))
+		}
+	}
+	if err := s.rollupHistory(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"control_samples", "control_disk_samples"} {
+		got := map[string][]time.Time{}
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			r, err := tx.Query(ctx, `SELECT instance, at FROM `+table+`
+				WHERE (instance, res) IN (('raw', 0), ('min', 60), ('hr', 3600)) ORDER BY at`)
+			if err != nil {
+				return err
+			}
+			var inst string
+			var at time.Time
+			_, err = pgx.ForEachRow(r, []any{&inst, &at}, func() error {
+				got[inst] = append(got[inst], at)
+				return nil
+			})
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for inst, x := range seed {
+			if len(got[inst]) != 1 || !got[inst][0].Equal(now.Add(-x.live)) {
+				t.Errorf("%s, %s (res %d): survivors %v, want only the one at -%v", table, inst, x.res, got[inst], x.live)
+			}
+		}
 	}
 }
 
