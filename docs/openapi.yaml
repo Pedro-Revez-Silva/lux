@@ -74,6 +74,55 @@ components:
           format: int64
           type: integer
       type: object
+    ControlSample:
+      additionalProperties: false
+      properties:
+        cpuCores:
+          description: "CPU in use, in cores: a rate over the previous point."
+          format: double
+          type: number
+        cpus:
+          description: Cores on the machine.
+          format: int64
+          type: integer
+        databaseBytes:
+          description: Size of lux's Postgres database.
+          format: int64
+          type: integer
+        databaseConnections:
+          description: Backends connected to lux's Postgres database.
+          format: int64
+          type: integer
+        disks:
+          description: Each tracked directory's filesystem (history.disk_paths).
+          items:
+            $ref: "#/components/schemas/DiskSample"
+          type:
+            - array
+            - "null"
+        memoryBytes:
+          format: int64
+          type: integer
+        memoryTotal:
+          format: int64
+          type: integer
+      type: object
+    DiskSample:
+      additionalProperties: false
+      properties:
+        freeBytes:
+          description: What an unprivileged process can still write.
+          format: int64
+          type: integer
+        path:
+          type: string
+        totalBytes:
+          format: int64
+          type: integer
+        usedBytes:
+          format: int64
+          type: integer
+      type: object
     DrainHostRequest:
       additionalProperties: false
       properties:
@@ -978,6 +1027,9 @@ components:
         capacityMemory:
           format: int64
           type: integer
+        control:
+          $ref: "#/components/schemas/ControlSample"
+          description: luxd's own machine and its Postgres. Only an operator key reading the whole system (no tenant) gets it.
         cpuCores:
           format: double
           type: number
@@ -1578,7 +1630,7 @@ paths:
   /v1/history:
     get:
       description: |-
-        Samples of what GET /v1/status reports.
+        Samples of what GET /v1/status reports. For an operator key reading the whole system (no tenant), each sample also carries `control`: the machine luxd runs on and its Postgres.
 
         Needs the `read` scope.
       operationId: history

@@ -210,7 +210,8 @@ func (s *Server) routes(api huma.API) {
 	}, "read", s.status)
 	register(s, api, huma.Operation{
 		OperationID: "history", Method: http.MethodGet, Path: "/v1/history", Tags: []string{"history"},
-		Summary: "The state of the system over time", Description: "Samples of what GET /v1/status reports.",
+		Summary: "The state of the system over time", Description: "Samples of what GET /v1/status reports. " +
+			"For an operator key reading the whole system (no tenant), each sample also carries `control`: the machine luxd runs on and its Postgres.",
 	}, "read", s.systemHistory)
 	register(s, api, huma.Operation{
 		OperationID: "eventFeed", Method: http.MethodGet, Path: "/v1/events", Tags: []string{"runs"},
