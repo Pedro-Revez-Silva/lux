@@ -1,5 +1,5 @@
 """The environment itself: hosts up, Podman working in them, Postgres and
-MinIO reachable from them. Everything else in the suite assumes this."""
+S3 reachable from them. Everything else in the suite assumes this."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import uuid
 import pytest
 import requests
 
-from env import ALPINE_IMAGE, MINIO_PORT, PG_PORT, TestEnvironment
+from env import ALPINE_IMAGE, PG_PORT, S3_HEALTH_PATH, S3_PORT, TestEnvironment
 
 pytestmark = pytest.mark.infra
 
@@ -67,9 +67,9 @@ def test_volume_moves_between_hosts(hosts):
 
 def test_services_reachable_from_hosts(env: TestEnvironment, hosts):
     for host in hosts:
-        # MinIO, via the gateway address luxd and presigned URLs use.
+        # S3, via the gateway address luxd and presigned URLs use.
         out = host.exec("curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                        f"http://{env.gateway}:{MINIO_PORT}/minio/health/live")
+                        f"http://{env.gateway}:{S3_PORT}{S3_HEALTH_PATH}")
         assert out == "200"
         # Postgres port open (hosts never talk to it, but the address is right).
         host.exec("bash", "-c", f"exec 3<>/dev/tcp/{env.gateway}/{PG_PORT}")
@@ -96,4 +96,4 @@ def test_gateway_reachable_from_hosts(env: TestEnvironment, hosts):
 
 def test_bucket_exists(env: TestEnvironment):
     env.s3().head_bucket(Bucket=env.bucket)
-    assert requests.get(f"http://127.0.0.1:{MINIO_PORT}/minio/health/live", timeout=2).ok
+    assert requests.get(f"http://127.0.0.1:{S3_PORT}{S3_HEALTH_PATH}", timeout=2).ok

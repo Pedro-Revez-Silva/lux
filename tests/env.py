@@ -1,9 +1,9 @@
 """TestEnvironment — one isolated lux environment per invocation.
 
-Shared, long-lived: a Postgres and a MinIO container. Per run: a database, a
+Shared, long-lived: a Postgres and an S3 (versitygw) container. Per run: a database, a
 bucket, a Docker network, N simulated hosts (privileged Podman containers,
 each with its own storage), and `luxd` on the developer machine listening on
-the network's gateway address, which the hosts, the tests and presigned MinIO
+the network's gateway address, which the hosts, the tests and presigned S3
 URLs can all reach.
 
 Everything a test needs is written to `<log dir>/env.json`; the pytest
@@ -30,8 +30,8 @@ BIN_DIR = REPO_ROOT / "bin"
 
 PODMAN_IMAGE = "quay.io/podman/stable:v5.8.7"
 POSTGRES_IMAGE = "postgres:18.6-alpine"
-# MinIO stopped publishing community images after this release.
-MINIO_IMAGE = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z"
+# An S3-compatible gateway over a local directory; it accepts only SigV4.
+S3_IMAGE = os.environ.get("LUX_TEST_S3_IMAGE", "versity/versitygw:v1.7.0")
 
 # Versioned, so upgrading the image does not reuse a data directory from an
 # older major version.
@@ -44,10 +44,13 @@ PG_OWNER_PASSWORD = "lux"
 PG_APP_USER = "lux_app"
 PG_APP_PASSWORD = "lux_app"
 
-MINIO_CONTAINER = "lux-e2e-minio"
-MINIO_PORT = int(os.environ.get("LUX_TEST_MINIO_PORT", "59000"))
-MINIO_USER = "luxminio"
-MINIO_PASSWORD = "luxminio-secret"
+S3_CONTAINER = "lux-e2e-s3"
+# LUX_TEST_MINIO_PORT is still honoured so existing setups keep their port.
+S3_PORT = int(os.environ.get("LUX_TEST_S3_PORT") or os.environ.get("LUX_TEST_MINIO_PORT") or "59000")
+S3_ACCESS_KEY = "luxs3"
+S3_SECRET_KEY = "luxs3-secret"
+S3_REGION = "us-east-1"
+S3_HEALTH_PATH = "/health"
 
 # Images every host has preloaded, so no test waits on a registry.
 ALPINE_IMAGE = "docker.io/library/alpine:3.24.2"
@@ -252,7 +255,7 @@ class TestEnvironment:
     def s3_endpoint(self) -> str:
         # The gateway address, so presigned URLs signed for it work from the
         # hosts as well as from here.
-        return f"http://{self.gateway}:{MINIO_PORT}"
+        return f"http://{self.gateway}:{S3_PORT}"
 
     @property
     def data_dir(self) -> str:
@@ -266,9 +269,9 @@ class TestEnvironment:
             "LUX_DATA_DIR": self.data_dir,
             "LUX_S3_ENDPOINT": self.s3_endpoint,
             "LUX_S3_BUCKET": self.bucket,
-            "LUX_S3_ACCESS_KEY": MINIO_USER,
-            "LUX_S3_SECRET_KEY": MINIO_PASSWORD,
-            "LUX_S3_REGION": "us-east-1",
+            "LUX_S3_ACCESS_KEY": S3_ACCESS_KEY,
+            "LUX_S3_SECRET_KEY": S3_SECRET_KEY,
+            "LUX_S3_REGION": S3_REGION,
             # Never the developer's AWS account: the EC2 provider gets only
             # what a test passes it (the fake's endpoint, or --real-ec2).
             **({} if os.environ.get("LUX_TEST_REAL_EC2") else {
@@ -314,25 +317,27 @@ class TestEnvironment:
                 "-e", f"POSTGRES_USER={PG_OWNER}", "-e", f"POSTGRES_PASSWORD={PG_OWNER_PASSWORD}",
                 POSTGRES_IMAGE, "-c", "max_connections=500",
             )
-        if not container_running(MINIO_CONTAINER):
-            sh("docker", "rm", "-f", MINIO_CONTAINER, check=False)
+        if not container_running(S3_CONTAINER):
+            sh("docker", "rm", "-f", S3_CONTAINER, check=False)
+            # Global flags precede the backend subcommand; the image has no
+            # /data, so the posix backend stores under /tmp.
             sh(
-                "docker", "run", "-d", "--name", MINIO_CONTAINER, "--label", LABEL,
-                "-p", f"0.0.0.0:{MINIO_PORT}:9000",
-                "-e", f"MINIO_ROOT_USER={MINIO_USER}", "-e", f"MINIO_ROOT_PASSWORD={MINIO_PASSWORD}",
-                MINIO_IMAGE, "server", "/data",
+                "docker", "run", "-d", "--name", S3_CONTAINER, "--label", LABEL,
+                "-p", f"0.0.0.0:{S3_PORT}:9000",
+                "-e", f"ROOT_ACCESS_KEY={S3_ACCESS_KEY}", "-e", f"ROOT_SECRET_KEY={S3_SECRET_KEY}",
+                S3_IMAGE, "--port", ":9000", "--health", S3_HEALTH_PATH, "--region", S3_REGION, "posix", "/tmp",
             )
         deadline = time.time() + 60
         while time.time() < deadline:
             try:
                 with psycopg.connect(self._dsn(PG_OWNER, PG_OWNER_PASSWORD, "postgres"), connect_timeout=2):
                     pass
-                if requests.get(f"http://127.0.0.1:{MINIO_PORT}/minio/health/live", timeout=2).ok:
+                if requests.get(f"http://127.0.0.1:{S3_PORT}{S3_HEALTH_PATH}", timeout=2).ok:
                     return
             except Exception:  # noqa: BLE001 - still starting
                 pass
             time.sleep(0.5)
-        raise RuntimeError("shared Postgres/MinIO did not become ready")
+        raise RuntimeError("shared Postgres/S3 did not become ready")
 
     def _network(self) -> None:
         sh("docker", "network", "create", "--label", LABEL, self.network)
@@ -347,13 +352,15 @@ class TestEnvironment:
 
     def s3(self):
         import boto3
+        from botocore.config import Config
 
         return boto3.client(
             "s3",
-            endpoint_url=f"http://127.0.0.1:{MINIO_PORT}",
-            aws_access_key_id=MINIO_USER,
-            aws_secret_access_key=MINIO_PASSWORD,
-            region_name="us-east-1",
+            endpoint_url=f"http://127.0.0.1:{S3_PORT}",
+            aws_access_key_id=S3_ACCESS_KEY,
+            aws_secret_access_key=S3_SECRET_KEY,
+            region_name=S3_REGION,
+            config=Config(signature_version="s3v4"),
         )
 
     def _bucket(self) -> None:

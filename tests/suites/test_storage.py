@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from conftest import CLIError, fake_agent, generic
-from env import ALPINE_IMAGE, MINIO_PASSWORD, wait_until
+from env import ALPINE_IMAGE, S3_SECRET_KEY, wait_until
 
 
 def s3_keys(env, run_id: str) -> list[str]:
@@ -35,7 +35,7 @@ def test_blobs_land_in_s3_scoped_by_tenant(env, lux, runners, hosts, fake_image)
 def test_runners_hold_no_s3_credentials(env, runners, hosts, lux):
     runners.start(hosts[0])
     procenv = hosts[0].exec("sh", "-c", "cat /proc/$(cat /run/lux-runner.pid)/environ | tr '\\0' '\\n'")
-    assert MINIO_PASSWORD not in procenv
+    assert S3_SECRET_KEY not in procenv
     assert "S3" not in procenv
 
 
