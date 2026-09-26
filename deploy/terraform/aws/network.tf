@@ -100,7 +100,7 @@ resource "aws_security_group" "control" {
 
 resource "aws_vpc_security_group_ingress_rule" "control_from_runners" {
   security_group_id            = aws_security_group.control.id
-  description                  = "runners -> luxd"
+  description                  = "runners to luxd"
   referenced_security_group_id = aws_security_group.runner.id
   from_port                    = var.luxd_port
   to_port                      = var.luxd_port
