@@ -176,6 +176,31 @@ func TestRunCostInvalidAmountAndEmptyReport(t *testing.T) {
 	}
 }
 
+// An insert the database refuses after the delete is queued (here a tenant
+// that does not exist, a foreign key) rolls the whole answer back: the
+// source's earlier lines and every other source's stay.
+func TestRunCostDatabaseFailureKeepsEarlierLines(t *testing.T) {
+	s, keys := costFixture(t)
+	report(t, s, "t1", "r1", "gw", line("ai", "m1", "1", "USD", false))
+	report(t, s, "t1", "r1", "other", line("video", "v", "10", "USD", false))
+
+	ctx := context.Background()
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return replaceCostLines(ctx, tx, "missing-tenant", "r1", "gw", []costReport{line("ai", "m2", "5", "USD", false)})
+	})
+	if err == nil {
+		t.Fatal("a line for a tenant that does not exist was accepted")
+	}
+	_, c := getCost(t, s, keys["t1"], "r1")
+	if got, want := totals(c.Totals), "/USD=11(f0,e11) "; got != want {
+		t.Errorf("totals after a failed answer:\n got %s\nwant %s", got, want)
+	}
+	if len(c.Lines) != 2 || c.Lines[0].Source != "gw" || c.Lines[0].Item != "m1" || c.Lines[0].Amount != "1" ||
+		c.Lines[1].Source != "other" || c.Lines[1].Item != "v" || c.Lines[1].Amount != "10" {
+		t.Errorf("lines after a failed answer: %+v", c.Lines)
+	}
+}
+
 // A tenant sees its own Runs' costs, and another tenant's Run is not found,
 // as on every Run endpoint. An operator reaches either.
 func TestRunCostTenantIsolation(t *testing.T) {
