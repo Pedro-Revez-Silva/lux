@@ -1,11 +1,9 @@
 """/etc/lux/luxd.toml, rendered from SSM infrastructure values and the
 desired-state file's [luxd] table."""
 import json
-import os
 import socket
 
 from .desired import Desired
-from .host import Host, write_if_changed
 
 
 def primary_ip() -> str:
@@ -51,9 +49,3 @@ def render(infra: dict, region: str, desired: Desired, creds: dict, ip: str, run
         lines += ["", f"[{name}]"]
         lines += [f"{k} = {_value(v)}" for k, v in kv.items()]
     return "\n".join(lines) + "\n"
-
-
-def write(host: Host, content: str) -> bool:
-    """Writes luxd.toml (0600, atomic); False if it already had content.
-    The caller decides whether luxd restarts."""
-    return write_if_changed(os.path.join(host.paths.etc_lux, "luxd.toml"), content, 0o600)

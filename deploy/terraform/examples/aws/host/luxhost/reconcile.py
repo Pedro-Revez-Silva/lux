@@ -103,7 +103,7 @@ class Run:
         toml = luxdconf.render(infra, self.boot.region, want, creds, ip, host.paths.runner_bin_dir)
         installed = release.installed_version(host.paths.install_root)
         deploying = want.lux_version is not None and want.lux_version != installed
-        if luxdconf.write(host, toml):
+        if write_if_changed(os.path.join(host.paths.etc_lux, "luxd.toml"), toml, 0o600):
             self.changed.append("luxd.toml")
             restart["luxd"] = True
 
@@ -122,7 +122,7 @@ class Run:
                 self.deferred_error = HostError(f"version: {e}")
         # A successful deploy has restarted luxd on the new config already.
         if not deploying or self.deferred_error:
-            if restart["luxd"] and installed and host.ok(["systemctl", "is-active", "--quiet", "luxd"]):
+            if restart["luxd"] and installed and release.is_luxd_active(host):
                 host.run(["systemctl", "restart", "luxd"])
                 self.changed.append("luxd-restarted")
         return installed
