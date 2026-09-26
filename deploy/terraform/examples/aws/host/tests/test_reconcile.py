@@ -563,7 +563,6 @@ def test_cluster_left_stopped_by_an_interrupted_run_is_chowned_and_started(env, 
     assert env.sh.commands("chown") == [] and start not in env.sh.calls
 
 
-PG_INSTALL = ["apt-get", "-o", "DPkg::Lock::Timeout=300", "install", "-y", "postgresql-18"]
 CLOUDFLARED_DEB_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{}.deb"
 
 
@@ -584,14 +583,14 @@ def test_first_run_installs_postgres_and_cloudflared_before_the_postgres_step(en
         "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] "
         "https://apt.postgresql.org/pub/repos/apt trixie-pgdg main\n"
     )
-    calls = env.sh.calls
-    update = ["apt-get", "-o", "DPkg::Lock::Timeout=300", "update"]
-    assert calls.index(update) < calls.index(PG_INSTALL) < calls.index(["systemctl", "enable", "postgresql"])
-    # The package (and its default cluster) exists before the volume step.
-    assert calls.index(["systemctl", "enable", "postgresql"]) < calls.index(next(c for c in calls if c[0] == "mountpoint"))
     assert env.web.package_fetched[-1] == CLOUDFLARED_DEB_URL.format("arm64")
     assert os.access(env.path("usr/local/bin/cloudflared"), os.X_OK)
     assert env.sh.dpkg_status == {"postgresql-18": INSTALLED, "cloudflared": INSTALLED}
+    # FakeSh fails every Postgres command until the package is installed,
+    # so these mean the install came before the volume and database steps.
+    assert {"pg-volume", "database"} <= set(changed)
+    assert env.sh.mounted and "lux" in env.sh.databases
+    assert "postgresql@18-main" in env.sh.active and "postgresql" in env.sh.enabled
 
 
 def test_cloudflared_deb_follows_the_host_architecture(env, capsys):

@@ -71,9 +71,23 @@ class FakeSh:
             return completed(argv, self.migrate_rc, stderr="" if self.migrate_rc == 0 else "migration 7 failed")
         if handler is None:
             raise AssertionError(f"unexpected command: {argv}")
+        if self._needs_postgres(argv) and self.dpkg_status.get("postgresql-18") != INSTALLED:
+            # As on a host without the package: no unit, no tools, no user.
+            return completed(argv, 1, stderr=f"{cmd}: postgresql-18 is not installed")
         if cmd == "apt-get":
             return handler(argv, input, env)
         return handler(argv, input)
+
+    @staticmethod
+    def _needs_postgres(argv):
+        cmd = os.path.basename(argv[0])
+        if cmd == "systemctl":
+            return any(a.removesuffix(".service") in ("postgresql", "postgresql@18-main") for a in argv[1:])
+        if cmd == "chown":
+            return any(a.startswith("postgres:") for a in argv[1:])
+        if cmd == "runuser":
+            return argv[1:3] == ["-u", "postgres"]
+        return cmd in ("pg_createcluster", "pg_dropcluster")
 
     def commands(self, name):
         return [c for c in self.calls if os.path.basename(c[0]) == name]
