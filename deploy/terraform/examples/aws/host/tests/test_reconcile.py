@@ -181,7 +181,8 @@ def test_checksum_mismatch_switches_nothing(env, capsys):
     env.web.releases["v2.0.0"] = rel
     env.repo.set_desired(desired("v2.0.0"))
     assert env.run() == 1
-    assert "checksum mismatch" in summary(capsys)
+    line = summary(capsys)
+    assert "checksum mismatch" in line and "leaving v1.0.0 running" in line
     assert installed(env) == "v1.0.0"
 
 

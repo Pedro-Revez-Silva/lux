@@ -203,7 +203,10 @@ def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url:
             download(f"{release_url}/SHA256SUMS", sums_path, host.urlopen)
         except Exception as e:
             raise HostError(f"download of {wanted} failed, leaving {running} running: {e}") from None
-        verify_sha256(tarball_path, sums_path, tarball_name)
+        try:
+            verify_sha256(tarball_path, sums_path, tarball_name)
+        except HostError as e:
+            raise HostError(f"{e}; leaving {running} running") from None
         version_dir = extract_release(tarball_path, versions_root, wanted)
 
     for rel in BIN_TARGETS:
