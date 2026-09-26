@@ -41,6 +41,10 @@ Wants=network-online.target
 RequiresMountsFor={pg_mount}
 
 [Service]
+# The control host's charted filesystems: in the environment rather than
+# luxd.toml, which luxd reads strictly, so a pinned older release that does
+# not know the setting still starts.
+Environment=LUX_HISTORY_DISK_PATHS=/,{pg_mount}
 ExecStart=/usr/local/bin/luxd serve
 Restart=on-failure
 RestartSec=5s

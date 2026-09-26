@@ -8,7 +8,7 @@ import pytest
 from conftest import INSTALLED, PREFIX, FakeWeb, desired, make_release
 
 from luxhost import backup, desired as desired_mod
-from luxhost.host import HostError
+from luxhost.host import HostError, Paths
 
 
 def summary(capsys) -> str:
@@ -83,6 +83,17 @@ def test_luxd_toml_carries_infra_and_desired_settings(env, capsys):
     app_pw = read(env, "root/.lux-app-password")
     assert cfg["database"]["app_password"] == app_pw
     assert cfg["database"]["url"] == f"postgres://lux_app:{app_pw}@127.0.0.1:5432/lux?sslmode=disable"
+
+
+def test_luxd_tracks_the_root_and_postgres_filesystems(env, capsys):
+    assert env.run() == 0
+    unit = read(env, "etc/systemd/system/luxd.service")
+    env_lines = [l for l in unit.splitlines() if l.startswith("Environment=LUX_HISTORY_DISK_PATHS=")]
+    assert env_lines == [f"Environment=LUX_HISTORY_DISK_PATHS=/,{env.host.paths.pg_mount}"], unit
+    # On a real host, the Postgres data volume's mount point.
+    assert Paths().pg_mount == "/var/lib/postgresql/18"
+    # luxd.toml leaves it to the environment: an older pinned luxd refuses unknown keys.
+    assert "disk_paths" not in luxd_toml(env).get("history", {})
 
 
 def test_no_access_team_means_key_auth(env, capsys):
