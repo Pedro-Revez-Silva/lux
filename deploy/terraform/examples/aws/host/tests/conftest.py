@@ -129,14 +129,10 @@ class FakeSh:
         self.mounted = True
         return completed(argv)
 
-    def _pg_dropcluster(self, argv, _input):
+    def _succeed(self, argv, _input):
         return completed(argv)
 
-    def _pg_createcluster(self, argv, _input):
-        return completed(argv)
-
-    def _chown(self, argv, _input):
-        return completed(argv)
+    _pg_dropcluster = _pg_createcluster = _chown = _succeed
 
     def _runuser(self, argv, input):
         inner = argv[argv.index("--") + 1:]
