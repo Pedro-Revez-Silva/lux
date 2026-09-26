@@ -54,6 +54,9 @@ def ensure_volume(host: Host, volume_id: str) -> bool:
     # (PGDG keeps it in /etc), so an existing cluster is only started.
     if os.path.exists(os.path.join(datadir, "PG_VERSION")):
         if changed:
+            # The postgres uid on a newer image may differ from the one
+            # that wrote these files.
+            host.run(["chown", "-R", "postgres:postgres", datadir])
             host.run(["systemctl", "start", CLUSTER_UNIT])
         return changed
     host.run(["pg_dropcluster", "--stop", PG_MAJOR, "main"], check=False)

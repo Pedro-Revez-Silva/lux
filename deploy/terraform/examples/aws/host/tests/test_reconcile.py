@@ -357,6 +357,25 @@ def test_volume_with_a_cluster_is_started_not_recreated(env, capsys):
     assert ["systemctl", "start", "postgresql@18-main"] in env.sh.commands("systemctl")
 
 
+def test_adopted_cluster_is_chowned_before_it_starts(env, capsys):
+    # A newer image may give postgres another uid than the one on the volume.
+    env.sh.has_filesystem = True
+    datadir = env.path("var/lib/postgresql/18/main")
+    os.makedirs(datadir)
+    with open(os.path.join(datadir, "PG_VERSION"), "w") as f:
+        f.write("18\n")
+    assert env.run() == 0, summary(capsys)
+    chown = ["chown", "-R", "postgres:postgres", datadir]
+    start = ["systemctl", "start", "postgresql@18-main"]
+    assert env.sh.commands("chown").count(chown) == 1
+    assert env.sh.calls.index(chown) < env.sh.calls.index(start)
+
+
+def test_new_cluster_is_not_chowned_recursively(env, capsys):
+    assert env.run() == 0, summary(capsys)
+    assert len(env.sh.commands("pg_createcluster")) == 1
+    assert [c for c in env.sh.commands("chown") if "-R" in c] == []
+
 def test_cluster_missing_on_a_mounted_volume_is_created(env, capsys):
     # A run that mounted the volume and then failed before the cluster.
     env.sh.mounted = env.sh.has_filesystem = True
