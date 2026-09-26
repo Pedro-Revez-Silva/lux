@@ -344,6 +344,27 @@ def test_mounted_volume_is_left_alone_and_fstab_written_once(env, capsys):
     assert env.sh.commands("pg_createcluster") == [] and env.sh.commands("blkid") == []
 
 
+def test_volume_with_a_cluster_is_started_not_recreated(env, capsys):
+    # A replaced host: the volume already holds the old host's cluster.
+    env.sh.has_filesystem = True
+    datadir = env.path("var/lib/postgresql/18/main")
+    os.makedirs(datadir)
+    with open(os.path.join(datadir, "PG_VERSION"), "w") as f:
+        f.write("18\n")
+    assert env.run() == 0, summary(capsys)
+    assert env.sh.commands("pg_createcluster") == [] and env.sh.commands("pg_dropcluster") == []
+    assert env.sh.commands("mkfs.ext4") == []
+    assert ["systemctl", "start", "postgresql@18-main"] in env.sh.commands("systemctl")
+
+
+def test_cluster_missing_on_a_mounted_volume_is_created(env, capsys):
+    # A run that mounted the volume and then failed before the cluster.
+    env.sh.mounted = env.sh.has_filesystem = True
+    assert env.run() == 0, summary(capsys)
+    assert len(env.sh.commands("pg_createcluster")) == 1
+    assert os.path.exists(env.path("var/lib/postgresql/18/main/PG_VERSION"))
+
+
 def test_passwords_are_generated_once(env, capsys):
     assert env.run() == 0
     owner = read(env, "root/.lux-pg-owner-password")

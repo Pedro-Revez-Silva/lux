@@ -99,6 +99,9 @@ class FakeSh:
         if verb in ("restart", "start"):
             self._start(units[0])
             return completed(argv)
+        if verb == "stop":
+            self.active.difference_update(units)
+            return completed(argv)
         if verb == "daemon-reload":
             return completed(argv)
         raise AssertionError(f"unexpected systemctl call: {argv}")
@@ -132,7 +135,19 @@ class FakeSh:
     def _succeed(self, argv, _input):
         return completed(argv)
 
-    _pg_dropcluster = _pg_createcluster = _chown = _succeed
+    _pg_dropcluster = _chown = _succeed
+
+    def _pg_createcluster(self, argv, _input):
+        # Like the real one: refuses a data directory that already holds a
+        # cluster without its postgresql.conf (PGDG keeps that in /etc).
+        datadir = argv[argv.index("-d") + 1]
+        marker = os.path.join(datadir, "PG_VERSION")
+        if os.path.exists(marker) and not os.path.exists(os.path.join(datadir, "postgresql.conf")):
+            return completed(argv, 1, stderr="Error: move_conffile: required configuration file does not exist")
+        os.makedirs(datadir, exist_ok=True)
+        with open(marker, "w") as f:
+            f.write("18\n")
+        return completed(argv)
 
     def _runuser(self, argv, input):
         inner = argv[argv.index("--") + 1:]

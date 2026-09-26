@@ -3,8 +3,10 @@
 The data volume (aws_ebs_volume.pg_data) is attached after the instance
 exists, so the first run may start before it shows up: it is waited for by
 its stable EBS device id, formatted only if it carries no filesystem at
-all, and the PGDG default cluster is recreated on it. Once the volume is
-mounted where Postgres keeps its data, that part is skipped.
+all, and the PGDG default cluster's data directory is moved onto it: a
+new one on a volume without a cluster, the volume's own when it already
+holds one (a replaced host). Once the volume is mounted and holds the
+cluster, that part is skipped.
 """
 import os
 import re
@@ -14,36 +16,48 @@ import string
 from .host import Host, HostError, read_file, write_if_changed
 
 PG_MAJOR = "18"
+CLUSTER_UNIT = f"postgresql@{PG_MAJOR}-main"
 DEVICE_WAIT_S = 300
 DEVICE_POLL_S = 5
 _DB_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 
 def ensure_volume(host: Host, volume_id: str) -> bool:
-    """Mounts the data volume and moves the cluster onto it. Returns True
+    """Mounts the data volume and runs the cluster from it. Returns True
     if it did anything; raises if the device never appears."""
     mnt = host.paths.pg_mount
-    if host.ok(["mountpoint", "-q", mnt]):
-        return False
-    dev = os.path.join(host.paths.dev_by_id, "nvme-Amazon_Elastic_Block_Store_" + volume_id.replace("-", ""))
-    waited = 0
-    while not os.path.exists(dev):
-        if waited >= DEVICE_WAIT_S:
-            raise HostError(f"{dev} did not appear after {waited}s")
-        host.sleep(DEVICE_POLL_S)
-        waited += DEVICE_POLL_S
-    # blkid exits non-zero when it finds no signature: only then format.
-    if not host.ok(["blkid", dev]):
-        host.run(["mkfs.ext4", "-L", "pgdata", dev])
+    datadir = os.path.join(mnt, "main")
+    changed = False
+    if not host.ok(["mountpoint", "-q", mnt]):
+        dev = os.path.join(host.paths.dev_by_id, "nvme-Amazon_Elastic_Block_Store_" + volume_id.replace("-", ""))
+        waited = 0
+        while not os.path.exists(dev):
+            if waited >= DEVICE_WAIT_S:
+                raise HostError(f"{dev} did not appear after {waited}s")
+            host.sleep(DEVICE_POLL_S)
+            waited += DEVICE_POLL_S
+        # blkid exits non-zero when it finds no signature: only then format.
+        if not host.ok(["blkid", dev]):
+            host.run(["mkfs.ext4", "-L", "pgdata", dev])
+        # The package's cluster runs from the root disk until the volume
+        # covers its data directory; its config in /etc/postgresql stays.
+        host.run(["systemctl", "stop", CLUSTER_UNIT])
+        os.makedirs(mnt, exist_ok=True)
+        host.run(["mount", "LABEL=pgdata", mnt])
+        fstab = read_file(host.paths.fstab) or ""
+        if not any(line.startswith("LABEL=pgdata") for line in fstab.splitlines()):
+            with open(host.paths.fstab, "a") as f:
+                f.write(f"LABEL=pgdata {mnt} ext4 defaults,nofail 0 2\n")
+        host.run(["chown", "postgres:postgres", mnt])
+        changed = True
+    # pg_createcluster refuses a data directory without postgresql.conf
+    # (PGDG keeps it in /etc), so an existing cluster is only started.
+    if os.path.exists(os.path.join(datadir, "PG_VERSION")):
+        if changed:
+            host.run(["systemctl", "start", CLUSTER_UNIT])
+        return changed
     host.run(["pg_dropcluster", "--stop", PG_MAJOR, "main"], check=False)
-    os.makedirs(mnt, exist_ok=True)
-    host.run(["mount", "LABEL=pgdata", mnt])
-    fstab = read_file(host.paths.fstab) or ""
-    if not any(line.startswith("LABEL=pgdata") for line in fstab.splitlines()):
-        with open(host.paths.fstab, "a") as f:
-            f.write(f"LABEL=pgdata {mnt} ext4 defaults,nofail 0 2\n")
-    host.run(["chown", "postgres:postgres", mnt])
-    host.run(["pg_createcluster", PG_MAJOR, "main", "-d", f"{mnt}/main", "--start"])
+    host.run(["pg_createcluster", PG_MAJOR, "main", "-d", datadir, "--start"])
     return True
 
 

@@ -17,8 +17,10 @@ shells out to `git`, `aws`, `systemctl` and the Postgres tools.
 3. Validates `lux-host.toml`. A bad file fails the run here, before
    anything on the host is touched.
 4. Postgres: waits up to 300s for the data volume, formats it only if it
-   has no filesystem, mounts it at `/var/lib/postgresql/18` and moves the
-   cluster onto it (skipped once mounted); generates the owner and
+   has no filesystem, mounts it at `/var/lib/postgresql/18` and runs the
+   cluster from it: the volume's own cluster if it holds one (a replaced
+   host), else a new one (skipped once mounted with a cluster); generates
+   the owner and
    `lux_app` passwords once (`/root/.lux-*`, 0600), sets the owner's
    password, creates the database.
 5. Writes the systemd units (luxd, cloudflared, the backup timer, its own
