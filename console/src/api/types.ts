@@ -277,6 +277,27 @@ export interface Sample {
   capacityMemory?: number;
   allocatedCpus?: number;
   allocatedMemory?: number;
+  /** Only for an operator reading the whole system. */
+  control?: ControlSample;
+}
+
+/** The machine luxd runs on, and its Postgres. */
+export interface ControlSample {
+  cpuCores?: number;
+  cpus?: number;
+  memoryBytes?: number;
+  memoryTotal?: number;
+  databaseBytes?: number;
+  databaseConnections?: number;
+  disks?: DiskSample[];
+}
+
+export interface DiskSample {
+  path: string;
+  usedBytes: number;
+  /** What an unprivileged process can still write. */
+  freeBytes: number;
+  totalBytes: number;
 }
 
 export interface History {
