@@ -22,6 +22,22 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
+func controlHistoryRequest(t *testing.T, s *Server, key, query string) History {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/history?"+query, nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("%s: %d %s", query, w.Code, w.Body)
+	}
+	var h History
+	if err := json.Unmarshal(w.Body.Bytes(), &h); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
 // The system tick also records this machine and its Postgres, at the whole
 // system sample's instant; a tracked path that does not exist is skipped
 // and logged once, does not fail the tick, and is sampled again once it
@@ -388,18 +404,7 @@ func TestControlCPURatePerInstance(t *testing.T) {
 	get := func(to time.Duration) History {
 		t.Helper()
 		q := url.Values{"res": {"0"}, "from": {base.Add(-time.Second).Format(time.RFC3339Nano)}, "to": {base.Add(to).Format(time.RFC3339Nano)}}
-		req := httptest.NewRequest(http.MethodGet, "/v1/history?"+q.Encode(), nil)
-		req.Header.Set("Authorization", "Bearer "+opKey)
-		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Fatalf("%d %s", w.Code, w.Body)
-		}
-		var h History
-		if err := json.Unmarshal(w.Body.Bytes(), &h); err != nil {
-			t.Fatal(err)
-		}
-		return h
+		return controlHistoryRequest(t, s, opKey, q.Encode())
 	}
 	check := func(h History, inst string, want map[time.Duration]*float64) {
 		t.Helper()
@@ -471,18 +476,7 @@ func TestRolledUpControlHistory(t *testing.T) {
 	get := func(res string) History {
 		t.Helper()
 		q := url.Values{"res": {res}, "from": {hour.Add(-time.Second).Format(time.RFC3339Nano)}, "to": {hour.Add(2 * time.Hour).Format(time.RFC3339Nano)}}
-		req := httptest.NewRequest(http.MethodGet, "/v1/history?"+q.Encode(), nil)
-		req.Header.Set("Authorization", "Bearer "+opKey)
-		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Fatalf("res %s: %d %s", res, w.Code, w.Body)
-		}
-		var h History
-		if err := json.Unmarshal(w.Body.Bytes(), &h); err != nil {
-			t.Fatal(err)
-		}
-		return h
+		return controlHistoryRequest(t, s, opKey, q.Encode())
 	}
 	disks := func(rootUsed, dataUsed int64) []DiskSample {
 		return []DiskSample{{"/", rootUsed, 1000 - rootUsed, 1000}, {"/data", dataUsed, 9000 - dataUsed, 9000}}
@@ -561,18 +555,7 @@ func TestSystemHistoryControlIsOperatorsOnly(t *testing.T) {
 
 	get := func(key, query string) History {
 		t.Helper()
-		req := httptest.NewRequest(http.MethodGet, "/v1/history?res=0&since=1h"+query, nil)
-		req.Header.Set("Authorization", "Bearer "+key)
-		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Fatalf("%s: %d %s", query, w.Code, w.Body)
-		}
-		var h History
-		if err := json.Unmarshal(w.Body.Bytes(), &h); err != nil {
-			t.Fatal(err)
-		}
-		return h
+		return controlHistoryRequest(t, s, key, "res=0&since=1h"+query)
 	}
 	for _, c := range []struct{ key, query string }{{tenantKey, ""}, {tenantKey, "&tenant="}, {opKey, "&tenant=acme"}, {opKey, "&tenant=t1"}} {
 		h := get(c.key, c.query)
