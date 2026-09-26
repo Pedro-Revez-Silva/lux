@@ -250,12 +250,12 @@ func TestRunCostTenantIsolation(t *testing.T) {
 	}
 }
 
-// Status follows the sources: none reported, complete while every source
+// Status follows the sources: pending before any report, complete while every source
 // has answered, incomplete while any source is, final once all are.
 func TestRunCostStatus(t *testing.T) {
 	s, keys := costFixture(t)
 	ctx := context.Background()
-	if _, c := getCost(t, s, keys["t1"], "r1"); c.Status != "none" || len(c.Totals) != 0 || c.Lines == nil {
+	if _, c := getCost(t, s, keys["t1"], "r1"); c.Status != "pending" || len(c.Totals) != 0 || c.Lines == nil {
 		t.Errorf("no lines: %+v", c)
 	}
 	answered, next := t0.Add(time.Hour), t0.Add(2*time.Hour)
