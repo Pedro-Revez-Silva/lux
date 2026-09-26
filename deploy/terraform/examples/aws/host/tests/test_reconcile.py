@@ -344,8 +344,9 @@ def test_mounted_volume_is_left_alone_and_fstab_written_once(env, capsys):
     assert env.sh.commands("pg_createcluster") == [] and env.sh.commands("blkid") == []
 
 
-def test_volume_with_a_cluster_is_started_not_recreated(env, capsys):
-    # A replaced host: the volume already holds the old host's cluster.
+def test_volume_with_a_cluster_is_chowned_and_started_not_recreated(env, capsys):
+    # A replaced host: the volume holds the old host's cluster, whose files a
+    # newer image's postgres uid may not own.
     env.sh.has_filesystem = True
     datadir = env.path("var/lib/postgresql/18/main")
     os.makedirs(datadir)
@@ -354,17 +355,6 @@ def test_volume_with_a_cluster_is_started_not_recreated(env, capsys):
     assert env.run() == 0, summary(capsys)
     assert env.sh.commands("pg_createcluster") == [] and env.sh.commands("pg_dropcluster") == []
     assert env.sh.commands("mkfs.ext4") == []
-    assert ["systemctl", "start", "postgresql@18-main"] in env.sh.commands("systemctl")
-
-
-def test_adopted_cluster_is_chowned_before_it_starts(env, capsys):
-    # A newer image may give postgres another uid than the one on the volume.
-    env.sh.has_filesystem = True
-    datadir = env.path("var/lib/postgresql/18/main")
-    os.makedirs(datadir)
-    with open(os.path.join(datadir, "PG_VERSION"), "w") as f:
-        f.write("18\n")
-    assert env.run() == 0, summary(capsys)
     chown = ["chown", "-R", "postgres:postgres", datadir]
     start = ["systemctl", "start", "postgresql@18-main"]
     assert env.sh.commands("chown").count(chown) == 1
