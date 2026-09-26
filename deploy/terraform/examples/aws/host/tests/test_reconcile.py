@@ -117,14 +117,16 @@ def test_ssm_change_rerenders_the_config(env, capsys):
     assert len(restarts(env)) == 1
 
 
-def test_config_change_does_not_start_a_stopped_luxd(env, capsys):
+def test_config_change_to_a_stopped_luxd_enables_it_instead_of_restarting(env, capsys):
     deploy_version(env, capsys, "v1.0.0")
     env.sh.active.discard("luxd")
     env.sh.enabled.discard("luxd")
-    env.sh.healthy_versions.clear()
     env.sh.calls.clear()
     env.repo.set_desired(desired("v1.0.0", "[luxd]\ndebug = true\n"))
-    env.run()
+    assert env.run() == 0
+    line = summary(capsys)
+    assert "luxd.toml" in line and "enable:luxd" in line and "luxd-restarted" not in line
+    assert "luxd" in env.sh.active
     assert restarts(env) == []
 
 

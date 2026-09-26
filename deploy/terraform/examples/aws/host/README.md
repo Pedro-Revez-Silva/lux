@@ -31,6 +31,9 @@ shells out to `git`, `aws`, `systemctl` and the Postgres tools.
    `/health`; on failure restores the previous binaries and restarts luxd.
    Otherwise, if the config or luxd's unit changed and luxd is running, it
    restarts luxd.
+   With a version installed, every run also enables and starts a stopped
+   luxd (`systemctl enable --now`, never a restart), so to keep luxd
+   stopped, disable `lux-reconcile.timer` first.
 8. Writes the cloudflared token from SSM and (re)starts cloudflared only
    if it or its unit changed.
 
