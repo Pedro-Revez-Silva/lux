@@ -93,3 +93,26 @@ func TestLaunchStoresHostFacts(t *testing.T) {
 		})
 	}
 }
+
+// A provider that reports only the instance id leaves the other host facts
+// NULL, not empty strings.
+func TestLaunchMissingHostFactsAreNull(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('pool1', 'burst', 'ec2')`)
+	if err := s.launch(ctx, &fakeLaunchProvider{launched: Launched{ProviderID: "i-bare"}}, poolRow{ID: "pool1", Name: "burst", Provider: "ec2"}); err != nil {
+		t.Fatal(err)
+	}
+	var providerID string
+	var instanceType, zone, market *string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT provider_id, instance_type, zone, market FROM hosts WHERE pool = 'burst'`).
+			Scan(&providerID, &instanceType, &zone, &market)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if providerID != "i-bare" || instanceType != nil || zone != nil || market != nil {
+		t.Fatalf("host row: provider_id %q instance_type %v zone %v market %v, want i-bare and three NULLs", providerID, instanceType, zone, market)
+	}
+}
