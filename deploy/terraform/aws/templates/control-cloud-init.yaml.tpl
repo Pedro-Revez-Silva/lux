@@ -1,8 +1,10 @@
 #cloud-config
-# Bootstrap only: packages, the config repo checkout, and the reconcile
-# timer. Everything else (Postgres volume and database, luxd.toml, the lux
-# release, cloudflared, backups, the systemd units) is done by
-# host/reconcile.py from the checkout, every 5 minutes.
+# Bootstrap only: base packages, awscli (the deploy key is read from SSM
+# before the clone), amazon-ssm-agent, the config repo checkout, and the
+# reconcile timer. Everything else (Postgres 18 and cloudflared packages,
+# Postgres volume and database, luxd.toml, the lux release, backups, the
+# systemd units) is done by host/reconcile.py from the checkout, every 5
+# minutes.
 hostname: ${hostname}
 
 package_update: true
@@ -15,6 +17,9 @@ packages:
   - git
   - openssh-client
   - python3
+  # Installed by the packages module, before runcmd's clone needs it and
+  # before the reconcile timer exists, so nothing contends for the dpkg lock.
+  - awscli
 
 write_files:
   - path: /etc/lux/host.json
@@ -64,17 +69,6 @@ runcmd:
       dpkg -i /tmp/amazon-ssm-agent.deb
       systemctl enable --now amazon-ssm-agent
     fi
-  # Postgres 18 via PGDG: trixie ships 17 (docs/operations.md says tested
-  # on 18).
-  - install -d -m 0755 /usr/share/postgresql-common/pgdg
-  - curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
-  - sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-  - apt-get update
-  - DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-18 awscli
-  - systemctl enable postgresql
-  - mkdir -p /etc/cloudflared
-  - curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb -o /tmp/cloudflared.deb
-  - dpkg -i /tmp/cloudflared.deb || apt-get install -f -y
   # The config repo; no deploy key parameter means a public repo. runcmd
   # entries run as one script, so set -e makes a failed clone end it:
   # without a checkout there is nothing to reconcile.
