@@ -108,14 +108,20 @@ Each invocation:
 1. Builds every `cmd/<name>` into `bin/` (static) and the fake agent's
    image (`tests/images/fake`).
 2. Starts (or reuses) a shared **Postgres** (`lux-e2e-postgres-18`, port
-   55432) and **MinIO** (`lux-e2e-minio`, port 59000), and creates a
-   database and a bucket for this run.
+   55432, `LUX_TEST_PG_PORT`) and an S3-compatible store, **versitygw**
+   (`lux-e2e-s3`, port 59000, `LUX_TEST_S3_PORT`; the older
+   `LUX_TEST_MINIO_PORT` is still read), and creates a database and a
+   bucket for this run. `LUX_TEST_S3_IMAGE` replaces the image
+   (default `versity/versitygw:v1.7.0`), e.g. with another versitygw
+   release: it is started with versitygw's arguments and polled at
+   `/health`. A `lux-e2e-minio` container from older checkouts is no
+   longer used and is left as it is.
 3. Creates a Docker network and N **simulated hosts**. Each host is a
    privileged `quay.io/podman/stable` container with its own Podman
    storage, `bin/` mounted at `/opt/lux`, a `containers` range in
    `/etc/subuid`, and the test images preloaded.
 4. Runs `luxd migrate` and then `luxd serve` on the network's gateway
-   address, which the hosts, the tests and presigned MinIO URLs can all
+   address, which the hosts, the tests and presigned S3 URLs can all
    reach.
 5. Runs pytest. Fixtures start runners inside hosts
    (`runners.start(hosts[0])`), so a test can kill a host, restart a runner

@@ -46,7 +46,7 @@ agent, stream-json for Claude Code, and app-server for Codex.
 
 ```bash
 make build                                   # bin/luxd, bin/lux-runner, bin/lux-shim, bin/lux, bin/lux-fake
-cd tests && uv run python run_tests.py       # bring up Postgres, MinIO, two Podman hosts; run every suite
+cd tests && uv run python run_tests.py       # bring up Postgres, versitygw (S3), two Podman hosts; run every suite
 ```
 
 See [docs/development.md](docs/development.md).
