@@ -120,7 +120,7 @@ func hostCost(t *testing.T, s *Server, hostID string) computeResult {
 			return err
 		}
 		var err error
-		in, err = loadHostCompute(ctx, tx, hostID, now)
+		in, err = loadHostCompute(ctx, tx, hostID, now.Add(-time.Hour), now)
 		return err
 	}); err != nil {
 		t.Fatal(err)
