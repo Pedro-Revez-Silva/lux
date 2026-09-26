@@ -592,7 +592,7 @@ terminated once idle; their live Runs finish where they are.
 	set.Flags().DurationVar(&p.ScaleDownAfter.Duration, "scale-down-after", 0, "how long a host stays idle before it is released (default: luxd's scale_down_after, 10m)")
 	set.Flags().BoolVar(&p.WarmWhileActive, "warm-while-active", false, "keep --warm hosts only while the pool is in use; an idle pool scales down to --min")
 	set.Flags().StringVar(&template, "template", "", "provider template (JSON)")
-	set.Flags().StringVar(&p.HourlyPrice, "hourly-price", "", "static pools: default hourly price of hosts registering into it, a decimal (with --currency); existing hosts keep theirs")
+	set.Flags().StringVar(&p.HourlyPrice, "hourly-price", "", "static pools: default hourly price of hosts registering into it, a decimal (with --currency); existing hosts keep theirs. Like every flag here, it replaces the pool's: omitted, the pool has no default price")
 	set.Flags().StringVar(&p.Currency, "currency", "", "ISO 4217 currency of --hourly-price (e.g. USD)")
 	cmd.AddCommand(ls, set)
 	return cmd

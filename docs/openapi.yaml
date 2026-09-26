@@ -438,6 +438,9 @@ components:
           examples:
             - "0.40"
           type: string
+      required:
+        - hourlyPrice
+        - currency
       type: object
     HostPriceSet:
       additionalProperties: false
@@ -455,6 +458,9 @@ components:
           examples:
             - "0.40"
           type: string
+      required:
+        - hourlyPrice
+        - currency
       type: object
     Image:
       additionalProperties: false
