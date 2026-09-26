@@ -15,18 +15,20 @@ separate private repo should hold the real values and state.
   port. An S3 gateway endpoint (free) keeps blob and backup traffic off
   the public internet.
 - **Control host** (`aws/control.tf`): one `t4g.medium` running Debian 13
-  (trixie) arm64, with `luxd` and Postgres 18 (via PGDG) both on it. Root
-  and Postgres-data volumes are separate encrypted gp3 EBS volumes; the
+  (trixie) arm64, with `luxd` and Postgres 18 (PGDG, installed by the
+  reconciler) both on it. Root and Postgres-data volumes are separate
+  encrypted gp3 EBS volumes; the
   data volume has `prevent_destroy` so replacing the instance does not
   touch it. `lifecycle { ignore_changes = [ami, user_data] }` keeps a
   newer Debian AMI or an edited cloud-init template from triggering an
   unplanned replacement. cloud-init is only a bootstrap: it installs
-  packages, clones the operator's **config repo** and starts
-  `lux-reconcile.timer`, which runs `host/reconcile.py` from that
-  checkout every 5 minutes. The reconciler does everything else
-  (Postgres volume and database, `luxd.toml`, the lux release,
-  cloudflared, the daily `pg_dump -Fc` to S3, the systemd units) from
-  the repo's `host/lux-host.toml` plus infrastructure values Terraform
+  base packages (git, python3, awscli), clones the operator's **config
+  repo** and starts `lux-reconcile.timer`, which runs
+  `host/reconcile.py` from that checkout every 5 minutes. The reconciler
+  does everything else (installing Postgres 18 and cloudflared, the
+  Postgres volume and database, `luxd.toml`, the lux release, the
+  cloudflared token, the daily `pg_dump -Fc` to S3, the systemd units)
+  from the repo's `host/lux-host.toml` plus infrastructure values Terraform
   writes to SSM — see "Config repo" below. Shell access is SSM Session
   Manager only: no SSH, no key pairs — cloud-init installs the regional
   `amazon-ssm-agent` `.deb`, which the Debian Cloud Image doesn't ship
@@ -213,8 +215,9 @@ new reconciler within the same run. A merged PR is the deploy.
    `terraform apply`.
 3. SSM into the control host (`aws ssm start-session --target
    <instance-id>`) and check `journalctl -u lux-reconcile`: the first run
-   (at the end of cloud-init) prepares Postgres, installs `lux_version`
-   and runs `luxd migrate` before starting luxd.
+   (at the end of cloud-init) installs Postgres 18 and cloudflared,
+   prepares Postgres, installs `lux_version` and runs `luxd migrate`
+   before starting luxd.
 4. Create your first tenant and operator key (docs/operations.md):
    `luxd admin create-tenant --name ...`, `luxd admin
    create-operator-key`.
