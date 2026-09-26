@@ -19,17 +19,13 @@ DEVICE_POLL_S = 5
 _DB_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 
-def device_path(host: Host, volume_id: str) -> str:
-    return os.path.join(host.paths.dev_by_id, "nvme-Amazon_Elastic_Block_Store_" + volume_id.replace("-", ""))
-
-
 def ensure_volume(host: Host, volume_id: str) -> bool:
     """Mounts the data volume and moves the cluster onto it. Returns True
     if it did anything; raises if the device never appears."""
     mnt = host.paths.pg_mount
     if host.ok(["mountpoint", "-q", mnt]):
         return False
-    dev = device_path(host, volume_id)
+    dev = os.path.join(host.paths.dev_by_id, "nvme-Amazon_Elastic_Block_Store_" + volume_id.replace("-", ""))
     waited = 0
     while not os.path.exists(dev):
         if waited >= DEVICE_WAIT_S:
