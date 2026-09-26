@@ -379,8 +379,19 @@ func TestControlCPURatePerInstance(t *testing.T) {
 	}
 	check := func(h History, inst string, want map[time.Duration]*float64) {
 		t.Helper()
-		if len(h.Samples) == 0 {
-			t.Fatal("no samples")
+		var got, wantOffs []time.Duration
+		for _, sm := range h.Samples {
+			if sm.Control != nil {
+				got = append(got, sm.At.Sub(base))
+			}
+		}
+		for off := range want {
+			wantOffs = append(wantOffs, off)
+		}
+		slices.Sort(got)
+		slices.Sort(wantOffs)
+		if !slices.Equal(got, wantOffs) {
+			t.Fatalf("samples with %s's control at %v, want %v", inst, got, wantOffs)
 		}
 		for _, sm := range h.Samples {
 			off := sm.At.Sub(base)
