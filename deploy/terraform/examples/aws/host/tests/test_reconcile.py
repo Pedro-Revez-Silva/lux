@@ -254,14 +254,15 @@ def test_checkout_follows_the_remote_and_drops_local_edits(env, capsys):
         assert "junk" not in f.read()
 
 
+@pytest.mark.parametrize("env", ["", "envs/prod"], indirect=True, ids=["repo-root", "config_repo_path"])
 def test_host_code_change_re_executes_the_new_reconciler_once(env, capsys):
     assert env.run() == 0
     capsys.readouterr()
-    env.repo.write("host/luxhost/marker.py", "# a change to the host code\n")
+    env.repo.write(f"{env.repo.host_rel}/luxhost/marker.py", "# a change to the host code\n")
     env.repo.commit("host code")
     assert env.run() == 0
     assert len(env.reexecs) == 1
-    assert env.reexecs[0][1] == os.path.join(env.checkout, "host", "reconcile.py")
+    assert env.reexecs[0][1] == os.path.join(env.checkout, env.repo.host_rel, "reconcile.py")
     line = summary(capsys)
     assert "checkout" in line
 
@@ -270,10 +271,13 @@ def test_host_code_change_re_executes_the_new_reconciler_once(env, capsys):
     assert len(env.reexecs) == 1
 
 
+@pytest.mark.parametrize("env", ["", "envs/prod"], indirect=True, ids=["repo-root", "config_repo_path"])
 def test_desired_state_only_change_does_not_re_exec(env, capsys):
     assert env.run() == 0
+    capsys.readouterr()
     env.repo.set_desired(desired(extra="[luxd]\ndebug = true\n"))
     assert env.run() == 0
+    assert "luxd.toml" in summary(capsys)
     assert env.reexecs == []
 
 

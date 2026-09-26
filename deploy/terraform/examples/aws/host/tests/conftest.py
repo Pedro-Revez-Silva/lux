@@ -213,7 +213,9 @@ def git(*args, cwd=None):
 class ConfigRepo:
     """A bare 'origin' plus a working clone to commit to it from."""
 
-    def __init__(self, base: str, host_src: str):
+    def __init__(self, base: str, host_src: str, config_repo_path: str = ""):
+        # Where host/ sits in the repo: config_repo_path/host.
+        self.host_rel = os.path.join(config_repo_path, "host")
         self.bare = os.path.join(base, "origin.git")
         self.work = os.path.join(base, "work")
         git("init", "-q", "--bare", "-b", "main", self.bare)
@@ -221,11 +223,11 @@ class ConfigRepo:
         git("config", "user.email", "ops@example.com", cwd=self.work)
         git("config", "user.name", "ops", cwd=self.work)
         # The real host code, so a re-exec runs a working reconciler.
-        subprocess.run(
-            ["cp", "-R", host_src, os.path.join(self.work, "host")], check=True,
-        )
-        subprocess.run(["rm", "-rf", os.path.join(self.work, "host", "tests")], check=True)
-        for dirpath, dirnames, _ in os.walk(os.path.join(self.work, "host")):
+        host_dir = os.path.join(self.work, self.host_rel)
+        os.makedirs(os.path.dirname(host_dir), exist_ok=True)
+        subprocess.run(["cp", "-R", host_src, host_dir], check=True)
+        subprocess.run(["rm", "-rf", os.path.join(host_dir, "tests")], check=True)
+        for dirpath, dirnames, _ in os.walk(host_dir):
             for d in list(dirnames):
                 if d in ("__pycache__", ".pytest_cache"):
                     subprocess.run(["rm", "-rf", os.path.join(dirpath, d)], check=True)
@@ -243,7 +245,7 @@ class ConfigRepo:
         git("push", "-q", "origin", "HEAD:main", cwd=self.work)
 
     def set_desired(self, text: str):
-        self.write("host/lux-host.toml", text)
+        self.write(f"{self.host_rel}/lux-host.toml", text)
         self.commit("desired state")
 
 
@@ -285,7 +287,9 @@ def desired(version: str = "none", extra: str = "") -> str:
 
 
 @pytest.fixture
-def env(tmp_path):
+def env(tmp_path, request):
+    # Indirect parametrisation sets the bootstrap's config_repo_path.
+    config_repo_path = getattr(request, "param", "")
     root = str(tmp_path / "root")
     os.makedirs(root)
     paths = Paths.under(root)
@@ -293,7 +297,7 @@ def env(tmp_path):
         os.makedirs(os.path.join(root, d) if not os.path.isabs(d) else d, exist_ok=True)
     open(os.path.join(paths.dev_by_id, "nvme-Amazon_Elastic_Block_Store_" + VOLUME.replace("-", "")), "w").close()
 
-    repo = ConfigRepo(str(tmp_path), HOST_DIR)
+    repo = ConfigRepo(str(tmp_path), HOST_DIR, config_repo_path)
     repo.set_desired(desired())
     checkout = os.path.join(root, "var/lib/lux/config")
     git("clone", "-q", "-b", "main", repo.bare, checkout)
@@ -322,5 +326,5 @@ def env(tmp_path):
     bootstrap = os.path.join(paths.etc_lux, "host.json")
     os.makedirs(paths.etc_lux, exist_ok=True)
     with open(bootstrap, "w") as f:
-        json.dump({"region": REGION, "ssm_prefix": PREFIX, "checkout": checkout, "config_repo_path": ""}, f)
+        json.dump({"region": REGION, "ssm_prefix": PREFIX, "checkout": checkout, "config_repo_path": config_repo_path}, f)
     return Env(root=root, sh=sh, web=web, host=host, repo=repo, checkout=checkout, bootstrap=bootstrap, reexecs=[])
