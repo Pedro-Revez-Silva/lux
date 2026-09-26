@@ -155,7 +155,7 @@ func (s *Server) sampleSystem(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		return sampleControl(ctx, tx, host)
+		return sampleControl(ctx, tx, s.instance, host)
 	})
 }
 
@@ -213,18 +213,18 @@ var (
 			(array_agg(hosts ORDER BY at DESC))[1], avg(cap_cpus), avg(cap_mem)::bigint, avg(alloc_cpus), avg(alloc_mem)::bigint
 		FROM system_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "system_samples", "d.tenant_id = s.tenant_id") + `
 		GROUP BY tenant_id, 3 ON CONFLICT DO NOTHING`
-	// The control host: CPU a counter, memory and connections levels,
+	// The control host, per luxd instance: CPU a counter, memory and connections levels,
 	// totals (cores, memory, disk) their maximum; the database size and
 	// disk use the bucket's mean.
-	rollupControl = `INSERT INTO control_samples (res, at, cpu_seconds, cpus, mem_bytes, mem_total, db_bytes, db_connections)
-		SELECT $2::int, ` + rollupBucket + `, max(cpu_seconds), max(cpus), avg(mem_bytes)::bigint, max(mem_total),
+	rollupControl = `INSERT INTO control_samples (instance, res, at, cpu_seconds, cpus, mem_bytes, mem_total, db_bytes, db_connections)
+		SELECT instance, $2::int, ` + rollupBucket + `, max(cpu_seconds), max(cpus), avg(mem_bytes)::bigint, max(mem_total),
 			avg(db_bytes)::bigint, round(avg(db_connections))::int
-		FROM control_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "control_samples", "true") + `
-		GROUP BY 2 ON CONFLICT DO NOTHING`
-	rollupControlDisks = `INSERT INTO control_disk_samples (path, res, at, used_bytes, free_bytes, total_bytes)
-		SELECT path, $2::int, ` + rollupBucket + `, avg(used_bytes)::bigint, avg(free_bytes)::bigint, max(total_bytes)
-		FROM control_disk_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "control_disk_samples", "d.path = s.path") + `
-		GROUP BY path, 3 ON CONFLICT DO NOTHING`
+		FROM control_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "control_samples", "d.instance = s.instance") + `
+		GROUP BY instance, 3 ON CONFLICT DO NOTHING`
+	rollupControlDisks = `INSERT INTO control_disk_samples (instance, path, res, at, used_bytes, free_bytes, total_bytes)
+		SELECT instance, path, $2::int, ` + rollupBucket + `, avg(used_bytes)::bigint, avg(free_bytes)::bigint, max(total_bytes)
+		FROM control_disk_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "control_disk_samples", "d.instance = s.instance AND d.path = s.path") + `
+		GROUP BY instance, path, 4 ON CONFLICT DO NOTHING`
 )
 
 // Sample is one point of history. Which fields are set depends on what it

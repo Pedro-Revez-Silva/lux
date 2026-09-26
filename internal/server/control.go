@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,6 +33,15 @@ type controlHost struct {
 type controlDisk struct {
 	path string
 	hoststat.Disk
+}
+
+// hostname identifies this luxd's control samples. Chosen over
+// /etc/machine-id, which cloned images and containers share or lack.
+func hostname() string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "luxd"
 }
 
 // readControlHost reads CPU, memory and every tracked path's filesystem. A
@@ -68,11 +78,11 @@ func (s *Server) readControlHost() controlHost {
 // sampleControl writes one control sample in the system sample's
 // transaction, so both carry the same `at`. Database size and connections
 // come from Postgres itself, which may be on another machine.
-func sampleControl(ctx context.Context, tx pgx.Tx, c controlHost) error {
-	if _, err := tx.Exec(ctx, `INSERT INTO control_samples (res, at, cpu_seconds, cpus, mem_bytes, mem_total, db_bytes, db_connections)
-		SELECT 0, now(), $1, $2, $3, $4, pg_database_size(current_database()),
+func sampleControl(ctx context.Context, tx pgx.Tx, instance string, c controlHost) error {
+	if _, err := tx.Exec(ctx, `INSERT INTO control_samples (instance, res, at, cpu_seconds, cpus, mem_bytes, mem_total, db_bytes, db_connections)
+		SELECT $1, 0, now(), $2, $3, $4, $5, pg_database_size(current_database()),
 			(SELECT count(*) FROM pg_stat_activity WHERE datname = current_database())
-		ON CONFLICT DO NOTHING`, c.cpuSeconds, c.cpus, c.memUsed, c.memTotal); err != nil {
+		ON CONFLICT DO NOTHING`, instance, c.cpuSeconds, c.cpus, c.memUsed, c.memTotal); err != nil {
 		return fmt.Errorf("control sample: %w", err)
 	}
 	if len(c.disks) == 0 {
@@ -83,9 +93,9 @@ func sampleControl(ctx context.Context, tx pgx.Tx, c controlHost) error {
 	for i, d := range c.disks {
 		paths[i], used[i], free[i], total[i] = d.path, d.Used, d.Free, d.Total
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO control_disk_samples (path, res, at, used_bytes, free_bytes, total_bytes)
-		SELECT p, 0, now(), u, f, t FROM unnest($1::text[], $2::int8[], $3::int8[], $4::int8[]) AS d(p, u, f, t)
-		ON CONFLICT DO NOTHING`, paths, used, free, total); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO control_disk_samples (instance, path, res, at, used_bytes, free_bytes, total_bytes)
+		SELECT $1, p, 0, now(), u, f, t FROM unnest($2::text[], $3::int8[], $4::int8[], $5::int8[]) AS d(p, u, f, t)
+		ON CONFLICT DO NOTHING`, instance, paths, used, free, total); err != nil {
 		return fmt.Errorf("control disk sample: %w", err)
 	}
 	return nil
@@ -94,6 +104,7 @@ func sampleControl(ctx context.Context, tx pgx.Tx, c controlHost) error {
 // ControlSample is the control host at one point of the whole system's
 // history: luxd's own machine and its Postgres.
 type ControlSample struct {
+	Instance            string       `json:"instance" doc:"The luxd instance's hostname that recorded it."`
 	CPUCores            *float64     `json:"cpuCores,omitempty" doc:"CPU in use, in cores: a rate over the previous point."`
 	CPUs                *int         `json:"cpus,omitempty" doc:"Cores on the machine."`
 	MemoryBytes         *int64       `json:"memoryBytes,omitempty"`
@@ -115,7 +126,10 @@ type DiskSample struct {
 func controlVisible(p Principal) bool { return p.Operator && p.TenantID == "" }
 
 // addControl sets Control on the whole system's samples (in time order)
-// from the control samples at the same instants.
+// from the control samples at the same instants. With several luxd
+// instances on the database, only the one with the latest sample in the
+// range is served, and CPU rates come from its own consecutive counters:
+// another machine's counter has an unrelated baseline.
 func addControl(ctx context.Context, tx pgx.Tx, samples []Sample, res int, from, to time.Time) error {
 	if len(samples) == 0 {
 		return nil
@@ -124,24 +138,27 @@ func addControl(ctx context.Context, tx pgx.Tx, samples []Sample, res int, from,
 	for i := range samples {
 		byAt[samples[i].At.UnixNano()] = &samples[i]
 	}
-	rows, err := tx.Query(ctx, `SELECT c.at, c.cpu_seconds, c.cpus, c.mem_bytes, c.mem_total, c.db_bytes, c.db_connections,
+	rows, err := tx.Query(ctx, `WITH latest AS (
+			SELECT instance FROM control_samples WHERE res = $1 AND at BETWEEN $2 AND $3 ORDER BY at DESC, instance LIMIT 1)
+		SELECT c.instance, c.at, c.cpu_seconds, c.cpus, c.mem_bytes, c.mem_total, c.db_bytes, c.db_connections,
 			coalesce((SELECT jsonb_agg(jsonb_build_object('path', d.path, 'usedBytes', d.used_bytes, 'freeBytes', d.free_bytes,
 				'totalBytes', d.total_bytes) ORDER BY d.path)
-				FROM control_disk_samples d WHERE d.res = c.res AND d.at = c.at), '[]')
-		FROM control_samples c WHERE c.res = $1 AND c.at BETWEEN $2 AND $3 ORDER BY c.at`, res, from, to)
+				FROM control_disk_samples d WHERE d.instance = c.instance AND d.res = c.res AND d.at = c.at), '[]')
+		FROM control_samples c JOIN latest USING (instance) WHERE c.res = $1 AND c.at BETWEEN $2 AND $3 ORDER BY c.at`, res, from, to)
 	if err != nil {
 		return err
 	}
 	var cpu rate
+	var instance string
 	var at time.Time
 	var cpuS *float64
 	var cpus, conns *int
 	var mem, memT, db *int64
 	var disks []DiskSample
-	_, err = pgx.ForEachRow(rows, []any{&at, &cpuS, &cpus, &mem, &memT, &db, &conns, &disks}, func() error {
+	_, err = pgx.ForEachRow(rows, []any{&instance, &at, &cpuS, &cpus, &mem, &memT, &db, &conns, &disks}, func() error {
 		cores := cpu.next(at, cpuS)
 		if sm := byAt[at.UnixNano()]; sm != nil {
-			sm.Control = &ControlSample{CPUCores: cores, CPUs: cpus, MemoryBytes: mem, MemoryTotal: memT,
+			sm.Control = &ControlSample{Instance: instance, CPUCores: cores, CPUs: cpus, MemoryBytes: mem, MemoryTotal: memT,
 				DatabaseBytes: db, DatabaseConnections: conns, Disks: disks}
 		}
 		disks = nil

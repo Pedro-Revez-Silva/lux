@@ -91,7 +91,7 @@ function ControlHost({ samples }: { samples: Sample[] | undefined }) {
   const now = samples?.filter((s) => s.control).at(-1)?.control;
   return (
     <>
-      <SectionHeader title="Control host" note="the machine luxd runs on, and its Postgres" />
+      <SectionHeader title="Control host" note={now ? `${now.instance}, the machine luxd runs on, and its Postgres` : "the machine luxd runs on, and its Postgres"} />
       <div className="grid grid-charts">
         <Card title="CPU" subtitle={now?.cpus ? `used vs capacity · ${formatCores(now.cpus)}` : "used vs capacity"}>
           <TimeSeriesChart x={cpu.x} ys={cpu.ys} series={[{ label: "Used", color: 1, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="cores" />
