@@ -8,7 +8,12 @@
 # one: luxd's terminate permission keys on lux:* tags (iam.tf), so such a
 # tag would let luxd terminate its own host.
 
+# Plan only: an apply run leaves aws_ebs_volume.pg_data in the test state,
+# and its prevent_destroy makes teardown fail after every run has passed.
+# override_during = plan feeds the mock ids and ARNs below into the plan.
 mock_provider "aws" {
+  override_during = plan
+
   mock_data "aws_availability_zones" {
     defaults = {
       names = ["eu-north-1a", "eu-north-1b", "eu-north-1c"]
@@ -41,7 +46,18 @@ mock_provider "aws" {
   }
   mock_resource "aws_s3_bucket" {
     defaults = {
-      id = "lux-pg-backups-123456789012-eu-north-1"
+      id  = "lux-pg-backups-123456789012-eu-north-1"
+      arn = "arn:aws:s3:::lux-pg-backups-123456789012-eu-north-1"
+    }
+  }
+  mock_resource "aws_subnet" {
+    defaults = {
+      id = "subnet-0123456789abcdef0"
+    }
+  }
+  mock_resource "aws_security_group" {
+    defaults = {
+      id = "sg-0123456789abcdef0"
     }
   }
   mock_resource "aws_launch_template" {
@@ -64,7 +80,7 @@ variables {
 }
 
 run "control_user_data_fits_ec2_limit" {
-  command = apply
+  command = plan
 
   # Raw size of the base64 payload: 3 bytes per 4 characters, minus padding.
   assert {
@@ -79,7 +95,7 @@ run "control_user_data_fits_ec2_limit" {
 }
 
 run "public_config_repo_grants_no_extra_parameter_read" {
-  command = apply
+  command = plan
 
   assert {
     condition = toset(one([for st in jsondecode(aws_iam_role_policy.control_luxd.policy).Statement : st.Resource if st.Sid == "ReadOwnParameters"])) == toset([
@@ -96,7 +112,7 @@ run "public_config_repo_grants_no_extra_parameter_read" {
 }
 
 run "deploy_key_parameter_is_readable_and_nothing_more" {
-  command = apply
+  command = plan
 
   variables {
     config_repo_deploy_key_parameter = "/acme/lux/config-repo-deploy-key"
