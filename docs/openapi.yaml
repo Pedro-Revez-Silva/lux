@@ -110,6 +110,83 @@ components:
           format: int64
           type: integer
       type: object
+    CostLine:
+      additionalProperties: false
+      properties:
+        amount:
+          description: A decimal string, up to 9 fractional digits; may be negative (a refund).
+          examples:
+            - "1.28431"
+          type: string
+        currency:
+          description: As reported (ISO 4217); never converted.
+          examples:
+            - USD
+          type: string
+        details:
+          additionalProperties: {}
+          type: object
+        family:
+          description: "Free-form: compute, ai, video, ..."
+          type: string
+        final:
+          description: "false: an estimate that may still change."
+          type: boolean
+        from:
+          description: Start of the time window the line covers.
+          format: date-time
+          type: string
+        item:
+          description: Empty when the source gives none.
+          type: string
+        reportedAt:
+          format: date-time
+          type: string
+        runId:
+          type: string
+        source:
+          description: compute, or a cost plugin's configured name.
+          type: string
+        to:
+          format: date-time
+          type: string
+      type: object
+    CostSource:
+      additionalProperties: false
+      properties:
+        answeredAt:
+          format: date-time
+          type: string
+        nextAt:
+          format: date-time
+          type: string
+        source:
+          type: string
+        status:
+          enum:
+            - ok
+            - incomplete
+            - final
+          type: string
+      type: object
+    CostTotal:
+      additionalProperties: false
+      properties:
+        amount:
+          description: final + estimate.
+          type: string
+        currency:
+          type: string
+        estimate:
+          description: The part from lines that may still change.
+          type: string
+        family:
+          description: In byFamily only.
+          type: string
+        final:
+          description: The part from final lines.
+          type: string
+      type: object
     DiskSample:
       additionalProperties: false
       properties:
@@ -851,6 +928,49 @@ components:
           type: string
         usage:
           $ref: "#/components/schemas/RunUsage"
+      type: object
+    RunCost:
+      additionalProperties: false
+      properties:
+        basis:
+          description: "list: list prices, before discounts, credits and tax."
+          type: string
+        byFamily:
+          items:
+            $ref: "#/components/schemas/CostTotal"
+          type:
+            - array
+            - "null"
+        final:
+          type: boolean
+        lines:
+          items:
+            $ref: "#/components/schemas/CostLine"
+          type:
+            - array
+            - "null"
+        runId:
+          type: string
+        sources:
+          items:
+            $ref: "#/components/schemas/CostSource"
+          type:
+            - array
+            - "null"
+        status:
+          description: "none: no source has reported. incomplete: some source has not answered or failed (see sources). final: every source is final."
+          enum:
+            - none
+            - complete
+            - incomplete
+            - final
+          type: string
+        totals:
+          items:
+            $ref: "#/components/schemas/CostTotal"
+          type:
+            - array
+            - "null"
       type: object
     RunPlacement:
       additionalProperties: false
@@ -2616,6 +2736,63 @@ paths:
       security:
         - apiKey: []
       summary: Cancel a Run
+      tags:
+        - runs
+  /v1/runs/{id}/cost:
+    get:
+      description: |-
+        Its cost lines (one per source and item), with totals per currency and per family and currency. Amounts in different currencies are never added together. Each total splits into the part from final lines and the part from estimates, which may still change. Amounts are list prices (basis: list).
+
+        Needs the `read` scope.
+      operationId: runCost
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunCost"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: What a Run cost
       tags:
         - runs
   /v1/runs/{id}/events:

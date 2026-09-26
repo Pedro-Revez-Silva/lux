@@ -1,8 +1,8 @@
 # Run costs (design)
 
-Status: **design for review, nothing here is built.** Tell us what's wrong
-before any code is written. The build order at the end breaks it into
-small steps.
+Status: **design for review. Build steps 1–3 (section 12) are built**, and
+the sections they touch say so and note where the build differs. The rest
+is not built. The build order at the end breaks it into small steps.
 
 This doc covers what each Run costs: the hosts it ran on (built in) and
 anything outside lux that it used, such as model tokens, video or image
@@ -112,8 +112,16 @@ CREATE TABLE cost_lines (
   PRIMARY KEY (source, run_id, item)
 );
 CREATE INDEX cost_lines_tenant_period ON cost_lines (tenant_id, period_to);
+CREATE INDEX cost_lines_run ON cost_lines (run_id);  -- the read API: the key leads with source
 -- tenant_rows RLS policy, as for runs.
 ```
+
+**Built**: migration `019_cost_lines.sql` (this table and `cost_sources`
+from section 5), and `replaceCostLines` in `internal/server/costs.go`,
+which no producer calls yet. It refuses a whole answer that names an item
+twice, or an amount that is not a decimal string with at most 15 integer
+and 9 fractional digits. Amounts come back with trailing zeros trimmed:
+`"1.284310"` is returned as `"1.28431"`.
 
 As JSON (API and plugin responses):
 
@@ -591,7 +599,7 @@ CREATE TABLE cost_sources (
   run_id        text NOT NULL REFERENCES runs(id),
   tenant_id     text NOT NULL,
   source        text NOT NULL,
-  status        text NOT NULL,     -- 'ok' | 'incomplete' | 'final'
+  status        text NOT NULL CHECK (status IN ('ok', 'incomplete', 'final')),
   answered_at   timestamptz,       -- last successful answer
   attempts      int NOT NULL DEFAULT 0,
   next_at       timestamptz,       -- next retry or settle attempt
@@ -722,6 +730,40 @@ Visibility follows the existing rules (RLS and `principal`):
   `/v1/history`.
 
 ### `GET /v1/runs/{id}/cost`
+
+**Built** (`runCost` in `internal/server/costs.go`, `read` scope, 404 for
+another tenant's Run as on every Run endpoint; an operator reaches any
+Run). What it returns today:
+
+```json
+{
+  "runId": "run_01J…",
+  "status": "incomplete",
+  "final": false,
+  "basis": "list",
+  "totals": [{"currency": "USD", "amount": "1.4342", "final": "0.1499", "estimate": "1.2843"}],
+  "byFamily": [
+    {"family": "ai", "currency": "USD", "amount": "1.2843", "final": "0", "estimate": "1.2843"},
+    {"family": "compute", "currency": "USD", "amount": "0.1499", "final": "0.1499", "estimate": "0"}
+  ],
+  "lines": [ /* cost lines as in section 1, plus reportedAt */ ],
+  "sources": [
+    {"source": "compute", "status": "ok", "answeredAt": "…"},
+    {"source": "model-gateway", "status": "incomplete", "answeredAt": "…", "nextAt": "…"}
+  ]
+}
+```
+
+- Every total carries its `final` and `estimate` parts (they add up to
+  `amount`), per currency, and per family and currency.
+- `status` adds `none` (no lines and no sources). Lines with no
+  `cost_sources` row count as `complete`, until a producer writes them.
+- `last_error` is never returned here, to anyone. Operators get it with
+  plugin health (step 7).
+
+Still to come, in the steps that produce them: `displayName` and `color`
+on `byFamily` (from a plugin's describe, step 7), `efficiency` (step 4)
+and `warnings` about shared session ids. The planned full response:
 
 ```json
 {
