@@ -257,19 +257,20 @@ over one host's rate periods, billed window and placements (anything still
 open ends at the `now` it is given), returns each placement's amount per
 currency, the host's unallocated amount, and every piece with its `S`.
 Money is exact rational arithmetic (`math/big.Rat`), never float64; an
-amount is rounded to 9 fractional digits only when turned into a string.
-A share uses the capacity of the **rate period** (`cap_cpus`,
-`cap_memory`), so a capacity change is a period boundary like a price
-change. A piece of the billed window with no period, or with a period
-with neither cpus nor memory, is returned as **missing**, for the host and
-for each placement live in it, never priced at zero. Overlapping periods are refused as an error. It is one sweep
-over the cut instants, so its cost grows with the number of placements and
-periods, not with their square. `loadHostCompute` reads a host's
-`host_rates` and placements overlapping a window `[from, to)` (a Run's
-placement, a billing hour) into it, never the host's whole history; the
-billed window is from `provision_requested_at` (a self-registered host:
-`registered_at`) to `terminated_at`, or still open, clipped to that window.
-Nothing calls them yet: the drainer (step 5) will.
+amount is rounded to 9 fractional digits only when turned into a string. A
+share uses the capacity of the **rate period** (`cap_cpus`, `cap_memory`),
+so a capacity change is a period boundary like a price change. A piece of
+the billed window with no period, or with a period with neither cpus nor
+memory, is returned as **missing**, for the host and for each placement
+live in it, never priced at zero. Overlapping periods are refused as an
+error. It is one sweep over the cut instants, so its cost grows with the
+number of placements and periods, not with their square. `loadHostCompute`
+reads a host's `host_rates` and placements overlapping a window
+`[from, to)` (a Run's placement, a billing hour) into it, never the host's
+whole history (an index on `placements (host_id, ended_at)` finds them);
+the billed window is from `provision_requested_at` (a self-registered host:
+`registered_at`) to `terminated_at`, or still open, clipped to that
+window. Nothing calls them yet: the drainer (step 5) will.
 
 **allocated + unallocated = host cost**, for every piece of the timeline:
 `Σ charged + max(0, 1 − S)` is `S + (1 − S) = 1` when `S ≤ 1`, and
