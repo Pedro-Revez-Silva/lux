@@ -170,7 +170,8 @@ neutral colour. `compute` is lux's own family.
 
 Compute is on by default for `ec2` pools and can be turned off per
 provider (`costs.compute.ec2`). A `static` pool has no price source today,
-so it costs nothing unless an operator gives it one (open question 6).
+so an operator sets a flat hourly price per host for the pool (decided,
+section 11).
 Other providers plug in their own price source: it fills the same
 `host_rates` rows (below), and nothing downstream changes.
 
@@ -309,8 +310,9 @@ New host columns, written at launch from the `RunInstances` reply
 `server.Launched` with the id, the reply's `instanceType` and
 `placement.availabilityZone`, and the market from the template's `spot`;
 `launch()` in `provisioner.go` stores them; an empty value is stored as
-NULL, as are all three on self-registered and pre-018 hosts; the API does
-not show them yet):
+NULL, as are all three on self-registered and pre-018 hosts; `GET
+/v1/hosts` and `GET /v1/hosts/{id}` return them as `instanceType`, `zone`
+and `market`, omitted when NULL, to whoever sees the host):
 
 ```sql
 ALTER TABLE hosts ADD COLUMN instance_type text;   -- from the reply, not the template
@@ -348,7 +350,7 @@ a host's window, the Run's compute line is `incomplete` for that part
 `running` until it stops, so this over-counts by the launch latency and
 luxd's termination lag, typically seconds. Recording the instance's own
 `LaunchTime` (already in `DescribeInstances`, which the provisioner calls
-every `provider_check_every`) would tighten the start. See open question 7.
+every `provider_check_every`) would tighten the start. See open question 5.
 
 ### Caching
 
@@ -760,7 +762,9 @@ Run). What it returns today:
 
 - Every total carries its `final` and `estimate` parts (they add up to
   `amount`), per currency, and per family and currency.
-- `status` adds `none` (no lines and no sources). Lines with no
+- `status` adds `pending`: no source has reported yet (for example, a
+  Run that just started, before the first cost tick). A placed Run always
+  costs something, so this is not zero. Lines with no
   `cost_sources` row count as `complete`, until a producer writes them.
 - `last_error` is never returned here, to anyone. Operators get it with
   plugin health (step 7).
@@ -914,24 +918,30 @@ operators can delete them with `luxd admin costs forget-source <name>`
    `ended_at`, so the stop grace and snapshot time are charged to the Run.
    Should snapshot upload after exit (`uploadedAt`) also count? The host
    is still busy, but the reservation is released.
-5. **`max(1, S)` scaling.** Is scaling down when shares go above 1
-   acceptable, or would you rather charge by one dimension only (for
-   example, whichever one the pool is short of)?
-6. **Static pools.** Should an operator be able to set a flat hourly rate
-   per static pool (`pools set --rate`), or do static hosts stay unpriced?
-7. **Billed window of an EC2 host.** Is `provision_requested_at` to
+5. **Billed window of an EC2 host.** Is `provision_requested_at` to
    `terminated_at` good enough, or should luxd store the instance's own
    `LaunchTime` and its termination time from `DescribeInstances`?
-8. **Quotas.** Costs are shown, not enforced. Should a tenant spending cap
+6. **Quotas.** Costs are shown, not enforced. Should a tenant spending cap
    be a later step?
-9. **Run deletion.** Runs are never deleted today. If they ever are,
+7. **Run deletion.** Runs are never deleted today. If they ever are,
    should their cost lines move to a per-tenant rollup, so totals survive?
-10. **Multiple currencies from one plugin** are allowed. Should the Runs
-    list column prefer a configured display currency (without
-    converting), and just mark the others?
-11. **Plugin list via environment.** The other settings map one-to-one to
-    `LUX_*` variables. Is a JSON `LUX_COSTS_PLUGINS` acceptable for the
-    array?
+8. **Multiple currencies from one plugin** are allowed. Should the Runs
+   list column prefer a configured display currency (without
+   converting), and just mark the others?
+9. **Plugin list via environment.** The other settings map one-to-one to
+   `LUX_*` variables. Is a JSON `LUX_COSTS_PLUGINS` acceptable for the
+   array?
+
+Decided:
+
+- **`max(1, S)` scaling** is accepted. It only applies when the sum of
+  each Run's max(cpu share, memory share) goes above 1, which the
+  scheduler allows: on a 4 CPU / 16 GB host, Runs of 3 CPU / 4 GB and
+  1 CPU / 12 GB both fit, and each has share 0.75.
+- **Static pools:** an operator sets a flat hourly price per host for a
+  static pool.
+- **Host facts** (`instanceType`, `zone`, `market`) are in the host API
+  now (section 3).
 
 ## 12. Build order
 

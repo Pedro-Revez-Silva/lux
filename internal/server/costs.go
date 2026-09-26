@@ -47,7 +47,7 @@ type CostSource struct {
 
 type RunCost struct {
 	RunID  string `json:"runId"`
-	Status string `json:"status" enum:"none,complete,incomplete,final" doc:"none: no source has reported. incomplete: some source has not answered or failed (see sources). final: every source is final."`
+	Status string `json:"status" enum:"pending,complete,incomplete,final" doc:"pending: no source has reported yet (for example, a Run that just started, before the first cost tick). incomplete: some source has not answered or failed (see sources). final: every source is final."`
 	Final  bool   `json:"final"`
 	Basis  string `json:"basis" doc:"list: list prices, before discounts, credits and tax."`
 	// Totals and ByFamily are ordered by currency (and family first).
@@ -120,14 +120,14 @@ func (s *Server) runCost(ctx context.Context, in *RunPath) (*runCostOutput, erro
 }
 
 // costStatus: incomplete if any source is; final once every source is;
-// complete otherwise. Lines without any source row (none is written until
-// a producer exists) count as complete.
+// complete otherwise; pending with no lines and no sources. Lines without
+// any source row (none is written until a producer exists) count as complete.
 func costStatus(sources []CostSource, lines bool) string {
 	if len(sources) == 0 {
 		if lines {
 			return "complete"
 		}
-		return "none"
+		return "pending"
 	}
 	final := true
 	for _, src := range sources {

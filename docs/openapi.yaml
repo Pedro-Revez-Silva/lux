@@ -970,9 +970,9 @@ components:
             - array
             - "null"
         status:
-          description: "none: no source has reported. incomplete: some source has not answered or failed (see sources). final: every source is final."
+          description: "pending: no source has reported yet (for example, a Run that just started, before the first cost tick). incomplete: some source has not answered or failed (see sources). final: every source is final."
           enum:
-            - none
+            - pending
             - complete
             - incomplete
             - final
