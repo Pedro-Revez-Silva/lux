@@ -100,6 +100,9 @@ components:
           type:
             - array
             - "null"
+        instance:
+          description: The luxd instance's hostname that recorded it.
+          type: string
         memoryBytes:
           format: int64
           type: integer
