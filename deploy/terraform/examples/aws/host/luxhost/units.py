@@ -26,6 +26,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# oneshot has no start timeout by default: a hung run would hold the
+# lock and stop the timer from ever starting another.
+TimeoutStartSec=20min
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/bin/python3 {host_dir}/reconcile.py
 """

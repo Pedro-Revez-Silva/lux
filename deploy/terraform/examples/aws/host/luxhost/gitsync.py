@@ -21,8 +21,10 @@ def git_env(host: Host, key_parameter: str) -> dict:
     known_hosts = os.path.join(host.paths.root_home, ".ssh", "known_hosts")
     # accept-new: the first fetch (cloud-init's clone) pins the host key.
     return {
+        "GIT_TERMINAL_PROMPT": "0",
         "GIT_SSH_COMMAND": (
-            f"ssh -i {deploy_key_path(host)} -o IdentitiesOnly=yes "
+            f"ssh -i {deploy_key_path(host)} -o IdentitiesOnly=yes -o BatchMode=yes "
+            f"-o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "
             f"-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={known_hosts}"
         ),
     }
