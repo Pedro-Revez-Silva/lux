@@ -300,3 +300,25 @@ func TestHostPriceAccess(t *testing.T) {
 		t.Errorf("pricing a provisioned host: %d %s, want 422", code, resp)
 	}
 }
+
+// A priced host advertising no capacity at all gets no period: its time is
+// missing, never shared out at zero. Once it advertises some, a period
+// opens; if it drops back to none, that period closes and none opens.
+func TestStaticRateZeroCapacity(t *testing.T) {
+	s, keys := priceFixture(t)
+	if code, body := call(t, s, keys["t1"], http.MethodPost, "/v1/pools", Pool{Name: "lab", Provider: "static", HourlyPrice: "0.40", Currency: "USD"}); code != http.StatusOK {
+		t.Fatalf("put pool: %d %s", code, body)
+	}
+	h1 := helloAs(t, s, "tok1", strp("t1"), "h1", 0, 0)
+	if got := periods(t, s, h1); len(got) != 0 {
+		t.Errorf("a host with no capacity has periods: %v", got)
+	}
+	if res := hostCost(t, s, h1); len(res.Missing) != 1 || len(res.Unallocated) != 0 {
+		t.Errorf("a host with no capacity: missing %v, unallocated %v", res.Missing, res.Unallocated)
+	}
+	helloAs(t, s, "tok1", strp("t1"), "h1", 8, 32)
+	helloAs(t, s, "tok1", strp("t1"), "h1", 0, 0)
+	if got, want := periods(t, s, h1), []string{"0.4 USD 8 32 closed"}; !slices.Equal(got, want) {
+		t.Errorf("after capacity came and went: %v, want %v", got, want)
+	}
+}

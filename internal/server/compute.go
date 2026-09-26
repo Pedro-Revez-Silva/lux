@@ -141,6 +141,9 @@ func computeCost(in hostCompute) (computeResult, error) {
 		if !ok {
 			return res, fmt.Errorf("host %s: rate %q from %s is not a decimal", in.HostID, r.PerHour, r.From)
 		}
+		if r.CapCPUs <= 0 && r.CapMemory <= 0 {
+			return res, fmt.Errorf("host %s: rate period from %s has no capacity to share", in.HostID, r.From)
+		}
 		rates[i] = v
 		cuts = append(cuts, clip(r.From), clip(end(r.To)))
 	}

@@ -40,7 +40,9 @@ func validPrice(price, currency string) error {
 // price and advertised capacity, in the caller's (system) transaction,
 // which holds the host row locked (FOR UPDATE): if either changed, the open
 // period is closed and, while the host has a price, a new one opens at the
-// same instant. No price: no open period. Closed periods are never
+// same instant. No price, or a host advertising no capacity at all (no
+// share could be worked out against it): no open period, so the time shows
+// as missing rather than its Runs paying nothing. Closed periods are never
 // touched. Called on every hello and on every price change; registering
 // (the host's first hello, which set its registered_at): its first period
 // opens when it registered, so its billed window has no gap before it.
@@ -64,6 +66,7 @@ func syncStaticRate(ctx context.Context, tx pgx.Tx, hostID string, registering b
 			coalesce((h.capacity->>'cpus')::float8, 0), coalesce((h.capacity->>'memory')::int8, 0), 'static'
 		FROM hosts h
 		WHERE h.id = $1 AND h.hourly_price IS NOT NULL
+		  AND (coalesce((h.capacity->>'cpus')::float8, 0) > 0 OR coalesce((h.capacity->>'memory')::int8, 0) > 0)
 		  AND NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.valid_to IS NULL)`, hostID, at, registering)
 	return tx.SendBatch(ctx, b).Close()
 }
