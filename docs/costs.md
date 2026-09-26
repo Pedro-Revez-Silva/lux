@@ -214,7 +214,8 @@ downstream changes.
   get no compute line (and, once lines are written, `details.missingRate`
   for that time). Nor does a host advertising neither cpus nor memory get
   a period (no share can be worked out against nothing): its time is
-  missing, never shared out at zero; `computeCost` refuses such a period.
+  missing, never shared out at zero; `computeCost` counts such a period's
+  time as missing too.
 
 ### Formula
 
@@ -259,9 +260,9 @@ Money is exact rational arithmetic (`math/big.Rat`), never float64; an
 amount is rounded to 9 fractional digits only when turned into a string.
 A share uses the capacity of the **rate period** (`cap_cpus`,
 `cap_memory`), so a capacity change is a period boundary like a price
-change. A piece of the billed window with no period is returned as
-**missing**, for the host and for each placement live in it, never priced
-at zero. Overlapping periods are refused as an error. It is one sweep
+change. A piece of the billed window with no period, or with a period
+with neither cpus nor memory, is returned as **missing**, for the host and
+for each placement live in it, never priced at zero. Overlapping periods are refused as an error. It is one sweep
 over the cut instants, so its cost grows with the number of placements and
 periods, not with their square. `loadHostCompute` reads a host's
 `host_rates` and placements overlapping a window `[from, to)` (a Run's
@@ -401,6 +402,11 @@ CREATE TABLE host_rates (
 **Built**: this table, in migration `021_host_rates.sql`, with a unique
 index allowing one open period per host. Only static prices write it so
 far (section 2).
+
+A provider's first period takes its capacity from the instance type, or
+opens at the host's first hello: before then `hosts.capacity` is empty,
+and a period with neither cpus nor memory prices nothing (its time is
+missing).
 
 **Past costs never change.** A period is closed (`valid_to` set) and never
 updated again. A later price fetch opens a new period from that moment and
