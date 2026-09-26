@@ -49,6 +49,9 @@ write_files:
 
       [Service]
       Type=oneshot
+      # oneshot has no start timeout by default: a hung run would hold the
+      # lock and stop the timer from ever starting another.
+      TimeoutStartSec=20min
       Environment=PYTHONDONTWRITEBYTECODE=1
       ExecStart=/usr/bin/python3 ${host_dir}/reconcile.py
 
@@ -79,10 +82,12 @@ runcmd:
     set -e
     install -d -m 0700 /root/.ssh
     if [ -n "${key_param}" ]; then
-      umask 077
-      aws ssm get-parameter --name "${key_param}" --with-decryption --region "${region}" \
-        --query Parameter.Value --output text > /root/.ssh/lux-config-deploy-key
-      export GIT_SSH_COMMAND="ssh -i /root/.ssh/lux-config-deploy-key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts"
+      # Subshell: umask 077 must not reach the clone, which postgres
+      # (the backup unit) has to be able to read.
+      (umask 077
+       aws ssm get-parameter --name "${key_param}" --with-decryption --region "${region}" \
+         --query Parameter.Value --output text > /root/.ssh/lux-config-deploy-key)
+      export GIT_SSH_COMMAND="ssh -i /root/.ssh/lux-config-deploy-key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts"
     fi
     if [ ! -d "${checkout}/.git" ]; then
       install -d -m 0755 "$(dirname "${checkout}")"
