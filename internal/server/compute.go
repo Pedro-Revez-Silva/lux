@@ -166,7 +166,6 @@ func computeCost(in hostCompute) (computeResult, error) {
 	pStarts := byStart(len(in.Placements), func(i int) time.Time { return in.Placements[i].From })
 	pEnds := byStart(len(in.Placements), func(i int) time.Time { return end(in.Placements[i].To) })
 	var liveRates, live []int
-	isLive := make([]bool, len(in.Placements))
 	var nrs, nre, nps, npe int
 	// shares[i] is placement i's share against rate period shareOf[i].
 	shares := make([]*big.Rat, len(in.Placements))
@@ -185,13 +184,11 @@ func computeCost(in hostCompute) (computeResult, error) {
 		}
 		for ; nps < len(pStarts) && !in.Placements[pStarts[nps]].From.After(a); nps++ {
 			if i := pStarts[nps]; end(in.Placements[i].To).After(a) {
-				live, isLive[i] = insertSorted(live, i), true
+				live = insertSorted(live, i)
 			}
 		}
 		for ; npe < len(pEnds) && !end(in.Placements[pEnds[npe]].To).After(a); npe++ {
-			if i := pEnds[npe]; isLive[i] {
-				live, isLive[i] = removeSorted(live, i), false
-			}
+			live = removeSorted(live, pEnds[npe])
 		}
 		if len(liveRates) > 1 {
 			return res, fmt.Errorf("host %s: rate periods from %s and %s overlap", in.HostID, in.Rates[liveRates[0]].From, in.Rates[liveRates[1]].From)
@@ -242,7 +239,8 @@ func computeCost(in hostCompute) (computeResult, error) {
 	return res, nil
 }
 
-// insertSorted adds i to the ascending s; removeSorted takes it out.
+// insertSorted adds i to the ascending s; removeSorted takes it out, if it
+// is there (one that never went live is not).
 func insertSorted(s []int, i int) []int {
 	k, _ := slices.BinarySearch(s, i)
 	return slices.Insert(s, k, i)
