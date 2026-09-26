@@ -116,6 +116,8 @@ type Server struct {
 	bins map[string]map[string]runnerBin
 	// diskFailing: tracked disk paths whose last read failed, so each
 	// failure is logged once (control.go).
+	// instance names this luxd's control samples: its hostname.
+	instance    string
 	diskMu      sync.Mutex
 	diskFailing map[string]bool
 	wg          sync.WaitGroup
@@ -166,6 +168,7 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 		wakeups:     newWakeups(),
 		kick:        make(chan struct{}, 1),
 		diskFailing: map[string]bool{},
+		instance:    hostname(),
 	}
 	if cfg.ConsoleAuth.Mode == "cloudflare-access" {
 		s.cfAccess = newCFAccess(cfg.ConsoleAuth.CFTeam, cfg.ConsoleAuth.CFAud)

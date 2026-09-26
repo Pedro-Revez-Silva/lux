@@ -83,7 +83,7 @@ scope (a notification carries nothing), so an event reaches a browser or
 ## History
 
 The columns above are lifecycle times, peaks and totals. Use over time is
-kept as samples, in three tables, at three resolutions (`res`: 0 raw, 60,
+kept as samples, in these tables, at three resolutions (`res`: 0 raw, 60,
 3600 seconds):
 
 | Table | Written | What |
@@ -91,11 +91,14 @@ kept as samples, in three tables, at three resolutions (`res`: 0 raw, 60,
 | `host_samples` | each heartbeat | the host's CPU seconds (counter), memory and disk in use; its live placements and the CPU and memory they asked for |
 | `placement_samples` | each heartbeat, per live placement | CPU seconds (counter), memory and pids now, disk, network counters |
 | `system_samples` | every `LUX_SAMPLE_EVERY` | for the system (tenant `''`) and each tenant with anything live: Runs by state, busy, idle, queued, started and finished since the last sample, time to start p50/p95, hosts by state, capacity, allocated |
-
 | `control_samples`, `control_disk_samples` | with the whole system's sample, at its instant | the control host, the machine luxd runs on: CPU seconds (counter) and cores, memory used and total; its Postgres database's size and connections (read with SQL, so a remote database works too); and for each of `LUX_HISTORY_DISK_PATHS` its filesystem's used, free (writable without root) and total bytes |
 
-The control host is one machine: with several luxd instances on one
-database, each samples its own, and the series interleaves them.
+Control samples carry the sampling luxd's hostname (`instance`). With
+several luxd instances on one database, each records its own machine, rolls
+up separately, and `/v1/history` serves the instance with the latest sample
+in the range (`control.instance`); its CPU rate is computed only between
+that instance's own samples, and a counter that drops (a reboot) gives no
+rate for that point.
 
 Every minute, luxd rolls complete buckets up into the next resolution
 (levels averaged, counters and peaks their maximum, starts and finishes

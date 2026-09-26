@@ -283,6 +283,8 @@ export interface Sample {
 
 /** The machine luxd runs on, and its Postgres. */
 export interface ControlSample {
+  /** Hostname of the luxd instance that recorded it. */
+  instance: string;
   cpuCores?: number;
   cpus?: number;
   memoryBytes?: number;

@@ -102,7 +102,8 @@ luxd keeps samples of:
   free space (`history.disk_paths`, `LUX_HISTORY_DISK_PATHS`; default `/`;
   a path that cannot be read is skipped and logged), and its Postgres
   database's size and connections. Only operators viewing all tenants see
-  it.
+  it. With several luxd instances on one database, the charts show the
+  instance that sampled most recently, named by hostname in the section.
 
 Raw samples are rolled up into minutes and hours; each resolution is kept
 for its own period (see [Operations](operations.md)). A read picks the
