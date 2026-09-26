@@ -396,13 +396,14 @@ CREATE TABLE host_rates (
   cap_cpus     float8 NOT NULL,         -- hosts.capacity at the time
   cap_memory   bigint NOT NULL,
   source       text NOT NULL,           -- 'aws-pricing', 'aws-spot-history', 'static', ...
-  PRIMARY KEY (host_id, valid_from)
+  PRIMARY KEY (host_id, valid_from),
+  CHECK (valid_to IS NULL OR valid_to > valid_from)  -- closed after it opened
 );  -- system_only
 ```
 
 **Built**: this table, in migration `021_host_rates.sql`, with a unique
-index allowing one open period per host. Only static prices write it so
-far (section 2).
+index allowing one open period per host and a CHECK that a period closes
+after it opens. Only static prices write it so far (section 2).
 
 A provider's first period takes its capacity from the instance type, or
 opens at the host's first hello: before then `hosts.capacity` is empty,

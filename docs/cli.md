@@ -114,9 +114,8 @@ registers. Changing it later does not reprice the pool's existing hosts:
 use `lux hosts price` for those. `lux pools set` replaces the whole pool,
 the default price included, like every other field: a `pools set` without
 `--hourly-price` leaves the pool with no default price. Each price or
-capacity change starts a new
-rate period, and earlier periods are never changed
-([Run costs](costs.md), section 2). `ec2` pools take no price: the
+capacity change starts a new rate period, and earlier periods are never
+changed ([Run costs](costs.md), section 2). `ec2` pools take no price: the
 provider prices their hosts.
 
 ## Status and history
