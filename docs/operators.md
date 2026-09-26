@@ -97,6 +97,12 @@ luxd keeps samples of:
 - the system, every `LUX_SAMPLE_EVERY`, once in total and once per tenant:
   Runs by state, busy and idle, the queue, Runs started and finished, time
   to start (p50, p95), hosts by state, capacity and what is allocated.
+- the control host, the machine luxd itself runs on, with the system: CPU
+  and memory used against what it has, each tracked filesystem's used and
+  free space (`history.disk_paths`, `LUX_HISTORY_DISK_PATHS`; default `/`;
+  a path that cannot be read is skipped and logged), and its Postgres
+  database's size and connections. Only operators viewing all tenants see
+  it.
 
 Raw samples are rolled up into minutes and hours; each resolution is kept
 for its own period (see [Operations](operations.md)). A read picks the
@@ -111,7 +117,9 @@ shows what its user can see: an operator the whole system, with a tenant
 filter at the top; a tenant key, that tenant.
 
 - **Overview**: status now, history charts over the chosen range, and a live
-  feed of every Run's events.
+  feed of every Run's events. An operator viewing all tenants also gets a
+  **Control host** row: luxd's machine (CPU, memory, one disk card per
+  tracked path) and its Postgres (size, connections).
 - **Runs**: filterable, with a Run page per Run: output (live), placement
   timeline, resource charts, events, snapshots and artifacts, and the
   actions above.

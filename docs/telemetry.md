@@ -92,9 +92,17 @@ kept as samples, in three tables, at three resolutions (`res`: 0 raw, 60,
 | `placement_samples` | each heartbeat, per live placement | CPU seconds (counter), memory and pids now, disk, network counters |
 | `system_samples` | every `LUX_SAMPLE_EVERY` | for the system (tenant `''`) and each tenant with anything live: Runs by state, busy, idle, queued, started and finished since the last sample, time to start p50/p95, hosts by state, capacity, allocated |
 
+| `control_samples`, `control_disk_samples` | with the whole system's sample, at its instant | the control host, the machine luxd runs on: CPU seconds (counter) and cores, memory used and total; its Postgres database's size and connections (read with SQL, so a remote database works too); and for each of `LUX_HISTORY_DISK_PATHS` its filesystem's used, free (writable without root) and total bytes |
+
+With several luxd instances on one database, each writes the control
+sample of its own machine; at a given instant the first one wins.
+
 Every minute, luxd rolls complete buckets up into the next resolution
 (levels averaged, counters and peaks their maximum, starts and finishes
 summed, states the bucket's last) and deletes what is older than that
 resolution's retention (`LUX_HISTORY_RAW`, `_MINUTES`, `_HOURS`). The API
 (`/v1/history`, `/v1/hosts/{id}/history`, `/v1/runs/{id}/history`) serves
-counters as rates. See [Operators](operators.md#history).
+counters as rates. `/v1/history` carries the control host (`control` on
+each sample) only for an operator key reading the whole system: never for
+a tenant key, nor for an operator's `?tenant=`. See
+[Operators](operators.md#history).
