@@ -40,18 +40,6 @@ def refresh_deploy_key(host: Host, key_parameter: str, region: str) -> bool:
     return write_if_changed(deploy_key_path(host), key.rstrip("\n") + "\n", 0o600)
 
 
-def code_changed(host: Host, checkout: str, before: str, after: str, host_rel: str) -> bool:
-    """Whether anything under host/ other than the desired-state file
-    differs between the two commits."""
-    if not before:
-        return True
-    out = host.run([
-        "git", "-C", checkout, "diff", "--name-only", before, after, "--",
-        host_rel, f":(exclude){host_rel}/lux-host.toml",
-    ])
-    return bool(out.stdout.strip())
-
-
 def sync(host: Host, checkout: str, url: str, ref: str, host_rel: str, env: dict) -> tuple[bool, bool]:
     """Fetches ref and resets the checkout to it. Returns (HEAD moved,
     the host code changed)."""
@@ -65,4 +53,8 @@ def sync(host: Host, checkout: str, url: str, ref: str, host_rel: str, env: dict
     after = host.run([*git, "rev-parse", "HEAD"]).stdout.strip()
     if before == after:
         return False, False
-    return True, code_changed(host, checkout, before, after, host_rel)
+    if not before:
+        return True, True
+    # Anything under host/ other than the desired-state file.
+    diff = host.run([*git, "diff", "--name-only", before, after, "--", host_rel, f":(exclude){host_rel}/lux-host.toml"])
+    return True, bool(diff.stdout.strip())
