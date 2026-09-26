@@ -153,7 +153,7 @@ func computeCost(in hostCompute) (computeResult, error) {
 
 	// The sweep's events: indexes into in.Rates and in.Placements by start
 	// and by end. Live sets hold indexes in ascending order.
-	byStart := func(n int, at func(int) time.Time) []int {
+	sortedBy := func(n int, at func(int) time.Time) []int {
 		o := make([]int, n)
 		for i := range o {
 			o[i] = i
@@ -161,10 +161,10 @@ func computeCost(in hostCompute) (computeResult, error) {
 		slices.SortStableFunc(o, func(a, b int) int { return at(a).Compare(at(b)) })
 		return o
 	}
-	rateStarts := byStart(len(in.Rates), func(i int) time.Time { return in.Rates[i].From })
-	rateEnds := byStart(len(in.Rates), func(i int) time.Time { return end(in.Rates[i].To) })
-	pStarts := byStart(len(in.Placements), func(i int) time.Time { return in.Placements[i].From })
-	pEnds := byStart(len(in.Placements), func(i int) time.Time { return end(in.Placements[i].To) })
+	rateStarts := sortedBy(len(in.Rates), func(i int) time.Time { return in.Rates[i].From })
+	rateEnds := sortedBy(len(in.Rates), func(i int) time.Time { return end(in.Rates[i].To) })
+	pStarts := sortedBy(len(in.Placements), func(i int) time.Time { return in.Placements[i].From })
+	pEnds := sortedBy(len(in.Placements), func(i int) time.Time { return end(in.Placements[i].To) })
 	var liveRates, live []int
 	var nrs, nre, nps, npe int
 	// shares[i] is placement i's share against rate period shareOf[i].
