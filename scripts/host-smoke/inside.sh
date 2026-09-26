@@ -42,13 +42,18 @@ EOF
 
 # Commands that create or destroy a volume or cluster log their argv to
 # $calls, then run the real one. /usr/local/sbin is first on PATH for
-# docker exec and systemd units alike.
+# docker exec and systemd units alike. The pg_* commands come with the
+# Postgres package the reconciler installs, so the real one is looked up
+# at call time. postgresql-18's postinst creates its default cluster on
+# the root disk without passing through here: apt runs maintainer scripts
+# with DPkg::Path (/usr/sbin:/usr/bin:/sbin:/bin), so $calls holds only
+# what the reconciler ran.
 for cmd in mkfs.ext4 pg_createcluster pg_dropcluster; do
-  real=$(PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v "$cmd")
   cat >"/usr/local/sbin/$cmd" <<EOF
 #!/bin/sh
 echo "$cmd \$*" >>$calls
-exec $real "\$@"
+real=\$(PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v $cmd) || { echo "$cmd: not installed" >&2; exit 127; }
+exec "\$real" "\$@"
 EOF
   chmod 755 "/usr/local/sbin/$cmd"
 done
@@ -147,10 +152,14 @@ check_second_run() {
 
 first() {
   echo "== run 1"
+  getent passwd postgres >/dev/null && fail "postgres user exists before the first run"
+  t0=$(date +%s)
   out1=$(reconcile) || { echo "$out1"; fail "first run exited non-zero"; }
   echo "$out1"
+  echo "host-smoke: first run took $(($(date +%s) - t0))s (package installs included)"
   summary1=$(grep '^lux-reconcile: status=' <<<"$out1")
   [[ $summary1 == "lux-reconcile: status=ok version=$version changed=["* ]] || fail "first run: $summary1"
+  [[ $summary1 == *"install:postgresql-18"* ]] || fail "first run did not install postgresql-18: $summary1"
   [[ $summary1 == *"version:$version"* ]] || fail "first run did not install $version"
   check_host_up
   # The wrappers see a new host's mkfs and cluster: their absence on the
@@ -196,26 +205,27 @@ replaced() {
   done
   [ ! -e /usr/local/lux ] || fail "lux is installed before the replaced host's first run"
 
-  # A newer image may give postgres another uid: renumber it (the package's
-  # own cluster stopped meanwhile) so the adopted files are foreign.
-  echo "== postgres uid $pg_uid on the first host; renumbering"
-  old_uid=$(id -u postgres) old_gid=$(id -g postgres)
-  new_id=$((old_uid + 1000))
-  systemctl stop postgresql@18-main postgresql
-  groupmod -g "$new_id" postgres
-  usermod -u "$new_id" -g "$new_id" postgres
-  find / -xdev \( -uid "$old_uid" -o -gid "$old_gid" \) -exec chown -h postgres:postgres {} +
-  chown postgres:postgres /run/postgresql
-  systemctl start postgresql@18-main postgresql
-  [ "$(id -u postgres)" != "$pg_uid" ] || fail "postgres uid still $pg_uid"
-  echo "postgres uid now $(id -u postgres)"
+  # A newer image may give postgres another uid, so the adopted files are
+  # foreign. The reconciler installs the package, whose postinst keeps an
+  # existing postgres user only if it is a system user (adduser --system
+  # exits 13 otherwise): pick another uid in the system range.
+  getent passwd postgres >/dev/null && fail "postgres user exists before the replaced host's first run"
+  new_id=990
+  [ "$new_id" != "$pg_uid" ] || new_id=991
+  groupadd -r -g "$new_id" postgres
+  useradd -r -u "$new_id" -g postgres -d /var/lib/postgresql -M -s /bin/bash postgres
+  echo "== postgres uid $pg_uid on the first host; $new_id here"
 
   echo "== replaced host: run 1"
+  t0=$(date +%s)
   out1=$(reconcile) || { echo "$out1"; fail "replaced host's first run exited non-zero"; }
   echo "$out1"
+  echo "host-smoke: replaced host's first run took $(($(date +%s) - t0))s (package installs included)"
+  [ "$(id -u postgres)" = "$new_id" ] || fail "the package install changed the postgres uid to $(id -u postgres)"
   summary1=$(grep '^lux-reconcile: status=' <<<"$out1")
   [[ $summary1 == "lux-reconcile: status=ok version=$version changed=["* ]] || fail "replaced host's first run: $summary1"
   [[ $summary1 == *"version:$version"* ]] || fail "replaced host did not install $version"
+  [[ $summary1 == *"install:postgresql-18"* ]] || fail "replaced host did not install postgresql-18: $summary1"
   # pg-volume is the mount (adopted or new alike); database is createdb.
   changed=${summary1#*changed=[}
   changed=,${changed%]},
@@ -236,9 +246,9 @@ replaced() {
   if grep -E 'not properly shut down|was interrupted' /var/log/postgresql/postgresql-18-main.log >&2; then
     fail "the adopted cluster was not shut down cleanly"
   fi
-  foreign=$(find /var/lib/postgresql/18/main ! -uid "$(id -u postgres)" | head -3)
-  [ -z "$foreign" ] || fail "not owned by postgres after adoption: $foreign"
-  echo "data directory owned by postgres uid $(id -u postgres)"
+  foreign=$(find /var/lib/postgresql/18/main ! -uid "$new_id" | head -3)
+  [ -z "$foreign" ] || fail "not owned by uid $new_id after adoption: $foreign"
+  echo "data directory owned by postgres uid $new_id (uid $pg_uid on the first host)"
 
   echo "== replaced host: sentinel data and migrations"
   got=$(lux_sql "SELECT v FROM smoke_sentinel")

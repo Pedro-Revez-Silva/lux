@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Container smoke test of the control host's reconciler (deploy/terraform/
-# examples/aws/host): a debian:trixie container with systemd and Postgres
-# 18, a local bare repo as the config repo, a fake `aws` serving SSM values,
+# examples/aws/host): a debian:trixie container with systemd (Postgres 18
+# is installed from PGDG by the reconciler, so it needs network), a local
+# bare repo as the config repo, a fake `aws` serving SSM values,
 # and a release built by `make dist` served over local HTTP. Runs the
 # reconciler twice (then once more through its systemd unit) and fails if
 # a later run changes anything. Then replaces the host: a second, fresh
