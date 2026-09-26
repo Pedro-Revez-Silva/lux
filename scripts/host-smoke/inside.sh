@@ -83,7 +83,7 @@ echo "$dev" >/run/smoke-loop
 mkdir -p /dev/disk/by-id
 ln -sf "$dev" "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${volume//-/}"
 
-# The config repo: the host/ under test (mounted at /src/host) with a
+# The config repo: the host/ under test (HOST_DIR in host-smoke.sh) with a
 # desired state naming the local release.
 git config --global user.email smoke@example.com
 git config --global user.name smoke

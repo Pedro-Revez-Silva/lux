@@ -9,12 +9,16 @@
 # volume, and the reconciler must adopt its cluster and data and reconnect
 # luxd. Needs a privileged container (loop device for the Postgres volume,
 # systemd as PID 1). DOCKER names the client.
+# HOST_DIR=path smoke-tests another copy of host/ (e.g. a downstream repo's).
 set -euo pipefail
 
 docker=${DOCKER:-docker}
 version=${VERSION:-v0.0.0-smoke}
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-host_dir=$root/deploy/terraform/examples/aws/host
+host_dir=${HOST_DIR:-deploy/terraform/examples/aws/host}
+[[ $host_dir == /* ]] || host_dir=$root/$host_dir
+[ -f "$host_dir/reconcile.py" ] || { echo "host-smoke: FAIL: $host_dir/reconcile.py not found" >&2; exit 1; }
+host_dir=$(cd "$host_dir" && pwd)
 arch=$("$docker" version --format '{{.Server.Arch}}')
 
 if [ ! -f "$root/dist/lux_${version}_linux_${arch}.tar.gz" ]; then
@@ -27,6 +31,7 @@ image=lux-host-smoke
 # outlives the first container.
 vol=lux-host-smoke-$$-pgvol
 name=
+echo "host-smoke: host/ under test: $host_dir"
 "$docker" build -q -t "$image" "$root/scripts/host-smoke" >/dev/null
 
 # Detaches the current container's loop device: losetup -d on a mounted

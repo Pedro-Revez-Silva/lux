@@ -90,3 +90,5 @@ journalctl -u lux-pg-backup           # daily backups
 ```bash
 python3 -m pytest host/tests          # unit tests, fakes for aws/systemctl/Postgres
 ```
+
+From a lux checkout, `make host-test` also runs the container smoke test (a new host, then a replaced one on the same Postgres volume); `make host-test HOST_DIR=/path/to/your/host` runs both against your copy of this directory.

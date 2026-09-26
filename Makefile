@@ -49,15 +49,16 @@ tf-validate:
 # The control host's reconciler (deploy/terraform/examples/aws/host):
 # host-unit is its pytest suite (Python 3.13+, pytest); host-test adds the
 # container smoke test (docker, privileged; builds `make dist` first if
-# dist/ has no VERSION release for the Docker host's arch).
-HOST_DIR := deploy/terraform/examples/aws/host
+# dist/ has no VERSION release for the Docker host's arch). HOST_DIR=path
+# runs both against another copy of host/ (e.g. a downstream repo's).
+HOST_DIR ?= deploy/terraform/examples/aws/host
 PYTHON ?= python3
 
 host-unit:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m pytest -q -p no:cacheprovider $(HOST_DIR)/tests
 
 host-test: host-unit
-	VERSION=$(or $(VERSION),v0.0.0-smoke) ./scripts/host-smoke.sh
+	VERSION=$(or $(VERSION),v0.0.0-smoke) HOST_DIR=$(HOST_DIR) ./scripts/host-smoke.sh
 
 # Release tarballs (docs/development.md "Releases"): lux_<version>_linux_
 # {arm64,amd64}.tar.gz (luxd, lux, both runner arches' lux-runner/lux-shim),
