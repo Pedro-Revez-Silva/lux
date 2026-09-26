@@ -137,13 +137,22 @@ def ensure_s3(docker, image: str, port: int) -> None:
     docker.remove(S3_CONTAINER)
     # Global flags precede the backend subcommand; the image has no
     # /data, so the posix backend stores under /tmp.
-    docker.run(
-        "-d", "--name", S3_CONTAINER, "--label", LABEL,
-        "-p", f"0.0.0.0:{port}:{S3_CONTAINER_PORT}",
-        "-e", f"ROOT_ACCESS_KEY={S3_ACCESS_KEY}", "-e", f"ROOT_SECRET_KEY={S3_SECRET_KEY}",
-        image, "--port", f":{S3_CONTAINER_PORT}", "--health", S3_HEALTH_PATH, "--region", S3_REGION,
-        "posix", "/tmp",
-    )
+    try:
+        docker.run(
+            "-d", "--name", S3_CONTAINER, "--label", LABEL,
+            "-p", f"0.0.0.0:{port}:{S3_CONTAINER_PORT}",
+            "-e", f"ROOT_ACCESS_KEY={S3_ACCESS_KEY}", "-e", f"ROOT_SECRET_KEY={S3_SECRET_KEY}",
+            image, "--port", f":{S3_CONTAINER_PORT}", "--health", S3_HEALTH_PATH, "--region", S3_REGION,
+            "posix", "/tmp",
+        )
+    except RuntimeError as e:
+        # Docker's wording for a host port another container or process holds.
+        if "port is already allocated" not in str(e) and "address already in use" not in str(e):
+            raise
+        raise SharedServiceError(
+            f"host port {port} for {S3_CONTAINER} is taken, e.g. by a lux-e2e-minio from an older "
+            "checkout. Stop that container if it is yours, or set LUX_TEST_S3_PORT to a free port."
+        ) from e
 
 
 def wait_until(fn, timeout: float = 30, interval: float = 0.3, message: str = "condition not met"):

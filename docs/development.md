@@ -115,7 +115,13 @@ Each invocation:
    (default `versity/versitygw:v1.7.0`), e.g. with another versitygw
    release: it is started with versitygw's arguments and polled at
    `/health`. A `lux-e2e-minio` container from older checkouts is no
-   longer used and is left as it is.
+   longer used and is left as it is; while it runs it holds port 59000,
+   so stop it (`docker rm -f lux-e2e-minio`) or set `LUX_TEST_S3_PORT`
+   to a free port. A `LUX_TEST_MINIO_PORT` still set in your shell
+   carries the old MinIO port over, so it collides the same way.
+   A running `lux-e2e-s3` is reused only if its image and host port
+   match `LUX_TEST_S3_IMAGE` and `LUX_TEST_S3_PORT`; otherwise the run
+   stops and says which differs, and never replaces it.
 3. Creates a Docker network and N **simulated hosts**. Each host is a
    privileged `quay.io/podman/stable` container with its own Podman
    storage, `bin/` mounted at `/opt/lux`, a `containers` range in
