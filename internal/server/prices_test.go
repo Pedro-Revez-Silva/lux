@@ -303,7 +303,8 @@ func TestHostPriceAccess(t *testing.T) {
 
 // A priced host advertising no capacity at all gets no period: its time is
 // missing, never shared out at zero. Once it advertises some, a period
-// opens; if it drops back to none, that period closes and none opens.
+// opens; if it drops back to none, that period closes and none opens. One
+// resource is enough: cpus with no memory opens a period.
 func TestStaticRateZeroCapacity(t *testing.T) {
 	s, keys := priceFixture(t)
 	if code, body := call(t, s, keys["t1"], http.MethodPost, "/v1/pools", Pool{Name: "lab", Provider: "static", HourlyPrice: "0.40", Currency: "USD"}); code != http.StatusOK {
@@ -320,6 +321,10 @@ func TestStaticRateZeroCapacity(t *testing.T) {
 	helloAs(t, s, "tok1", strp("t1"), "h1", 0, 0)
 	if got, want := periods(t, s, h1), []string{"0.4 USD 8 32 closed"}; !slices.Equal(got, want) {
 		t.Errorf("after capacity came and went: %v, want %v", got, want)
+	}
+	helloAs(t, s, "tok1", strp("t1"), "h1", 8, 0)
+	if got, want := periods(t, s, h1), []string{"0.4 USD 8 32 closed", "0.4 USD 8 0 open"}; !slices.Equal(got, want) {
+		t.Errorf("after cpus with no memory: %v, want %v", got, want)
 	}
 }
 
