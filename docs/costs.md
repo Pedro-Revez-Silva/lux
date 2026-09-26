@@ -170,8 +170,8 @@ neutral colour. `compute` is lux's own family.
 
 Compute is on by default for `ec2` pools and can be turned off per
 provider (`costs.compute.ec2`). A `static` pool has no price source today,
-so an operator sets a flat hourly price per host for the pool (decided,
-section 11).
+so its Runs get no compute line. The fix is decided but not built: an
+operator will set a flat hourly price per host for the pool (section 11).
 Other providers plug in their own price source: it fills the same
 `host_rates` rows (below), and nothing downstream changes.
 
@@ -763,8 +763,8 @@ Run). What it returns today:
 - Every total carries its `final` and `estimate` parts (they add up to
   `amount`), per currency, and per family and currency.
 - `status` adds `pending`: no source has reported yet (for example, a
-  Run that just started, before the first cost tick). A placed Run always
-  costs something, so this is not zero. Lines with no
+  Run that just started, before the first cost tick). It means no cost has
+  been reported yet, not that the Run costs nothing. Lines with no
   `cost_sources` row count as `complete`, until a producer writes them.
 - `last_error` is never returned here, to anyone. Operators get it with
   plugin health (step 7).
@@ -938,8 +938,8 @@ Decided:
   each Run's max(cpu share, memory share) goes above 1, which the
   scheduler allows: on a 4 CPU / 16 GB host, Runs of 3 CPU / 4 GB and
   1 CPU / 12 GB both fit, and each has share 0.75.
-- **Static pools:** an operator sets a flat hourly price per host for a
-  static pool.
+- **Static pools:** an operator will set a flat hourly price per host
+  for a static pool. Not built yet.
 - **Host facts** (`instanceType`, `zone`, `market`) are in the host API
   now (section 3).
 
