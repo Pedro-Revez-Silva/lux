@@ -382,6 +382,12 @@ def test_desired_state_validation(text, problem):
         desired_mod.parse(text)
 
 
+def test_bad_release_repo_type_is_one_problem():
+    with pytest.raises(HostError) as e:
+        desired_mod.parse("release_repo = 1\n")
+    assert "release_repo: 1" in str(e.value) and "release_base_url" not in str(e.value)
+
+
 def test_desired_state_defaults():
     d = desired_mod.parse("")
     assert d.lux_version is None

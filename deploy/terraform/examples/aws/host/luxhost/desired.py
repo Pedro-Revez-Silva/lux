@@ -114,7 +114,7 @@ def parse(text: str, source: str = "lux-host.toml") -> Desired:
     base_url = doc.pop("release_base_url", None)
     if base_url is None and isinstance(repo, str):
         base_url = f"https://github.com/{repo}/releases/download"
-    elif not isinstance(base_url, str) or not re.match(r"^https?://", base_url):
+    elif base_url is not None and (not isinstance(base_url, str) or not re.match(r"^https?://", base_url)):
         problems.append(f"release_base_url: {base_url!r}: want an http(s) URL")
 
     luxd = doc.pop("luxd", {})
