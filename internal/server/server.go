@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/marcioapm/lux/console"
@@ -114,13 +115,16 @@ type Server struct {
 	// file swap can never make luxd serve bytes that don't match the
 	// sha256 it advertises.
 	bins map[string]map[string]runnerBin
-	// diskFailing: tracked disk paths whose last read failed, so each
-	// failure is logged once (control.go).
 	// instance names this luxd's control samples: its hostname.
-	instance    string
-	diskMu      sync.Mutex
-	diskFailing map[string]bool
-	wg          sync.WaitGroup
+	instance string
+	// readPostgres is postgresFigures (replaced in tests). pgFailing and
+	// diskFailing record what failed on the last read, so each failure is
+	// logged once (control.go).
+	readPostgres func(context.Context) (int64, int, error)
+	pgFailing    atomic.Bool
+	diskMu       sync.Mutex
+	diskFailing  map[string]bool
+	wg           sync.WaitGroup
 }
 
 func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Server {
@@ -170,6 +174,7 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 		diskFailing: map[string]bool{},
 		instance:    hostname(),
 	}
+	s.readPostgres = s.postgresFigures
 	if cfg.ConsoleAuth.Mode == "cloudflare-access" {
 		s.cfAccess = newCFAccess(cfg.ConsoleAuth.CFTeam, cfg.ConsoleAuth.CFAud)
 	}
