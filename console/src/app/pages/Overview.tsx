@@ -1,5 +1,6 @@
 import { Card, formatBytes, formatCores, formatCount, formatDuration, formatElapsed, PageHeader, SectionHeader, StatTile, TimeSeriesChart } from "@lux/design-system";
-import { api, useNow } from "../../api/index.ts";
+import { useMemo } from "react";
+import { api, useNow, type Sample } from "../../api/index.ts";
 import { go } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, useSeries } from "./common.tsx";
@@ -72,9 +73,54 @@ export function Overview() {
               <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Allocated", color: 7, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="bytes" />
             </Card>
           </div>
+          {scope.operator && !scope.apiTenant && <ControlHost samples={h} />}
         </div>
         <ActivityFeed />
       </div>
     </div>
+  );
+}
+
+/** The machine luxd runs on and its Postgres: operators, whole system only (the API sends it to no one else). */
+function ControlHost({ samples }: { samples: Sample[] | undefined }) {
+  const cpu = useSeries(samples, [(s) => s.control?.cpuCores, (s) => s.control?.cpus]);
+  const mem = useSeries(samples, [(s) => s.control?.memoryBytes, (s) => s.control?.memoryTotal]);
+  const dbSize = useSeries(samples, [(s) => s.control?.databaseBytes]);
+  const dbConns = useSeries(samples, [(s) => s.control?.databaseConnections]);
+  const paths = useMemo(() => [...new Set((samples ?? []).flatMap((s) => s.control?.disks?.map((d) => d.path) ?? []))], [samples]);
+  const now = samples?.filter((s) => s.control).at(-1)?.control;
+  return (
+    <>
+      <SectionHeader title="Control host" note="the machine luxd runs on, and its Postgres" />
+      <div className="grid grid-charts">
+        <Card title="CPU" subtitle={now?.cpus ? `used vs capacity · ${formatCores(now.cpus)}` : "used vs capacity"}>
+          <TimeSeriesChart x={cpu.x} ys={cpu.ys} series={[{ label: "Used", color: 1, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="cores" />
+        </Card>
+        <Card title="Memory" subtitle={now?.memoryTotal ? `used vs total · ${formatBytes(now.memoryTotal)}` : "used vs total"}>
+          <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Used", color: 7, area: true }, { label: "Total", color: "var(--fg-faint)", dashed: true }]} unit="bytes" />
+        </Card>
+        {paths.map((p) => (
+          <DiskCard key={p} path={p} samples={samples} />
+        ))}
+        <Card title="Postgres size" subtitle={now?.databaseBytes != null ? `lux's database · ${formatBytes(now.databaseBytes)}` : "lux's database"}>
+          <TimeSeriesChart x={dbSize.x} ys={dbSize.ys} series={[{ label: "Size", color: 5, area: true }]} unit="bytes" />
+        </Card>
+        <Card title="Postgres connections" subtitle="backends connected to lux's database">
+          <TimeSeriesChart x={dbConns.x} ys={dbConns.ys} series={[{ label: "Connections", color: 6, step: true }]} unit="count" />
+        </Card>
+      </div>
+    </>
+  );
+}
+
+function DiskCard({ path, samples }: { path: string; samples: Sample[] | undefined }) {
+  const disk = (s: Sample) => s.control?.disks?.find((d) => d.path === path);
+  // useSeries recomputes on samples only: the path is fixed for this card's life (it is its key).
+  const series = useSeries(samples, [(s) => disk(s)?.usedBytes, (s) => disk(s)?.totalBytes]);
+  const last = samples?.map(disk).filter((d) => d != null).at(-1);
+  return (
+    <Card title={`Disk ${path}`} subtitle={last ? `used vs capacity · ${formatBytes(last.freeBytes)} free` : "used vs capacity"}>
+      <TimeSeriesChart x={series.x} ys={series.ys} series={[{ label: "Used", color: 4, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="bytes" />
+    </Card>
   );
 }
