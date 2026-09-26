@@ -161,23 +161,13 @@ func TestComputeCost(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			checkRuns(t, c.in, res, c.want)
 			for i, p := range c.in.Placements {
-				got := ""
-				if a := res.Placements[i].Amounts["USD"]; a != nil {
-					got = moneyString(a)
-				}
-				if want := c.want[p.RunID]; got != want {
-					t.Errorf("run %s: got %q, want %q", p.RunID, got, want)
-				}
 				if got, want := res.Placements[i].Missing, c.runMissing[p.RunID]; !rangesEqual(got, want) {
 					t.Errorf("run %s missing: got %v, want %v", p.RunID, got, want)
 				}
 			}
-			got := ""
-			if u := res.Unallocated["USD"]; u != nil {
-				got = moneyString(u)
-			}
-			if got != c.unalloc {
+			if got := usd(res.Unallocated); got != c.unalloc {
 				t.Errorf("unallocated: got %q, want %q", got, c.unalloc)
 			}
 			if !rangesEqual(res.Missing, c.missing) {
@@ -185,6 +175,24 @@ func TestComputeCost(t *testing.T) {
 			}
 			checkPieces(t, c.in, res)
 		})
+	}
+}
+
+// usd is m's USD amount as moneyString gives it, "" if it has none.
+func usd(m map[string]*big.Rat) string {
+	if a := m["USD"]; a != nil {
+		return moneyString(a)
+	}
+	return ""
+}
+
+// checkRuns: each placement's USD amount is want's for its Run.
+func checkRuns(t *testing.T, in hostCompute, res computeResult, want map[string]string) {
+	t.Helper()
+	for i, p := range in.Placements {
+		if got := usd(res.Placements[i].Amounts); got != want[p.RunID] {
+			t.Errorf("run %s: got %q, want %q", p.RunID, got, want[p.RunID])
+		}
 	}
 }
 
@@ -531,6 +539,35 @@ func TestMoneyString(t *testing.T) {
 	}
 }
 
+// insertPlacements stores ps as tenant t1's placements on host h1, each of
+// its own Run.
+func insertPlacements(t *testing.T, s *Server, ps []placementWindow) {
+	t.Helper()
+	ctx := context.Background()
+	for i, p := range ps {
+		execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ($1, 't1', '{}', 'running')`, p.RunID)
+		execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at, ended_at)
+			VALUES ($1, 't1', $2, 'h1', 1, CASE WHEN $5::timestamptz IS NULL THEN 'running' ELSE 'exited' END,
+				jsonb_build_object('cpus', $3::float8, 'memory', $4::int8), $6, $5)`,
+			fmt.Sprint("p", i), p.RunID, p.CPUs, p.Memory, p.To, p.From)
+	}
+}
+
+// loadHost is loadHostCompute in a system transaction of its own.
+func loadHost(t *testing.T, s *Server, hostID string, from, to time.Time) hostCompute {
+	t.Helper()
+	ctx := context.Background()
+	var in hostCompute
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var err error
+		in, err = loadHostCompute(ctx, tx, hostID, from, to)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return in
+}
+
 // loadHostCompute reads the worked example back from Postgres: its rate
 // periods, billed window and placements, live ones included; computeCost
 // then gives the same amounts as from the literal input.
@@ -546,22 +583,9 @@ func TestLoadHostCompute(t *testing.T) {
 	execSQL(t, s, ctx, `UPDATE hosts SET registered_at = $1 WHERE id = 'h1'`, at("10:05"))
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('h1', $1, NULL, 0.40, 'USD', 8, $2, 'static')`, at("10:00"), 32*gib)
-	for i, p := range append(append([]placementWindow{}, workedExample...), place("D", 2, 4, "10:30", "10:45"), place("E", 1, 1, "10:50", "")) {
-		execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ($1, 't1', '{}', 'running')`, p.RunID)
-		execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at, ended_at)
-			VALUES ($1, 't1', $2, 'h1', 1, CASE WHEN $5::timestamptz IS NULL THEN 'running' ELSE 'exited' END,
-				jsonb_build_object('cpus', $3::float8, 'memory', $4::int8), $6, $5)`,
-			fmt.Sprint("p", i), p.RunID, p.CPUs, p.Memory, p.To, p.From)
-	}
+	insertPlacements(t, s, append(append([]placementWindow{}, workedExample...), place("D", 2, 4, "10:30", "10:45"), place("E", 1, 1, "10:50", "")))
 
-	var in hostCompute
-	var err error
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		in, err = loadHostCompute(ctx, tx, "h1", at("00:00"), at("12:00"))
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
+	in := loadHost(t, s, "h1", at("00:00"), at("12:00"))
 	if !in.From.Equal(at("10:00")) || in.To == nil || !in.To.Equal(at("11:00")) || len(in.Rates) != 1 || len(in.Placements) != 5 ||
 		in.Rates[0].PerHour != "0.400000000" || in.Rates[0].CapCPUs != 8 || in.Rates[0].CapMemory != 32*gib || in.Rates[0].To != nil ||
 		in.Placements[1].CPUs != 1 || in.Placements[1].Memory != 16*gib || in.Placements[4].To != nil {
@@ -572,25 +596,15 @@ func TestLoadHostCompute(t *testing.T) {
 		t.Fatal(err)
 	}
 	// E (share 1/8, from 10:50, still live) runs to the host's end.
-	want := map[string]string{"A": "0.05", "B": "0.14", "C": "0.04", "D": "0.02", "E": "0.008333333"}
-	for i, p := range in.Placements {
-		if got := moneyString(res.Placements[i].Amounts["USD"]); got != want[p.RunID] {
-			t.Errorf("run %s: %s, want %s", p.RunID, got, want[p.RunID])
-		}
-	}
-	if got := moneyString(res.Unallocated["USD"]); got != "0.141666667" {
+	checkRuns(t, in, res, map[string]string{"A": "0.05", "B": "0.14", "C": "0.04", "D": "0.02", "E": "0.008333333"})
+	if got := usd(res.Unallocated); got != "0.141666667" {
 		t.Errorf("unallocated %s", got)
 	}
 	checkPieces(t, in, res)
 
 	// A host that registered itself is billed from its first hello, and
 	// with no period at all that whole window is missing.
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		in, err = loadHostCompute(ctx, tx, "h2", at("00:00"), at("11:00"))
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
+	in = loadHost(t, s, "h2", at("00:00"), at("11:00"))
 	if res, err = computeCost(in); err != nil {
 		t.Fatal(err)
 	}
@@ -609,27 +623,14 @@ func TestLoadHostComputeWindow(t *testing.T) {
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('h1', $1, $2, 0.40, 'USD', 8, $4, 'static'), ('h1', $2, $3, 0.80, 'USD', 8, $4, 'static'),
 			('h1', $3, NULL, 1.20, 'USD', 8, $4, 'static')`, at("10:00"), at("10:30"), at("11:05"), 32*gib)
-	for i, p := range []placementWindow{
+	insertPlacements(t, s, []placementWindow{
 		place("A", 4, 8, "10:00", "10:20"), // before the window
 		place("B", 4, 8, "10:25", "10:50"), // straddles its start
 		place("C", 2, 8, "10:45", "11:15"), // straddles its end
 		place("D", 2, 8, "11:10", ""),      // after it, still live
-	} {
-		execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ($1, 't1', '{}', 'running')`, p.RunID)
-		execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at, ended_at)
-			VALUES ($1, 't1', $2, 'h1', 1, CASE WHEN $5::timestamptz IS NULL THEN 'running' ELSE 'exited' END,
-				jsonb_build_object('cpus', $3::float8, 'memory', $4::int8), $6, $5)`,
-			fmt.Sprint("p", i), p.RunID, p.CPUs, p.Memory, p.To, p.From)
-	}
+	})
 
-	var in hostCompute
-	var err error
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		in, err = loadHostCompute(ctx, tx, "h1", at("10:40"), at("11:00"))
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
+	in := loadHost(t, s, "h1", at("10:40"), at("11:00"))
 	var runs []string
 	for _, p := range in.Placements {
 		runs = append(runs, p.RunID)
@@ -643,13 +644,8 @@ func TestLoadHostComputeWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	// At $0.80/h: B (share 1/2) for 10 minutes, C (share 1/4) for 15.
-	want := map[string]string{"B": "0.066666667", "C": "0.05"}
-	for i, p := range in.Placements {
-		if got := moneyString(res.Placements[i].Amounts["USD"]); got != want[p.RunID] {
-			t.Errorf("run %s: %s, want %s", p.RunID, got, want[p.RunID])
-		}
-	}
-	if got := moneyString(res.Unallocated["USD"]); got != "0.15" || len(res.Missing) != 0 {
+	checkRuns(t, in, res, map[string]string{"B": "0.066666667", "C": "0.05"})
+	if got := usd(res.Unallocated); got != "0.15" || len(res.Missing) != 0 {
 		t.Errorf("unallocated %s, missing %v", got, res.Missing)
 	}
 	checkPieces(t, in, res)

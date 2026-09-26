@@ -37,17 +37,14 @@ func priceFixture(t *testing.T) (*Server, map[string]string) {
 // returns the status and the response body.
 func call(t *testing.T, s *Server, key, method, path string, body any) (int, string) {
 	t.Helper()
-	var r *bytes.Reader
+	var b []byte
 	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
+		var err error
+		if b, err = json.Marshal(body); err != nil {
 			t.Fatal(err)
 		}
-		r = bytes.NewReader(b)
-	} else {
-		r = bytes.NewReader(nil)
 	}
-	req := httptest.NewRequest(method, path, r)
+	req := httptest.NewRequest(method, path, bytes.NewReader(b))
 	req.Header.Set("Authorization", "Bearer "+key)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -112,20 +109,11 @@ func strp(s string) *string { return &s }
 // and prices it.
 func hostCost(t *testing.T, s *Server, hostID string) computeResult {
 	t.Helper()
-	ctx := context.Background()
-	var in hostCompute
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		var now time.Time
-		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
-			return err
-		}
-		var err error
-		in, err = loadHostCompute(ctx, tx, hostID, now.Add(-time.Hour), now)
-		return err
-	}); err != nil {
+	var now time.Time
+	if err := s.db.Pool.QueryRow(context.Background(), `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		t.Fatal(err)
 	}
-	res, err := computeCost(in)
+	res, err := computeCost(loadHost(t, s, hostID, now.Add(-time.Hour), now))
 	if err != nil {
 		t.Fatal(err)
 	}
