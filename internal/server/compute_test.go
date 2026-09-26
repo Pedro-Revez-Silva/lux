@@ -161,7 +161,7 @@ func TestComputeCost(t *testing.T) {
 // exactly; and the whole priced window's total is what the rates say.
 func checkPieces(t *testing.T, in hostCompute, res computeResult) {
 	t.Helper()
-	total := new(big.Rat)
+	total := map[string]*big.Rat{}
 	for _, p := range res.Pieces {
 		if p.Rate == nil {
 			if p.Host != nil || p.Charged != nil || p.Unallocated != nil {
@@ -176,24 +176,66 @@ func checkPieces(t *testing.T, in hostCompute, res computeResult) {
 		if sum.Cmp(p.Host) != 0 {
 			t.Errorf("piece %s–%s: allocated + unallocated = %s, host cost %s", p.From, p.To, sum.FloatString(12), p.Host.FloatString(12))
 		}
-		total.Add(total, p.Host)
+		addTo(total, p.Rate.Currency, p.Host)
 	}
-	u := res.Unallocated["USD"]
-	if u == nil {
-		if total.Sign() != 0 {
-			t.Errorf("no unallocated amount, host cost %s", total.FloatString(12))
-		}
-		return
+	// Per currency: amounts in one are never added to another's.
+	all := map[string]*big.Rat{}
+	for currency, u := range res.Unallocated {
+		addTo(all, currency, u)
 	}
-	all := new(big.Rat).Set(u)
 	for _, pc := range res.Placements {
-		if a := pc.Amounts["USD"]; a != nil {
-			all.Add(all, a)
+		for currency, a := range pc.Amounts {
+			addTo(all, currency, a)
 		}
 	}
-	if all.Cmp(total) != 0 {
-		t.Errorf("allocated + unallocated = %s, host cost %s", all.FloatString(12), total.FloatString(12))
+	for currency, v := range total {
+		if a := all[currency]; a == nil || a.Cmp(v) != 0 {
+			t.Errorf("%s: allocated + unallocated = %v, host cost %s", currency, a, v.FloatString(12))
+		}
 	}
+	for currency, a := range all {
+		if total[currency] == nil && a.Sign() != 0 {
+			t.Errorf("%s: %s allocated and unallocated, no host cost", currency, a.FloatString(12))
+		}
+	}
+}
+
+// A period in another currency is priced in it, never added to the
+// first's; a fractional cpus share is the exact decimal ratio.
+func TestComputeCostCurrenciesAndFractions(t *testing.T) {
+	eur := usdRate("10:30", "", "0.60")
+	eur.Currency = "EUR"
+	in := hostCompute{From: at("10:00"), To: atp("11:00"), Rates: []ratePeriod{usdRate("10:00", "10:30", "0.40"), eur},
+		Placements: []placementWindow{place("A", 4, 8, "10:15", "10:45")}}
+	res, err := computeCost(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A (share 1/2): 15 minutes at $0.40, then 15 at €0.60.
+	for currency, want := range map[string][2]string{"USD": {"0.05", "0.15"}, "EUR": {"0.075", "0.225"}} {
+		a, u := res.Placements[0].Amounts[currency], res.Unallocated[currency]
+		if a == nil || u == nil || moneyString(a) != want[0] || moneyString(u) != want[1] {
+			t.Errorf("%s: A %v, unallocated %v; want %s and %s", currency, a, u, want[0], want[1])
+		}
+	}
+	if len(res.Placements[0].Amounts) != 2 || len(res.Unallocated) != 2 {
+		t.Errorf("currencies: A %v, unallocated %v", res.Placements[0].Amounts, res.Unallocated)
+	}
+	checkPieces(t, in, res)
+
+	in = hostCompute{From: at("10:00"), To: atp("11:00"),
+		Rates:      []ratePeriod{{From: at("10:00"), PerHour: "0.30", Currency: "USD", CapCPUs: 0.3, CapMemory: 32 * gib, Source: "static"}},
+		Placements: []placementWindow{place("A", 0.1, 1, "10:00", "11:00")}}
+	if res, err = computeCost(in); err != nil {
+		t.Fatal(err)
+	}
+	if s := res.Pieces[0].S.RatString(); s != "1/3" {
+		t.Errorf("S of 0.1 cpus on 0.3: %s, want 1/3", s)
+	}
+	if a, u := res.Placements[0].Amounts["USD"], res.Unallocated["USD"]; a.Cmp(big.NewRat(1, 10)) != 0 || u.Cmp(big.NewRat(2, 10)) != 0 {
+		t.Errorf("A %s, unallocated %s; want exactly 1/10 and 1/5", a.RatString(), u.RatString())
+	}
+	checkPieces(t, in, res)
 }
 
 func rangesEqual(a, b []timeRange) bool {
@@ -274,7 +316,10 @@ func TestLoadHostCompute(t *testing.T) {
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, provision_requested_at, terminated_at)
 		VALUES ('h1', 't1', 'h1', 'terminated', $1, $2), ('h2', 't1', 'h2', 'ready', NULL, NULL)`, at("10:00"), at("11:00"))
+	// h1 was launched by its provider at 10:00 and registered at 10:05: it is
+	// billed from the launch.
 	execSQL(t, s, ctx, `UPDATE hosts SET registered_at = $1 WHERE id = 'h2'`, at("10:20"))
+	execSQL(t, s, ctx, `UPDATE hosts SET registered_at = $1 WHERE id = 'h1'`, at("10:05"))
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('h1', $1, NULL, 0.40, 'USD', 8, $2, 'static')`, at("10:00"), 32*gib)
 	for i, p := range append(append([]placementWindow{}, workedExample...), place("D", 2, 4, "10:30", "10:45"), place("E", 1, 1, "10:50", "")) {

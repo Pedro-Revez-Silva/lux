@@ -432,3 +432,54 @@ func TestStaticRateLeavesProviderPeriods(t *testing.T) {
 		t.Errorf("periods: %v, want only the provider's", got)
 	}
 }
+
+// A change of currency alone, or of memory alone, closes the open period
+// and opens the next.
+func TestHostPricePeriodTriggers(t *testing.T) {
+	s, keys := priceFixture(t)
+	h1 := helloAs(t, s, "tok1", strp("t1"), "h1", 8, 32)
+	for _, p := range []HostPrice{{HourlyPrice: "0.40", Currency: "USD"}, {HourlyPrice: "0.40", Currency: "EUR"}} {
+		if code, body := call(t, s, keys["t1"], http.MethodPut, "/v1/hosts/h1/price", p); code != http.StatusOK {
+			t.Fatalf("set price %+v: %d %s", p, code, body)
+		}
+	}
+	helloAs(t, s, "tok1", strp("t1"), "h1", 8, 16)
+	want := []string{"0.4 USD 8 32 closed", "0.4 EUR 8 32 closed", "0.4 EUR 8 16 open"}
+	if got := periods(t, s, h1); !slices.Equal(got, want) {
+		t.Errorf("after a currency change and a memory change: %v, want %v", got, want)
+	}
+	if n := touching(t, s, h1); n != 2 {
+		t.Errorf("%d periods start as the one before ends, want 2", n)
+	}
+}
+
+// The database refuses what the API does: a price on an ec2 pool, a
+// negative price on a host.
+func TestPriceChecks(t *testing.T) {
+	s, _ := priceFixture(t)
+	ctx := context.Background()
+	h1 := helloAs(t, s, "tok1", strp("t1"), "h1", 8, 32)
+	for _, q := range []struct {
+		sql  string
+		args []any
+	}{
+		{`INSERT INTO pools (id, tenant_id, name, provider, hourly_price, price_currency) VALUES ('pool1', 't1', 'burst', 'ec2', 0.40, 'USD')`, nil},
+		{`UPDATE hosts SET hourly_price = -0.40, price_currency = 'USD' WHERE id = $1`, []any{h1}},
+	} {
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q.sql, q.args...); return err }); err == nil {
+			t.Errorf("stored: %s", q.sql)
+		}
+	}
+}
+
+// A retired pool's default price is not copied: a host registering into
+// its name gets no price and no period.
+func TestRetiredPoolPrice(t *testing.T) {
+	s, _ := priceFixture(t)
+	execSQL(t, s, context.Background(), `INSERT INTO pools (id, tenant_id, name, provider, hourly_price, price_currency, retired)
+		VALUES ('pool1', 't1', 'lab', 'static', 0.40, 'USD', true)`)
+	h1 := helloAs(t, s, "tok1", strp("t1"), "h1", 8, 32)
+	if got := periods(t, s, h1); len(got) != 0 {
+		t.Errorf("a host of a retired pool has periods: %v", got)
+	}
+}
