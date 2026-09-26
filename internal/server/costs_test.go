@@ -33,13 +33,16 @@ func costFixture(t *testing.T) (s *Server, keys map[string]string) {
 // report stores one source's answer for a Run, as a producer will.
 func report(t *testing.T, s *Server, tenantID, runID, source string, lines ...costReport) {
 	t.Helper()
-	ctx := context.Background()
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return replaceCostLines(ctx, tx, tenantID, runID, source, lines)
-	})
-	if err != nil {
+	if err := reportError(s, tenantID, runID, source, lines...); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func reportError(s *Server, tenantID, runID, source string, lines ...costReport) error {
+	ctx := context.Background()
+	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return replaceCostLines(ctx, tx, tenantID, runID, source, lines)
+	})
 }
 
 func getCost(t *testing.T, s *Server, key, runID string) (int, RunCost) {
@@ -133,11 +136,7 @@ func TestRunCostReReportReplaces(t *testing.T) {
 		t.Errorf("lines after re-report: %+v", c.Lines)
 	}
 
-	ctx := context.Background()
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return replaceCostLines(ctx, tx, "t1", "r1", "gw", []costReport{line("ai", "m1", "1", "USD", false), line("ai", "m1", "2", "USD", false)})
-	})
-	if err == nil {
+	if err := reportError(s, "t1", "r1", "gw", line("ai", "m1", "1", "USD", false), line("ai", "m1", "2", "USD", false)); err == nil {
 		t.Fatal("an answer with one item twice was accepted")
 	}
 	if _, c := getCost(t, s, keys["t1"], "r1"); totals(c.Totals) != "/USD=11.5(f1.5,e10) " {
@@ -153,12 +152,8 @@ func TestRunCostInvalidAmountAndEmptyReport(t *testing.T) {
 	report(t, s, "t1", "r1", "gw", line("ai", "m1", "1", "USD", false))
 	report(t, s, "t1", "r1", "other", line("video", "v", "10", "USD", false))
 
-	ctx := context.Background()
 	for _, amount := range []string{"1e3", "abc", "1.0000000001", ""} {
-		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			return replaceCostLines(ctx, tx, "t1", "r1", "gw", []costReport{line("ai", "m1", amount, "USD", false)})
-		})
-		if err == nil {
+		if err := reportError(s, "t1", "r1", "gw", line("ai", "m1", amount, "USD", false)); err == nil {
 			t.Errorf("amount %q was accepted", amount)
 		}
 		if _, c := getCost(t, s, keys["t1"], "r1"); totals(c.Totals) != "/USD=11(f0,e11) " {
@@ -184,11 +179,7 @@ func TestRunCostDatabaseFailureKeepsEarlierLines(t *testing.T) {
 	report(t, s, "t1", "r1", "gw", line("ai", "m1", "1", "USD", false))
 	report(t, s, "t1", "r1", "other", line("video", "v", "10", "USD", false))
 
-	ctx := context.Background()
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return replaceCostLines(ctx, tx, "missing-tenant", "r1", "gw", []costReport{line("ai", "m2", "5", "USD", false)})
-	})
-	if err == nil {
+	if err := reportError(s, "missing-tenant", "r1", "gw", line("ai", "m2", "5", "USD", false)); err == nil {
 		t.Fatal("a line for a tenant that does not exist was accepted")
 	}
 	_, c := getCost(t, s, keys["t1"], "r1")
