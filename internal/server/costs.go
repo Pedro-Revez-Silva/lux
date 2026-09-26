@@ -162,20 +162,19 @@ func replaceCostLines(ctx context.Context, tx pgx.Tx, tenantID, runID, source st
 			return fmt.Errorf("cost source %s: amount %q is not a decimal with up to 9 fractional digits", source, l.Amount)
 		}
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM cost_lines WHERE source = $1 AND run_id = $2`, source, runID); err != nil {
-		return err
-	}
+	// The delete and every insert in one round trip, in the caller's
+	// transaction: any failure there leaves the earlier lines.
+	b := &pgx.Batch{}
+	b.Queue(`DELETE FROM cost_lines WHERE source = $1 AND run_id = $2`, source, runID)
 	for _, l := range lines {
 		details := l.Details
 		if details == nil {
 			details = map[string]any{}
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency,
+		b.Queue(`INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency,
 				period_from, period_to, final, details)
 			VALUES ($1, $2, $3, $4, $5, $6::text::numeric, $7, $8, $9, $10, $11)`,
-			tenantID, runID, source, l.Item, l.Family, l.Amount, l.Currency, l.From, l.To, l.Final, details); err != nil {
-			return err
-		}
+			tenantID, runID, source, l.Item, l.Family, l.Amount, l.Currency, l.From, l.To, l.Final, details)
 	}
-	return nil
+	return tx.SendBatch(ctx, b).Close()
 }
