@@ -823,8 +823,8 @@ Run). What it returns today:
   plugin health (step 7).
 
 Still to come, in the steps that produce them: `displayName` and `color`
-on `byFamily` (from a plugin's describe, step 7), `efficiency` (step 4)
-and `warnings` about shared session ids. The planned full response:
+on `byFamily` (from a plugin's describe, step 7), `efficiency` (reserved
+vs used, section 2; step 4 did not build it) and `warnings` about shared session ids. The planned full response:
 
 ```json
 {
