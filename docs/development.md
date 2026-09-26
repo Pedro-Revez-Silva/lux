@@ -101,6 +101,7 @@ uv run python run_tests.py suites/test_x.py  # one suite; -x, -k work as in pyte
 uv run python run_tests.py --keep            # keep containers and database to debug
 uv run python run_tests.py --hosts 3         # more simulated hosts
 uv run python run_tests.py --real-ec2        # EC2 suites against real AWS (nightly)
+uv run pytest test_harness_config.py         # the harness's own config; no Docker (make harness-unit)
 ```
 
 Each invocation:

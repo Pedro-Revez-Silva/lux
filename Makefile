@@ -1,4 +1,4 @@
-.PHONY: build console test unit e2e infra lint tf-validate host-unit host-test dist clean
+.PHONY: build console test unit e2e infra harness-unit lint tf-validate host-unit host-test dist clean
 
 GO_LDFLAGS := -s -w -X github.com/marcioapm/lux/internal/version.Version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BINARIES := luxd lux-runner lux-shim lux lux-fake
@@ -33,6 +33,11 @@ e2e:
 
 infra:
 	cd tests && uv run python run_tests.py --infra-only
+
+# The e2e harness's own configuration (tests/test_harness_config.py);
+# no Docker, no environment.
+harness-unit:
+	cd tests && uv run pytest -q -p no:cacheprovider test_harness_config.py
 
 test: unit e2e
 
