@@ -94,8 +94,8 @@ kept as samples, in three tables, at three resolutions (`res`: 0 raw, 60,
 
 | `control_samples`, `control_disk_samples` | with the whole system's sample, at its instant | the control host, the machine luxd runs on: CPU seconds (counter) and cores, memory used and total; its Postgres database's size and connections (read with SQL, so a remote database works too); and for each of `LUX_HISTORY_DISK_PATHS` its filesystem's used, free (writable without root) and total bytes |
 
-With several luxd instances on one database, each writes the control
-sample of its own machine; at a given instant the first one wins.
+The control host is one machine: with several luxd instances on one
+database, each samples its own, and the series interleaves them.
 
 Every minute, luxd rolls complete buckets up into the next resolution
 (levels averaged, counters and peaks their maximum, starts and finishes
