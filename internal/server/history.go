@@ -90,7 +90,7 @@ func (s *Server) historyLoop(ctx context.Context) {
 // The control host (control.go) is sampled in the same transaction, so its
 // rows share the whole system's `at`.
 func (s *Server) sampleSystem(ctx context.Context) error {
-	host := s.readControlHost()
+	host := s.readControlHost(ctx)
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var from time.Time
 		if err := tx.QueryRow(ctx, `SELECT coalesce(max(window_end), now() - interval '1 minute' - $1::interval)
