@@ -53,11 +53,15 @@ def ensure_volume(host: Host, volume_id: str) -> bool:
     # pg_createcluster refuses a data directory without postgresql.conf
     # (PGDG keeps it in /etc), so an existing cluster is only started.
     if os.path.exists(os.path.join(datadir, "PG_VERSION")):
-        if changed:
-            # The postgres uid on a newer image may differ from the one
-            # that wrote these files.
+        # The postgres uid on a newer image may differ from the one that
+        # wrote these files. Checked every run, not only the mounting one:
+        # a run that dies after the mount must not leave this undone.
+        if changed or host.run(["stat", "-c", "%U", datadir]).stdout.strip() != "postgres":
             host.run(["chown", "-R", "postgres:postgres", datadir])
+            changed = True
+        if not host.ok(["systemctl", "is-active", "--quiet", CLUSTER_UNIT]):
             host.run(["systemctl", "start", CLUSTER_UNIT])
+            changed = True
         return changed
     host.run(["pg_dropcluster", "--stop", PG_MAJOR, "main"], check=False)
     host.run(["pg_createcluster", PG_MAJOR, "main", "-d", datadir, "--start"])
