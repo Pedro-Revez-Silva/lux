@@ -301,6 +301,13 @@ func (s *Server) applySnapshotDone(ctx context.Context, tx pgx.Tx, tenantID, hos
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`, sd.Manifest.SnapshotID, tenantID, runID, placementID, epoch, sd.Manifest, hostID); err != nil {
 		return err
 	}
+	// Recorded for any epoch, late ones too: the session ran in that
+	// placement even when it no longer becomes the Run's.
+	if sd.Manifest.SessionID != "" {
+		if err := recordSession(ctx, tx, tenantID, runID, epoch, sd.Manifest.SessionID); err != nil {
+			return err
+		}
+	}
 	// Only the current placement's snapshot becomes the Run's: an old host
 	// reporting late must not roll the Run back.
 	if epoch == current {
@@ -311,6 +318,14 @@ func (s *Server) applySnapshotDone(ctx context.Context, tx pgx.Tx, tenantID, hos
 		}
 	}
 	return addEvent(ctx, tx, tenantID, runID, epoch, "snapshot", map[string]any{"snapshotId": sd.Manifest.SnapshotID, "bytes": total, "volumes": len(sd.Manifest.Volumes)})
+}
+
+// recordSession notes that a Run's placement epoch had session id: one row
+// per (run, epoch, id), its last_seen moved on a repeat.
+func recordSession(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, id string) error {
+	_, err := tx.Exec(ctx, `INSERT INTO run_sessions (tenant_id, run_id, epoch, session_id) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (run_id, epoch, session_id) DO UPDATE SET last_seen = now()`, tenantID, runID, epoch, id)
+	return err
 }
 
 func insertBlob(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, hostID, blobID, kind, name string, size int64, sha string) error {
@@ -326,6 +341,9 @@ func (s *Server) applyAdapterEvent(ctx context.Context, tx pgx.Tx, tenantID, run
 			return err
 		}
 		addEvent(ctx, tx, tenantID, runID, epoch, "session", map[string]any{"sessionId": ev.SessionID})
+		if err := recordSession(ctx, tx, tenantID, runID, epoch, ev.SessionID); err != nil {
+			return err
+		}
 	}
 	if ev.Activity != "" {
 		if _, err := tx.Exec(ctx, `UPDATE runs SET activity = $2 WHERE id = $1 AND state = 'running'`, runID, ev.Activity); err != nil {
