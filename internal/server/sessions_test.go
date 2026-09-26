@@ -166,3 +166,34 @@ func TestRunSessionsRepeatUpdatesLastSeen(t *testing.T) {
 		t.Fatalf("first/last seen: before %+v after %+v", first[0], got[0])
 	}
 }
+
+// run_sessions is tenant scoped: t1's scope reads only t1's sessions and
+// cannot write one for t2.
+func TestRunSessionsTenantIsolation(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1'), ('t2', 't2')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r1', 't1', '{}', 'running'), ('r2', 't2', '{}', 'running')`)
+	execSQL(t, s, ctx, `INSERT INTO run_sessions (tenant_id, run_id, epoch, session_id) VALUES
+		('t1', 'r1', 1, 'mine'), ('t2', 'r2', 1, 'theirs'), ('t2', 'r2', 2, 'theirs-too')`)
+
+	var ids []string
+	err := s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT session_id FROM run_sessions ORDER BY session_id`)
+		if err != nil {
+			return err
+		}
+		ids, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	})
+	if err != nil || len(ids) != 1 || ids[0] != "mine" {
+		t.Errorf("t1 sees sessions %v (%v), want [mine]", ids, err)
+	}
+	err = s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO run_sessions (tenant_id, run_id, epoch, session_id) VALUES ('t2', 'r2', 3, 'evil')`)
+		return err
+	})
+	if err == nil {
+		t.Error("t1 wrote a session for t2")
+	}
+}

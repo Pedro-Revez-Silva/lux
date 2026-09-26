@@ -48,7 +48,7 @@ func TestRunSessionsBackfill(t *testing.T) {
 			('s1', 't1', 'r1', 'p2', 2, '{"sessionId": "c"}', '%[1]s'),
 			('s0', 't1', 'r1', 'p1', 1, '{"sessionId": ""}', '%[1]s')`, t0.Add(2*time.Hour).Format(time.RFC3339)),
 		fmt.Sprintf(`INSERT INTO run_sessions (tenant_id, run_id, epoch, session_id, first_seen, last_seen) VALUES
-			('t1', 'r1', 2, 'b', '%[1]s', '%[1]s')`, t0.Add(5*time.Hour).Format(time.RFC3339)),
+			('t1', 'r1', 2, 'b', '%[1]s', '%[2]s')`, t0.Add(5*time.Hour).Format(time.RFC3339), t0.Add(6*time.Hour).Format(time.RFC3339)),
 	} {
 		if _, err := conn.Exec(ctx, q); err != nil {
 			t.Fatal(err)
@@ -70,8 +70,8 @@ func TestRunSessionsBackfill(t *testing.T) {
 		if run == "r1" && id == "a" && (!first.Equal(t0) || !last.Equal(t0.Add(time.Minute))) {
 			return fmt.Errorf("a seen %v..%v, want %v..%v", first, last, t0, t0.Add(time.Minute))
 		}
-		if run == "r1" && id == "b" && !first.Equal(t0.Add(5*time.Hour)) {
-			return fmt.Errorf("b first seen %v, want the row already there (%v)", first, t0.Add(5*time.Hour))
+		if run == "r1" && id == "b" && (!first.Equal(t0.Add(5*time.Hour)) || !last.Equal(t0.Add(6*time.Hour))) {
+			return fmt.Errorf("b seen %v..%v, want the row already there (%v..%v)", first, last, t0.Add(5*time.Hour), t0.Add(6*time.Hour))
 		}
 		return nil
 	})
