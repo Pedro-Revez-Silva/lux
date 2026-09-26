@@ -34,7 +34,10 @@ tools.
    password, creates the database.
 6. Writes the systemd units (luxd, cloudflared, the backup timer, its own
    timer/service, the Postgres mount drop-in) and runs `daemon-reload`
-   only if one changed.
+   only if one changed. luxd's unit sets `LUX_HISTORY_DISK_PATHS=/,/var/lib/postgresql/18`:
+   the filesystems the console's Control host row charts. It is in the
+   environment, not `luxd.toml`, so an older pinned release (which refuses
+   unknown keys in its file) still starts.
 7. Renders `/etc/lux/luxd.toml` (0600, atomic).
 8. If `lux_version` differs from the installed version: downloads the
    release, verifies it against `SHA256SUMS`, runs `luxd migrate` with
