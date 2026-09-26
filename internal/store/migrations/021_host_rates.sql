@@ -22,6 +22,10 @@ CREATE UNIQUE INDEX host_rates_open ON host_rates (host_id) WHERE valid_to IS NU
 ALTER TABLE host_rates ENABLE ROW LEVEL SECURITY;
 CREATE POLICY system_only ON host_rates USING (lux_system()) WITH CHECK (lux_system());
 
+-- Compute cost reads a host's placements overlapping a window (live, or
+-- ended after its start), not the host's whole history.
+CREATE INDEX placements_host_ended ON placements (host_id, ended_at);
+
 -- A static host's flat hourly price: set per host (PUT /v1/hosts/{id}/price)
 -- or copied from its pool's default when the host first registers. It
 -- drives the host's 'static' periods above. NULL: no price, no period.
