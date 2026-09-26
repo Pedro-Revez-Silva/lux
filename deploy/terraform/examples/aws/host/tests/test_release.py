@@ -1,7 +1,7 @@
 """Version switch and rollback: luxhost.release (ported from the unit tests
 of the deploy script it replaces). Offline, against a temp directory
-standing in for /usr/local/lux; systemctl and the health check are stubbed
-through the functions' runner=/sleep=/now= hooks."""
+standing in for /usr/local/lux; systemctl and `luxd migrate` go through a
+Host whose `sh` is stubbed, the health wait through its sleep=/now= hooks."""
 import os
 import subprocess
 import tarfile
@@ -9,14 +9,16 @@ import tarfile
 import pytest
 
 from luxhost import release
-from luxhost.host import HostError
+from luxhost.host import Host, HostError
 
 
-def fake_run(returncode: int, stderr: str = "", stdout: str = ""):
-    def runner(*args, **kwargs):
-        return subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr=stderr)
+def fake_host(returncode: int, stderr: str = "", stdout: str = "", seen: list | None = None) -> Host:
+    def sh(argv, **kwargs):
+        if seen is not None:
+            seen.append((argv, kwargs.get("env")))
+        return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr=stderr)
 
-    return runner
+    return Host(sh=sh)
 
 
 @pytest.fixture
@@ -115,19 +117,21 @@ def test_verify_sha256_refuses_a_mismatch_and_an_unlisted_tarball(tmp_path):
 
 
 def test_run_migrate_reports_success_and_failure():
-    assert release.run_migrate("/bin/true", "postgres://x", runner=fake_run(0))[0]
-    ok, stderr = release.run_migrate("/bin/false", "postgres://x", runner=fake_run(1, stderr="boom"))
+    seen = []
+    assert release.run_migrate(fake_host(0, seen=seen), "/v2/bin/luxd", "postgres://x")[0]
+    assert seen[0][0] == ["/v2/bin/luxd", "migrate"] and seen[0][1]["LUX_DATABASE_URL"] == "postgres://x"
+    ok, stderr = release.run_migrate(fake_host(1, stderr="boom"), "/v2/bin/luxd", "postgres://x")
     assert not ok and stderr == "boom"
 
 
 def test_restart_luxd_reports_failure():
-    ok, stderr = release.restart_luxd(runner=fake_run(1, stderr="unit not found"))
+    ok, stderr = release.restart_luxd(fake_host(1, stderr="unit not found"))
     assert not ok and stderr == "unit not found"
 
 
-def test_is_luxd_active_reads_systemctl_stdout():
-    assert release.is_luxd_active(runner=fake_run(0, stdout="active\n"))
-    assert not release.is_luxd_active(runner=fake_run(3, stdout="failed\n"))
+def test_is_luxd_active_follows_systemctl_exit_status():
+    assert release.is_luxd_active(fake_host(0, stdout="active\n"))
+    assert not release.is_luxd_active(fake_host(3, stdout="failed\n"))
 
 
 def test_wait_healthy_returns_true_as_soon_as_both_checks_pass():

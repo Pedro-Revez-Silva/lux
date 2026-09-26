@@ -14,7 +14,6 @@ and a failure never leaves the host without the previous luxd.
 import hashlib
 import os
 import shutil
-import subprocess
 import tarfile
 import tempfile
 import time
@@ -141,29 +140,18 @@ def restore_symlinks(previous: dict, current_link: str, links: dict) -> None:
             os.remove(link_path)
 
 
-def run_migrate(luxd_bin: str, dsn: str, runner=subprocess.run):
-    result = runner(
-        [luxd_bin, "migrate"],
-        env={**os.environ, "LUX_DATABASE_URL": dsn},
-        capture_output=True, text=True, check=False,
-    )
-    return result.returncode == 0, result.stderr
+def run_migrate(host: Host, luxd_bin: str, dsn: str):
+    result = host.run([luxd_bin, "migrate"], check=False, env={"LUX_DATABASE_URL": dsn})
+    return result.returncode == 0, result.stderr or ""
 
 
-def restart_luxd(systemctl_bin: str = "systemctl", runner=subprocess.run):
-    result = runner(
-        [systemctl_bin, "restart", "luxd"],
-        capture_output=True, text=True, check=False,
-    )
-    return result.returncode == 0, result.stderr
+def restart_luxd(host: Host):
+    result = host.run(["systemctl", "restart", "luxd"], check=False)
+    return result.returncode == 0, result.stderr or ""
 
 
-def is_luxd_active(systemctl_bin: str = "systemctl", runner=subprocess.run) -> bool:
-    result = runner(
-        [systemctl_bin, "is-active", "luxd"],
-        capture_output=True, text=True, check=False,
-    )
-    return result.stdout.strip() == "active"
+def is_luxd_active(host: Host) -> bool:
+    return host.ok(["systemctl", "is-active", "--quiet", "luxd"])
 
 
 def is_healthy(health_url: str, urlopen=urllib.request.urlopen) -> bool:
@@ -225,23 +213,23 @@ def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url:
         if not os.path.isdir(os.path.join(version_dir, "lib", "lux", "runner", rel_arch)):
             host.log(f"note: {rel_arch} runner binaries absent from {wanted}")
 
-    migrated, migrate_err = run_migrate(os.path.join(version_dir, "bin", "luxd"), migrate_dsn, host.sh)
+    migrated, migrate_err = run_migrate(host, os.path.join(version_dir, "bin", "luxd"), migrate_dsn)
     if not migrated:
         raise HostError(f"luxd migrate for {wanted} failed, leaving {running} running: {migrate_err.strip()}")
 
     links = stable_links(current_link, p.bin_dir, p.runner_bin_dir)
     previous_targets = switch_symlinks(version_dir, current_link, links)
 
-    restarted, restart_err = restart_luxd(runner=host.sh)
+    restarted, restart_err = restart_luxd(host)
     healthy = restarted and wait_healthy(
-        lambda: is_luxd_active(runner=host.sh),
+        lambda: is_luxd_active(host),
         lambda: is_healthy(health_url, host.urlopen),
         sleep=host.sleep,
         now=host.now,
     )
     if not healthy:
         restore_symlinks(previous_targets, current_link, links)
-        rolled_back, rollback_err = restart_luxd(runner=host.sh)
+        rolled_back, rollback_err = restart_luxd(host)
         detail = "ok" if restarted else "failed: " + restart_err.strip()
         msg = f"{wanted} did not come up healthy (restart {detail}); rolled back to {current or 'nothing'}"
         if not rolled_back:
