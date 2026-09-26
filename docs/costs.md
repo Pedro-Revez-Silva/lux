@@ -652,12 +652,19 @@ Why a table and not the events:
 - Events have no "last seen" and cannot be updated (the app role has no
   `UPDATE` on `run_events`).
 
-It is written in the same two places that write `runs.session_id`:
-`applyAdapterEvent` (with the placement's epoch) and `applySnapshotDone`.
-Each upserts `(run_id, epoch, session_id)`, setting `last_seen = now()`
-only on a change (so a heartbeat does not write). The migration
-**backfills** it from `run_events` (`type = 'session'`) and from
-`snapshots.manifest->>'sessionId'`.
+**Built** (migration `017_run_sessions.sql`, `recordSession` in
+`internal/server/lifecycle.go`). It is written in the same two places that
+write `runs.session_id`: `applyAdapterEvent` (with the placement's epoch)
+and `applySnapshotDone` (the manifest's `sessionId`, at the snapshot's
+epoch, including a late snapshot of an older epoch, which no longer
+changes `runs.session_id`). Each upserts `(run_id, epoch, session_id)` and
+sets `last_seen = now()` on a repeat. Session events arrive when an
+adapter learns an id, not with heartbeats, so this is not a per-heartbeat
+write. The migration **backfills** it
+from `run_events` (`type = 'session'`), from
+`snapshots.manifest->>'sessionId'` (first/last seen: the earliest and
+latest of those rows), and from `runs.session_id` at `current_epoch` when
+neither of those has the id for the Run (last seen: `runs.updated_at`).
 
 The index on `session_id` lets lux **notice** the same session id in two
 Runs of one tenant. lux flags it (a warning on both Runs' cost cards) but

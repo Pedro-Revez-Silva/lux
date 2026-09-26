@@ -79,6 +79,12 @@ func (s *Store) Tx(ctx context.Context, sc Scope, fn func(pgx.Tx) error) error {
 // Migrate applies pending migrations as the database owner, then makes sure
 // the application role exists with exactly the grants it needs.
 func Migrate(ctx context.Context, dsn, appPassword string) ([]string, error) {
+	return migrate(ctx, dsn, appPassword, "")
+}
+
+// migrate applies pending migrations up to and including version upTo
+// ("" for all of them).
+func migrate(ctx context.Context, dsn, appPassword, upTo string) ([]string, error) {
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
@@ -117,6 +123,9 @@ func Migrate(ctx context.Context, dsn, appPassword string) ([]string, error) {
 	var done []string
 	for _, name := range names {
 		version := strings.TrimSuffix(strings.TrimPrefix(name, "migrations/"), ".sql")
+		if upTo != "" && version > upTo {
+			break
+		}
 		if applied[version] {
 			continue
 		}

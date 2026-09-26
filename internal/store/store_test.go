@@ -19,6 +19,16 @@ import (
 // (tests/run_tests.py starts one on that port.) They are skipped otherwise.
 func testDB(t *testing.T) (owner, app string) {
 	t.Helper()
+	owner, app = emptyDB(t)
+	if _, err := store.Migrate(context.Background(), owner, "lux_app"); err != nil {
+		t.Fatal(err)
+	}
+	return owner, app
+}
+
+// emptyDB is a new database with no migrations applied.
+func emptyDB(t *testing.T) (owner, app string) {
+	t.Helper()
 	admin := os.Getenv("LUX_TEST_PG")
 	if admin == "" {
 		t.Skip("LUX_TEST_PG not set")
@@ -40,9 +50,6 @@ func testDB(t *testing.T) (owner, app string) {
 	cfg := conn.Config()
 	owner = fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", cfg.User, cfg.Password, cfg.Host, cfg.Port, name)
 	app = fmt.Sprintf("postgres://lux_app:lux_app@%s:%d/%s?sslmode=disable", cfg.Host, cfg.Port, name)
-	if _, err := store.Migrate(ctx, owner, "lux_app"); err != nil {
-		t.Fatal(err)
-	}
 	return owner, app
 }
 
