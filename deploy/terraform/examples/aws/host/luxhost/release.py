@@ -20,7 +20,7 @@ import time
 import urllib.error
 import urllib.request
 
-from .host import Host, HostError
+from .host import Host, HostError, read_file
 
 BIN_TARGETS = ["bin/luxd", "bin/lux"]
 RUNNER_ARCHES = ["linux-arm64", "linux-amd64"]
@@ -38,16 +38,7 @@ def arch() -> str:
 
 
 def installed_version(install_root: str) -> str:
-    path = os.path.join(install_root, "CURRENT_VERSION")
-    if not os.path.exists(path):
-        return ""
-    with open(path) as f:
-        return f.read().strip()
-
-
-def write_installed_version(install_root: str, version: str) -> None:
-    with open(os.path.join(install_root, "CURRENT_VERSION"), "w") as f:
-        f.write(version + "\n")
+    return (read_file(os.path.join(install_root, "CURRENT_VERSION")) or "").strip()
 
 
 def download(url: str, dest: str, urlopen=urllib.request.urlopen) -> None:
@@ -239,5 +230,6 @@ def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url:
             msg += f"; restart after rollback also failed: {rollback_err.strip()}"
         raise HostError(msg)
 
-    write_installed_version(install_root, wanted)
+    with open(os.path.join(install_root, "CURRENT_VERSION"), "w") as f:
+        f.write(wanted + "\n")
     host.log(f"deployed {wanted}")
