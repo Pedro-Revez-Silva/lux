@@ -286,7 +286,7 @@ func TestLoadHostCompute(t *testing.T) {
 	var in hostCompute
 	var err error
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		in, err = loadHostCompute(ctx, tx, "h1", at("12:00"))
+		in, err = loadHostCompute(ctx, tx, "h1", at("00:00"), at("12:00"))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -315,7 +315,7 @@ func TestLoadHostCompute(t *testing.T) {
 	// A host that registered itself is billed from its first hello, and
 	// with no period at all that whole window is missing.
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		in, err = loadHostCompute(ctx, tx, "h2", at("11:00"))
+		in, err = loadHostCompute(ctx, tx, "h2", at("00:00"), at("11:00"))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -326,4 +326,93 @@ func TestLoadHostCompute(t *testing.T) {
 	if !rangesEqual(res.Missing, []timeRange{{at("10:20"), at("11:00")}}) || len(res.Unallocated) != 0 {
 		t.Errorf("unpriced host: missing %v, unallocated %v", res.Missing, res.Unallocated)
 	}
+}
+
+// A window reads only the periods and placements overlapping it, and clips
+// the billed window and whatever straddles its edges to it.
+func TestLoadHostComputeWindow(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, provision_requested_at) VALUES ('h1', 't1', 'h1', 'ready', $1)`, at("10:00"))
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('h1', $1, $2, 0.40, 'USD', 8, $4, 'static'), ('h1', $2, $3, 0.80, 'USD', 8, $4, 'static'),
+			('h1', $3, NULL, 1.20, 'USD', 8, $4, 'static')`, at("10:00"), at("10:30"), at("11:05"), 32*gib)
+	for i, p := range []placementWindow{
+		place("A", 4, 8, "10:00", "10:20"), // before the window
+		place("B", 4, 8, "10:25", "10:50"), // straddles its start
+		place("C", 2, 8, "10:45", "11:15"), // straddles its end
+		place("D", 2, 8, "11:10", ""),      // after it, still live
+	} {
+		execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ($1, 't1', '{}', 'running')`, p.RunID)
+		execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at, ended_at)
+			VALUES ($1, 't1', $2, 'h1', 1, CASE WHEN $5::timestamptz IS NULL THEN 'running' ELSE 'exited' END,
+				jsonb_build_object('cpus', $3::float8, 'memory', $4::int8), $6, $5)`,
+			fmt.Sprint("p", i), p.RunID, p.CPUs, p.Memory, p.To, p.From)
+	}
+
+	var in hostCompute
+	var err error
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		in, err = loadHostCompute(ctx, tx, "h1", at("10:40"), at("11:00"))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var runs []string
+	for _, p := range in.Placements {
+		runs = append(runs, p.RunID)
+	}
+	if !in.From.Equal(at("10:40")) || in.To == nil || !in.To.Equal(at("11:00")) ||
+		len(in.Rates) != 1 || in.Rates[0].PerHour != "0.800000000" || fmt.Sprint(runs) != "[B C]" {
+		t.Fatalf("loaded window %s–%v, rates %+v, runs %v", in.From, in.To, in.Rates, runs)
+	}
+	res, err := computeCost(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// At $0.80/h: B (share 1/2) for 10 minutes, C (share 1/4) for 15.
+	want := map[string]string{"B": "0.066666667", "C": "0.05"}
+	for i, p := range in.Placements {
+		if got := moneyString(res.Placements[i].Amounts["USD"]); got != want[p.RunID] {
+			t.Errorf("run %s: %s, want %s", p.RunID, got, want[p.RunID])
+		}
+	}
+	if got := moneyString(res.Unallocated["USD"]); got != "0.15" || len(res.Missing) != 0 {
+		t.Errorf("unallocated %s, missing %v", got, res.Missing)
+	}
+	checkPieces(t, in, res)
+}
+
+// Many sequential placements beside a long one: the sweep keeps this
+// linear (the time is logged; see TestComputeCost for the formula).
+func TestComputeCostManyPlacements(t *testing.T) {
+	const n = 8000
+	base := at("00:00")
+	in := hostCompute{From: base, Now: base.Add((n + 1) * time.Minute), Rates: []ratePeriod{usdRate("00:00", "", "0.40")},
+		Placements: []placementWindow{{ID: "long", RunID: "long", CPUs: 2, Memory: 8 * gib, From: base}}}
+	for i := range n {
+		from := base.Add(time.Duration(i)*time.Minute + 10*time.Second)
+		to := from.Add(30 * time.Second)
+		in.Placements = append(in.Placements, placementWindow{ID: fmt.Sprint(i), RunID: fmt.Sprint(i), CPUs: 1, Memory: 2 * gib, From: from, To: &to})
+	}
+	start := time.Now()
+	res, err := computeCost(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%d placements, %d pieces: %s", len(in.Placements), len(res.Pieces), time.Since(start))
+	// long: 1/4 of $0.40/h for 8001 minutes; each short one 1/8 for 30 s.
+	if got := moneyString(res.Placements[0].Amounts["USD"]); got != "13.335" {
+		t.Errorf("long placement: %s, want 13.335", got)
+	}
+	for i := 1; i < len(res.Placements); i++ {
+		if got := moneyString(res.Placements[i].Amounts["USD"]); got != "0.000416667" {
+			t.Fatalf("placement %d: %s, want 0.000416667", i, got)
+		}
+	}
+	if len(res.Pieces) != 2*n+1 {
+		t.Errorf("%d pieces, want %d", len(res.Pieces), 2*n+1)
+	}
+	checkPieces(t, in, res)
 }

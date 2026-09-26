@@ -99,6 +99,11 @@ var nanosPerHour = big.NewRat(int64(time.Hour), 1)
 
 // computeCost prices a host's billed window. It reads nothing: the loader
 // (loadHostCompute) gathers its input.
+//
+// One sweep over the cut instants: placements and rate periods join the
+// live sets as the sweep reaches their start and leave at their end, so
+// each piece costs only its live placements, and a placement's share is
+// worked out once per rate period rather than once per piece.
 func computeCost(in hostCompute) (computeResult, error) {
 	from, to := in.From, in.Now
 	if in.To != nil {
@@ -120,7 +125,8 @@ func computeCost(in hostCompute) (computeResult, error) {
 		return res, nil
 	}
 	rates := make([]*big.Rat, len(in.Rates))
-	cuts := []time.Time{from, to}
+	cuts := make([]time.Time, 0, 2+2*len(in.Rates)+2*len(in.Placements))
+	cuts = append(cuts, from, to)
 	clip := func(t time.Time) time.Time {
 		switch {
 		case t.Before(from):
@@ -144,24 +150,56 @@ func computeCost(in hostCompute) (computeResult, error) {
 	slices.SortFunc(cuts, time.Time.Compare)
 	cuts = slices.CompactFunc(cuts, time.Time.Equal)
 
+	// The sweep's events: indexes into in.Rates and in.Placements by start
+	// and by end. Live sets hold indexes in ascending order.
+	byStart := func(n int, at func(int) time.Time) []int {
+		o := make([]int, n)
+		for i := range o {
+			o[i] = i
+		}
+		slices.SortStableFunc(o, func(a, b int) int { return at(a).Compare(at(b)) })
+		return o
+	}
+	rateStarts := byStart(len(in.Rates), func(i int) time.Time { return in.Rates[i].From })
+	rateEnds := byStart(len(in.Rates), func(i int) time.Time { return end(in.Rates[i].To) })
+	pStarts := byStart(len(in.Placements), func(i int) time.Time { return in.Placements[i].From })
+	pEnds := byStart(len(in.Placements), func(i int) time.Time { return end(in.Placements[i].To) })
+	var liveRates, live []int
+	isLive := make([]bool, len(in.Placements))
+	var nrs, nre, nps, npe int
+	// shares[i] is placement i's share against rate period shareOf[i].
+	shares := make([]*big.Rat, len(in.Placements))
+	shareOf := make([]int, len(in.Placements))
+
 	for k := 0; k+1 < len(cuts); k++ {
 		a, b := cuts[k], cuts[k+1]
+		// Live at a: started at or before a, ending after it.
+		for ; nrs < len(rateStarts) && !in.Rates[rateStarts[nrs]].From.After(a); nrs++ {
+			if i := rateStarts[nrs]; end(in.Rates[i].To).After(a) {
+				liveRates = insertSorted(liveRates, i)
+			}
+		}
+		for ; nre < len(rateEnds) && !end(in.Rates[rateEnds[nre]].To).After(a); nre++ {
+			liveRates = removeSorted(liveRates, rateEnds[nre])
+		}
+		for ; nps < len(pStarts) && !in.Placements[pStarts[nps]].From.After(a); nps++ {
+			if i := pStarts[nps]; end(in.Placements[i].To).After(a) {
+				live, isLive[i] = insertSorted(live, i), true
+			}
+		}
+		for ; npe < len(pEnds) && !end(in.Placements[pEnds[npe]].To).After(a); npe++ {
+			if i := pEnds[npe]; isLive[i] {
+				live, isLive[i] = removeSorted(live, i), false
+			}
+		}
+		if len(liveRates) > 1 {
+			return res, fmt.Errorf("host %s: rate periods from %s and %s overlap", in.HostID, in.Rates[liveRates[0]].From, in.Rates[liveRates[1]].From)
+		}
 		piece := costPiece{timeRange: timeRange{a, b}}
-		for i, p := range in.Placements {
-			if !p.From.After(a) && end(p.To).After(a) {
-				piece.Live = append(piece.Live, i)
-			}
+		if len(live) > 0 {
+			piece.Live = slices.Clone(live)
 		}
-		ri := -1
-		for i, r := range in.Rates {
-			if !r.From.After(a) && end(r.To).After(a) {
-				if ri >= 0 {
-					return res, fmt.Errorf("host %s: rate periods from %s and %s overlap", in.HostID, in.Rates[ri].From, r.From)
-				}
-				ri = i
-			}
-		}
-		if ri < 0 {
+		if len(liveRates) == 0 {
 			res.Missing = appendRange(res.Missing, piece.timeRange)
 			for _, i := range piece.Live {
 				res.Placements[i].Missing = appendRange(res.Placements[i].Missing, piece.timeRange)
@@ -169,13 +207,15 @@ func computeCost(in hostCompute) (computeResult, error) {
 			res.Pieces = append(res.Pieces, piece)
 			continue
 		}
+		ri := liveRates[0]
 		r := &in.Rates[ri]
 		piece.Rate = r
-		shares := make([]*big.Rat, len(piece.Live))
 		piece.S = new(big.Rat)
-		for j, i := range piece.Live {
-			shares[j] = share(in.Placements[i], r)
-			piece.S.Add(piece.S, shares[j])
+		for _, i := range piece.Live {
+			if shares[i] == nil || shareOf[i] != ri {
+				shares[i], shareOf[i] = share(in.Placements[i], r), ri
+			}
+			piece.S.Add(piece.S, shares[i])
 		}
 		dt := new(big.Rat).SetFrac64(int64(b.Sub(a)), 1)
 		piece.Host = new(big.Rat).Mul(rates[ri], dt)
@@ -186,7 +226,7 @@ func computeCost(in hostCompute) (computeResult, error) {
 		}
 		piece.Charged = make([]*big.Rat, len(piece.Live))
 		for j, i := range piece.Live {
-			c := new(big.Rat).Mul(piece.Host, shares[j])
+			c := new(big.Rat).Mul(piece.Host, shares[i])
 			c.Quo(c, scale)
 			piece.Charged[j] = c
 			addTo(res.Placements[i].Amounts, r.Currency, c)
@@ -199,6 +239,19 @@ func computeCost(in hostCompute) (computeResult, error) {
 		res.Pieces = append(res.Pieces, piece)
 	}
 	return res, nil
+}
+
+// insertSorted adds i to the ascending s; removeSorted takes it out.
+func insertSorted(s []int, i int) []int {
+	k, _ := slices.BinarySearch(s, i)
+	return slices.Insert(s, k, i)
+}
+
+func removeSorted(s []int, i int) []int {
+	if k, ok := slices.BinarySearch(s, i); ok {
+		return slices.Delete(s, k, k+1)
+	}
+	return s
 }
 
 // share is max(cpu share, memory share) against the period's capacity. A
@@ -249,20 +302,24 @@ func moneyString(r *big.Rat) string {
 	return s
 }
 
-// loadHostCompute reads a host's rate periods, billed window and
-// placements into computeCost's input, in the caller's (system)
-// transaction. The billed window runs from when luxd asked the provider
-// for the host (a host that registered itself: its first hello) to when it
-// was terminated, or is still open. Whatever of it no period covers comes
-// back from computeCost as missing.
-func loadHostCompute(ctx context.Context, tx pgx.Tx, hostID string, now time.Time) (hostCompute, error) {
-	in := hostCompute{HostID: hostID, Now: now}
-	if err := tx.QueryRow(ctx, `SELECT coalesce(provision_requested_at, registered_at, created_at), terminated_at
-			FROM hosts WHERE id = $1`, hostID).Scan(&in.From, &in.To); err != nil {
+// loadHostCompute reads what computeCost needs to price a host over the
+// window [from, to), in the caller's (system) transaction: the rate periods
+// and placements overlapping it, and the host's billed window clipped to
+// it. to is at most now: whatever is still open ends there. The billed
+// window runs from when luxd asked the provider for the host (a host that
+// registered itself: its first hello) to when it was terminated, or is
+// still open. Whatever of it no period covers comes back from computeCost
+// as missing.
+func loadHostCompute(ctx context.Context, tx pgx.Tx, hostID string, from, to time.Time) (hostCompute, error) {
+	in := hostCompute{HostID: hostID, Now: to}
+	if err := tx.QueryRow(ctx, `SELECT greatest(coalesce(provision_requested_at, registered_at, created_at), $2),
+			least(terminated_at, $3)
+			FROM hosts WHERE id = $1`, hostID, from, to).Scan(&in.From, &in.To); err != nil {
 		return in, err
 	}
 	rows, err := tx.Query(ctx, `SELECT valid_from, valid_to, per_hour::text, currency, cap_cpus, cap_memory, source
-		FROM host_rates WHERE host_id = $1 ORDER BY valid_from`, hostID)
+		FROM host_rates WHERE host_id = $1 AND valid_from < $3 AND (valid_to IS NULL OR valid_to > $2)
+		ORDER BY valid_from`, hostID, from, to)
 	if err != nil {
 		return in, err
 	}
@@ -271,7 +328,8 @@ func loadHostCompute(ctx context.Context, tx pgx.Tx, hostID string, now time.Tim
 	}
 	rows, err = tx.Query(ctx, `SELECT id, run_id, epoch, coalesce((resources->>'cpus')::float8, 0),
 			coalesce((resources->>'memory')::int8, 0), created_at, ended_at
-		FROM placements WHERE host_id = $1 ORDER BY created_at, id`, hostID)
+		FROM placements WHERE host_id = $1 AND created_at < $3 AND (ended_at IS NULL OR ended_at > $2)
+		ORDER BY created_at, id`, hostID, from, to)
 	if err != nil {
 		return in, err
 	}
