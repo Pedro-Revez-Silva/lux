@@ -54,15 +54,14 @@ def ensure_volume(host: Host, volume_id: str) -> bool:
     # (PGDG keeps it in /etc), so an existing cluster is only started.
     if os.path.exists(os.path.join(datadir, "PG_VERSION")):
         # The postgres uid on a newer image may differ from the one that
-        # wrote these files. Checked every run, not only the mounting one:
-        # a run that dies after the mount must not leave this undone.
-        if changed or host.run(["stat", "-c", "%U", datadir]).stdout.strip() != "postgres":
+        # wrote these files, and Postgres won't start on files it doesn't
+        # own. Checked every run, not only the mounting one: a run that
+        # died after the mount, or mid-chown, must not leave this undone.
+        if changed or not host.ok(["systemctl", "is-active", "--quiet", CLUSTER_UNIT]):
             host.run(["chown", "-R", "postgres:postgres", datadir])
-            changed = True
-        if not host.ok(["systemctl", "is-active", "--quiet", CLUSTER_UNIT]):
             host.run(["systemctl", "start", CLUSTER_UNIT])
-            changed = True
-        return changed
+            return True
+        return False
     host.run(["pg_dropcluster", "--stop", PG_MAJOR, "main"], check=False)
     host.run(["pg_createcluster", PG_MAJOR, "main", "-d", datadir, "--start"])
     return True

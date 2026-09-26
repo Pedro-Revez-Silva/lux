@@ -543,20 +543,21 @@ def test_release_base_url_is_used_for_downloads(env, capsys):
     assert env.web.fetched[0].startswith(FakeWeb.BASE_URL + "/v1.0.0/lux_v1.0.0_linux_")
 
 
-def test_cluster_left_unowned_and_stopped_by_an_interrupted_run_is_repaired(env, capsys):
-    # The run that mounted the volume died before the chown and the start;
-    # the next one sees the volume already mounted.
+def test_cluster_left_stopped_by_an_interrupted_run_is_chowned_and_started(env, capsys):
+    # The run that mounted the volume died before (or during) the chown, or
+    # before the start; the next one sees the volume already mounted.
     env.sh.mounted = env.sh.has_filesystem = True
-    env.sh.datadir_owner = "systemd-coredump"
     datadir = env.path("var/lib/postgresql/18/main")
     os.makedirs(datadir)
     with open(os.path.join(datadir, "PG_VERSION"), "w") as f:
         f.write("18\n")
-    assert env.run() == 0, summary(capsys)
+    assert env.run() == 0
+    assert "pg-volume" in summary(capsys)
     chown = ["chown", "-R", "postgres:postgres", datadir]
     start = ["systemctl", "start", "postgresql@18-main"]
     assert env.sh.calls.index(chown) < env.sh.calls.index(start)
     assert env.sh.commands("pg_createcluster") == []
     env.sh.calls.clear()
-    assert env.run() == 0, summary(capsys)
+    assert env.run() == 0
+    assert summary(capsys).endswith("changed=[]")
     assert env.sh.commands("chown") == [] and start not in env.sh.calls

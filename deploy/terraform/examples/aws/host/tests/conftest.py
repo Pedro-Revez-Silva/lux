@@ -44,8 +44,6 @@ class FakeSh:
     mounted: bool = False
     has_filesystem: bool = False
     migrate_rc: int = 0
-    # Owner of the cluster's data directory, as `stat -c %U` reports it.
-    datadir_owner: str = "postgres"
     # Whether luxd comes up after a restart, by the version `current` points at.
     healthy_versions: set = dataclasses.field(default_factory=set)
     calls: list = dataclasses.field(default_factory=list)
@@ -137,16 +135,7 @@ class FakeSh:
     def _succeed(self, argv, _input):
         return completed(argv)
 
-    _pg_dropcluster = _succeed
-
-    def _stat(self, argv, _input):
-        assert argv[1:3] == ["-c", "%U"], argv
-        return completed(argv, stdout=self.datadir_owner + "\n")
-
-    def _chown(self, argv, _input):
-        if "-R" in argv:
-            self.datadir_owner = argv[-2].split(":")[0]
-        return completed(argv)
+    _pg_dropcluster = _chown = _succeed
 
     def _pg_createcluster(self, argv, _input):
         # Like the real one: refuses a data directory that already holds a
