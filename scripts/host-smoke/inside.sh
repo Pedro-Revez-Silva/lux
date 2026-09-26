@@ -10,8 +10,6 @@ volume=vol-0123456789abcdef0
 backup_bucket=lux-pg-backups-123456789012-eu-north-1
 checkout=/var/lib/lux/config
 
-systemctl is-system-running --wait >/dev/null || true
-
 # The release, served like GitHub's <base>/<tag>/<file>.
 arch=$(dpkg --print-architecture)
 mkdir -p "/srv/releases/$version"
