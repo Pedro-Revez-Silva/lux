@@ -332,6 +332,9 @@ components:
           type: boolean
         id:
           type: string
+        instanceType:
+          description: The instance type the provider launched; absent for a host that registered itself.
+          type: string
         labels:
           additionalProperties:
             type: string
@@ -342,6 +345,12 @@ components:
         liveRuns:
           format: int64
           type: integer
+        market:
+          description: on-demand or spot, as the provider launched it.
+          enum:
+            - on-demand
+            - spot
+          type: string
         name:
           type: string
         placements:
@@ -373,6 +382,9 @@ components:
         versions:
           additionalProperties: {}
           type: object
+        zone:
+          description: The availability zone the provider launched it in.
+          type: string
       type: object
     HostDrain:
       additionalProperties: false

@@ -1325,6 +1325,9 @@ type Host struct {
 	Platform      bool                  `json:"platform"`
 	LiveRuns      int                   `json:"liveRuns"`
 	ProviderID    *string               `json:"providerId,omitempty"`
+	InstanceType  *string               `json:"instanceType,omitempty" doc:"The instance type the provider launched; absent for a host that registered itself."`
+	Zone          *string               `json:"zone,omitempty" doc:"The availability zone the provider launched it in."`
+	Market        *string               `json:"market,omitempty" enum:"on-demand,spot" doc:"on-demand or spot, as the provider launched it."`
 	LastHeartbeat *time.Time            `json:"lastHeartbeat,omitempty"`
 	Times         map[string]*time.Time `json:"times"`
 	// Placements: on GET /v1/hosts/{id} only, its live placements (the
@@ -1363,7 +1366,7 @@ const visiblePlacements = "($1 = '' OR pl.tenant_id = $1)"
 const hostColumns = `h.id, h.name, coalesce(ht.name, ''), h.pool, h.state, h.state_reason,
 	h.draining, h.labels, h.capacity, h.versions, h.tenant_id IS NULL,
 	hl.n, jsonb_build_object('cpus', hl.cpus, 'memory', hl.mem, 'disk', hl.disk),
-	h.provider_id, h.last_heartbeat,
+	h.provider_id, h.instance_type, h.zone, h.market, h.last_heartbeat,
 	h.provision_requested_at, h.provisioned_at, h.registered_at, h.first_placement_at, h.last_placement_ended_at,
 	h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at`
 
@@ -1376,7 +1379,7 @@ func scanHost(row pgx.Row) (Host, error) {
 	var h Host
 	var t [10]*time.Time
 	if err := row.Scan(&h.ID, &h.Name, &h.Tenant, &h.Pool, &h.State, &h.StateReason, &h.Draining, &h.Labels, &h.Capacity, &h.Versions,
-		&h.Platform, &h.LiveRuns, &h.Allocated, &h.ProviderID, &h.LastHeartbeat,
+		&h.Platform, &h.LiveRuns, &h.Allocated, &h.ProviderID, &h.InstanceType, &h.Zone, &h.Market, &h.LastHeartbeat,
 		&t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7], &t[8], &t[9]); err != nil {
 		return h, err
 	}
