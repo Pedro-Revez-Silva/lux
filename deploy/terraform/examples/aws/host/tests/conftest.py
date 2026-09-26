@@ -1,8 +1,8 @@
 """Fakes for everything the reconciler shells out to, and a host rooted in
 a temporary directory.
 
-`aws`, `systemctl`, the Postgres tools, mount/blkid/mkfs and `luxd migrate`
-are answered by FakeSh from in-memory state. `git` runs for real, against
+`aws`, `systemctl`, `dpkg`, `apt-get`, the Postgres tools, mount/blkid/mkfs
+and `luxd migrate` are answered by FakeSh from in-memory state. `git` runs for real, against
 bare repositories in the temporary directory: the reconciler's checkout
 logic (fetch, hard reset, detecting a host/ change) is what is under test,
 and a local remote needs no network.
@@ -47,6 +47,13 @@ class FakeSh:
     # Whether luxd comes up after a restart, by the version `current` points at.
     healthy_versions: set = dataclasses.field(default_factory=set)
     calls: list = dataclasses.field(default_factory=list)
+    # dpkg's installed packages; a fresh host has none of the reconciler's.
+    installed: set = dataclasses.field(default_factory=set)
+    # Packages (or "update") whose apt-get run exits 100.
+    apt_fail: set = dataclasses.field(default_factory=set)
+    # How many `apt-get update` calls find the lists lock held first.
+    apt_lists_locked: int = 0
+    arch: str = "arm64"
 
     def __call__(self, argv, input=None, env=None, **kwargs):
         argv = list(argv)
@@ -59,6 +66,8 @@ class FakeSh:
             return completed(argv, self.migrate_rc, stderr="" if self.migrate_rc == 0 else "migration 7 failed")
         if handler is None:
             raise AssertionError(f"unexpected command: {argv}")
+        if cmd == "apt-get":
+            return handler(argv, input, env)
         return handler(argv, input)
 
     def commands(self, name):
@@ -116,6 +125,46 @@ class FakeSh:
             self.active.add("luxd")
         else:
             self.active.discard("luxd")
+
+    def _dpkg(self, argv, _input):
+        if argv[1:] == ["--print-architecture"]:
+            return completed(argv, stdout=self.arch + "\n")
+        if argv[1] == "-s":
+            if argv[2] in self.installed:
+                return completed(argv, stdout=f"Package: {argv[2]}\nStatus: install ok installed\n")
+            return completed(argv, 1, stderr=f"dpkg-query: package '{argv[2]}' is not installed")
+        raise AssertionError(f"unexpected dpkg call: {argv}")
+
+    def _apt_get(self, argv, _input, env=None):
+        assert argv[1:3] == ["-o", "DPkg::Lock::Timeout=300"], argv
+        args = argv[3:]
+        if args == ["update"]:
+            if self.apt_lists_locked:
+                self.apt_lists_locked -= 1
+                return completed(argv, 100, stderr="E: Could not get lock /var/lib/apt/lists/lock")
+            pgdg = os.path.join(self.root, "etc/apt/sources.list.d/pgdg.list")
+            assert os.path.exists(pgdg), "apt-get update before the PGDG source is written"
+            return completed(argv, 100 if "update" in self.apt_fail else 0)
+        assert args[:2] == ["install", "-y"] and len(args) == 3, argv
+        assert (env or {}).get("DEBIAN_FRONTEND") == "noninteractive", "apt-get install may prompt"
+        target = args[2]
+        if target.endswith(".deb"):
+            with open(target, "rb") as f:
+                assert f.read() == FakeWeb.CLOUDFLARED_DEB
+            package = "cloudflared"
+        else:
+            package = target
+        if package in self.apt_fail:
+            return completed(argv, 100, stderr=f"E: Unable to install {package}")
+        self.installed.add(package)
+        if package == "cloudflared":
+            # The package's postinst links /usr/bin/cloudflared here.
+            path = os.path.join(self.root, "usr/local/bin/cloudflared")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write("#!/bin/sh\n")
+            os.chmod(path, 0o755)
+        return completed(argv)
 
     def _mountpoint(self, argv, _input):
         return completed(argv, 0 if self.mounted else 1)
@@ -191,14 +240,29 @@ def make_release(version: str, luxd_body: str | None = None) -> dict:
 
 @dataclasses.dataclass
 class FakeWeb:
-    """urlopen: releases under BASE_URL/<version>/, and luxd's /health."""
+    """urlopen: releases under BASE_URL/<version>/, luxd's /health, the
+    PGDG signing key and the cloudflared .deb."""
     sh: FakeSh
     releases: dict = dataclasses.field(default_factory=dict)
     fetched: list = dataclasses.field(default_factory=list)
 
     BASE_URL = "https://releases.example.com/lux"
+    PGDG_KEY = b"-----BEGIN PGP PUBLIC KEY BLOCK-----\npgdg\n-----END PGP PUBLIC KEY BLOCK-----\n"
+    CLOUDFLARED_DEB = b"!<arch>\ncloudflared"
+    # The PGDG key and the cloudflared .deb, apart from the releases.
+    package_fetched: list = dataclasses.field(default_factory=list)
+    # URLs answering 503 instead.
+    failing: set = dataclasses.field(default_factory=set)
 
     def __call__(self, url, timeout=None):
+        if url in self.failing:
+            raise urllib.error.HTTPError(url, 503, "Service Unavailable", {}, None)
+        if url == "https://www.postgresql.org/media/keys/ACCC4CF8.asc":
+            self.package_fetched.append(url)
+            return FakeResponse(self.PGDG_KEY)
+        if url == f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{self.sh.arch}.deb":
+            self.package_fetched.append(url)
+            return FakeResponse(self.CLOUDFLARED_DEB)
         if url.endswith("/health"):
             if "luxd" in self.sh.active:
                 return FakeResponse(b'{"status":"ok"}')

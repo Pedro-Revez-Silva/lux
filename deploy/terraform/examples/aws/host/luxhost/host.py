@@ -30,6 +30,8 @@ class Paths:
     cloudflared_dir: str = "/etc/cloudflared"
     pg_mount: str = "/var/lib/postgresql/18"
     dev_by_id: str = "/dev/disk/by-id"
+    pgdg_key_dir: str = "/usr/share/postgresql-common/pgdg"
+    apt_sources_dir: str = "/etc/apt/sources.list.d"
 
     @classmethod
     def under(cls, root: str) -> "Paths":

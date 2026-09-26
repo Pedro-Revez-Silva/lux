@@ -3,7 +3,8 @@
 The control host runs `reconcile.py` from its checkout of this repo
 (`/var/lib/lux/config`) every 5 minutes, as `lux-reconcile.service`
 triggered by `lux-reconcile.timer`. Python 3.13 standard library only; it
-shells out to `git`, `aws`, `systemctl` and the Postgres tools.
+shells out to `git`, `aws`, `systemctl`, `apt-get`/`dpkg` and the Postgres
+tools.
 
 ## What a run does
 
@@ -16,18 +17,25 @@ shells out to `git`, `aws`, `systemctl` and the Postgres tools.
    `lux-host.toml` changed, it re-executes the new `reconcile.py` once.
 3. Validates `lux-host.toml`. A bad file fails the run here, before
    anything on the host is touched.
-4. Postgres: waits up to 300s for the data volume, formats it only if it
+4. Packages: installs Postgres 18 (PGDG apt repo; `dpkg -s postgresql-18`)
+   and cloudflared (the GitHub release `.deb` for `dpkg
+   --print-architecture`; present when `/usr/local/bin/cloudflared`, the
+   link its postinst makes to `/usr/bin/cloudflared`, exists) if missing.
+   apt-get waits up to 300s for the dpkg and lists locks (cloud-init's own
+   apt run). Once both are installed this runs no apt command; a failed
+   install fails the run (`packages:`) and the next run retries.
+5. Postgres: waits up to 300s for the data volume, formats it only if it
    has no filesystem, mounts it at `/var/lib/postgresql/18` and runs the
    cluster from it: the volume's own cluster if it holds one (a replaced
    host), else a new one (skipped once mounted with a cluster); generates
    the owner and
    `lux_app` passwords once (`/root/.lux-*`, 0600), sets the owner's
    password, creates the database.
-5. Writes the systemd units (luxd, cloudflared, the backup timer, its own
+6. Writes the systemd units (luxd, cloudflared, the backup timer, its own
    timer/service, the Postgres mount drop-in) and runs `daemon-reload`
    only if one changed.
-6. Renders `/etc/lux/luxd.toml` (0600, atomic).
-7. If `lux_version` differs from the installed version: downloads the
+7. Renders `/etc/lux/luxd.toml` (0600, atomic).
+8. If `lux_version` differs from the installed version: downloads the
    release, verifies it against `SHA256SUMS`, runs `luxd migrate` with
    the new binary, switches the symlinks, restarts luxd and waits ~30s for
    `/health`; on failure restores the previous binaries and restarts luxd.
@@ -36,7 +44,7 @@ shells out to `git`, `aws`, `systemctl` and the Postgres tools.
    With a version installed, every run also enables and starts a stopped
    luxd (`systemctl enable --now`, never a restart), so to keep luxd
    stopped, disable `lux-reconcile.timer` first.
-8. Writes the cloudflared token from SSM and (re)starts cloudflared only
+9. Writes the cloudflared token from SSM and (re)starts cloudflared only
    if it or its unit changed.
 
 A second run with nothing changed changes nothing.

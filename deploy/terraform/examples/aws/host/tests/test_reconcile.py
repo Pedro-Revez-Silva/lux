@@ -561,3 +561,113 @@ def test_cluster_left_stopped_by_an_interrupted_run_is_chowned_and_started(env, 
     assert env.run() == 0
     assert summary(capsys).endswith("changed=[]")
     assert env.sh.commands("chown") == [] and start not in env.sh.calls
+
+
+PG_INSTALL = ["apt-get", "-o", "DPkg::Lock::Timeout=300", "install", "-y", "postgresql-18"]
+CLOUDFLARED_DEB_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{}.deb"
+
+
+def installs(env):
+    return [c for c in env.sh.commands("apt-get") if "install" in c]
+
+
+def changed_entries(line):
+    return line.split("changed=[", 1)[1].split("]", 1)[0].split(",")
+
+
+def test_first_run_installs_postgres_and_cloudflared_before_the_postgres_step(env, capsys):
+    assert env.run() == 0
+    changed = changed_entries(summary(capsys))
+    assert "install:postgresql-18" in changed and "install:cloudflared" in changed
+    assert read(env, "usr/share/postgresql-common/pgdg/apt.postgresql.org.asc") == FakeWeb.PGDG_KEY.decode()
+    assert read(env, "etc/apt/sources.list.d/pgdg.list") == (
+        "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] "
+        "https://apt.postgresql.org/pub/repos/apt trixie-pgdg main\n"
+    )
+    calls = env.sh.calls
+    update = ["apt-get", "-o", "DPkg::Lock::Timeout=300", "update"]
+    assert calls.index(update) < calls.index(PG_INSTALL) < calls.index(["systemctl", "enable", "postgresql"])
+    # The package (and its default cluster) exists before the volume step.
+    assert calls.index(["systemctl", "enable", "postgresql"]) < calls.index(next(c for c in calls if c[0] == "mountpoint"))
+    assert env.web.package_fetched[-1] == CLOUDFLARED_DEB_URL.format("arm64")
+    assert os.access(env.path("usr/local/bin/cloudflared"), os.X_OK)
+    assert {"postgresql-18", "cloudflared"} <= env.sh.installed
+
+
+def test_cloudflared_deb_follows_the_host_architecture(env, capsys):
+    env.sh.arch = "amd64"
+    assert env.run() == 0, summary(capsys)
+    assert env.web.package_fetched[-1] == CLOUDFLARED_DEB_URL.format("amd64")
+
+
+def test_second_run_runs_no_install_command(env, capsys):
+    assert env.run() == 0
+    capsys.readouterr()
+    env.sh.calls.clear()
+    env.web.package_fetched.clear()
+    assert env.run() == 0
+    assert "install:" not in summary(capsys)
+    assert env.sh.commands("apt-get") == []
+    assert [c for c in env.sh.commands("dpkg") if c[1] != "-s"] == []
+    assert env.web.package_fetched == []
+    assert ["systemctl", "enable", "postgresql"] not in env.sh.calls
+
+
+def test_nothing_is_installed_when_already_present(env, capsys):
+    env.sh.installed.add("postgresql-18")
+    path = env.path("usr/local/bin/cloudflared")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write("#!/bin/sh\n")
+    os.chmod(path, 0o755)
+    assert env.run() == 0
+    assert "install:" not in summary(capsys)
+    assert env.sh.commands("apt-get") == []
+    assert env.web.package_fetched == []
+    assert not os.path.exists(env.path("etc/apt/sources.list.d/pgdg.list"))
+
+
+@pytest.mark.parametrize("failing, entry", [
+    ("postgresql-18", "install:postgresql-18"),
+    ("update", "install:postgresql-18"),
+    ("cloudflared", "install:cloudflared"),
+])
+def test_failed_install_fails_the_run_and_the_next_run_retries(env, capsys, failing, entry):
+    env.sh.apt_fail.add(failing)
+    assert env.run() == 1
+    line = summary(capsys)
+    assert line.startswith("lux-reconcile: status=error") and "error='packages: " in line
+    assert entry not in changed_entries(line)
+    # Nothing past the packages step ran.
+    assert env.sh.commands("mountpoint") == []
+
+    env.sh.apt_fail.clear()
+    env.sh.calls.clear()
+    assert env.run() == 0
+    assert entry in changed_entries(summary(capsys))
+
+
+def test_failed_cloudflared_download_fails_the_run_and_the_next_run_retries(env, capsys):
+    env.web.failing.add(CLOUDFLARED_DEB_URL.format("arm64"))
+    assert env.run() == 1
+    line = summary(capsys)
+    assert "error='packages: cloudflared download failed" in line
+    assert not [c for c in installs(env) if c[-1].endswith(".deb")]
+
+    env.web.failing.clear()
+    assert env.run() == 0
+    assert "install:cloudflared" in changed_entries(summary(capsys))
+
+
+def test_apt_update_waits_for_the_lists_lock(env, capsys):
+    env.sh.apt_lists_locked = 3
+    assert env.run() == 0, summary(capsys)
+    updates = [c for c in env.sh.commands("apt-get") if c[-1] == "update"]
+    assert len(updates) == 4
+
+
+def test_apt_update_gives_up_on_a_lock_held_past_the_timeout(env, capsys):
+    env.sh.apt_lists_locked = 1000
+    assert env.run() == 1
+    assert "error='packages: apt-get update: exit 100" in summary(capsys)
+    assert installs(env) == []

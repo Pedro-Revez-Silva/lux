@@ -5,7 +5,7 @@ import os
 import sys
 
 from . import desired as desired_mod
-from . import gitsync, luxdconf, postgres, release, units
+from . import gitsync, luxdconf, packages, postgres, release, units
 from .host import Host, HostError, read_file, write_if_changed
 from .infra import Bootstrap, get_secure_parameter, load_bootstrap, load_infra
 
@@ -77,6 +77,10 @@ class Run:
                 os.remove(f)
         self.host.run(["systemctl", "daemon-reload"])
         self.changed.append("legacy-removed")
+
+    def packages(self) -> None:
+        self.step = "packages"
+        self.changed += packages.ensure(self.host)
 
     def postgres(self, infra: dict) -> dict:
         self.step = "postgres"
@@ -157,6 +161,7 @@ class Run:
         self.sync_checkout(infra)
         want = self.load_desired()
         self.remove_legacy()
+        self.packages()
         creds = self.postgres(infra)
         restart = self.write_units(infra)
         installed = self.luxd(infra, want, creds, restart)
