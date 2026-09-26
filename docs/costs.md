@@ -666,7 +666,8 @@ Why a table and not the events:
 - Events have no "last seen" and cannot be updated (the app role has no
   `UPDATE` on `run_events`).
 
-**Built** (migration `017_run_sessions.sql`, `recordSession` in
+**Built** (migrations `017_run_sessions.sql` and
+`020_run_sessions_backfill.sql`, `recordSession` in
 `internal/server/lifecycle.go`). It is written in the same two places that
 write `runs.session_id`: `applyAdapterEvent` (with the placement's epoch)
 and `applySnapshotDone` (the manifest's `sessionId`, at the snapshot's
@@ -674,8 +675,8 @@ epoch, including a late snapshot of an older epoch, which no longer
 changes `runs.session_id`). Each upserts `(run_id, epoch, session_id)` and
 sets `last_seen = now()` on a repeat. Session events arrive when an
 adapter learns an id, not with heartbeats, so this is not a per-heartbeat
-write. The migration **backfills** it
-from `run_events` (`type = 'session'`), from
+write. Migration 020, a transaction of its own after the table exists,
+**backfills** it from `run_events` (`type = 'session'`), from
 `snapshots.manifest->>'sessionId'` (first/last seen: the earliest and
 latest of those rows), and from `runs.session_id` at `current_epoch` when
 neither of those has the id for the Run (last seen: `runs.updated_at`).
