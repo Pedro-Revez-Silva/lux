@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import itertools
 import os
 import subprocess
 import sys
@@ -21,20 +20,16 @@ OTHER = "versity/versitygw:v1.6.0"
 
 
 class FakeDocker:
-    """Containers by name; each start gets a new id, so a reused container
-    is told apart from a replaced one by what is running afterwards."""
-
-    _ids = itertools.count(1)
+    """Containers by name; state identity distinguishes reuse from replacement."""
 
     def __init__(self):
-        self.containers: dict[str, tuple[ContainerState, int]] = {}
+        self.containers: dict[str, ContainerState] = {}
 
     def add(self, name: str, state: ContainerState) -> None:
-        self.containers[name] = (state, next(self._ids))
+        self.containers[name] = state
 
     def inspect(self, name: str) -> ContainerState | None:
-        entry = self.containers.get(name)
-        return entry[0] if entry else None
+        return self.containers.get(name)
 
     def remove(self, name: str) -> None:
         self.containers.pop(name, None)
@@ -53,11 +48,6 @@ class FakeDocker:
             raise RuntimeError(f"docker run failed (125): Conflict. The container name \"/{name}\" is already in use")
         host_port = int(opts["-p"][0].rsplit(":", 2)[1])
         self.add(name, ContainerState(True, rest[0], host_port))
-
-    def id_of(self, name: str) -> int | None:
-        entry = self.containers.get(name)
-        return entry[1] if entry else None
-
 
 def running(image: str, port: int) -> ContainerState:
     return ContainerState(running=True, image=image, host_port=port)
@@ -79,34 +69,31 @@ def test_stopped_container_is_replaced_with_selected_image():
 def test_matching_running_container_is_reused():
     docker = FakeDocker()
     docker.add(S3_CONTAINER, running(DEFAULT, 59000))
-    before = docker.id_of(S3_CONTAINER)
+    before = docker.inspect(S3_CONTAINER)
     ensure_s3(docker, DEFAULT, 59000)
-    assert docker.id_of(S3_CONTAINER) == before
-    assert docker.inspect(S3_CONTAINER) == running(DEFAULT, 59000)
+    assert docker.inspect(S3_CONTAINER) is before
 
 
 def test_running_container_with_other_image_is_an_error_and_kept():
     docker = FakeDocker()
     docker.add(S3_CONTAINER, running(DEFAULT, 59000))
-    before = docker.id_of(S3_CONTAINER)
+    before = docker.inspect(S3_CONTAINER)
     with pytest.raises(SharedServiceError) as e:
         ensure_s3(docker, OTHER, 59000)
     msg = str(e.value)
     assert DEFAULT in msg and OTHER in msg and "LUX_TEST_S3_IMAGE" in msg
-    assert docker.id_of(S3_CONTAINER) == before
-    assert docker.inspect(S3_CONTAINER) == running(DEFAULT, 59000)
+    assert docker.inspect(S3_CONTAINER) is before
 
 
 def test_running_container_on_other_port_is_an_error_and_kept():
     docker = FakeDocker()
     docker.add(S3_CONTAINER, running(DEFAULT, 59000))
-    before = docker.id_of(S3_CONTAINER)
+    before = docker.inspect(S3_CONTAINER)
     with pytest.raises(SharedServiceError) as e:
         ensure_s3(docker, DEFAULT, 59201)
     msg = str(e.value)
     assert "59000" in msg and "59201" in msg and "LUX_TEST_S3_PORT" in msg
-    assert docker.id_of(S3_CONTAINER) == before
-    assert docker.inspect(S3_CONTAINER) == running(DEFAULT, 59000)
+    assert docker.inspect(S3_CONTAINER) is before
 
 
 def test_host_port_taken_on_start_is_explained():
