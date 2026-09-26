@@ -84,11 +84,31 @@ func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason 
 	if err != nil {
 		return err
 	}
+	if costStates[state] {
+		if err := enqueueCost(ctx, tx, runID, "state:"+state); err != nil {
+			return err
+		}
+	}
 	data := map[string]any{"state": state}
 	if reason != "" {
 		data["reason"] = reason
 	}
 	return addEvent(ctx, tx, tenantID, runID, epoch, "state", data)
+}
+
+// costStates: a Run entering one of these has its costs evaluated at once
+// (docs/costs.md, section 5), queued with the state change itself.
+var costStates = map[string]bool{
+	StateStopping: true, StateStopped: true, StateLost: true,
+	StateSucceeded: true, StateFailed: true, StateCancelled: true,
+}
+
+// enqueueCost queues a Run's costs as due now, merged with any row it
+// already has, in the caller's transaction (a tenant's scope too:
+// lux_cost_enqueue, migration 022). Nothing is computed here.
+func enqueueCost(ctx context.Context, tx pgx.Tx, runID, reason string) error {
+	_, err := tx.Exec(ctx, `SELECT lux_cost_enqueue($1, $2)`, runID, reason)
+	return err
 }
 
 // applyStatus moves a Run forward from what its runner reports.
