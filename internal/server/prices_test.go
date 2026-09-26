@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -107,6 +108,30 @@ func touching(t *testing.T, s *Server, hostID string) int {
 
 func strp(s string) *string { return &s }
 
+// hostCost loads a host's compute input up to now (the database's clock)
+// and prices it.
+func hostCost(t *testing.T, s *Server, hostID string) computeResult {
+	t.Helper()
+	ctx := context.Background()
+	var in hostCompute
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var now time.Time
+		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+			return err
+		}
+		var err error
+		in, err = loadHostCompute(ctx, tx, hostID, now)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := computeCost(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
 // A static pool's default price is copied to a host when it registers and
 // opens its first period; changing the default reprices no existing host,
 // only the hosts registering after. A pool without a price leaves its
@@ -126,6 +151,10 @@ func TestStaticPoolDefaultPrice(t *testing.T) {
 	h1 := helloAs(t, s, "tok1", strp("t1"), "h1", 8, 32)
 	if got, want := periods(t, s, h1), []string{"0.4 USD 8 32 open"}; !slices.Equal(got, want) {
 		t.Errorf("h1 periods at registration: %v, want %v", got, want)
+	}
+	// Priced from its first hello: no part of its billed window is missing.
+	if res := hostCost(t, s, h1); len(res.Missing) != 0 {
+		t.Errorf("h1, priced since it registered, has missing ranges %v", res.Missing)
 	}
 
 	if code, body := call(t, s, keys["t1"], http.MethodPost, "/v1/pools", Pool{Name: "lab", Provider: "static", HourlyPrice: "0.5", Currency: "USD"}); code != http.StatusOK {
