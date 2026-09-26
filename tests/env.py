@@ -110,28 +110,20 @@ class DockerCLI:
         sh("docker", "run", *args)
 
 
-def s3_action(found: ContainerState | None, image: str, port: int) -> str:
-    """Returns "reuse" for a running S3_CONTAINER with this image and port,
-    "start" when none is running. A running one with another image or port
-    is never replaced, since it may serve another developer's run."""
-    if found is None or not found.running:
-        return "start"
-    mismatches = []
-    if found.image != image:
-        mismatches.append(f"it runs image {found.image}, this run wants {image} (LUX_TEST_S3_IMAGE)")
-    if found.host_port != port:
-        mismatches.append(f"it publishes host port {found.host_port}, this run wants {port} (LUX_TEST_S3_PORT)")
-    if mismatches:
-        raise SharedServiceError(
-            f"{S3_CONTAINER} is already running but {'; '.join(mismatches)}. "
-            f"If it is yours, stop it (docker rm -f {S3_CONTAINER}) and rerun; otherwise set "
-            f"LUX_TEST_S3_IMAGE={found.image} LUX_TEST_S3_PORT={found.host_port} to share it as it is."
-        )
-    return "reuse"
-
-
 def ensure_s3(docker, image: str, port: int) -> None:
-    if s3_action(docker.inspect(S3_CONTAINER), image, port) == "reuse":
+    found = docker.inspect(S3_CONTAINER)
+    if found is not None and found.running:
+        mismatches = []
+        if found.image != image:
+            mismatches.append(f"it runs image {found.image}, this run wants {image} (LUX_TEST_S3_IMAGE)")
+        if found.host_port != port:
+            mismatches.append(f"it publishes host port {found.host_port}, this run wants {port} (LUX_TEST_S3_PORT)")
+        if mismatches:
+            raise SharedServiceError(
+                f"{S3_CONTAINER} is already running but {'; '.join(mismatches)}. "
+                f"If it is yours, stop it (docker rm -f {S3_CONTAINER}) and rerun; otherwise set "
+                f"LUX_TEST_S3_IMAGE={found.image} LUX_TEST_S3_PORT={found.host_port} to share it as it is."
+            )
         return
     # A stopped S3_CONTAINER holds nothing; clear it so the name is free.
     docker.remove(S3_CONTAINER)
