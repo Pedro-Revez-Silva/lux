@@ -86,23 +86,21 @@ class Run:
         self.changed += changed
         return creds
 
-    def run(self) -> str:
-        host, boot = self.host, self.boot
-        self.step = "ssm"
-        infra = load_infra(host, boot)
-        self.sync_checkout(infra)
-        want = self.load_desired()
-        self.remove_legacy()
-        creds = self.postgres(infra)
-
+    def write_units(self, infra: dict) -> dict:
+        """Writes the units; returns which services need a restart for it."""
         self.step = "units"
-        changed_units = units.apply(host, units.render(host, boot.host_dir, infra, boot.region))
+        changed_units = units.apply(self.host, units.render(self.host, self.boot.host_dir, infra, self.boot.region))
         self.changed += [f"unit:{u}" for u in changed_units]
-        restart = {"luxd": "luxd.service" in changed_units, "cloudflared": "cloudflared.service" in changed_units}
+        return {"luxd": "luxd.service" in changed_units, "cloudflared": "cloudflared.service" in changed_units}
 
+    def luxd(self, infra: dict, want: desired_mod.Desired, creds: dict, restart: dict) -> str:
+        """luxd.toml, the version switch and the luxd restart. Returns the
+        installed version ("" if none). A failed switch is kept in
+        self.deferred_error so the remaining steps still run."""
+        host = self.host
         self.step = "luxd.toml"
         ip = self.environ.get("LUX_RUNNER_IP") or luxdconf.primary_ip()
-        toml = luxdconf.render(infra, boot.region, want, creds, ip, host.paths.runner_bin_dir)
+        toml = luxdconf.render(infra, self.boot.region, want, creds, ip, host.paths.runner_bin_dir)
         installed = release.installed_version(host.paths.install_root)
         deploying = want.lux_version is not None and want.lux_version != installed
         if luxdconf.write(host, toml):
@@ -127,16 +125,20 @@ class Run:
             if restart["luxd"] and installed and host.ok(["systemctl", "is-active", "--quiet", "luxd"]):
                 host.run(["systemctl", "restart", "luxd"])
                 self.changed.append("luxd-restarted")
+        return installed
 
+    def enable(self, installed: str) -> None:
         self.step = "enable"
-        if installed and units.enable_now(host, "luxd.service"):
+        if installed and units.enable_now(self.host, "luxd.service"):
             self.changed.append("enable:luxd")
         for timer in units.TIMERS:
-            if units.enable_now(host, timer):
+            if units.enable_now(self.host, timer):
                 self.changed.append(f"enable:{timer}")
 
+    def cloudflared(self, infra: dict, restart: dict) -> None:
+        host = self.host
         self.step = "cloudflared"
-        token = get_secure_parameter(host, infra["tunnel_token_parameter"], boot.region)
+        token = get_secure_parameter(host, infra["tunnel_token_parameter"], self.boot.region)
         if not token.strip():
             raise HostError(f"{infra['tunnel_token_parameter']} is empty")
         token_file = os.path.join(host.paths.cloudflared_dir, "token")
@@ -148,6 +150,18 @@ class Run:
         elif restart["cloudflared"]:
             host.run(["systemctl", "restart", "cloudflared"])
             self.changed.append("cloudflared-restarted")
+
+    def run(self) -> str:
+        self.step = "ssm"
+        infra = load_infra(self.host, self.boot)
+        self.sync_checkout(infra)
+        want = self.load_desired()
+        self.remove_legacy()
+        creds = self.postgres(infra)
+        restart = self.write_units(infra)
+        installed = self.luxd(infra, want, creds, restart)
+        self.enable(installed)
+        self.cloudflared(infra, restart)
         if self.deferred_error:
             self.step = "version"
             raise self.deferred_error
