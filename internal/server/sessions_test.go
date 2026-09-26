@@ -22,9 +22,11 @@ func runSessions(t *testing.T, s *Server, ctx context.Context, runID string) []s
 	t.Helper()
 	var out []sessionRow
 	err := s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
-		rows, _ := tx.Query(ctx, `SELECT epoch, session_id, first_seen, last_seen FROM run_sessions
+		rows, err := tx.Query(ctx, `SELECT epoch, session_id, first_seen, last_seen FROM run_sessions
 			WHERE run_id = $1 ORDER BY epoch, first_seen`, runID)
-		var err error
+		if err != nil {
+			return err
+		}
 		out, err = pgx.CollectRows(rows, pgx.RowToStructByPos[sessionRow])
 		return err
 	})

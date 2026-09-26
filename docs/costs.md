@@ -88,8 +88,11 @@ The parts this design builds on:
 - The instance's real launch and termination times at the provider.
   lux has its own `provision_requested_at` and `terminated_at`, which are
   close but not exact.
-- Any price and any money column. (The per-run list of every session is
-  built: `run_sessions`, section 6.)
+- Any price, and the money tables beyond the lines themselves:
+  `host_rates`, `price_cache`, `cost_pending`, `cost_ticks` and
+  `cost_hourly` do not exist, and nothing
+  writes a cost line yet. (Built: `cost_lines.amount` and `cost_sources`,
+  section 1; the per-run list of every session, `run_sessions`, section 6.)
 
 ## 1. The cost line
 
