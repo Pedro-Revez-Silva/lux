@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"math"
 	"net/http"
@@ -84,6 +85,68 @@ func TestSampleControlHost(t *testing.T) {
 		if len(x.paths) != 1 || x.paths[0] != "/" || x.total <= 0 || x.used <= 0 || x.used+x.free > x.total {
 			t.Fatalf("disks: %+v", x)
 		}
+	}
+}
+
+// When the Postgres size probe fails, the tick still writes its samples,
+// without the two Postgres fields; the failure is logged once, and so is
+// the recovery.
+func TestSampleControlPostgresProbeFails(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	var logs bytes.Buffer
+	s.log = slog.New(slog.NewTextHandler(&logs, nil))
+	s.cfg.DiskPaths = []string{"/"}
+	fail := true
+	s.readPostgres = func(ctx context.Context) (int64, int, error) {
+		if fail {
+			return 0, 0, errors.New("probe timed out")
+		}
+		return s.postgresFigures(ctx)
+	}
+	for i := range 4 {
+		fail = i < 2
+		if err := s.sampleSystem(ctx); err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+	}
+	type row struct {
+		cpus  *int
+		db    *int64
+		conns *int
+	}
+	var rows []row
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		r, err := tx.Query(ctx, `SELECT cpus, db_bytes, db_connections FROM control_samples WHERE res = 0 ORDER BY at`)
+		if err != nil {
+			return err
+		}
+		var x row
+		_, err = pgx.ForEachRow(r, []any{&x.cpus, &x.db, &x.conns}, func() error {
+			rows = append(rows, x)
+			return nil
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 4 {
+		t.Fatalf("want 4 control samples, got %d", len(rows))
+	}
+	for i, x := range rows {
+		if x.cpus == nil {
+			t.Errorf("tick %d: host figures missing", i)
+		}
+		if failed := i < 2; failed != (x.db == nil) || failed != (x.conns == nil) {
+			t.Errorf("tick %d: db %v conns %v", i, x.db, x.conns)
+		}
+	}
+	if n := strings.Count(logs.String(), "postgres size and connections skipped"); n != 1 {
+		t.Errorf("want one failure line, got %d:\n%s", n, logs.String())
+	}
+	if n := strings.Count(logs.String(), "postgres size and connections readable again"); n != 1 {
+		t.Errorf("want one recovery line, got %d:\n%s", n, logs.String())
 	}
 }
 

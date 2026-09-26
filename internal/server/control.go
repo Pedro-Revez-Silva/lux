@@ -27,6 +27,8 @@ type controlHost struct {
 	cpus       *int
 	memUsed    *int64
 	memTotal   *int64
+	dbBytes    *int64
+	dbConns    *int
 	disks      []controlDisk
 }
 
@@ -44,11 +46,22 @@ func hostname() string {
 	return "luxd"
 }
 
-// readControlHost reads CPU, memory and every tracked path's filesystem. A
-// path that cannot be read is skipped, and logged when it starts and stops
-// failing rather than on every tick.
-func (s *Server) readControlHost() controlHost {
+// readControlHost reads CPU, memory, every tracked path's filesystem and
+// the Postgres figures, all before the sampling transaction so a slow read
+// never holds it. What cannot be read is left out, and logged when it
+// starts and stops failing rather than on every tick.
+func (s *Server) readControlHost(ctx context.Context) controlHost {
 	var c controlHost
+	if b, n, err := s.readPostgres(ctx); err != nil {
+		if !s.pgFailing.Swap(true) {
+			s.log.Warn("history: postgres size and connections skipped", "err", err)
+		}
+	} else {
+		if s.pgFailing.Swap(false) {
+			s.log.Info("history: postgres size and connections readable again")
+		}
+		c.dbBytes, c.dbConns = &b, &n
+	}
 	if cpu, err := hoststat.ReadCPU(); err == nil {
 		c.cpuSeconds, c.cpus = &cpu.Seconds, &cpu.Cores
 	}
@@ -75,14 +88,20 @@ func (s *Server) readControlHost() controlHost {
 	return c
 }
 
+// postgresFigures is lux's database size and its connected backends, read
+// with SQL so a Postgres on another machine works too.
+func (s *Server) postgresFigures(ctx context.Context) (size int64, conns int, err error) {
+	err = s.db.Pool.QueryRow(ctx, `SELECT pg_database_size(current_database()),
+		(SELECT count(*) FROM pg_stat_activity WHERE datname = current_database())`).Scan(&size, &conns)
+	return size, conns, err
+}
+
 // sampleControl writes one control sample in the system sample's
-// transaction, so both carry the same `at`. Database size and connections
-// come from Postgres itself, which may be on another machine.
+// transaction, so both carry the same `at`.
 func sampleControl(ctx context.Context, tx pgx.Tx, instance string, c controlHost) error {
 	if _, err := tx.Exec(ctx, `INSERT INTO control_samples (instance, res, at, cpu_seconds, cpus, mem_bytes, mem_total, db_bytes, db_connections)
-		SELECT $1, 0, now(), $2, $3, $4, $5, pg_database_size(current_database()),
-			(SELECT count(*) FROM pg_stat_activity WHERE datname = current_database())
-		ON CONFLICT DO NOTHING`, instance, c.cpuSeconds, c.cpus, c.memUsed, c.memTotal); err != nil {
+		VALUES ($1, 0, now(), $2, $3, $4, $5, $6, $7)
+		ON CONFLICT DO NOTHING`, instance, c.cpuSeconds, c.cpus, c.memUsed, c.memTotal, c.dbBytes, c.dbConns); err != nil {
 		return fmt.Errorf("control sample: %w", err)
 	}
 	if len(c.disks) == 0 {
