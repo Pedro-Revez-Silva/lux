@@ -80,7 +80,12 @@ class Run:
 
     def packages(self) -> None:
         self.step = "packages"
-        self.changed += packages.ensure(self.host)
+        # Recorded one at a time: a failed cloudflared install must not
+        # hide the Postgres install that succeeded before it.
+        if packages.ensure_postgres(self.host):
+            self.changed.append(f"install:{packages.PG_PACKAGE}")
+        if packages.ensure_cloudflared(self.host):
+            self.changed.append("install:cloudflared")
 
     def postgres(self, infra: dict) -> dict:
         self.step = "postgres"

@@ -90,13 +90,3 @@ def ensure_cloudflared(host: Host) -> bool:
     if not cloudflared_present(host):
         raise HostError(f"cloudflared installed but {host.paths.bin_dir}/cloudflared is missing")
     return True
-
-
-def ensure(host: Host) -> list:
-    """Installs what is missing; returns the changed entries."""
-    changed = []
-    if ensure_postgres(host):
-        changed.append(f"install:{PG_PACKAGE}")
-    if ensure_cloudflared(host):
-        changed.append("install:cloudflared")
-    return changed

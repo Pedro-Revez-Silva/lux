@@ -659,6 +659,28 @@ def test_failed_cloudflared_download_fails_the_run_and_the_next_run_retries(env,
     assert "install:cloudflared" in changed_entries(summary(capsys))
 
 
+@pytest.mark.parametrize("failure", ["download", "install"])
+def test_postgres_installed_before_a_failed_cloudflared_install_is_reported(env, capsys, failure):
+    if failure == "download":
+        env.web.failing.add(CLOUDFLARED_DEB_URL.format("arm64"))
+    else:
+        env.sh.apt_fail.add("cloudflared")
+    assert env.run() == 1
+    line = summary(capsys)
+    assert "error='packages: " in line
+    assert changed_entries(line) == ["install:postgresql-18"]
+
+    env.web.failing.clear()
+    env.sh.apt_fail.clear()
+    env.sh.calls.clear()
+    env.web.package_fetched.clear()
+    assert env.run() == 0
+    changed = changed_entries(summary(capsys))
+    assert "install:cloudflared" in changed and "install:postgresql-18" not in changed
+    assert env.web.package_fetched == [CLOUDFLARED_DEB_URL.format("arm64")]
+    assert [c[-1] for c in installs(env)] != [] and all(c[-1].endswith(".deb") for c in installs(env))
+
+
 def test_apt_update_waits_for_the_lists_lock(env, capsys):
     env.sh.apt_lists_locked = 3
     assert env.run() == 0, summary(capsys)
