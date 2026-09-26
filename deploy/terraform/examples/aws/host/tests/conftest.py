@@ -168,12 +168,6 @@ class FakeResponse(io.BytesIO):
         super().__init__(body)
         self.status = status
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        self.close()
-
 
 def make_release(version: str, luxd_body: str | None = None) -> dict:
     """A release as urlopen would serve it: {filename: bytes}."""
