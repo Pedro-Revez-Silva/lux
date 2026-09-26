@@ -270,11 +270,12 @@ func TestRollupControl(t *testing.T) {
 					VALUES ($1, 0, $2, $3, 4, $4, 1000, $5, $6)`, inst, hour.Add(at), base+float64(i*10), int64(100*(i+1)), int64(10*(i+1)), i+1); err != nil {
 					return err
 				}
-				for _, p := range []string{"/", "/data"} {
-					if _, err := tx.Exec(ctx, `INSERT INTO control_disk_samples (instance, path, res, at, used_bytes, free_bytes, total_bytes)
-						VALUES ($1, $2, 0, $3, $4, $5, 1000)`, inst, p, hour.Add(at), int64(100*(i+1)), int64(900-100*(i+1))); err != nil {
-						return err
-					}
+				// /data's total grows, so its maximum differs from its mean.
+				n := int64(i + 1)
+				if _, err := tx.Exec(ctx, `INSERT INTO control_disk_samples (instance, path, res, at, used_bytes, free_bytes, total_bytes)
+					VALUES ($1, '/', 0, $2, $3, $4, 1000), ($1, '/data', 0, $2, $5, $6, $7)`,
+					inst, hour.Add(at), 100*n, 900-100*n, 5000+10*n, 4000-10*n, 9000+n); err != nil {
+					return err
 				}
 			}
 		}
@@ -289,27 +290,43 @@ func TestRollupControl(t *testing.T) {
 		}
 	}
 	type row struct {
+		instance      string
+		res           int
+		at            time.Time
+		cpu           float64
+		cpus, conns   int
+		mem, memT, db int64
+	}
+	type diskRow struct {
 		instance          string
 		res               int
-		cpu               float64
-		cpus, conns       int
-		mem, memT, db     int64
+		at                time.Time
+		path              string
 		used, free, total int64
-		disks             int
 	}
 	var got []row
+	var gotDisks []diskRow
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		r, err := tx.Query(ctx, `SELECT c.instance, c.res, c.cpu_seconds, c.cpus, c.db_connections, c.mem_bytes, c.mem_total, c.db_bytes,
-				d.used_bytes, d.free_bytes, d.total_bytes,
-				(SELECT count(*) FROM control_disk_samples x WHERE x.instance = c.instance AND x.res = c.res AND x.at = c.at)
-			FROM control_samples c JOIN control_disk_samples d ON d.instance = c.instance AND d.res = c.res AND d.at = c.at AND d.path = '/data'
-			WHERE c.res > 0 ORDER BY c.instance, c.res, c.at`)
+		r, err := tx.Query(ctx, `SELECT instance, res, at, cpu_seconds, cpus, db_connections, mem_bytes, mem_total, db_bytes
+			FROM control_samples WHERE res > 0 ORDER BY instance, res, at`)
 		if err != nil {
 			return err
 		}
 		var x row
-		_, err = pgx.ForEachRow(r, []any{&x.instance, &x.res, &x.cpu, &x.cpus, &x.conns, &x.mem, &x.memT, &x.db, &x.used, &x.free, &x.total, &x.disks}, func() error {
+		if _, err = pgx.ForEachRow(r, []any{&x.instance, &x.res, &x.at, &x.cpu, &x.cpus, &x.conns, &x.mem, &x.memT, &x.db}, func() error {
 			got = append(got, x)
+			return nil
+		}); err != nil {
+			return err
+		}
+		r, err = tx.Query(ctx, `SELECT instance, res, at, path, used_bytes, free_bytes, total_bytes
+			FROM control_disk_samples WHERE res > 0 ORDER BY instance, res, at, path`)
+		if err != nil {
+			return err
+		}
+		var d diskRow
+		_, err = pgx.ForEachRow(r, []any{&d.instance, &d.res, &d.at, &d.path, &d.used, &d.free, &d.total}, func() error {
+			gotDisks = append(gotDisks, d)
 			return nil
 		})
 		return err
@@ -317,21 +334,28 @@ func TestRollupControl(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	m1 := hour.Add(time.Minute)
 	want := []row{
-		{"a", 60, 10, 4, 2, 150, 1000, 15, 150, 750, 1000, 2}, // round(1.5) = 2
-		{"a", 60, 30, 4, 4, 350, 1000, 35, 350, 550, 1000, 2}, // round(3.5) = 4
-		{"a", 3600, 30, 4, 3, 250, 1000, 25, 250, 650, 1000, 2},
-		{"b", 60, 100010, 4, 2, 150, 1000, 15, 150, 750, 1000, 2},
-		{"b", 60, 100030, 4, 4, 350, 1000, 35, 350, 550, 1000, 2},
-		{"b", 3600, 100030, 4, 3, 250, 1000, 25, 250, 650, 1000, 2},
+		{"a", 60, hour, 10, 4, 2, 150, 1000, 15}, // round(1.5) = 2
+		{"a", 60, m1, 30, 4, 4, 350, 1000, 35},   // round(3.5) = 4
+		{"a", 3600, hour, 30, 4, 3, 250, 1000, 25},
+		{"b", 60, hour, 100010, 4, 2, 150, 1000, 15},
+		{"b", 60, m1, 100030, 4, 4, 350, 1000, 35},
+		{"b", 3600, hour, 100030, 4, 3, 250, 1000, 25},
 	}
-	if len(got) != len(want) {
-		t.Fatalf("rollups:\n got %+v\nwant %+v", got, want)
+	var wantDisks []diskRow
+	for _, inst := range []string{"a", "b"} {
+		wantDisks = append(wantDisks,
+			diskRow{inst, 60, hour, "/", 150, 750, 1000}, diskRow{inst, 60, hour, "/data", 5015, 3985, 9002},
+			diskRow{inst, 60, m1, "/", 350, 550, 1000}, diskRow{inst, 60, m1, "/data", 5035, 3965, 9004},
+			diskRow{inst, 3600, hour, "/", 250, 650, 1000}, diskRow{inst, 3600, hour, "/data", 5025, 3975, 9004})
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("rollup %d:\n got %+v\nwant %+v", i, got[i], want[i])
-		}
+	// Timestamps are compared as instants: the driver's carry a location.
+	if !slices.EqualFunc(got, want, func(a, b row) bool { a.at, b.at = a.at.UTC(), b.at.UTC(); return a == b }) {
+		t.Errorf("rollups:\n got %+v\nwant %+v", got, want)
+	}
+	if !slices.EqualFunc(gotDisks, wantDisks, func(a, b diskRow) bool { a.at, b.at = a.at.UTC(), b.at.UTC(); return a == b }) {
+		t.Errorf("disk rollups:\n got %+v\nwant %+v", gotDisks, wantDisks)
 	}
 }
 
