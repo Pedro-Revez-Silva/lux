@@ -655,18 +655,26 @@ func TestLoadHostComputeWindow(t *testing.T) {
 	checkPieces(t, in, res)
 }
 
-// Many sequential placements beside a long one: the sweep keeps this
-// linear (the time is logged; see TestComputeCost for the formula).
-func TestComputeCostManyPlacements(t *testing.T) {
-	const n = 8000
+// manyPlacements is n sequential 30 s placements (1 CPU, 2 GiB) beside one
+// long one (2 CPU, 8 GiB) on the worked example's host at $0.40/h, for
+// n+1 minutes.
+func manyPlacements(n int) hostCompute {
 	base := at("00:00")
-	in := hostCompute{From: base, Now: base.Add((n + 1) * time.Minute), Rates: []ratePeriod{usdRate("00:00", "", "0.40")},
+	in := hostCompute{From: base, Now: base.Add(time.Duration(n+1) * time.Minute), Rates: []ratePeriod{usdRate("00:00", "", "0.40")},
 		Placements: []placementWindow{{ID: "long", RunID: "long", CPUs: 2, Memory: 8 * gib, From: base}}}
 	for i := range n {
 		from := base.Add(time.Duration(i)*time.Minute + 10*time.Second)
 		to := from.Add(30 * time.Second)
 		in.Placements = append(in.Placements, placementWindow{ID: fmt.Sprint(i), RunID: fmt.Sprint(i), CPUs: 1, Memory: 2 * gib, From: from, To: &to})
 	}
+	return in
+}
+
+// Correctness at scale: many sequential placements beside a long one (the
+// time is logged; BenchmarkComputeCost measures how it grows).
+func TestComputeCostManyPlacements(t *testing.T) {
+	const n = 8000
+	in := manyPlacements(n)
 	start := time.Now()
 	res, err := computeCost(in)
 	if err != nil {
@@ -686,4 +694,20 @@ func TestComputeCostManyPlacements(t *testing.T) {
 		t.Errorf("%d pieces, want %d", len(res.Pieces), 2*n+1)
 	}
 	checkPieces(t, in, res)
+}
+
+// How computeCost grows with the number of placements:
+// go test -run '^$' -bench ComputeCost ./internal/server. The sweep keeps
+// the time per placement roughly flat from one size to the next.
+func BenchmarkComputeCost(b *testing.B) {
+	for _, n := range []int{1000, 4000, 16000} {
+		in := manyPlacements(n)
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			for b.Loop() {
+				if _, err := computeCost(in); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }
