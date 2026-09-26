@@ -31,7 +31,7 @@ func costFixture(t *testing.T) (s *Server, keys map[string]string) {
 }
 
 // report stores one source's answer for a Run, as a producer will.
-func report(t *testing.T, s *Server, tenantID, runID, source string, lines ...CostLine) {
+func report(t *testing.T, s *Server, tenantID, runID, source string, lines ...costReport) {
 	t.Helper()
 	ctx := context.Background()
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -59,8 +59,8 @@ func getCost(t *testing.T, s *Server, key, runID string) (int, RunCost) {
 
 var t0 = time.Date(2026, 9, 26, 10, 0, 0, 0, time.UTC)
 
-func line(family, item, amount, currency string, final bool) CostLine {
-	return CostLine{Family: family, Item: item, Amount: amount, Currency: currency, From: t0, To: t0.Add(time.Hour), Final: final}
+func line(family, item, amount, currency string, final bool) costReport {
+	return costReport{Family: family, Item: item, Amount: amount, Currency: currency, From: t0, To: t0.Add(time.Hour), Final: final}
 }
 
 func totals(ts []CostTotal) string {
@@ -135,7 +135,7 @@ func TestRunCostReReportReplaces(t *testing.T) {
 
 	ctx := context.Background()
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return replaceCostLines(ctx, tx, "t1", "r1", "gw", []CostLine{line("ai", "m1", "1", "USD", false), line("ai", "m1", "2", "USD", false)})
+		return replaceCostLines(ctx, tx, "t1", "r1", "gw", []costReport{line("ai", "m1", "1", "USD", false), line("ai", "m1", "2", "USD", false)})
 	})
 	if err == nil {
 		t.Fatal("an answer with one item twice was accepted")
@@ -179,7 +179,7 @@ func TestRunCostTenantIsolation(t *testing.T) {
 		t.Errorf("t1 sees %d cost lines (%v), want 1", n, err)
 	}
 	err = s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
-		return replaceCostLines(ctx, tx, "t2", "r2", "evil", []CostLine{line("ai", "m", "1", "USD", false)})
+		return replaceCostLines(ctx, tx, "t2", "r2", "evil", []costReport{line("ai", "m", "1", "USD", false)})
 	})
 	if err == nil {
 		t.Error("t1 wrote a cost line for t2")

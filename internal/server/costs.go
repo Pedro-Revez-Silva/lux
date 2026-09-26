@@ -148,10 +148,23 @@ func costStatus(sources []CostSource, lines bool) string {
 // numeric(24, 9) holds without rounding.
 var costAmount = regexp.MustCompile(`^-?[0-9]{1,15}(\.[0-9]{1,9})?$`)
 
+// costReport is one line as a source reports it. The Run, the source and
+// the time reported come from the caller and the database, not the line.
+type costReport struct {
+	Family   string
+	Item     string
+	Amount   string
+	Currency string
+	From     time.Time
+	To       time.Time
+	Final    bool
+	Details  map[string]any
+}
+
 // replaceCostLines stores a source's latest answer for a Run: every earlier
 // line of that source for the Run goes, in the caller's transaction. An
 // answer naming one item twice is refused whole, never summed.
-func replaceCostLines(ctx context.Context, tx pgx.Tx, tenantID, runID, source string, lines []CostLine) error {
+func replaceCostLines(ctx context.Context, tx pgx.Tx, tenantID, runID, source string, lines []costReport) error {
 	seen := map[string]bool{}
 	for _, l := range lines {
 		if seen[l.Item] {
@@ -162,8 +175,8 @@ func replaceCostLines(ctx context.Context, tx pgx.Tx, tenantID, runID, source st
 			return fmt.Errorf("cost source %s: amount %q is not a decimal with up to 9 fractional digits", source, l.Amount)
 		}
 	}
-	// The delete and every insert in one round trip, in the caller's
-	// transaction: any failure there leaves the earlier lines.
+	// The delete and every insert in one round trip. A failed statement
+	// aborts the caller's transaction, so the earlier lines stay.
 	b := &pgx.Batch{}
 	b.Queue(`DELETE FROM cost_lines WHERE source = $1 AND run_id = $2`, source, runID)
 	for _, l := range lines {
