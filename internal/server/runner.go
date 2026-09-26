@@ -124,7 +124,8 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 			causes = slices.DeleteFunc(causes, func(c string) bool { return c == causeOutdated })
 		}
 		draining := len(causes) > 0
-		_, err = tx.Exec(ctx, `UPDATE hosts SET
+		var priced bool
+		err = tx.QueryRow(ctx, `UPDATE hosts SET
 				drain_causes = $9,
 				draining = $10,
 				state = CASE WHEN $10 THEN 'draining' ELSE 'ready' END,
@@ -136,15 +137,20 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 				registered_at = coalesce(registered_at, now()),
 				provisioned_at = coalesce(provisioned_at, now()),
 				last_heartbeat = now(), lost_at = NULL
-			WHERE id = $1`,
-			hostID, labels, h.Arch, h.Capacity, versions, caches, nonNil(h.LocalSnapshots), h.ProviderID, nonNil(causes), draining)
+			WHERE id = $1
+			RETURNING hourly_price IS NOT NULL
+				OR EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = $1 AND r.valid_to IS NULL AND r.source = 'static')`,
+			hostID, labels, h.Arch, h.Capacity, versions, caches, nonNil(h.LocalSnapshots), h.ProviderID, nonNil(causes), draining).Scan(&priced)
 		if err != nil {
 			return err
 		}
 		// A priced static host: a changed capacity opens a new rate period
-		// (its first, at registration, from the instant it registered).
-		if err := syncStaticRate(ctx, tx, hostID, registering); err != nil {
-			return err
+		// (its first, at registration, from the instant it registered). A
+		// host with no price and no static period has nothing to sync.
+		if priced {
+			if err := syncStaticRate(ctx, tx, hostID, registering); err != nil {
+				return err
+			}
 		}
 		if undrainOutdated {
 			if _, err := tx.Exec(ctx, `UPDATE host_messages SET acked_at = now()

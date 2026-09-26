@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"regexp"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -47,28 +46,30 @@ func validPrice(price, currency string) error {
 // (the host's first hello, which set its registered_at): its first period
 // opens when it registered, so its billed window has no gap before it.
 func syncStaticRate(ctx context.Context, tx pgx.Tx, hostID string, registering bool) error {
-	// The instant is taken after the lock, not at the transaction's start
-	// (now()): a transaction that waited for the row must not close a
-	// period before the one that held it opened it.
-	var at time.Time
-	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&at); err != nil {
-		return err
-	}
-	b := &pgx.Batch{}
-	b.Queue(`UPDATE host_rates r SET valid_to = $2
-		FROM hosts h
-		WHERE h.id = $1 AND r.host_id = h.id AND r.valid_to IS NULL AND r.source = 'static'
-		  AND (h.hourly_price IS DISTINCT FROM r.per_hour OR h.price_currency IS DISTINCT FROM r.currency
-		       OR coalesce((h.capacity->>'cpus')::float8, 0) <> r.cap_cpus
-		       OR coalesce((h.capacity->>'memory')::int8, 0) <> r.cap_memory)`, hostID, at)
-	b.Queue(`INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
-		SELECT h.id, CASE WHEN $3 THEN h.registered_at ELSE $2 END, h.hourly_price, h.price_currency,
+	// One statement, one instant: taken after the lock (clock_timestamp()),
+	// not at the transaction's start (now()), since a transaction that
+	// waited for the row must not close a period before the one that held
+	// it opened it. The INSERT sees the host_rates of before the statement,
+	// the period it closes still open: so it opens one where none was open,
+	// or where it closed one.
+	_, err := tx.Exec(ctx, `WITH at AS (SELECT clock_timestamp() AS at),
+		closed AS (
+			UPDATE host_rates r SET valid_to = (SELECT at FROM at)
+			FROM hosts h
+			WHERE h.id = $1 AND r.host_id = h.id AND r.valid_to IS NULL AND r.source = 'static'
+			  AND (h.hourly_price IS DISTINCT FROM r.per_hour OR h.price_currency IS DISTINCT FROM r.currency
+			       OR coalesce((h.capacity->>'cpus')::float8, 0) <> r.cap_cpus
+			       OR coalesce((h.capacity->>'memory')::int8, 0) <> r.cap_memory)
+			RETURNING r.host_id)
+		INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
+		SELECT h.id, CASE WHEN $2 THEN h.registered_at ELSE (SELECT at FROM at) END, h.hourly_price, h.price_currency,
 			coalesce((h.capacity->>'cpus')::float8, 0), coalesce((h.capacity->>'memory')::int8, 0), 'static'
 		FROM hosts h
 		WHERE h.id = $1 AND h.hourly_price IS NOT NULL
 		  AND (coalesce((h.capacity->>'cpus')::float8, 0) > 0 OR coalesce((h.capacity->>'memory')::int8, 0) > 0)
-		  AND NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.valid_to IS NULL)`, hostID, at, registering)
-	return tx.SendBatch(ctx, b).Close()
+		  AND (EXISTS (SELECT 1 FROM closed)
+		       OR NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.valid_to IS NULL))`, hostID, registering)
+	return err
 }
 
 // HostPrice is a static host's flat hourly price.
