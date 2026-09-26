@@ -198,9 +198,11 @@ downstream changes.
   --hourly-price --currency`, `luxd admin create-pool` with the same
   flags). Like every other field, it is replaced on each `pools set`: one
   without `--hourly-price` removes the default. It is refused for `ec2`
-  pools. A host registering into the pool for the first time copies it.
-  **Changing the default does not reprice the pool's existing hosts**; set
-  those one by one.
+  pools. A host registering into the pool for the first time copies it,
+  and only from its own tenant's pool of that name (a platform host: the
+  platform's): a tenant host joining a pool name only the platform has
+  gets no default price. **Changing the default does not reprice the
+  pool's existing hosts**; set those one by one.
 - **Periods:** on every hello and every price change, luxd compares the
   host's price and advertised capacity (`cpus`, `memory`) with its open
   `static` period. If either changed, the open period is closed and a new
