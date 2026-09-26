@@ -169,7 +169,8 @@ func TestDebugFlag(t *testing.T) {
 }
 
 // history.disk_paths defaults to "/", is a list in the file and
-// comma-separated in the environment, and takes only absolute paths.
+// comma-separated in the environment, may be explicitly empty, and takes
+// only absolute paths.
 func TestDiskPaths(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "luxd.toml")
 	load := func(file string) (config, error) {
@@ -191,6 +192,18 @@ func TestDiskPaths(t *testing.T) {
 	c, err = load("[history]\ndisk_paths = [\"/\"]\n")
 	if err != nil || !slices.Equal(c.History.DiskPaths, []string{"/data", "/srv"}) {
 		t.Fatalf("env over file: %q %v", c.History.DiskPaths, err)
+	}
+	// An explicitly empty list, in the file or as only commas, tracks no
+	// disks: it stays empty rather than falling back to "/".
+	t.Setenv("LUX_HISTORY_DISK_PATHS", ",,")
+	c, err = load("")
+	if err != nil || c.History.DiskPaths == nil || len(c.History.DiskPaths) != 0 {
+		t.Fatalf("env ,,: %#v %v", c.History.DiskPaths, err)
+	}
+	t.Setenv("LUX_HISTORY_DISK_PATHS", "")
+	c, err = load("[history]\ndisk_paths = []\n")
+	if err != nil || c.History.DiskPaths == nil || len(c.History.DiskPaths) != 0 {
+		t.Fatalf("file []: %#v %v", c.History.DiskPaths, err)
 	}
 	t.Setenv("LUX_HISTORY_DISK_PATHS", "var/lib")
 	if _, err := load(""); err == nil || !strings.Contains(err.Error(), "history.disk_paths") {

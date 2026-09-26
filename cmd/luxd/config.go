@@ -72,7 +72,8 @@ type config struct {
 		Minutes     duration `toml:"minutes" env:"LUX_HISTORY_MINUTES"`
 		Hours       duration `toml:"hours" env:"LUX_HISTORY_HOURS"`
 		// DiskPaths: directories whose filesystems the control host's
-		// history tracks; in the environment, comma-separated.
+		// history tracks; in the environment, comma-separated. Empty
+		// ([] or only commas): no disk samples.
 		DiskPaths []string `toml:"disk_paths" env:"LUX_HISTORY_DISK_PATHS"`
 	} `toml:"history"`
 	EC2 struct {
@@ -246,7 +247,8 @@ func setField(v reflect.Value, s string) error {
 		if v.Type().Elem().Kind() != reflect.String {
 			return fmt.Errorf("unsupported kind %s", v.Kind())
 		}
-		var list []string
+		// Non-nil even when empty: only commas is an explicit empty list.
+		list := []string{}
 		for _, e := range strings.Split(s, ",") {
 			if e = strings.TrimSpace(e); e != "" {
 				list = append(list, e)
