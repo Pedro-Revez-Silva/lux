@@ -26,8 +26,23 @@ Environment=LUX_S3_ENDPOINT=http://127.0.0.1:9000 LUX_S3_ACCESS_KEY=smoke LUX_S3
 EOF
 
 # The Postgres data volume: a loop device under its EBS by-id name.
+# Loop devices are the Docker host's: the container's /dev holds only the
+# nodes that existed when it started, so the free one may need its node.
+# host-smoke.sh detaches it through /run/smoke-loop. The reconciler mounts
+# LABEL=pgdata, so a device left attached by an earlier run would be
+# mounted instead of this one.
+leftover=$(blkid -t LABEL=pgdata -o device 2>/dev/null || true)
+[ -z "$leftover" ] || { echo "host-smoke: FAIL: LABEL=pgdata already on $leftover (detach with losetup -d on the Docker host)" >&2; exit 1; }
 truncate -s 256M /var/lib/smoke-pg.img
-dev=$(losetup -f --show /var/lib/smoke-pg.img)
+dev=
+for _ in 1 2 3 4 5; do
+  dev=$(losetup -f)
+  [ -b "$dev" ] || mknod -m 0660 "$dev" b 7 "${dev#/dev/loop}"
+  losetup "$dev" /var/lib/smoke-pg.img && break
+  dev=
+done
+[ -n "$dev" ] || { echo "host-smoke: FAIL: no loop device" >&2; exit 1; }
+echo "$dev" >/run/smoke-loop
 mkdir -p /dev/disk/by-id
 ln -sf "$dev" "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${volume//-/}"
 

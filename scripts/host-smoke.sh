@@ -21,7 +21,13 @@ fi
 image=lux-host-smoke
 name=lux-host-smoke-$$
 "$docker" build -q -t "$image" "$root/scripts/host-smoke" >/dev/null
-trap '"$docker" rm -f "$name" >/dev/null 2>&1 || true' EXIT
+# The loop device outlives the container unless detached: losetup -d on a
+# mounted one sets autoclear, so it goes when the container's mounts do.
+cleanup() {
+  "$docker" exec "$name" sh -c 'dev=$(cat /run/smoke-loop 2>/dev/null) && losetup -d "$dev"' >/dev/null 2>&1 || true
+  "$docker" rm -f "$name" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
 
 # The container's boot log and failed units, for a failure after start.
 diagnose() {
