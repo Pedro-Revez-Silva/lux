@@ -11,13 +11,14 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// 017 fills run_sessions from what luxd recorded before it: session events,
-// snapshot manifests and runs.session_id, one row per (run, epoch, id) with
-// the earliest and latest time it was seen.
+// 020 fills run_sessions (017) from what luxd recorded before it: session
+// events, snapshot manifests and runs.session_id, one row per (run, epoch,
+// id) with the earliest and latest time it was seen. A row already in
+// run_sessions when 020 runs is kept as it is.
 func TestRunSessionsBackfill(t *testing.T) {
 	owner, _ := emptyDB(t)
 	ctx := context.Background()
-	if _, err := store.MigrateTo(ctx, owner, "lux_app", "016_control_samples"); err != nil {
+	if _, err := store.MigrateTo(ctx, owner, "lux_app", "019_cost_lines"); err != nil {
 		t.Fatal(err)
 	}
 	conn, err := pgx.Connect(ctx, owner)
@@ -46,6 +47,8 @@ func TestRunSessionsBackfill(t *testing.T) {
 		fmt.Sprintf(`INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest, created_at) VALUES
 			('s1', 't1', 'r1', 'p2', 2, '{"sessionId": "c"}', '%[1]s'),
 			('s0', 't1', 'r1', 'p1', 1, '{"sessionId": ""}', '%[1]s')`, t0.Add(2*time.Hour).Format(time.RFC3339)),
+		fmt.Sprintf(`INSERT INTO run_sessions (tenant_id, run_id, epoch, session_id, first_seen, last_seen) VALUES
+			('t1', 'r1', 2, 'b', '%[1]s', '%[1]s')`, t0.Add(5*time.Hour).Format(time.RFC3339)),
 	} {
 		if _, err := conn.Exec(ctx, q); err != nil {
 			t.Fatal(err)
@@ -54,7 +57,10 @@ func TestRunSessionsBackfill(t *testing.T) {
 	if _, err := store.Migrate(ctx, owner, "lux_app"); err != nil {
 		t.Fatal(err)
 	}
-	rows, _ := conn.Query(ctx, `SELECT tenant_id, run_id, epoch, session_id, first_seen, last_seen FROM run_sessions ORDER BY run_id, epoch, session_id`)
+	rows, err := conn.Query(ctx, `SELECT tenant_id, run_id, epoch, session_id, first_seen, last_seen FROM run_sessions ORDER BY run_id, epoch, session_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var got []string
 	var tenant, run, id string
 	var epoch int
@@ -63,6 +69,9 @@ func TestRunSessionsBackfill(t *testing.T) {
 		got = append(got, fmt.Sprintf("%s/%s/%d/%s", tenant, run, epoch, id))
 		if run == "r1" && id == "a" && (!first.Equal(t0) || !last.Equal(t0.Add(time.Minute))) {
 			return fmt.Errorf("a seen %v..%v, want %v..%v", first, last, t0, t0.Add(time.Minute))
+		}
+		if run == "r1" && id == "b" && !first.Equal(t0.Add(5*time.Hour)) {
+			return fmt.Errorf("b first seen %v, want the row already there (%v)", first, t0.Add(5*time.Hour))
 		}
 		return nil
 	})
