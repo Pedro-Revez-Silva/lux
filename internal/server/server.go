@@ -81,6 +81,9 @@ type Config struct {
 	SampleEvery time.Duration
 	// How long history is kept: raw samples, minute and hour rollups.
 	HistoryRaw, HistoryMinutes, HistoryHours time.Duration
+	// DiskPaths are the directories whose filesystems the control host's
+	// history tracks. Empty: DefaultDiskPaths.
+	DiskPaths []string
 }
 
 type Server struct {
@@ -111,7 +114,11 @@ type Server struct {
 	// file swap can never make luxd serve bytes that don't match the
 	// sha256 it advertises.
 	bins map[string]map[string]runnerBin
-	wg   sync.WaitGroup
+	// diskFailing: tracked disk paths whose last read failed, so each
+	// failure is logged once (control.go).
+	diskMu      sync.Mutex
+	diskFailing map[string]bool
+	wg          sync.WaitGroup
 }
 
 func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Server {
@@ -147,14 +154,18 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 	cfg.HistoryRaw = cmp.Or(cfg.HistoryRaw, DefaultHistoryRaw)
 	cfg.HistoryMinutes = cmp.Or(cfg.HistoryMinutes, DefaultHistoryMinutes)
 	cfg.HistoryHours = cmp.Or(cfg.HistoryHours, DefaultHistoryHours)
+	if len(cfg.DiskPaths) == 0 {
+		cfg.DiskPaths = DefaultDiskPaths
+	}
 	s := &Server{
-		cfg:     cfg,
-		db:      db,
-		blobs:   blobs,
-		log:     log,
-		secrets: newSecretCache(),
-		wakeups: newWakeups(),
-		kick:    make(chan struct{}, 1),
+		cfg:         cfg,
+		db:          db,
+		blobs:       blobs,
+		log:         log,
+		secrets:     newSecretCache(),
+		wakeups:     newWakeups(),
+		kick:        make(chan struct{}, 1),
+		diskFailing: map[string]bool{},
 	}
 	if cfg.ConsoleAuth.Mode == "cloudflare-access" {
 		s.cfAccess = newCFAccess(cfg.ConsoleAuth.CFTeam, cfg.ConsoleAuth.CFAud)
