@@ -5,7 +5,10 @@ system's Chrome, or Playwright's own Chromium if installed
 
 from __future__ import annotations
 
+import re
+
 import pytest
+from playwright.sync_api import expect
 
 from conftest import generic
 from env import ALPINE_IMAGE, wait_until
@@ -112,11 +115,22 @@ def test_pages_update_live_from_events(page, operator, tenant_factory):
 def test_control_host_row_is_the_operators_whole_system_view(page, env, operator, tenant_factory):
     a = tenant_factory()
     page.sign_in(operator.api_key, "/")
-    page.get_by_text("Control host", exact=True).wait_for(timeout=15_000)
-    page.get_by_text("Disk /", exact=True).wait_for(timeout=45_000)
-    page.get_by_text("Postgres size", exact=True).wait_for(timeout=5_000)
+    expect(page.get_by_role("heading", name="Control host", exact=True)).to_have_count(1, timeout=15_000)
+    expect(page.get_by_role("heading", name="Disk /", exact=True)).to_have_count(1, timeout=45_000)
+    expect(page.get_by_role("heading", name="Postgres size", exact=True)).to_have_count(1, timeout=5_000)
     # Narrowed to a tenant, the row is gone.
     page.goto(env.luxd_url + f"/?tenant={a.tenant_id}")
-    page.get_by_text("Trends", exact=True).wait_for(timeout=15_000)
-    assert page.get_by_text("Control host", exact=True).count() == 0
+    page.get_by_text(re.compile(rf"^tenant {re.escape(a.tenant_id)} · charts over")).wait_for(timeout=15_000)
+    expect(page.get_by_role("heading", name="Control host", exact=True)).to_have_count(0)
+    expect(page.get_by_role("heading", name="Postgres size", exact=True)).to_have_count(0)
+    assert not page.errors, page.errors
+
+
+def test_a_tenant_key_overview_has_no_control_host(page, tenant_factory):
+    a = tenant_factory()
+    page.sign_in(a.api_key, "/")
+    page.get_by_text(re.compile(r"^your runs and hosts · charts over")).wait_for(timeout=15_000)
+    expect(page.get_by_role("heading", name="Trends", exact=True)).to_have_count(1)
+    expect(page.get_by_role("heading", name="Control host", exact=True)).to_have_count(0)
+    expect(page.get_by_role("heading", name="Postgres size", exact=True)).to_have_count(0)
     assert not page.errors, page.errors
