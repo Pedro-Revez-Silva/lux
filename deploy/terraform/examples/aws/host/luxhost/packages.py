@@ -1,9 +1,4 @@
-"""The packages the control host runs beyond cloud-init's bootstrap:
-Postgres 18 from PGDG (trixie ships 17; docs/operations.md says tested on
-18) and cloudflared from its GitHub release. Each is installed only when
-missing, so a steady-state run runs no apt command and downloads nothing;
-a failed install fails the run and the next run tries again.
-"""
+"""Install Postgres 18 from PGDG and cloudflared from its GitHub release."""
 import os
 import tempfile
 
@@ -56,8 +51,8 @@ def ensure_postgres(host: Host) -> bool:
         raise HostError(f"PGDG signing key download failed: {e}") from None
     write_if_changed(key, key_text, 0o644)
     source = (
-        f"deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] "
-        f"https://apt.postgresql.org/pub/repos/apt trixie-pgdg main\n"
+        "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] "
+        "https://apt.postgresql.org/pub/repos/apt trixie-pgdg main\n"
     )
     write_if_changed(os.path.join(host.paths.apt_sources_dir, "pgdg.list"), source, 0o644)
     apt_update(host)

@@ -677,7 +677,8 @@ def test_postgres_installed_before_a_failed_cloudflared_install_is_reported(env,
     changed = changed_entries(summary(capsys))
     assert "install:cloudflared" in changed and "install:postgresql-18" not in changed
     assert env.web.package_fetched == [CLOUDFLARED_DEB_URL.format("arm64")]
-    assert [c[-1] for c in installs(env)] != [] and all(c[-1].endswith(".deb") for c in installs(env))
+    retry_installs = installs(env)
+    assert retry_installs and all(c[-1].endswith(".deb") for c in retry_installs)
 
 
 def test_half_configured_postgres_is_installed_again_before_the_volume_step(env, capsys):
