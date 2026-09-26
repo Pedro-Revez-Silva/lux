@@ -197,6 +197,20 @@ func (s *Server) routes(api huma.API) {
 		Errors:        []int{http.StatusNotFound},
 	}, "admin", s.drainHost)
 	register(s, api, huma.Operation{
+		OperationID: "setHostPrice", Method: http.MethodPut, Path: "/v1/hosts/{id}/price", Tags: []string{"hosts"},
+		Summary: "Set a static host's hourly price",
+		Description: "The flat price its compute cost is worked out at, from now: the host's current rate period closes and a new one opens. " +
+			"Only for a host that registered itself (a provisioned host is priced by its provider). " +
+			"The tenant's own hosts; operators, any host (a platform host's price is theirs to set).",
+		Errors: []int{http.StatusNotFound, http.StatusUnprocessableEntity},
+	}, "admin", s.setHostPrice)
+	register(s, api, huma.Operation{
+		OperationID: "clearHostPrice", Method: http.MethodDelete, Path: "/v1/hosts/{id}/price", Tags: []string{"hosts"},
+		Summary:     "Clear a static host's hourly price",
+		Description: "Its current rate period closes now and no new one opens: its Runs get no compute cost from then on. Who may: as for setting it.",
+		Errors:      []int{http.StatusNotFound, http.StatusUnprocessableEntity},
+	}, "admin", s.clearHostPrice)
+	register(s, api, huma.Operation{
 		OperationID: "listPools", Method: http.MethodGet, Path: "/v1/pools", Tags: []string{"pools"},
 		Summary: "List pools", Description: "The tenant's pools and the platform pools it can use. Operators: every pool.",
 	}, "read", s.listPools)
@@ -1623,6 +1637,11 @@ type Pool struct {
 	WarmWhileActive bool          `json:"warmWhileActive,omitempty" doc:"Keep warmHosts only while the pool is in use (a Run placed or ended within scaleDownAfter, or one waiting); an idle pool scales down to minHosts."`
 	Shared          bool          `json:"shared"`
 	Platform        bool          `json:"platform"`
+	// HourlyPrice and Currency: a static pool's default price, copied to
+	// each host when it first registers. Changing it does not reprice the
+	// pool's existing hosts (PUT /v1/hosts/{id}/price does, one host).
+	HourlyPrice string `json:"hourlyPrice,omitempty" doc:"Static pools: the default hourly price of hosts registering into the pool, a decimal string with up to 9 fractional digits. Copied to each host when it first registers; changing it does not reprice existing hosts. Refused for ec2 pools, which the provider prices." example:"0.40"`
+	Currency    string `json:"currency,omitempty" doc:"The currency of hourlyPrice (ISO 4217); both or neither." example:"USD"`
 }
 
 type listPoolsOutput struct {
@@ -1637,7 +1656,7 @@ func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutpu
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
 				coalesce(p.scale_down_after_s, 0), p.warm_while_active,
-				p.shared, p.tenant_id IS NULL
+				p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, '')
 			FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id
 			WHERE ($1 = '' OR p.tenant_id = $1 OR p.tenant_id IS NULL) AND NOT p.retired ORDER BY p.name, t.name NULLS FIRST`, p.TenantID)
 		if err != nil {
@@ -1648,7 +1667,7 @@ func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutpu
 			var pl Pool
 			var sda int
 			if err := rows.Scan(&pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts,
-				&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform); err != nil {
+				&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency); err != nil {
 				return err
 			}
 			pl.ScaleDownAfter.Duration = time.Duration(sda) * time.Second
@@ -1725,6 +1744,9 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 			}
 		}
 	}
+	if err := ValidPoolPrice(pl.Provider, pl.HourlyPrice, pl.Currency); err != nil {
+		return nil, err
+	}
 	if pl.Template == nil {
 		pl.Template = map[string]any{}
 	}
@@ -1734,14 +1756,15 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	}
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
-				scale_down_after_s, warm_while_active)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				scale_down_after_s, warm_while_active, hourly_price, price_currency)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''))
 			ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 				min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
 				scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
+				hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
 				retired = false`,
 			ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
-			sda, pl.WarmWhileActive)
+			sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency)
 		return err
 	})
 	if err != nil {

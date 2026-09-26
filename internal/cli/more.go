@@ -393,7 +393,33 @@ every host, with a TENANT column (--tenant: what that tenant sees).`,
 		},
 	}
 	drain.Flags().BoolVar(&forceEvict, "force-evict", false, "also stop the host's live Runs so they resume elsewhere")
-	cmd.AddCommand(ls, get, drain)
+	var price server.HostPrice
+	var clearPrice bool
+	priceCmd := &cobra.Command{
+		Use:   "price <host> (--hourly-price D --currency C | --clear)",
+		Short: "Set or clear a static host's hourly price",
+		Long: `Set the flat hourly price a host that registered itself (a static pool's)
+is costed at, from now on; --clear removes it, and its Runs get no compute
+cost from then on. A host its pool's provider launched is priced by the
+provider. Your own hosts; operators, any host.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := "/v1/hosts/" + url.PathEscape(args[0]) + "/price"
+			switch {
+			case clearPrice && (price.HourlyPrice != "" || price.Currency != ""):
+				return errors.New("--clear takes no --hourly-price or --currency")
+			case clearPrice:
+				return a.c.Do(ctxOf(cmd), "DELETE", path, nil, nil)
+			case price.HourlyPrice == "" || price.Currency == "":
+				return errors.New("--hourly-price and --currency, or --clear")
+			}
+			return a.c.Do(ctxOf(cmd), "PUT", path, price, nil)
+		},
+	}
+	priceCmd.Flags().StringVar(&price.HourlyPrice, "hourly-price", "", "price per hour, a decimal (e.g. 0.40)")
+	priceCmd.Flags().StringVar(&price.Currency, "currency", "", "ISO 4217 currency of --hourly-price (e.g. USD)")
+	priceCmd.Flags().BoolVar(&clearPrice, "clear", false, "remove the host's price")
+	cmd.AddCommand(ls, get, drain, priceCmd)
 	return cmd
 }
 
@@ -566,6 +592,8 @@ terminated once idle; their live Runs finish where they are.
 	set.Flags().DurationVar(&p.ScaleDownAfter.Duration, "scale-down-after", 0, "how long a host stays idle before it is released (default: luxd's scale_down_after, 10m)")
 	set.Flags().BoolVar(&p.WarmWhileActive, "warm-while-active", false, "keep --warm hosts only while the pool is in use; an idle pool scales down to --min")
 	set.Flags().StringVar(&template, "template", "", "provider template (JSON)")
+	set.Flags().StringVar(&p.HourlyPrice, "hourly-price", "", "static pools: default hourly price of hosts registering into it, a decimal (with --currency); existing hosts keep theirs")
+	set.Flags().StringVar(&p.Currency, "currency", "", "ISO 4217 currency of --hourly-price (e.g. USD)")
 	cmd.AddCommand(ls, set)
 	return cmd
 }
