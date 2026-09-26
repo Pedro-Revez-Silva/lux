@@ -1,6 +1,6 @@
 # Run costs (design)
 
-Status: **design for review. Build steps 1–3 (section 12) are built**, and
+Status: **design for review. Build steps 1–4 (section 12) are built**, and
 the sections they touch say so and note where the build differs. The rest
 is not built. The build order at the end breaks it into small steps.
 
@@ -88,11 +88,12 @@ The parts this design builds on:
 - The instance's real launch and termination times at the provider.
   lux has its own `provision_requested_at` and `terminated_at`, which are
   close but not exact.
-- Any price, and the money tables beyond the lines themselves:
-  `host_rates`, `price_cache`, `cost_pending`, `cost_ticks` and
-  `cost_hourly` do not exist, and nothing
-  writes a cost line yet. (Built: `cost_lines.amount` and `cost_sources`,
-  section 1; the per-run list of every session, `run_sessions`, section 6.)
+- Any price from a provider, and the money tables beyond the lines and
+  rates: `price_cache`, `cost_pending`, `cost_ticks` and `cost_hourly` do
+  not exist, and nothing writes a cost line yet. (Built: `cost_lines.amount`
+  and `cost_sources`, section 1; `host_rates` and static hosts' prices,
+  sections 2 and 3; the per-run list of every session, `run_sessions`,
+  section 6.)
 
 ## 1. The cost line
 
@@ -169,11 +170,42 @@ neutral colour. `compute` is lux's own family.
 ## 2. Compute cost (built in)
 
 Compute is on by default for `ec2` pools and can be turned off per
-provider (`costs.compute.ec2`). A `static` pool has no price source today,
-so its Runs get no compute line. The fix is decided but not built: an
-operator will set a flat hourly price per host for the pool (section 11).
-Other providers plug in their own price source: it fills the same
-`host_rates` rows (below), and nothing downstream changes.
+provider (`costs.compute.ec2`). A `static` pool's hosts registered
+themselves, so no provider prices them: each carries a **flat hourly
+price** of its own, stored in the database (not luxd's config, since pools
+and hosts are created through the API), which fills its `host_rates`
+periods with source `static`. Other providers plug in their own price
+source: it fills the same `host_rates` rows (section 3), and nothing
+downstream changes.
+
+### Static prices
+
+**Built** (migration `021_host_rates.sql`, `internal/server/prices.go`):
+
+- **Per host:** `hosts.hourly_price numeric(24, 9)` and
+  `hosts.price_currency text`, both NULL or both set (a CHECK). Set with
+  `PUT /v1/hosts/{id}/price` (`{"hourlyPrice": "0.40", "currency":
+  "USD"}`), cleared with `DELETE` on the same path, or `lux hosts price
+  <host> --hourly-price 0.40 --currency USD` / `--clear`. Whoever may change
+  the host's pool may do it: a tenant for its own hosts, an operator for
+  any host (a platform host's price is the operators'). A tenant gets 404
+  for a host it cannot see and 403 for a platform host it can. A host its
+  pool's provider launched is refused (422): the provider prices it.
+- **Pool default:** a `static` pool may carry `hourlyPrice` (a decimal
+  string) and `currency` in the Pool API body (`lux pools set
+  --hourly-price --currency`, `luxd admin create-pool` with the same
+  flags). It is refused for `ec2` pools. A host registering into the pool
+  for the first time copies it. **Changing the default does not reprice
+  the pool's existing hosts**; set those one by one.
+- **Periods:** on every hello and every price change, luxd compares the
+  host's price and advertised capacity (`cpus`, `memory`) with its open
+  `static` period. If either changed, the open period is closed and a new
+  one opens at the same instant, with the current capacity and price.
+  So a priced host's first registration opens its first period, a re-hello
+  with the same capacity changes nothing, and clearing the price closes the
+  open period and opens none. **No price, no period**: its Runs get no
+  compute line (and, once lines are written, `details.missingRate` for
+  that time).
 
 ### Formula
 
@@ -209,6 +241,22 @@ unalloc(h) = ∫ rate(h, t) × max(0, 1 − S(h, t)) dt   over h's billed window
   period boundary. So luxd splits the host's timeline at those instants and
   sums over the pieces. It needs only `placements` and `host_rates`, never
   the heartbeat samples.
+
+**Built** (`internal/server/compute.go`): `computeCost`, a pure function
+over one host's rate periods, billed window and placements (anything still
+open ends at the `now` it is given), returns each placement's amount per
+currency, the host's unallocated amount, and every piece with its `S`.
+Money is exact rational arithmetic (`math/big.Rat`), never float64; an
+amount is rounded to 9 fractional digits only when turned into a string.
+A share uses the capacity of the **rate period** (`cap_cpus`,
+`cap_memory`), so a capacity change is a period boundary like a price
+change. A piece of the billed window with no period is returned as
+**missing**, for the host and for each placement live in it, never priced
+at zero. Overlapping periods are refused as an error. `loadHostCompute`
+reads a host's `host_rates` and placements into it; the billed window is
+from `provision_requested_at` (a self-registered host: `registered_at`) to
+`terminated_at`, or still open. Nothing calls them yet: the drainer
+(step 5) will.
 
 **allocated + unallocated = host cost**, for every piece of the timeline:
 `Σ charged + max(0, 1 − S)` is `S + (1 − S) = 1` when `S ≤ 1`, and
@@ -259,7 +307,8 @@ placements:
   "market": "on-demand", "zone": "eu-west-1a", "amount": "0.05"}]}
 ```
 
-Static hosts without a rate produce no line.
+Static hosts without a price have no period, so their Runs get no
+compute line.
 
 ### Reserved vs used (efficiency)
 
@@ -336,6 +385,10 @@ CREATE TABLE host_rates (
   PRIMARY KEY (host_id, valid_from)
 );  -- system_only
 ```
+
+**Built**: this table, in migration `021_host_rates.sql`, with a unique
+index allowing one open period per host. Only static prices write it so
+far (section 2).
 
 **Past costs never change.** A period is closed (`valid_to` set) and never
 updated again. A later price fetch opens a new period from that moment and
@@ -703,7 +756,7 @@ once.
 | `cost_pending` | per Run with work due | system | deleted when done |
 | `cost_ticks` | per tick | system | 1 day |
 | `run_sessions` | per (Run, epoch, session) | tenant (RLS) | as long as the Run |
-| `hosts` + 3 columns, `host_rates` | per host / price period | system | as long as the host row |
+| `hosts` + 5 columns, `host_rates` | per host / price period | system | as long as the host row |
 | `price_cache` | per (region, type, OS) | system | overwritten |
 | `cost_hourly` | per hour × (tenant, Run, source, family, currency), plus host rows | tenant rows RLS, host rows system | `costs.hourly` (default 400d, like `history.hours`) |
 
@@ -938,8 +991,11 @@ Decided:
   each Run's max(cpu share, memory share) goes above 1, which the
   scheduler allows: on a 4 CPU / 16 GB host, Runs of 3 CPU / 4 GB and
   1 CPU / 12 GB both fit, and each has share 0.75.
-- **Static pools:** an operator will set a flat hourly price per host
-  for a static pool. Not built yet.
+- **Static pools:** each static host has a flat hourly price, stored in
+  the database (`hosts.hourly_price`, `price_currency`), not luxd's config.
+  It is set per host through the API (`PUT /v1/hosts/{id}/price`), or
+  copied at first registration from the pool's default (`hourlyPrice`,
+  `currency` on a static pool). Built in step 4 (section 2).
 - **Host facts** (`instanceType`, `zone`, `market`) are in the host API
   now (section 3).
 
@@ -961,7 +1017,10 @@ Each step can be reviewed and shipped on its own.
 4. **Compute cost, static rates first**: `host_rates`, the piecewise
    formula as a pure function, and unallocated. Table-driven tests with the
    worked example above (both variants), asserting allocated + unallocated
-   = host cost.
+   = host cost. **Built**: migration `021_host_rates.sql`,
+   `computeCost` and `loadHostCompute` (`internal/server/compute.go`),
+   static prices per host and per pool with their periods
+   (`internal/server/prices.go`, section 2). No cost line is written yet.
 5. **The queue**: `cost_pending`, `cost_ticks`, the tick, the drainer, and
    the `setRunState` enqueue, with compute as the only source. Tests: a
    state change queues in the same transaction (rolled back means nothing
