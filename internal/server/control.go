@@ -11,17 +11,14 @@ import (
 	"github.com/marcioapm/lux/internal/hoststat"
 )
 
-// The control host is the machine this luxd runs on, and its Postgres: what
-// operators watch to keep lux itself up. It is sampled with the whole
-// system (sampleSystem), into control_samples and control_disk_samples, and
-// served only to an operator looking at the whole system (systemHistory).
+// The control host is the machine this luxd runs on, and its Postgres. It is
+// sampled with the whole system (sampleSystem) and served only to an
+// operator reading the whole system (systemHistory).
 
-// DefaultDiskPaths are the directories whose filesystems are tracked when
-// history.disk_paths is unset.
+// DefaultDiskPaths applies when history.disk_paths is unset.
 var DefaultDiskPaths = []string{"/"}
 
-// controlHost is one reading of this machine. Fields it could not read
-// stay nil; disks it could not read are left out.
+// controlHost is one reading; what could not be read stays nil or absent.
 type controlHost struct {
 	cpuSeconds *float64
 	cpus       *int
@@ -88,8 +85,7 @@ func (s *Server) readControlHost(ctx context.Context) controlHost {
 	return c
 }
 
-// postgresFigures is lux's database size and its connected backends, read
-// with SQL so a Postgres on another machine works too.
+// postgresFigures reads through SQL so a Postgres on another machine works.
 func (s *Server) postgresFigures(ctx context.Context) (size int64, conns int, err error) {
 	err = s.db.Pool.QueryRow(ctx, `SELECT pg_database_size(current_database()),
 		(SELECT count(*) FROM pg_stat_activity WHERE datname = current_database())`).Scan(&size, &conns)
@@ -120,8 +116,6 @@ func sampleControl(ctx context.Context, tx pgx.Tx, instance string, c controlHos
 	return nil
 }
 
-// ControlSample is the control host at one point of the whole system's
-// history: luxd's own machine and its Postgres.
 type ControlSample struct {
 	Instance            string       `json:"instance" doc:"The luxd instance's hostname that recorded it."`
 	CPUCores            *float64     `json:"cpuCores,omitempty" doc:"CPU in use, in cores: a rate over the previous point."`
@@ -140,15 +134,12 @@ type DiskSample struct {
 	TotalBytes int64  `json:"totalBytes"`
 }
 
-// controlVisible: only an operator not narrowed to a tenant sees the
-// control host; a tenant key, or an operator's ?tenant= view, never does.
+// An operator's ?tenant= view carries TenantID too, so it is excluded here.
 func controlVisible(p Principal) bool { return p.Operator && p.TenantID == "" }
 
-// addControl sets Control on the whole system's samples (in time order)
-// from the control samples at the same instants. With several luxd
-// instances on the database, only the one with the latest sample in the
-// range is served, and CPU rates come from its own consecutive counters:
-// another machine's counter has an unrelated baseline.
+// addControl attaches the control samples at the system samples' instants.
+// Only the instance with the latest sample in the range is served: CPU
+// counters of different machines have unrelated baselines.
 func addControl(ctx context.Context, tx pgx.Tx, samples []Sample, res int, from, to time.Time) error {
 	if len(samples) == 0 {
 		return nil

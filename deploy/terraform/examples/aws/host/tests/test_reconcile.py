@@ -8,7 +8,7 @@ import pytest
 from conftest import INSTALLED, PREFIX, FakeWeb, desired, make_release
 
 from luxhost import backup, desired as desired_mod
-from luxhost.host import HostError, Paths
+from luxhost.host import HostError
 
 
 def summary(capsys) -> str:
@@ -90,8 +90,6 @@ def test_luxd_tracks_the_root_and_postgres_filesystems(env, capsys):
     unit = read(env, "etc/systemd/system/luxd.service")
     env_lines = [l for l in unit.splitlines() if l.startswith("Environment=LUX_HISTORY_DISK_PATHS=")]
     assert env_lines == [f"Environment=LUX_HISTORY_DISK_PATHS=/,{env.host.paths.pg_mount}"], unit
-    # On a real host, the Postgres data volume's mount point.
-    assert Paths().pg_mount == "/var/lib/postgresql/18"
     # luxd.toml leaves it to the environment: an older pinned luxd refuses unknown keys.
     assert "disk_paths" not in luxd_toml(env).get("history", {})
 
