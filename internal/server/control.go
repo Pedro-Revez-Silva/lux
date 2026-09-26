@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -88,4 +89,63 @@ func sampleControl(ctx context.Context, tx pgx.Tx, c controlHost) error {
 		return fmt.Errorf("control disk sample: %w", err)
 	}
 	return nil
+}
+
+// ControlSample is the control host at one point of the whole system's
+// history: luxd's own machine and its Postgres.
+type ControlSample struct {
+	CPUCores            *float64     `json:"cpuCores,omitempty" doc:"CPU in use, in cores: a rate over the previous point."`
+	CPUs                *int         `json:"cpus,omitempty" doc:"Cores on the machine."`
+	MemoryBytes         *int64       `json:"memoryBytes,omitempty"`
+	MemoryTotal         *int64       `json:"memoryTotal,omitempty"`
+	DatabaseBytes       *int64       `json:"databaseBytes,omitempty" doc:"Size of lux's Postgres database."`
+	DatabaseConnections *int         `json:"databaseConnections,omitempty" doc:"Backends connected to lux's Postgres database."`
+	Disks               []DiskSample `json:"disks,omitempty" doc:"Each tracked directory's filesystem (history.disk_paths)."`
+}
+
+type DiskSample struct {
+	Path       string `json:"path"`
+	UsedBytes  int64  `json:"usedBytes"`
+	FreeBytes  int64  `json:"freeBytes" doc:"What an unprivileged process can still write."`
+	TotalBytes int64  `json:"totalBytes"`
+}
+
+// controlVisible: only an operator not narrowed to a tenant sees the
+// control host; a tenant key, or an operator's ?tenant= view, never does.
+func controlVisible(p Principal) bool { return p.Operator && p.TenantID == "" }
+
+// addControl sets Control on the whole system's samples (in time order)
+// from the control samples at the same instants.
+func addControl(ctx context.Context, tx pgx.Tx, samples []Sample, res int, from, to time.Time) error {
+	if len(samples) == 0 {
+		return nil
+	}
+	byAt := make(map[int64]*Sample, len(samples))
+	for i := range samples {
+		byAt[samples[i].At.UnixNano()] = &samples[i]
+	}
+	rows, err := tx.Query(ctx, `SELECT c.at, c.cpu_seconds, c.cpus, c.mem_bytes, c.mem_total, c.db_bytes, c.db_connections,
+			coalesce((SELECT jsonb_agg(jsonb_build_object('path', d.path, 'usedBytes', d.used_bytes, 'freeBytes', d.free_bytes,
+				'totalBytes', d.total_bytes) ORDER BY d.path)
+				FROM control_disk_samples d WHERE d.res = c.res AND d.at = c.at), '[]')
+		FROM control_samples c WHERE c.res = $1 AND c.at BETWEEN $2 AND $3 ORDER BY c.at`, res, from, to)
+	if err != nil {
+		return err
+	}
+	var cpu rate
+	var at time.Time
+	var cpuS *float64
+	var cpus, conns *int
+	var mem, memT, db *int64
+	var disks []DiskSample
+	_, err = pgx.ForEachRow(rows, []any{&at, &cpuS, &cpus, &mem, &memT, &db, &conns, &disks}, func() error {
+		cores := cpu.next(at, cpuS)
+		if sm := byAt[at.UnixNano()]; sm != nil {
+			sm.Control = &ControlSample{CPUCores: cores, CPUs: cpus, MemoryBytes: mem, MemoryTotal: memT,
+				DatabaseBytes: db, DatabaseConnections: conns, Disks: disks}
+		}
+		disks = nil
+		return nil
+	})
+	return err
 }
