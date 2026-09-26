@@ -95,8 +95,14 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 						return err
 					}
 				}
-				if _, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool, token_id, name, state)
-					VALUES ($1, $2, $3, $4, $5, 'ready')`, hostID, tok.TenantID, tok.Pool, tok.ID, h.Name); err != nil {
+				// A static pool's default price, if it has one, is the new
+				// host's own from now on (changing the default later does
+				// not reprice it).
+				if _, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool, token_id, name, state, hourly_price, price_currency)
+					SELECT $1, $2, $3, $4, $5, 'ready', p.hourly_price, p.price_currency
+					FROM (VALUES (1)) v LEFT JOIN pools p
+					  ON coalesce(p.tenant_id, '') = coalesce($2, '') AND p.name = $3 AND NOT p.retired`,
+					hostID, tok.TenantID, tok.Pool, tok.ID, h.Name); err != nil {
 					return err
 				}
 			}
@@ -133,6 +139,10 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 			WHERE id = $1`,
 			hostID, labels, h.Arch, h.Capacity, versions, caches, nonNil(h.LocalSnapshots), h.ProviderID, nonNil(causes), draining)
 		if err != nil {
+			return err
+		}
+		// A priced static host: a changed capacity opens a new rate period.
+		if err := syncStaticRate(ctx, tx, hostID); err != nil {
 			return err
 		}
 		if undrainOutdated {

@@ -425,6 +425,37 @@ components:
         tenant:
           type: string
       type: object
+    HostPrice:
+      additionalProperties: false
+      properties:
+        currency:
+          description: ISO 4217.
+          examples:
+            - USD
+          type: string
+        hourlyPrice:
+          description: Per hour, a decimal string with up to 9 fractional digits.
+          examples:
+            - "0.40"
+          type: string
+      type: object
+    HostPriceSet:
+      additionalProperties: false
+      properties:
+        currency:
+          description: ISO 4217.
+          examples:
+            - USD
+          type: string
+        host:
+          description: The host's id.
+          type: string
+        hourlyPrice:
+          description: Per hour, a decimal string with up to 9 fractional digits.
+          examples:
+            - "0.40"
+          type: string
+      type: object
     Image:
       additionalProperties: false
       properties:
@@ -643,6 +674,16 @@ components:
     Pool:
       additionalProperties: false
       properties:
+        currency:
+          description: The currency of hourlyPrice (ISO 4217); both or neither.
+          examples:
+            - USD
+          type: string
+        hourlyPrice:
+          description: "Static pools: the default hourly price of hosts registering into the pool, a decimal string with up to 9 fractional digits. Copied to each host when it first registers; changing it does not reprice existing hosts. Refused for ec2 pools, which the provider prices."
+          examples:
+            - "0.40"
+          type: string
         maxHosts:
           format: int64
           type: integer
@@ -2156,6 +2197,135 @@ paths:
       summary: A host's resource use over time
       tags:
         - history
+  /v1/hosts/{id}/price:
+    delete:
+      description: |-
+        Its current rate period closes now and no new one opens: its Runs get no compute cost from then on. Who may: as for setting it.
+
+        Needs the `admin` scope.
+      operationId: clearHostPrice
+      parameters:
+        - description: The host's id or name (a name of a host that is not terminated).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The host's id or name (a name of a host that is not terminated).
+            type: string
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+      responses:
+        "204":
+          description: No Content
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Clear a static host's hourly price
+      tags:
+        - hosts
+    put:
+      description: |-
+        The flat price its compute cost is worked out at, from now: the host's current rate period closes and a new one opens. Only for a host that registered itself (a provisioned host is priced by its provider). The tenant's own hosts; operators, any host (a platform host's price is theirs to set).
+
+        Needs the `admin` scope.
+      operationId: setHostPrice
+      parameters:
+        - description: The host's id or name (a name of a host that is not terminated).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The host's id or name (a name of a host that is not terminated).
+            type: string
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HostPrice"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostPriceSet"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Set a static host's hourly price
+      tags:
+        - hosts
   /v1/pools:
     get:
       description: |-

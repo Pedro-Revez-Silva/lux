@@ -98,6 +98,7 @@ admin commands:
   create-host-token [--tenant T] [--pool P] [--label k=v ...]
   create-pool --name N --provider static|ec2 [--tenant T] [--shared]
               [--min N] [--max N] [--warm N] [--template JSON]
+              [--hourly-price D --currency C]   (static pools: hosts' default price)
   set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BYTES] [--retention-days N]`)
 	os.Exit(2)
 }
@@ -300,6 +301,8 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		scaleDown := fs.Duration("scale-down-after", 0, "how long a host stays idle before it is released (default: scale_down_after)")
 		warmActive := fs.Bool("warm-while-active", false, "keep --warm hosts only while the pool is in use")
 		template := fs.String("template", "{}", "provider template (JSON)")
+		price := fs.String("hourly-price", "", "static pools: default hourly price of hosts registering into it (a decimal; with --currency)")
+		currency := fs.String("currency", "", "the currency of --hourly-price (ISO 4217, e.g. USD)")
 		fs.Parse(args[1:])
 		var tmpl map[string]any
 		if err := json.Unmarshal([]byte(*template), &tmpl); err != nil {
@@ -308,16 +311,20 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		if *shared && *tenant != "" {
 			return errors.New("only platform pools (no --tenant) can be shared")
 		}
+		if err := server.ValidPoolPrice(*provider, *price, *currency); err != nil {
+			return err
+		}
 		id := ids.New(ids.Pool)
 		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
-					scale_down_after_s, warm_while_active)
-				VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11)
+					scale_down_after_s, warm_while_active, hourly_price, price_currency)
+				VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11, nullif($12, '')::numeric, nullif($13, ''))
 				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts, shared = EXCLUDED.shared,
 					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
+					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
 					retired = false`,
-				id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive)
+				id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive, *price, *currency)
 			return err
 		})
 		if err != nil {
