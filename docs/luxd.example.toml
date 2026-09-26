@@ -43,6 +43,7 @@ sample_every = "10s"               # LUX_SAMPLE_EVERY
 raw = "48h"                        # LUX_HISTORY_RAW
 minutes = "720h"                   # LUX_HISTORY_MINUTES
 hours = "9600h"                    # LUX_HISTORY_HOURS
+disk_paths = ["/"]                 # LUX_HISTORY_DISK_PATHS (comma-separated): filesystems of luxd's own machine to chart; a missing one is skipped
 
 [ec2]
 endpoint = ""                      # LUX_EC2_ENDPOINT (tests)
