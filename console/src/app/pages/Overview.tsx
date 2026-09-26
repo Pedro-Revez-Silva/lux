@@ -82,7 +82,13 @@ export function Overview() {
 }
 
 /** The machine luxd runs on and its Postgres: operators, whole system only (the API sends it to no one else). */
-function ControlHost({ samples }: { samples: Sample[] | undefined }) {
+function ControlHost({ samples: all }: { samples: Sample[] | undefined }) {
+  // From the first control sample on: system samples from before it (e.g. before an upgrade) would chart as nulls
+  // instead of the chart's empty or waiting state. Later samples without control stay, as gaps.
+  const samples = useMemo(() => {
+    const first = all?.findIndex((s) => s.control) ?? -1;
+    return first < 0 ? [] : all!.slice(first);
+  }, [all]);
   const cpu = useSeries(samples, [(s) => s.control?.cpuCores, (s) => s.control?.cpus]);
   const mem = useSeries(samples, [(s) => s.control?.memoryBytes, (s) => s.control?.memoryTotal]);
   const dbSize = useSeries(samples, [(s) => s.control?.databaseBytes]);
