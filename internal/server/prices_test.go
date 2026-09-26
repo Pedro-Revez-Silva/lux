@@ -201,7 +201,8 @@ func TestPoolPriceValidation(t *testing.T) {
 // Setting a host's price closes its open period and opens one at the new
 // price; clearing it closes the open period and opens none; setting it
 // again starts over. A capacity change on a re-hello does the same, at the
-// current price; a re-hello with the same capacity changes nothing.
+// current price; a re-hello with the same capacity changes nothing; a
+// re-hello of a host whose price is gone closes its open period.
 func TestHostPricePeriods(t *testing.T) {
 	s, keys := priceFixture(t)
 	h1 := helloAs(t, s, "tok1", strp("t1"), "h1", 8, 32)
@@ -254,6 +255,14 @@ func TestHostPricePeriods(t *testing.T) {
 	}
 	if n := touching(t, s, h1); n != 2 {
 		t.Errorf("after a gap with no price: %d periods start as the one before ends, want 2", n)
+	}
+
+	// A price cleared other than through the API: the next hello still
+	// closes the open period.
+	execSQL(t, s, context.Background(), `UPDATE hosts SET hourly_price = NULL, price_currency = NULL WHERE id = $1`, h1)
+	helloAs(t, s, "tok1", strp("t1"), "h1", 2, 32)
+	if got, want := periods(t, s, h1), append(want, "0.3 EUR 2 32 closed"); !slices.Equal(got, want) {
+		t.Errorf("after the price was cleared in the database: %v, want %v", got, want)
 	}
 
 	for _, p := range []HostPrice{{}, {HourlyPrice: "0.4"}, {HourlyPrice: "x", Currency: "USD"}, {HourlyPrice: "-0.4", Currency: "USD"}} {
