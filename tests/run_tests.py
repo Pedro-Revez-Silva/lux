@@ -144,7 +144,7 @@ def _split(suites: list[str], jobs: int, seconds: dict[str, float]) -> list[list
 def run_parallel(args, pytest_args, selected, fake_image, binaries, images) -> int:
     """Runs suite files across args.jobs environments at once, each with its
     own luxd, database, bucket, network and hosts (as separate invocations
-    would have). Shared Postgres and MinIO, and the images, are made once."""
+    would have). Shared Postgres and S3, and the images, are made once."""
     # Splitting is by suite file: node ids and pytest options that take a
     # path (--deselect, --ignore) would be taken for suites, so those runs
     # stay serial (use -j 1).

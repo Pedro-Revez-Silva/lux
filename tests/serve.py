@@ -4,7 +4,7 @@
     uv run python run_tests.py --serve --detach                        # up in the background
     uv run python run_tests.py --down [ENV_JSON]                       # take a detached one down
 
-It brings up what the suite uses (Postgres, MinIO, simulated Podman hosts,
+It brings up what the suite uses (Postgres, S3, simulated Podman hosts,
 luxd), starts a runner on every host, creates a tenant, and writes
 env.json: luxd_url, api_key (scopes run, read), admin_key, tenant_id,
 and the rest of the environment. `--image` preloads an image from the
