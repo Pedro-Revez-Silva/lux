@@ -301,7 +301,7 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		scaleDown := fs.Duration("scale-down-after", 0, "how long a host stays idle before it is released (default: scale_down_after)")
 		warmActive := fs.Bool("warm-while-active", false, "keep --warm hosts only while the pool is in use")
 		template := fs.String("template", "{}", "provider template (JSON)")
-		price := fs.String("hourly-price", "", "static pools: default hourly price of hosts registering into it (a decimal; with --currency)")
+		price := fs.String("hourly-price", "", "static pools: default hourly price of hosts registering into it (a decimal; with --currency); replaces the pool's, like every flag here")
 		currency := fs.String("currency", "", "the currency of --hourly-price (ISO 4217, e.g. USD)")
 		fs.Parse(args[1:])
 		var tmpl map[string]any

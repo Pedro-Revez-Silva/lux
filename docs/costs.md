@@ -185,18 +185,22 @@ downstream changes.
 - **Per host:** `hosts.hourly_price numeric(24, 9)` and
   `hosts.price_currency text`, both NULL or both set (a CHECK). Set with
   `PUT /v1/hosts/{id}/price` (`{"hourlyPrice": "0.40", "currency":
-  "USD"}`), cleared with `DELETE` on the same path, or `lux hosts price
-  <host> --hourly-price 0.40 --currency USD` / `--clear`. Whoever may change
-  the host's pool may do it: a tenant for its own hosts, an operator for
-  any host (a platform host's price is the operators'). A tenant gets 404
-  for a host it cannot see and 403 for a platform host it can. A host its
-  pool's provider launched is refused (422): the provider prices it.
+  "USD"}`; it answers the price as stored, trailing zeros trimmed as the
+  pool API shows a default: `"0.4"`), cleared with `DELETE` on the same
+  path, or `lux hosts price <host> --hourly-price 0.40 --currency USD` /
+  `--clear`. Whoever may change the host's pool may do it: a tenant for its
+  own hosts, an operator for any host (a platform host's price is the
+  operators'). A tenant gets 404 for a host it cannot see and 403 for a
+  platform host it can. A host its pool's provider launched is refused
+  (422): the provider prices it.
 - **Pool default:** a `static` pool may carry `hourlyPrice` (a decimal
   string) and `currency` in the Pool API body (`lux pools set
   --hourly-price --currency`, `luxd admin create-pool` with the same
-  flags). It is refused for `ec2` pools. A host registering into the pool
-  for the first time copies it. **Changing the default does not reprice
-  the pool's existing hosts**; set those one by one.
+  flags). Like every other field, it is replaced on each `pools set`: one
+  without `--hourly-price` removes the default. It is refused for `ec2`
+  pools. A host registering into the pool for the first time copies it.
+  **Changing the default does not reprice the pool's existing hosts**; set
+  those one by one.
 - **Periods:** on every hello and every price change, luxd compares the
   host's price and advertised capacity (`cpus`, `memory`) with its open
   `static` period. If either changed, the open period is closed and a new

@@ -74,8 +74,8 @@ func syncStaticRate(ctx context.Context, tx pgx.Tx, hostID string, registering b
 
 // HostPrice is a static host's flat hourly price.
 type HostPrice struct {
-	HourlyPrice string `json:"hourlyPrice" doc:"Per hour, a decimal string with up to 9 fractional digits." example:"0.40"`
-	Currency    string `json:"currency" doc:"ISO 4217." example:"USD"`
+	HourlyPrice string `json:"hourlyPrice" required:"true" doc:"Per hour, a decimal string with up to 9 fractional digits." example:"0.40"`
+	Currency    string `json:"currency" required:"true" doc:"ISO 4217." example:"USD"`
 }
 
 type setHostPriceInput struct {
@@ -97,7 +97,8 @@ type clearHostPriceInput struct {
 }
 
 // setHostPrice sets a static host's hourly price: its open rate period
-// closes now and a new one opens at the new price.
+// closes now and a new one opens at the new price. It answers the price as
+// stored, trailing zeros trimmed as the pool API shows a default.
 func (s *Server) setHostPrice(ctx context.Context, in *setHostPriceInput) (*hostPriceOutput, error) {
 	if in.Body.HourlyPrice == "" || in.Body.Currency == "" {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_price", "hourlyPrice and currency are required (DELETE clears the price)")
@@ -105,12 +106,13 @@ func (s *Server) setHostPrice(ctx context.Context, in *setHostPriceInput) (*host
 	if err := validPrice(in.Body.HourlyPrice, in.Body.Currency); err != nil {
 		return nil, err
 	}
-	id, err := s.priceHost(ctx, in.ID, &in.Body)
+	price := in.Body
+	id, err := s.priceHost(ctx, in.ID, &price)
 	if err != nil {
 		return nil, err
 	}
 	out := &hostPriceOutput{}
-	out.Body.Host, out.Body.HostPrice = id, in.Body
+	out.Body.Host, out.Body.HostPrice = id, price
 	return out, nil
 }
 
@@ -126,7 +128,8 @@ func (s *Server) clearHostPrice(ctx context.Context, in *clearHostPriceInput) (*
 // priceHost sets (nil: clears) the price of a host the principal may
 // change, as it may change the host's pool: a tenant its own hosts, an
 // operator any host. A host the principal cannot see is not found; a
-// platform host a tenant sees is not its to price.
+// platform host a tenant sees is not its to price. price is set to what
+// was stored.
 func (s *Server) priceHost(ctx context.Context, ref string, price *HostPrice) (string, error) {
 	p := principal(ctx)
 	var id string
@@ -150,9 +153,13 @@ func (s *Server) priceHost(ctx context.Context, ref string, price *HostPrice) (s
 		if price != nil {
 			amount, currency = &price.HourlyPrice, &price.Currency
 		}
-		if _, err := tx.Exec(ctx, `UPDATE hosts SET hourly_price = $2::text::numeric, price_currency = $3 WHERE id = $1`,
-			id, amount, currency); err != nil {
+		var stored *string
+		if err := tx.QueryRow(ctx, `UPDATE hosts SET hourly_price = $2::text::numeric, price_currency = $3 WHERE id = $1
+			RETURNING trim_scale(hourly_price)::text`, id, amount, currency).Scan(&stored); err != nil {
 			return err
+		}
+		if price != nil {
+			price.HourlyPrice = *stored
 		}
 		return syncStaticRate(ctx, tx, id, false)
 	})

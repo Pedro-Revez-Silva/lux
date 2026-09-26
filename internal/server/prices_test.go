@@ -217,7 +217,7 @@ func TestHostPricePeriods(t *testing.T) {
 		Host        string `json:"host"`
 		HourlyPrice string `json:"hourlyPrice"`
 	}
-	if err := json.Unmarshal([]byte(body), &set); err != nil || set.Host != h1 || set.HourlyPrice != "0.40" {
+	if err := json.Unmarshal([]byte(body), &set); err != nil || set.Host != h1 || set.HourlyPrice != "0.4" {
 		t.Errorf("set price answered %s", body)
 	}
 	helloAs(t, s, "tok1", strp("t1"), "h1", 8, 32)
