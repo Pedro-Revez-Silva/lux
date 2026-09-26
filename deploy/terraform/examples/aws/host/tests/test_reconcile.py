@@ -176,6 +176,21 @@ def test_failed_migrate_switches_nothing(env, capsys):
     assert restarts(env) == []
 
 
+def test_failed_migrate_still_reconciles_the_rest(env, capsys):
+    deploy_version(env, capsys, "v1.0.0")
+    env.web.releases["v2.0.0"] = make_release("v2.0.0")
+    env.sh.migrate_rc = 1
+    env.sh.ssm[f"{PREFIX}/cloudflare-tunnel-token"] = "new-token"
+    env.repo.set_desired(desired("v2.0.0", '[luxd]\nscale_down_after = "30m"\n'))
+    env.sh.calls.clear()
+    assert env.run() == 1
+    line = summary(capsys)
+    assert "cloudflared-token" in line and "luxd-restarted" in line
+    assert read(env, "etc/cloudflared/token") == "new-token\n"
+    assert luxd_toml(env)["scale_down_after"] == "30m"
+    assert len(restarts(env)) == 1 and installed(env) == "v1.0.0"
+
+
 def test_checksum_mismatch_switches_nothing(env, capsys):
     deploy_version(env, capsys, "v1.0.0")
     rel = make_release("v2.0.0")
