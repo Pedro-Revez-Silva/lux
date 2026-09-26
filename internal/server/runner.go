@@ -114,9 +114,9 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		// remove only the "outdated" cause. FOR UPDATE holds the row until
 		// this transaction commits, so a concurrent drainHost or deletePool
 		// cannot add a cause the UPDATE below would then overwrite.
-		var wasDraining bool
+		var wasDraining, registering bool
 		var causes []string
-		if err := tx.QueryRow(ctx, `SELECT draining, drain_causes FROM hosts WHERE id = $1 FOR UPDATE`, hostID).Scan(&wasDraining, &causes); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT draining, drain_causes, registered_at IS NULL FROM hosts WHERE id = $1 FOR UPDATE`, hostID).Scan(&wasDraining, &causes, &registering); err != nil {
 			return err
 		}
 		undrainOutdated := wasDraining && slices.Contains(causes, causeOutdated) && s.binariesMatch(h.Arch, h.RunnerSHA256, h.ShimSHA256)
@@ -141,8 +141,9 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		if err != nil {
 			return err
 		}
-		// A priced static host: a changed capacity opens a new rate period.
-		if err := syncStaticRate(ctx, tx, hostID); err != nil {
+		// A priced static host: a changed capacity opens a new rate period
+		// (its first, at registration, from the instant it registered).
+		if err := syncStaticRate(ctx, tx, hostID, registering); err != nil {
 			return err
 		}
 		if undrainOutdated {

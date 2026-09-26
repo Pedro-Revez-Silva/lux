@@ -41,8 +41,10 @@ func validPrice(price, currency string) error {
 // which holds the host row locked (FOR UPDATE): if either changed, the open
 // period is closed and, while the host has a price, a new one opens at the
 // same instant. No price: no open period. Closed periods are never
-// touched. Called on every hello and on every price change.
-func syncStaticRate(ctx context.Context, tx pgx.Tx, hostID string) error {
+// touched. Called on every hello and on every price change; registering
+// (the host's first hello, which set its registered_at): its first period
+// opens when it registered, so its billed window has no gap before it.
+func syncStaticRate(ctx context.Context, tx pgx.Tx, hostID string, registering bool) error {
 	// The instant is taken after the lock, not at the transaction's start
 	// (now()): a transaction that waited for the row must not close a
 	// period before the one that held it opened it.
@@ -58,11 +60,11 @@ func syncStaticRate(ctx context.Context, tx pgx.Tx, hostID string) error {
 		       OR coalesce((h.capacity->>'cpus')::float8, 0) <> r.cap_cpus
 		       OR coalesce((h.capacity->>'memory')::int8, 0) <> r.cap_memory)`, hostID, at)
 	b.Queue(`INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
-		SELECT h.id, $2, h.hourly_price, h.price_currency,
+		SELECT h.id, CASE WHEN $3 THEN h.registered_at ELSE $2 END, h.hourly_price, h.price_currency,
 			coalesce((h.capacity->>'cpus')::float8, 0), coalesce((h.capacity->>'memory')::int8, 0), 'static'
 		FROM hosts h
 		WHERE h.id = $1 AND h.hourly_price IS NOT NULL
-		  AND NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.valid_to IS NULL)`, hostID, at)
+		  AND NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.valid_to IS NULL)`, hostID, at, registering)
 	return tx.SendBatch(ctx, b).Close()
 }
 
@@ -148,7 +150,7 @@ func (s *Server) priceHost(ctx context.Context, ref string, price *HostPrice) (s
 			id, amount, currency); err != nil {
 			return err
 		}
-		return syncStaticRate(ctx, tx, id)
+		return syncStaticRate(ctx, tx, id, false)
 	})
 	return id, err
 }
