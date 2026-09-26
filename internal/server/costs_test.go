@@ -145,6 +145,37 @@ func TestRunCostReReportReplaces(t *testing.T) {
 	}
 }
 
+// An amount that is not a decimal numeric(24, 9) holds exactly is refused
+// and changes nothing. An empty answer is valid: that source's lines go,
+// other sources' stay.
+func TestRunCostInvalidAmountAndEmptyReport(t *testing.T) {
+	s, keys := costFixture(t)
+	report(t, s, "t1", "r1", "gw", line("ai", "m1", "1", "USD", false))
+	report(t, s, "t1", "r1", "other", line("video", "v", "10", "USD", false))
+
+	ctx := context.Background()
+	for _, amount := range []string{"1e3", "abc", "1.0000000001", ""} {
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return replaceCostLines(ctx, tx, "t1", "r1", "gw", []costReport{line("ai", "m1", amount, "USD", false)})
+		})
+		if err == nil {
+			t.Errorf("amount %q was accepted", amount)
+		}
+		if _, c := getCost(t, s, keys["t1"], "r1"); totals(c.Totals) != "/USD=11(f0,e11) " {
+			t.Errorf("refused amount %q changed the totals: %s", amount, totals(c.Totals))
+		}
+	}
+
+	report(t, s, "t1", "r1", "gw")
+	_, c := getCost(t, s, keys["t1"], "r1")
+	if got, want := totals(c.Totals), "/USD=10(f0,e10) "; got != want {
+		t.Errorf("totals after an empty answer:\n got %s\nwant %s", got, want)
+	}
+	if len(c.Lines) != 1 || c.Lines[0].Source != "other" || c.Lines[0].Item != "v" {
+		t.Errorf("lines after an empty answer: %+v", c.Lines)
+	}
+}
+
 // A tenant sees its own Runs' costs, and another tenant's Run is not found,
 // as on every Run endpoint. An operator reaches either.
 func TestRunCostTenantIsolation(t *testing.T) {
@@ -184,23 +215,64 @@ func TestRunCostTenantIsolation(t *testing.T) {
 	if err == nil {
 		t.Error("t1 wrote a cost line for t2")
 	}
+
+	// cost_sources has its own policy: the same two checks.
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES
+		('r1', 't1', 'gw', 'ok'), ('r2', 't2', 'gw', 'ok'), ('r2', 't2', 'compute', 'ok')`)
+	err = s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM cost_sources`).Scan(&n)
+	})
+	if err != nil || n != 1 {
+		t.Errorf("t1 sees %d cost sources (%v), want 1", n, err)
+	}
+	err = s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES ('r2', 't2', 'evil', 'final')`)
+		return err
+	})
+	if err == nil {
+		t.Error("t1 wrote a cost source for t2")
+	}
 }
 
-// Status follows the sources: none reported, incomplete while any source
-// is, final once all are.
+// Status follows the sources: none reported, complete while every source
+// has answered, incomplete while any source is, final once all are.
 func TestRunCostStatus(t *testing.T) {
 	s, keys := costFixture(t)
 	ctx := context.Background()
 	if _, c := getCost(t, s, keys["t1"], "r1"); c.Status != "none" || len(c.Totals) != 0 || c.Lines == nil {
 		t.Errorf("no lines: %+v", c)
 	}
-	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at) VALUES
-		('r1', 't1', 'compute', 'final', now()), ('r1', 't1', 'gw', 'incomplete', NULL)`)
-	if _, c := getCost(t, s, keys["t1"], "r1"); c.Status != "incomplete" || c.Final || len(c.Sources) != 2 || c.Sources[0].AnsweredAt == nil {
+	answered, next := t0.Add(time.Hour), t0.Add(2*time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, next_at) VALUES
+		('r1', 't1', 'compute', 'final', $1, NULL), ('r1', 't1', 'gw', 'ok', $1, $2)`, answered, next)
+	_, c := getCost(t, s, keys["t1"], "r1")
+	if c.Status != "complete" || c.Final {
+		t.Errorf("all answered: status %q final %v", c.Status, c.Final)
+	}
+	sources := func(ss []CostSource) string {
+		out := ""
+		for _, src := range ss {
+			out += fmt.Sprintf("%s/%s/answered=%v/next=%v ", src.Source, src.Status, fmtTime(src.AnsweredAt), fmtTime(src.NextAt))
+		}
+		return out
+	}
+	if got, want := sources(c.Sources), "compute/final/answered=2026-09-26T11:00:00Z/next=- gw/ok/answered=2026-09-26T11:00:00Z/next=2026-09-26T12:00:00Z "; got != want {
+		t.Errorf("sources:\n got %s\nwant %s", got, want)
+	}
+
+	execSQL(t, s, ctx, `UPDATE cost_sources SET status = 'incomplete', answered_at = NULL WHERE source = 'gw'`)
+	if _, c := getCost(t, s, keys["t1"], "r1"); c.Status != "incomplete" || c.Final || len(c.Sources) != 2 || c.Sources[0].AnsweredAt == nil || c.Sources[1].AnsweredAt != nil {
 		t.Errorf("one incomplete: %+v", c)
 	}
 	execSQL(t, s, ctx, `UPDATE cost_sources SET status = 'final' WHERE source = 'gw'`)
 	if _, c := getCost(t, s, keys["t1"], "r1"); c.Status != "final" || !c.Final {
 		t.Errorf("all final: %+v", c)
 	}
+}
+
+func fmtTime(t *time.Time) string {
+	if t == nil {
+		return "-"
+	}
+	return t.UTC().Format(time.RFC3339)
 }

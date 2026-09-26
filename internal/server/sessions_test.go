@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -52,30 +53,73 @@ func (s *Server) testAdapterEvent(t *testing.T, ctx context.Context, epoch int, 
 	}
 }
 
+// runSessionID reads the Run's current session and snapshot ids.
+func runSessionID(t *testing.T, s *Server, ctx context.Context, runID string) (sessionID, snapshotID string) {
+	t.Helper()
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT session_id, coalesce(snapshot_id, '') FROM runs WHERE id = $1`, runID).Scan(&sessionID, &snapshotID)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sessionID, snapshotID
+}
+
+// reportSession sends a runner's adapter event for r1 through the report
+// path (fencing included) from host h1, and returns the reply.
+func (s *Server) reportSession(t *testing.T, ctx context.Context, epoch int, sessionID string) proto.Frame {
+	t.Helper()
+	return s.handleReport(ctx, "h1", proto.Frame{Type: proto.MsgAdapterEvent, ID: 1, RunID: "r1", Epoch: epoch,
+		Data: proto.Marshal(proto.AdapterEvent{SessionID: sessionID})})
+}
+
 // A resume that cannot load the old session starts a new one: both ids stay
 // recorded, each at its epoch, while runs.session_id holds only the latest.
+// Once the Run is at epoch 2, a report from epoch 1 is refused as stale and
+// records nothing.
 func TestRunSessionsResumeKeepsBothIDs(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
-	sessionFixture(t, s, ctx)
-	s.testAdapterEvent(t, ctx, 1, "old")
-	s.testAdapterEvent(t, ctx, 2, "new")
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state) VALUES ('h1', 'h1', 'ready')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', '{}', 'running', 1)`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
+	if r := s.reportSession(t, ctx, 1, "old"); r.Type != proto.MsgAck {
+		t.Fatalf("epoch 1 report: %s %s", r.Type, r.Data)
+	}
+
+	// The resume: epoch 1's placement ends, epoch 2's starts.
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited' WHERE id = 'p1'`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p2', 't1', 'r1', 'h1', 2, 'running')`)
+	execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 2 WHERE id = 'r1'`)
+	if r := s.reportSession(t, ctx, 2, "new"); r.Type != proto.MsgAck {
+		t.Fatalf("epoch 2 report: %s %s", r.Type, r.Data)
+	}
 
 	got := runSessions(t, s, ctx, "r1")
 	if len(got) != 2 || got[0].Epoch != 1 || got[0].ID != "old" || got[1].Epoch != 2 || got[1].ID != "new" {
 		t.Fatalf("run_sessions: %+v", got)
 	}
-	var latest string
-	_ = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT session_id FROM runs WHERE id = 'r1'`).Scan(&latest)
-	})
-	if latest != "new" {
+	if latest, _ := runSessionID(t, s, ctx, "r1"); latest != "new" {
 		t.Fatalf("runs.session_id = %q, want new", latest)
+	}
+
+	r := s.reportSession(t, ctx, 1, "late")
+	var nack proto.Nack
+	if r.Type != proto.MsgNack || json.Unmarshal(r.Data, &nack) != nil || !nack.Stale {
+		t.Fatalf("late epoch 1 report: %s %s, want a stale nack", r.Type, r.Data)
+	}
+	if after := runSessions(t, s, ctx, "r1"); len(after) != 2 || after[0] != got[0] || after[1] != got[1] {
+		t.Fatalf("a stale report changed run_sessions: %+v", after)
+	}
+	if latest, _ := runSessionID(t, s, ctx, "r1"); latest != "new" {
+		t.Fatalf("a stale report set runs.session_id = %q", latest)
 	}
 }
 
 // An id that only a snapshot manifest carries (no adapter event) is recorded
-// at the snapshot's epoch, also for a late snapshot of an older placement.
+// at the snapshot's epoch, also for a late snapshot of an older placement,
+// which leaves the Run's session and snapshot at epoch 2's.
 func TestRunSessionsSnapshotOnly(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
@@ -83,7 +127,7 @@ func TestRunSessionsSnapshotOnly(t *testing.T) {
 	for _, sd := range []struct {
 		epoch    int
 		snap, id string
-	}{{1, "snap1", "from-epoch-1"}, {2, "snap2", "from-manifest"}} {
+	}{{2, "snap2", "from-manifest"}, {1, "snap1", "from-epoch-1"}} {
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 			return s.applySnapshotDone(ctx, tx, "t1", "h1", "r1", sd.epoch, 2, proto.SnapshotDone{
 				Manifest: proto.Manifest{SnapshotID: sd.snap, RunID: "r1", Epoch: sd.epoch, SessionID: sd.id, Volumes: []proto.VolumeSnapshot{}},
@@ -96,6 +140,9 @@ func TestRunSessionsSnapshotOnly(t *testing.T) {
 	got := runSessions(t, s, ctx, "r1")
 	if len(got) != 2 || got[0].Epoch != 1 || got[0].ID != "from-epoch-1" || got[1].Epoch != 2 || got[1].ID != "from-manifest" {
 		t.Fatalf("run_sessions: %+v", got)
+	}
+	if session, snapshot := runSessionID(t, s, ctx, "r1"); session != "from-manifest" || snapshot != "snap2" {
+		t.Fatalf("runs: session_id %q snapshot_id %q, want from-manifest, snap2", session, snapshot)
 	}
 }
 
