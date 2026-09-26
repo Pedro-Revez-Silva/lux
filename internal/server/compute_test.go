@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"math/rand/v2"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -268,19 +271,21 @@ func rangesEqual(a, b []timeRange) bool {
 
 // The worked example piece by piece, as section 2's table shows it.
 func TestComputeCostWorkedExamplePieces(t *testing.T) {
-	res, err := computeCost(hostCompute{From: at("10:00"), To: atp("11:00"),
-		Rates: []ratePeriod{usdRate("10:00", "", "0.40")}, Placements: workedExample})
+	in := hostCompute{From: at("10:00"), To: atp("11:00"), Rates: []ratePeriod{usdRate("10:00", "", "0.40")}, Placements: workedExample}
+	res, err := computeCost(in)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Live: A, B and C are placements 0, 1 and 2.
 	want := []struct {
 		from, s, unalloc string
+		live             []int
 		charged          []string
 	}{
-		{"10:00", "1/4", "0.075", []string{"0.025"}},
-		{"10:15", "3/4", "0.025", []string{"0.025", "0.05"}},
-		{"10:30", "1", "0", []string{"0.05", "0.05"}},
-		{"10:45", "1/2", "0.05", []string{"0.05"}},
+		{"10:00", "1/4", "0.075", []int{0}, []string{"0.025"}},
+		{"10:15", "3/4", "0.025", []int{0, 1}, []string{"0.025", "0.05"}},
+		{"10:30", "1", "0", []int{1, 2}, []string{"0.05", "0.05"}},
+		{"10:45", "1/2", "0.05", []int{1}, []string{"0.05"}},
 	}
 	if len(res.Pieces) != len(want) {
 		t.Fatalf("%d pieces, want %d", len(res.Pieces), len(want))
@@ -291,12 +296,204 @@ func TestComputeCostWorkedExamplePieces(t *testing.T) {
 		for _, c := range p.Charged {
 			charged = append(charged, moneyString(c))
 		}
-		if !p.From.Equal(at(w.from)) || p.S.RatString() != w.s || moneyString(p.Unallocated) != w.unalloc || moneyString(p.Host) != "0.1" ||
-			len(charged) != len(w.charged) || (len(charged) > 0 && charged[0] != w.charged[0]) || (len(charged) > 1 && charged[1] != w.charged[1]) {
-			t.Errorf("piece %d: from %s S %s unalloc %s host %s charged %v; want %+v",
-				i, p.From.Format("15:04"), p.S.RatString(), moneyString(p.Unallocated), moneyString(p.Host), charged, w)
+		if !p.From.Equal(at(w.from)) || p.Rate != &in.Rates[0] || !slices.Equal(p.Live, w.live) || p.S.RatString() != w.s ||
+			moneyString(p.Unallocated) != w.unalloc || moneyString(p.Host) != "0.1" || !slices.Equal(charged, w.charged) {
+			t.Errorf("piece %d: from %s rate %p live %v S %s unalloc %s host %s charged %v; want %+v",
+				i, p.From.Format("15:04"), p.Rate, p.Live, p.S.RatString(), moneyString(p.Unallocated), moneyString(p.Host), charged, w)
 		}
 	}
+}
+
+// computeCost against naiveComputeCost, which works out every piece from
+// scratch, on random hosts drawn from a coarse grid of instants, so that
+// touching, coincident, zero-length and inverted ranges, open ends,
+// overlapping periods and a second currency all come up often. Every piece,
+// amount, missing range and error must be the same.
+func TestComputeCostMatchesNaive(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	grid := func() time.Time { return at("10:00").Add(time.Duration(rng.IntN(13)) * 5 * time.Minute) }
+	gridp := func() *time.Time {
+		if rng.IntN(4) == 0 {
+			return nil
+		}
+		t := grid()
+		return &t
+	}
+	for n := range 5000 {
+		// Mostly a billed window of 5 to 60 minutes, open or closed; now and
+		// then an empty or inverted one.
+		in := hostCompute{HostID: "h", From: grid()}
+		in.Now = in.From.Add(time.Duration(1+rng.IntN(12)) * 5 * time.Minute)
+		switch rng.IntN(8) {
+		case 0:
+			in.Now = grid()
+		case 1:
+			in.To = gridp()
+		case 2, 3:
+		default:
+			in.To = &in.Now
+		}
+		for range rng.IntN(4) {
+			in.Rates = append(in.Rates, ratePeriod{From: grid(), To: gridp(),
+				PerHour: []string{"0", "0.40", "1.3"}[rng.IntN(3)], Currency: []string{"USD", "EUR"}[rng.IntN(2)],
+				CapCPUs: []float64{0, 4, 8}[rng.IntN(3)], CapMemory: []int64{0, 16, 32}[rng.IntN(3)] * gib})
+		}
+		for i := range rng.IntN(9) {
+			in.Placements = append(in.Placements, placementWindow{ID: fmt.Sprint(i),
+				CPUs: []float64{0, 1, 2.5, 4}[rng.IntN(4)], Memory: []int64{0, 4, 16}[rng.IntN(3)] * gib, From: grid(), To: gridp()})
+		}
+		res, err := computeCost(in)
+		want, wantErr := naiveComputeCost(in)
+		if got, want := dumpCost(in, res, err), dumpCost(in, want, wantErr); got != want {
+			t.Fatalf("input %d %+v:\ngot\n%s\nwant\n%s", n, in, got, want)
+		}
+	}
+}
+
+// dumpCost is everything computeCost answers, as text.
+func dumpCost(in hostCompute, res computeResult, err error) string {
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	var b strings.Builder
+	rat := func(r *big.Rat) string {
+		if r == nil {
+			return "nil"
+		}
+		return r.RatString()
+	}
+	amounts := func(m map[string]*big.Rat) string {
+		var s []string
+		for c, v := range m {
+			s = append(s, c+" "+rat(v))
+		}
+		slices.Sort(s)
+		return fmt.Sprint(s)
+	}
+	for _, p := range res.Pieces {
+		ri := -1
+		for i := range in.Rates {
+			if p.Rate == &in.Rates[i] {
+				ri = i
+			}
+		}
+		var charged []string
+		for _, c := range p.Charged {
+			charged = append(charged, rat(c))
+		}
+		fmt.Fprintf(&b, "piece %s–%s rate %d live %v S %s host %s charged %v unallocated %s\n",
+			p.From.Format("15:04"), p.To.Format("15:04"), ri, p.Live, rat(p.S), rat(p.Host), charged, rat(p.Unallocated))
+	}
+	for i, pc := range res.Placements {
+		fmt.Fprintf(&b, "placement %d %s missing %v\n", i, amounts(pc.Amounts), pc.Missing)
+	}
+	fmt.Fprintf(&b, "unallocated %s missing %v\n", amounts(res.Unallocated), res.Missing)
+	return b.String()
+}
+
+// naiveComputeCost is computeCost as it was before the sweep: every piece
+// scans every rate period and placement.
+func naiveComputeCost(in hostCompute) (computeResult, error) {
+	from, to := in.From, in.Now
+	if in.To != nil {
+		to = *in.To
+	}
+	end := func(t *time.Time) time.Time {
+		if t == nil {
+			return to
+		}
+		return *t
+	}
+	res := computeResult{Placements: make([]placementCost, len(in.Placements)), Unallocated: map[string]*big.Rat{}}
+	for i := range res.Placements {
+		res.Placements[i].Amounts = map[string]*big.Rat{}
+	}
+	if !to.After(from) {
+		return res, nil
+	}
+	rates := make([]*big.Rat, len(in.Rates))
+	cuts := []time.Time{from, to}
+	clip := func(t time.Time) time.Time {
+		switch {
+		case t.Before(from):
+			return from
+		case t.After(to):
+			return to
+		}
+		return t
+	}
+	for i, r := range in.Rates {
+		v, ok := new(big.Rat).SetString(r.PerHour)
+		if !ok {
+			return res, fmt.Errorf("host %s: rate %q from %s is not a decimal", in.HostID, r.PerHour, r.From)
+		}
+		if r.CapCPUs <= 0 && r.CapMemory <= 0 {
+			return res, fmt.Errorf("host %s: rate period from %s has no capacity to share", in.HostID, r.From)
+		}
+		rates[i] = v
+		cuts = append(cuts, clip(r.From), clip(end(r.To)))
+	}
+	for _, p := range in.Placements {
+		cuts = append(cuts, clip(p.From), clip(end(p.To)))
+	}
+	slices.SortFunc(cuts, time.Time.Compare)
+	cuts = slices.CompactFunc(cuts, time.Time.Equal)
+
+	for k := 0; k+1 < len(cuts); k++ {
+		a, b := cuts[k], cuts[k+1]
+		piece := costPiece{timeRange: timeRange{a, b}}
+		for i, p := range in.Placements {
+			if !p.From.After(a) && end(p.To).After(a) {
+				piece.Live = append(piece.Live, i)
+			}
+		}
+		ri := -1
+		for i, r := range in.Rates {
+			if !r.From.After(a) && end(r.To).After(a) {
+				if ri >= 0 {
+					return res, fmt.Errorf("host %s: rate periods from %s and %s overlap", in.HostID, in.Rates[ri].From, r.From)
+				}
+				ri = i
+			}
+		}
+		if ri < 0 {
+			res.Missing = appendRange(res.Missing, piece.timeRange)
+			for _, i := range piece.Live {
+				res.Placements[i].Missing = appendRange(res.Placements[i].Missing, piece.timeRange)
+			}
+			res.Pieces = append(res.Pieces, piece)
+			continue
+		}
+		r := &in.Rates[ri]
+		piece.Rate = r
+		shares := make([]*big.Rat, len(piece.Live))
+		piece.S = new(big.Rat)
+		for j, i := range piece.Live {
+			shares[j] = share(in.Placements[i], r)
+			piece.S.Add(piece.S, shares[j])
+		}
+		dt := new(big.Rat).SetFrac64(int64(b.Sub(a)), 1)
+		piece.Host = new(big.Rat).Mul(rates[ri], dt)
+		piece.Host.Quo(piece.Host, nanosPerHour)
+		scale := big.NewRat(1, 1)
+		if piece.S.Cmp(scale) > 0 {
+			scale.Set(piece.S)
+		}
+		piece.Charged = make([]*big.Rat, len(piece.Live))
+		for j, i := range piece.Live {
+			c := new(big.Rat).Mul(piece.Host, shares[j])
+			c.Quo(c, scale)
+			piece.Charged[j] = c
+			addTo(res.Placements[i].Amounts, r.Currency, c)
+		}
+		piece.Unallocated = new(big.Rat)
+		if free := new(big.Rat).Sub(big.NewRat(1, 1), piece.S); free.Sign() > 0 {
+			piece.Unallocated.Mul(piece.Host, free)
+		}
+		addTo(res.Unallocated, r.Currency, piece.Unallocated)
+		res.Pieces = append(res.Pieces, piece)
+	}
+	return res, nil
 }
 
 // Overlapping periods are a bug in whatever wrote them: refused, never
