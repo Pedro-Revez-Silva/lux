@@ -72,12 +72,13 @@ def test_control_host_is_only_in_the_operators_whole_system_history(tenant_facto
         return [s["control"] for s in h["samples"] if "control" in s]
     c = wait_until(lambda: (lambda c: c if len(c) >= 2 else None)(control(operator)), 60, 1,
                    "no control host in the operator's history")[-1]
-    assert c["cpus"] > 0 and c["cpuCores"] >= 0 and 0 < c["memoryBytes"] <= c["memoryTotal"], c
+    assert c["instance"] and c["cpus"] > 0 and c["cpuCores"] >= 0 and 0 < c["memoryBytes"] <= c["memoryTotal"], c
     assert c["databaseBytes"] > 0 and c["databaseConnections"] >= 1, c
     assert [d["path"] for d in c["disks"]] == ["/"], c
     d = c["disks"][0]
     assert 0 < d["usedBytes"] and d["usedBytes"] + d["freeBytes"] <= d["totalBytes"], d
-    # A tenant, and an operator narrowed to that tenant, never see it.
-    wait_until(lambda: a.json("history", "--since", "5m")["samples"] or None, 30, 1, "no tenant samples")
+    # A tenant, and an operator narrowed to that tenant, never see it. An idle
+    # tenant has no samples of its own; the unit tests cover the gate on
+    # tenant samples that share the control samples' instants.
     assert control(a) == []
     assert control(operator, "--tenant", a.tenant_id) == []
