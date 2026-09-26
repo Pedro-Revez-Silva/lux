@@ -5,7 +5,7 @@ import subprocess
 import tomllib
 
 import pytest
-from conftest import PREFIX, FakeWeb, desired, make_release
+from conftest import INSTALLED, PREFIX, FakeWeb, desired, make_release
 
 from luxhost import backup, desired as desired_mod
 from luxhost.host import HostError
@@ -591,7 +591,7 @@ def test_first_run_installs_postgres_and_cloudflared_before_the_postgres_step(en
     assert calls.index(["systemctl", "enable", "postgresql"]) < calls.index(next(c for c in calls if c[0] == "mountpoint"))
     assert env.web.package_fetched[-1] == CLOUDFLARED_DEB_URL.format("arm64")
     assert os.access(env.path("usr/local/bin/cloudflared"), os.X_OK)
-    assert {"postgresql-18", "cloudflared"} <= env.sh.installed
+    assert env.sh.dpkg_status == {"postgresql-18": INSTALLED, "cloudflared": INSTALLED}
 
 
 def test_cloudflared_deb_follows_the_host_architecture(env, capsys):
@@ -614,7 +614,7 @@ def test_second_run_runs_no_install_command(env, capsys):
 
 
 def test_nothing_is_installed_when_already_present(env, capsys):
-    env.sh.installed.add("postgresql-18")
+    env.sh.dpkg_status["postgresql-18"] = INSTALLED
     path = env.path("usr/local/bin/cloudflared")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -679,6 +679,42 @@ def test_postgres_installed_before_a_failed_cloudflared_install_is_reported(env,
     assert "install:cloudflared" in changed and "install:postgresql-18" not in changed
     assert env.web.package_fetched == [CLOUDFLARED_DEB_URL.format("arm64")]
     assert [c[-1] for c in installs(env)] != [] and all(c[-1].endswith(".deb") for c in installs(env))
+
+
+def test_half_configured_postgres_is_installed_again_before_the_volume_step(env, capsys):
+    env.sh.apt_half_configure.add("postgresql-18")
+    assert env.run() == 1
+    line = summary(capsys)
+    assert "error='packages: " in line and "install:postgresql-18" not in changed_entries(line)
+    assert env.sh.dpkg_status["postgresql-18"] == "install ok half-configured"
+    assert not env.sh.mounted and env.sh.commands("mkfs.ext4") == []
+
+    env.sh.apt_half_configure.clear()
+    env.sh.calls.clear()
+    assert env.run() == 0
+    changed = changed_entries(summary(capsys))
+    assert "install:postgresql-18" in changed and "pg-volume" in changed
+    assert env.sh.mounted and "lux" in env.sh.databases
+    assert env.sh.dpkg_status["postgresql-18"] == INSTALLED
+
+    env.sh.calls.clear()
+    env.web.package_fetched.clear()
+    assert env.run() == 0
+    assert summary(capsys).endswith("changed=[]")
+    assert env.sh.commands("apt-get") == [] and env.web.package_fetched == []
+
+
+def test_failed_pgdg_key_download_fails_the_run_and_the_next_run_recovers(env, capsys):
+    env.web.failing.add("https://www.postgresql.org/media/keys/ACCC4CF8.asc")
+    assert env.run() == 1
+    line = summary(capsys)
+    assert "error='packages: PGDG signing key download failed: HTTP Error 503" in line
+    assert installs(env) == [] and not env.sh.mounted
+
+    env.web.failing.clear()
+    assert env.run() == 0
+    changed = changed_entries(summary(capsys))
+    assert "install:postgresql-18" in changed and "pg-volume" in changed
 
 
 def test_apt_update_waits_for_the_lists_lock(env, capsys):

@@ -28,6 +28,7 @@ from luxhost.host import Host, Paths  # noqa: E402
 PREFIX = "/lux"
 REGION = "eu-north-1"
 VOLUME = "vol-0123456789abcdef0"
+INSTALLED = "install ok installed"
 
 
 def completed(argv, rc=0, stdout="", stderr=""):
@@ -47,10 +48,14 @@ class FakeSh:
     # Whether luxd comes up after a restart, by the version `current` points at.
     healthy_versions: set = dataclasses.field(default_factory=set)
     calls: list = dataclasses.field(default_factory=list)
-    # dpkg's installed packages; a fresh host has none of the reconciler's.
-    installed: set = dataclasses.field(default_factory=set)
+    # What `dpkg -s` reports as Status: per package; a fresh host has none
+    # of the reconciler's packages.
+    dpkg_status: dict = dataclasses.field(default_factory=dict)
     # Packages (or "update") whose apt-get run exits 100.
     apt_fail: set = dataclasses.field(default_factory=set)
+    # Packages whose apt-get install exits 100 after unpacking, leaving
+    # them half-configured (a failed postinst).
+    apt_half_configure: set = dataclasses.field(default_factory=set)
     # How many `apt-get update` calls find the lists lock held first.
     apt_lists_locked: int = 0
     arch: str = "arm64"
@@ -130,8 +135,8 @@ class FakeSh:
         if argv[1:] == ["--print-architecture"]:
             return completed(argv, stdout=self.arch + "\n")
         if argv[1] == "-s":
-            if argv[2] in self.installed:
-                return completed(argv, stdout=f"Package: {argv[2]}\nStatus: install ok installed\n")
+            if argv[2] in self.dpkg_status:
+                return completed(argv, stdout=f"Package: {argv[2]}\nStatus: {self.dpkg_status[argv[2]]}\n")
             return completed(argv, 1, stderr=f"dpkg-query: package '{argv[2]}' is not installed")
         raise AssertionError(f"unexpected dpkg call: {argv}")
 
@@ -156,7 +161,10 @@ class FakeSh:
             package = target
         if package in self.apt_fail:
             return completed(argv, 100, stderr=f"E: Unable to install {package}")
-        self.installed.add(package)
+        if package in self.apt_half_configure:
+            self.dpkg_status[package] = "install ok half-configured"
+            return completed(argv, 100, stderr="E: Sub-process /usr/bin/dpkg returned an error code (1)")
+        self.dpkg_status[package] = INSTALLED
         if package == "cloudflared":
             # The package's postinst links /usr/bin/cloudflared here.
             path = os.path.join(self.root, "usr/local/bin/cloudflared")
