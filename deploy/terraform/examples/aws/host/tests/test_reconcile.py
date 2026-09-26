@@ -614,6 +614,7 @@ def test_second_run_runs_no_install_command(env, capsys):
 
 def test_nothing_is_installed_when_already_present(env, capsys):
     env.sh.dpkg_status["postgresql-18"] = INSTALLED
+    env.sh.dpkg_status["cloudflared"] = INSTALLED
     path = env.path("usr/local/bin/cloudflared")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -679,6 +680,31 @@ def test_postgres_installed_before_a_failed_cloudflared_install_is_reported(env,
     assert env.web.package_fetched == [CLOUDFLARED_DEB_URL.format("arm64")]
     retry_installs = installs(env)
     assert retry_installs and all(c[-1].endswith(".deb") for c in retry_installs)
+
+
+def test_half_configured_cloudflared_with_its_link_is_installed_again(env, capsys):
+    # cloudflared's postinst makes /usr/local/bin/cloudflared before a step
+    # that can fail: the link must not pass for a completed install.
+    env.sh.apt_half_configure.add("cloudflared")
+    assert env.run() == 1
+    line = summary(capsys)
+    assert "error='packages: " in line and "install:cloudflared" not in changed_entries(line)
+    assert os.access(env.path("usr/local/bin/cloudflared"), os.X_OK)
+    assert env.sh.dpkg_status["cloudflared"] == "install ok half-configured"
+
+    env.sh.apt_half_configure.clear()
+    env.sh.calls.clear()
+    env.web.package_fetched.clear()
+    assert env.run() == 0
+    assert "install:cloudflared" in changed_entries(summary(capsys))
+    assert env.web.package_fetched == [CLOUDFLARED_DEB_URL.format("arm64")]
+    assert env.sh.dpkg_status["cloudflared"] == INSTALLED
+
+    env.sh.calls.clear()
+    env.web.package_fetched.clear()
+    assert env.run() == 0
+    assert summary(capsys).endswith("changed=[]")
+    assert env.sh.commands("apt-get") == [] and env.web.package_fetched == []
 
 
 def test_half_configured_postgres_is_installed_again_before_the_volume_step(env, capsys):

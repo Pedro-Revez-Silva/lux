@@ -62,9 +62,12 @@ def ensure_postgres(host: Host) -> bool:
 
 
 def cloudflared_present(host: Host) -> bool:
-    # The unit's ExecStart path. The .deb ships /usr/bin/cloudflared; its
-    # postinst links it here, so this also means the install completed.
-    return os.access(os.path.join(host.paths.bin_dir, "cloudflared"), os.X_OK)
+    # The unit's ExecStart path: the .deb ships /usr/bin/cloudflared and its
+    # postinst links it here. The postinst links before a later step that
+    # can fail, so the link alone may mean a half-configured package: also
+    # require dpkg's installed state, or that install would never be retried.
+    return (os.access(os.path.join(host.paths.bin_dir, "cloudflared"), os.X_OK)
+            and is_installed(host, "cloudflared"))
 
 
 def ensure_cloudflared(host: Host) -> bool:
@@ -83,5 +86,5 @@ def ensure_cloudflared(host: Host) -> bool:
         # for the dpkg lock where dpkg -i would fail at once.
         host.run(_apt_get("install", "-y", deb), env=APT_ENV)
     if not cloudflared_present(host):
-        raise HostError(f"cloudflared installed but {host.paths.bin_dir}/cloudflared is missing")
+        raise HostError(f"cloudflared not installed, or {host.paths.bin_dir}/cloudflared missing, after apt-get install")
     return True

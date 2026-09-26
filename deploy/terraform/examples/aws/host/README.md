@@ -19,8 +19,9 @@ tools.
    anything on the host is touched.
 4. Packages: installs Postgres 18 (PGDG apt repo; `dpkg -s postgresql-18`)
    and cloudflared (the GitHub release `.deb` for `dpkg
-   --print-architecture`; present when `/usr/local/bin/cloudflared`, the
-   link its postinst makes to `/usr/bin/cloudflared`, exists) if missing.
+   --print-architecture`; present when dpkg says `install ok installed`
+   and `/usr/local/bin/cloudflared`, the link its postinst makes to
+   `/usr/bin/cloudflared`, exists) if missing.
    apt-get waits up to 300s for the dpkg and lists locks (cloud-init's own
    apt run). Once both are installed this runs no apt command; a failed
    install fails the run (`packages:`) and the next run retries.

@@ -175,17 +175,18 @@ class FakeSh:
             package = target
         if package in self.apt_fail:
             return completed(argv, 100, stderr=f"E: Unable to install {package}")
-        if package in self.apt_half_configure:
-            self.dpkg_status[package] = "install ok half-configured"
-            return completed(argv, 100, stderr="E: Sub-process /usr/bin/dpkg returned an error code (1)")
-        self.dpkg_status[package] = INSTALLED
         if package == "cloudflared":
-            # The package's postinst links /usr/bin/cloudflared here.
+            # The package's postinst links /usr/bin/cloudflared here first,
+            # so the link exists even when a later postinst step fails.
             path = os.path.join(self.root, "usr/local/bin/cloudflared")
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as f:
                 f.write("#!/bin/sh\n")
             os.chmod(path, 0o755)
+        if package in self.apt_half_configure:
+            self.dpkg_status[package] = "install ok half-configured"
+            return completed(argv, 100, stderr="E: Sub-process /usr/bin/dpkg returned an error code (1)")
+        self.dpkg_status[package] = INSTALLED
         return completed(argv)
 
     def _mountpoint(self, argv, _input):
