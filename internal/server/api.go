@@ -109,6 +109,14 @@ func (s *Server) routes(api huma.API) {
 		Errors: []int{http.StatusNotFound},
 	}, "read", s.runHistory)
 	register(s, api, huma.Operation{
+		OperationID: "runCost", Method: http.MethodGet, Path: "/v1/runs/{id}/cost", Tags: []string{"runs"},
+		Summary: "What a Run cost",
+		Description: "Its cost lines (one per source and item), with totals per currency and per family and currency. " +
+			"Amounts in different currencies are never added together. Each total splits into the part from final lines " +
+			"and the part from estimates, which may still change. Amounts are list prices (basis: list).",
+		Errors: []int{http.StatusNotFound},
+	}, "read", s.runCost)
+	register(s, api, huma.Operation{
 		OperationID: "pushRun", Method: http.MethodPost, Path: "/v1/runs/{id}/push", Tags: []string{"runs"},
 		Summary: "Push a running Run's repositories",
 		Description: "To the spec's git.push branch, with the runner's credentials. The outcome arrives as a git.push event carrying the request id.\n\n" +
