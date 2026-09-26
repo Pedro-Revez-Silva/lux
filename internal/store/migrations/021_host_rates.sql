@@ -13,7 +13,8 @@ CREATE TABLE host_rates (
   cap_cpus     float8 NOT NULL,         -- hosts.capacity at the time
   cap_memory   bigint NOT NULL,
   source       text NOT NULL,           -- 'aws-pricing', 'aws-spot-history', 'static', ...
-  PRIMARY KEY (host_id, valid_from)
+  PRIMARY KEY (host_id, valid_from),
+  CHECK (valid_to IS NULL OR valid_to > valid_from)  -- closed after it opened
 );
 -- At most one open period per host.
 CREATE UNIQUE INDEX host_rates_open ON host_rates (host_id) WHERE valid_to IS NULL;

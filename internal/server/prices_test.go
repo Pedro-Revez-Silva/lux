@@ -322,3 +322,73 @@ func TestStaticRateZeroCapacity(t *testing.T) {
 		t.Errorf("after capacity came and went: %v, want %v", got, want)
 	}
 }
+
+// A transaction that began before a price change committed, then locks the
+// host and syncs, closes the period that change opened no earlier than it
+// opened: period boundaries are taken after the lock, not at a
+// transaction's start. No period ends at or before it starts, none
+// overlap.
+func TestStaticRateConcurrentChange(t *testing.T) {
+	s, keys := priceFixture(t)
+	ctx := context.Background()
+	h1 := helloAs(t, s, "tok1", strp("t1"), "h1", 8, 32)
+
+	tx, err := s.db.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT set_config('lux.system', 'on', true)`); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := call(t, s, keys["t1"], http.MethodPut, "/v1/hosts/h1/price", HostPrice{HourlyPrice: "0.40", Currency: "USD"}); code != http.StatusOK {
+		t.Fatalf("set price: %d %s", code, body)
+	}
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM hosts WHERE id = $1 FOR UPDATE`, h1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE hosts SET hourly_price = 0.5, price_currency = 'USD' WHERE id = $1`, h1); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncStaticRate(ctx, tx, h1, false); err != nil {
+		t.Fatalf("sync after a concurrent change: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := periods(t, s, h1), []string{"0.4 USD 8 32 closed", "0.5 USD 8 32 open"}; !slices.Equal(got, want) {
+		t.Errorf("periods: %v, want %v", got, want)
+	}
+	var bad int
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM host_rates a JOIN host_rates b
+			ON a.host_id = b.host_id AND a.valid_from < b.valid_from
+			WHERE a.host_id = $1 AND (a.valid_to IS NULL OR a.valid_to > b.valid_from)`, h1).Scan(&bad)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if bad != 0 {
+		t.Errorf("%d pairs of periods overlap", bad)
+	}
+	if n := touching(t, s, h1); n != 1 {
+		t.Errorf("%d periods start as the one before ends, want 1", n)
+	}
+}
+
+// host_rates refuses a period that ends at or before it starts.
+func TestHostRatesCheck(t *testing.T) {
+	s, _ := priceFixture(t)
+	ctx := context.Background()
+	h1 := helloAs(t, s, "tok1", strp("t1"), "h1", 8, 32)
+	for _, to := range []string{"10:00", "09:59"} {
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+				VALUES ($1, $2, $3, 0.4, 'USD', 8, 1, 'static')`, h1, at("10:00"), at(to))
+			return err
+		})
+		if err == nil {
+			t.Errorf("a period from 10:00 to %s was stored", to)
+		}
+	}
+}
