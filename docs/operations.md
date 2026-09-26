@@ -83,7 +83,7 @@ its variable; the table below lists them by variable.
 | `LUX_HISTORY_RAW` | `48h` | How long raw samples (hosts and placements: one per heartbeat) are kept. |
 | `LUX_HISTORY_MINUTES` | `720h` | How long minute rollups are kept. |
 | `LUX_HISTORY_HOURS` | `9600h` | How long hour rollups are kept. |
-| `LUX_HISTORY_DISK_PATHS` | `/` | Directories on luxd's own machine whose filesystems (used, free, total) the operators' Overview charts, comma-separated (`history.disk_paths`, a list, in the file). A path that cannot be read is skipped and logged. |
+| `LUX_HISTORY_DISK_PATHS` | `/` | Directories on luxd's own machine whose filesystems (used, free, total) the operators' Overview charts, comma-separated (`history.disk_paths`, a list, in the file). A path that cannot be read is skipped and logged. An empty list (`[]`, or only commas such as `,`) tracks no filesystem. |
 | `LUX_DEBUG` | — | Debug logging. |
 | `LUX_CONSOLE_AUTH` | `key` | How the console signs people in: `key` or `cloudflare-access` ([Operators](operators.md#signing-in)). |
 | `LUX_CF_ACCESS_TEAM`, `LUX_CF_ACCESS_AUD` | — | For `cloudflare-access`: the Access team (`acme` or `acme.cloudflareaccess.com`) and the application's AUD tag. |

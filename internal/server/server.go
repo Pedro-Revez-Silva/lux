@@ -83,7 +83,7 @@ type Config struct {
 	// How long history is kept: raw samples, minute and hour rollups.
 	HistoryRaw, HistoryMinutes, HistoryHours time.Duration
 	// DiskPaths are the directories whose filesystems the control host's
-	// history tracks. Empty: DefaultDiskPaths.
+	// history tracks. Nil: DefaultDiskPaths; empty: none.
 	DiskPaths []string
 }
 
@@ -160,7 +160,7 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 	cfg.HistoryRaw = cmp.Or(cfg.HistoryRaw, DefaultHistoryRaw)
 	cfg.HistoryMinutes = cmp.Or(cfg.HistoryMinutes, DefaultHistoryMinutes)
 	cfg.HistoryHours = cmp.Or(cfg.HistoryHours, DefaultHistoryHours)
-	if len(cfg.DiskPaths) == 0 {
+	if cfg.DiskPaths == nil {
 		cfg.DiskPaths = DefaultDiskPaths
 	}
 	s := &Server{
