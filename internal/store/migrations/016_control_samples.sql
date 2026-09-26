@@ -30,7 +30,11 @@ CREATE TABLE control_disk_samples (
   PRIMARY KEY (instance, path, res, at)
 );
 
--- control_samples' primary key serves (res, at); the disk table's leads with instance and path.
+-- Neither primary key orders by (res, at): control_samples' puts instance
+-- between them, the disk table's leads with instance and path. History's
+-- newest-sample-across-instances lookup and retention's deletes by age
+-- need a time-ordered path.
+CREATE INDEX control_samples_res_at ON control_samples (res, at);
 CREATE INDEX control_disk_samples_res_at ON control_disk_samples (res, at);
 
 ALTER TABLE control_samples ENABLE ROW LEVEL SECURITY;
