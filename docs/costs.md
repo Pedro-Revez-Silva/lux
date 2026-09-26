@@ -201,11 +201,14 @@ downstream changes.
   host's price and advertised capacity (`cpus`, `memory`) with its open
   `static` period. If either changed, the open period is closed and a new
   one opens at the same instant, with the current capacity and price.
-  So a priced host's first registration opens its first period, a re-hello
-  with the same capacity changes nothing, and clearing the price closes the
-  open period and opens none. **No price, no period**: its Runs get no
-  compute line (and, once lines are written, `details.missingRate` for
-  that time).
+  So a priced host's first registration opens its first period (from the
+  instant it registered, so its billed window has no gap at the start), a
+  re-hello with the same capacity changes nothing, and clearing the price
+  closes the open period and opens none. **No price, no period**: its Runs
+  get no compute line (and, once lines are written, `details.missingRate`
+  for that time). Nor does a host advertising neither cpus nor memory get
+  a period (no share can be worked out against nothing): its time is
+  missing, never shared out at zero; `computeCost` refuses such a period.
 
 ### Formula
 

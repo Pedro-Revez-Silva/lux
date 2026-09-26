@@ -242,11 +242,13 @@ func TestComputeCostWorkedExamplePieces(t *testing.T) {
 }
 
 // Overlapping periods are a bug in whatever wrote them: refused, never
-// priced twice. A rate that is not a decimal is refused too.
+// priced twice. A rate that is not a decimal is refused too, and so is a
+// period with neither cpus nor memory, which would price every Run at zero.
 func TestComputeCostRefusesBadRates(t *testing.T) {
 	for _, rates := range [][]ratePeriod{
 		{usdRate("10:00", "", "0.40"), usdRate("10:30", "", "0.40")},
 		{usdRate("10:00", "", "abc")},
+		{{From: at("10:00"), PerHour: "0.40", Currency: "USD", Source: "static"}}, // no capacity at all
 	} {
 		if _, err := computeCost(hostCompute{From: at("10:00"), To: atp("11:00"), Rates: rates}); err == nil {
 			t.Errorf("rates %+v were accepted", rates)
