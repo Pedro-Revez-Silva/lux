@@ -445,10 +445,6 @@ func TestSystemHistoryControlIsOperatorsOnly(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("%s: %d %s", query, w.Code, w.Body)
 		}
-		if strings.Contains(w.Body.String(), `"control"`) != (key == opKey && query == "") {
-			t.Errorf("key %s query %q: control in body = %v:\n%s", map[string]string{tenantKey: "tenant", opKey: "operator"}[key], query,
-				strings.Contains(w.Body.String(), `"control"`), w.Body)
-		}
 		var h History
 		if err := json.Unmarshal(w.Body.Bytes(), &h); err != nil {
 			t.Fatal(err)
@@ -456,8 +452,14 @@ func TestSystemHistoryControlIsOperatorsOnly(t *testing.T) {
 		return h
 	}
 	for _, c := range []struct{ key, query string }{{tenantKey, ""}, {tenantKey, "&tenant="}, {opKey, "&tenant=acme"}, {opKey, "&tenant=t1"}} {
-		if h := get(c.key, c.query); len(h.Samples) != 2 {
+		h := get(c.key, c.query)
+		if len(h.Samples) != 2 {
 			t.Errorf("%q: want the tenant's 2 samples, got %d", c.query, len(h.Samples))
+		}
+		for i, sm := range h.Samples {
+			if sm.Control != nil {
+				t.Errorf("key %s query %q sample %d: control %+v", map[string]string{tenantKey: "tenant", opKey: "operator"}[c.key], c.query, i, sm.Control)
+			}
 		}
 	}
 	h := get(opKey, "")
