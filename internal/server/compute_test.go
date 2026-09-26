@@ -124,6 +124,22 @@ func TestComputeCost(t *testing.T) {
 			Placements: []placementWindow{place("A", 8, 32, "09:30", "11:00")}},
 		want:    map[string]string{"A": "0.2"},
 		unalloc: "0",
+	}, {
+		name: "no memory capacity: shared by cpus alone",
+		in: hostCompute{From: at("10:00"), To: atp("11:00"),
+			Rates:      []ratePeriod{{From: at("10:00"), PerHour: "0.40", Currency: "USD", CapCPUs: 8, Source: "static"}},
+			Placements: []placementWindow{place("A", 4, 30, "10:00", "11:00")}},
+		// S = 4/8; the 30 GiB it reserved count for nothing.
+		want:    map[string]string{"A": "0.2"},
+		unalloc: "0.2",
+	}, {
+		name: "no cpu capacity: shared by memory alone",
+		in: hostCompute{From: at("10:00"), To: atp("11:00"),
+			Rates:      []ratePeriod{{From: at("10:00"), PerHour: "0.40", Currency: "USD", CapMemory: 32 * gib, Source: "static"}},
+			Placements: []placementWindow{place("A", 6, 16, "10:00", "11:00")}},
+		// S = 16/32; the 6 cpus it reserved count for nothing.
+		want:    map[string]string{"A": "0.2"},
+		unalloc: "0.2",
 	}} {
 		t.Run(c.name, func(t *testing.T) {
 			res, err := computeCost(c.in)
