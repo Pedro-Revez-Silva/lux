@@ -86,7 +86,11 @@ func (s *Server) historyLoop(ctx context.Context) {
 // Starts and finishes are counted in a window a minute behind (from the
 // last sample's window end to now - 1m), so one written by a transaction
 // still open at sampling time is counted by a later sample, and none twice.
+//
+// The control host (control.go) is sampled in the same transaction, so its
+// rows share the whole system's `at`.
 func (s *Server) sampleSystem(ctx context.Context) error {
+	host := s.readControlHost()
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var from time.Time
 		if err := tx.QueryRow(ctx, `SELECT coalesce(max(window_end), now() - interval '1 minute' - $1::interval)
@@ -148,7 +152,10 @@ func (s *Server) sampleSystem(ctx context.Context) error {
 				coalesce(a.cpus, 0), coalesce(a.mem, 0)
 			FROM tenants t LEFT JOIN runs_by r USING (id) LEFT JOIN flow f USING (id) LEFT JOIN alloc a USING (id) LEFT JOIN hosts_by h USING (id)
 			ON CONFLICT DO NOTHING`, from)
-		return err
+		if err != nil {
+			return err
+		}
+		return sampleControl(ctx, tx, host)
 	})
 }
 
@@ -159,14 +166,14 @@ func (s *Server) rollupHistory(ctx context.Context) error {
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		for i := 1; i < len(rs); i++ {
 			from, to := rs[i-1].res, rs[i].res
-			for _, q := range []string{rollupHosts, rollupPlacements, rollupSystem} {
+			for _, q := range []string{rollupHosts, rollupPlacements, rollupSystem, rollupControl, rollupControlDisks} {
 				if _, err := tx.Exec(ctx, q, from, to); err != nil {
 					return err
 				}
 			}
 		}
 		for _, r := range rs {
-			for _, t := range []string{"host_samples", "placement_samples", "system_samples"} {
+			for _, t := range []string{"host_samples", "placement_samples", "system_samples", "control_samples", "control_disk_samples"} {
 				if _, err := tx.Exec(ctx, `DELETE FROM `+t+` WHERE res = $1::int AND at < now() - $2::interval`, r.res, interval(r.keep)); err != nil {
 					return err
 				}
@@ -206,6 +213,18 @@ var (
 			(array_agg(hosts ORDER BY at DESC))[1], avg(cap_cpus), avg(cap_mem)::bigint, avg(alloc_cpus), avg(alloc_mem)::bigint
 		FROM system_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "system_samples", "d.tenant_id = s.tenant_id") + `
 		GROUP BY tenant_id, 3 ON CONFLICT DO NOTHING`
+	// The control host: CPU a counter, memory and connections levels,
+	// totals (cores, memory, disk) their maximum; the database size and
+	// disk use the bucket's mean.
+	rollupControl = `INSERT INTO control_samples (res, at, cpu_seconds, cpus, mem_bytes, mem_total, db_bytes, db_connections)
+		SELECT $2::int, ` + rollupBucket + `, max(cpu_seconds), max(cpus), avg(mem_bytes)::bigint, max(mem_total),
+			avg(db_bytes)::bigint, round(avg(db_connections))::int
+		FROM control_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "control_samples", "true") + `
+		GROUP BY 2 ON CONFLICT DO NOTHING`
+	rollupControlDisks = `INSERT INTO control_disk_samples (path, res, at, used_bytes, free_bytes, total_bytes)
+		SELECT path, $2::int, ` + rollupBucket + `, avg(used_bytes)::bigint, avg(free_bytes)::bigint, max(total_bytes)
+		FROM control_disk_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "control_disk_samples", "d.path = s.path") + `
+		GROUP BY path, 3 ON CONFLICT DO NOTHING`
 )
 
 // Sample is one point of history. Which fields are set depends on what it
