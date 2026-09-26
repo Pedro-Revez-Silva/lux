@@ -259,6 +259,8 @@ type Sample struct {
 	CapMem    *int64         `json:"capacityMemory,omitempty"`
 	SysAllocC *float64       `json:"allocatedCpus,omitempty"`
 	SysAllocM *int64         `json:"allocatedMemory,omitempty"`
+	// The control host: only for an operator reading the whole system.
+	Control *ControlSample `json:"control,omitempty" doc:"luxd's own machine and its Postgres. Only an operator key reading the whole system (no tenant) gets it."`
 }
 
 // History is a series over [From, To] at Resolution seconds (0: raw).
@@ -471,7 +473,8 @@ func (s *Server) runHistory(ctx context.Context, in *runHistoryInput) (*historyO
 }
 
 // systemHistory is GET /v1/history: the system's samples, or a tenant's
-// (its own key's, or an operator's ?tenant=).
+// (its own key's, or an operator's ?tenant=). The whole system's, read by
+// an operator, also carry the control host.
 func (s *Server) systemHistory(ctx context.Context, in *HistoryQuery) (*historyOutput, error) {
 	p := principal(ctx)
 	from, to, res, err := s.historyRange(*in)
@@ -492,7 +495,10 @@ func (s *Server) systemHistory(ctx context.Context, in *HistoryQuery) (*historyO
 				&sm.Hosts, &sm.CapCPUs, &sm.CapMem, &sm.SysAllocC, &sm.SysAllocM)
 			return sm, err
 		})
-		return err
+		if err != nil || !controlVisible(p) {
+			return err
+		}
+		return addControl(ctx, tx, h.Samples, res, from, to)
 	})
 	if err != nil {
 		return nil, err

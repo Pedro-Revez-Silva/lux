@@ -3,13 +3,17 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -149,6 +153,67 @@ func TestRollupControl(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("rollup %d:\n got %+v\nwant %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// GET /v1/history carries the control host only for an operator key
+// reading the whole system: a tenant key, and an operator narrowed to a
+// tenant, get none of it, though the samples exist for their instants.
+func TestSystemHistoryControlIsOperatorsOnly(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 'acme')`)
+	tenantKey, opKey := ids.Secret("luxk"), ids.Secret("luxk")
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('kt', 't1', 'k', $1, ARRAY['read'])`, ids.Hash(tenantKey))
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('ko', NULL, 'o', $1, ARRAY['operator'])`, ids.Hash(opKey))
+	// t1's samples are stamped at the control samples' instants, so a
+	// missing gate would attach the control host to them too.
+	s.cfg.DiskPaths = []string{"/"}
+	for range 2 {
+		if err := s.sampleSystem(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execSQL(t, s, ctx, `INSERT INTO system_samples (tenant_id, res, at) SELECT 't1', 0, at FROM system_samples WHERE tenant_id = '' AND res = 0`)
+
+	get := func(key, query string) History {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/v1/history?res=0&since=1h"+query, nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", query, w.Code, w.Body)
+		}
+		if strings.Contains(w.Body.String(), `"control"`) != (key == opKey && query == "") {
+			t.Errorf("key %s query %q: control in body = %v:\n%s", map[string]string{tenantKey: "tenant", opKey: "operator"}[key], query,
+				strings.Contains(w.Body.String(), `"control"`), w.Body)
+		}
+		var h History
+		if err := json.Unmarshal(w.Body.Bytes(), &h); err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	for _, c := range []struct{ key, query string }{{tenantKey, ""}, {tenantKey, "&tenant="}, {opKey, "&tenant=acme"}, {opKey, "&tenant=t1"}} {
+		if h := get(c.key, c.query); len(h.Samples) != 2 {
+			t.Errorf("%q: want the tenant's 2 samples, got %d", c.query, len(h.Samples))
+		}
+	}
+	h := get(opKey, "")
+	if len(h.Samples) != 2 {
+		t.Fatalf("operator: %+v", h)
+	}
+	for i, sm := range h.Samples {
+		c := sm.Control
+		if c == nil || c.CPUs == nil || *c.CPUs <= 0 || c.MemoryTotal == nil || c.DatabaseBytes == nil || c.DatabaseConnections == nil ||
+			len(c.Disks) != 1 || c.Disks[0].Path != "/" || c.Disks[0].TotalBytes <= 0 {
+			t.Fatalf("operator sample %d: %+v", i, c)
+		}
+		// CPU is a rate: none for the first point.
+		if (c.CPUCores == nil) != (i == 0) {
+			t.Errorf("sample %d cpuCores %v", i, c.CPUCores)
 		}
 	}
 }
