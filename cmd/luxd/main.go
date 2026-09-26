@@ -165,6 +165,7 @@ func serve(ctx context.Context, c config) error {
 		HistoryRaw:           c.History.Raw.Duration,
 		HistoryMinutes:       c.History.Minutes.Duration,
 		HistoryHours:         c.History.Hours.Duration,
+		DiskPaths:            c.History.DiskPaths,
 		Providers:            providers(c),
 		ConsoleAuth: server.ConsoleAuth{
 			Mode:   c.Console.Auth,

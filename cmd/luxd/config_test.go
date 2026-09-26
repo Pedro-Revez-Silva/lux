@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -164,5 +165,35 @@ func TestDebugFlag(t *testing.T) {
 		if bool(c.Debug) != want {
 			t.Errorf("LUX_DEBUG=%s: debug %v", v, c.Debug)
 		}
+	}
+}
+
+// history.disk_paths defaults to "/", is a list in the file and
+// comma-separated in the environment, and takes only absolute paths.
+func TestDiskPaths(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "luxd.toml")
+	load := func(file string) (config, error) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return loadConfig(path)
+	}
+	c, err := load("")
+	if err != nil || !slices.Equal(c.History.DiskPaths, []string{"/"}) {
+		t.Fatalf("default: %q %v", c.History.DiskPaths, err)
+	}
+	c, err = load("[history]\ndisk_paths = [\"/\", \"/var/lib/postgresql/18\"]\n")
+	if err != nil || !slices.Equal(c.History.DiskPaths, []string{"/", "/var/lib/postgresql/18"}) {
+		t.Fatalf("file: %q %v", c.History.DiskPaths, err)
+	}
+	t.Setenv("LUX_HISTORY_DISK_PATHS", "/data, /srv,")
+	c, err = load("[history]\ndisk_paths = [\"/\"]\n")
+	if err != nil || !slices.Equal(c.History.DiskPaths, []string{"/data", "/srv"}) {
+		t.Fatalf("env over file: %q %v", c.History.DiskPaths, err)
+	}
+	t.Setenv("LUX_HISTORY_DISK_PATHS", "var/lib")
+	if _, err := load(""); err == nil || !strings.Contains(err.Error(), "history.disk_paths") {
+		t.Fatalf("relative path: %v", err)
 	}
 }
