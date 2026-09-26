@@ -1,0 +1,2 @@
+// See /usr/local/lib/smoke/swap-cloudflared.
+DPkg::Post-Invoke { "/usr/local/lib/smoke/swap-cloudflared"; };

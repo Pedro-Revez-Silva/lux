@@ -1,0 +1,22 @@
+#!/bin/sh
+# apt's DPkg::Post-Invoke hook (99smoke-cloudflared), run after every dpkg
+# call. Once dpkg has installed the real cloudflared package, it records
+# what the real binary reports, keeps a copy of it and puts the fake in
+# its place. That happens inside the reconciler's apt-get call, before the
+# reconciler first starts cloudflared.service, so the unit never runs the
+# real binary and no tunnel is attempted. A failure here fails that
+# apt-get call, and so the reconcile run, before the unit starts.
+set -eu
+state=/var/lib/smoke-cloudflared
+mkdir -p "$state"
+# The time of each dpkg run: the one before cloudflared's marks the end of
+# the Postgres install, where the cloudflared download starts.
+date +%s.%N >>"$state/dpkg-runs"
+[ ! -e "$state/swapped" ] || exit 0
+dpkg-query -W -f '${Status}' cloudflared 2>/dev/null | grep -qx 'install ok installed' || exit 0
+readlink /usr/local/bin/cloudflared >"$state/link-target"
+/usr/local/bin/cloudflared --version >"$state/version" 2>&1
+cp /usr/bin/cloudflared "$state/cloudflared.real"
+install -m 755 /usr/local/lib/smoke/fake-cloudflared /usr/bin/cloudflared
+# Which dpkg run installed it.
+wc -l <"$state/dpkg-runs" >"$state/swapped"

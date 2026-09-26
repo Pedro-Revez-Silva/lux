@@ -150,9 +150,43 @@ check_second_run() {
   [ "$summary" = "lux-reconcile: status=ok version=$version changed=[]" ] || fail "$1 changed something: $summary"
 }
 
+# The image carries no cloudflared: the reconciler downloads and installs
+# the release .deb, and the apt hook swap-cloudflared swaps its binary for
+# the fake before the unit first starts (see that script).
+cf_state=/var/lib/smoke-cloudflared
+check_no_cloudflared() {
+  [ ! -e /usr/local/bin/cloudflared ] && [ ! -e /usr/bin/cloudflared ] || fail "cloudflared present before the first run"
+}
+check_cloudflared_installed() {
+  local summary=$1 n cf_end pg_end md5
+  [[ $summary == *"install:cloudflared"* ]] || fail "first run did not install cloudflared: $summary"
+  [ -f "$cf_state/swapped" ] || fail "the apt hook did not see the cloudflared package installed"
+  [ "$(dpkg-query -W -f '${Status}' cloudflared)" = "install ok installed" ] || fail "cloudflared package status"
+  [ "$(cat "$cf_state/link-target")" = /usr/bin/cloudflared ] || fail "/usr/local/bin/cloudflared did not link to /usr/bin/cloudflared"
+  # The binary the package installed, checked against dpkg's own md5sums.
+  md5=$(awk '$2 == "usr/bin/cloudflared" {print $1}' /var/lib/dpkg/info/cloudflared.md5sums)
+  [ -n "$md5" ] && [ "$(md5sum <"$cf_state/cloudflared.real" | cut -d' ' -f1)" = "$md5" ] \
+    || fail "the kept binary is not the package's /usr/bin/cloudflared"
+  grep -Eq '^cloudflared version [0-9]{4}\.' "$cf_state/version" || fail "/usr/local/bin/cloudflared --version: $(cat "$cf_state/version")"
+  echo "installed by the reconciler: $(cat "$cf_state/version")"
+  # The unit runs the fake: its process is the fake's sleep, never restarted.
+  [ "$(systemctl show -P NRestarts cloudflared)" = 0 ] || fail "cloudflared.service restarted"
+  [ "$(tr '\0' ' ' </proc/"$(systemctl show -P MainPID cloudflared)"/cmdline)" = "sleep infinity " ] \
+    || fail "cloudflared.service does not run the fake"
+  # From the end of the dpkg run before it (the Postgres install) to the
+  # end of cloudflared's: the download plus its apt-get install.
+  n=$(cat "$cf_state/swapped")
+  cf_end=$(sed -n "${n}p" "$cf_state/dpkg-runs")
+  pg_end=$(sed -n "$((n - 1))p" "$cf_state/dpkg-runs")
+  echo "host-smoke: $2 cloudflared download and install took $(awk "BEGIN {printf \"%.1f\", $cf_end - $pg_end}")s"
+}
+# A run that installs nothing runs no dpkg at all.
+dpkg_runs() { wc -l <"$cf_state/dpkg-runs"; }
+
 first() {
   echo "== run 1"
   getent passwd postgres >/dev/null && fail "postgres user exists before the first run"
+  check_no_cloudflared
   t0=$(date +%s)
   out1=$(reconcile) || { echo "$out1"; fail "first run exited non-zero"; }
   echo "$out1"
@@ -162,13 +196,16 @@ first() {
   [[ $summary1 == *"install:postgresql-18"* ]] || fail "first run did not install postgresql-18: $summary1"
   [[ $summary1 == *"version:$version"* ]] || fail "first run did not install $version"
   check_host_up
+  check_cloudflared_installed "$summary1" "first host:"
   # The wrappers see a new host's mkfs and cluster: their absence on the
   # replaced host means something.
   grep -q '^mkfs.ext4 ' "$calls" || fail "first run: mkfs.ext4 not seen by the wrapper"
   grep -q '^pg_createcluster ' "$calls" || fail "first run: pg_createcluster not seen by the wrapper"
 
   echo "== run 2"
+  runs=$(dpkg_runs)
   check_second_run "second run"
+  [ "$(dpkg_runs)" = "$runs" ] || fail "second run ran dpkg"
 
   echo "== run 3, through the systemd unit"
   systemctl start lux-reconcile.service || fail "lux-reconcile.service"
@@ -216,6 +253,7 @@ replaced() {
   useradd -r -u "$new_id" -g postgres -d /var/lib/postgresql -M -s /bin/bash postgres
   echo "== postgres uid $pg_uid on the first host; $new_id here"
 
+  check_no_cloudflared
   echo "== replaced host: run 1"
   t0=$(date +%s)
   out1=$(reconcile) || { echo "$out1"; fail "replaced host's first run exited non-zero"; }
@@ -226,6 +264,7 @@ replaced() {
   [[ $summary1 == "lux-reconcile: status=ok version=$version changed=["* ]] || fail "replaced host's first run: $summary1"
   [[ $summary1 == *"version:$version"* ]] || fail "replaced host did not install $version"
   [[ $summary1 == *"install:postgresql-18"* ]] || fail "replaced host did not install postgresql-18: $summary1"
+  check_cloudflared_installed "$summary1" "replaced host:"
   # pg-volume is the mount (adopted or new alike); database is createdb.
   changed=${summary1#*changed=[}
   changed=,${changed%]},
@@ -289,7 +328,9 @@ replaced() {
   echo "luxd admin create-tenant (luxd.toml, lux_app): ok"
 
   echo "== replaced host: run 2"
+  runs=$(dpkg_runs)
   check_second_run "replaced host's second run"
+  [ "$(dpkg_runs)" = "$runs" ] || fail "replaced host's second run ran dpkg"
 
   echo "host-smoke: replaced host ok"
 }

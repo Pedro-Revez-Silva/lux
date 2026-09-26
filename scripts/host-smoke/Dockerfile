@@ -1,7 +1,8 @@
 # The control host as cloud-init leaves it (base packages only; Postgres 18
-# is the reconciler's to install), for scripts/host-smoke.sh. systemd is
-# PID 1; `aws` and `cloudflared` are fakes, and the fake cloudflared at
-# /usr/local/bin makes the reconciler skip that install.
+# and cloudflared are the reconciler's to install), for scripts/host-smoke.sh.
+# systemd is PID 1; `aws` is a fake. cloudflared is the real release .deb,
+# installed by the reconciler; an apt hook (swap-cloudflared) replaces its
+# binary with the fake before the unit first starts.
 FROM debian:trixie
 
 RUN apt-get update \
@@ -10,8 +11,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY fake-aws /usr/local/bin/aws
-COPY fake-cloudflared /usr/local/bin/cloudflared
-COPY fake-s3.py /usr/local/lib/smoke/fake-s3.py
+COPY fake-cloudflared swap-cloudflared fake-s3.py /usr/local/lib/smoke/
+COPY 99smoke-cloudflared /etc/apt/apt.conf.d/99smoke-cloudflared
 
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]
