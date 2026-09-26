@@ -392,3 +392,43 @@ func TestHostRatesCheck(t *testing.T) {
 		}
 	}
 }
+
+// A provisioned host's provider period is not static: a re-hello with a
+// new capacity neither closes it nor opens a static one beside it, even
+// with a price on the host row.
+func TestStaticRateLeavesProviderPeriods(t *testing.T) {
+	s, _ := priceFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provider_id, provision_requested_at, hourly_price, price_currency)
+		VALUES ('h9', 't1', 'h9', 'lab', 'provisioning', 'i-9', $1, 0.40, 'USD')`, at("10:00"))
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('h9', $1, 0.0832, 'USD', 2, $2, 'aws-pricing')`, at("10:00"), 8*gib)
+	for _, cpus := range []float64{8, 4} {
+		w, err := s.registerHost(ctx, &hostToken{ID: "tok1", TenantID: strp("t1"), Pool: "lab"}, proto.Hello{
+			Name: "h9", ProviderID: "i-9", ProtocolVersion: proto.Version, Arch: "arm64",
+			Capacity: proto.Capacity{CPUs: cpus, Memory: 32 * gib, Runs: 4},
+		})
+		if err != nil || w.HostID != "h9" {
+			t.Fatalf("hello with %v cpus: %v, host %q", cpus, err, w.HostID)
+		}
+	}
+	var got []string
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT format('%s %s %s %s %s %s', trim_scale(per_hour), currency, cap_cpus, cap_memory / (1024 * 1024 * 1024),
+				source, coalesce(valid_to::text, 'open'))
+			FROM host_rates WHERE host_id = 'h9' AND valid_from = $1`, at("10:00"))
+		if err != nil {
+			return err
+		}
+		got, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"0.0832 USD 2 8 aws-pricing open"}; !slices.Equal(got, want) {
+		t.Errorf("the provider period is now %v, want %v", got, want)
+	}
+	if got := periods(t, s, "h9"); len(got) != 1 {
+		t.Errorf("periods: %v, want only the provider's", got)
+	}
+}
