@@ -376,6 +376,7 @@ def test_new_cluster_is_not_chowned_recursively(env, capsys):
     assert len(env.sh.commands("pg_createcluster")) == 1
     assert [c for c in env.sh.commands("chown") if "-R" in c] == []
 
+
 def test_cluster_missing_on_a_mounted_volume_is_created(env, capsys):
     # A run that mounted the volume and then failed before the cluster.
     env.sh.mounted = env.sh.has_filesystem = True
