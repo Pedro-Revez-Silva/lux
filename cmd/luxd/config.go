@@ -7,7 +7,9 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -69,6 +71,9 @@ type config struct {
 		Raw         duration `toml:"raw" env:"LUX_HISTORY_RAW"`
 		Minutes     duration `toml:"minutes" env:"LUX_HISTORY_MINUTES"`
 		Hours       duration `toml:"hours" env:"LUX_HISTORY_HOURS"`
+		// DiskPaths: directories whose filesystems the control host's
+		// history tracks; in the environment, comma-separated.
+		DiskPaths []string `toml:"disk_paths" env:"LUX_HISTORY_DISK_PATHS"`
 	} `toml:"history"`
 	EC2 struct {
 		Endpoint string `toml:"endpoint" env:"LUX_EC2_ENDPOINT"`
@@ -159,6 +164,7 @@ func defaultConfig() config {
 	c.History.Raw.Duration = server.DefaultHistoryRaw
 	c.History.Minutes.Duration = server.DefaultHistoryMinutes
 	c.History.Hours.Duration = server.DefaultHistoryHours
+	c.History.DiskPaths = slices.Clone(server.DefaultDiskPaths)
 	c.Console.Auth = "key"
 	return c
 }
@@ -236,6 +242,17 @@ func setField(v reflect.Value, s string) error {
 			return err
 		}
 		v.SetInt(int64(n))
+	case reflect.Slice:
+		if v.Type().Elem().Kind() != reflect.String {
+			return fmt.Errorf("unsupported kind %s", v.Kind())
+		}
+		var list []string
+		for _, e := range strings.Split(s, ",") {
+			if e = strings.TrimSpace(e); e != "" {
+				list = append(list, e)
+			}
+		}
+		v.Set(reflect.ValueOf(list))
 	case reflect.Float64:
 		n, err := strconv.ParseFloat(s, 64)
 		if err != nil {
@@ -261,6 +278,11 @@ func (c config) check() error {
 	}
 	if c.Defaults.Pids <= 0 {
 		problems = append(problems, "defaults.pids (LUX_DEFAULT_PIDS) must be a positive number")
+	}
+	for _, p := range c.History.DiskPaths {
+		if !filepath.IsAbs(p) {
+			problems = append(problems, fmt.Sprintf("history.disk_paths (LUX_HISTORY_DISK_PATHS) %q: want an absolute path", p))
+		}
 	}
 	switch c.Console.Auth {
 	case "key":
