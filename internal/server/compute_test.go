@@ -143,6 +143,18 @@ func TestComputeCost(t *testing.T) {
 		// S = 16/32; the 6 cpus it reserved count for nothing.
 		want:    map[string]string{"A": "0.2"},
 		unalloc: "0.2",
+	}, {
+		// A provider period opened before the host said what it has: missing,
+		// like no period, not an error for the whole host.
+		name: "period with no capacity is missing",
+		in: hostCompute{From: at("10:00"), To: atp("11:00"),
+			Rates:      []ratePeriod{{From: at("10:00"), To: atp("10:30"), PerHour: "0.40", Currency: "USD", Source: "aws-pricing"}, usdRate("10:30", "", "0.40")},
+			Placements: []placementWindow{place("A", 2, 8, "10:15", "11:00")}},
+		// From 10:30, A (share 1/4) pays 1/4 of $0.20.
+		want:       map[string]string{"A": "0.05"},
+		unalloc:    "0.15",
+		missing:    []timeRange{{at("10:00"), at("10:30")}},
+		runMissing: map[string][]timeRange{"A": {{at("10:15"), at("10:30")}}},
 	}} {
 		t.Run(c.name, func(t *testing.T) {
 			res, err := computeCost(c.in)
@@ -307,8 +319,9 @@ func TestComputeCostWorkedExamplePieces(t *testing.T) {
 // computeCost against naiveComputeCost, which works out every piece from
 // scratch, on random hosts drawn from a coarse grid of instants, so that
 // touching, coincident, zero-length and inverted ranges, open ends,
-// overlapping periods and a second currency all come up often. Every piece,
-// amount, missing range and error must be the same.
+// overlapping periods, periods with no capacity and a second currency all
+// come up often. Every piece, amount, missing range and error must be the
+// same.
 func TestComputeCostMatchesNaive(t *testing.T) {
 	rng := rand.New(rand.NewPCG(1, 2))
 	grid := func() time.Time { return at("10:00").Add(time.Duration(rng.IntN(13)) * 5 * time.Minute) }
@@ -392,7 +405,8 @@ func dumpCost(in hostCompute, res computeResult, err error) string {
 }
 
 // naiveComputeCost is computeCost as it was before the sweep: every piece
-// scans every rate period and placement.
+// scans every rate period and placement. A piece whose period has no
+// capacity is missing, as in computeCost.
 func naiveComputeCost(in hostCompute) (computeResult, error) {
 	from, to := in.From, in.Now
 	if in.To != nil {
@@ -427,9 +441,6 @@ func naiveComputeCost(in hostCompute) (computeResult, error) {
 		if !ok {
 			return res, fmt.Errorf("host %s: rate %q from %s is not a decimal", in.HostID, r.PerHour, r.From)
 		}
-		if r.CapCPUs <= 0 && r.CapMemory <= 0 {
-			return res, fmt.Errorf("host %s: rate period from %s has no capacity to share", in.HostID, r.From)
-		}
 		rates[i] = v
 		cuts = append(cuts, clip(r.From), clip(end(r.To)))
 	}
@@ -456,7 +467,7 @@ func naiveComputeCost(in hostCompute) (computeResult, error) {
 				ri = i
 			}
 		}
-		if ri < 0 {
+		if ri < 0 || in.Rates[ri].CapCPUs <= 0 && in.Rates[ri].CapMemory <= 0 {
 			res.Missing = appendRange(res.Missing, piece.timeRange)
 			for _, i := range piece.Live {
 				res.Placements[i].Missing = appendRange(res.Placements[i].Missing, piece.timeRange)
@@ -497,13 +508,13 @@ func naiveComputeCost(in hostCompute) (computeResult, error) {
 }
 
 // Overlapping periods are a bug in whatever wrote them: refused, never
-// priced twice. A rate that is not a decimal is refused too, and so is a
-// period with neither cpus nor memory, which would price every Run at zero.
+// priced twice, even when one of them has no capacity. A rate that is not a
+// decimal is refused too.
 func TestComputeCostRefusesBadRates(t *testing.T) {
 	for _, rates := range [][]ratePeriod{
 		{usdRate("10:00", "", "0.40"), usdRate("10:30", "", "0.40")},
 		{usdRate("10:00", "", "abc")},
-		{{From: at("10:00"), PerHour: "0.40", Currency: "USD", Source: "static"}}, // no capacity at all
+		{usdRate("10:00", "", "0.40"), {From: at("10:30"), PerHour: "0.40", Currency: "USD", Source: "static"}},
 	} {
 		if _, err := computeCost(hostCompute{From: at("10:00"), To: atp("11:00"), Rates: rates}); err == nil {
 			t.Errorf("rates %+v were accepted", rates)

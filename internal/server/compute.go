@@ -21,7 +21,8 @@ import (
 //	unalloc    = rate × dt × max(0, 1 − S)
 //
 // Money is exact: big.Rat throughout, never float64. A piece with no rate
-// period is missing, never priced at zero.
+// period, or whose period has neither cpus nor memory to share, is missing,
+// never priced at zero.
 
 // ratePeriod is one host_rates row. To nil: still current.
 type ratePeriod struct {
@@ -141,9 +142,6 @@ func computeCost(in hostCompute) (computeResult, error) {
 		if !ok {
 			return res, fmt.Errorf("host %s: rate %q from %s is not a decimal", in.HostID, r.PerHour, r.From)
 		}
-		if r.CapCPUs <= 0 && r.CapMemory <= 0 {
-			return res, fmt.Errorf("host %s: rate period from %s has no capacity to share", in.HostID, r.From)
-		}
 		rates[i] = v
 		cuts = append(cuts, clip(r.From), clip(end(r.To)))
 	}
@@ -202,7 +200,7 @@ func computeCost(in hostCompute) (computeResult, error) {
 		if len(live) > 0 {
 			piece.Live = slices.Clone(live)
 		}
-		if len(liveRates) == 0 {
+		if len(liveRates) == 0 || !hasCapacity(in.Rates[liveRates[0]]) {
 			res.Missing = appendRange(res.Missing, piece.timeRange)
 			for _, i := range piece.Live {
 				res.Placements[i].Missing = appendRange(res.Placements[i].Missing, piece.timeRange)
@@ -255,6 +253,12 @@ func removeSorted(s []int, i int) []int {
 		return slices.Delete(s, k, k+1)
 	}
 	return s
+}
+
+// hasCapacity: r has cpus or memory to share. A period with neither is
+// treated as no period at all (every share against it would be zero).
+func hasCapacity(r ratePeriod) bool {
+	return r.CapCPUs > 0 || r.CapMemory > 0
 }
 
 // share is max(cpu share, memory share) against the period's capacity. A
