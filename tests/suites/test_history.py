@@ -61,3 +61,23 @@ def test_history_of_another_tenants_run_is_not_found(tenant_factory):
         a.run("history", run_id)
     assert e.value.code == 3
     b.run("cancel", run_id)
+
+
+def test_control_host_is_only_in_the_operators_whole_system_history(tenant_factory, operator):
+    a = tenant_factory()
+    # The system tick samples luxd's own machine: the operator's whole-system
+    # history carries it once a couple of samples exist.
+    def control(lux, *args):
+        h = lux.json("history", "--since", "5m", *args)
+        return [s["control"] for s in h["samples"] if "control" in s]
+    c = wait_until(lambda: (lambda c: c if len(c) >= 2 else None)(control(operator)), 60, 1,
+                   "no control host in the operator's history")[-1]
+    assert c["cpus"] > 0 and c["cpuCores"] >= 0 and 0 < c["memoryBytes"] <= c["memoryTotal"], c
+    assert c["databaseBytes"] > 0 and c["databaseConnections"] >= 1, c
+    assert [d["path"] for d in c["disks"]] == ["/"], c
+    d = c["disks"][0]
+    assert 0 < d["usedBytes"] and d["usedBytes"] + d["freeBytes"] <= d["totalBytes"], d
+    # A tenant, and an operator narrowed to that tenant, never see it.
+    wait_until(lambda: a.json("history", "--since", "5m")["samples"] or None, 30, 1, "no tenant samples")
+    assert control(a) == []
+    assert control(operator, "--tenant", a.tenant_id) == []

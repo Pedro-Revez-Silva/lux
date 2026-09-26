@@ -107,3 +107,16 @@ def test_pages_update_live_from_events(page, operator, tenant_factory):
     page.get_by_text(name, exact=True).wait_for(timeout=5_000)
     assert not page.errors, page.errors
     a.run("cancel", run_id)
+
+
+def test_control_host_row_is_the_operators_whole_system_view(page, env, operator, tenant_factory):
+    a = tenant_factory()
+    page.sign_in(operator.api_key, "/")
+    page.get_by_text("Control host", exact=True).wait_for(timeout=15_000)
+    page.get_by_text("Disk /", exact=True).wait_for(timeout=45_000)
+    page.get_by_text("Postgres size", exact=True).wait_for(timeout=5_000)
+    # Narrowed to a tenant, the row is gone.
+    page.goto(env.luxd_url + f"/?tenant={a.tenant_id}")
+    page.get_by_text("Trends", exact=True).wait_for(timeout=15_000)
+    assert page.get_by_text("Control host", exact=True).count() == 0
+    assert not page.errors, page.errors
