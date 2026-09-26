@@ -20,6 +20,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/marcioapm/lux/internal/hoststat"
 )
 
 type Podman struct {
@@ -470,41 +472,16 @@ type HostUsage struct {
 
 func ReadHostUsage(dir string) (HostUsage, error) {
 	var u HostUsage
-	b, err := os.ReadFile("/proc/stat")
+	cpu, err := hoststat.ReadCPU()
 	if err != nil {
 		return u, err
 	}
-	// cpu  user nice system idle iowait irq softirq steal ...: busy is
-	// everything but idle and iowait, in USER_HZ (100 on Linux).
-	if line, _, ok := strings.Cut(string(b), "\n"); ok && strings.HasPrefix(line, "cpu ") {
-		for i, f := range strings.Fields(line)[1:] {
-			if i == 3 || i == 4 || i >= 8 { // idle, iowait; guest time is already in user
-				continue
-			}
-			n, _ := strconv.ParseInt(f, 10, 64)
-			u.CPUSeconds += float64(n) / 100
-		}
+	u.CPUSeconds = cpu.Seconds
+	if m, err := hoststat.ReadMemory(); err == nil {
+		u.MemoryBytes = m.Used
 	}
-	if b, err := os.ReadFile("/proc/meminfo"); err == nil {
-		var total, avail int64
-		for _, l := range strings.Split(string(b), "\n") {
-			f := strings.Fields(l)
-			if len(f) < 2 {
-				continue
-			}
-			n, _ := strconv.ParseInt(f[1], 10, 64)
-			switch f[0] {
-			case "MemTotal:":
-				total = n * 1024
-			case "MemAvailable:":
-				avail = n * 1024
-			}
-		}
-		u.MemoryBytes = total - avail
-	}
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(dir, &st); err == nil {
-		u.DiskBytes = int64(st.Blocks-st.Bfree) * st.Bsize
+	if d, err := hoststat.ReadDisk(dir); err == nil {
+		u.DiskBytes = d.Used
 	}
 	return u, nil
 }
