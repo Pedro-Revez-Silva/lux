@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"testing"
 
@@ -168,19 +167,6 @@ func TestHostAPIReturnsHostFacts(t *testing.T) {
 		platform = append(platform, id)
 	}
 
-	get := func(t *testing.T, key, path string, out any) int {
-		t.Helper()
-		req := httptest.NewRequest(http.MethodGet, path, nil)
-		req.Header.Set("Authorization", "Bearer "+key)
-		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, req)
-		if w.Code == http.StatusOK {
-			if err := json.Unmarshal(w.Body.Bytes(), out); err != nil {
-				t.Fatal(err)
-			}
-		}
-		return w.Code
-	}
 	// factsOf keeps only the fact keys present in a response host, so an
 	// omitted key and one serialized as "" or null differ.
 	factsOf := func(h map[string]any) facts {
@@ -201,7 +187,7 @@ func TestHostAPIReturnsHostFacts(t *testing.T) {
 			var list struct {
 				Hosts []map[string]any `json:"hosts"`
 			}
-			if code := get(t, key, "/v1/hosts", &list); code != http.StatusOK {
+			if code := getJSON(t, s, key, "/v1/hosts", &list); code != http.StatusOK {
 				t.Fatalf("GET /v1/hosts: %d", code)
 			}
 			got := map[string]facts{}
@@ -217,7 +203,7 @@ func TestHostAPIReturnsHostFacts(t *testing.T) {
 			}
 			for _, id := range visible[who] {
 				var h map[string]any
-				if code := get(t, key, "/v1/hosts/"+id, &h); code != http.StatusOK {
+				if code := getJSON(t, s, key, "/v1/hosts/"+id, &h); code != http.StatusOK {
 					t.Fatalf("GET /v1/hosts/%s: %d", id, code)
 				}
 				if f := factsOf(h); h["id"] != id || !reflect.DeepEqual(f, want[id]) {
@@ -226,7 +212,7 @@ func TestHostAPIReturnsHostFacts(t *testing.T) {
 			}
 			if who == "tenant" {
 				var h map[string]any
-				if code := get(t, key, "/v1/hosts/h-t2", &h); code != http.StatusNotFound {
+				if code := getJSON(t, s, key, "/v1/hosts/h-t2", &h); code != http.StatusNotFound {
 					t.Errorf("GET /v1/hosts/h-t2 as t1: %d, want 404", code)
 				}
 			}

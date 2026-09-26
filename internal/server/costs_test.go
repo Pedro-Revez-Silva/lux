@@ -45,19 +45,26 @@ func reportError(s *Server, tenantID, runID, source string, lines ...costReport)
 	})
 }
 
-func getCost(t *testing.T, s *Server, key, runID string) (int, RunCost) {
+// getJSON GETs path with key and, on 200, decodes the body into out.
+func getJSON(t *testing.T, s *Server, key, path string, out any) int {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/v1/runs/"+runID+"/cost", nil)
+	req := httptest.NewRequest(http.MethodGet, path, nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
-	var c RunCost
 	if w.Code == http.StatusOK {
-		if err := json.Unmarshal(w.Body.Bytes(), &c); err != nil {
+		if err := json.Unmarshal(w.Body.Bytes(), out); err != nil {
 			t.Fatal(err)
 		}
 	}
-	return w.Code, c
+	return w.Code
+}
+
+func getCost(t *testing.T, s *Server, key, runID string) (int, RunCost) {
+	t.Helper()
+	var c RunCost
+	code := getJSON(t, s, key, "/v1/runs/"+runID+"/cost", &c)
+	return code, c
 }
 
 var t0 = time.Date(2026, 9, 26, 10, 0, 0, 0, time.UTC)
