@@ -409,6 +409,94 @@ func TestControlCPURatePerInstance(t *testing.T) {
 	check(get(45*time.Second), "a", map[time.Duration]*float64{0: nil, 20 * time.Second: &two, 40 * time.Second: &two})
 }
 
+// Rolled-up control samples reach /v1/history at their resolution,
+// attached to the whole system's rolled-up samples of the same buckets,
+// with CPU rates between consecutive buckets and each path's disk figures.
+func TestRolledUpControlHistory(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	opKey := ids.Secret("luxk")
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('ko', NULL, 'o', $1, ARRAY['operator'])`, ids.Hash(opKey))
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
+	// Two minute buckets in the first hour, one in the second. No raw sample
+	// is at a bucket's start, so raw control samples cannot pass for rolled ones.
+	offs := []time.Duration{0, 30 * time.Second, time.Minute, 90 * time.Second, time.Hour, time.Hour + 30*time.Second}
+	cpu := []float64{1000, 1030, 1060, 1120, 8170, 8200}
+	for i, off := range offs {
+		at := hour.Add(off + 5*time.Second)
+		execSQL(t, s, ctx, `INSERT INTO system_samples (tenant_id, res, at, queued) VALUES ('', 0, $1, 1)`, at)
+		execSQL(t, s, ctx, `INSERT INTO control_samples (instance, res, at, cpu_seconds, cpus) VALUES ('ctl', 0, $1, $2, 8)`, at, cpu[i])
+		n := int64(i + 1)
+		execSQL(t, s, ctx, `INSERT INTO control_disk_samples (instance, path, res, at, used_bytes, free_bytes, total_bytes)
+			VALUES ('ctl', '/', 0, $1, $2, $3, 1000), ('ctl', '/data', 0, $1, $4, $5, 9000)`, at, 100*n, 1000-100*n, 5000+10*n, 4000-10*n)
+	}
+	if err := s.rollupHistory(ctx); err != nil {
+		t.Fatal(err)
+	}
+	get := func(res string) History {
+		t.Helper()
+		q := url.Values{"res": {res}, "from": {hour.Add(-time.Second).Format(time.RFC3339Nano)}, "to": {hour.Add(2 * time.Hour).Format(time.RFC3339Nano)}}
+		req := httptest.NewRequest(http.MethodGet, "/v1/history?"+q.Encode(), nil)
+		req.Header.Set("Authorization", "Bearer "+opKey)
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("res %s: %d %s", res, w.Code, w.Body)
+		}
+		var h History
+		if err := json.Unmarshal(w.Body.Bytes(), &h); err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	disks := func(rootUsed, dataUsed int64) []DiskSample {
+		return []DiskSample{{"/", rootUsed, 1000 - rootUsed, 1000}, {"/data", dataUsed, 9000 - dataUsed, 9000}}
+	}
+	f := func(v float64) *float64 { return &v }
+	type point struct {
+		off   time.Duration
+		cores *float64
+		disks []DiskSample
+	}
+	for _, c := range []struct {
+		res  string
+		want []point
+	}{
+		// Minute buckets: CPU the bucket's maximum, disks its mean.
+		{"60", []point{
+			{0, nil, disks(150, 5015)},
+			{time.Minute, f((1120 - 1030) / 60.0), disks(350, 5035)},
+			{time.Hour, f((8200 - 1120) / (59 * 60.0)), disks(550, 5055)},
+		}},
+		// Hour buckets, from the minute ones.
+		{"3600", []point{
+			{0, nil, disks(250, 5025)},
+			{time.Hour, f((8200 - 1120) / 3600.0), disks(550, 5055)},
+		}},
+	} {
+		h := get(c.res)
+		if len(h.Samples) != len(c.want) {
+			t.Fatalf("res %s: %d samples, want %d: %+v", c.res, len(h.Samples), len(c.want), h.Samples)
+		}
+		for i, w := range c.want {
+			sm := h.Samples[i]
+			if !sm.At.Equal(hour.Add(w.off)) {
+				t.Errorf("res %s sample %d: at %v, want +%v", c.res, i, sm.At, w.off)
+			}
+			ctl := sm.Control
+			if ctl == nil || ctl.Instance != "ctl" || ctl.CPUs == nil || *ctl.CPUs != 8 {
+				t.Fatalf("res %s +%v: control %+v", c.res, w.off, ctl)
+			}
+			if (w.cores == nil) != (ctl.CPUCores == nil) || w.cores != nil && math.Abs(*w.cores-*ctl.CPUCores) > 1e-9 {
+				t.Errorf("res %s +%v: cpuCores %v, want %v", c.res, w.off, deref(ctl.CPUCores), deref(w.cores))
+			}
+			if !slices.Equal(ctl.Disks, w.disks) {
+				t.Errorf("res %s +%v: disks %+v, want %+v", c.res, w.off, ctl.Disks, w.disks)
+			}
+		}
+	}
+}
+
 func deref(f *float64) any {
 	if f == nil {
 		return nil
