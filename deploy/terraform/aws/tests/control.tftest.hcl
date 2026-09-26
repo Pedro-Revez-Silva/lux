@@ -11,6 +11,7 @@
 # Plan only: an apply run leaves aws_ebs_volume.pg_data in the test state,
 # and its prevent_destroy makes teardown fail after every run has passed.
 # override_during = plan feeds the mock ids and ARNs below into the plan.
+# override_during needs Terraform >= 1.11 (the module itself allows 1.10).
 mock_provider "aws" {
   override_during = plan
 
