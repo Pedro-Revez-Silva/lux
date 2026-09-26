@@ -7,6 +7,7 @@ operator choices; infrastructure values (listen, public_url, database, s3,
 console) come from SSM and are refused here.
 """
 import dataclasses
+import math
 import re
 import tomllib
 
@@ -14,26 +15,41 @@ from .host import HostError
 
 DEFAULT_REPO = "marcioapm/lux"
 
-_DURATION = re.compile(r"^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$")
-_SIZE = re.compile(r"^([0-9]+(\.[0-9]+)?)\s*([KMGT]i?)?B?$")
+_DURATION_PART = re.compile(r"([0-9]+(?:\.[0-9]+)?)(ns|us|µs|ms|s|m|h)")
+_DURATION = re.compile(f"(?:{_DURATION_PART.pattern})+")
+_DURATION_NS = {"ns": 1, "us": 1e3, "µs": 1e3, "ms": 1e6, "s": 1e9, "m": 60e9, "h": 3600e9}
+_SIZE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*([KMGT]i?)?B?")
+# spec.Bytes.parse's multipliers: luxd truncates the product to int64 bytes.
+_SIZE_MULT = {None: 1, "K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12,
+              "Ki": 1 << 10, "Mi": 1 << 20, "Gi": 1 << 30, "Ti": 1 << 40}
+_INT64_MAX = (1 << 63) - 1
 _VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
 def _duration(v):
-    return isinstance(v, str) and bool(_DURATION.match(v))
+    # time.ParseDuration refuses a value over int64 nanoseconds.
+    if not isinstance(v, str) or not _DURATION.fullmatch(v):
+        return False
+    return sum(float(n) * _DURATION_NS[u] for n, u in _DURATION_PART.findall(v)) <= _INT64_MAX
 
 
 def _positive_int(v):
-    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+    return isinstance(v, int) and not isinstance(v, bool) and 0 < v <= _INT64_MAX
 
 
 def _positive_number(v):
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < math.inf
 
 
 def _size(v):
-    return _positive_int(v) or (isinstance(v, str) and bool(_SIZE.match(v.strip())))
+    # luxd's check() refuses a size of 0 bytes, including one that rounds down to 0.
+    if isinstance(v, int) and not isinstance(v, bool):
+        return _positive_int(v)
+    m = isinstance(v, str) and _SIZE.fullmatch(v.strip())
+    if not m:
+        return False
+    return 0 < int(float(m.group(1)) * _SIZE_MULT[m.group(2)]) <= _INT64_MAX
 
 
 def _percent(v):
@@ -55,8 +71,8 @@ _LUXD_KEYS = {
 _LUXD_TABLES = {
     "defaults": {
         "cpus": (_positive_number, "a positive number"),
-        "memory": (_size, "a size such as \"8Gi\""),
-        "disk": (_size, "a size such as \"50Gi\""),
+        "memory": (_size, "a positive size such as \"8Gi\""),
+        "disk": (_size, "a positive size such as \"50Gi\""),
         "pids": (_positive_int, "a positive integer"),
     },
     "history": {

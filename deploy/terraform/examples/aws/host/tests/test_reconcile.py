@@ -377,12 +377,36 @@ def test_legacy_deploy_timer_is_removed(env, capsys):
     ('[luxd]\nlease = "30"\n', "luxd.lease"),
     ('[luxd]\noutdated_drain_percent = 0\n', "outdated_drain_percent"),
     ('[luxd.defaults]\ncpus = -1\n', "luxd.defaults.cpus"),
+    ('[luxd.defaults]\ncpus = inf\n', "luxd.defaults.cpus"),
+    ('[luxd.defaults]\nmemory = "0"\n', "luxd.defaults.memory"),
+    ('[luxd.defaults]\nmemory = "0Gi"\n', "luxd.defaults.memory"),
+    ('[luxd.defaults]\nmemory = 0\n', "luxd.defaults.memory"),
+    ('[luxd.defaults]\ndisk = "0.0001"\n', "luxd.defaults.disk"),
+    ('[luxd.defaults]\ndisk = "0.5"\n', "luxd.defaults.disk"),
+    ('[luxd.defaults]\ndisk = "9000000Ti"\n', "luxd.defaults.disk"),
+    ('[luxd]\ntick = "30s\\n"\n', "luxd.tick"),
+    ('[luxd]\nlease = "3000000h"\n', "luxd.lease"),
     ('[luxd.database]\nurl = "x"\n', "luxd.database: unknown key"),
     ('extra = 1\n', "extra: unknown key"),
 ])
 def test_desired_state_validation(text, problem):
     with pytest.raises(HostError, match=problem.replace(".", r"\.").replace("(", r"\(")):
         desired_mod.parse(text)
+
+
+@pytest.mark.parametrize("table,key,value", [
+    ("defaults", "memory", '"1"'),
+    ("defaults", "memory", '"0.001Ki"'),
+    ("defaults", "disk", '" 50 GiB "'),
+    ("defaults", "memory", "8589934592"),
+    ("defaults", "cpus", "0.5"),
+    ("defaults", "pids", "1"),
+    ("history", "raw", '"1h30m"'),
+    ("history", "sample_every", '"500ms"'),
+])
+def test_desired_state_accepts_the_smallest_and_mixed_values_luxd_takes(table, key, value):
+    d = desired_mod.parse(f"[luxd.{table}]\n{key} = {value}\n")
+    assert key in d.luxd_tables[table]
 
 
 def test_bad_release_repo_type_is_one_problem():
