@@ -5,17 +5,25 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/store"
 )
 
-// fakeLaunchProvider records the env launch passed it (the one thing
-// this test cares about); Terminate and Instances are unused here.
+// fakeLaunchProvider records the env launch passed it and answers with
+// launched (i-fake when unset); Terminate and Instances are unused here.
 type fakeLaunchProvider struct {
-	env map[string]string
+	env      map[string]string
+	launched Launched
 }
 
-func (p *fakeLaunchProvider) Launch(ctx context.Context, template json.RawMessage, tags, env map[string]string) (string, error) {
+func (p *fakeLaunchProvider) Launch(ctx context.Context, template json.RawMessage, tags, env map[string]string) (Launched, error) {
 	p.env = env
-	return "i-fake", nil
+	if p.launched.ProviderID == "" {
+		return Launched{ProviderID: "i-fake"}, nil
+	}
+	return p.launched, nil
 }
 
 func (p *fakeLaunchProvider) Terminate(ctx context.Context, template json.RawMessage, providerID string) error {
@@ -52,6 +60,35 @@ func TestLaunchSetsLuxURLFromRunnerURL(t *testing.T) {
 			}
 			if prov.env["LUX_URL"] != c.wantLuxURL {
 				t.Errorf("LUX_URL = %q, want %q", prov.env["LUX_URL"], c.wantLuxURL)
+			}
+		})
+	}
+}
+
+// launch stores what the provider says it started: id, instance type, zone
+// and market, on the host row.
+func TestLaunchStoresHostFacts(t *testing.T) {
+	for _, want := range []Launched{
+		{ProviderID: "i-od", InstanceType: "m7i.2xlarge", Zone: "eu-west-1a", Market: MarketOnDemand},
+		{ProviderID: "i-spot", InstanceType: "c7g.xlarge", Zone: "eu-west-1c", Market: MarketSpot},
+	} {
+		t.Run(want.Market, func(t *testing.T) {
+			s := testServer(t)
+			ctx := context.Background()
+			execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('pool1', 'burst', 'ec2')`)
+			if err := s.launch(ctx, &fakeLaunchProvider{launched: want}, poolRow{ID: "pool1", Name: "burst", Provider: "ec2"}); err != nil {
+				t.Fatal(err)
+			}
+			var got Launched
+			err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				return tx.QueryRow(ctx, `SELECT provider_id, instance_type, zone, market FROM hosts WHERE pool = 'burst'`).
+					Scan(&got.ProviderID, &got.InstanceType, &got.Zone, &got.Market)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != want {
+				t.Fatalf("host row: got %+v, want %+v", got, want)
 			}
 		})
 	}

@@ -62,6 +62,10 @@ def _parse_env_lines(text: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
 
 
+# The instance type the fake's launch templates stand for.
+FAKE_TEMPLATE_TYPE = "m7i.large"
+
+
 class FakeEC2:
     real = False
 
@@ -193,8 +197,14 @@ class FakeEC2:
         if self.lose_reply:
             self.lose_reply = False
             raise FakeError("RequestLimitExceeded", "the reply was lost (fake)")
+        # As EC2: the reply names the type actually launched (the launch
+        # template's when the request gives none) and the zone.
+        itype = q.get("InstanceType") or FAKE_TEMPLATE_TYPE
+        zone = (self.template.get("region") or "us-east-1") + "a"
         return (f'<RunInstancesResponse xmlns="{NS}"><reservationId>r-{uuid.uuid4().hex[:17]}</reservationId>'
-                f"<instancesSet><item><instanceId>{iid}</instanceId><instanceState><code>0</code><name>pending</name>"
+                f"<instancesSet><item><instanceId>{iid}</instanceId><instanceType>{escape(itype)}</instanceType>"
+                f"<placement><availabilityZone>{escape(zone)}</availabilityZone></placement>"
+                f"<instanceState><code>0</code><name>pending</name>"
                 f"</instanceState></item></instancesSet></RunInstancesResponse>")
 
     def _boot(self, iid: str):

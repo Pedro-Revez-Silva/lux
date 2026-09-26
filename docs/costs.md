@@ -83,12 +83,13 @@ The parts this design builds on:
 **Missing today** (each one is a step in the build order):
 
 - The instance's availability zone, and its instance type when the
-  launch template picks it. `RunInstances` returns both, but
-  `ec2.Provider.Launch` throws them away and returns only the id.
+  launch template picks it (**built**, section 3: `hosts.instance_type`,
+  `zone`, `market`).
 - The instance's real launch and termination times at the provider.
   lux has its own `provision_requested_at` and `terminated_at`, which are
   close but not exact.
-- Any price, any money column, and any per-run list of every session.
+- Any price and any money column. (The per-run list of every session is
+  built: `run_sessions`, section 6.)
 
 ## 1. The cost line
 
@@ -293,12 +294,17 @@ test suite can serve prices.
 ### What each host stores
 
 New host columns, written at launch from the `RunInstances` reply
-(**Missing today**: `Launch` must return more than the id):
+(**built**: migration `018_host_facts.sql`; `Provider.Launch` returns a
+`server.Launched` with the id, the reply's `instanceType` and
+`placement.availabilityZone`, and the market from the template's `spot`;
+`launch()` in `provisioner.go` stores them; an empty value is stored as
+NULL, as are all three on self-registered and pre-018 hosts; the API does
+not show them yet):
 
 ```sql
 ALTER TABLE hosts ADD COLUMN instance_type text;   -- from the reply, not the template
 ALTER TABLE hosts ADD COLUMN zone text;            -- Placement.AvailabilityZone
-ALTER TABLE hosts ADD COLUMN market text;          -- 'on-demand' | 'spot'
+ALTER TABLE hosts ADD COLUMN market text CHECK (market IN ('on-demand', 'spot'));
 ```
 
 Rate periods for each host. A new period starts when the price changes
