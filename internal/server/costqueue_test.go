@@ -511,7 +511,7 @@ func TestDrainComputeStaleClaim(t *testing.T) {
 	}
 	finish(t, s, "t1", "A", StateSucceeded)
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return s.writeCompute(ctx, tx, "A", evals["A"], now)
+		return s.writeCosts(ctx, tx, runs, evals, now)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -521,5 +521,81 @@ func TestDrainComputeStaleClaim(t *testing.T) {
 	drain(t, s)
 	if lines, src := computeView(t, s, keys["t1"], "A"); fmt.Sprint(lines) != "[static 0.05 USD true]" || src != "final" {
 		t.Errorf("A: %v, source %q", lines, src)
+	}
+}
+
+// waitLocked waits until n of s's sessions wait on a lock.
+func waitLocked(s *Server, n int) error {
+	ctx := context.Background()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var got int
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
+				WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&got)
+		}); err != nil {
+			return err
+		}
+		if got >= n {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%d sessions waiting on a lock, want %d", got, n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A state change holds its Run's row (as a runner report, a stop or the
+// reaper does) while a drainer writes that Run: the drainer takes the Run
+// before its queue row, as the state change does, so it waits, finds its
+// claim freed, and writes nothing. Neither deadlocks.
+func TestDrainComputeLockOrder(t *testing.T) {
+	s, keys := costFixture(t)
+	costHosts(t, s)
+	placeRun(t, s, "t1", "A", StateRunning, "static", workedExample[0])
+	finish(t, s, "t1", "A", StateStopping)
+	ctx := context.Background()
+	runs, err := s.claimCosts(ctx)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("claimed %v (%v)", runs, err)
+	}
+	var evals map[string]*computeEval
+	var now time.Time
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		evals, now, err = evaluateCompute(ctx, tx, runs)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	locked, wrote := make(chan struct{}), make(chan error, 1)
+	change := make(chan error, 1)
+	go func() {
+		change <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = 'A' FOR UPDATE`); err != nil {
+				return err
+			}
+			close(locked)
+			if err := waitLocked(s, 1); err != nil { // the drainer, on A
+				return err
+			}
+			return setRunState(ctx, tx, "t1", "A", StateSucceeded, "", 1)
+		})
+	}()
+	<-locked
+	go func() {
+		wrote <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return s.writeCosts(ctx, tx, runs, evals, now)
+		})
+	}()
+	if err := <-change; err != nil {
+		t.Errorf("state change: %v", err)
+	}
+	if err := <-wrote; err != nil {
+		t.Errorf("drainer: %v", err)
+	}
+	if lines, _ := computeView(t, s, keys["t1"], "A"); len(lines) != 0 || pending(t, s, "A") != "state:succeeded -" {
+		t.Errorf("stale result written: %v, queued %q", lines, pending(t, s, "A"))
 	}
 }

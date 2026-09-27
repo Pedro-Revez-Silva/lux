@@ -145,6 +145,7 @@ func (s *Server) drainCosts(ctx context.Context) (int, error) {
 	if err != nil || len(runs) == 0 {
 		return 0, err
 	}
+	slices.Sort(runs) // each chunk locks its Runs in id order
 	var evals map[string]*computeEval
 	var now time.Time
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -159,12 +160,7 @@ func (s *Server) drainCosts(ctx context.Context) (int, error) {
 	}
 	for chunk := range slices.Chunk(runs, costChunk) {
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			for _, id := range chunk {
-				if err := s.writeCompute(ctx, tx, id, evals[id], now); err != nil {
-					return err
-				}
-			}
-			return nil
+			return s.writeCosts(ctx, tx, chunk, evals, now)
 		})
 		if err != nil {
 			s.releaseCosts(ctx, chunk)
@@ -441,18 +437,36 @@ func (b *computeLines) lines(runID string) []costReport {
 	return out
 }
 
-// writeCompute stores one Run's evaluation, if this luxd still holds its
-// claim: a state change since (which frees the claim) makes it stale, and
-// the Run is evaluated again. On an error, its earlier lines stay.
-func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *computeEval, now time.Time) error {
-	var held bool
-	err := tx.QueryRow(ctx, `SELECT true FROM cost_pending WHERE run_id = $1 AND claimed_by = $2 FOR UPDATE`, runID, s.id).Scan(&held)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
+// writeCosts writes one chunk of claimed Runs, those whose claim this luxd
+// still holds: a state change since (which frees the claim) makes a
+// result stale, and the Run is evaluated again. It locks the chunk's Runs,
+// then their queue rows, each in id order: the order a state change takes
+// them in (it holds its Run's row when it queues it), so the two wait for
+// each other rather than deadlock.
+func (s *Server) writeCosts(ctx context.Context, tx pgx.Tx, runs []string, evals map[string]*computeEval, now time.Time) error {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR KEY SHARE`, runs); err != nil {
+		return err
 	}
+	rows, err := tx.Query(ctx, `SELECT run_id FROM cost_pending WHERE run_id = ANY($1) AND claimed_by = $2
+		ORDER BY run_id FOR UPDATE`, runs, s.id)
 	if err != nil {
 		return err
 	}
+	held, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	for _, id := range held {
+		if err := s.writeCompute(ctx, tx, id, evals[id], now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeCompute stores one claimed Run's evaluation. On an error, its
+// earlier lines stay.
+func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *computeEval, now time.Time) error {
 	if e == nil {
 		// Not a Run any more: nothing to evaluate.
 		_, err := tx.Exec(ctx, `DELETE FROM cost_pending WHERE run_id = $1`, runID)
@@ -499,7 +513,7 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *c
 		runID, e.TenantID, status, e.Err == nil, attempts, nextAt, lastError); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `DELETE FROM cost_pending WHERE run_id = $1`, runID)
+	_, err := tx.Exec(ctx, `DELETE FROM cost_pending WHERE run_id = $1`, runID)
 	return err
 }
 
