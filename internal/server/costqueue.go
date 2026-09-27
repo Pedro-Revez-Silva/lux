@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 	"slices"
 	"strings"
@@ -89,8 +90,6 @@ func (s *Server) costLoop(ctx context.Context) {
 			untilTick = c.DrainEvery // the tick failed: again after drain_every
 		}
 		wait(ctx, woken, min(c.DrainEvery, untilTick))
-		// Every Run event wakes it, not only state changes: a short pause
-		// lets a burst of them (a pool draining) become one claim.
 		wait(ctx, nil, min(c.DrainEvery, costSettleWake))
 	}
 }
@@ -318,11 +317,7 @@ func evaluateCompute(ctx context.Context, tx pgx.Tx, runs []string) (map[string]
 	}); err != nil {
 		return nil, now, err
 	}
-	hostIDs := make([]string, 0, len(windows))
-	for h := range windows {
-		hostIDs = append(hostIDs, h)
-	}
-	slices.Sort(hostIDs)
+	hostIDs := slices.Sorted(maps.Keys(windows))
 	hosts := map[string]costHost{}
 	rows, err = tx.Query(ctx, `SELECT id, provision_requested_at IS NOT NULL,
 			coalesce(instance_type, launch_template->>'instanceType', ''), coalesce(market, ''), coalesce(zone, '')
