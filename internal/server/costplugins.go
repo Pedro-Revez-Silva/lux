@@ -595,8 +595,8 @@ func (s *Server) writePluginCost(ctx context.Context, tx pgx.Tx, cfg CostPluginC
 		}
 		attempts = 0
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, attempts, next_at, settles_left, last_error)
-		VALUES ($1,$2,$3,$4,CASE WHEN $5 THEN now() END,$6,$7,$8,$9)
-		ON CONFLICT (run_id,source) DO UPDATE SET status = EXCLUDED.status, answered_at = coalesce(EXCLUDED.answered_at,cost_sources.answered_at), attempts = EXCLUDED.attempts, next_at = EXCLUDED.next_at, settles_left = EXCLUDED.settles_left, last_error = EXCLUDED.last_error`, id, e.TenantID, cfg.Name, status, a.err == nil, attempts, next, left, last)
+	_, err = tx.Exec(ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, attempts, next_at, settles_left, last_error, hourly_generation)
+		VALUES ($1,$2,$3,$4,CASE WHEN $5 THEN now() END,$6,$7,$8,$9,CASE WHEN $5 THEN 1 ELSE 0 END)
+		ON CONFLICT (run_id,source) DO UPDATE SET status = EXCLUDED.status, answered_at = coalesce(EXCLUDED.answered_at,cost_sources.answered_at), attempts = EXCLUDED.attempts, next_at = EXCLUDED.next_at, settles_left = EXCLUDED.settles_left, last_error = EXCLUDED.last_error, hourly_generation = CASE WHEN $5 THEN cost_sources.hourly_generation + 1 ELSE cost_sources.hourly_generation END`, id, e.TenantID, cfg.Name, status, a.err == nil, attempts, next, left, last)
 	return err
 }

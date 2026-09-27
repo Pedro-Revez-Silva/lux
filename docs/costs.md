@@ -903,6 +903,16 @@ cursor backfills their retained hourly rows from stored final lines without
 calling plugins again. Non-final sources are evaluated through the normal
 queue. The backfill skips hours outside retention and does not reconstruct
 historical host allocations or unallocated cost from those final lines.
+Migration 030 adds `cost_sources.hourly_generation`: a successful hourly-aware
+writer stamps its source in the same transaction as its lines and hours. The
+database resets the stamp when an older writer updates the source without
+stamping it. Repeated bounded discovery sweeps revisit final unstamped sources
+even when an estimated hourly row exists; backfill replaces those retained
+hours from final lines and stamps the source when complete. This detects legacy
+writes after migration 030, including during a rolling upgrade, but cannot
+identify stale hours already written before that migration. Reconstructed
+compute hours have no host attribution and use proportional final-line timing;
+the original compute allocation cannot be recovered from final lines alone.
 
 ## 8. API and visibility
 
