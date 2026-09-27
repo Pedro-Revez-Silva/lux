@@ -170,51 +170,89 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 			}
 		}
 		w.HostID = hostID
-
-		// What luxd thinks is live here. Anything the runner has beyond this
-		// is stale (its Run moved on) and it must stop it.
-		rows, err := tx.Query(ctx, `SELECT run_id, epoch, state FROM placements
-			WHERE host_id = $1 AND state IN `+livePlacementStates+``, hostID)
-		if err != nil {
-			return err
-		}
-		live := map[string]proto.LivePlacement{}
-		for rows.Next() {
-			var lp proto.LivePlacement
-			if err := rows.Scan(&lp.RunID, &lp.Epoch, &lp.State); err != nil {
-				return err
-			}
-			w.Live = append(w.Live, lp)
-			live[lp.RunID] = lp
-		}
-		rows.Close()
-
-		// Placements the runner no longer has: it lost them while
-		// disconnected (e.g. the runner restarted and the container was gone).
-		have := map[string]int{}
-		for _, lp := range h.Live {
-			have[lp.RunID] = lp.Epoch
-		}
-		for runID, lp := range live {
-			if e, ok := have[runID]; ok && e == lp.Epoch {
-				continue
-			}
-			// Still assigned but not yet acked: the assign message is pending
-			// and will be (re)delivered; not lost.
-			if lp.State == "assigned" {
-				continue
-			}
-			if err := s.placementLost(ctx, tx, runID, lp.Epoch, "runner restarted without the container"); err != nil {
-				return err
-			}
-		}
 		return nil
 	})
+	if err == nil {
+		// Registration owns the host row; reconciliation takes Run locks first
+		// in a separate transaction so an exiting placement can update the host.
+		for attempt := 0; attempt < 3; attempt++ {
+			err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				rows, err := tx.Query(ctx, `SELECT DISTINCT run_id FROM placements
+					WHERE host_id = $1 AND state IN `+livePlacementStates+` ORDER BY run_id`, w.HostID)
+				if err != nil {
+					return err
+				}
+				runs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+				if err != nil {
+					return err
+				}
+				if err := lockReaperRuns(ctx, tx, runs); err != nil {
+					return err
+				}
+				if err := lockCostHosts(ctx, tx, runs); err != nil {
+					return err
+				}
+				return s.reconcileHostPlacements(ctx, tx, w.HostID, h.Live, runs, &w)
+			})
+			if !errors.Is(err, errHostPlacementsChanged) {
+				break
+			}
+		}
+	}
 	if err == nil {
 		s.Kick()
 		s.notifyAll(outdatedDrained)
 	}
 	return w, err
+}
+
+var errHostPlacementsChanged = errors.New("host placements changed during reconciliation")
+
+func (s *Server) reconcileHostPlacements(ctx context.Context, tx pgx.Tx, hostID string, reported []proto.LivePlacement, runs []string, w *proto.Welcome) error {
+	// A new assignment after discovery has no Run lock. Retry discovery
+	// without taking a Run lock after a host lock.
+	rows, err := tx.Query(ctx, `SELECT run_id, epoch, state FROM placements
+		WHERE host_id = $1 AND state IN `+livePlacementStates+` ORDER BY run_id`, hostID)
+	if err != nil {
+		return err
+	}
+	live := []proto.LivePlacement{}
+	for rows.Next() {
+		var lp proto.LivePlacement
+		if err := rows.Scan(&lp.RunID, &lp.Epoch, &lp.State); err != nil {
+			rows.Close()
+			return err
+		}
+		live = append(live, lp)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	locked := make(map[string]bool, len(runs))
+	for _, id := range runs {
+		locked[id] = true
+	}
+	for _, lp := range live {
+		if !locked[lp.RunID] {
+			return errHostPlacementsChanged
+		}
+	}
+	w.Live = live
+	have := map[string]int{}
+	for _, lp := range reported {
+		have[lp.RunID] = lp.Epoch
+	}
+	for _, lp := range live {
+		if e, ok := have[lp.RunID]; ok && e == lp.Epoch || lp.State == "assigned" {
+			continue
+		}
+		if err := s.placementLost(ctx, tx, lp.RunID, lp.Epoch, "runner restarted without the container"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // syncProviderCapacity splits only the open provider period. A price fetched

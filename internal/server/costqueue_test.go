@@ -1184,6 +1184,116 @@ func TestComputeHostPlacementEndSerializes(t *testing.T) {
 	}
 }
 
+// A holds the Run and cost-host locks while B discovers a stale host. B
+// must wait for the Run before taking the host row, so A can refresh the
+// heartbeat and end the placement without a lock cycle.
+func TestReapHostsRunBeforeHostRow(t *testing.T) {
+	s, keys := costFixture(t)
+	costHosts(t, s)
+	placeRun(t, s, "t1", "reap-race", StateRunning, "static", placementWindow{From: at("10:00"), CPUs: 2, Memory: 8 * gib})
+	execSQL(t, s, context.Background(), `UPDATE hosts SET last_heartbeat = now() - interval '1 day' WHERE id = 'static'`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	type heldLock struct {
+		pid int
+		err error
+	}
+	held := make(chan heldLock, 1)
+	release := make(chan struct{})
+	aDone := make(chan error, 1)
+	go func() {
+		aDone <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = 'reap-race' FOR UPDATE`); err != nil {
+				held <- heldLock{err: err}
+				return err
+			}
+			if err := lockCostHost(ctx, tx, "static"); err != nil {
+				held <- heldLock{err: err}
+				return err
+			}
+			var pid int
+			if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+				held <- heldLock{err: err}
+				return err
+			}
+			held <- heldLock{pid: pid}
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			if _, err := tx.Exec(ctx, `UPDATE hosts SET last_heartbeat = now() WHERE id = 'static'`); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE placements SET state = 'exited', ended_at = $1 WHERE id = 'p-reap-race'`, at("10:30")); err != nil {
+				return err
+			}
+			return setRunState(ctx, tx, "t1", "reap-race", StateSucceeded, "", 1)
+		})
+	}()
+	lock := <-held
+	if lock.err != nil {
+		<-aDone
+		t.Fatal(lock.err)
+	}
+	bDone := make(chan error, 1)
+	go func() { bDone <- s.reapHosts(ctx) }()
+
+	// Observe B blocked by A, not merely scheduled but not yet running.
+	waitErr := func() error {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			var waiting bool
+			err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				return tx.QueryRow(ctx, `SELECT EXISTS (
+					SELECT 1 FROM pg_stat_activity
+					WHERE datname = current_database() AND wait_event_type = 'Lock'
+					  AND $1 = ANY(pg_blocking_pids(pid)))`, lock.pid).Scan(&waiting)
+			})
+			if err != nil {
+				return err
+			}
+			if waiting {
+				return nil
+			}
+			select {
+			case err := <-bDone:
+				return fmt.Errorf("reaper finished before blocking: %v", err)
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+			}
+		}
+	}()
+	close(release)
+	aErr := <-aDone
+	bErr := <-bDone
+	if waitErr != nil || aErr != nil || bErr != nil {
+		t.Fatalf("wait for reaper: %v; placement transaction: %v; reaper: %v", waitErr, aErr, bErr)
+	}
+	var hostState, placementState, runState string
+	systemScan(t, s, `SELECT h.state, p.state, r.state FROM hosts h
+		JOIN placements p ON p.host_id = h.id JOIN runs r ON r.id = p.run_id
+		WHERE p.id = 'p-reap-race'`, nil, &hostState, &placementState, &runState)
+	if hostState != "ready" || placementState != "exited" || runState != StateSucceeded {
+		t.Fatalf("reaper discarded refreshed host or placement: host %s, placement %s, run %s", hostState, placementState, runState)
+	}
+	drain(t, s)
+	lines, source := computeView(t, s, keys["t1"], "reap-race")
+	if fmt.Sprint(lines) != "[static 0.05 USD true]" || source != "final" {
+		t.Fatalf("final compute: %v, source %q", lines, source)
+	}
+	execSQL(t, s, context.Background(), `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('static', $1, $2, 0.80, 'USD', 8, $3, 'static')`, at("10:10"), at("10:20"), 32*gib)
+	execSQL(t, s, context.Background(), `SELECT lux_cost_enqueue('reap-race', 'retry')`)
+	drain(t, s)
+	if after, src := computeView(t, s, keys["t1"], "reap-race"); fmt.Sprint(after) != fmt.Sprint(lines) || src != "final" {
+		t.Errorf("final compute changed: %v, source %q (was %v)", after, src, lines)
+	}
+}
+
 // The tick is tried at the start of the next bucket (not a whole
 // costs.every after the last try, which drifts across buckets), and a tick
 // that failed is tried again within its bucket.
@@ -1601,6 +1711,51 @@ func TestDrainComputeSnapshotHourlyRounding(t *testing.T) {
 		if count != 1 || total != want {
 			t.Errorf("hour %d: %d rows totaling %s, want one totaling %s", hour, count, total, want)
 		}
+	}
+}
+
+func TestResolvePlacementRateProviderSource(t *testing.T) {
+	for _, tc := range []struct {
+		market, suffix string
+	}{
+		{"on-demand", "-pricing"},
+		{"spot", "-spot-history"},
+	} {
+		t.Run(tc.market, func(t *testing.T) {
+			s, _ := costFixture(t)
+			ctx := context.Background()
+			execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES
+				('rate-pool-t1', 't1', 'burst', 'ec2'), ('rate-pool-t2', 't2', 'burst', 'ec2')`)
+			execSQL(t, s, ctx, `INSERT INTO hosts
+				(id, tenant_id, name, pool, state, provision_requested_at, instance_type, market, zone, launch_template, capacity)
+				VALUES ('rate-target', 't1', 'rate-target', 'burst', 'ready', $1, 'm7i.large', $2,
+				'us-east-1a', '{"region":"us-east-1"}', '{"cpus":4,"memory":17179869184}'),
+				('rate-peer', 't2', 'rate-peer', 'burst', 'ready', $1, 'm7i.large', $2,
+				'us-east-1a', '{"region":"us-east-1"}', '{"cpus":8,"memory":34359738368}')`, at("10:00"), tc.market)
+			execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
+				VALUES ('rate-peer', $1, 0.40, 'USD', 8, $3, $4),
+				('rate-target', $2, 9.00, 'USD', 4, $5, $6)`, at("10:00"), at("10:30"), 32*gib, "ec2"+tc.suffix, 16*gib, "other"+tc.suffix)
+			check := func(host, wantPrice, wantSource string) {
+				t.Helper()
+				if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+					rate, err := resolvePlacementRate(ctx, tx, host, at("10:45"))
+					if err != nil {
+						return err
+					}
+					if rate.PerHour != wantPrice || rate.Source != wantSource || rate.CapCPUs != 4 || rate.CapMemory != 16*gib {
+						t.Errorf("%s: rate %+v, want %s from %s with target capacity", host, rate, wantPrice, wantSource)
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			check("rate-target", "0.400000000", "ec2"+tc.suffix)
+
+			// Without a pool, a legacy host's own suffix-matching observation remains usable.
+			execSQL(t, s, ctx, `UPDATE hosts SET pool = 'legacy' WHERE id = 'rate-target'`)
+			check("rate-target", "9.000000000", "other"+tc.suffix)
+		})
 	}
 }
 
