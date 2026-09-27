@@ -3,6 +3,7 @@ package server
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -198,6 +199,138 @@ func TestCostTickOnePerBucket(t *testing.T) {
 	var early bool
 	if systemScan(t, s, `SELECT due_at < now() - interval '59 minutes' FROM cost_pending WHERE run_id = 'r2'`, nil, &early); !early {
 		t.Error("r2's earlier due_at not kept")
+	}
+}
+
+func TestCostTickDiscoversHistoricalPluginSources(t *testing.T) {
+	s, keys, _ := pluginFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if pluginDescribeHandler(w, r) {
+			return
+		}
+		var req struct {
+			Runs []pluginRun `json:"runs"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			return
+		}
+		out := make([]any, 0, len(req.Runs))
+		for _, run := range req.Runs {
+			out = append(out, map[string]any{"runId": run.RunID, "status": "ok", "final": true, "lines": []any{pluginLine()}})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"protocol": 1, "runs": out})
+	})
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped' WHERE id IN ('r1', 'r2')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES
+		('old-t1', 't1', '{}', 'failed'), ('old-t2', 't2', '{}', 'cancelled'),
+		('existing', 't1', '{}', 'succeeded'), ('quiet', 't1', '{}', 'stopped')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, next_at) VALUES
+		('old-t1', 't1', 'compute', 'final', NULL), ('old-t2', 't2', 'compute', 'final', NULL),
+		('existing', 't1', 'ledger', 'final', NULL), ('quiet', 't1', 'removed', 'incomplete', now() - interval '1 second'),
+		('existing', 't1', 'removed', 'incomplete', now() - interval '1 second')`)
+	if _, cost := getCost(t, s, keys["t1"], "old-t1"); cost.Final || cost.Status != "incomplete" {
+		t.Fatalf("missing configured source appeared final before backfill: %+v", cost)
+	}
+	if won, err := s.costTick(ctx); err != nil || !won {
+		t.Fatalf("tick: won %v, %v", won, err)
+	}
+	for run, want := range map[string]string{"old-t1": "tick -", "old-t2": "tick -", "existing": "", "quiet": "", "r1": "", "r2": ""} {
+		if got := pending(t, s, run); got != want {
+			t.Errorf("%s: queued %q, want %q", run, got, want)
+		}
+	}
+	drain(t, s)
+	for _, c := range []struct{ id, key string }{{"old-t1", keys["t1"]}, {"old-t2", keys["t2"]}} {
+		code, cost := getCost(t, s, c.key, c.id)
+		if code != http.StatusOK || len(cost.Lines) != 1 || cost.Lines[0].Source != "ledger" || !cost.Lines[0].Final {
+			t.Errorf("%s: %d, %+v", c.id, code, cost)
+		}
+	}
+	if code, _ := getCost(t, s, keys["t2"], "old-t1"); code != http.StatusNotFound {
+		t.Errorf("t2 read t1's historical costs: %d", code)
+	}
+	if won, err := s.costTick(ctx); err != nil || won {
+		t.Errorf("second tick: won %v, %v", won, err)
+	}
+	if got := pending(t, s, "old-t1"); got != "" {
+		t.Errorf("settled historical run queued again: %q", got)
+	}
+}
+
+func TestCostLoopPollsDueSourcesBetweenTicks(t *testing.T) {
+	s, _ := costFixture(t)
+	s.cfg.Costs.Enabled = true
+	s.cfg.Costs.Every = time.Hour
+	s.cfg.Costs.DrainEvery = 20 * time.Millisecond
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped' WHERE id IN ('r1', 'r2')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('due', 't1', '{}', 'failed'), ('removed', 't2', '{}', 'stopped')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, registered_at)
+		VALUES ('due-host', 't1', 'due-host', 'ready', now() - interval '1 hour')`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at)
+		VALUES ('due-placement', 't1', 'due', 'due-host', 1, 'running', '{}', now() - interval '1 hour')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, next_at) VALUES
+		('due', 't1', 'compute', 'incomplete', now() + interval '200 milliseconds'),
+		('removed', 't2', 'old-plugin', 'incomplete', now() - interval '1 second')`)
+	// Consume this bucket before starting the loop, so only drain-cadence
+	// polling can enqueue the near-due source.
+	if won, err := s.costTick(ctx); err != nil || !won {
+		t.Fatalf("initial tick: won %v, %v", won, err)
+	}
+	lctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { s.costLoop(lctx); close(done) }()
+	deadline := time.Now().Add(5 * time.Second)
+	var attempted bool
+	for time.Now().Before(deadline) {
+		systemScan(t, s, `SELECT attempts > 0 FROM cost_sources WHERE run_id = 'due' AND source = 'compute'`, nil, &attempted)
+		if attempted {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if !attempted {
+		t.Error("near-due compute source was not retried before the next tick")
+	}
+	if got := pending(t, s, "removed"); got != "" {
+		t.Errorf("removed plugin queued: %q", got)
+	}
+}
+
+func TestPollDueCostSourcesConfiguredPluginsOnly(t *testing.T) {
+	s, _ := costFixture(t)
+	s.cfg.Costs.Plugins = []CostPluginConfig{{Name: "ledger"}}
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped' WHERE id IN ('r1', 'r2')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES
+		('plugin-due', 't1', '{}', 'failed'), ('plugin-later', 't2', '{}', 'cancelled'),
+		('removed-only', 't2', '{}', 'stopped'), ('final-only', 't1', '{}', 'succeeded')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, next_at) VALUES
+		('plugin-due', 't1', 'ledger', 'incomplete', now() - interval '1 second'),
+		('plugin-later', 't2', 'ledger', 'incomplete', now() + interval '1 hour'),
+		('removed-only', 't2', 'removed', 'incomplete', now() - interval '1 second'),
+		('final-only', 't1', 'ledger', 'final', now() - interval '1 second')`)
+	if err := s.pollDueCostSources(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for run, want := range map[string]string{"plugin-due": "retry -", "plugin-later": "", "removed-only": "", "final-only": ""} {
+		if got := pending(t, s, run); got != want {
+			t.Errorf("%s: queued %q, want %q", run, got, want)
+		}
+	}
+	// Polling does not postpone an earlier state-triggered queue entry.
+	execSQL(t, s, ctx, `UPDATE cost_pending SET due_at = now() - interval '1 hour', reason = 'state:failed' WHERE run_id = 'plugin-due'`)
+	if err := s.pollDueCostSources(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var kept bool
+	systemScan(t, s, `SELECT reason = 'state:failed' AND due_at < now() - interval '59 minutes'
+		FROM cost_pending WHERE run_id = 'plugin-due'`, nil, &kept)
+	if !kept {
+		t.Error("poll replaced an earlier state-triggered queue entry")
 	}
 }
 

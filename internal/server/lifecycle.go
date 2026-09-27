@@ -77,6 +77,14 @@ func live(state string) bool {
 }
 
 func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason string, epoch int) error {
+	if terminal(state) {
+		// A terminal Run begins a new settlement epoch after a stopped/lost one.
+		if _, err := tx.Exec(ctx, `UPDATE cost_sources SET settles_left = NULL, next_at = NULL, attempts = 0
+			WHERE run_id = $1 AND source <> 'compute' AND EXISTS
+			(SELECT 1 FROM runs WHERE id = $1 AND state IN ('stopped', 'lost'))`, runID); err != nil {
+			return err
+		}
+	}
 	_, err := tx.Exec(ctx, `UPDATE runs SET state = $2, state_reason = $3, updated_at = now(),
 			finished_at = CASE WHEN $2 IN ('succeeded', 'failed', 'cancelled') THEN now() ELSE finished_at END,
 			activity = CASE WHEN $2 IN ('running') THEN activity ELSE '' END
