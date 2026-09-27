@@ -51,6 +51,10 @@ tools.
    previous config and binaries before restarting the previous luxd. A
    killed switch is restored by luxd's `ExecStartPre` on boot/restart or at
    the start of the next reconcile, before extraction or service start.
+   The unit's start wrapper pins the binary and config as open file descriptors
+   under `/usr/local/lux/.pair.lock` and rechecks candidate readiness there;
+   rollback and config-only writes hold the same lock. A start admitted before
+   rollback either pins the candidate pair or fails closed after rollback.
    Otherwise, if the config or luxd's unit changed and luxd is running, it
    restarts luxd.
    With a version installed, every run also enables and starts a stopped
