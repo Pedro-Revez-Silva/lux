@@ -54,6 +54,7 @@ const (
 // changes still queue their Runs, which wait for a luxd that has it on).
 type CostsConfig struct {
 	Enabled bool
+	Hourly  time.Duration
 	// Every is the tick: every live Run is queued once per bucket of it.
 	Every time.Duration
 	// DrainEvery is how often the queue is polled when no Run event wakes
@@ -195,7 +196,18 @@ func (s *Server) costTick(ctx context.Context) (bool, error) {
 			return err
 		}
 		_, err = tx.Exec(ctx, `DELETE FROM cost_ticks WHERE tick_at < now() - interval '1 day'`)
-		return err
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `DELETE FROM cost_hourly WHERE hour < now() - $1::interval`, interval(s.cfg.Costs.Hourly))
+		if err != nil {
+			return err
+		}
+		var now time.Time
+		if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&now); err != nil {
+			return err
+		}
+		return s.updateHostHours(ctx, tx, now)
 	})
 	return won && err == nil, err
 }
@@ -368,6 +380,7 @@ func (s *Server) releaseCosts(ctx context.Context, runs []string) {
 // computeEval is one Run's compute cost as evaluated from one read.
 type computeEval struct {
 	TenantID   string
+	Hours      []computeHour
 	State      string
 	FinishedAt *time.Time
 	StateAt    time.Time
@@ -525,6 +538,18 @@ func evaluateCompute(ctx context.Context, tx pgx.Tx, runs []string) (map[string]
 			continue
 		}
 		b.add(evals, in, res, hosts[hostID])
+		for _, piece := range res.Pieces {
+			if piece.Rate == nil {
+				continue
+			}
+			forEachCostHour(piece.From, piece.To, func(hour time.Time, fraction *big.Rat) {
+				for j, i := range piece.Live {
+					if e := evals[in.Placements[i].RunID]; e != nil {
+						e.Hours = append(e.Hours, computeHour{hour, hostID, piece.Rate.Currency, new(big.Rat).Mul(piece.Charged[j], fraction)})
+					}
+				}
+			})
+		}
 	}
 	for id, e := range evals {
 		e.Lines = b.lines(id)
@@ -742,6 +767,9 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *c
 			e.Lines[i].Final = final
 		}
 		if err := replaceCostLines(ctx, tx, e.TenantID, runID, "compute", e.Lines); err != nil {
+			return err
+		}
+		if err := replaceComputeHours(ctx, tx, e.TenantID, runID, e.Hours); err != nil {
 			return err
 		}
 	}

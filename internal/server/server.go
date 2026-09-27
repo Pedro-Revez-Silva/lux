@@ -171,6 +171,7 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 		cfg.DiskPaths = DefaultDiskPaths
 	}
 	cfg.Costs.Every = cmp.Or(cfg.Costs.Every, DefaultCostsEvery)
+	cfg.Costs.Hourly = cmp.Or(cfg.Costs.Hourly, 400*24*time.Hour)
 	cfg.Costs.DrainEvery = cmp.Or(cfg.Costs.DrainEvery, DefaultCostsDrainEvery)
 	cfg.Costs.Batch = cmp.Or(cfg.Costs.Batch, DefaultCostsBatch)
 	cfg.Costs.PricesRefresh = cmp.Or(cfg.Costs.PricesRefresh, DefaultPricesRefresh)

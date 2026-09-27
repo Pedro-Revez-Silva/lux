@@ -117,6 +117,11 @@ func (s *Server) routes(api huma.API) {
 		Errors: []int{http.StatusNotFound},
 	}, "read", s.runCost)
 	register(s, api, huma.Operation{
+		OperationID: "costSummary", Method: http.MethodGet, Path: "/v1/costs", Tags: []string{"costs"},
+		Summary: "Summarize costs by currency, time and up to two groups",
+		Errors:  []int{http.StatusBadRequest},
+	}, "read", s.costSummary)
+	register(s, api, huma.Operation{
 		OperationID: "pushRun", Method: http.MethodPost, Path: "/v1/runs/{id}/push", Tags: []string{"runs"},
 		Summary: "Push a running Run's repositories",
 		Description: "To the spec's git.push branch, with the runner's credentials. The outcome arrives as a git.push event carrying the request id.\n\n" +
@@ -188,6 +193,11 @@ func (s *Server) routes(api huma.API) {
 			"A tenant sees its own hosts' history only.",
 		Errors: []int{http.StatusNotFound, http.StatusConflict},
 	}, "read", s.hostHistory)
+	register(s, api, huma.Operation{
+		OperationID: "hostCost", Method: http.MethodGet, Path: "/v1/hosts/{id}/cost", Tags: []string{"hosts", "costs"},
+		Summary: "A host's hourly allocation and rate periods",
+		Errors:  []int{http.StatusNotFound, http.StatusForbidden, http.StatusConflict},
+	}, "read", s.hostCost)
 	register(s, api, huma.Operation{
 		OperationID: "drainHost", Method: http.MethodPost, Path: "/v1/hosts/{id}/drain", Tags: []string{"hosts"},
 		Summary: "Drain a host",

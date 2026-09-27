@@ -197,6 +197,7 @@ func serve(ctx context.Context, c config) error {
 			Backoff:       c.Costs.Backoff.Duration,
 			BackoffMax:    c.Costs.BackoffMax.Duration,
 			DescribeEvery: c.Costs.DescribeEvery.Duration,
+			Hourly:        c.Costs.Hourly.Duration,
 			ComputeEC2:    c.Costs.Compute.EC2,
 			PricesRefresh: c.Costs.Compute.PricesRefresh.Duration,
 			Prices: map[string]server.PriceProvider{

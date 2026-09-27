@@ -92,6 +92,7 @@ type config struct {
 		Backoff       duration           `toml:"backoff" env:"LUX_COSTS_BACKOFF"`
 		BackoffMax    duration           `toml:"backoff_max" env:"LUX_COSTS_BACKOFF_MAX"`
 		DescribeEvery duration           `toml:"describe_every" env:"LUX_COSTS_DESCRIBE_EVERY"`
+		Hourly        duration           `toml:"hourly" env:"LUX_COSTS_HOURLY"`
 		Plugin        []costPluginConfig `toml:"plugin" env:"LUX_COSTS_PLUGINS"`
 		Compute       struct {
 			EC2             bool     `toml:"ec2" env:"LUX_COSTS_COMPUTE_EC2"`
@@ -219,6 +220,7 @@ func defaultConfig() config {
 	c.Costs.Backoff.Duration = 10 * time.Second
 	c.Costs.BackoffMax.Duration = 10 * time.Minute
 	c.Costs.DescribeEvery.Duration = time.Hour
+	c.Costs.Hourly.Duration = 400 * 24 * time.Hour
 	c.Costs.Compute.EC2 = true
 	c.Costs.Compute.PricesRefresh.Duration = server.DefaultPricesRefresh
 	c.Costs.Compute.PricingRegion = "us-east-1"
@@ -371,6 +373,7 @@ func (c config) check() error {
 		"backoff":        c.Costs.Backoff.Duration,
 		"backoff_max":    c.Costs.BackoffMax.Duration,
 		"describe_every": c.Costs.DescribeEvery.Duration,
+		"hourly":         c.Costs.Hourly.Duration,
 	} {
 		if value <= 0 {
 			problems = append(problems, "costs."+key+" must be positive")

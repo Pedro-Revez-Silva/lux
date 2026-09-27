@@ -575,6 +575,9 @@ func (s *Server) writePluginCost(ctx context.Context, tx pgx.Tx, cfg CostPluginC
 		if err := replaceCostLines(ctx, tx, e.TenantID, id, cfg.Name, lines); err != nil {
 			return err
 		}
+		if err := replacePluginHours(ctx, tx, e.TenantID, id, cfg.Name, lines); err != nil {
+			return err
+		}
 		attempts = 0
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, attempts, next_at, settles_left, last_error)
