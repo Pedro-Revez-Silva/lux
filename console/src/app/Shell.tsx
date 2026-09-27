@@ -113,30 +113,27 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
   );
   // Who is signed in, at the foot of the sidebar: the person and a way out.
   const user = session.user ? (
-    <div className="sidebar-user">
-      <Avatar name={session.user.name} email={session.user.email} picture={session.user.picture} />
-      <span className="sidebar-user-text">
-        <span className="sidebar-user-name">{session.user.name}</span>
-        <span className="sidebar-user-sub">{session.user.email}</span>
-      </span>
-      {/* Signed in by Cloudflare Access: signing out is Access's. */}
-      <a className="btn btn-iconOnly btn-ghost btn-sm" href="/cdn-cgi/access/logout" aria-label="Sign out" title="Sign out of Cloudflare Access">
-        <IconLogout size={15} />
-      </a>
-    </div>
+    <SidebarUser
+      avatar={<Avatar key={session.user.picture} name={session.user.name} picture={session.user.picture} />}
+      name={session.user.name}
+      sub={session.user.email}
+      // Signed in by Cloudflare Access: signing out is Access's.
+      signOut={() => window.location.assign("/cdn-cgi/access/logout")}
+      signOutLabel="Sign out of Cloudflare Access"
+    />
   ) : (
-    <div className="sidebar-user">
-      <span className="avatar" title="API key session">
-        <IconKey size={15} />
-      </span>
-      <span className="sidebar-user-text">
-        <span className="sidebar-user-name">{session.role === "operator" ? "Operator key" : "API key"}</span>
-        <span className="sidebar-user-sub">API key session</span>
-      </span>
-      <IconButton size="sm" label="Sign out" onClick={signOut}>
-        <IconLogout size={15} />
-      </IconButton>
-    </div>
+    <SidebarUser
+      avatar={
+        <span className="avatar" role="img" aria-label="API key">
+          <IconKey size={15} />
+        </span>
+      }
+      // Until whoami answers, the role is unknown: do not guess.
+      name={session.role === "operator" ? "Operator key" : session.role === "tenant" ? "Tenant key" : "API key"}
+      sub="API key session"
+      signOut={signOut}
+      signOutLabel="Sign out"
+    />
   );
 
   const brand = (
@@ -152,7 +149,7 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
       <aside className="sidebar" aria-label="Sidebar">
         <div className="sidebar-top">
           {brand}
-          <IconButton size="sm" label={rail ? "Expand sidebar" : "Collapse sidebar"} className="sidebar-toggle" onClick={toggleRail}>
+          <IconButton size="sm" label={rail ? "Expand sidebar" : "Collapse sidebar"} className="sidebar-toggle" onClick={toggleRail} aria-expanded={!rail}>
             {rail ? <IconChevronRight size={15} /> : <IconChevronLeft size={15} />}
           </IconButton>
           <IconButton size="sm" label="Close menu" className="sidebar-close" onClick={() => setDrawer(false)}>
@@ -221,11 +218,31 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
   );
 }
 
+/**
+ * The foot of the sidebar: avatar, name and a second line, sign out. In the
+ * rail only the avatar and the button show, so the avatar names the person
+ * (hover, and to assistive technology).
+ */
+function SidebarUser({ avatar, name, sub, signOut, signOutLabel }: { avatar: ReactNode; name: string; sub: string; signOut: () => void; signOutLabel: string }) {
+  return (
+    <div className="sidebar-user" title={`${name} · ${sub}`}>
+      {avatar}
+      <span className="sidebar-user-text">
+        <span className="sidebar-user-name">{name}</span>
+        <span className="sidebar-user-sub">{sub}</span>
+      </span>
+      <IconButton size="sm" label={signOutLabel} onClick={signOut}>
+        <IconLogout size={15} />
+      </IconButton>
+    </div>
+  );
+}
+
 /** The person's photo from the identity provider; their initials without one, or if it fails to load. */
-function Avatar({ name, email, picture }: { name: string; email: string; picture?: string }) {
+function Avatar({ name, picture }: { name: string; picture?: string }) {
   const [failed, setFailed] = useState(false);
   return (
-    <span className="avatar" title={email}>
+    <span className="avatar" role="img" aria-label={name}>
       {picture && !failed ? <img src={picture} alt="" referrerPolicy="no-referrer" onError={() => setFailed(true)} /> : initials(name)}
     </span>
   );
