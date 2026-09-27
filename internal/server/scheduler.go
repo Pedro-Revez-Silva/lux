@@ -462,5 +462,8 @@ func (s *Server) requestResume(ctx context.Context, tx pgx.Tx, tenantID, runID s
 	if err != nil {
 		return err
 	}
+	if err := resetCostFinality(ctx, tx, runID); err != nil {
+		return err
+	}
 	return addEvent(ctx, tx, tenantID, runID, 0, "state", map[string]any{"state": StateResuming, "reason": why})
 }
