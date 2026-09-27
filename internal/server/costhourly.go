@@ -133,6 +133,9 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 	now := time.Now().UTC()
 	oldest := now.Add(-s.cfg.Costs.Hourly).Truncate(time.Hour).Add(time.Hour)
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `DELETE FROM cost_host_hour_gaps WHERE hour < $1`, oldest); err != nil {
+			return err
+		}
 		firstLimit := max(1, s.cfg.Costs.Batch-1)
 		if s.cfg.Costs.Batch == 1 {
 			var currentFirst bool
@@ -207,8 +210,8 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 			if err := lockCostHost(ctx, tx, job.id); err != nil {
 				return err
 			}
-			var end *time.Time
-			if err := tx.QueryRow(ctx, `SELECT terminated_at FROM hosts WHERE id = $1`, job.id).Scan(&end); err != nil {
+			var end, registered, provisioned *time.Time
+			if err := tx.QueryRow(ctx, `SELECT terminated_at, registered_at, provision_requested_at FROM hosts WHERE id = $1`, job.id).Scan(&end, &registered, &provisioned); err != nil {
 				return err
 			}
 			var cursor time.Time
@@ -225,7 +228,7 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 				to = minTime(to, *end)
 			}
 			if to.After(job.hour) {
-				if err := s.writeHostHour(ctx, tx, job.id, job.hour, to); err != nil {
+				if err := s.writeHostHour(ctx, tx, job.id, job.hour, to, provisioned, registered, end); err != nil {
 					return err
 				}
 			}
@@ -264,7 +267,7 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, to time.Time) error {
+func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, to time.Time, provisioned, registered, terminated *time.Time) error {
 	in, err := loadHostCompute(ctx, tx, id, hour, to)
 	if err != nil {
 		return err
@@ -274,7 +277,22 @@ func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, 
 		return err
 	}
 	if len(res.Missing) > 0 {
-		return fmt.Errorf("host %s: missing rate in hour %s", id, hour)
+		// Entirely unpriced static hours cannot be backfilled by a later
+		// static price; partially priced hours stay pending for rate repair.
+		staticClosed := provisioned == nil && (terminated != nil || !to.Before(hour.Add(time.Hour))) && len(res.Pieces) > 0
+		for _, piece := range res.Pieces {
+			if piece.Rate != nil {
+				staticClosed = false
+				break
+			}
+		}
+		// A terminated provider's capacity only becomes known at registration.
+		beforeRegistration := provisioned != nil && terminated != nil && registered != nil
+		for _, gap := range res.Missing {
+			if !staticClosed && (!beforeRegistration || gap.To.After(*registered)) {
+				return fmt.Errorf("host %s: missing rate in hour %s", id, hour)
+			}
+		}
 	}
 	type key struct {
 		hour     time.Time
@@ -295,6 +313,19 @@ func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, 
 			}
 			total[k].Add(total[k], new(big.Rat).Mul(piece.Host, fraction))
 		})
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM cost_host_hour_gaps WHERE host_id = $1 AND hour = $2`, id, hour); err != nil {
+		return err
+	}
+	for _, gap := range res.Missing {
+		reason := "static_unpriced"
+		if provisioned != nil {
+			reason = "provider_pre_registration"
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO cost_host_hour_gaps (host_id, hour, missing_from, missing_to, reason)
+			VALUES ($1, $2, $3, $4, $5)`, id, hour, gap.From, gap.To, reason); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM cost_hourly WHERE host_id = $1 AND run_id IS NULL AND hour = $2`, id, hour); err != nil {
 		return err
