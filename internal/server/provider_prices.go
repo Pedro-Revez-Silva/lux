@@ -37,7 +37,13 @@ func (s *Server) pricedHosts(ctx context.Context) ([]pricedHost, error) {
     coalesce((h.capacity->>'cpus')::float8,0), coalesce((h.capacity->>'memory')::int8,0)
     FROM hosts h JOIN pools p ON p.name = h.pool AND p.tenant_id IS NOT DISTINCT FROM h.tenant_id
     WHERE h.provision_requested_at IS NOT NULL AND h.provider_id IS NOT NULL AND p.provider <> 'static'
-      AND h.terminated_at IS NULL
+      AND (h.terminated_at IS NULL OR (
+       NOT EXISTS (SELECT 1 FROM host_rates hr WHERE hr.host_id = h.id)
+       AND EXISTS (SELECT 1 FROM placements pl
+         JOIN cost_sources source ON source.run_id = pl.run_id AND source.source = 'compute' AND source.status = 'incomplete'
+         LEFT JOIN cost_placement_snapshots snap ON snap.placement_id = pl.id
+         WHERE pl.host_id = h.id AND pl.ended_at IS NOT NULL
+           AND (snap.placement_id IS NULL OR snap.amount IS NULL))))
     ORDER BY h.id`)
 		if err != nil {
 			return err
@@ -100,7 +106,8 @@ func (s *Server) onDemandPrice(ctx context.Context, provider, region, kind strin
 }
 
 // refreshPrices runs independently of cost draining and provisioning. Spot
-// requests are shared by zone/type; only live hosts need a current rate.
+// requests are shared by zone/type; terminated hosts are retried only while
+// incomplete ended placements still need a rate.
 func (s *Server) refreshPrices(ctx context.Context) {
 	if !s.cfg.Costs.Enabled || !s.cfg.Costs.ComputeEC2 {
 		return
@@ -162,19 +169,24 @@ func (s *Server) refreshPrices(ctx context.Context) {
 		if len(history) == 0 {
 			continue
 		}
-		latest := history[0]
-		for _, r := range history[1:] {
-			if r.At.After(latest.At) {
+		var latest *SpotRate
+		for i := range history {
+			r := &history[i]
+			if err := validPrice(r.PerHour, r.Currency); err != nil || r.Currency == "" || r.At.After(now) || r.At.IsZero() {
+				continue
+			}
+			if latest == nil || r.At.After(latest.At) {
 				latest = r
 			}
 		}
-		if err := validPrice(latest.PerHour, latest.Currency); err != nil || latest.Currency == "" {
-			s.log.Warn("costs: invalid spot price", "zone", key.zone, "type", key.kind, "err", err)
+		if latest == nil {
+			s.log.Warn("costs: no valid spot price", "zone", key.zone, "type", key.kind)
 			continue
 		}
-		latest.PerHour = moneyString(mustRat(latest.PerHour))
+		price := *latest
+		price.PerHour = moneyString(mustRat(price.PerHour))
 		for _, h := range hs {
-			if err := s.applySpotPrice(ctx, h, latest); err != nil && ctx.Err() == nil {
+			if err := s.applySpotPrice(ctx, h, price); err != nil && ctx.Err() == nil {
 				s.log.Warn("costs: apply spot price", "host", h.ID, "err", err)
 			}
 		}
@@ -197,8 +209,28 @@ func (s *Server) applySpotPrice(ctx context.Context, h pricedHost, price SpotRat
 			}
 			return err
 		}
-		if ended != nil || (cpus <= 0 && memory <= 0) {
+		if cpus <= 0 && memory <= 0 {
 			return nil
+		}
+		if ended != nil {
+			// Recovery uses one observed estimate only for a host with no rate history.
+			var exists bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM host_rates WHERE host_id=$1)`, h.ID).Scan(&exists); err != nil {
+				return err
+			}
+			if exists {
+				return nil
+			}
+			if registered != nil {
+				from = *registered
+			}
+			if !from.Before(*ended) {
+				return nil
+			}
+			_, err := tx.Exec(ctx, `INSERT INTO host_rates (host_id,valid_from,valid_to,per_hour,currency,cap_cpus,cap_memory,source)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (host_id,valid_from) DO NOTHING`,
+				h.ID, from, ended, price.PerHour, price.Currency, cpus, memory, h.Provider+"-spot-history")
+			return err
 		}
 		if registered != nil {
 			from = *registered
@@ -259,6 +291,19 @@ func (s *Server) applyCurrentPrice(ctx context.Context, h pricedHost, rate Hourl
 		// Capacity is not known until the runner registers. Prior time is missing.
 		if registered != nil {
 			from = *registered
+		}
+		if ended != nil {
+			var exists bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM host_rates WHERE host_id=$1)`, h.ID).Scan(&exists); err != nil {
+				return err
+			}
+			if exists || !from.Before(*ended) {
+				return nil
+			}
+			_, err := tx.Exec(ctx, `INSERT INTO host_rates (host_id,valid_from,valid_to,per_hour,currency,cap_cpus,cap_memory,source)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (host_id,valid_from) DO NOTHING`,
+				h.ID, from, ended, rate.PerHour, rate.Currency, cpus, memory, source)
+			return err
 		}
 		var fetched time.Time
 		if err := tx.QueryRow(ctx, `SELECT fetched_at FROM price_cache

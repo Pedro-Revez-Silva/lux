@@ -1080,6 +1080,110 @@ func TestCostTickLockOrder(t *testing.T) {
 	}
 }
 
+// An uncommitted placement insert holds the host lock while a different Run's
+// final evaluation waits. After commit, A's frozen share includes B.
+func TestComputeHostPlacementInsertSerializes(t *testing.T) {
+	s, keys := costFixture(t)
+	costHosts(t, s)
+	placeRun(t, s, "t1", "A", StateRunning, "static", workedExample[0])
+	execSQL(t, s, context.Background(), `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('B', 't1', '{}', 'running')`)
+	finish(t, s, "t1", "A", StateSucceeded)
+	c := claimOne(t, s)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	inserted := make(chan error, 1)
+	go func() {
+		inserted <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = 'B' FOR UPDATE`); err != nil {
+				return err
+			}
+			if err := lockCostHost(ctx, tx, "static"); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at, ended_at)
+				VALUES ('race-b', 't1', 'B', 'static', 1, 'exited', '{"cpus": 8, "memory": 34359738368}', $1, $2)`, at("10:00"), at("10:30"))
+			if err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+	written := make(chan error, 1)
+	done := make(chan struct{})
+	go func() { written <- c.write(s); close(done) }()
+	if err := waitLocked(s, 1, done); err != nil {
+		close(release)
+		<-inserted
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-inserted; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-written; err != nil {
+		t.Fatal(err)
+	}
+	if lines, source := computeView(t, s, keys["t1"], "A"); fmt.Sprint(lines) != "[static 0.04 USD true]" || source != "final" {
+		t.Errorf("serialized final snapshot: %v, %s", lines, source)
+	}
+}
+
+// Ending B's overlapping placement while A is being finalized must be
+// visible to A's frozen occupancy calculation.
+func TestComputeHostPlacementEndSerializes(t *testing.T) {
+	s, keys := costFixture(t)
+	costHosts(t, s)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	placeRun(t, s, "t1", "A", StateRunning, "static", workedExample[0])
+	placeRun(t, s, "t1", "B", StateRunning, "static", placementWindow{From: at("10:00"), CPUs: 8, Memory: 32 * gib})
+	finish(t, s, "t1", "A", StateSucceeded)
+	c := claimOne(t, s)
+	locked, release := make(chan struct{}), make(chan struct{})
+	ended := make(chan error, 1)
+	go func() {
+		ended <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = 'B' FOR UPDATE`); err != nil {
+				return err
+			}
+			if err := lockCostHost(ctx, tx, "static"); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `UPDATE placements SET state = 'exited', ended_at = $1 WHERE id = 'p-B'`, at("10:30"))
+			if err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+	written := make(chan error, 1)
+	done := make(chan struct{})
+	go func() { written <- c.write(s); close(done) }()
+	if err := waitLocked(s, 1, done); err != nil {
+		close(release)
+		<-ended
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-ended; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-written; err != nil {
+		t.Fatal(err)
+	}
+	if lines, source := computeView(t, s, keys["t1"], "A"); fmt.Sprint(lines) != "[static 0.04 USD true]" || source != "final" {
+		t.Errorf("serialized end: %v, %s", lines, source)
+	}
+}
+
 // The tick is tried at the start of the next bucket (not a whole
 // costs.every after the last try, which drifts across buckets), and a tick
 // that failed is tried again within its bucket.
@@ -1490,7 +1594,7 @@ func TestDrainComputeSnapshotHourlyRounding(t *testing.T) {
 	if total != snapshot {
 		t.Errorf("hours total %s, snapshots %s", total, snapshot)
 	}
-	for hour, want := range []string{"0", "0", "0.000000002"} {
+	for hour, want := range []string{"0", "0.000000002", "0"} {
 		systemScan(t, s, `SELECT count(*), trim_scale(sum(amount))::text FROM cost_hourly
 			WHERE run_id = 'round-run' AND source = 'compute' AND host_id = 'round-host' AND hour = $1`,
 			[]any{from.Add(time.Duration(hour) * time.Hour)}, &count, &total)

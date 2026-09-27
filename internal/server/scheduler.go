@@ -132,6 +132,22 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 			return nil
 		}
 		last = cursorPos{items[n-1].updated, items[n-1].r.ID}
+		// Reserve each candidate host before reading occupancy or inserting a
+		// placement. Host locks follow the already-held Run locks.
+		hostRows, err := tx.Query(ctx, `SELECT id FROM hosts WHERE state = 'ready' AND NOT draining
+			AND last_heartbeat > now() - $1::interval ORDER BY id`, interval(s.cfg.LeaseDuration))
+		if err != nil {
+			return err
+		}
+		hostIDs, err := pgx.CollectRows(hostRows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		for _, hostID := range hostIDs {
+			if err := lockCostHost(ctx, tx, hostID); err != nil {
+				return err
+			}
+		}
 		hosts, err := s.candidateHosts(ctx, tx)
 		if err != nil {
 			return err
