@@ -195,6 +195,57 @@ func TestPluginPerRunErrorDoesNotRollbackSibling(t *testing.T) {
 	}
 }
 
+func TestPluginRejectsOversizedHourlyReports(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lines []any
+	}{
+		{
+			name: "line over 90 days",
+			lines: []any{map[string]any{
+				"family": "ai", "item": "model", "amount": "1.250", "currency": "USD",
+				"from": t0.Add(-91 * 24 * time.Hour), "to": t0,
+			}},
+		},
+		{
+			name: "combined bucket budget",
+			lines: []any{
+				map[string]any{"family": "ai", "item": "model-a", "amount": "1.250", "currency": "USD", "from": t0, "to": t0.Add(45 * 24 * time.Hour)},
+				map[string]any{"family": "ai", "item": "model-b", "amount": "1.250", "currency": "USD", "from": t0, "to": t0.Add(45 * 24 * time.Hour)},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, keys, _ := pluginFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if pluginDescribeHandler(w, r) {
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"protocol": 1, "runs": []any{
+					map[string]any{"runId": "r1", "status": "ok", "final": true, "lines": tc.lines},
+				}})
+			})
+			finish(t, s, "t1", "r1", StateFailed)
+			drain(t, s)
+			code, c := getCost(t, s, keys["t1"], "r1")
+			if code != http.StatusOK || c.Final || c.Status != "incomplete" || len(c.Lines) != 0 {
+				t.Fatalf("rejected report: %d %+v", code, c)
+			}
+			var status string
+			var answered *time.Time
+			systemScan(t, s, `SELECT status, answered_at FROM cost_sources WHERE run_id = 'r1' AND source = 'ledger'`, nil, &status, &answered)
+			if status != "incomplete" || answered != nil {
+				t.Errorf("rejected final source: status %q, answered %v", status, answered)
+			}
+			var lines, hours int
+			systemScan(t, s, `SELECT count(*) FROM cost_lines WHERE run_id = 'r1' AND source = 'ledger'`, nil, &lines)
+			systemScan(t, s, `SELECT count(*) FROM cost_hourly WHERE run_id = 'r1' AND source = 'ledger'`, nil, &hours)
+			if lines != 0 || hours != 0 {
+				t.Errorf("rejected report persisted %d lines and %d hours", lines, hours)
+			}
+		})
+	}
+}
+
 func TestPluginSettlementAndFinalSourceSkippedOnTick(t *testing.T) {
 	requests := 0
 	s, keys, _ := pluginFixture(t, func(w http.ResponseWriter, r *http.Request) {

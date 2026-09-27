@@ -575,6 +575,12 @@ Response, `200`:
   final before the settle retries run out (section 5).
 - `amount` is a decimal **string**, up to 9 fractional digits. Negative
   amounts (refunds, credits) are allowed.
+- Each line's `from`–`to` span must be at most 90 days. The sum of hourly
+  buckets touched by all lines in one Run's answer must be at most 2161
+  (counting each line separately, including both endpoint hours). A
+  report over either limit is rejected for that Run: previous lines and
+  hourly rows stay, the source is incomplete and retried, and `final: true`
+  does not make it final.
 - Per-Run `status: "error"` marks only that Run incomplete for this
   source. Its previous lines stay, and it is retried after `retryAfter`
   or with backoff.
@@ -881,14 +887,22 @@ are never expired, so it can always be recomputed exactly. Heartbeat
 samples are used only for the average-memory efficiency figure, and only
 while they exist.
 
-**`cost_hourly`** feeds the charts over time. It is kept up to date for
-the hours a changed Run's lines cover, in the same transaction that
-replaces the lines. Compute rows are split exactly by hour (the pieces
-from section 2). A plugin line is spread evenly over its `from`–`to` hours,
-because the protocol gives one amount per item, not a time series. So
-plugin charts are approximate in time and exact in total. Host rows hold
-`allocated` and `unallocated` per host per hour, and are written by the
-tick for every host with a billed window in the hour.
+**`cost_hourly`** feeds the charts over time; it is not a permanent ledger.
+The tick deletes hours older than `costs.hourly` (default 400d), while
+`cost_lines` and final source state remain. A changed Run's hourly rows are
+replaced in the same transaction as its lines, but only hours inside that
+retention window are written. Compute rows are split exactly by hour (the
+pieces from section 2). A plugin line is spread evenly over its `from`–`to`
+hours, because the protocol gives one amount per item, not a time series.
+Plugin charts are approximate in time and exact in total only while all
+hours are retained. Host rows hold `allocated` and `unallocated` per host
+per hour. A bounded refresh advances through each host's billed window,
+including idle hours, and revisits the current open hour; old hours outside
+retention are not rebuilt. When upgrading existing final sources, a bounded
+cursor backfills their retained hourly rows from stored final lines without
+calling plugins again. Non-final sources are evaluated through the normal
+queue. The backfill skips hours outside retention and does not reconstruct
+historical host allocations or unallocated cost from those final lines.
 
 ## 8. API and visibility
 
@@ -970,6 +984,19 @@ operators), and also:
   `label:<key>`, repeatable for two levels;
 - `family`: filter by family;
 - `interval`: `hour` or `day`, to return a series instead of totals.
+
+Both cost range endpoints use `[from, to)` over whole UTC hour buckets.
+An omitted `to` is now; an omitted `from` is one hour before `to` (or
+`since` before `to`). A supplied partial-hour `from` rounds down and a
+partial-hour `to` rounds up; exact-hour bounds stay exact. The response's
+`from` and `to` are these effective bounds, not the raw query parameters.
+`from` must precede `to` before rounding, and the effective range must not
+exceed 90 days (400 response). The combined number of rows in a summary's
+`totals`, `series`, `unallocated` and `hosts`, or a host cost response's
+`hours` and `rates`, is limited to 10,000 (413 response).
+Summary totals, series, unallocated and host allocations are read from one
+repeatable-read snapshot with the request's tenant scope; only an operator
+without a tenant scope receives system-wide host allocations.
 
 Amounts in a range come from `cost_hourly`. Grouping by `pool` or `host`
 applies only to compute lines (the only ones tied to a host). Other
