@@ -9,6 +9,7 @@ the restart is polled (systemctl is-active plus GET /health) for about 30s.
 On failure, the old config and symlinks are restored before restarting luxd.
 """
 import hashlib
+import json
 import os
 import shutil
 import tarfile
@@ -67,11 +68,13 @@ def extract_release(tarball_path: str, versions_root: str, version: str) -> str:
 
     Extracts into a fresh temp directory, then renames it into place: a
     version directory is either absent or complete, and a stale leftover
-    from a failed attempt at the same version is replaced. Never touches
-    any other version directory, so the one `current` resolves to is safe.
+    from a failed attempt at the same version is replaced, unless selected.
     """
     os.makedirs(versions_root, exist_ok=True)
     version_dir = os.path.join(versions_root, version)
+    current_link = os.path.join(os.path.dirname(versions_root), "current")
+    if os.path.islink(current_link) and os.path.realpath(current_link) == os.path.realpath(version_dir):
+        raise HostError(f"refusing to replace selected release {version}")
     tmp_extract = tempfile.mkdtemp(prefix=f"{version}.", dir=versions_root)
     try:
         with tarfile.open(tarball_path) as tf:
@@ -79,9 +82,15 @@ def extract_release(tarball_path: str, versions_root: str, version: str) -> str:
     except Exception:
         shutil.rmtree(tmp_extract, ignore_errors=True)
         raise
-    if os.path.lexists(version_dir):
-        shutil.rmtree(version_dir)
-    os.replace(tmp_extract, version_dir)
+    try:
+        if os.path.islink(current_link) and os.path.realpath(current_link) == os.path.realpath(version_dir):
+            raise HostError(f"refusing to replace selected release {version}")
+        if os.path.lexists(version_dir):
+            shutil.rmtree(version_dir)
+        os.replace(tmp_extract, version_dir)
+    finally:
+        if os.path.exists(tmp_extract):
+            shutil.rmtree(tmp_extract)
     return version_dir
 
 
@@ -126,6 +135,70 @@ def restore_symlinks(previous: dict, current_link: str, links: dict) -> None:
             _atomic_symlink(target, link_path)
         elif os.path.islink(link_path):
             os.remove(link_path)
+
+
+def recover(install_root: str) -> bool:
+    """Restore the last paired state before any service start or retry."""
+    journal = os.path.join(install_root, ".switch")
+    if not os.path.lexists(journal):
+        return False
+    record = read_file(os.path.join(journal, "state.json"))
+    if record is None:
+        raise HostError("switch journal missing state; refusing to start luxd")
+    try:
+        state = json.loads(record)
+        config_path = state["config_path"]
+        targets = state["targets"]
+        version = state["version"]
+        had_config = state["had_config"]
+        current_link = os.path.join(install_root, "current")
+        if (not isinstance(version, str) or not isinstance(config_path, str) or
+                not isinstance(had_config, bool) or not isinstance(targets, dict) or
+                any(not isinstance(k, str) or (v is not None and not isinstance(v, str))
+                    for k, v in targets.items()) or current_link not in targets):
+            raise ValueError("invalid switch state")
+        if targets[current_link] is not None and not version:
+            raise ValueError("selected release without previous version")
+        if version and targets[current_link] is None:
+            raise ValueError("previous release without selected link")
+    except (ValueError, TypeError, KeyError) as e:
+        raise HostError(f"invalid switch journal; refusing to start luxd: {e}") from e
+    saved = read_file(os.path.join(journal, "luxd.toml"))
+    if had_config and saved is None:
+        raise HostError("switch journal missing previous config")
+    if version and not had_config:
+        raise HostError("switch journal missing previous config for installed release")
+    if version and targets.get(current_link) != os.path.join(install_root, "versions", version):
+        raise HostError("switch journal has mismatched previous version")
+    if version and not os.path.exists(os.path.join(install_root, "versions", version, "bin", "luxd")):
+        raise HostError("previous luxd binary missing; refusing to start luxd")
+    if saved is not None and had_config:
+        write_if_changed(config_path, saved, 0o600)
+    elif os.path.exists(config_path):
+        os.remove(config_path)
+    restore_symlinks(targets, current_link, {path: None for path in targets if path != current_link})
+    marker = os.path.join(install_root, "CURRENT_VERSION")
+    if version:
+        write_if_changed(marker, version + "\n")
+    elif os.path.exists(marker):
+        os.remove(marker)
+    shutil.rmtree(journal)
+    return True
+
+
+def check_config(host: Host, binary: str, config: str, config_path: str) -> bool:
+    with tempfile.TemporaryDirectory(prefix=".luxd-config-", dir=os.path.dirname(config_path)) as tmp:
+        staged = os.path.join(tmp, "luxd.toml")
+        write_if_changed(staged, config, 0o600)
+        result = host.run([binary, "--config", staged, "check-config"], check=False)
+        if result.returncode == 0:
+            return True
+        # Releases predating check-config still load strictly before opening the DB.
+        if "usage: luxd" not in (result.stderr or ""):
+            return False
+        probe = host.run([binary, "--config", staged, "admin", "create-key"], check=False,
+                         env={"LUX_DATABASE_URL": "postgres://probe:probe@127.0.0.1:1/probe?sslmode=disable"})
+        return probe.returncode != 0 and "connect to database" in (probe.stderr or "").lower()
 
 
 def run_migrate(host: Host, luxd_bin: str, dsn: str, config_path: str):
@@ -177,6 +250,7 @@ def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url:
     current_link = os.path.join(install_root, "current")
     versions_root = os.path.join(install_root, "versions")
     os.makedirs(install_root, exist_ok=True)
+    recover(install_root)
     current = installed_version(install_root)
     running = current or "no version"
 
@@ -216,7 +290,38 @@ def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url:
     links = stable_links(current_link, p.bin_dir, p.runner_bin_dir)
     previous_config = read_file(config_path)
     previous_targets = {path: os.readlink(path) if os.path.islink(path) else None
-                        for path in (current_link, *links)}
+                         for path in (current_link, *links)}
+    journal = tempfile.mkdtemp(prefix=".switch-prep-", dir=install_root)
+    os.chmod(journal, 0o700)
+    try:
+        if previous_config is not None:
+            write_if_changed(os.path.join(journal, "luxd.toml"), previous_config, 0o600)
+        write_if_changed(os.path.join(journal, "state.json"), json.dumps({
+            "version": current, "config_path": config_path,
+            "had_config": previous_config is not None, "targets": previous_targets,
+        }), 0o600)
+        # The undo record must survive power loss before any live pointer changes.
+        for name in ("state.json", "luxd.toml"):
+            path = os.path.join(journal, name)
+            if os.path.exists(path):
+                with open(path, "rb") as f:
+                    os.fsync(f.fileno())
+        fd = os.open(journal, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(journal, os.path.join(install_root, ".switch"))
+        journal = os.path.join(install_root, ".switch")
+        fd = os.open(install_root, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException:
+        if journal != os.path.join(install_root, ".switch") and os.path.isdir(journal):
+            shutil.rmtree(journal)
+        raise
     try:
         switch_symlinks(version_dir, current_link, links)
         write_if_changed(config_path, config, 0o600)
@@ -230,19 +335,14 @@ def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url:
         if not healthy:
             detail = "ok" if restarted else "failed: " + restart_err.strip()
             raise HostError(f"{wanted} did not come up healthy (restart {detail})")
-        with open(os.path.join(install_root, "CURRENT_VERSION"), "w") as f:
-            f.write(wanted + "\n")
+        write_if_changed(os.path.join(install_root, "CURRENT_VERSION"), wanted + "\n")
     except Exception as e:
-        if previous_config is None:
-            if os.path.exists(config_path):
-                os.remove(config_path)
-        else:
-            write_if_changed(config_path, previous_config, 0o600)
-        restore_symlinks(previous_targets, current_link, links)
+        recover(install_root)
         rolled_back, rollback_err = restart_luxd(host)
         msg = f"{e}; rolled back to {current or 'nothing'}"
         if not rolled_back:
             msg += f"; restart after rollback also failed: {rollback_err.strip()}"
         raise HostError(msg) from e
 
+    shutil.rmtree(journal)
     host.log(f"deployed {wanted}")

@@ -7,7 +7,7 @@ import tomllib
 import pytest
 from conftest import INSTALLED, PREFIX, FakeWeb, desired, make_release
 
-from luxhost import backup, desired as desired_mod
+from luxhost import backup, desired as desired_mod, release
 from luxhost.host import HostError
 
 
@@ -246,10 +246,221 @@ def test_staged_access_settings_keep_old_config_across_periodic_reconcile(env, c
     env.sh.calls.clear()
     for _ in range(2):
         assert env.run() == 1
-        assert "need a lux_version upgrade" in summary(capsys)
+        assert "not supported by installed luxd" in summary(capsys)
         assert read(env, "etc/lux/luxd.toml") == old
         assert installed(env) == "v1.0.0"
         assert restarts(env) == []
+
+
+def test_compatible_installed_binary_accepts_key_to_access_config_only(env, capsys, monkeypatch):
+    del env.sh.ssm[f"{PREFIX}/cf_access_team"]
+    del env.sh.ssm[f"{PREFIX}/cf_access_aud"]
+    env.repo.set_desired('lux_version = "v2.0.0"\nrelease_base_url = "https://releases.example.com/lux"\n')
+    env.web.releases["v2.0.0"] = make_release("v2.0.0")
+    env.sh.healthy_versions.add("v2.0.0")
+    assert env.run() == 0, summary(capsys)
+    capsys.readouterr()
+    assert luxd_toml(env)["console"]["auth"] == "key"
+    env.sh.ssm[f"{PREFIX}/cf_access_team"] = "acme"
+    env.sh.ssm[f"{PREFIX}/cf_access_aud"] = "aud-tag"
+    env.repo.set_desired(desired("v2.0.0"))
+    env.sh.calls.clear()
+    new_bin = os.environ.get("LUX_TEST_NEW_LUXD")
+    if new_bin:
+        real_check = release.check_config
+
+        def check(host, binary, config, path):
+            with monkeypatch.context() as patch:
+                patch.setattr(host, "sh", lambda argv, **kw: subprocess.run(
+                    [new_bin, *argv[1:]], **kw))
+                return real_check(host, binary, config, path)
+
+        monkeypatch.setattr(release, "check_config", check)
+    assert env.run() == 0, summary(capsys)
+    assert installed(env) == "v2.0.0"
+    assert luxd_toml(env)["console"]["auth"] == "cloudflare-access"
+    assert len(restarts(env)) == 1
+    assert not [c for c in env.sh.calls if c[-1] == "migrate"]
+
+
+@pytest.mark.parametrize("boundary", ["current", "stable", "config", "restart", "health", "marker", "commit"])
+def test_killed_switch_recovers_before_service_restart_and_retry(env, capsys, monkeypatch, boundary):
+    deploy_version(env, capsys, "v1.0.0")
+    path = env.path("etc/lux/luxd.toml")
+    old = read(env, "etc/lux/luxd.toml").replace('operators = ["operator@example.com"]\n', '').replace(
+        'default_tenant = "ten_aaaaaaaaaaaaaaaa"\n', ''
+    )
+    with open(path, "w") as f:
+        f.write(old)
+    env.web.releases["v2.0.0"] = make_release("v2.0.0")
+    env.sh.healthy_versions.add("v2.0.0")
+    env.repo.set_desired(desired("v2.0.0"))
+    original_link = release._atomic_symlink
+    original_write = release.write_if_changed
+    original_restart = release.restart_luxd
+    original_health = release.wait_healthy
+    original_remove = release.shutil.rmtree
+    current_link = env.path("usr/local/lux/current")
+    marker = env.path("usr/local/lux/CURRENT_VERSION")
+    journal = env.path("usr/local/lux/.switch")
+
+    def crash():
+        raise KeyboardInterrupt("power loss")
+
+    def link(target, path):
+        original_link(target, path)
+        if boundary == "current" and path == current_link and target.endswith("v2.0.0"):
+            crash()
+        if boundary == "stable" and path == env.path("usr/local/bin/luxd") and target.startswith(current_link):
+            crash()
+
+    def write(path, content, mode=0o644):
+        result = original_write(path, content, mode)
+        if boundary == "config" and path == env.path("etc/lux/luxd.toml"):
+            crash()
+        if boundary == "marker" and path == marker:
+            crash()
+        return result
+
+    def restart(host):
+        if boundary == "restart":
+            crash()
+        return original_restart(host)
+
+    def health(*args, **kwargs):
+        if boundary == "health":
+            crash()
+        return original_health(*args, **kwargs)
+
+    def remove(path, *args, **kwargs):
+        if boundary == "commit" and path == journal:
+            crash()
+        return original_remove(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(release, "_atomic_symlink", link)
+        patch.setattr(release, "write_if_changed", write)
+        patch.setattr(release, "restart_luxd", restart)
+        patch.setattr(release, "wait_healthy", health)
+        patch.setattr(release.shutil, "rmtree", remove)
+        with pytest.raises(KeyboardInterrupt):
+            env.run()
+    assert os.stat(journal).st_mode & 0o777 == 0o700
+    assert os.stat(os.path.join(journal, "state.json")).st_mode & 0o777 == 0o600
+    old_bin = os.environ.get("LUX_TEST_OLD_LUXD")
+    new_bin = os.environ.get("LUX_TEST_NEW_LUXD")
+    # Simulate ExecStartPre on boot, before systemd can load either binary.
+    assert release.recover(env.host.paths.install_root)
+    assert read(env, "etc/lux/luxd.toml") == old
+    assert installed(env) == "v1.0.0"
+    assert os.path.realpath(env.path("usr/local/bin/luxd")) == env.path("usr/local/lux/versions/v1.0.0/bin/luxd")
+    if old_bin and new_bin:
+        for binary, valid in ((old_bin, True), (new_bin, False)):
+            result = subprocess.run([binary, "--config", path, "admin", "create-key"],
+                                    capture_output=True, text=True, timeout=10)
+            assert ("connect to database" in result.stderr.lower()) == valid, result.stderr
+    env.sh.active.discard("luxd")
+    env.sh._start("luxd")
+    assert "luxd" in env.sh.active
+    # A retry must leave the selected release intact during extraction.
+    original_extract = release.extract_release
+
+    def extract(*args):
+        assert os.path.exists(env.path("usr/local/lux/versions/v1.0.0/bin/luxd"))
+        return original_extract(*args)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(release, "extract_release", extract)
+        assert env.run() == 0, summary(capsys)
+    assert installed(env) == "v2.0.0"
+    assert "luxd" in env.sh.active
+    if new_bin:
+        result = subprocess.run([new_bin, "--config", path, "admin", "create-key"],
+                                capture_output=True, text=True, timeout=10)
+        assert "connect to database" in result.stderr.lower(), result.stderr
+
+
+def test_extract_never_replaces_release_selected_by_current(env, capsys):
+    deploy_version(env, capsys, "v1.0.0")
+    existing = env.path("usr/local/lux/versions/v1.0.0/bin/luxd")
+    with pytest.raises(HostError, match="refusing to replace selected release"):
+        release.extract_release(
+            env.path("usr/local/lux/versions/v1.0.0/bin/luxd"),
+            env.path("usr/local/lux/versions"), "v1.0.0",
+        )
+    assert os.path.exists(existing)
+
+
+def test_retry_recovers_selected_candidate_before_extraction(env, capsys, monkeypatch):
+    deploy_version(env, capsys, "v1.0.0")
+    env.web.releases["v2.0.0"] = make_release("v2.0.0")
+    env.sh.healthy_versions.add("v2.0.0")
+    env.repo.set_desired(desired("v2.0.0"))
+    original = release.switch_symlinks
+
+    def interrupted(*args):
+        original(*args)
+        raise KeyboardInterrupt("killed after switch")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(release, "switch_symlinks", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            env.run()
+    selected = env.path("usr/local/lux/versions/v2.0.0/bin/luxd")
+    assert os.path.exists(selected)
+    original_extract = release.extract_release
+
+    def extract(*args):
+        assert os.path.realpath(env.path("usr/local/lux/current")) == env.path("usr/local/lux/versions/v1.0.0")
+        assert os.path.exists(selected)
+        return original_extract(*args)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(release, "extract_release", extract)
+        assert env.run() == 0, summary(capsys)
+    assert installed(env) == "v2.0.0"
+
+
+def test_boot_recovery_helper_restores_pair_before_start(env, capsys, monkeypatch):
+    import runpy
+
+    deploy_version(env, capsys, "v1.0.0")
+    before = read(env, "etc/lux/luxd.toml")
+    env.web.releases["v2.0.0"] = make_release("v2.0.0")
+    env.sh.healthy_versions.add("v2.0.0")
+    env.repo.set_desired(desired("v2.0.0"))
+    original = release.switch_symlinks
+
+    def interrupted(*args):
+        original(*args)
+        raise KeyboardInterrupt("power loss")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(release, "switch_symlinks", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            env.run()
+    real_open = open
+    real_recover = release.recover
+
+    def open_lock(path, *args, **kwargs):
+        if path == "/etc/lux/.reconcile.lock":
+            path = env.path("etc/lux/.reconcile.lock")
+        return real_open(path, *args, **kwargs)
+
+    def recover_root(path):
+        assert path == "/usr/local/lux"
+        return real_recover(env.host.paths.install_root)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("builtins.open", open_lock)
+        patch.setattr(release, "recover", recover_root)
+        runpy.run_path(os.path.join(os.path.dirname(os.path.dirname(__file__)), "recover.py"))
+    assert read(env, "etc/lux/luxd.toml") == before
+    assert os.path.realpath(env.path("usr/local/bin/luxd")) == env.path("usr/local/lux/versions/v1.0.0/bin/luxd")
+    env.sh.active.discard("luxd")
+    env.sh._start("luxd")
+    assert "luxd" in env.sh.active
+
 
 
 def test_real_strict_loaders_accept_the_config_selected_for_each_version(env, capsys):
@@ -289,6 +500,30 @@ def test_real_strict_loaders_accept_the_config_selected_for_each_version(env, ca
     assert env.run() == 1
     summary(capsys)
     load(new_bin, True)
+
+
+def test_real_installed_binaries_validate_access_candidate_without_database(env, capsys):
+    old_bin = os.environ.get("LUX_TEST_OLD_LUXD")
+    new_bin = os.environ.get("LUX_TEST_NEW_LUXD")
+    if not old_bin or not new_bin:
+        pytest.skip("set LUX_TEST_OLD_LUXD and LUX_TEST_NEW_LUXD to real old/new binaries")
+    deploy_version(env, capsys, "v1.0.0")
+    path = env.path("etc/lux/luxd.toml")
+    candidate = read(env, "etc/lux/luxd.toml")
+    old = candidate.replace('operators = ["operator@example.com"]\n', '').replace(
+        'default_tenant = "ten_aaaaaaaaaaaaaaaa"\n', ''
+    )
+    with open(path, "w") as f:
+        f.write(old)
+    for binary, expected in ((old_bin, False), (new_bin, True)):
+        host = env.host
+        original = host.sh
+        host.sh = lambda argv, **kw: subprocess.run([binary, *argv[1:]], **kw)
+        try:
+            assert release.check_config(host, binary, candidate, path) == expected
+        finally:
+            host.sh = original
+        assert read(env, "etc/lux/luxd.toml") == old
 
 
 @pytest.mark.parametrize("failure", ["download", "migrate", "health"])
