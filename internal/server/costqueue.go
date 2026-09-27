@@ -140,7 +140,7 @@ func nextCostTick(now time.Time, every time.Duration) time.Time {
 	return epoch.Add(now.Sub(epoch).Truncate(every) + every + min(costTickSlack, every/10))
 }
 
-// costTick queues live Runs, due configured sources and terminal Runs missing
+// costTick queues live Runs, due configured sources and settled Runs missing
 // a configured plugin source, once per costs.every bucket. It reports whether
 // this luxd won the bucket.
 func (s *Server) costTick(ctx context.Context) (bool, error) {
@@ -171,7 +171,7 @@ func (s *Server) costTick(ctx context.Context) (bool, error) {
 						AND (source = 'compute' OR source = ANY($1))
 					UNION
 					SELECT r.id FROM runs r CROSS JOIN unnest($1::text[]) AS plugin(source)
-						WHERE r.state IN ('succeeded', 'failed', 'cancelled')
+						WHERE r.state IN ('succeeded', 'failed', 'cancelled', 'stopped', 'lost')
 						AND NOT EXISTS (SELECT 1 FROM cost_sources c WHERE c.run_id = r.id AND c.source = plugin.source))
 				ORDER BY id FOR KEY SHARE SKIP LOCKED)
 			INSERT INTO cost_pending (run_id, due_at, reason)
@@ -194,13 +194,14 @@ func (s *Server) pollDueCostSources(ctx context.Context) error {
 	}
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `WITH due AS (
-			SELECT id FROM runs WHERE id IN (
-				SELECT run_id FROM cost_sources WHERE status <> 'final' AND next_at <= now()
-					AND (source = 'compute' OR source = ANY($1)))
-			ORDER BY id FOR KEY SHARE SKIP LOCKED)
+			SELECT r.id FROM runs r WHERE r.id IN (
+				SELECT c.run_id FROM cost_sources c WHERE c.status <> 'final' AND c.next_at <= now()
+				AND (c.source = 'compute' OR c.source = ANY($1)))
+				AND NOT EXISTS (SELECT 1 FROM cost_pending p WHERE p.run_id = r.id)
+			ORDER BY r.id LIMIT $2 FOR KEY SHARE OF r SKIP LOCKED)
 			INSERT INTO cost_pending (run_id, due_at, reason)
 				SELECT id, now(), 'retry' FROM due ORDER BY id
-			ON CONFLICT (run_id) DO UPDATE SET due_at = least(cost_pending.due_at, EXCLUDED.due_at)`, plugins)
+			ON CONFLICT (run_id) DO UPDATE SET due_at = least(cost_pending.due_at, EXCLUDED.due_at)`, plugins, s.cfg.Costs.Batch)
 		return err
 	})
 }
@@ -279,21 +280,37 @@ func (s *Server) drainCosts(ctx context.Context) (int, error) {
 			delete(pluginRuns, id)
 		}
 	}
-	first = cmp.Or(first, s.reportCostPlugins(ctx, pluginRuns, pluginDue, evals, now))
+	failed, pluginErr := s.reportCostPlugins(ctx, pluginRuns, pluginDue, evals, now)
+	first = cmp.Or(first, pluginErr)
 	if ctx.Err() != nil {
 		s.releaseCosts(context.WithoutCancel(ctx), runs)
 		return len(runs), cmp.Or(first, ctx.Err())
 	}
 	for chunk := range slices.Chunk(runs, costChunk) {
+		var done []string
+		var retry []string
+		for _, id := range chunk {
+			if valid[id] && !failed[id] {
+				done = append(done, id)
+			} else {
+				retry = append(retry, id)
+			}
+		}
+		if len(retry) > 0 {
+			s.releaseCosts(context.WithoutCancel(ctx), retry)
+		}
+		if len(done) == 0 {
+			continue
+		}
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR KEY SHARE`, chunk); err != nil {
+			if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR KEY SHARE`, done); err != nil {
 				return err
 			}
-			_, err := tx.Exec(ctx, `DELETE FROM cost_pending WHERE run_id = ANY($1) AND claimed_by = $2`, chunk, s.id)
+			_, err := tx.Exec(ctx, `DELETE FROM cost_pending WHERE run_id = ANY($1) AND claimed_by = $2`, done, s.id)
 			return err
 		})
 		if err != nil {
-			s.releaseCosts(context.WithoutCancel(ctx), chunk)
+			s.releaseCosts(context.WithoutCancel(ctx), done)
 			first = cmp.Or(first, err)
 		}
 	}

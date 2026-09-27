@@ -221,13 +221,15 @@ func TestCostTickDiscoversHistoricalPluginSources(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"protocol": 1, "runs": out})
 	})
 	ctx := context.Background()
-	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped' WHERE id IN ('r1', 'r2')`)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped' WHERE id = 'r1'`)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'lost' WHERE id = 'r2'`)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES
 		('old-t1', 't1', '{}', 'failed'), ('old-t2', 't2', '{}', 'cancelled'),
 		('existing', 't1', '{}', 'succeeded'), ('quiet', 't1', '{}', 'stopped')`)
 	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, next_at) VALUES
 		('old-t1', 't1', 'compute', 'final', NULL), ('old-t2', 't2', 'compute', 'final', NULL),
-		('existing', 't1', 'ledger', 'final', NULL), ('quiet', 't1', 'removed', 'incomplete', now() - interval '1 second'),
+		('existing', 't1', 'ledger', 'final', NULL), ('quiet', 't1', 'ledger', 'ok', NULL),
+		('quiet', 't1', 'removed', 'incomplete', now() - interval '1 second'),
 		('existing', 't1', 'removed', 'incomplete', now() - interval '1 second')`)
 	if _, cost := getCost(t, s, keys["t1"], "old-t1"); cost.Final || cost.Status != "incomplete" {
 		t.Fatalf("missing configured source appeared final before backfill: %+v", cost)
@@ -235,15 +237,15 @@ func TestCostTickDiscoversHistoricalPluginSources(t *testing.T) {
 	if won, err := s.costTick(ctx); err != nil || !won {
 		t.Fatalf("tick: won %v, %v", won, err)
 	}
-	for run, want := range map[string]string{"old-t1": "tick -", "old-t2": "tick -", "existing": "", "quiet": "", "r1": "", "r2": ""} {
+	for run, want := range map[string]string{"old-t1": "tick -", "old-t2": "tick -", "existing": "", "quiet": "", "r1": "tick -", "r2": "tick -"} {
 		if got := pending(t, s, run); got != want {
 			t.Errorf("%s: queued %q, want %q", run, got, want)
 		}
 	}
 	drain(t, s)
-	for _, c := range []struct{ id, key string }{{"old-t1", keys["t1"]}, {"old-t2", keys["t2"]}} {
+	for _, c := range []struct{ id, key string }{{"old-t1", keys["t1"]}, {"old-t2", keys["t2"]}, {"r1", keys["t1"]}, {"r2", keys["t2"]}} {
 		code, cost := getCost(t, s, c.key, c.id)
-		if code != http.StatusOK || len(cost.Lines) != 1 || cost.Lines[0].Source != "ledger" || !cost.Lines[0].Final {
+		if code != http.StatusOK || len(cost.Lines) != 1 || cost.Lines[0].Source != "ledger" || cost.Sources[len(cost.Sources)-1].Source != "ledger" {
 			t.Errorf("%s: %d, %+v", c.id, code, cost)
 		}
 	}
@@ -255,6 +257,62 @@ func TestCostTickDiscoversHistoricalPluginSources(t *testing.T) {
 	}
 	if got := pending(t, s, "old-t1"); got != "" {
 		t.Errorf("settled historical run queued again: %q", got)
+	}
+	execSQL(t, s, ctx, `DELETE FROM cost_ticks`)
+	if _, err := s.costTick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"r1", "r2", "quiet"} {
+		if got := pending(t, s, id); got != "" {
+			t.Errorf("%s with existing source queued again: %q", id, got)
+		}
+	}
+}
+
+func TestPollDueCostSourcesBoundedWithoutRewritingClaims(t *testing.T) {
+	s, _ := costFixture(t)
+	s.cfg.Costs.Batch = 2
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'failed' WHERE id IN ('r1', 'r2')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES
+		('r3', 't1', '{}', 'failed'), ('r4', 't2', '{}', 'failed'), ('r5', 't2', '{}', 'failed')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, next_at) VALUES
+		('r1', 't1', 'compute', 'incomplete', now() - interval '1 hour'),
+		('r2', 't2', 'compute', 'incomplete', now() - interval '1 hour'),
+		('r3', 't1', 'compute', 'incomplete', now() - interval '1 hour'),
+		('r4', 't2', 'compute', 'incomplete', now() - interval '1 hour'),
+		('r5', 't2', 'compute', 'incomplete', now() - interval '1 hour')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_pending (run_id, due_at, reason, claimed_by, claimed_until)
+		VALUES ('r1', now() - interval '1 hour', 'state:failed', 'peer', now() + interval '1 hour')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_pending (run_id, due_at, reason)
+		VALUES ('r2', now() + interval '1 hour', 'retry')`)
+	for pass, want := range []int{4, 5, 5} {
+		if err := s.pollDueCostSources(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var count int
+		systemScan(t, s, `SELECT count(*) FROM cost_pending`, nil, &count)
+		if count != want {
+			t.Fatalf("pass %d queued %d, want %d", pass, count, want)
+		}
+		if got := pending(t, s, "r1"); got != "state:failed peer" {
+			t.Fatalf("claimed row changed: %q", got)
+		}
+		var delayed bool
+		systemScan(t, s, `SELECT due_at > now() + interval '59 minutes' FROM cost_pending WHERE run_id = 'r2'`, nil, &delayed)
+		if !delayed {
+			t.Fatal("released retry was made due early")
+		}
+	}
+	// A new retry due later is eligible despite the already-queued population.
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r6', 't1', '{}', 'failed')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, next_at)
+		VALUES ('r6', 't1', 'compute', 'incomplete', now() - interval '1 second')`)
+	if err := s.pollDueCostSources(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := pending(t, s, "r6"); got != "retry -" {
+		t.Errorf("newly due retry: %q", got)
 	}
 }
 

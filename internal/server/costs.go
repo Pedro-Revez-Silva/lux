@@ -118,7 +118,9 @@ func (s *Server) runCost(ctx context.Context, in *RunPath) (*runCostOutput, erro
 		return nil, err
 	}
 	s.decorateCostFamilies(c.ByFamily)
+	active := map[string]bool{"compute": true}
 	for _, plugin := range s.cfg.Costs.Plugins {
+		active[plugin.Name] = true
 		found := false
 		for _, source := range c.Sources {
 			if source.Source == plugin.Name {
@@ -130,7 +132,14 @@ func (s *Server) runCost(ctx context.Context, in *RunPath) (*runCostOutput, erro
 			c.Sources = append(c.Sources, CostSource{Source: plugin.Name, Status: "incomplete"})
 		}
 	}
-	c.Status = costStatus(c.Sources, len(c.Lines) > 0)
+	var current []CostSource
+	for _, source := range c.Sources {
+		if active[source.Source] {
+			current = append(current, source)
+		}
+	}
+	// Historical sources and lines remain visible, but cannot hold up current finality.
+	c.Status = costStatus(current, len(c.Lines) > 0)
 	c.Final = c.Status == "final"
 	return &runCostOutput{c}, nil
 }

@@ -335,9 +335,10 @@ func loadPluginDue(ctx context.Context, tx pgx.Tx, runs []string, now time.Time)
 	return due, rows.Err()
 }
 
-func (s *Server) reportCostPlugins(ctx context.Context, runs map[string]pluginRun, due map[string]map[string]bool, evals map[string]*computeEval, now time.Time) error {
+func (s *Server) reportCostPlugins(ctx context.Context, runs map[string]pluginRun, due map[string]map[string]bool, evals map[string]*computeEval, now time.Time) (map[string]bool, error) {
+	failedRuns := map[string]bool{}
 	if len(runs) == 0 {
-		return nil
+		return failedRuns, nil
 	}
 	s.initCostPlugins()
 	var wg sync.WaitGroup
@@ -465,8 +466,14 @@ func (s *Server) reportCostPlugins(ctx context.Context, runs map[string]pluginRu
 					return nil
 				})
 				if writeErr != nil {
+					if failed == nil {
+						failed = writeErr
+					}
 					mu.Lock()
 					first = cmp.Or(first, writeErr)
+					for _, id := range chunk {
+						failedRuns[id] = true
+					}
 					mu.Unlock()
 				}
 			}
@@ -476,7 +483,7 @@ func (s *Server) reportCostPlugins(ctx context.Context, runs map[string]pluginRu
 		}()
 	}
 	wg.Wait()
-	return first
+	return failedRuns, first
 }
 
 func idsNewCost() string { return ids.New("cq") }
