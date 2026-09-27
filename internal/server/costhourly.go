@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math/big"
 	"time"
 
@@ -127,8 +126,9 @@ func replacePluginHours(ctx context.Context, tx pgx.Tx, tenant, run, source stri
 // The per-host cursor resumes within retention after a restart.
 func (s *Server) updateHostHours(ctx context.Context) error {
 	var jobs []struct {
-		id   string
-		hour time.Time
+		id      string
+		hour    time.Time
+		pending bool
 	}
 	now := time.Now().UTC()
 	oldest := now.Add(-s.cfg.Costs.Hourly).Truncate(time.Hour).Add(time.Hour)
@@ -137,12 +137,14 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 			return err
 		}
 		firstLimit := max(1, s.cfg.Costs.Batch-1)
+		var pendingFirst bool
 		if s.cfg.Costs.Batch == 1 {
 			var currentFirst bool
 			if err := tx.QueryRow(ctx, `SELECT current_first FROM cost_host_turn WHERE id FOR UPDATE`).Scan(&currentFirst); err != nil {
 				return err
 			}
-			if !currentFirst {
+			pendingFirst = !currentFirst
+			if pendingFirst {
 				firstLimit = 0
 			}
 		}
@@ -158,8 +160,9 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 		}
 		for rows.Next() {
 			var job struct {
-				id   string
-				hour time.Time
+				id      string
+				hour    time.Time
+				pending bool
 			}
 			if err := rows.Scan(&job.id, &job.hour); err != nil {
 				rows.Close()
@@ -172,14 +175,36 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if len(jobs) < s.cfg.Costs.Batch && (pendingFirst || s.cfg.Costs.Batch > 1) {
+			ids := make([]string, 0, len(jobs))
+			for _, job := range jobs {
+				ids = append(ids, job.id)
+			}
+			var job struct {
+				id      string
+				hour    time.Time
+				pending bool
+			}
+			err := tx.QueryRow(ctx, `SELECT host_id, hour FROM cost_host_hour_gaps
+				WHERE retry_at <= $1 AND hour >= $2 AND host_id <> ALL($3::text[])
+				ORDER BY retry_at, hour, host_id LIMIT 1`, now, oldest, ids).Scan(&job.id, &job.hour)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if err == nil {
+				job.pending = true
+				jobs = append(jobs, job)
+			}
+		}
 		if len(jobs) < s.cfg.Costs.Batch {
 			ids := make([]string, 0, len(jobs))
 			for _, job := range jobs {
 				ids = append(ids, job.id)
 			}
 			var job struct {
-				id   string
-				hour time.Time
+				id      string
+				hour    time.Time
+				pending bool
 			}
 			err = tx.QueryRow(ctx, `SELECT h.id, greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1)
 				FROM hosts h LEFT JOIN cost_host_refresh c ON c.host_id = h.id
@@ -195,9 +220,31 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 				jobs = append(jobs, job)
 			}
 		}
+		if len(jobs) < s.cfg.Costs.Batch && !pendingFirst {
+			ids := make([]string, 0, len(jobs))
+			for _, job := range jobs {
+				ids = append(ids, job.id)
+			}
+			var job struct {
+				id      string
+				hour    time.Time
+				pending bool
+			}
+			err := tx.QueryRow(ctx, `SELECT host_id, hour FROM cost_host_hour_gaps
+				WHERE retry_at <= $1 AND hour >= $2 AND host_id <> ALL($3::text[])
+				ORDER BY retry_at, hour, host_id LIMIT 1`, now, oldest, ids).Scan(&job.id, &job.hour)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if err == nil {
+				job.pending = true
+				jobs = append(jobs, job)
+			}
+		}
 		if s.cfg.Costs.Batch == 1 && len(jobs) > 0 {
-			_, err = tx.Exec(ctx, `UPDATE cost_host_turn SET current_first = NOT current_first WHERE id`)
-			return err
+			if _, err := tx.Exec(ctx, `UPDATE cost_host_turn SET current_first = NOT current_first WHERE id`); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -220,7 +267,16 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return err
 			}
-			if err == nil && (cursor.After(job.hour) || (retryAt != nil && retryAt.After(now))) {
+			if job.pending {
+				var due bool
+				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM cost_host_hour_gaps
+					WHERE host_id = $1 AND hour = $2 AND retry_at <= $3)`, job.id, job.hour, now).Scan(&due); err != nil {
+					return err
+				}
+				if !due {
+					return nil
+				}
+			} else if err == nil && (cursor.After(job.hour) || (retryAt != nil && retryAt.After(now))) {
 				return nil
 			}
 			to := minTime(now, job.hour.Add(time.Hour))
@@ -231,6 +287,9 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 				if err := s.writeHostHour(ctx, tx, job.id, job.hour, to, provisioned, registered, end); err != nil {
 					return err
 				}
+			}
+			if job.pending {
+				return nil
 			}
 			next := job.hour.Add(time.Hour)
 			if end == nil && next.After(now) {
@@ -252,6 +311,11 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 			s.log.Warn("costs: host hour", "host", job.id, "hour", job.hour, "err", err)
 			if retryErr := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 				if err := lockCostHost(ctx, tx, job.id); err != nil {
+					return err
+				}
+				if job.pending {
+					_, err := tx.Exec(ctx, `UPDATE cost_host_hour_gaps SET retry_at = now() + interval '1 hour'
+						WHERE host_id = $1 AND hour = $2 AND retry_at IS NOT NULL`, job.id, job.hour)
 					return err
 				}
 				_, err := tx.Exec(ctx, `INSERT INTO cost_host_refresh (host_id, next_hour, retry_at)
@@ -276,24 +340,9 @@ func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, 
 	if err != nil {
 		return err
 	}
-	if len(res.Missing) > 0 {
-		// Entirely unpriced static hours cannot be backfilled by a later
-		// static price; partially priced hours stay pending for rate repair.
-		staticClosed := provisioned == nil && (terminated != nil || !to.Before(hour.Add(time.Hour))) && len(res.Pieces) > 0
-		for _, piece := range res.Pieces {
-			if piece.Rate != nil {
-				staticClosed = false
-				break
-			}
-		}
-		// A terminated provider's capacity only becomes known at registration.
-		beforeRegistration := provisioned != nil && terminated != nil && registered != nil
-		for _, gap := range res.Missing {
-			if !staticClosed && (!beforeRegistration || gap.To.After(*registered)) {
-				return fmt.Errorf("host %s: missing rate in hour %s", id, hour)
-			}
-		}
-	}
+	// Unpriced intervals stay visible; recoverable gaps retry independently
+	// of the forward cursor, while priced pieces remain available immediately.
+	retry := time.Now().UTC().Add(time.Hour)
 	type key struct {
 		hour     time.Time
 		currency string
@@ -318,12 +367,15 @@ func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, 
 		return err
 	}
 	for _, gap := range res.Missing {
-		reason := "static_unpriced"
-		if provisioned != nil {
-			reason = "provider_pre_registration"
+		reason := "rate_pending"
+		var retryAt *time.Time = &retry
+		if provisioned == nil && terminated != nil && len(allocated) == 0 {
+			reason, retryAt = "static_unpriced", nil
+		} else if provisioned != nil && terminated != nil && registered != nil && !gap.To.After(*registered) {
+			reason, retryAt = "provider_pre_registration", nil
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO cost_host_hour_gaps (host_id, hour, missing_from, missing_to, reason)
-			VALUES ($1, $2, $3, $4, $5)`, id, hour, gap.From, gap.To, reason); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO cost_host_hour_gaps (host_id, hour, missing_from, missing_to, reason, retry_at)
+			VALUES ($1, $2, $3, $4, $5, $6)`, id, hour, gap.From, gap.To, reason, retryAt); err != nil {
 			return err
 		}
 	}
