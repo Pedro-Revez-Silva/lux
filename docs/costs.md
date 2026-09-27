@@ -754,19 +754,25 @@ where it differs from the above:
   "settling or backing off" Runs are those whose `compute` source is not
   final and whose `next_at` has passed. The drainer runs the tick itself,
   before draining, at the start of each bucket (up to a second after it),
-  and again at its next pass if the tick failed. The tick locks those Runs first
-  (`FOR KEY SHARE SKIP LOCKED`, in id order), then inserts their queue
-  rows in the same order; a Run another transaction holds is skipped, as
-  it is changing state, which queues it.
-- The drainer wakes on any `lux_events` notification, then waits 200 ms so
-  a burst becomes one claim. Its read is one transaction for every claimed
-  Run (each host loaded once); the writes are one transaction per 100
-  Runs. A read that fails frees the claims and moves `due_at` one tick on;
-  so does a write that fails, for its own 100 Runs, and the next ones are
-  still written.
-  Each write locks its Runs' `runs` rows, then their `cost_pending` rows,
-  in id order: the order a state change takes them in (it holds the Run
-  when it queues it), so the two wait for each other, never deadlock.
+  and again at its next pass if the tick failed. The tick locks those Runs
+  first (`FOR KEY SHARE SKIP LOCKED`, in id order), then inserts their
+  queue rows in the same order; a Run another transaction holds is
+  skipped, as it is changing state, which queues it.
+- The drainer wakes on any `lux_events` notification (any Run event, not
+  only a state change), then waits 1 s so a burst becomes one claim: at
+  most about one claim a second per luxd while events flow. Its read is
+  one transaction for every claimed Run (each host loaded once); the
+  writes are one transaction per 100 Runs. A read that fails frees the
+  claims and moves `due_at` one tick on; so does a write that fails, for
+  its own 100 Runs, and the next ones are still written. Each write locks
+  its Runs' `runs` rows, then their `cost_pending` rows, in id order: the
+  order a state change takes them in (it holds the Run when it queues it),
+  so the two wait for each other, never deadlock.
+- A long-lived Run's host is re-read and re-priced every tick over the
+  whole window since the Run's first placement on it (with every other
+  placement there in that window); settling the pieces that can no longer
+  change (ended placements, closed rate periods) is planned before
+  `cost_hourly` (step 8).
 - Compute's source row: `ok` after an answer; `incomplete` with the
   missing gaps (or the pricing error, such as overlapping periods, in which
   case the earlier lines stay) in `last_error`; `final` as in point 4. A

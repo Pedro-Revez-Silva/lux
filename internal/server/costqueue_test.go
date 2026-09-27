@@ -275,6 +275,58 @@ func TestCostLoopEnabled(t *testing.T) {
 	}
 }
 
+// With drain_every an hour, the loop still drains at once while more is
+// due (a full batch), and when a Run event wakes it.
+func TestCostLoopWakes(t *testing.T) {
+	s, _ := costFixture(t)
+	s.cfg.Costs = CostsConfig{Enabled: true, Every: time.Hour, DrainEvery: time.Hour, Batch: 1}
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r3', 't1', '{}', 'running'), ('r4', 't1', '{}', 'stopped')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_pending (run_id, due_at, reason) VALUES ('r4', now(), 'state:stopped')`)
+	lctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	defer func() { cancel(); wg.Wait() }()
+	queued := func() int {
+		var n int
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM cost_pending`).Scan(&n)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	until := func(what string, done func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for !done() {
+			if time.Now().After(deadline) {
+				t.Fatalf("not %s within 10s", what)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	// r4, and r1, r2 and r3 (queued by the tick): four batches of one.
+	wg.Add(1)
+	go func() { defer wg.Done(); s.costLoop(lctx) }()
+	until("drained batch after batch", func() bool { return queued() == 0 })
+
+	wg.Add(1)
+	go func() { defer wg.Done(); s.listenLoop(lctx) }()
+	until("listening", func() bool {
+		var n int
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
+				WHERE datname = current_database() AND query = 'LISTEN lux_events' AND state = 'idle'`).Scan(&n)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return n == 1
+	})
+	finish(t, s, "t1", "r3", StateStopped)
+	until("woken by the state change", func() bool { return queued() == 0 })
+}
+
 // drain drains s's queue until nothing is due.
 func drain(t *testing.T, s *Server) {
 	t.Helper()
