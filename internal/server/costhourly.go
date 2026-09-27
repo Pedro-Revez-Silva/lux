@@ -123,56 +123,73 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 	now := time.Now().UTC()
 	oldest := now.Add(-s.cfg.Costs.Hourly).Truncate(time.Hour).Add(time.Hour)
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		firstLimit := max(1, s.cfg.Costs.Batch-1)
+		if s.cfg.Costs.Batch == 1 {
+			var currentFirst bool
+			if err := tx.QueryRow(ctx, `SELECT current_first FROM cost_host_turn WHERE id FOR UPDATE`).Scan(&currentFirst); err != nil {
+				return err
+			}
+			if !currentFirst {
+				firstLimit = 0
+			}
+		}
 		rows, err := tx.Query(ctx, `SELECT h.id, greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1)
 			FROM hosts h LEFT JOIN cost_host_refresh c ON c.host_id = h.id
 			WHERE (c.retry_at IS NULL OR c.retry_at <= $2)
 				AND greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1) <= date_trunc('hour', $2::timestamptz)
 				AND (h.terminated_at IS NULL OR h.terminated_at > greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1))
 			ORDER BY CASE WHEN greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1) = date_trunc('hour', $2::timestamptz) THEN 0 ELSE 1 END,
-				2, h.id LIMIT $3`, oldest, now, max(1, s.cfg.Costs.Batch-1))
+				2, h.id LIMIT $3`, oldest, now, firstLimit)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
 		for rows.Next() {
 			var job struct {
 				id   string
 				hour time.Time
 			}
 			if err := rows.Scan(&job.id, &job.hour); err != nil {
+				rows.Close()
 				return err
 			}
 			jobs = append(jobs, job)
 		}
-		return rows.Err()
-	})
-	if err != nil {
-		return err
-	}
-	if len(jobs) < s.cfg.Costs.Batch {
-		ids := make([]string, 0, len(jobs))
-		for _, job := range jobs {
-			ids = append(ids, job.id)
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
 		}
-		var job struct {
-			id   string
-			hour time.Time
-		}
-		err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT h.id, greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1)
+		if len(jobs) < s.cfg.Costs.Batch {
+			ids := make([]string, 0, len(jobs))
+			for _, job := range jobs {
+				ids = append(ids, job.id)
+			}
+			var job struct {
+				id   string
+				hour time.Time
+			}
+			err = tx.QueryRow(ctx, `SELECT h.id, greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1)
 				FROM hosts h LEFT JOIN cost_host_refresh c ON c.host_id = h.id
 				WHERE (c.retry_at IS NULL OR c.retry_at <= $2)
 					AND greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1) <= date_trunc('hour', $2::timestamptz)
 					AND (h.terminated_at IS NULL OR h.terminated_at > greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1))
 					AND h.id <> ALL($3::text[])
 				ORDER BY 2, h.id LIMIT 1`, oldest, now, ids).Scan(&job.id, &job.hour)
-		})
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if err == nil {
+				jobs = append(jobs, job)
+			}
+		}
+		if s.cfg.Costs.Batch == 1 && len(jobs) > 0 {
+			_, err = tx.Exec(ctx, `UPDATE cost_host_turn SET current_first = NOT current_first WHERE id`)
 			return err
 		}
-		if err == nil {
-			jobs = append(jobs, job)
-		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	for _, job := range jobs {
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {

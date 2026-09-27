@@ -250,7 +250,9 @@ func (s *Server) discoverFinalCostHours(ctx context.Context) error {
 			return err
 		}
 		if completed {
-			return nil
+			// Start another bounded sweep: older writers can finalize sources
+			// already passed by the previous sweep without writing hourly rows.
+			run, source = "", ""
 		}
 		oldest := time.Now().UTC().Add(-s.cfg.Costs.Hourly).Truncate(time.Hour).Add(time.Hour)
 		type candidate struct {
@@ -279,7 +281,12 @@ func (s *Server) discoverFinalCostHours(ctx context.Context) error {
 			var start *time.Time
 			if err := tx.QueryRow(ctx, `SELECT min(l.period_from) FROM cost_lines l JOIN cost_sources s
 				ON s.run_id = l.run_id AND s.source = l.source
-				WHERE l.run_id = $1 AND l.source = $2 AND l.final AND l.period_to >= $3 AND s.status = 'final'`, c.run, c.source, oldest).Scan(&start); err != nil {
+				WHERE l.run_id = $1 AND l.source = $2 AND l.final AND l.period_to >= $3 AND s.status = 'final'
+				AND EXISTS (SELECT 1 FROM generate_series(greatest(date_trunc('hour', l.period_from), $3),
+					least(date_trunc('hour', l.period_to), date_trunc('hour', now())), interval '1 hour') h(hour)
+					WHERE (h.hour < l.period_to OR (l.period_from = l.period_to AND h.hour = date_trunc('hour', l.period_from)))
+					AND NOT EXISTS (SELECT 1 FROM cost_hourly ch
+						WHERE ch.run_id = l.run_id AND ch.source = l.source AND ch.hour = h.hour))`, c.run, c.source, oldest).Scan(&start); err != nil {
 				return err
 			}
 			if start == nil {
@@ -292,10 +299,10 @@ func (s *Server) discoverFinalCostHours(ctx context.Context) error {
 			}
 		}
 		if len(page) == 0 {
-			_, err = tx.Exec(ctx, `UPDATE cost_final_hour_discovery SET completed = true WHERE id`)
+			_, err = tx.Exec(ctx, `UPDATE cost_final_hour_discovery SET completed = true, run_id = '', source = '' WHERE id`)
 		} else {
 			c := page[len(page)-1]
-			_, err = tx.Exec(ctx, `UPDATE cost_final_hour_discovery SET run_id = $1, source = $2 WHERE id`, c.run, c.source)
+			_, err = tx.Exec(ctx, `UPDATE cost_final_hour_discovery SET completed = false, run_id = $1, source = $2 WHERE id`, c.run, c.source)
 		}
 		return err
 	})
@@ -928,6 +935,11 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *c
 		// Defensive: a queued Run always has its runs row (cost_pending's
 		// foreign key, and Runs are never deleted), so it is evaluated.
 		_, err := tx.Exec(ctx, `DELETE FROM cost_pending WHERE run_id = $1`, runID)
+		return err
+	}
+	// Backfill takes the source lock before inspecting or inserting hourly rows.
+	var locked string
+	if err := tx.QueryRow(ctx, `SELECT source FROM cost_sources WHERE run_id = $1 AND source = 'compute' FOR UPDATE`, runID).Scan(&locked); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
 	final := e.final()
