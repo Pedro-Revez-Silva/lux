@@ -169,6 +169,57 @@ components:
             - final
           type: string
       type: object
+    CostSummaryBody:
+      additionalProperties: false
+      properties:
+        basis:
+          type: string
+        from:
+          format: date-time
+          type: string
+        hosts:
+          items:
+            $ref: "#/components/schemas/HostAllocation"
+          type:
+            - array
+            - "null"
+        series:
+          items:
+            $ref: "#/components/schemas/CostSummaryRow"
+          type:
+            - array
+            - "null"
+        to:
+          format: date-time
+          type: string
+        totals:
+          items:
+            $ref: "#/components/schemas/CostSummaryRow"
+          type:
+            - array
+            - "null"
+        unallocated:
+          items:
+            $ref: "#/components/schemas/CostSummaryRow"
+          type:
+            - array
+            - "null"
+      type: object
+    CostSummaryRow:
+      additionalProperties: false
+      properties:
+        amount:
+          type: string
+        at:
+          format: date-time
+          type: string
+        currency:
+          type: string
+        group:
+          additionalProperties:
+            type: string
+          type: object
+      type: object
     CostTotal:
       additionalProperties: false
       properties:
@@ -390,6 +441,73 @@ components:
           type: object
         zone:
           description: The availability zone the provider launched it in.
+          type: string
+      type: object
+    HostAllocation:
+      additionalProperties: false
+      properties:
+        allocated:
+          type: string
+        currency:
+          type: string
+        hostId:
+          type: string
+        unallocated:
+          type: string
+      type: object
+    HostCost:
+      additionalProperties: false
+      properties:
+        basis:
+          type: string
+        from:
+          format: date-time
+          type: string
+        hostId:
+          type: string
+        hours:
+          items:
+            $ref: "#/components/schemas/HostCostHour"
+          type:
+            - array
+            - "null"
+        rates:
+          items:
+            $ref: "#/components/schemas/HostCostRate"
+          type:
+            - array
+            - "null"
+        to:
+          format: date-time
+          type: string
+      type: object
+    HostCostHour:
+      additionalProperties: false
+      properties:
+        allocated:
+          type: string
+        currency:
+          type: string
+        hour:
+          format: date-time
+          type: string
+        unallocated:
+          type: string
+      type: object
+    HostCostRate:
+      additionalProperties: false
+      properties:
+        currency:
+          type: string
+        from:
+          format: date-time
+          type: string
+        perHour:
+          type: string
+        source:
+          type: string
+        to:
+          format: date-time
           type: string
       type: object
     HostDrain:
@@ -1709,6 +1827,115 @@ paths:
       summary: Download an artifact
       tags:
         - runs
+  /v1/costs:
+    get:
+      description: Needs the `read` scope.
+      operationId: costSummary
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+          explode: false
+          in: query
+          name: since
+          schema:
+            description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+            examples:
+              - 24h
+            type: string
+        - description: The start (RFC 3339), instead of since.
+          explode: false
+          in: query
+          name: from
+          schema:
+            description: The start (RFC 3339), instead of since.
+            type: string
+        - description: The end (RFC 3339); default now.
+          explode: false
+          in: query
+          name: to
+          schema:
+            description: The end (RFC 3339); default now.
+            type: string
+        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+          explode: false
+          in: query
+          name: res
+          schema:
+            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            type: string
+        - description: "Repeat up to twice: tenant (operators), pool, host, family, run, label:key."
+          explode: true
+          in: query
+          name: group
+          schema:
+            description: "Repeat up to twice: tenant (operators), pool, host, family, run, label:key."
+            items:
+              type: string
+            type:
+              - array
+              - "null"
+        - description: Only this family.
+          explode: false
+          in: query
+          name: family
+          schema:
+            description: Only this family.
+            type: string
+        - description: hour or day; include a time series.
+          explode: false
+          in: query
+          name: interval
+          schema:
+            description: hour or day; include a time series.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CostSummaryBody"
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Summarize costs by currency, time and up to two groups
+      tags:
+        - costs
   /v1/events:
     get:
       description: |-
@@ -2040,6 +2267,104 @@ paths:
       summary: Get a host
       tags:
         - hosts
+  /v1/hosts/{id}/cost:
+    get:
+      description: Needs the `read` scope.
+      operationId: hostCost
+      parameters:
+        - description: The host's id or name (a name of a host that is not terminated).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The host's id or name (a name of a host that is not terminated).
+            type: string
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+          explode: false
+          in: query
+          name: since
+          schema:
+            description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+            examples:
+              - 24h
+            type: string
+        - description: The start (RFC 3339), instead of since.
+          explode: false
+          in: query
+          name: from
+          schema:
+            description: The start (RFC 3339), instead of since.
+            type: string
+        - description: The end (RFC 3339); default now.
+          explode: false
+          in: query
+          name: to
+          schema:
+            description: The end (RFC 3339); default now.
+            type: string
+        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+          explode: false
+          in: query
+          name: res
+          schema:
+            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostCost"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: A host's hourly allocation and rate periods
+      tags:
+        - hosts
+        - costs
   /v1/hosts/{id}/drain:
     post:
       description: |-
