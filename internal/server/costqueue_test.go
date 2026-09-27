@@ -151,7 +151,8 @@ func TestCostTickOnePerBucket(t *testing.T) {
 	execSQL(t, s, ctx, `INSERT INTO cost_ticks (tick_at) VALUES (now() - interval '25 hours'), (now() - interval '23 hours')`)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES
 		('stopped', 't1', '{}', 'stopped'), ('owed', 't1', '{}', 'failed'), ('later', 't1', '{}', 'failed'),
-		('done', 't1', '{}', 'succeeded'), ('stopping', 't2', '{}', 'stopping')`)
+		('done', 't1', '{}', 'succeeded'), ('stopping', 't2', '{}', 'stopping'),
+		('scheduled', 't1', '{}', 'scheduled'), ('starting', 't1', '{}', 'starting')`)
 	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, next_at) VALUES
 		('owed', 't1', 'compute', 'incomplete', now() - interval '1 second'),
 		('later', 't1', 'compute', 'incomplete', now() + interval '1 hour'),
@@ -187,7 +188,7 @@ func TestCostTickOnePerBucket(t *testing.T) {
 		t.Errorf("%d tick rows, want this bucket's and the one under a day old", n)
 	}
 	for run, want := range map[string]string{"r1": "tick -", "r2": "state:stopping -", "stopping": "tick -", "owed": "tick -",
-		"stopped": "", "later": "", "done": ""} {
+		"scheduled": "tick -", "starting": "tick -", "stopped": "", "later": "", "done": ""} {
 		if got := pending(t, s, run); got != want {
 			t.Errorf("%s: queued %q, want %q", run, got, want)
 		}
@@ -795,5 +796,238 @@ func TestDrainComputeFailedRead(t *testing.T) {
 	}
 	if !retried(t, s, "A") {
 		t.Errorf("A queued %q, want a retry a tick later", pending(t, s, "A"))
+	}
+}
+
+// sourceRow is a Run's compute source as "status attempts next_at-set
+// last_error-set" (the flags t or f), and next_at - now, read in the
+// system scope (last_error is operators').
+func sourceRow(t *testing.T, s *Server, runID string) (string, time.Duration) {
+	t.Helper()
+	ctx := context.Background()
+	var out string
+	var next *time.Duration
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT format('%s %s %s %s', status, attempts, next_at IS NOT NULL, last_error <> ''), next_at - now()
+			FROM cost_sources WHERE run_id = $1 AND source = 'compute'`, runID).Scan(&out, &next)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if next == nil {
+		return out, 0
+	}
+	return out, *next
+}
+
+// A host that cannot be priced (its rates overlap): the Run's earlier
+// lines stay, and its source is incomplete, saying why.
+func TestDrainComputeUnpriceableHost(t *testing.T) {
+	s, keys := costFixture(t)
+	costHosts(t, s)
+	placeRun(t, s, "t1", "A", StateStopping, "static", workedExample[0])
+	finish(t, s, "t1", "A", StateStopped)
+	drain(t, s)
+	if lines, src := computeView(t, s, keys["t1"], "A"); fmt.Sprint(lines) != "[static 0.05 USD false]" || src != "ok" {
+		t.Fatalf("A: %v, source %q", lines, src)
+	}
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('static', $1, $2, 0.80, 'USD', 8, $3, 'static')`, at("10:10"), at("10:20"), 32*gib)
+	finish(t, s, "t1", "A", StateStopped)
+	drain(t, s)
+	if lines, src := computeView(t, s, keys["t1"], "A"); fmt.Sprint(lines) != "[static 0.05 USD false]" || src != "incomplete" {
+		t.Errorf("A, host unpriceable: %v, source %q; want its earlier line, incomplete", lines, src)
+	}
+	if row, _ := sourceRow(t, s, "A"); row != "incomplete 0 f t" {
+		t.Errorf("A's source: %s, want incomplete with its error", row)
+	}
+}
+
+// Runs of two tenants drained together: each Run's lines are its own
+// tenant's.
+func TestDrainComputeTenants(t *testing.T) {
+	s, keys := costFixture(t)
+	costHosts(t, s)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, registered_at) VALUES ('t2host', 't2', 't2host', 'ready', $1)`, at("10:00"))
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('t2host', $1, NULL, 0.80, 'USD', 8, $2, 'static')`, at("10:00"), 32*gib)
+	placeRun(t, s, "t1", "A", StateStopping, "static", workedExample[0])
+	placeRun(t, s, "t2", "T", StateStopping, "t2host", place("T", 2, 8, "10:00", "10:30"))
+	placeRun(t, s, "t1", "U", StateStopping, "static", workedExample[2])
+	for _, r := range [][2]string{{"t1", "A"}, {"t2", "T"}, {"t1", "U"}} {
+		finish(t, s, r[0], r[1], StateStopped)
+	}
+	if n, err := s.drainCosts(ctx); n != 3 || err != nil {
+		t.Fatalf("drained %d in one batch (%v), want 3", n, err)
+	}
+	if lines, src := computeView(t, s, keys["t2"], "T"); fmt.Sprint(lines) != "[static 0.1 USD false]" || src != "ok" {
+		t.Errorf("T, read by t2: %v, source %q", lines, src)
+	}
+	for run, want := range map[string]string{"A": "t1", "T": "t2", "U": "t1"} {
+		var lines, sources string
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT (SELECT string_agg(tenant_id, ',') FROM cost_lines WHERE run_id = $1),
+				(SELECT string_agg(tenant_id, ',') FROM cost_sources WHERE run_id = $1)`, run).Scan(&lines, &sources)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if lines != want || sources != want {
+			t.Errorf("%s: lines of %s, source of %s; want %s", run, lines, sources, want)
+		}
+	}
+}
+
+// Two luxd, eight drainers each, claiming at once: no Run is claimed twice.
+func TestCostClaimsConcurrent(t *testing.T) {
+	s, _ := costFixture(t)
+	s.cfg.Costs.Batch = 7
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) SELECT 'c' || i, 't1', '{}', 'stopped' FROM generate_series(1, 200) i`)
+	execSQL(t, s, ctx, `INSERT INTO cost_pending (run_id, due_at, reason) SELECT id, now(), 'tick' FROM runs WHERE id LIKE 'c%'`)
+	b := peer(s, "luxd-b")
+	var mu sync.Mutex
+	claimed := map[string]int{}
+	var wg sync.WaitGroup
+	for i := range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			srv := s
+			if i%2 == 1 {
+				srv = b
+			}
+			for {
+				runs, err := srv.claimCosts(ctx)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if len(runs) == 0 {
+					return
+				}
+				mu.Lock()
+				for _, r := range runs {
+					claimed[r]++
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	twice := 0
+	for _, n := range claimed {
+		if n > 1 {
+			twice++
+		}
+	}
+	if len(claimed) != 200 || twice != 0 {
+		t.Errorf("%d Runs claimed, %d of them more than once; want 200, none", len(claimed), twice)
+	}
+}
+
+// A live placement: priced up to now, its "to" null, never final, not even
+// once the Run is terminal while the placement is still open.
+func TestDrainComputeLivePlacement(t *testing.T) {
+	s, keys := costFixture(t)
+	costHosts(t, s)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('L', 't1', '{}', 'running')`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at)
+		VALUES ('p-L', 't1', 'L', 'static', 1, 'running', '{"cpus": 2, "memory": 8589934592}', now() - interval '1 hour')`)
+	if _, err := s.costTick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, s)
+	_, c := getCost(t, s, keys["t1"], "L")
+	if len(c.Lines) != 1 || c.Lines[0].Final || time.Since(c.Lines[0].To) > time.Minute || time.Since(c.Lines[0].From) < time.Hour {
+		t.Fatalf("L: %+v", c.Lines)
+	}
+	if d := c.Lines[0].Details["placements"].([]any)[0].(map[string]any); d["to"] != nil {
+		t.Errorf("L's placement ends at %v, want null", d["to"])
+	}
+	if c.Sources[0].Status != "ok" || c.Sources[0].NextAt != nil {
+		t.Errorf("L's source: %+v", c.Sources[0])
+	}
+
+	finish(t, s, "t1", "L", StateSucceeded)
+	drain(t, s)
+	if lines, src := computeView(t, s, keys["t1"], "L"); len(lines) != 1 || lines[0][len(lines[0])-5:] != "false" || src == "final" {
+		t.Errorf("L succeeded, placement open: %v, source %q; want not final", lines, src)
+	}
+}
+
+// A terminal Run whose compute is not final backs off up to an hour, stops
+// being tried a week after it finished, and a resume starts it over.
+func TestDrainComputeBackoff(t *testing.T) {
+	s, keys := costFixture(t)
+	costHosts(t, s)
+	ctx := context.Background()
+	placeRun(t, s, "t1", "ec2", StateRunning, "ec2", place("", 2, 8, "10:00", "11:00"))
+	finish(t, s, "t1", "ec2", StateFailed)
+	drain(t, s)
+
+	// Capped at an hour.
+	execSQL(t, s, ctx, `UPDATE cost_sources SET attempts = 10 WHERE run_id = 'ec2'`)
+	finish(t, s, "t1", "ec2", StateFailed)
+	drain(t, s)
+	if row, next := sourceRow(t, s, "ec2"); row != "incomplete 11 t t" || next > time.Hour || next < 59*time.Minute {
+		t.Errorf("ec2, attempt 11: %s, next in %s; want within the hour", row, next)
+	}
+
+	// Finished over a week ago: given up.
+	execSQL(t, s, ctx, `UPDATE runs SET finished_at = now() - interval '8 days' WHERE id = 'ec2'`)
+	execSQL(t, s, ctx, `SELECT lux_cost_enqueue('ec2', 'retry')`)
+	drain(t, s)
+	if row, _ := sourceRow(t, s, "ec2"); row != "incomplete 12 f t" {
+		t.Errorf("ec2, a week on: %s; want no next attempt", row)
+	}
+
+	// Resumed while incomplete: no retry pending, attempts start over.
+	execSQL(t, s, ctx, `UPDATE cost_sources SET next_at = now() + interval '1 hour' WHERE run_id = 'ec2'`)
+	if err := s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
+		return s.requestResume(ctx, tx, "t1", "ec2", nil, "resume")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if row, _ := sourceRow(t, s, "ec2"); row != "incomplete 0 f t" {
+		t.Errorf("ec2 resumed: %s; want no next attempt, attempts 0", row)
+	}
+	if _, src := computeView(t, s, keys["t1"], "ec2"); src != "incomplete" {
+		t.Errorf("ec2 resumed: source %q", src)
+	}
+}
+
+// Line names: an on-demand instance is its type, a spot one type:spot, a
+// static host "static"; an item priced in two currencies is one line per
+// currency, suffixed. A stopped or lost Run is evaluated, never retried.
+func TestDrainComputeItems(t *testing.T) {
+	s, keys := costFixture(t)
+	costHosts(t, s)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, registered_at) VALUES ('eur', 't1', 'eur', 'ready', $1)`, at("10:00"))
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, provision_requested_at, registered_at, instance_type, market, zone)
+		VALUES ('od', 't1', 'od', 'ready', $1, $1, 'm7i.large', 'on-demand', 'eu-west-1b')`, at("10:00"))
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source) VALUES
+		('eur', $1, NULL, 0.80, 'EUR', 8, $2, 'static'), ('od', $1, NULL, 0.40, 'USD', 8, $2, 'aws-pricing')`, at("10:00"), 32*gib)
+	whole := place("", 2, 8, "10:00", "11:00") // share 1/4
+	placeRun(t, s, "t1", "M", StateStopping, "static", whole)
+	for i, h := range []string{"eur", "od", "ec2"} {
+		execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at, ended_at)
+			VALUES ($1, 't1', 'M', $2, $3, 'exited', '{"cpus": 2, "memory": 8589934592}', $4, $5)`,
+			"p-M-"+h, h, i+2, at("10:00"), at("11:00"))
+	}
+	placeRun(t, s, "t1", "X", StateStopping, "static", place("", 1, 4, "10:00", "10:30"))
+	finish(t, s, "t1", "M", StateStopped)
+	finish(t, s, "t1", "X", StateLost)
+	drain(t, s)
+	want := "[m7i.2xlarge:spot 0.066666667 USD false m7i.large 0.1 USD false static:EUR 0.2 EUR false static:USD 0.1 USD false]"
+	if lines, src := computeView(t, s, keys["t1"], "M"); fmt.Sprint(lines) != want || src != "incomplete" {
+		t.Errorf("M: %v, source %q; want %s, incomplete", lines, src, want)
+	}
+	for _, run := range []string{"M", "X"} {
+		if _, c := getCost(t, s, keys["t1"], run); len(c.Sources) != 1 || c.Sources[0].NextAt != nil {
+			t.Errorf("%s (not terminal) is retried: %+v", run, c.Sources)
+		}
 	}
 }
