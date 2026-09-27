@@ -756,6 +756,9 @@ where it differs from the above:
   a burst becomes one claim. Its read is one transaction for every claimed
   Run (each host loaded once); the writes are one transaction per 100
   Runs. A read that fails frees the claims and moves `due_at` one tick on.
+  Each write locks its Runs' `runs` rows, then their `cost_pending` rows,
+  in id order: the order a state change takes them in (it holds the Run
+  when it queues it), so the two wait for each other, never deadlock.
 - Compute's source row: `ok` after an answer; `incomplete` with the
   missing gaps (or the pricing error, such as overlapping periods, in which
   case the earlier lines stay) in `last_error`; `final` as in point 4. A
