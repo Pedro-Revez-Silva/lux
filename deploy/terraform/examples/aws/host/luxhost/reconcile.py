@@ -3,6 +3,7 @@ SSM describe. See host/README.md for the steps and how to read the result."""
 import fcntl
 import os
 import sys
+import tomllib
 
 from . import desired as desired_mod
 from . import gitsync, luxdconf, packages, postgres, release, units
@@ -112,23 +113,31 @@ class Run:
         toml = luxdconf.render(infra, self.boot.region, want, creds, ip, host.paths.runner_bin_dir)
         installed = release.installed_version(host.paths.install_root)
         deploying = want.lux_version is not None and want.lux_version != installed
-        if write_if_changed(os.path.join(host.paths.etc_lux, "luxd.toml"), toml, 0o600):
-            self.changed.append("luxd.toml")
-            restart["luxd"] = True
+        config_path = os.path.join(host.paths.etc_lux, "luxd.toml")
+        previous = read_file(config_path)
+        if installed and not deploying and want.cloudflare_access:
+            access = tomllib.loads(previous or "").get("console", {}).get("cloudflare_access", {})
+            if not all(k in access for k in ("operators", "default_tenant")):
+                raise HostError("Access settings need a lux_version upgrade; keeping installed luxd config")
 
         if deploying:
             self.step = "version"
             try:
                 release.deploy(
                     host, want.lux_version, want.release_base_url, creds["migrate_dsn"],
-                    f"http://127.0.0.1:{infra['luxd_port']}/health",
+                    f"http://127.0.0.1:{infra['luxd_port']}/health", config_path, toml,
                 )
+                if previous != toml:
+                    self.changed.append("luxd.toml")
                 self.changed.append(f"version:{want.lux_version}")
                 installed = want.lux_version
             except HostError as e:
                 # The previous version is still in place: keep the tunnel
                 # and timers reconciled, and fail the run at the end.
                 self.deferred_error = HostError(f"version: {e}")
+        elif write_if_changed(config_path, toml, 0o600):
+            self.changed.append("luxd.toml")
+            restart["luxd"] = True
         # A successful deploy has restarted luxd on the new config already.
         if not deploying or self.deferred_error:
             if restart["luxd"] and installed and release.is_luxd_active(host):

@@ -124,9 +124,7 @@ def test_existing_access_host_upgrades_with_private_settings(env, capsys):
     assert env.run() == 0, summary(capsys)
     assert installed(env) == "v2.0.0"
     assert os.path.realpath(env.path("usr/local/bin/luxd")) == env.path("usr/local/lux/versions/v2.0.0/bin/luxd")
-    assert [c for c in env.sh.calls if c[-1] == "migrate"] == [
-        [env.path("usr/local/lux/versions/v2.0.0/bin/luxd"), "migrate"]
-    ]
+    assert [c for c in env.sh.calls if c[-1] == "migrate"][0][0] == env.path("usr/local/lux/versions/v2.0.0/bin/luxd")
     cfg = luxd_toml(env)
     assert cfg["debug"] is True
     assert cfg["console"] == {
@@ -218,7 +216,7 @@ def test_version_switch_installs_migrates_and_restarts(env, capsys):
     assert "version:v1.1.0" in summary(capsys)
     assert installed(env) == "v1.1.0"
     migrate = [c for c in env.sh.calls if c[-1] == "migrate"]
-    assert migrate == [[env.path("usr/local/lux/versions/v1.1.0/bin/luxd"), "migrate"]]
+    assert len(migrate) == 1 and migrate[0][0] == env.path("usr/local/lux/versions/v1.1.0/bin/luxd")
     assert os.path.realpath(env.path("usr/local/bin/luxd")) == env.path("usr/local/lux/versions/v1.1.0/bin/luxd")
 
 
@@ -234,6 +232,95 @@ def test_unhealthy_release_rolls_back_and_fails_the_run(env, capsys):
     assert os.path.realpath(env.path("usr/local/bin/luxd")) == env.path("usr/local/lux/versions/v1.0.0/bin/luxd")
     assert os.path.realpath(env.path("usr/local/lib/lux/runner")) == env.path("usr/local/lux/versions/v1.0.0/lib/lux/runner")
     assert "luxd" in env.sh.active
+
+
+def test_staged_access_settings_keep_old_config_across_periodic_reconcile(env, capsys):
+    deploy_version(env, capsys, "v1.0.0")
+    path = env.path("etc/lux/luxd.toml")
+    before = read(env, "etc/lux/luxd.toml")
+    old = before.replace('operators = ["operator@example.com"]\n', '').replace(
+        'default_tenant = "ten_aaaaaaaaaaaaaaaa"\n', ''
+    )
+    with open(path, "w") as f:
+        f.write(old)
+    env.sh.calls.clear()
+    for _ in range(2):
+        assert env.run() == 1
+        assert "need a lux_version upgrade" in summary(capsys)
+        assert read(env, "etc/lux/luxd.toml") == old
+        assert installed(env) == "v1.0.0"
+        assert restarts(env) == []
+
+
+def test_real_strict_loaders_accept_the_config_selected_for_each_version(env, capsys):
+    old_bin = os.environ.get("LUX_TEST_OLD_LUXD")
+    new_bin = os.environ.get("LUX_TEST_NEW_LUXD")
+    if not old_bin or not new_bin:
+        pytest.skip("set LUX_TEST_OLD_LUXD and LUX_TEST_NEW_LUXD to real old/new binaries")
+    deploy_version(env, capsys, "v1.0.0")
+    path = env.path("etc/lux/luxd.toml")
+    old = read(env, "etc/lux/luxd.toml").replace('operators = ["operator@example.com"]\n', '').replace(
+        'default_tenant = "ten_aaaaaaaaaaaaaaaa"\n', ''
+    )
+    with open(path, "w") as f:
+        f.write(old)
+
+    def load(binary, valid):
+        result = subprocess.run([binary, "--config", path, "admin", "create-key"],
+                                capture_output=True, text=True, timeout=10)
+        # A database connection error is reached only after config validation.
+        assert ("connect to database" in result.stderr.lower()) == valid, result.stderr
+
+    load(old_bin, True)
+    load(new_bin, False)
+    assert env.run() == 1
+    summary(capsys)
+    load(old_bin, True)
+    env.web.releases["v2.0.0"] = make_release("v2.0.0")
+    env.repo.set_desired(desired("v2.0.0"))
+    env.sh.healthy_versions.add("v2.0.0")
+    assert env.run() == 0
+    summary(capsys)
+    load(old_bin, False)
+    load(new_bin, True)
+    env.sh.healthy_versions.discard("v1.0.0")
+    env.repo.set_desired(desired("v1.0.0"))
+    # An unhealthy downgrade restores the new config and binary as a pair.
+    assert env.run() == 1
+    summary(capsys)
+    load(new_bin, True)
+
+
+@pytest.mark.parametrize("failure", ["download", "migrate", "health"])
+def test_failed_access_upgrade_restores_old_config_before_old_restart(env, capsys, failure):
+    deploy_version(env, capsys, "v1.0.0")
+    path = env.path("etc/lux/luxd.toml")
+    before = read(env, "etc/lux/luxd.toml").replace('operators = ["operator@example.com"]\n', '').replace(
+        'default_tenant = "ten_aaaaaaaaaaaaaaaa"\n', ''
+    )
+    with open(path, "w") as f:
+        f.write(before)
+    env.web.releases["v2.0.0"] = make_release("v2.0.0")
+    if failure == "download":
+        env.web.failing.add(f"{env.web.BASE_URL}/v2.0.0/SHA256SUMS")
+    if failure == "migrate":
+        env.sh.migrate_rc = 1
+    env.repo.set_desired(desired("v2.0.0", '[luxd]\ndebug = true\n'))
+    env.sh.calls.clear()
+    assert env.run() == 1
+    summary(capsys)
+    assert read(env, "etc/lux/luxd.toml") == before
+    assert installed(env) == "v1.0.0"
+    old_bin = os.environ.get("LUX_TEST_OLD_LUXD")
+    if old_bin:
+        result = subprocess.run([old_bin, "--config", path, "admin", "create-key"],
+                                capture_output=True, text=True, timeout=10)
+        assert "connect to database" in result.stderr.lower(), result.stderr
+    if failure == "health":
+        assert len(restarts(env)) == 2
+    assert env.run() == 1
+    summary(capsys)
+    assert read(env, "etc/lux/luxd.toml") == before
 
 
 def test_failed_migrate_switches_nothing(env, capsys):
@@ -259,10 +346,10 @@ def test_failed_migrate_still_reconciles_the_rest(env, capsys):
     env.sh.calls.clear()
     assert env.run() == 1
     line = summary(capsys)
-    assert "cloudflared-token" in line and "luxd-restarted" in line
+    assert "cloudflared-token" in line and "luxd-restarted" not in line
     assert read(env, "etc/cloudflared/token") == "new-token\n"
-    assert luxd_toml(env)["scale_down_after"] == "30m"
-    assert len(restarts(env)) == 1 and installed(env) == "v1.0.0"
+    assert "scale_down_after" not in luxd_toml(env)
+    assert restarts(env) == [] and installed(env) == "v1.0.0"
 
 
 def test_checksum_mismatch_switches_nothing(env, capsys):

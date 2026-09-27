@@ -3,13 +3,10 @@
 A release is lux_<version>_linux_<arch>.tar.gz plus SHA256SUMS under
 <release_base_url>/<version>/. The tarball's checksum is verified and it
 is extracted into <install_root>/versions/<version>. `luxd migrate` runs
-with *that* version's binary, before anything is switched: if it fails,
-the running version is untouched. Only then do the `current` and
-stable-path symlinks move and luxd restart; the restart is polled
-(systemctl is-active plus GET /health) for about 30s. If luxd does not
-come up healthy, the previous symlink targets are restored, luxd is
-restarted again and the step fails: a bad release never runs unmigrated,
-and a failure never leaves the host without the previous luxd.
+with that binary and a private candidate config before anything is switched.
+Only then do the stable symlinks and service config move and luxd restart;
+the restart is polled (systemctl is-active plus GET /health) for about 30s.
+On failure, the old config and symlinks are restored before restarting luxd.
 """
 import hashlib
 import os
@@ -20,7 +17,7 @@ import time
 import urllib.error
 import urllib.request
 
-from .host import Host, HostError, read_file
+from .host import Host, HostError, read_file, write_if_changed
 
 BIN_TARGETS = ["bin/luxd", "bin/lux"]
 RUNNER_ARCHES = ["linux-arm64", "linux-amd64"]
@@ -131,8 +128,8 @@ def restore_symlinks(previous: dict, current_link: str, links: dict) -> None:
             os.remove(link_path)
 
 
-def run_migrate(host: Host, luxd_bin: str, dsn: str):
-    result = host.run([luxd_bin, "migrate"], check=False, env={"LUX_DATABASE_URL": dsn})
+def run_migrate(host: Host, luxd_bin: str, dsn: str, config_path: str):
+    result = host.run([luxd_bin, "--config", config_path, "migrate"], check=False, env={"LUX_DATABASE_URL": dsn})
     return result.returncode == 0, result.stderr or ""
 
 
@@ -171,7 +168,8 @@ def wait_healthy(
         sleep(interval_s)
 
 
-def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url: str) -> None:
+def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url: str,
+           config_path: str, config: str) -> None:
     """Installs `wanted` and switches luxd to it, or raises HostError with
     the previous version (if any) still in place."""
     p = host.paths
@@ -207,29 +205,44 @@ def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url:
         if not os.path.isdir(os.path.join(version_dir, "lib", "lux", "runner", rel_arch)):
             host.log(f"note: {rel_arch} runner binaries absent from {wanted}")
 
-    migrated, migrate_err = run_migrate(host, os.path.join(version_dir, "bin", "luxd"), migrate_dsn)
+    # Migration reads the candidate through --config, without exposing it to the old service.
+    with tempfile.TemporaryDirectory(prefix=".luxd-config-", dir=os.path.dirname(config_path)) as tmp:
+        staged = os.path.join(tmp, "luxd.toml")
+        write_if_changed(staged, config, 0o600)
+        migrated, migrate_err = run_migrate(host, os.path.join(version_dir, "bin", "luxd"), migrate_dsn, staged)
     if not migrated:
         raise HostError(f"luxd migrate for {wanted} failed, leaving {running} running: {migrate_err.strip()}")
 
     links = stable_links(current_link, p.bin_dir, p.runner_bin_dir)
-    previous_targets = switch_symlinks(version_dir, current_link, links)
-
-    restarted, restart_err = restart_luxd(host)
-    healthy = restarted and wait_healthy(
-        lambda: is_luxd_active(host),
-        lambda: is_healthy(health_url, host.urlopen),
-        sleep=host.sleep,
-        now=host.now,
-    )
-    if not healthy:
+    previous_config = read_file(config_path)
+    previous_targets = {path: os.readlink(path) if os.path.islink(path) else None
+                        for path in (current_link, *links)}
+    try:
+        switch_symlinks(version_dir, current_link, links)
+        write_if_changed(config_path, config, 0o600)
+        restarted, restart_err = restart_luxd(host)
+        healthy = restarted and wait_healthy(
+            lambda: is_luxd_active(host),
+            lambda: is_healthy(health_url, host.urlopen),
+            sleep=host.sleep,
+            now=host.now,
+        )
+        if not healthy:
+            detail = "ok" if restarted else "failed: " + restart_err.strip()
+            raise HostError(f"{wanted} did not come up healthy (restart {detail})")
+        with open(os.path.join(install_root, "CURRENT_VERSION"), "w") as f:
+            f.write(wanted + "\n")
+    except Exception as e:
+        if previous_config is None:
+            if os.path.exists(config_path):
+                os.remove(config_path)
+        else:
+            write_if_changed(config_path, previous_config, 0o600)
         restore_symlinks(previous_targets, current_link, links)
         rolled_back, rollback_err = restart_luxd(host)
-        detail = "ok" if restarted else "failed: " + restart_err.strip()
-        msg = f"{wanted} did not come up healthy (restart {detail}); rolled back to {current or 'nothing'}"
+        msg = f"{e}; rolled back to {current or 'nothing'}"
         if not rolled_back:
             msg += f"; restart after rollback also failed: {rollback_err.strip()}"
-        raise HostError(msg)
+        raise HostError(msg) from e
 
-    with open(os.path.join(install_root, "CURRENT_VERSION"), "w") as f:
-        f.write(wanted + "\n")
     host.log(f"deployed {wanted}")
