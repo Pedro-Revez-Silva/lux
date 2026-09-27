@@ -233,10 +233,10 @@ func TestHostHoursBackfillRespectsRetention(t *testing.T) {
 	s, _ := costFixture(t)
 	ctx := context.Background()
 	s.cfg.Costs.Batch = 10
-	s.cfg.Costs.Hourly = 90 * time.Minute
+	s.cfg.Costs.Hourly = 3 * time.Hour
 	now := time.Now().UTC().Truncate(time.Hour)
 	start := now.Add(-12 * time.Hour)
-	stop := now.Add(-30 * time.Minute)
+	stop := time.Now().UTC().Add(-15 * time.Minute)
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at, terminated_at)
 		VALUES ('old-host','old-host','p','terminated',$1,$2)`, start, stop)
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
@@ -247,7 +247,38 @@ func TestHostHoursBackfillRespectsRetention(t *testing.T) {
 	var first time.Time
 	var n int
 	systemScan(t, s, `SELECT min(hour), count(*) FROM cost_hourly WHERE host_id = 'old-host' AND run_id IS NULL`, nil, &first, &n)
-	if first.Before(now.Add(-2*time.Hour)) || n < 1 || n > 2 {
-		t.Errorf("retained host hours start %s, count %d, want at most two recent hours", first, n)
+	if first.Before(now.Add(-3*time.Hour)) || n < 1 || n > 3 {
+		t.Errorf("retained host hours start %s, count %d, want at most three recent hours", first, n)
+	}
+}
+
+func TestHostHoursRefreshesCurrentHourWithBacklog(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 2
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	current := time.Now().UTC().Truncate(time.Hour)
+	old := current.Add(-5 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at) VALUES
+		('a-old', 'a-old', 'p', 'ready', $1), ('b-old', 'b-old', 'p', 'ready', $1),
+		('c-old', 'c-old', 'p', 'ready', $1), ('z-current', 'z-current', 'p', 'ready', $2)`, old, current)
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source) VALUES
+		('a-old', $1, 4, 'USD', 1, 1, 'static'), ('b-old', $1, 4, 'USD', 1, 1, 'static'),
+		('c-old', $1, 4, 'USD', 1, 1, 'static'), ('z-current', $2, 4, 'USD', 1, 1, 'static')`, old, current)
+	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, source, family, currency, host_id, pool, allocated, unallocated)
+		VALUES ($1, 'compute', 'compute', 'USD', 'z-current', 'p', 0, 0)`, current)
+	if err := s.updateHostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var amount string
+	systemScan(t, s, `SELECT trim_scale(unallocated)::text FROM cost_hourly
+		WHERE host_id = 'z-current' AND hour = $1 AND run_id IS NULL`, []any{current}, &amount)
+	if amount == "0" {
+		t.Error("current host hour stayed stale behind older host-hour backlog")
+	}
+	var refreshed int
+	systemScan(t, s, `SELECT count(*) FROM cost_host_refresh WHERE host_id IN ('a-old', 'b-old', 'c-old')`, nil, &refreshed)
+	if refreshed > s.cfg.Costs.Batch-1 {
+		t.Errorf("advanced %d old host cursors, leaving no slot for current host in a batch of %d", refreshed, s.cfg.Costs.Batch)
 	}
 }

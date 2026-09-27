@@ -237,56 +237,150 @@ func (s *Server) pollDueCostSources(ctx context.Context) error {
 	})
 }
 
-// backfillFinalCostHours copies one retained hour per source in each bounded
-// pass. The cursor and hourly rows commit together; final reports are never
-// sent back through the plugin or compute evaluation paths.
-func (s *Server) backfillFinalCostHours(ctx context.Context) error {
-	for range s.cfg.Costs.Batch {
-		var worked bool
-		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			var run, source string
-			var hour time.Time
-			err := tx.QueryRow(ctx, `SELECT run_id, source, next_hour FROM cost_final_hour_backfill
-				ORDER BY next_hour, run_id, source LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&run, &source, &hour)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil
-			}
-			if err != nil {
+// discoverFinalCostHours scans sources in durable, bounded pages.
+// The page position and new cursors commit together across luxd restarts.
+func (s *Server) discoverFinalCostHours(ctx context.Context) error {
+	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var source, run string
+		var completed bool
+		if err := tx.QueryRow(ctx, `SELECT run_id, source, completed
+			FROM cost_final_hour_discovery WHERE id FOR UPDATE SKIP LOCKED`).Scan(&run, &source, &completed); errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if completed {
+			return nil
+		}
+		oldest := time.Now().UTC().Add(-s.cfg.Costs.Hourly).Truncate(time.Hour).Add(time.Hour)
+		type candidate struct {
+			run, source string
+		}
+		var page []candidate
+		rows, err := tx.Query(ctx, `SELECT run_id, source FROM cost_sources
+			WHERE (run_id, source) > ($1, $2) ORDER BY run_id, source LIMIT $3`, run, source, max(1, s.cfg.Costs.Batch))
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var c candidate
+			if err := rows.Scan(&c.run, &c.source); err != nil {
+				rows.Close()
 				return err
 			}
-			worked = true
+			page = append(page, c)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		for _, c := range page {
+			var start *time.Time
+			if err := tx.QueryRow(ctx, `SELECT min(l.period_from) FROM cost_lines l JOIN cost_sources s
+				ON s.run_id = l.run_id AND s.source = l.source
+				WHERE l.run_id = $1 AND l.source = $2 AND l.final AND l.period_to >= $3 AND s.status = 'final'`, c.run, c.source, oldest).Scan(&start); err != nil {
+				return err
+			}
+			if start == nil {
+				continue
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO cost_final_hour_backfill (run_id, source, next_hour)
+				SELECT run_id, source, $3 FROM cost_sources WHERE run_id = $1 AND source = $2 AND status = 'final'
+				ON CONFLICT (run_id, source) DO NOTHING`, c.run, c.source, maxTime(start.UTC().Truncate(time.Hour), oldest)); err != nil {
+				return err
+			}
+		}
+		if len(page) == 0 {
+			_, err = tx.Exec(ctx, `UPDATE cost_final_hour_discovery SET completed = true WHERE id`)
+		} else {
+			c := page[len(page)-1]
+			_, err = tx.Exec(ctx, `UPDATE cost_final_hour_discovery SET run_id = $1, source = $2 WHERE id`, c.run, c.source)
+		}
+		return err
+	})
+}
+
+// backfillFinalCostHours claims a bounded set of sources, advancing contiguous
+// retained hours per source in the same transaction as its cursor.
+func (s *Server) backfillFinalCostHours(ctx context.Context) error {
+	return s.backfillFinalCostHoursAt(ctx, time.Now().UTC())
+}
+
+func (s *Server) backfillFinalCostHoursAt(ctx context.Context, now time.Time) error {
+	if err := s.discoverFinalCostHours(ctx); err != nil {
+		return err
+	}
+	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		limit := max(1, s.cfg.Costs.Batch)
+		rows, err := tx.Query(ctx, `SELECT run_id, source, next_hour FROM cost_final_hour_backfill
+			WHERE next_hour <= date_trunc('hour', $2::timestamptz)
+			ORDER BY next_hour, run_id, source LIMIT $1 FOR UPDATE SKIP LOCKED`, limit, now)
+		if err != nil {
+			return err
+		}
+		type cursor struct {
+			run, source string
+			hour        time.Time
+		}
+		var cursors []cursor
+		for rows.Next() {
+			var c cursor
+			if err := rows.Scan(&c.run, &c.source, &c.hour); err != nil {
+				rows.Close()
+				return err
+			}
+			cursors = append(cursors, c)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		remaining := limit
+		for _, c := range cursors {
+			run, source, hour := c.run, c.source, c.hour
 			var status string
 			if err := tx.QueryRow(ctx, `SELECT status FROM cost_sources WHERE run_id = $1 AND source = $2 FOR UPDATE`, run, source).Scan(&status); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return err
 			}
 			if status != "final" {
-				_, err := tx.Exec(ctx, `DELETE FROM cost_final_hour_backfill WHERE run_id = $1 AND source = $2`, run, source)
-				return err
+				if _, err := tx.Exec(ctx, `DELETE FROM cost_final_hour_backfill WHERE run_id = $1 AND source = $2`, run, source); err != nil {
+					return err
+				}
+				remaining--
+				continue
 			}
 			var last *time.Time
-			err = tx.QueryRow(ctx, `SELECT max(period_to) FROM cost_lines WHERE run_id = $1 AND source = $2 AND final`, run, source).Scan(&last)
-			if err != nil {
+			if err := tx.QueryRow(ctx, `SELECT max(period_to) FROM cost_lines WHERE run_id = $1 AND source = $2 AND final`, run, source).Scan(&last); err != nil {
 				return err
 			}
-			oldest := time.Now().UTC().Add(-s.cfg.Costs.Hourly).Truncate(time.Hour).Add(time.Hour)
+			oldest := now.Add(-s.cfg.Costs.Hourly).Truncate(time.Hour).Add(time.Hour)
 			if hour.Before(oldest) {
 				hour = oldest
 			}
-			if last == nil || hour.After(*last) || hour.After(time.Now()) {
-				_, err := tx.Exec(ctx, `DELETE FROM cost_final_hour_backfill WHERE run_id = $1 AND source = $2`, run, source)
-				return err
+			for remaining > 0 && last != nil && !hour.After(*last) && !hour.After(now.Truncate(time.Hour)) {
+				if err := backfillFinalCostHour(ctx, tx, run, source, hour); err != nil {
+					return err
+				}
+				hour = hour.Add(time.Hour)
+				remaining--
 			}
-			if err := backfillFinalCostHour(ctx, tx, run, source, hour); err != nil {
-				return err
+			if last == nil || hour.After(*last) {
+				if _, err := tx.Exec(ctx, `DELETE FROM cost_final_hour_backfill WHERE run_id = $1 AND source = $2`, run, source); err != nil {
+					return err
+				}
+			} else {
+				if _, err := tx.Exec(ctx, `UPDATE cost_final_hour_backfill SET next_hour = $3 WHERE run_id = $1 AND source = $2`, run, source, hour); err != nil {
+					return err
+				}
 			}
-			_, err = tx.Exec(ctx, `UPDATE cost_final_hour_backfill SET next_hour = $3 WHERE run_id = $1 AND source = $2`, run, source, hour.Add(time.Hour))
-			return err
-		})
-		if err != nil || !worked {
-			return err
+			if remaining == 0 {
+				break
+			}
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 func backfillFinalCostHour(ctx context.Context, tx pgx.Tx, run, source string, hour time.Time) error {
