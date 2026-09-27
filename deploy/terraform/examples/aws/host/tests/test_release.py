@@ -53,7 +53,9 @@ def test_switch_points_every_link_at_the_new_version(layout):
 
 def test_restore_after_switch_returns_every_link_to_v1(layout):
     current_link, links, old_dir, new_dir = layout
-    previous = release.switch_symlinks(new_dir, current_link, links)
+    previous = {path: os.readlink(path) if os.path.islink(path) else None
+                for path in (current_link, *links)}
+    release.switch_symlinks(new_dir, current_link, links)
     release.restore_symlinks(previous, current_link, links)
     assert os.path.realpath(current_link) == old_dir
     for link_path in links:
