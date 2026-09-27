@@ -26,12 +26,13 @@ const (
 	DefaultCostsBatch      = 1000
 )
 
+// costChunk Runs are written per transaction (a variable for tests).
+var costChunk = 100
+
 const (
 	// costClaim is how long a drainer holds the Runs it claimed: a luxd that
 	// dies mid-drain leaves claims that expire, and another takes them.
 	costClaim = 2 * time.Minute
-	// costChunk Runs are written per transaction.
-	costChunk = 100
 	// costSettleWake: how long the drainer lets Run events gather after one
 	// wakes it.
 	costSettleWake = 200 * time.Millisecond
@@ -193,16 +194,18 @@ func (s *Server) drainCosts(ctx context.Context) (int, error) {
 		s.releaseCosts(ctx, runs)
 		return len(runs), err
 	}
+	// A chunk that fails is tried again later; the others go on.
+	var first error
 	for chunk := range slices.Chunk(runs, costChunk) {
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 			return s.writeCosts(ctx, tx, chunk, evals, now)
 		})
 		if err != nil {
 			s.releaseCosts(ctx, chunk)
-			return len(runs), err
+			first = cmp.Or(first, err)
 		}
 	}
-	return len(runs), nil
+	return len(runs), first
 }
 
 // releaseCosts gives up this luxd's claims on runs after a failure, and

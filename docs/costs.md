@@ -759,7 +759,9 @@ where it differs from the above:
 - The drainer wakes on any `lux_events` notification, then waits 200 ms so
   a burst becomes one claim. Its read is one transaction for every claimed
   Run (each host loaded once); the writes are one transaction per 100
-  Runs. A read that fails frees the claims and moves `due_at` one tick on.
+  Runs. A read that fails frees the claims and moves `due_at` one tick on;
+  so does a write that fails, for its own 100 Runs, and the next ones are
+  still written.
   Each write locks its Runs' `runs` rows, then their `cost_pending` rows,
   in id order: the order a state change takes them in (it holds the Run
   when it queues it), so the two wait for each other, never deadlock.

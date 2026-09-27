@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -675,5 +677,89 @@ func TestNextCostTick(t *testing.T) {
 	got := s.tryCostTick(context.Background(), last)
 	if after := nextCostTick(time.Now(), every); !got.Equal(before) && !got.Equal(after) {
 		t.Errorf("tick: next at %s, want %s", got, before)
+	}
+}
+
+// ownerExec runs q on s's database as its owner (the admin LUX_TEST_PG
+// user), for what lux_app may not do: triggers, grants.
+func ownerExec(t *testing.T, s *Server, q string, args ...any) {
+	t.Helper()
+	ctx := context.Background()
+	cfg, err := pgx.ParseConfig(os.Getenv("LUX_TEST_PG"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Database = s.db.Pool.Config().ConnConfig.Database
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, q, args...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// retried reports whether runID's queue row was given back after a failure:
+// unclaimed, reason retry, due about one costs.every from now.
+func retried(t *testing.T, s *Server, runID string) bool {
+	t.Helper()
+	ctx := context.Background()
+	var ok bool
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT claimed_by IS NULL AND claimed_until IS NULL AND reason = 'retry'
+				AND due_at BETWEEN now() + $2::interval - interval '10 seconds' AND now() + $2::interval
+			FROM cost_pending WHERE run_id = $1`, runID, interval(s.cfg.Costs.Every)).Scan(&ok)
+	})
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatal(err)
+	}
+	return ok
+}
+
+// One Run whose write fails fails its chunk: those Runs are given back to
+// be tried a tick later, and the next chunks are still written.
+func TestDrainComputeFailedChunk(t *testing.T) {
+	s, keys := costFixture(t)
+	s.cfg.Costs.Every = 2 * time.Minute
+	costHosts(t, s)
+	defer func(n int) { costChunk = n }(costChunk)
+	costChunk = 2
+	for _, p := range workedExample {
+		placeRun(t, s, "t1", p.RunID, StateStopping, "static", p)
+		finish(t, s, "t1", p.RunID, StateStopped)
+	}
+	ownerExec(t, s, `CREATE FUNCTION fail_a() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'no writes for A'; END $$;
+		CREATE TRIGGER fail_a BEFORE INSERT OR UPDATE ON cost_sources FOR EACH ROW
+			WHEN (NEW.run_id = 'A') EXECUTE FUNCTION fail_a()`)
+	n, err := s.drainCosts(context.Background())
+	if n != 3 || err == nil || !strings.Contains(err.Error(), "no writes for A") {
+		t.Fatalf("drain: %d claimed, %v", n, err)
+	}
+	// A and B (its chunk) are given back; C (the next chunk) is written.
+	for _, run := range []string{"A", "B"} {
+		if lines, _ := computeView(t, s, keys["t1"], run); len(lines) != 0 || !retried(t, s, run) {
+			t.Errorf("%s: lines %v, queued %q, want none and a retry a tick later", run, lines, pending(t, s, run))
+		}
+	}
+	if lines, src := computeView(t, s, keys["t1"], "C"); fmt.Sprint(lines) != "[static 0.05 USD false]" || src != "ok" || pending(t, s, "C") != "" {
+		t.Errorf("C: %v, source %q, queued %q", lines, src, pending(t, s, "C"))
+	}
+}
+
+// A read that fails gives back every claimed Run, a tick later.
+func TestDrainComputeFailedRead(t *testing.T) {
+	s, _ := costFixture(t)
+	s.cfg.Costs.Every = 2 * time.Minute
+	costHosts(t, s)
+	placeRun(t, s, "t1", "A", StateStopping, "static", workedExample[0])
+	finish(t, s, "t1", "A", StateStopped)
+	ownerExec(t, s, `REVOKE SELECT ON placements FROM lux_app`)
+	if n, err := s.drainCosts(context.Background()); n != 1 || err == nil {
+		t.Fatalf("drain: %d claimed, %v", n, err)
+	}
+	if !retried(t, s, "A") {
+		t.Errorf("A queued %q, want a retry a tick later", pending(t, s, "A"))
 	}
 }
