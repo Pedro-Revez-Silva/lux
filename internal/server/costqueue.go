@@ -180,9 +180,13 @@ func (s *Server) costTick(ctx context.Context) (bool, error) {
 							AND NOT EXISTS (SELECT 1 FROM cost_pending p WHERE p.run_id = c.run_id)
 						ORDER BY c.run_id LIMIT $2) AS retries
 					UNION
-					SELECT missing.id FROM runs missing CROSS JOIN unnest($1::text[]) AS plugin(source)
+					SELECT id FROM (
+						SELECT missing.id FROM runs missing
 						WHERE missing.state IN ('succeeded', 'failed', 'cancelled', 'stopped', 'lost')
-						AND NOT EXISTS (SELECT 1 FROM cost_sources c WHERE c.run_id = missing.id AND c.source = plugin.source))
+							AND EXISTS (SELECT 1 FROM unnest($1::text[]) AS plugin(source)
+								WHERE NOT EXISTS (SELECT 1 FROM cost_sources c WHERE c.run_id = missing.id AND c.source = plugin.source))
+							AND NOT EXISTS (SELECT 1 FROM cost_pending p WHERE p.run_id = missing.id)
+						ORDER BY missing.id LIMIT $2) AS missing_sources)
 				AND NOT EXISTS (SELECT 1 FROM cost_pending p WHERE p.run_id = r.id)
 				ORDER BY r.id FOR KEY SHARE OF r SKIP LOCKED)
 			INSERT INTO cost_pending (run_id, due_at, reason)
