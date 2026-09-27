@@ -1,6 +1,7 @@
 """Whole reconcile runs against FakeSh/FakeWeb and a real local Git remote."""
 import datetime
 import os
+import runpy
 import subprocess
 import tomllib
 
@@ -333,7 +334,7 @@ def test_killed_switch_recovers_before_service_restart_and_retry(env, capsys, mo
         return original_health(*args, **kwargs)
 
     def remove(path, *args, **kwargs):
-        if boundary == "commit" and path == journal:
+        if boundary == "commit" and path == env.path("usr/local/lux/.switch-discard"):
             crash()
         return original_remove(path, *args, **kwargs)
 
@@ -345,17 +346,26 @@ def test_killed_switch_recovers_before_service_restart_and_retry(env, capsys, mo
         patch.setattr(release.shutil, "rmtree", remove)
         with pytest.raises(KeyboardInterrupt):
             env.run()
-    assert os.stat(journal).st_mode & 0o777 == 0o700
-    assert os.stat(os.path.join(journal, "state.json")).st_mode & 0o777 == 0o600
+    if boundary != "commit":
+        assert os.stat(journal).st_mode & 0o777 == 0o700
+        assert os.stat(os.path.join(journal, "state.json")).st_mode & 0o777 == 0o600
     old_bin = os.environ.get("LUX_TEST_OLD_LUXD")
     new_bin = os.environ.get("LUX_TEST_NEW_LUXD")
     # Simulate ExecStartPre on boot, before systemd can load either binary.
-    assert release.recover(env.host.paths.install_root)
-    assert read(env, "etc/lux/luxd.toml") == old
-    assert installed(env) == "v1.0.0"
-    assert os.path.realpath(env.path("usr/local/bin/luxd")) == env.path("usr/local/lux/versions/v1.0.0/bin/luxd")
-    if old_bin and new_bin:
+    assert release.recover(env.host.paths.install_root) == (boundary != "commit")
+    expected = "v2.0.0" if boundary == "commit" else "v1.0.0"
+    assert luxd_toml(env)["console"]["auth"] == "cloudflare-access"
+    if boundary != "commit":
+        assert read(env, "etc/lux/luxd.toml") == old
+    assert installed(env) == expected
+    assert os.path.realpath(env.path("usr/local/bin/luxd")) == env.path(f"usr/local/lux/versions/{expected}/bin/luxd")
+    if old_bin and new_bin and boundary != "commit":
         for binary, valid in ((old_bin, True), (new_bin, False)):
+            result = subprocess.run([binary, "--config", path, "admin", "create-key"],
+                                    capture_output=True, text=True, timeout=10)
+            assert ("connect to database" in result.stderr.lower()) == valid, result.stderr
+    elif old_bin and new_bin:
+        for binary, valid in ((old_bin, False), (new_bin, True)):
             result = subprocess.run([binary, "--config", path, "admin", "create-key"],
                                     capture_output=True, text=True, timeout=10)
             assert ("connect to database" in result.stderr.lower()) == valid, result.stderr
@@ -460,6 +470,125 @@ def test_boot_recovery_helper_restores_pair_before_start(env, capsys, monkeypatc
     env.sh.active.discard("luxd")
     env.sh._start("luxd")
     assert "luxd" in env.sh.active
+
+
+def test_boot_helper_denies_contended_switch_until_pair_is_ready(env, capsys, monkeypatch):
+    deploy_version(env, capsys, "v1.0.0")
+    old = read(env, "etc/lux/luxd.toml").replace('operators = ["operator@example.com"]\n', '').replace(
+        'default_tenant = "ten_aaaaaaaaaaaaaaaa"\n', ''
+    )
+    with open(env.path("etc/lux/luxd.toml"), "w") as f:
+        f.write(old)
+    env.web.releases["v2.0.0"] = make_release("v2.0.0")
+    env.sh.healthy_versions.add("v2.0.0")
+    env.repo.set_desired(desired("v2.0.0"))
+    real_open = open
+    real_exists = os.path.exists
+    real_recover = release.recover
+    real_link = release._atomic_symlink
+    real_restart = release.restart_luxd
+    observed = []
+
+    def open_lock(path, *args, **kwargs):
+        return real_open(env.path("etc/lux/.reconcile.lock") if path == "/etc/lux/.reconcile.lock" else path,
+                         *args, **kwargs)
+
+    def exists(path):
+        if path == "/usr/local/lux/.switch/ready":
+            return real_exists(env.path("usr/local/lux/.switch/ready"))
+        return real_exists(path)
+
+    def recover_root(path):
+        if path != "/usr/local/lux":
+            return real_recover(path)
+        return real_recover(env.host.paths.install_root)
+
+    script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "recover.py")
+
+    def link(target, path):
+        real_link(target, path)
+        if path == env.path("usr/local/lux/current") and target.endswith("v2.0.0"):
+            with pytest.raises(SystemExit) as err:
+                runpy.run_path(script)
+            observed.append(err.value.code)
+            assert read(env, "etc/lux/luxd.toml") == old
+
+    def restart(host):
+        runpy.run_path(script)
+        observed.append(0)
+        return real_restart(host)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("builtins.open", open_lock)
+        patch.setattr(os.path, "exists", exists)
+        patch.setattr(release, "recover", recover_root)
+        patch.setattr(release, "_atomic_symlink", link)
+        patch.setattr(release, "restart_luxd", restart)
+        assert env.run() == 0, summary(capsys)
+    assert observed == [1, 0]
+    assert installed(env) == "v2.0.0"
+
+
+def test_interrupted_disposal_with_missing_state_does_not_block_boot_or_retry(env, capsys, monkeypatch):
+    deploy_version(env, capsys, "v1.0.0")
+    env.web.releases["v2.0.0"] = make_release("v2.0.0")
+    env.sh.healthy_versions.add("v2.0.0")
+    env.repo.set_desired(desired("v2.0.0"))
+    discarded = env.path("usr/local/lux/.switch-discard")
+    original = release.shutil.rmtree
+
+    def interrupted(path, *args, **kwargs):
+        if path == discarded:
+            os.remove(os.path.join(path, "state.json"))
+            raise KeyboardInterrupt("power loss during disposal")
+        return original(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(release.shutil, "rmtree", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            env.run()
+    assert not os.path.exists(env.path("usr/local/lux/.switch"))
+    real_open = open
+    real_recover = release.recover
+
+    def open_lock(path, *args, **kwargs):
+        return real_open(env.path("etc/lux/.reconcile.lock") if path == "/etc/lux/.reconcile.lock" else path,
+                         *args, **kwargs)
+
+    def recover_root(path):
+        assert path == "/usr/local/lux"
+        assert real_recover(env.host.paths.install_root) is False
+
+    with monkeypatch.context() as patch:
+        patch.setattr("builtins.open", open_lock)
+        patch.setattr(release, "recover", recover_root)
+        runpy.run_path(os.path.join(os.path.dirname(os.path.dirname(__file__)), "recover.py"))
+    assert installed(env) == "v2.0.0"
+    assert env.run() == 0, summary(capsys)
+
+
+def test_failed_pair_sync_keeps_undo_record_for_boot_and_retry(env, capsys, monkeypatch):
+    deploy_version(env, capsys, "v1.0.0")
+    before = read(env, "etc/lux/luxd.toml")
+    env.web.releases["v2.0.0"] = make_release("v2.0.0")
+    env.sh.healthy_versions.add("v2.0.0")
+    env.repo.set_desired(desired("v2.0.0"))
+    original = release._persist_pair
+
+    def failed_sync(*args):
+        original(*args)
+        raise KeyboardInterrupt("power loss before durability barrier")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(release, "_persist_pair", failed_sync)
+        with pytest.raises(KeyboardInterrupt):
+            env.run()
+    assert not os.path.exists(env.path("usr/local/lux/.switch/ready"))
+    assert release.recover(env.host.paths.install_root)
+    assert read(env, "etc/lux/luxd.toml") == before
+    assert installed(env) == "v1.0.0"
+    assert env.run() == 0, summary(capsys)
+    assert installed(env) == "v2.0.0"
 
 
 

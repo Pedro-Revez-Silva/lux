@@ -22,6 +22,7 @@ from .host import Host, HostError, read_file, write_if_changed
 
 BIN_TARGETS = ["bin/luxd", "bin/lux"]
 RUNNER_ARCHES = ["linux-arm64", "linux-amd64"]
+DISCARDED_JOURNAL = ".switch-discard"
 HEALTH_TIMEOUT_S = 30
 HEALTH_POLL_INTERVAL_S = 2
 
@@ -137,6 +138,47 @@ def restore_symlinks(previous: dict, current_link: str, links: dict) -> None:
             os.remove(link_path)
 
 
+def _sync_dir(path: str) -> None:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _persist_pair(install_root: str, config_path: str, links: dict) -> None:
+    for path in (config_path, os.path.join(install_root, "CURRENT_VERSION")):
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                os.fsync(f.fileno())
+    for directory in {install_root, os.path.dirname(config_path),
+                      *(os.path.dirname(path) for path in links)}:
+        _sync_dir(directory)
+
+
+def _persist_release(version_dir: str) -> None:
+    for directory, _, files in os.walk(version_dir):
+        for name in files:
+            path = os.path.join(directory, name)
+            if not os.path.islink(path):
+                with open(path, "rb") as f:
+                    os.fsync(f.fileno())
+    for directory, _, _ in os.walk(version_dir, topdown=False):
+        _sync_dir(directory)
+    _sync_dir(os.path.dirname(version_dir))
+
+
+def _discard_journal(install_root: str) -> None:
+    journal = os.path.join(install_root, ".switch")
+    discarded = os.path.join(install_root, DISCARDED_JOURNAL)
+    if os.path.exists(discarded):
+        shutil.rmtree(discarded)
+    os.replace(journal, discarded)
+    _sync_dir(install_root)
+    shutil.rmtree(discarded)
+    _sync_dir(install_root)
+
+
 def recover(install_root: str) -> bool:
     """Restore the last paired state before any service start or retry."""
     journal = os.path.join(install_root, ".switch")
@@ -172,6 +214,10 @@ def recover(install_root: str) -> bool:
         raise HostError("switch journal has mismatched previous version")
     if version and not os.path.exists(os.path.join(install_root, "versions", version, "bin", "luxd")):
         raise HostError("previous luxd binary missing; refusing to start luxd")
+    ready = os.path.join(journal, "ready")
+    if os.path.exists(ready):
+        os.remove(ready)
+        _sync_dir(journal)
     if saved is not None and had_config:
         write_if_changed(config_path, saved, 0o600)
     elif os.path.exists(config_path):
@@ -182,7 +228,8 @@ def recover(install_root: str) -> bool:
         write_if_changed(marker, version + "\n")
     elif os.path.exists(marker):
         os.remove(marker)
-    shutil.rmtree(journal)
+    _persist_pair(install_root, config_path, targets)
+    _discard_journal(install_root)
     return True
 
 
@@ -251,6 +298,9 @@ def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url:
     versions_root = os.path.join(install_root, "versions")
     os.makedirs(install_root, exist_ok=True)
     recover(install_root)
+    discarded = os.path.join(install_root, DISCARDED_JOURNAL)
+    if os.path.exists(discarded):
+        shutil.rmtree(discarded)
     current = installed_version(install_root)
     running = current or "no version"
 
@@ -278,6 +328,8 @@ def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url:
     for rel_arch in RUNNER_ARCHES:
         if not os.path.isdir(os.path.join(version_dir, "lib", "lux", "runner", rel_arch)):
             host.log(f"note: {rel_arch} runner binaries absent from {wanted}")
+    _persist_release(version_dir)
+    _sync_dir(install_root)
 
     # Migration reads the candidate through --config, without exposing it to the old service.
     with tempfile.TemporaryDirectory(prefix=".luxd-config-", dir=os.path.dirname(config_path)) as tmp:
@@ -306,18 +358,10 @@ def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url:
             if os.path.exists(path):
                 with open(path, "rb") as f:
                     os.fsync(f.fileno())
-        fd = os.open(journal, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        _sync_dir(journal)
         os.replace(journal, os.path.join(install_root, ".switch"))
         journal = os.path.join(install_root, ".switch")
-        fd = os.open(install_root, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        _sync_dir(install_root)
     except BaseException:
         if journal != os.path.join(install_root, ".switch") and os.path.isdir(journal):
             shutil.rmtree(journal)
@@ -325,6 +369,11 @@ def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url:
     try:
         switch_symlinks(version_dir, current_link, links)
         write_if_changed(config_path, config, 0o600)
+        write_if_changed(os.path.join(install_root, "CURRENT_VERSION"), wanted + "\n")
+        _persist_pair(install_root, config_path, links)
+        ready = os.path.join(journal, "ready")
+        write_if_changed(ready, "", 0o600)
+        _sync_dir(journal)
         restarted, restart_err = restart_luxd(host)
         healthy = restarted and wait_healthy(
             lambda: is_luxd_active(host),
@@ -335,7 +384,6 @@ def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url:
         if not healthy:
             detail = "ok" if restarted else "failed: " + restart_err.strip()
             raise HostError(f"{wanted} did not come up healthy (restart {detail})")
-        write_if_changed(os.path.join(install_root, "CURRENT_VERSION"), wanted + "\n")
     except Exception as e:
         recover(install_root)
         rolled_back, rollback_err = restart_luxd(host)
@@ -344,5 +392,5 @@ def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url:
             msg += f"; restart after rollback also failed: {rollback_err.strip()}"
         raise HostError(msg) from e
 
-    shutil.rmtree(journal)
+    _discard_journal(install_root)
     host.log(f"deployed {wanted}")
