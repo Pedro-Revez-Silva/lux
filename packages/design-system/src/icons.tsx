@@ -196,12 +196,6 @@ export const IconRowsLoose = (p: IconProps) => (
     <path d="M2.5 4h11M2.5 8h11M2.5 12h11" />
   </Icon>
 );
-export const IconSidebar = (p: IconProps) => (
-  <Icon {...p}>
-    <rect x="2" y="3" width="12" height="10" rx="1.5" />
-    <path d="M6 3v10" />
-  </Icon>
-);
 export const IconPalette = (p: IconProps) => (
   <Icon {...p}>
     <path d="M8 2a6 6 0 1 0 0 12c1 0 1.5-.6 1.5-1.3 0-.8-.6-1-.6-1.7 0-.6.5-1 1.1-1H11a3 3 0 0 0 3-3c0-2.8-2.7-5-6-5z" />
