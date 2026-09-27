@@ -83,6 +83,12 @@ type config struct {
 		Every      duration `toml:"every" env:"LUX_COSTS_EVERY"`
 		DrainEvery duration `toml:"drain_every" env:"LUX_COSTS_DRAIN_EVERY"`
 		Batch      int      `toml:"batch" env:"LUX_COSTS_BATCH"`
+		Compute    struct {
+			EC2             bool     `toml:"ec2" env:"LUX_COSTS_COMPUTE_EC2"`
+			PricesRefresh   duration `toml:"prices_refresh" env:"LUX_COSTS_PRICES_REFRESH"`
+			PricingRegion   string   `toml:"pricing_region" env:"LUX_COSTS_PRICING_REGION"`
+			PricingEndpoint string   `toml:"pricing_endpoint" env:"LUX_PRICING_ENDPOINT"`
+		} `toml:"compute"`
 	} `toml:"costs"`
 	EC2 struct {
 		Endpoint string `toml:"endpoint" env:"LUX_EC2_ENDPOINT"`
@@ -178,6 +184,9 @@ func defaultConfig() config {
 	c.Costs.Every.Duration = server.DefaultCostsEvery
 	c.Costs.DrainEvery.Duration = server.DefaultCostsDrainEvery
 	c.Costs.Batch = server.DefaultCostsBatch
+	c.Costs.Compute.EC2 = true
+	c.Costs.Compute.PricesRefresh.Duration = server.DefaultPricesRefresh
+	c.Costs.Compute.PricingRegion = "us-east-1"
 	c.Console.Auth = "key"
 	return c
 }
@@ -306,6 +315,12 @@ func (c config) check() error {
 	}
 	if c.Costs.Batch <= 0 {
 		problems = append(problems, "costs.batch (LUX_COSTS_BATCH) must be a positive number")
+	}
+	if c.Costs.Compute.PricesRefresh.Duration <= 0 {
+		problems = append(problems, "costs.compute.prices_refresh (LUX_COSTS_PRICES_REFRESH) must be positive")
+	}
+	if c.Costs.Compute.PricingRegion == "" {
+		problems = append(problems, "costs.compute.pricing_region (LUX_COSTS_PRICING_REGION) is required")
 	}
 	switch c.Console.Auth {
 	case "key":

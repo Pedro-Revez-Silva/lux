@@ -30,6 +30,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/marcioapm/lux/internal/blob"
+	"github.com/marcioapm/lux/internal/ec2"
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/server"
 	"github.com/marcioapm/lux/internal/spec"
@@ -168,10 +169,15 @@ func serve(ctx context.Context, c config) error {
 		HistoryHours:         c.History.Hours.Duration,
 		DiskPaths:            c.History.DiskPaths,
 		Costs: server.CostsConfig{
-			Enabled:    c.Costs.Enabled,
-			Every:      c.Costs.Every.Duration,
-			DrainEvery: c.Costs.DrainEvery.Duration,
-			Batch:      c.Costs.Batch,
+			Enabled:       c.Costs.Enabled,
+			Every:         c.Costs.Every.Duration,
+			DrainEvery:    c.Costs.DrainEvery.Duration,
+			Batch:         c.Costs.Batch,
+			ComputeEC2:    c.Costs.Compute.EC2,
+			PricesRefresh: c.Costs.Compute.PricesRefresh.Duration,
+			Prices: map[string]server.PriceProvider{
+				"ec2": ec2.NewPrices(c.Costs.Compute.PricingRegion, c.Costs.Compute.PricingEndpoint, c.EC2.Endpoint),
+			},
 		},
 		Providers: providers(c),
 		ConsoleAuth: server.ConsoleAuth{

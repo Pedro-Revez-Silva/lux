@@ -482,12 +482,16 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow) error {
 	}
 	s.log.Info("host launched", "pool", pl.Name, "host", name, "providerId", l.ProviderID,
 		"instanceType", l.InstanceType, "zone", l.Zone, "market", l.Market)
-	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE hosts SET provider_id = $2,
 				instance_type = nullif($3, ''), zone = nullif($4, ''), market = nullif($5, '')
 			WHERE id = $1`, hostID, l.ProviderID, l.InstanceType, l.Zone, l.Market)
 		return err
-	})
+	}); err != nil {
+		return err
+	}
+	s.priceLaunchedHost(ctx, pl.Provider, pl.Template, l)
+	return nil
 }
 
 // checkHostQuota: one rule for a tenant's hosts, whether a runner
