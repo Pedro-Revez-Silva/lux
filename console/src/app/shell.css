@@ -163,39 +163,42 @@
   color: var(--fg-muted);
 }
 
-/* Rail: icons only. */
-.shell.is-rail {
-  grid-template-columns: var(--sidebar-rail-w) minmax(0, 1fr);
-}
-.shell.is-rail .sidebar {
-  padding-left: var(--sp-4);
-  padding-right: var(--sp-4);
-}
-.shell.is-rail .brand {
-  padding: 0;
-  justify-content: center;
-  width: 100%;
-}
-.shell.is-rail .sidebar-top {
-  flex-direction: column;
-  justify-content: center;
-  gap: var(--sp-3);
-  height: auto;
-  min-height: var(--topbar-h);
-}
-.shell.is-rail .brand-name,
-.shell.is-rail .nav-label,
-.shell.is-rail .sidebar-user-text {
-  display: none;
-}
-.shell.is-rail .sidebar-user {
-  flex-direction: column;
-  gap: var(--sp-3);
-  padding: 0;
-}
-.shell.is-rail .nav-item {
-  justify-content: center;
-  padding: 0;
+/* Rail: icons only. The preference is for large screens only: medium ones
+   are always the rail, and on small ones the drawer is the full sidebar. */
+@media (min-width: 1280px) {
+  .shell.is-rail {
+    grid-template-columns: var(--sidebar-rail-w) minmax(0, 1fr);
+  }
+  .shell.is-rail .sidebar {
+    padding-left: var(--sp-4);
+    padding-right: var(--sp-4);
+  }
+  .shell.is-rail .brand {
+    padding: 0;
+    justify-content: center;
+    width: 100%;
+  }
+  .shell.is-rail .sidebar-top {
+    flex-direction: column;
+    justify-content: center;
+    gap: var(--sp-3);
+    height: auto;
+    min-height: var(--topbar-h);
+  }
+  .shell.is-rail .brand-name,
+  .shell.is-rail .nav-label,
+  .shell.is-rail .sidebar-user-text {
+    display: none;
+  }
+  .shell.is-rail .sidebar-user {
+    flex-direction: column;
+    gap: var(--sp-3);
+    padding: 0;
+  }
+  .shell.is-rail .nav-item {
+    justify-content: center;
+    padding: 0;
+  }
 }
 .shell-backdrop {
   display: none;
@@ -311,8 +314,7 @@
 
 /* ---------- Medium: rail ---------- */
 @media (max-width: 1279px) {
-  .shell,
-  .shell.is-rail {
+  .shell {
     grid-template-columns: var(--sidebar-rail-w) minmax(0, 1fr);
   }
   .shell .sidebar {
@@ -349,8 +351,7 @@
    The document scrolls (not the content area), so the browser chrome can
    collapse and full-page captures work; the top bar sticks. */
 @media (max-width: 767px) {
-  .shell,
-  .shell.is-rail {
+  .shell {
     grid-template-columns: minmax(0, 1fr);
     height: auto;
     min-height: 100%;

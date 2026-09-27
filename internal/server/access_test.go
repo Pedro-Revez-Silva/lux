@@ -91,12 +91,13 @@ func TestAccessIdentityPicture(t *testing.T) {
 		{`{"name":"Ada","oidc_fields":{"picture":"https://img.example/ada.png"}}`, "Ada", "https://img.example/ada.png"},
 		{`{"name":"Ada","oidc_fields":{"picture":"http://img.example/ada.png"}}`, "Ada", ""},
 		{`{"name":"Ada","oidc_fields":{"picture":"javascript:alert(1)"}}`, "Ada", ""},
+		{`{"name":"Ada","oidc_fields":{"picture":{"data":{"url":"https://img.example/ada.png"}}}}`, "Ada", ""},
 		{`{"name":"Ada"}`, "Ada", ""},
 		{`{}`, "ada@example.com", ""},
 	} {
 		body = tc.body
-		a := &cfAccess{team: srv.URL, client: srv.Client(), names: map[string]cachedIdentity{}}
-		id := a.identity(context.Background(), "ada@example.com", "token")
+		a := &cfAccess{team: srv.URL, client: srv.Client(), identities: map[string]cachedIdentity{}}
+		id := a.lookupIdentity(context.Background(), "ada@example.com", "token")
 		if id.Name != tc.name || id.Picture != tc.picture {
 			t.Errorf("%s: got %+v, want name %q picture %q", tc.body, id, tc.name, tc.picture)
 		}
