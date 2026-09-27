@@ -164,19 +164,30 @@ func (s *Server) costTick(ctx context.Context) (bool, error) {
 		// drain write takes both in that order too. A Run that is busy is
 		// skipped: it is changing state, which queues it.
 		if _, err := tx.Exec(ctx, `WITH due AS (
-				SELECT id FROM runs WHERE id IN (
-					SELECT id FROM runs WHERE state IN ('scheduled', 'starting', 'running', 'stopping')
-					UNION
-					SELECT run_id FROM cost_sources WHERE status <> 'final' AND next_at <= now()
-						AND (source = 'compute' OR source = ANY($1))
-					UNION
-					SELECT r.id FROM runs r CROSS JOIN unnest($1::text[]) AS plugin(source)
-						WHERE r.state IN ('succeeded', 'failed', 'cancelled', 'stopped', 'lost')
-						AND NOT EXISTS (SELECT 1 FROM cost_sources c WHERE c.run_id = r.id AND c.source = plugin.source))
+				SELECT id FROM runs WHERE state IN ('scheduled', 'starting', 'running', 'stopping')
 				ORDER BY id FOR KEY SHARE SKIP LOCKED)
 			INSERT INTO cost_pending (run_id, due_at, reason)
 				SELECT id, now(), 'tick' FROM due ORDER BY id
-			ON CONFLICT (run_id) DO UPDATE SET due_at = least(cost_pending.due_at, EXCLUDED.due_at)`, plugins); err != nil {
+			ON CONFLICT (run_id) DO UPDATE SET due_at = least(cost_pending.due_at, EXCLUDED.due_at)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `WITH due AS (
+				SELECT r.id FROM runs r WHERE r.id IN (
+					SELECT run_id FROM (
+						SELECT DISTINCT c.run_id FROM cost_sources c
+						WHERE c.status <> 'final' AND c.next_at <= now()
+							AND (c.source = 'compute' OR c.source = ANY($1))
+							AND NOT EXISTS (SELECT 1 FROM cost_pending p WHERE p.run_id = c.run_id)
+						ORDER BY c.run_id LIMIT $2) AS retries
+					UNION
+					SELECT missing.id FROM runs missing CROSS JOIN unnest($1::text[]) AS plugin(source)
+						WHERE missing.state IN ('succeeded', 'failed', 'cancelled', 'stopped', 'lost')
+						AND NOT EXISTS (SELECT 1 FROM cost_sources c WHERE c.run_id = missing.id AND c.source = plugin.source))
+				AND NOT EXISTS (SELECT 1 FROM cost_pending p WHERE p.run_id = r.id)
+				ORDER BY r.id FOR KEY SHARE OF r SKIP LOCKED)
+			INSERT INTO cost_pending (run_id, due_at, reason)
+				SELECT id, now(), 'tick' FROM due ORDER BY id
+			ON CONFLICT (run_id) DO NOTHING`, plugins, s.cfg.Costs.Batch); err != nil {
 			return err
 		}
 		_, err = tx.Exec(ctx, `DELETE FROM cost_ticks WHERE tick_at < now() - interval '1 day'`)
@@ -201,7 +212,7 @@ func (s *Server) pollDueCostSources(ctx context.Context) error {
 			ORDER BY r.id LIMIT $2 FOR KEY SHARE OF r SKIP LOCKED)
 			INSERT INTO cost_pending (run_id, due_at, reason)
 				SELECT id, now(), 'retry' FROM due ORDER BY id
-			ON CONFLICT (run_id) DO UPDATE SET due_at = least(cost_pending.due_at, EXCLUDED.due_at)`, plugins, s.cfg.Costs.Batch)
+			ON CONFLICT (run_id) DO NOTHING`, plugins, s.cfg.Costs.Batch)
 		return err
 	})
 }

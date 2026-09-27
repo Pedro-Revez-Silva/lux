@@ -316,6 +316,81 @@ func TestPollDueCostSourcesBoundedWithoutRewritingClaims(t *testing.T) {
 	}
 }
 
+func TestCostTickBoundedRetriesWithConcurrentPoll(t *testing.T) {
+	s, _ := costFixture(t)
+	s.cfg.Costs.Batch = 3
+	s.cfg.Costs.Plugins = []CostPluginConfig{{Name: "ledger"}}
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'failed' WHERE id IN ('r1', 'r2')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state)
+		SELECT 'backlog-' || lpad(n::text, 4, '0'), 't1', '{}', 'failed' FROM generate_series(1, 1200) n`)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, next_at)
+		SELECT id, tenant_id, 'ledger', 'incomplete', now() - interval '1 hour'
+		FROM runs WHERE id LIKE 'backlog-%'`)
+	execSQL(t, s, ctx, `INSERT INTO cost_pending (run_id, due_at, reason, claimed_by, claimed_until)
+		VALUES ('backlog-0001', now() - interval '1 hour', 'retry', 'peer', now() + interval '1 hour'),
+			('backlog-0002', now() + interval '1 hour', 'retry', NULL, NULL)`)
+	// Existing plugin sources keep the backlog out of missing-source discovery.
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status)
+		VALUES ('r1', 't1', 'ledger', 'final'), ('r2', 't2', 'ledger', 'final')`)
+	type queueRow struct {
+		due, claim             time.Time
+		reason, owner, version string
+	}
+	readRow := func(id string) queueRow {
+		t.Helper()
+		var row queueRow
+		var claim *time.Time
+		var owner *string
+		systemScan(t, s, `SELECT due_at, reason, claimed_by, claimed_until, xmin::text FROM cost_pending WHERE run_id = $1`, []any{id}, &row.due, &row.reason, &owner, &claim, &row.version)
+		if owner != nil {
+			row.owner = *owner
+		}
+		if claim != nil {
+			row.claim = *claim
+		}
+		return row
+	}
+	claimed, delayed := readRow("backlog-0001"), readRow("backlog-0002")
+	b := peer(s, "luxd-b")
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, run := range []func() error{
+		func() error { _, err := s.costTick(ctx); return err },
+		func() error { return b.pollDueCostSources(ctx) },
+	} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := run(); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	var queued int
+	systemScan(t, s, `SELECT count(*) FROM cost_pending WHERE run_id LIKE 'backlog-%'`, nil, &queued)
+	if queued < 3 || queued > 8 {
+		t.Errorf("queued %d backlog rows, want between 3 and 8 after tick and poll", queued)
+	}
+	for id, before := range map[string]queueRow{"backlog-0001": claimed, "backlog-0002": delayed} {
+		if after := readRow(id); after != before {
+			t.Errorf("%s changed from %+v to %+v", id, before, after)
+		}
+	}
+	// The next drain poll discovers more retries without another tick.
+	if err := b.pollDueCostSources(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var after int
+	systemScan(t, s, `SELECT count(*) FROM cost_pending WHERE run_id LIKE 'backlog-%'`, nil, &after)
+	if after != queued+3 {
+		t.Errorf("next poll queued %d more backlog rows, want 3", after-queued)
+	}
+}
+
 func TestCostLoopPollsDueSourcesBetweenTicks(t *testing.T) {
 	s, _ := costFixture(t)
 	s.cfg.Costs.Enabled = true
