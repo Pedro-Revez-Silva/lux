@@ -33,6 +33,17 @@ func pending(t *testing.T, s *Server, runID string) string {
 	return out
 }
 
+// systemScan scans q's one row into dest, in the system scope.
+func systemScan(t *testing.T, s *Server, q string, args []any, dest ...any) {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, args...).Scan(dest...)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Leaving running queues the Run's costs in the state change's own
 // transaction, whatever the scope (an API stop runs as the tenant); a live
 // state doesn't. A rolled-back change queues nothing, and several changes
@@ -96,11 +107,7 @@ func TestSetRunStateQueuesCosts(t *testing.T) {
 	}
 	var n int
 	var early bool
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(*), bool_and(due_at < now() - interval '59 minutes') FROM cost_pending`).Scan(&n, &early)
-	}); err != nil {
-		t.Fatal(err)
-	}
+	systemScan(t, s, `SELECT count(*), bool_and(due_at < now() - interval '59 minutes') FROM cost_pending`, nil, &n, &early)
 	if got := pending(t, s, "r1"); n != 1 || !early || got != "state:cancelled -" {
 		t.Errorf("merged into %d rows (earliest kept %v): %q", n, early, got)
 	}
@@ -131,13 +138,8 @@ func peer(s *Server, id string) *Server {
 // ticks counts cost_ticks rows.
 func ticks(t *testing.T, s *Server) int {
 	t.Helper()
-	ctx := context.Background()
 	var n int
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(*) FROM cost_ticks`).Scan(&n)
-	}); err != nil {
-		t.Fatal(err)
-	}
+	systemScan(t, s, `SELECT count(*) FROM cost_ticks`, nil, &n)
 	return n
 }
 
@@ -194,10 +196,8 @@ func TestCostTickOnePerBucket(t *testing.T) {
 		}
 	}
 	var early bool
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT due_at < now() - interval '59 minutes' FROM cost_pending WHERE run_id = 'r2'`).Scan(&early)
-	}); err != nil || !early {
-		t.Errorf("r2's earlier due_at kept: %v (%v)", early, err)
+	if systemScan(t, s, `SELECT due_at < now() - interval '59 minutes' FROM cost_pending WHERE run_id = 'r2'`, nil, &early); !early {
+		t.Error("r2's earlier due_at not kept")
 	}
 }
 
@@ -288,11 +288,7 @@ func TestCostLoopWakes(t *testing.T) {
 	defer func() { cancel(); wg.Wait() }()
 	queued := func() int {
 		var n int
-		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT count(*) FROM cost_pending`).Scan(&n)
-		}); err != nil {
-			t.Fatal(err)
-		}
+		systemScan(t, s, `SELECT count(*) FROM cost_pending`, nil, &n)
 		return n
 	}
 	until := func(what string, done func() bool) {
@@ -315,12 +311,8 @@ func TestCostLoopWakes(t *testing.T) {
 	go func() { defer wg.Done(); s.listenLoop(lctx) }()
 	until("listening", func() bool {
 		var n int
-		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
-				WHERE datname = current_database() AND query = 'LISTEN lux_events' AND state = 'idle'`).Scan(&n)
-		}); err != nil {
-			t.Fatal(err)
-		}
+		systemScan(t, s, `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND query = 'LISTEN lux_events' AND state = 'idle'`, nil, &n)
 		return n == 1
 	})
 	finish(t, s, "t1", "r3", StateStopped)
@@ -347,6 +339,18 @@ func finish(t *testing.T, s *Server, tenantID, runID, state string) {
 	ctx := context.Background()
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		return setRunState(ctx, tx, tenantID, runID, state, "", 1)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// resume resumes t1's Run through requestResume, in t1's scope, as the API
+// does.
+func resume(t *testing.T, s *Server, runID string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
+		return s.requestResume(ctx, tx, "t1", runID, nil, "resume")
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -460,12 +464,7 @@ func TestDrainComputeWorkedExample(t *testing.T) {
 	// C failed (final) and resumed: its costs are an estimate again.
 	finish(t, s, "t1", "C", StateFailed)
 	drain(t, s)
-	ctx := context.Background()
-	if err := s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
-		return s.requestResume(ctx, tx, "t1", "C", nil, "resume")
-	}); err != nil {
-		t.Fatal(err)
-	}
+	resume(t, s, "C")
 	if lines, src := computeView(t, s, keys["t1"], "C"); fmt.Sprint(lines) != "[static 0.05 USD false]" || src != "ok" {
 		t.Errorf("C resumed: %v, source %q", lines, src)
 	}
@@ -521,11 +520,7 @@ func TestDrainComputeUnpricedAndMissing(t *testing.T) {
 	drain(t, s)
 	var attempts int
 	var next time.Duration
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT attempts, next_at - now() FROM cost_sources WHERE run_id = 'ec2'`).Scan(&attempts, &next)
-	}); err != nil {
-		t.Fatal(err)
-	}
+	systemScan(t, s, `SELECT attempts, next_at - now() FROM cost_sources WHERE run_id = 'ec2'`, nil, &attempts, &next)
 	if attempts != 2 || next < 3*time.Minute || next > 4*time.Minute {
 		t.Errorf("ec2 after its retry: attempt %d, next in %s", attempts, next)
 	}
@@ -544,6 +539,40 @@ func TestDrainComputeUnpricedAndMissing(t *testing.T) {
 	}
 }
 
+// claimed is one drain's claim and read, not yet written.
+type claimed struct {
+	runs  []string
+	evals map[string]*computeEval
+	now   time.Time
+}
+
+// claimOne claims s's one due Run and evaluates it, as a drain does before
+// it writes.
+func claimOne(t *testing.T, s *Server) claimed {
+	t.Helper()
+	ctx := context.Background()
+	runs, err := s.claimCosts(ctx)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("claimed %v (%v)", runs, err)
+	}
+	c := claimed{runs: runs}
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		c.evals, c.now, err = evaluateCompute(ctx, tx, runs)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// write writes c's result, as the drain goes on to.
+func (c claimed) write(s *Server) error {
+	ctx := context.Background()
+	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return s.writeCosts(ctx, tx, c.runs, c.evals, c.now)
+	})
+}
+
 // A state change while a luxd works a Run frees its claim: that luxd's
 // result, read before the change, is not written, and the Run is due again.
 func TestDrainComputeStaleClaim(t *testing.T) {
@@ -551,23 +580,9 @@ func TestDrainComputeStaleClaim(t *testing.T) {
 	costHosts(t, s)
 	placeRun(t, s, "t1", "A", StateRunning, "static", workedExample[0])
 	finish(t, s, "t1", "A", StateStopping)
-	ctx := context.Background()
-	runs, err := s.claimCosts(ctx)
-	if err != nil || len(runs) != 1 {
-		t.Fatalf("claimed %v (%v)", runs, err)
-	}
-	var evals map[string]*computeEval
-	var now time.Time
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		evals, now, err = evaluateCompute(ctx, tx, runs)
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
+	c := claimOne(t, s)
 	finish(t, s, "t1", "A", StateSucceeded)
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return s.writeCosts(ctx, tx, runs, evals, now)
-	}); err != nil {
+	if err := c.write(s); err != nil {
 		t.Fatal(err)
 	}
 	if lines, src := computeView(t, s, keys["t1"], "A"); len(lines) != 0 || src != "" || pending(t, s, "A") != "state:succeeded -" {
@@ -582,26 +597,12 @@ func TestDrainComputeStaleClaim(t *testing.T) {
 	// was finished, would make it final again.
 	placeRun(t, s, "t1", "B", StateRunning, "static", workedExample[1])
 	finish(t, s, "t1", "B", StateFailed)
-	if runs, err = s.claimCosts(ctx); err != nil || len(runs) != 1 {
-		t.Fatalf("claimed %v (%v)", runs, err)
+	c = claimOne(t, s)
+	if !c.evals["B"].final() {
+		t.Fatalf("B evaluated as not final: %+v", c.evals["B"])
 	}
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		evals, now, err = evaluateCompute(ctx, tx, runs)
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if !evals["B"].final() {
-		t.Fatalf("B evaluated as not final: %+v", evals["B"])
-	}
-	if err := s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
-		return s.requestResume(ctx, tx, "t1", "B", nil, "resume")
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return s.writeCosts(ctx, tx, runs, evals, now)
-	}); err != nil {
+	resume(t, s, "B")
+	if err := c.write(s); err != nil {
 		t.Fatal(err)
 	}
 	if lines, src := computeView(t, s, keys["t1"], "B"); len(lines) != 0 || src != "" || pending(t, s, "B") != "state:resuming -" {
@@ -650,19 +651,8 @@ func TestDrainComputeLockOrder(t *testing.T) {
 	costHosts(t, s)
 	placeRun(t, s, "t1", "A", StateRunning, "static", workedExample[0])
 	finish(t, s, "t1", "A", StateStopping)
+	c := claimOne(t, s)
 	ctx := context.Background()
-	runs, err := s.claimCosts(ctx)
-	if err != nil || len(runs) != 1 {
-		t.Fatalf("claimed %v (%v)", runs, err)
-	}
-	var evals map[string]*computeEval
-	var now time.Time
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		evals, now, err = evaluateCompute(ctx, tx, runs)
-		return err
-	}); err != nil {
-		t.Fatal(err)
-	}
 
 	locked, wrote := make(chan struct{}), make(chan error, 1)
 	change := make(chan error, 1)
@@ -679,11 +669,7 @@ func TestDrainComputeLockOrder(t *testing.T) {
 		})
 	}()
 	<-locked
-	go func() {
-		wrote <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			return s.writeCosts(ctx, tx, runs, evals, now)
-		})
-	}()
+	go func() { wrote <- c.write(s) }()
 	if err := <-change; err != nil {
 		t.Errorf("state change: %v", err)
 	}
@@ -856,15 +842,10 @@ func TestDrainComputeFailedRead(t *testing.T) {
 // system scope (last_error is operators').
 func sourceRow(t *testing.T, s *Server, runID string) (string, time.Duration) {
 	t.Helper()
-	ctx := context.Background()
 	var out string
 	var next *time.Duration
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT format('%s %s %s %s', status, attempts, next_at IS NOT NULL, last_error <> ''), next_at - now()
-			FROM cost_sources WHERE run_id = $1 AND source = 'compute'`, runID).Scan(&out, &next)
-	}); err != nil {
-		t.Fatal(err)
-	}
+	systemScan(t, s, `SELECT format('%s %s %s %s', status, attempts, next_at IS NOT NULL, last_error <> ''), next_at - now()
+		FROM cost_sources WHERE run_id = $1 AND source = 'compute'`, []any{runID}, &out, &next)
 	if next == nil {
 		return out, 0
 	}
@@ -918,12 +899,8 @@ func TestDrainComputeTenants(t *testing.T) {
 	}
 	for run, want := range map[string]string{"A": "t1", "T": "t2", "U": "t1"} {
 		var lines, sources string
-		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT (SELECT string_agg(tenant_id, ',') FROM cost_lines WHERE run_id = $1),
-				(SELECT string_agg(tenant_id, ',') FROM cost_sources WHERE run_id = $1)`, run).Scan(&lines, &sources)
-		}); err != nil {
-			t.Fatal(err)
-		}
+		systemScan(t, s, `SELECT (SELECT string_agg(tenant_id, ',') FROM cost_lines WHERE run_id = $1),
+			(SELECT string_agg(tenant_id, ',') FROM cost_sources WHERE run_id = $1)`, []any{run}, &lines, &sources)
 		if lines != want || sources != want {
 			t.Errorf("%s: lines of %s, source of %s; want %s", run, lines, sources, want)
 		}
@@ -1037,11 +1014,7 @@ func TestDrainComputeBackoff(t *testing.T) {
 
 	// Resumed while incomplete: no retry pending, attempts start over.
 	execSQL(t, s, ctx, `UPDATE cost_sources SET next_at = now() + interval '1 hour' WHERE run_id = 'ec2'`)
-	if err := s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
-		return s.requestResume(ctx, tx, "t1", "ec2", nil, "resume")
-	}); err != nil {
-		t.Fatal(err)
-	}
+	resume(t, s, "ec2")
 	if row, _ := sourceRow(t, s, "ec2"); row != "incomplete 0 f t" {
 		t.Errorf("ec2 resumed: %s; want no next attempt, attempts 0", row)
 	}
