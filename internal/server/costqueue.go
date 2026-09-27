@@ -103,11 +103,18 @@ func (s *Server) costTick(ctx context.Context) (bool, error) {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO cost_pending (run_id, due_at, reason)
-				SELECT id, now(), 'tick' FROM runs WHERE state IN ('scheduled', 'starting', 'running', 'stopping')
-				UNION
-				SELECT run_id, now(), 'tick' FROM cost_sources
-				WHERE source = 'compute' AND status <> 'final' AND next_at <= now()
+		// The Runs first, in id order, then their queue rows in the same
+		// order: a state change holds its Run when it queues it, and a
+		// drain write takes both in that order too. A Run that is busy is
+		// skipped: it is changing state, which queues it.
+		if _, err := tx.Exec(ctx, `WITH due AS (
+				SELECT id FROM runs WHERE id IN (
+					SELECT id FROM runs WHERE state IN ('scheduled', 'starting', 'running', 'stopping')
+					UNION
+					SELECT run_id FROM cost_sources WHERE source = 'compute' AND status <> 'final' AND next_at <= now())
+				ORDER BY id FOR KEY SHARE SKIP LOCKED)
+			INSERT INTO cost_pending (run_id, due_at, reason)
+				SELECT id, now(), 'tick' FROM due ORDER BY id
 			ON CONFLICT (run_id) DO UPDATE SET due_at = least(cost_pending.due_at, EXCLUDED.due_at)`); err != nil {
 			return err
 		}

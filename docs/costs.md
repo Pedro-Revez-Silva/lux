@@ -751,7 +751,10 @@ where it differs from the above:
 - The tick's bucket is `costs.every` (not a fixed 120 s), and its
   "settling or backing off" Runs are those whose `compute` source is not
   final and whose `next_at` has passed. The drainer runs the tick itself,
-  every `costs.every`, before draining.
+  every `costs.every`, before draining. The tick locks those Runs first
+  (`FOR KEY SHARE SKIP LOCKED`, in id order), then inserts their queue
+  rows in the same order; a Run another transaction holds is skipped, as
+  it is changing state, which queues it.
 - The drainer wakes on any `lux_events` notification, then waits 200 ms so
   a burst becomes one claim. Its read is one transaction for every claimed
   Run (each host loaded once); the writes are one transaction per 100
