@@ -1037,8 +1037,8 @@ func TestDrainComputeLivePlacement(t *testing.T) {
 	}
 }
 
-// A terminal Run whose compute is not final backs off up to an hour, stops
-// being tried a week after it finished, and a resume starts it over.
+// A terminal Run whose compute is not final backs off up to an hour. A spot
+// host still running keeps the Run eligible beyond a week; a resume resets it.
 func TestDrainComputeBackoff(t *testing.T) {
 	s, keys := costFixture(t)
 	costHosts(t, s)
@@ -1055,12 +1055,12 @@ func TestDrainComputeBackoff(t *testing.T) {
 		t.Errorf("ec2, attempt 11: %s, next in %s; want within the hour", row, next)
 	}
 
-	// Finished over a week ago: given up.
+	// Finished over a week ago, but the spot host is still running.
 	execSQL(t, s, ctx, `UPDATE runs SET finished_at = now() - interval '8 days' WHERE id = 'ec2'`)
 	execSQL(t, s, ctx, `SELECT lux_cost_enqueue('ec2', 'retry')`)
 	drain(t, s)
-	if row, _ := sourceRow(t, s, "ec2"); row != "incomplete 12 f t" {
-		t.Errorf("ec2, a week on: %s; want no next attempt", row)
+	if row, _ := sourceRow(t, s, "ec2"); row != "incomplete 12 t t" {
+		t.Errorf("ec2, a week on: %s; want continued retry", row)
 	}
 
 	// Resumed while incomplete: no retry pending, attempts start over.

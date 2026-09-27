@@ -243,8 +243,13 @@ type computeEval struct {
 	Open bool
 	// Spot: at least one placement ran on a spot host.
 	Spot bool
+	// SpotOpen: a spot host used by this Run is still alive.
+	SpotOpen bool
 	// Latest termination of a spot host used by this Run, if any.
 	SpotEnded *time.Time
+	// SpotChecked: earliest successful recent-history check across its spot hosts.
+	SpotChecked   *time.Time
+	SpotUnchecked bool
 	// Err: a host it ran on could not be priced (overlapping periods).
 	Err error
 }
@@ -327,18 +332,22 @@ func evaluateCompute(ctx context.Context, tx pgx.Tx, runs []string) (map[string]
 	}
 	hostIDs := slices.Sorted(maps.Keys(windows))
 	hosts := map[string]costHost{}
-	rows, err = tx.Query(ctx, `SELECT id, provision_requested_at IS NOT NULL,
-			coalesce(instance_type, launch_template->>'instanceType', ''), coalesce(market, ''), coalesce(zone, ''), terminated_at
-		FROM hosts WHERE id = ANY($1)`, hostIDs)
+	rows, err = tx.Query(ctx, `SELECT h.id, h.provision_requested_at IS NOT NULL,
+			coalesce(h.instance_type, h.launch_template->>'instanceType', ''), coalesce(h.market, ''), coalesce(h.zone, ''),
+			h.terminated_at, r.checked_at
+		FROM hosts h LEFT JOIN spot_history_refresh r ON r.host_id = h.id WHERE h.id = ANY($1)`, hostIDs)
 	if err != nil {
 		return nil, now, err
 	}
 	var h costHost
 	var hostEnded *time.Time
+	var hostChecked *time.Time
 	ended := map[string]*time.Time{}
-	if _, err := pgx.ForEachRow(rows, []any{&host, &h.Provider, &h.Type, &h.Market, &h.Zone, &hostEnded}, func() error {
+	checked := map[string]*time.Time{}
+	if _, err := pgx.ForEachRow(rows, []any{&host, &h.Provider, &h.Type, &h.Market, &h.Zone, &hostEnded, &hostChecked}, func() error {
 		hosts[host] = h
 		ended[host] = hostEnded
+		checked[host] = hostChecked
 		return nil
 	}); err != nil {
 		return nil, now, err
@@ -355,8 +364,15 @@ func evaluateCompute(ctx context.Context, tx pgx.Tx, runs []string) (map[string]
 			for _, p := range in.Placements {
 				if e := evals[p.RunID]; e != nil {
 					e.Spot = true
-					if stop := ended[hostID]; stop != nil && (e.SpotEnded == nil || stop.After(*e.SpotEnded)) {
+					if stop := ended[hostID]; stop == nil {
+						e.SpotOpen = true
+					} else if e.SpotEnded == nil || stop.After(*e.SpotEnded) {
 						e.SpotEnded = stop
+					}
+					if at := checked[hostID]; at == nil {
+						e.SpotUnchecked = true
+					} else if e.SpotChecked == nil || at.Before(*e.SpotChecked) {
+						e.SpotChecked = at
 					}
 				}
 			}
@@ -544,7 +560,8 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *c
 		if e.SpotEnded != nil && (settleFrom == nil || e.SpotEnded.After(*settleFrom)) {
 			settleFrom = e.SpotEnded
 		}
-		if settleFrom == nil || now.Before(settleFrom.Add(costSpotSettle)) {
+		if e.SpotOpen || settleFrom == nil || now.Before(settleFrom.Add(costSpotSettle)) ||
+			e.SpotUnchecked || e.SpotChecked == nil || e.SpotChecked.Before(settleFrom.Add(costSpotSettle)) {
 			final = false
 		}
 	}
@@ -563,7 +580,7 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *c
 	var nextAt *time.Time
 	if terminal(e.State) && !final {
 		attempts++
-		if e.FinishedAt == nil || now.Sub(*e.FinishedAt) < costGiveUp {
+		if e.Spot && (e.SpotOpen || e.final()) || e.FinishedAt == nil || now.Sub(*e.FinishedAt) < costGiveUp {
 			t := now.Add(min(s.cfg.Costs.Every<<min(attempts-1, 16), costRetryMax))
 			nextAt = &t
 		}
