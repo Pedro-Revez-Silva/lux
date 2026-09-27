@@ -113,8 +113,10 @@ func replacePluginHours(ctx context.Context, tx pgx.Tx, tenant, run, source stri
 	return nil
 }
 
-// Host totals include idle hours with no Run. Each pass works at most Batch
-// host-hours; the cursor survives restarts and excludes hours past retention.
+// Each pass refreshes at most Batch host-hours, including idle time. Reserve
+// a slot for older hours when current hours are due; with Batch=1, persist
+// which priority goes first so a current hour cannot starve the backlog.
+// The per-host cursor resumes within retention after a restart.
 func (s *Server) updateHostHours(ctx context.Context) error {
 	var jobs []struct {
 		id   string
