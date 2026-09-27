@@ -15,8 +15,9 @@ tools.
 2. Fetches the ref and hard-resets the checkout to it (local edits on the
    host are discarded). If anything under `host/` other than
    `lux-host.toml` changed, it re-executes the new `reconcile.py` once.
-3. Validates `lux-host.toml`. A bad file fails the run here, before
-   anything on the host is touched.
+3. Validates `lux-host.toml` and its Access settings against SSM. A bad
+   file fails here after checkout/deploy-key sync, before packages, units,
+   database or luxd are changed.
 4. Packages: installs Postgres 18 (PGDG apt repo; `dpkg -s postgresql-18`)
    and cloudflared (the GitHub release `.deb` for `dpkg
    --print-architecture`; present when dpkg says `install ok installed`
@@ -38,13 +39,26 @@ tools.
    the filesystems the console's Control host row charts. It is in the
    environment, not `luxd.toml`, so an older pinned release (which refuses
    unknown keys in its file) still starts.
-7. Renders `/etc/lux/luxd.toml` (0600, atomic).
+7. Renders the candidate config, leaving the installed config untouched until
+   a version switch is ready. The installed binary validates a changed
+   candidate before a config-only Access transition; unsupported settings
+   leave the live config untouched.
 8. If `lux_version` differs from the installed version: downloads the
    release, verifies it against `SHA256SUMS`, runs `luxd migrate` with
-   the new binary, switches the symlinks, restarts luxd and waits ~30s for
-   `/health`; on failure restores the previous binaries and restarts luxd.
+   the new binary and candidate config, journals the previous config (0600)
+   and links privately (0700), switches the symlinks and config,
+   restarts luxd and waits ~30s for `/health`; on failure restores the
+   previous config and binaries before restarting the previous luxd. A
+   killed switch is restored by luxd's `ExecStartPre` on boot/restart or at
+   the start of the next reconcile, before extraction or service start.
+   The unit's start wrapper pins the binary and config as open file descriptors
+   under `/usr/local/lux/.pair.lock` and rechecks admission there; if the
+   reconciler has exited, it recovers any interrupted switch before selection.
+   Rollback and config-only writes hold the same lock. A start admitted before
+   rollback either pins the candidate pair or fails closed after rollback.
    Otherwise, if the config or luxd's unit changed and luxd is running, it
-   restarts luxd.
+   restarts luxd after releasing the reconcile lock, so its startup admission
+   does not reject a config-only restart.
    With a version installed, every run also enables and starts a stopped
    luxd (`systemctl enable --now`, never a restart), so to keep luxd
    stopped, disable `lux-reconcile.timer` first.
@@ -77,8 +91,35 @@ sample_every = "10s"
 ```
 
 Unknown keys are errors. Infrastructure settings (`listen`, `public_url`,
-`[database]`, `[s3]`, `[console]`) come from Terraform through SSM and are
-refused here. Secrets never go in this file.
+`[database]`, `[s3]`, console auth and Cloudflare team/AUD) come from Terraform
+through SSM and are refused here. Secrets never go in this file.
+
+When Cloudflare Access is enabled in Terraform, add the following table to the
+**private** config repo's `host/lux-host.toml` before reconciling or upgrading
+the host. Do not put actual operator addresses or tenant IDs in a public repo:
+
+```toml
+[console.cloudflare_access]
+operators = ["operator@example.com"]
+default_tenant = "ten_aaaaaaaaaaaaaaaa"
+```
+
+Replace the placeholders with the explicit operator email allowlist and the
+ID of an existing tenant created with `luxd admin create-tenant` (the stable
+`ten_` ID, not its name). Operator email matching is case-insensitive; the
+list must be nonempty and have no duplicates. Both settings are required in
+Access mode and rejected in key mode. A missing or invalid setting fails the
+run before package changes, `luxd.toml` writes, or a binary switch. Migrating
+an existing host requires adding this private table along with enabling
+Access; an already-compatible installed binary can switch config only,
+otherwise upgrade `lux_version` to a release supporting these fields.
+Staging the table on an incompatible binary fails reconciliation but keeps the
+old config and old binary running; the periodic timer retries after the bump.
+Failed downloads, migrations and health checks likewise keep or restore the
+old config. For key mode, omit `[console.cloudflare_access]` entirely and leave
+the Terraform Cloudflare Access team and AUD unset; the public example
+`lux-host.toml` uses this mode. Do not rely on environment variables or a
+manually edited `/etc/lux/luxd.toml`, since reconciliation overwrites it.
 
 ## Changing the version
 
@@ -101,6 +142,7 @@ journalctl -u lux-pg-backup           # daily backups
 
 ```bash
 python3 -m pytest host/tests          # unit tests, fakes for aws/systemctl/Postgres
+go test ./cmd/luxd                    # loads host-rendered Access and key configs with luxd
 ```
 
 From a lux checkout, `make host-test` also runs the container smoke test (a new host, then a replaced one on the same Postgres volume); `make host-test HOST_DIR=/path/to/your/host` runs both against your copy of this directory.

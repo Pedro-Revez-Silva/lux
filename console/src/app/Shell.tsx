@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { IconButton, LiveDot, Logo, TenantPicker, TimeRangePicker, useDensity, useTheme, type Tenant } from "@lux/design-system";
-import { IconClose, IconGrid, IconLayers, IconLogout, IconMenu, IconMoon, IconPlay, IconRows, IconRowsLoose, IconServer, IconSidebar, IconSliders, IconSun, IconUsers } from "@lux/design-system/icons";
+import { IconChevronLeft, IconChevronRight, IconClose, IconGrid, IconKey, IconLayers, IconLogout, IconMenu, IconMoon, IconPlay, IconRows, IconRowsLoose, IconServer, IconSliders, IconSun, IconUsers } from "@lux/design-system/icons";
 import { liveLabel, signOut, useLiveState, useSession } from "../api/index.ts";
-import { Link, usePath } from "./router.tsx";
+import { isPlainClick, Link, usePath } from "./router.tsx";
 import { useScope } from "./scope.tsx";
 
 interface NavItem {
@@ -54,6 +54,22 @@ function subscribeRail(cb: () => void) {
   };
 }
 
+/* The breakpoints the shell lays out by: keep in step with the
+   "(max-width: 767px)" queries in shell.css (the rail's is its exact
+   complement) and the "not all and (min-width: 1280px)" in tokens.css. */
+function mediaStore(query: string) {
+  const mq = window.matchMedia(query);
+  return {
+    subscribe: (cb: () => void) => {
+      mq.addEventListener("change", cb);
+      return () => mq.removeEventListener("change", cb);
+    },
+    get: () => mq.matches,
+  };
+}
+const phoneMedia = mediaStore("(max-width: 767px)");
+const wideMedia = mediaStore("(min-width: 1280px)");
+
 /**
  * App shell: sidebar (full on large screens, an icon rail on medium ones,
  * an off-canvas drawer behind a menu button on small ones), a top bar whose
@@ -66,15 +82,46 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
   const { resolved, toggle } = useTheme();
   const { density, toggle: toggleDensity } = useDensity();
   const rail = useSyncExternalStore(subscribeRail, readRail, () => false);
+  const phone = useSyncExternalStore(phoneMedia.subscribe, phoneMedia.get);
+  const wide = useSyncExternalStore(wideMedia.subscribe, wideMedia.get);
+  // Icons only: always on medium screens; on wide ones if collapsed. On
+  // phones the drawer is the full sidebar.
+  const compact = !phone && (!wide || rail);
   const [drawer, setDrawer] = useState(false);
+  // The drawer is a phone's: leaving phone width closes it (in this render,
+  // so no wider frame shows it), and it does not come back by itself.
+  if (drawer && !phone) setDrawer(false);
   const [menu, setMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const menuBtnRef = useRef<HTMLButtonElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const asideRef = useRef<HTMLElement>(null);
+  // Opening the drawer moves focus in; closing it, however it closes (the
+  // button, Escape, the backdrop, a link, Back, a wider window), hands focus
+  // back to the menu button if it was in the drawer or nowhere, once the page
+  // is no longer inert; or, wider than a phone (no menu button), to the
+  // sidebar's current page (or its first), now in view.
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (drawer) closeRef.current?.focus();
+    else if (wasOpen.current) {
+      const at = document.activeElement;
+      const aside = asideRef.current;
+      if (!at || at === document.body || aside?.contains(at)) {
+        if (phone) menuBtnRef.current?.focus();
+        else (aside?.querySelector<HTMLElement>(".nav-item.is-active") ?? aside?.querySelector<HTMLElement>(".nav-item"))?.focus();
+      }
+    }
+    wasOpen.current = drawer;
+  }, [drawer, phone]);
 
   // A navigation closes the drawer and the scope menu.
   useEffect(() => {
     setDrawer(false);
     setMenu(false);
   }, [path]);
+  // So does following a link in the drawer, even to the page already shown
+  // (see onClickCapture below), but not a click that opens a tab.
   useEffect(() => {
     if (!menu) return;
     const onDoc = (e: MouseEvent) => {
@@ -111,34 +158,60 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
       {density === "compact" ? <IconRowsLoose size={15} /> : <IconRows size={15} />}
     </IconButton>
   );
+  // Who is signed in, at the foot of the sidebar: the person and a way out.
+  // Until whoami answers, a key's role is unknown: do not guess.
+  const keyName = session.role === "operator" ? "Operator key" : session.role === "tenant" ? "Tenant key" : "API key";
   const user = session.user ? (
-    // Signed in by Cloudflare Access: signing out is Access's.
-    <a className="topbar-user" href="/cdn-cgi/access/logout" title={`${session.user.email} · sign out of Cloudflare Access`}>
-      {session.user.name}
-    </a>
+    <SidebarUser
+      avatar={<Avatar key={session.user.picture} name={session.user.name} picture={session.user.picture} labelled={compact} />}
+      name={session.user.name}
+      sub={session.user.email}
+      // Signed in by Cloudflare Access: signing out is Access's.
+      signOut={() => window.location.assign("/cdn-cgi/access/logout")}
+      signOutLabel="Sign out of Cloudflare Access"
+    />
   ) : (
-    <IconButton size="sm" label="Sign out" onClick={signOut}>
-      <IconLogout size={15} />
-    </IconButton>
+    <SidebarUser
+      avatar={<Avatar name={keyName} fallback={<IconKey size={15} />} labelled={compact} />}
+      name={keyName}
+      sub="API key session"
+      signOut={signOut}
+      signOutLabel="Sign out"
+    />
   );
 
   const brand = (
-    <Link to="/" className="brand" aria-label="lux console">
-      <Logo className="brand-mark" />
-      <span className="brand-name">lux</span>
-      <span className="brand-sub">console</span>
+    <Link to="/" className="brand" aria-label="Lux">
+      <Logo size={26} className="brand-mark" />
+      <span className="brand-name">Lux</span>
     </Link>
   );
 
   return (
-    <div className={["shell", rail ? "is-rail" : "", drawer ? "is-drawer-open" : ""].join(" ").trim()}>
+    <div className={["shell", compact ? "is-rail" : "", drawer ? "is-drawer-open" : ""].join(" ").trim()}>
       <div className="shell-backdrop" onClick={() => setDrawer(false)} aria-hidden="true" />
-      <aside className="sidebar" aria-label="Sidebar">
+      <aside
+        ref={asideRef}
+        className="sidebar"
+        aria-label="Sidebar"
+        inert={phone && !drawer}
+        // On capture: Link stops the click from bubbling.
+        onClickCapture={(e) => {
+          if (isPlainClick(e) && (e.target as Element).closest("a")) setDrawer(false);
+        }}
+      >
         <div className="sidebar-top">
           {brand}
-          <IconButton size="sm" label="Close menu" className="sidebar-close" onClick={() => setDrawer(false)}>
-            <IconClose size={15} />
-          </IconButton>
+          {wide && (
+            <IconButton size="sm" label={rail ? "Expand sidebar" : "Collapse sidebar"} className="sidebar-toggle" onClick={toggleRail} aria-expanded={!rail}>
+              {rail ? <IconChevronRight size={15} /> : <IconChevronLeft size={15} />}
+            </IconButton>
+          )}
+          {phone && (
+            <IconButton ref={closeRef} size="sm" label="Close menu" onClick={() => setDrawer(false)}>
+              <IconClose size={15} />
+            </IconButton>
+          )}
         </div>
         <nav className="nav" aria-label="Primary">
           {NAV.filter((n) => !n.operator || operator).map((n) => (
@@ -148,19 +221,12 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
             </Link>
           ))}
         </nav>
-        <div className="sidebar-foot">
-          <button type="button" className="nav-item nav-collapse" onClick={toggleRail} title={rail ? "Expand sidebar" : "Collapse sidebar"} aria-label={rail ? "Expand sidebar" : "Collapse sidebar"} aria-pressed={rail}>
-            <span className="nav-icon">
-              <IconSidebar />
-            </span>
-            <span className="nav-label">Collapse</span>
-          </button>
-        </div>
+        <div className="sidebar-foot">{user}</div>
       </aside>
-      <div className="main">
+      <div className="main" inert={drawer}>
         <header className="topbar">
           <div className="topbar-lead">
-            <IconButton size="sm" label="Open menu" className="topbar-menu-btn" onClick={() => setDrawer(true)}>
+            <IconButton ref={menuBtnRef} size="sm" label="Open menu" className="topbar-menu-btn" onClick={() => setDrawer(true)}>
               <IconMenu size={16} />
             </IconButton>
             <span className="topbar-brand">{brand}</span>
@@ -174,7 +240,6 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
               <span className="topbar-sep" aria-hidden="true" />
               {densityButton}
               {themeButton}
-              {user}
             </div>
             <div className="topbar-narrow" ref={menuRef}>
               <IconButton size="sm" label="Scope and settings" active={menu} onClick={() => setMenu((m) => !m)} aria-expanded={menu}>
@@ -199,10 +264,6 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
                       {themeButton}
                     </span>
                   </div>
-                  <div className="topbar-pop-row">
-                    <span className="topbar-pop-label">{session.user ? "Signed in" : "Session"}</span>
-                    {user}
-                  </div>
                 </div>
               )}
             </div>
@@ -212,6 +273,57 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
       </div>
     </div>
   );
+}
+
+/**
+ * The foot of the sidebar: avatar, name and a second line, sign out. In the
+ * rail only the avatar and the button show, so the avatar names the person
+ * (hover, and to assistive technology).
+ */
+function SidebarUser({ avatar, name, sub, signOut, signOutLabel }: { avatar: ReactNode; name: string; sub: string; signOut: () => void; signOutLabel: string }) {
+  return (
+    <div className="sidebar-user" title={`${name} · ${sub}`}>
+      {avatar}
+      <span className="sidebar-user-text">
+        <span className="sidebar-user-name ellipsis">{name}</span>
+        <span className="sidebar-user-sub ellipsis">{sub}</span>
+      </span>
+      <IconButton size="sm" label={signOutLabel} onClick={signOut}>
+        <IconLogout size={15} />
+      </IconButton>
+    </div>
+  );
+}
+
+/**
+ * A photo (the identity provider's); without one, or if it fails to load,
+ * the fallback: initials unless given. Labelled: it names the person, for
+ * where their name is not shown beside it; otherwise it is decoration.
+ */
+function Avatar({ name, picture, fallback, labelled }: { name: string; picture?: string; fallback?: ReactNode; labelled: boolean }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <span className="avatar" {...(labelled ? { role: "img", "aria-label": name } : { "aria-hidden": true })}>
+      {picture && !failed ? <img src={picture} alt="" referrerPolicy="no-referrer" onError={() => setFailed(true)} /> : (fallback ?? initials(name))}
+    </span>
+  );
+}
+
+/* Graphemes where the browser can (an emoji or accent stays whole); code points otherwise. */
+const graphemes = typeof Intl.Segmenter === "function" ? new Intl.Segmenter() : null;
+function firstChar(w: string): string {
+  return (graphemes ? graphemes.segment(w).containing(0)?.segment : [...w][0]) ?? "";
+}
+
+/** "Ada Lovelace" → "AL"; "ada@example.com" → "A"; "Ada Lovelace (ops)" → "AO"; "Ada | Ops" → "AO". Leading punctuation and symbols are skipped; emoji (So) are kept. */
+function initials(name: string): string {
+  const local = /^[^\s@]+@[^\s@]+$/.test(name) ? name.slice(0, name.indexOf("@")) : name;
+  const words = local
+    .split(/[\s._-]+/)
+    .map((w) => w.replace(/^[\p{P}\p{Sm}\p{Sc}\p{Sk}]+/u, ""))
+    .filter(Boolean);
+  const ends = words.length > 1 ? [words[0] ?? "", words.at(-1) ?? ""] : words;
+  return ends.map(firstChar).join("").toUpperCase() || "?";
 }
 
 /** Whether the event stream is up: pages update as things happen, or fall back to polling. */

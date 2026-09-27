@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tarfile
@@ -67,6 +68,17 @@ class FakeSh:
         self.calls.append(argv)
         cmd = os.path.basename(argv[0])
         handler = getattr(self, "_" + cmd.replace("-", "_").replace(".", "_"), None)
+        if cmd == "luxd" and argv[-1] in ("check-config", "create-key"):
+            with open(argv[argv.index("--config") + 1]) as f:
+                candidate = f.read()
+            current = os.path.join(self.root, "usr/local/lux/current")
+            version = os.path.basename(os.readlink(current)) if os.path.islink(current) else ""
+            with open(os.path.join(self.root, "etc/lux/luxd.toml")) as f:
+                active = f.read()
+            supported = version != "v1.0.0" or "operators = " not in candidate or "operators = " in active
+            if argv[-1] == "check-config":
+                return completed(argv, 2, stderr="usage: luxd")
+            return completed(argv, 1, stderr="connect to database" if supported else "unsupported Access config")
         if cmd == "luxd":
             return completed(argv, self.migrate_rc, stderr="" if self.migrate_rc == 0 else "migration 7 failed")
         if handler is None:
@@ -118,15 +130,18 @@ class FakeSh:
             self.enabled.update(units)
             if "--now" in argv:
                 for u in units:
-                    self._start(u)
+                    if u not in self.active and not self._start(u):
+                        return completed(argv, 1, stderr=f"{u} start failed")
             return completed(argv)
         if verb == "disable":
             self.enabled.difference_update(units)
             self.active.difference_update(units)
             return completed(argv)
         if verb in ("restart", "start"):
-            self._start(units[0])
-            return completed(argv)
+            if verb == "restart":
+                self.active.discard(units[0])
+            return completed(argv, 0 if self._start(units[0]) else 1,
+                             stderr="" if units[0] in self.active else f"{units[0]} start failed")
         if verb == "stop":
             self.active.difference_update(units)
             return completed(argv)
@@ -137,13 +152,30 @@ class FakeSh:
     def _start(self, unit):
         if unit != "luxd":
             self.active.add(unit)
-            return
+            return True
+        root = os.path.join(self.root, "usr/local/lux")
+        config = os.path.join(self.root, "etc/lux/luxd.toml")
+        lock = os.path.join(self.root, "etc/lux/.reconcile.lock")
+        helper = runpy.run_path(os.path.join(HOST_DIR, "recover.py"), run_name="unit_helper")
+        try:
+            helper["admit"](root, lock)
+            helper["start"](root, config, lock_path=lock,
+                            execute=lambda binary, argv, environ: self._check_pair(binary, argv))
+        except (SystemExit, OSError):
+            self.active.discard("luxd")
+            return False
         current = os.path.join(self.root, "usr/local/lux/current")
         version = os.path.basename(os.readlink(current)) if os.path.islink(current) else None
         if version in self.healthy_versions:
             self.active.add("luxd")
         else:
             self.active.discard("luxd")
+        return "luxd" in self.active
+
+    def _check_pair(self, binary, argv):
+        assert os.path.samefile(binary, os.path.join(self.root, "usr/local/lux/current/bin/luxd"))
+        with open(argv[2]) as config:
+            assert config.read()
 
     def _dpkg(self, argv, _input):
         if argv[1:] == ["--print-architecture"]:
@@ -377,6 +409,8 @@ def desired(version: str = "none", extra: str = "") -> str:
         f'lux_version = "{version}"\n'
         f'release_base_url = "{FakeWeb.BASE_URL}"\n'
         f"{extra}"
+        '\n[console.cloudflare_access]\noperators = ["operator@example.com"]\n'
+        'default_tenant = "ten_aaaaaaaaaaaaaaaa"\n'
     )
 
 

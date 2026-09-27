@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -41,6 +42,8 @@ auth = "cloudflare-access"
 [console.cloudflare_access]
 team = "acme"
 aud = "aud-from-file"
+operators = ["ada@example.com"]
+default_tenant = "absmartly"
 `)
 	t.Setenv("LUX_S3_BUCKET", "from-env")
 	t.Setenv("LUX_DEFAULT_CPUS", "1.5")
@@ -60,7 +63,8 @@ aud = "aud-from-file"
 		t.Errorf("history: %+v", c.History)
 	case c.Costs.Enabled || c.Costs.Every.Duration != 5*time.Minute || c.Costs.Batch != 50 || c.Costs.DrainEvery.Duration != 2*time.Second:
 		t.Errorf("costs: %+v", c.Costs)
-	case c.Console.Auth != "cloudflare-access" || c.Console.CloudflareAccess.Team != "acme":
+	case c.Console.Auth != "cloudflare-access" || c.Console.CloudflareAccess.Team != "acme" ||
+		!slices.Equal(c.Console.CloudflareAccess.Operators, []string{"ada@example.com"}) || c.Console.CloudflareAccess.DefaultTenant != "absmartly":
 		t.Errorf("console: %+v", c.Console)
 	case c.S3.Region != "us-east-1" || c.Tick.Duration != time.Second:
 		t.Errorf("defaults kept: region %q tick %v", c.S3.Region, c.Tick)
@@ -72,6 +76,9 @@ aud = "aud-from-file"
 		{"", "LUX_LEASE=soon", "LUX_LEASE"},
 		{"[defaults]\ncpus = -1", "", "defaults.cpus"},
 		{"[console]\nauth = \"cloudflare-access\"", "", "console.cloudflare_access.team"},
+		{"[console]\nauth = \"cloudflare-access\"\n[console.cloudflare_access]\nteam = \"acme\"\naud = \"aud\"", "", "default_tenant"},
+		{"[console]\nauth = \"cloudflare-access\"\n[console.cloudflare_access]\nteam = \"acme\"\naud = \"aud\"\ndefault_tenant = \"absmartly\"", "", "operators"},
+		{"[console]\nauth = \"cloudflare-access\"\n[console.cloudflare_access]\nteam = \"acme\"\naud = \"aud\"\ndefault_tenant = \"absmartly\"\noperators = [\"ada@example.com\", \"ADA@example.com\"]", "", "operators"},
 		{"[console]\nauth = \"magic\"", "", "want key or cloudflare-access"},
 		{"[costs]\nbatch = 0", "", "costs.batch"},
 		{"", "LUX_COSTS_EVERY=0s", "costs.every"},
@@ -91,6 +98,47 @@ aud = "aud-from-file"
 	// A file named but missing is an error; the default path missing is not.
 	if _, err := loadConfig(filepath.Join(dir, "none.toml")); err == nil {
 		t.Error("a missing named file was not an error")
+	}
+}
+
+// The host reconciler's rendered TOML must decode with luxd's strict parser
+// and pass the same validation as a config loaded at startup.
+func TestHostRenderedConfig(t *testing.T) {
+	for _, name := range []string{"LUX_CONSOLE_AUTH", "LUX_CF_ACCESS_TEAM", "LUX_CF_ACCESS_AUD", "LUX_CF_ACCESS_OPERATORS", "LUX_CF_ACCESS_DEFAULT_TENANT", "LUX_DEFAULT_MEMORY"} {
+		t.Setenv(name, "")
+	}
+	for _, mode := range []string{"access", "key"} {
+		t.Run(mode, func(t *testing.T) {
+			fixture := "../../deploy/terraform/examples/aws/host/tests/render_config.py"
+			out, err := exec.Command("python3", fixture, mode).CombinedOutput()
+			if err != nil {
+				t.Fatalf("host render: %v: %s", err, out)
+			}
+			path := filepath.Join(t.TempDir(), "luxd.toml")
+			if err := os.WriteFile(path, out, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := loadConfig(path)
+			if err != nil {
+				t.Fatalf("host-generated %s config: %v", mode, err)
+			}
+			if c.Database.URL != "postgres://lux_app:test-password@127.0.0.1:5432/lux?sslmode=disable" {
+				t.Fatalf("host-generated %s config: unexpected values: %+v", mode, c)
+			}
+			if mode == "access" {
+				if c.Console.Auth != "cloudflare-access" ||
+					c.Console.CloudflareAccess.Team != "acme" || c.Console.CloudflareAccess.AUD != "aud-tag" ||
+					c.Defaults.Memory.Bytes != 16<<30 ||
+					!slices.Equal(c.Console.CloudflareAccess.Operators, []string{"operator@example.com", "second@example.com"}) ||
+					c.Console.CloudflareAccess.DefaultTenant != "ten_aaaaaaaaaaaaaaaa" {
+					t.Fatalf("host-generated Access config: %+v", c.Console)
+				}
+			} else if c.Console.Auth != "key" || c.Console.CloudflareAccess.Team != "" ||
+				c.Console.CloudflareAccess.AUD != "" || len(c.Console.CloudflareAccess.Operators) != 0 ||
+				c.Console.CloudflareAccess.DefaultTenant != "" {
+				t.Fatalf("host-generated key config: %+v", c.Console)
+			}
+		})
 	}
 }
 

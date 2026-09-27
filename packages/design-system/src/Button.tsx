@@ -1,10 +1,10 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { ComponentPropsWithRef, ReactNode } from "react";
 import { Spinner } from "./Spinner.tsx";
 
 export type ButtonVariant = "default" | "primary" | "danger" | "ghost";
 export type ButtonSize = "sm" | "md" | "lg";
 
-export interface ButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children"> {
+export interface ButtonProps extends Omit<ComponentPropsWithRef<"button">, "children"> {
   variant?: ButtonVariant;
   size?: ButtonSize;
   loading?: boolean;
@@ -22,7 +22,7 @@ export function Button({ variant = "default", size = "md", loading = false, icon
   );
 }
 
-export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children"> {
+export interface IconButtonProps extends Omit<ComponentPropsWithRef<"button">, "children"> {
   /** Required: icon-only buttons need an accessible name. */
   label: string;
   size?: ButtonSize;

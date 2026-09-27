@@ -19,6 +19,8 @@ type Whoami struct {
 	// Email and Name: a person's, signed in through console auth (no key).
 	Email string `json:"email,omitempty"`
 	Name  string `json:"name,omitempty"`
+	// Picture: the person's photo URL, from the identity provider.
+	Picture string `json:"picture,omitempty"`
 	// ConsoleAuth is luxd's console auth: key or cloudflare-access.
 	ConsoleAuth string   `json:"consoleAuth"`
 	Scopes      []string `json:"scopes"`
@@ -32,7 +34,7 @@ type whoamiOutput struct {
 // knows what to offer without probing.
 func (s *Server) whoami(ctx context.Context, _ *struct{}) (*whoamiOutput, error) {
 	p := principal(ctx)
-	w := Whoami{Operator: p.Operator, KeyID: p.KeyID, Email: p.Email, Name: p.Name, Scopes: slices.Clone(p.Scopes),
+	w := Whoami{Operator: p.Operator, KeyID: p.KeyID, Email: p.Email, Name: p.Name, Picture: p.Picture, Scopes: slices.Clone(p.Scopes),
 		ConsoleAuth: cmp.Or(s.cfg.ConsoleAuth.Mode, "key")}
 	if !p.Operator {
 		w.TenantID = p.TenantID

@@ -139,22 +139,29 @@ or load balancer you already use for luxd.
 - **`key`** (the default): the console asks for an API key, kept for the
   browser tab's session only.
 - **`cloudflare-access`**: luxd sits behind a Cloudflare Access
-  application, and whoever Access lets in is an operator; the console
-  shows their name, and their actions are recorded as their email. Set
-  `console.cloudflare_access.team` and `.aud` (the application's AUD tag,
-  on its Overview page). luxd verifies every Access token itself (the
-  `Cf-Access-Jwt-Assertion` header or `CF_Authorization` cookie: signed by
-  the team's keys, for this application, not expired), so a request that
-  reaches luxd around Access gets nothing without a key. Access policies
-  decide who is an operator: keep the application's policy to the people
-  who should be (a policy letting in anyone with an email makes everyone an
-  operator). API keys still work alongside (the CLI, runners). The Access
-  cookie authenticates reads and requests from the console itself; a form
-  or script on another site cannot act with it (writes need the browser to
-  mark them same-origin, `Sec-Fetch-Site`; every current browser does).
-  Service tokens carry no email and are refused. The top bar shows who is
-  signed in; clicking the name signs out of Access
-  (`/cdn-cgi/access/logout`). In key mode, "Sign out" forgets the key.
+  application. Configure `console.cloudflare_access.team`, `.aud`,
+  `.operators` (an explicit list of operator email addresses), and
+  `.default_tenant` (an existing tenant ID, preferred, or exact name such as
+  `absmartly`). Missing or invalid settings prevent startup. Only an email
+  in the verified Access JWT can match the operator allowlist; matching is
+  case-insensitive. Every other Access user with a valid email is an `admin`
+  principal confined to the default tenant, including when `?tenant=` names
+  another tenant. An absent default tenant denies their requests; it never
+  promotes them to operator. Create the tenant and verify its ID before
+  enabling this mode. Keep Access policies restrictive as the default tenant
+  grants Run and admin operations to every admitted user. Never put personal
+  addresses in a public config example; keep the actual allowlist in private
+  deployment configuration. luxd verifies tokens (header or cookie): team
+  signature, issuer, audience and expiry. API keys still work alongside.
+  The Access cookie authenticates reads and same-origin writes only
+  (`Sec-Fetch-Site`). Service tokens without email are refused. Actions are
+  recorded as the JWT email. The foot of the sidebar shows who is signed
+  in, with a button to sign out of Access (`/cdn-cgi/access/logout`). Their
+  photo comes from the identity provider's `picture` claim: in Zero Trust,
+  add `picture` under the identity provider's OIDC claims (and make sure it
+  requests the `profile` scope); luxd reads it from Access's identity
+  endpoint (`oidc_fields.picture`, https URLs only). Without one, the
+  sidebar shows initials. In key mode, "Sign out" forgets the key.
 
   With a tunnel (`cloudflared`), `originRequest.access.required` can also
   refuse unauthenticated requests before they reach luxd.

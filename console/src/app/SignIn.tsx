@@ -14,9 +14,8 @@ export function SignIn({ reason }: { reason?: string }) {
     <div className="signin">
       <form className="signin-card" onSubmit={submit}>
         <div className="brand signin-brand">
-          <Logo className="brand-mark" />
-          <span className="brand-name">lux</span>
-          <span className="brand-sub">console</span>
+          <Logo size={26} className="brand-mark" />
+          <span className="brand-name">Lux</span>
         </div>
         <p className="secondary">Sign in with an API key. Operator keys see every tenant; tenant keys see their own.</p>
         {reason && (

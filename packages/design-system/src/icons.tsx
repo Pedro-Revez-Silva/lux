@@ -54,6 +54,22 @@ export const IconChevronUp = (p: IconProps) => (
     <path d="M4 10l4-4 4 4" />
   </Icon>
 );
+export const IconChevronLeft = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M10 3.5L5.5 8l4.5 4.5" />
+  </Icon>
+);
+export const IconChevronRight = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M6 3.5L10.5 8 6 12.5" />
+  </Icon>
+);
+export const IconKey = (p: IconProps) => (
+  <Icon {...p}>
+    <circle cx="5.5" cy="10.5" r="3" />
+    <path d="M7.7 8.3l5.8-5.8M11.5 4.5L13 6" />
+  </Icon>
+);
 export const IconClose = (p: IconProps) => (
   <Icon {...p}>
     <path d="M4 4l8 8M12 4l-8 8" />
@@ -178,12 +194,6 @@ export const IconRows = (p: IconProps) => (
 export const IconRowsLoose = (p: IconProps) => (
   <Icon {...p}>
     <path d="M2.5 4h11M2.5 8h11M2.5 12h11" />
-  </Icon>
-);
-export const IconSidebar = (p: IconProps) => (
-  <Icon {...p}>
-    <rect x="2" y="3" width="12" height="10" rx="1.5" />
-    <path d="M6 3v10" />
   </Icon>
 );
 export const IconPalette = (p: IconProps) => (

@@ -54,7 +54,7 @@ func main() {
 	cmd, args := rest[0], rest[1:]
 	var cfg config
 	switch cmd {
-	case "migrate", "admin", "serve":
+	case "migrate", "admin", "serve", "check-config":
 		if cfg, err = loadConfig(path); err != nil {
 			break
 		}
@@ -63,6 +63,8 @@ func main() {
 			break
 		}
 		switch cmd {
+		case "check-config":
+			// loadConfig has already parsed and validated the candidate.
 		case "migrate":
 			err = migrate(ctx, cfg)
 		case "admin":
@@ -87,7 +89,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: luxd [--config FILE] migrate | admin <command> | serve | openapi | version
+	fmt.Fprintln(os.Stderr, `usage: luxd [--config FILE] migrate | admin <command> | serve | check-config | openapi | version
 
 Configuration: FILE (TOML), else LUX_CONFIG, else /etc/lux/luxd.toml if it
 exists; environment variables override it (docs/operations.md).
@@ -206,9 +208,11 @@ func serve(ctx context.Context, c config) error {
 		},
 		Providers: providers(c),
 		ConsoleAuth: server.ConsoleAuth{
-			Mode:   c.Console.Auth,
-			CFTeam: c.Console.CloudflareAccess.Team,
-			CFAud:  c.Console.CloudflareAccess.AUD,
+			Mode:            c.Console.Auth,
+			CFTeam:          c.Console.CloudflareAccess.Team,
+			CFAud:           c.Console.CloudflareAccess.AUD,
+			CFOperators:     c.Console.CloudflareAccess.Operators,
+			CFDefaultTenant: c.Console.CloudflareAccess.DefaultTenant,
 		},
 	}, db, blobs, log)
 	return srv.Run(ctx)

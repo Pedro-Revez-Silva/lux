@@ -105,6 +105,11 @@ export function go(to: string) {
   navigate(scoped(to));
 }
 
+/** A plain left click: one a link follows here, not one the browser opens elsewhere (a new tab, a download). */
+export function isPlainClick(e: React.MouseEvent): boolean {
+  return !e.defaultPrevented && e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
+}
+
 /**
  * href and onClick for an anchor that navigates client-side and keeps the
  * scope query. Clicks never bubble (so a link inside a clickable table row
@@ -117,7 +122,7 @@ export function linkTo(to: string, search: string = currentSearch()): { href: st
     href: href(target),
     onClick: (e) => {
       e.stopPropagation();
-      if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      if (!isPlainClick(e)) return;
       e.preventDefault();
       navigate(target);
     },
