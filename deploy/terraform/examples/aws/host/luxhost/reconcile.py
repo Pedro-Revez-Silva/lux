@@ -143,7 +143,7 @@ class Run:
         self.restart_luxd = (not deploying or self.deferred_error) and restart["luxd"] and bool(installed)
         return installed
 
-    def enable(self, installed: str) -> None:
+    def enable(self) -> None:
         self.step = "enable"
         for timer in units.TIMERS:
             if units.enable_now(self.host, timer):
@@ -187,7 +187,7 @@ class Run:
         restart = self.write_units(infra)
         installed = self.luxd(infra, want, creds, restart)
         self.installed = installed
-        self.enable(installed)
+        self.enable()
         self.cloudflared(infra, restart)
         if self.deferred_error:
             self.step = "version"

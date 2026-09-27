@@ -125,17 +125,11 @@ def stable_links(current_link: str, bin_dir: str, runner_bin_dir: str) -> dict:
     }
 
 
-def switch_symlinks(version_dir: str, current_link: str, links: dict) -> dict:
-    """Points `current` and every stable link at the new version; returns
-    each link's previous target (None if absent) for restore_symlinks."""
-    previous = {
-        current_link: os.readlink(current_link) if os.path.islink(current_link) else None,
-    }
+def switch_symlinks(version_dir: str, current_link: str, links: dict) -> None:
+    """Points `current` and every stable link at the new version."""
     _atomic_symlink(version_dir, current_link)
     for link_path, target in links.items():
-        previous[link_path] = os.readlink(link_path) if os.path.islink(link_path) else None
         _atomic_symlink(target, link_path)
-    return previous
 
 
 def restore_symlinks(previous: dict, current_link: str, links: dict) -> None:
