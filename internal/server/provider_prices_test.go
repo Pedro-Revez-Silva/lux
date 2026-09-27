@@ -317,7 +317,7 @@ func TestProviderPricesSpotWindowBoundaryLeavesUnknownPriceMissing(t *testing.T)
 	}
 	rates := providerRates(t, s, "spot-boundary")
 	if len(p.spotCalls) != 2 || len(rates) != 2 || !rates[0].from.Equal(from) || rates[0].perHour != "0.1" ||
-		rates[0].open || !rates[0].to.Equal(change) || !rates[1].from.Equal(change) || rates[1].perHour != "0.2" || !rates[1].open {
+		rates[0].open || !rates[0].to.Equal(boundary) || !rates[1].from.Equal(change) || rates[1].perHour != "0.2" || rates[1].open {
 		t.Fatalf("unknown window start must not acquire a synthetic price: calls=%+v rates=%+v", p.spotCalls, rates)
 	}
 	if !p.spotCalls[0].to.Equal(boundary) || !p.spotCalls[1].from.Equal(boundary) {
@@ -378,10 +378,110 @@ func TestProviderPricesSpotLateHistorySettlesRunCost(t *testing.T) {
 	}
 	drain(t, s)
 	code, c = getCost(t, s, keys["t1"], "spot-run")
-	if code != http.StatusOK || c.Status != "final" || !c.Final || len(c.Lines) != 1 ||
-		c.Lines[0].Amount != "0.15" || !c.Lines[0].Final || len(c.Sources) != 1 ||
-		c.Sources[0].NextAt != nil || totals(c.Totals) != "/USD=0.15(f0.15,e0) " {
-		t.Fatalf("spot cost after settle: HTTP %d, cost %+v", code, c)
+	if code != http.StatusOK || c.Status != "complete" || c.Final || len(c.Lines) != 1 ||
+		c.Lines[0].Amount != "0.15" || c.Lines[0].Final || len(c.Sources) != 1 ||
+		c.Sources[0].NextAt == nil || totals(c.Totals) != "/USD=0.15(f0,e0.15) " {
+		t.Fatalf("spot cost remains eligible before time-based settlement: HTTP %d, cost %+v", code, c)
+	}
+}
+
+func TestProviderPricesSpotTerminatedHistoryAcrossWindows(t *testing.T) {
+	from := time.Now().UTC().Add(-80 * time.Hour).Truncate(time.Microsecond)
+	boundary := from.Add(24 * time.Hour)
+	change := from.Add(30 * time.Hour)
+	end := from.Add(49 * time.Hour)
+	p := &fakePriceProvider{spot: [][]SpotRate{
+		{{At: from, HourlyRate: HourlyRate{PerHour: "0.1", Currency: "USD"}}},
+		{{At: boundary, HourlyRate: HourlyRate{PerHour: "0.1", Currency: "USD"}},
+			{At: change, HourlyRate: HourlyRate{PerHour: "0.2", Currency: "USD"}}},
+		{{At: from.Add(48 * time.Hour), HourlyRate: HourlyRate{PerHour: "0.2", Currency: "USD"}}},
+	}}
+	s, keys := costFixture(t)
+	s.cfg.Costs = CostsConfig{Enabled: true, ComputeEC2: true, Every: time.Minute, Batch: DefaultCostsBatch,
+		Prices: map[string]PriceProvider{"ec2": p}}
+	insertProviderHost(t, s, "t1", "burst", "ec2", "spot-49h", MarketSpot, from)
+	execSQL(t, s, context.Background(), `UPDATE hosts SET terminated_at = $1 WHERE id = 'spot-49h'`, end)
+	placeRun(t, s, "t1", "spot-49h-run", StateRunning, "spot-49h", placementWindow{
+		From: from, To: &end, CPUs: 4, Memory: 16 * gib,
+	})
+	finish(t, s, "t1", "spot-49h-run", StateSucceeded)
+	drain(t, s)
+
+	s.refreshPrices(context.Background())
+	if calls := p.spotCalls; len(calls) != 1 || !calls[0].from.Equal(from) || !calls[0].to.Equal(boundary) {
+		t.Fatalf("first bounded request: %+v", calls)
+	}
+	if rates := providerRates(t, s, "spot-49h"); len(rates) != 1 || rates[0].open || !rates[0].to.Equal(boundary) {
+		t.Fatalf("unqueried tail must not acquire an open rate: %+v", rates)
+	}
+	drain(t, s)
+	if _, c := getCost(t, s, keys["t1"], "spot-49h-run"); c.Status != "incomplete" || c.Final {
+		t.Fatalf("unqueried placement tail must remain incomplete: %+v", c)
+	}
+	s.refreshPrices(context.Background())
+	s.refreshPrices(context.Background())
+	if calls := p.spotCalls; len(calls) != 3 || !calls[1].from.Equal(boundary) || !calls[1].to.Equal(from.Add(48*time.Hour)) ||
+		!calls[2].from.Equal(from.Add(48*time.Hour)) || !calls[2].to.Equal(end) {
+		t.Fatalf("historical gap requests: %+v", calls)
+	}
+	rates := providerRates(t, s, "spot-49h")
+	if len(rates) != 4 || rates[0].open || !rates[0].to.Equal(boundary) || rates[1].open || !rates[1].to.Equal(change) ||
+		rates[2].open || !rates[2].to.Equal(from.Add(48*time.Hour)) || !rates[3].open || !rates[3].from.Equal(from.Add(48*time.Hour)) {
+		t.Fatalf("bounded historical rates: %+v", rates)
+	}
+	execSQL(t, s, context.Background(), `SELECT lux_cost_enqueue('spot-49h-run', 'retry')`)
+	drain(t, s)
+	if _, c := getCost(t, s, keys["t1"], "spot-49h-run"); c.Status != "complete" || c.Final || len(c.Lines) != 1 || c.Lines[0].Amount != "6.8" {
+		t.Fatalf("49h cost after all windows checked: %+v", c)
+	}
+}
+
+func TestProviderPricesSpotDelayedChangeAfterTwoCompleteAnswers(t *testing.T) {
+	from := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Microsecond)
+	change := from.Add(time.Hour)
+	end := from.Add(2 * time.Hour)
+	p := &fakePriceProvider{spot: [][]SpotRate{
+		{{At: from, HourlyRate: HourlyRate{PerHour: "0.1", Currency: "USD"}}},
+		{{At: from, HourlyRate: HourlyRate{PerHour: "0.1", Currency: "USD"}}},
+		{{At: from, HourlyRate: HourlyRate{PerHour: "0.1", Currency: "USD"}},
+			{At: change, HourlyRate: HourlyRate{PerHour: "0.2", Currency: "USD"}}},
+	}}
+	s, keys := costFixture(t)
+	s.cfg.Costs = CostsConfig{Enabled: true, ComputeEC2: true, Every: time.Minute, Batch: DefaultCostsBatch,
+		Prices: map[string]PriceProvider{"ec2": p}}
+	insertProviderHost(t, s, "t1", "burst", "ec2", "spot-delayed", MarketSpot, from)
+	execSQL(t, s, context.Background(), `UPDATE hosts SET terminated_at = $1 WHERE id = 'spot-delayed'`, end)
+	placeRun(t, s, "t1", "spot-delayed-run", StateRunning, "spot-delayed", placementWindow{
+		From: from, To: &end, CPUs: 4, Memory: 16 * gib,
+	})
+	finish(t, s, "t1", "spot-delayed-run", StateSucceeded)
+	drain(t, s)
+	for i := range 2 {
+		s.refreshPrices(context.Background())
+		execSQL(t, s, context.Background(), `SELECT lux_cost_enqueue('spot-delayed-run', 'retry')`)
+		drain(t, s)
+		if _, c := getCost(t, s, keys["t1"], "spot-delayed-run"); c.Status != "complete" || c.Final || len(c.Lines) != 1 || c.Lines[0].Amount != "0.2" {
+			t.Fatalf("complete answer %d must not finalize: %+v", i+1, c)
+		}
+	}
+	s.refreshPrices(context.Background())
+	execSQL(t, s, context.Background(), `SELECT lux_cost_enqueue('spot-delayed-run', 'retry')`)
+	drain(t, s)
+	if _, c := getCost(t, s, keys["t1"], "spot-delayed-run"); c.Status != "complete" || c.Final || c.Lines[0].Amount != "0.3" {
+		t.Fatalf("late price must update estimated cost: %+v", c)
+	}
+	execSQL(t, s, context.Background(), `SELECT lux_cost_enqueue('spot-delayed-run', 'retry')`)
+	settled := claimOne(t, s)
+	settled.now = time.Now().Add(costSpotSettle + time.Minute)
+	if err := settled.write(s); err != nil {
+		t.Fatal(err)
+	}
+	if _, c := getCost(t, s, keys["t1"], "spot-delayed-run"); c.Status != "final" || !c.Final || len(c.Lines) != 1 || c.Lines[0].Amount != "0.3" || !c.Lines[0].Final {
+		t.Fatalf("settled spot cost: %+v", c)
+	}
+	s.refreshPrices(context.Background())
+	if len(p.spotCalls) != 3 {
+		t.Fatalf("finalized host was queried again: %+v", p.spotCalls)
 	}
 }
 

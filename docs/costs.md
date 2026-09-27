@@ -794,10 +794,14 @@ where it differs from the above:
   the resume's transaction. It also queues the Run (`state:resuming`),
   which frees any claim: a drainer's result, read while the Run was still
   finished, is not written.
-- Spot compute waits for one additional complete evaluation after the first
-  complete terminal answer. Missing rates and errors do not consume that
-  round; the pending retry and `settles_left` survive a restart. A resume
-  clears the round along with finality.
+- Spot compute remains estimated for at least 24 hours after both the Run
+  finishes and its latest spot host terminates. During that window terminated
+  hosts remain eligible for spot refresh and incomplete/estimated Runs keep
+  retrying. Bounded history requests close rates at historical window edges
+  so unchecked hours remain missing until queried. The refresh revisits only
+  the latest 24 hours of a fully covered terminated host: corrections outside
+  that finite lookback, or arriving after settlement, cannot change final costs.
+  A resume clears finality as usual.
 
 ## 6. Sessions: where the full list comes from
 

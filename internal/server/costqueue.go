@@ -49,6 +49,8 @@ const (
 	// [costs] backoff and settle keys, with the plugins, will replace these.)
 	costRetryMax = time.Hour
 	costGiveUp   = 7 * 24 * time.Hour
+	// Spot history can arrive after multiple successful cost evaluations.
+	costSpotSettle = 24 * time.Hour
 )
 
 // CostsConfig: the cost tick and drainer. Not Enabled: neither runs (state
@@ -241,6 +243,8 @@ type computeEval struct {
 	Open bool
 	// Spot: at least one placement ran on a spot host.
 	Spot bool
+	// Latest termination of a spot host used by this Run, if any.
+	SpotEnded *time.Time
 	// Err: a host it ran on could not be priced (overlapping periods).
 	Err error
 }
@@ -324,14 +328,17 @@ func evaluateCompute(ctx context.Context, tx pgx.Tx, runs []string) (map[string]
 	hostIDs := slices.Sorted(maps.Keys(windows))
 	hosts := map[string]costHost{}
 	rows, err = tx.Query(ctx, `SELECT id, provision_requested_at IS NOT NULL,
-			coalesce(instance_type, launch_template->>'instanceType', ''), coalesce(market, ''), coalesce(zone, '')
+			coalesce(instance_type, launch_template->>'instanceType', ''), coalesce(market, ''), coalesce(zone, ''), terminated_at
 		FROM hosts WHERE id = ANY($1)`, hostIDs)
 	if err != nil {
 		return nil, now, err
 	}
 	var h costHost
-	if _, err := pgx.ForEachRow(rows, []any{&host, &h.Provider, &h.Type, &h.Market, &h.Zone}, func() error {
+	var hostEnded *time.Time
+	ended := map[string]*time.Time{}
+	if _, err := pgx.ForEachRow(rows, []any{&host, &h.Provider, &h.Type, &h.Market, &h.Zone, &hostEnded}, func() error {
 		hosts[host] = h
+		ended[host] = hostEnded
 		return nil
 	}); err != nil {
 		return nil, now, err
@@ -348,6 +355,9 @@ func evaluateCompute(ctx context.Context, tx pgx.Tx, runs []string) (map[string]
 			for _, p := range in.Placements {
 				if e := evals[p.RunID]; e != nil {
 					e.Spot = true
+					if stop := ended[hostID]; stop != nil && (e.SpotEnded == nil || stop.After(*e.SpotEnded)) {
+						e.SpotEnded = stop
+					}
 				}
 			}
 		}
@@ -521,24 +531,21 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *c
 		return err
 	}
 	final := e.final()
-	var settlesLeft *int
 	var attempts int
-	if terminal(e.State) && (e.Spot || !final) {
-		err := tx.QueryRow(ctx, `SELECT attempts, settles_left FROM cost_sources WHERE run_id = $1 AND source = 'compute'`, runID).
-			Scan(&attempts, &settlesLeft)
+	if terminal(e.State) {
+		err := tx.QueryRow(ctx, `SELECT attempts FROM cost_sources WHERE run_id = $1 AND source = 'compute'`, runID).
+			Scan(&attempts)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
 	}
 	if terminal(e.State) && e.Spot {
-		if final {
-			if settlesLeft == nil {
-				n := 1
-				settlesLeft = &n
-			} else if *settlesLeft > 0 {
-				*settlesLeft--
-			}
-			final = *settlesLeft == 0
+		settleFrom := e.FinishedAt
+		if e.SpotEnded != nil && (settleFrom == nil || e.SpotEnded.After(*settleFrom)) {
+			settleFrom = e.SpotEnded
+		}
+		if settleFrom == nil || now.Before(settleFrom.Add(costSpotSettle)) {
+			final = false
 		}
 	}
 	status, lastError := "ok", ""
@@ -577,7 +584,7 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *c
 			answered_at = coalesce(EXCLUDED.answered_at, cost_sources.answered_at),
 			attempts = EXCLUDED.attempts, next_at = EXCLUDED.next_at,
 			settles_left = EXCLUDED.settles_left, last_error = EXCLUDED.last_error`,
-		runID, e.TenantID, status, e.Err == nil, attempts, nextAt, settlesLeft, lastError); err != nil {
+		runID, e.TenantID, status, e.Err == nil, attempts, nextAt, nil, lastError); err != nil {
 		return err
 	}
 	_, err := tx.Exec(ctx, `DELETE FROM cost_pending WHERE run_id = $1`, runID)
