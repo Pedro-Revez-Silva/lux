@@ -36,10 +36,10 @@ func TestHostHourOnceRoundedAndMissingRateRetry(t *testing.T) {
 	s.cfg.Costs.Batch = 1
 	s.cfg.Costs.Hourly = 48 * time.Hour
 	hour := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at, terminated_at, capacity)
-		VALUES ('h-round','h-round','p','terminated',$1,$2,'{"cpus":2,"memory":2}')`, hour, hour.Add(time.Hour))
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, provision_requested_at, registered_at, terminated_at, capacity)
+		VALUES ('h-round','h-round','p','terminated',$1,$1,$2,'{"cpus":2,"memory":2}')`, hour, hour.Add(time.Hour))
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
-		VALUES ('h-round',$1,$2,0.000000001,'USD',2,2,'static')`, hour, hour.Add(30*time.Minute))
+		VALUES ('h-round',$1,$2,0.000000001,'USD',2,2,'aws-pricing')`, hour, hour.Add(30*time.Minute))
 	if err := s.updateHostHours(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestHostHourOnceRoundedAndMissingRateRetry(t *testing.T) {
 		t.Fatalf("missing-rate hour has %d pending intervals, want 1", pendingGaps)
 	}
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
-		VALUES ('h-round',$1,$2,0.000000001,'USD',2,2,'static')`, hour.Add(30*time.Minute), hour.Add(time.Hour))
+		VALUES ('h-round',$1,$2,0.000000001,'USD',2,2,'aws-pricing')`, hour.Add(30*time.Minute), hour.Add(time.Hour))
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at, ended_at)
 		VALUES ('p-round','t1','r1','h-round',1,'exited','{"cpus":1,"memory":1}',$1,$2)`, hour, hour.Add(time.Hour))
 	execSQL(t, s, ctx, `UPDATE cost_host_hour_gaps SET retry_at = now() - interval '1 second' WHERE host_id = 'h-round'`)
@@ -409,6 +409,111 @@ func TestHostHoursPendingGapExpiresWithRetention(t *testing.T) {
 	systemScan(t, s, `SELECT count(*) FROM cost_host_hour_gaps WHERE host_id = 'h-expiring-gap'`, nil, &count)
 	if count != 0 {
 		t.Fatalf("expired pending intervals: %d", count)
+	}
+}
+
+func TestHostHoursBatchTwoRetriesSameHostOlderGap(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 2
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	current := time.Now().UTC().Truncate(time.Hour)
+	old := current.Add(-3 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at)
+		VALUES ('h-same-host', 'h-same-host', 'p', 'ready', $1)`, old)
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('h-same-host', $1, 4, 'USD', 1, 1, 'static')`, old)
+	execSQL(t, s, ctx, `INSERT INTO cost_host_refresh (host_id, next_hour) VALUES ('h-same-host', $1)`, current)
+	execSQL(t, s, ctx, `INSERT INTO cost_host_hour_gaps (host_id, hour, missing_from, missing_to, reason, retry_at)
+		VALUES ('h-same-host', $1, $1, $2, 'rate_pending', now() - interval '1 second')`, old, old.Add(time.Hour))
+	if err := s.updateHostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	systemScan(t, s, `SELECT count(*) FROM cost_host_hour_gaps WHERE host_id = 'h-same-host'`, nil, &count)
+	if count != 0 {
+		t.Fatalf("same-host older gap remained after batch of two: %d", count)
+	}
+	systemScan(t, s, `SELECT count(*) FROM cost_hourly WHERE host_id = 'h-same-host' AND hour IN ($1, $2) AND run_id IS NULL`, []any{old, current}, &count)
+	if count != 2 {
+		t.Fatalf("refreshed %d distinct host hours, want 2", count)
+	}
+}
+
+func TestHostHoursPartialStaticTerminatedGapIsNotRetried(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 1
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	registered := hour.Add(10 * time.Minute)
+	priced := hour.Add(30 * time.Minute)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at, terminated_at)
+		VALUES ('h-static-partial', 'h-static-partial', 'p', 'terminated', $1, $2)`, registered, hour.Add(time.Hour))
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('h-static-partial', $1, $2, 4, 'USD', 1, 1, 'static')`, priced, hour.Add(time.Hour))
+	if err := s.updateHostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var from, to time.Time
+	var reason string
+	var retry *time.Time
+	systemScan(t, s, `SELECT missing_from, missing_to, reason, retry_at FROM cost_host_hour_gaps
+		WHERE host_id = 'h-static-partial'`, nil, &from, &to, &reason, &retry)
+	if !from.Equal(registered) || !to.Equal(priced) || reason != "static_unpriced" || retry != nil {
+		t.Fatalf("partial static missing interval %s to %s: %s retry %v", from, to, reason, retry)
+	}
+	var amount string
+	systemScan(t, s, `SELECT trim_scale(unallocated)::text FROM cost_hourly
+		WHERE host_id = 'h-static-partial' AND hour = $1 AND run_id IS NULL`, []any{hour}, &amount)
+	if amount != "2" {
+		t.Fatalf("priced half-hour idle %s, want 2", amount)
+	}
+	if err := peer(s, "restart").updateHostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var gaps int
+	systemScan(t, s, `SELECT count(*) FROM cost_host_hour_gaps WHERE host_id = 'h-static-partial' AND retry_at IS NOT NULL`, nil, &gaps)
+	if gaps != 0 {
+		t.Fatalf("static host scheduled %d pointless retries", gaps)
+	}
+}
+
+func TestHostHoursLastRetainedGapRetriesBeforeExpiry(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 1
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
+	// Put the retention cutoff near the end of the oldest hour (HH:59).
+	s.cfg.Costs.Hourly = time.Since(hour) + 8*time.Second
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, provision_requested_at, registered_at, terminated_at)
+		VALUES ('h-boundary', 'h-boundary', 'p', 'terminated', $1, $1, $2)`, hour, hour.Add(time.Hour))
+	if err := s.updateHostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var retry time.Time
+	systemScan(t, s, `SELECT retry_at FROM cost_host_hour_gaps WHERE host_id = 'h-boundary'`, nil, &retry)
+	if !retry.After(time.Now()) || !retry.Before(hour.Add(s.cfg.Costs.Hourly)) {
+		t.Fatalf("retry %s must precede retention boundary %s", retry, hour.Add(s.cfg.Costs.Hourly))
+	}
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('h-boundary', $1, $2, 4, 'USD', 1, 1, 'aws-pricing')`, hour, hour.Add(time.Hour))
+	if wait := time.Until(retry); wait > 0 {
+		time.Sleep(wait + 20*time.Millisecond)
+	}
+	if err := s.updateHostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var gaps int
+	systemScan(t, s, `SELECT count(*) FROM cost_host_hour_gaps WHERE host_id = 'h-boundary'`, nil, &gaps)
+	if gaps != 0 {
+		t.Fatalf("recovered last retained hour left %d gaps", gaps)
+	}
+	var amount string
+	systemScan(t, s, `SELECT trim_scale(unallocated)::text FROM cost_hourly
+		WHERE host_id = 'h-boundary' AND hour = $1 AND run_id IS NULL`, []any{hour}, &amount)
+	if amount != "4" {
+		t.Fatalf("recovered last retained hour idle %s, want 4", amount)
 	}
 }
 

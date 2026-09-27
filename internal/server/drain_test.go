@@ -113,6 +113,85 @@ func waitForRunWaiter(t *testing.T, s *Server, ctx context.Context, runID string
 	}
 }
 
+// A force drain holding the Run commits its stop while the timeout reaper
+// waits for that Run. The reaper must not replace the drain reason with timeout.
+func TestTimeoutReaperInterleavesWithForceDrain(t *testing.T) {
+	s := testServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	drainFixture(t, s, ctx)
+	execSQL(t, s, ctx, `UPDATE runs SET spec = '{"timeout":"1s"}', first_started_at = now() - interval '1 hour' WHERE id = 'r1'`)
+	execSQL(t, s, ctx, `UPDATE placements SET started_at = now() - interval '1 hour' WHERE id = 'p1'`)
+	locked, release := make(chan int, 1), make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	drain := make(chan error, 1)
+	go func() {
+		drain <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			if err := lockReaperRuns(ctx, tx, []string{"r1"}); err != nil {
+				return err
+			}
+			var pid int
+			if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+				return err
+			}
+			locked <- pid
+			<-release
+			_, err := s.drainHosts(ctx, tx, "drain requested", causeManual, "drain", "id = $1", "h1")
+			return err
+		})
+	}()
+	drainPID := <-locked
+	reaper := make(chan error, 1)
+	go func() { reaper <- s.reapTimeouts(ctx) }()
+	// Observe the reaper blocked by the drain's Run lock before committing
+	// the stop; scheduling alone does not prove the reaper saw the due Run.
+	for {
+		var waiting bool
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+				WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid)))`, drainPID).Scan(&waiting)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("reaper did not wait for drain Run lock: %v", ctx.Err())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(release)
+	for _, ch := range []chan error{drain, reaper} {
+		if err := <-ch; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if draining, stopped, reason := drainState(t, s, ctx, "h1", "r1"); !draining || !stopped || reason != "drain" {
+		t.Fatalf("draining=%v stopped=%v reason=%q, want true/true/drain", draining, stopped, reason)
+	}
+	var runState string
+	var timeoutStops int
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT state FROM runs WHERE id = 'r1'`).Scan(&runState); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT count(*) FROM run_events WHERE run_id = 'r1' AND data->>'reason' = 'timeout'`).Scan(&timeoutStops)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if runState != StateStopping || timeoutStops != 0 {
+		t.Fatalf("run state=%q timeout events=%d, want stopping/0", runState, timeoutStops)
+	}
+}
+
 // Reconciliation takes the Run lock after registration commits. A competing
 // session holding that Run can update the host and commit before reconciliation.
 func TestHelloReconciliationWaitsForRunBeforeHost(t *testing.T) {
