@@ -211,12 +211,7 @@ func (s *Server) refreshPrices(ctx context.Context) {
 			if h.To != nil && recent.Before(until) {
 				recentWindows[h.ID] = spotWindowRequest{recent, until}
 			}
-			if h.To == nil {
-				recent = maxTime(from, now.Add(-spotWindow))
-				if recent.Before(until) {
-					windows = append(windows, spotWindowRequest{recent, until})
-				}
-			} else if !gapFrom.Before(gapTo) && recent.Before(until) {
+			if (h.To == nil || !gapFrom.Before(gapTo)) && recent.Before(until) {
 				windows = append(windows, spotWindowRequest{recent, until})
 			}
 			if gapFrom.Before(gapTo) && (h.To != nil || gapFrom.Before(recent)) {
