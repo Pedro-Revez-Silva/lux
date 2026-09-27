@@ -377,6 +377,8 @@ def desired(version: str = "none", extra: str = "") -> str:
         f'lux_version = "{version}"\n'
         f'release_base_url = "{FakeWeb.BASE_URL}"\n'
         f"{extra}"
+        '\n[console.cloudflare_access]\noperators = ["operator@example.com"]\n'
+        'default_tenant = "ten_aaaaaaaaaaaaaaaa"\n'
     )
 
 

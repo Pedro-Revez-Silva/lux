@@ -4,9 +4,10 @@ Everything is checked before any reconcile step runs, so a bad file fails
 the run without touching Postgres, luxd.toml, the units or the install.
 The [luxd] table is a subset of luxd.toml (cmd/luxd/config.go) limited to
 operator choices; infrastructure values (listen, public_url, database, s3,
-console) come from SSM and are refused here.
+console auth and Cloudflare team/AUD) come from SSM and are refused here.
 """
 import dataclasses
+from email.utils import parseaddr
 import math
 import re
 import tomllib
@@ -25,6 +26,8 @@ _SIZE_MULT = {None: 1, "K": 1e3, "M": 1e6, "G": 1e9, "T": 1e12,
 _INT64_MAX = (1 << 63) - 1
 _VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 _REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_TENANT_ID = re.compile(r"ten_[a-z2-7]{16}\Z")
+_EMAIL = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\Z")
 
 
 def _duration(v):
@@ -92,6 +95,7 @@ class Desired:
     # Validated luxd.toml settings: top-level keys, and {table: {key: value}}.
     luxd: dict
     luxd_tables: dict
+    cloudflare_access: dict
 
 
 def _check_table(table: dict, allowed: dict, where: str, problems: list) -> dict:
@@ -106,6 +110,15 @@ def _check_table(table: dict, allowed: dict, where: str, problems: list) -> dict
             continue
         out[k] = v
     return out
+
+
+def _operators(v):
+    if not isinstance(v, list) or not v:
+        return False
+    if any(not isinstance(email, str) or not _EMAIL.fullmatch(email) or
+           parseaddr(email) != ("", email) for email in v):
+        return False
+    return len({email.lower() for email in v}) == len(v)
 
 
 def parse(text: str, source: str = "lux-host.toml") -> Desired:
@@ -148,6 +161,26 @@ def parse(text: str, source: str = "lux-host.toml") -> Desired:
                 tables[name] = checked
         top = _check_table(luxd, _LUXD_KEYS, "luxd", problems)
 
+    console = doc.pop("console", {})
+    access = {}
+    if not isinstance(console, dict):
+        problems.append("console: want a table")
+    else:
+        access_present = "cloudflare_access" in console
+        cf = console.pop("cloudflare_access", {})
+        if not isinstance(cf, dict):
+            problems.append("console.cloudflare_access: want a table")
+        else:
+            access = _check_table(cf, {
+                "operators": (_operators, "a nonempty list of distinct plain email addresses"),
+                "default_tenant": (lambda v: isinstance(v, str) and bool(_TENANT_ID.fullmatch(v)),
+                                   "an existing stable tenant ID (ten_ followed by 16 base32 characters)"),
+            }, "console.cloudflare_access", problems)
+            if access_present and ("operators" not in access or "default_tenant" not in access):
+                problems.append("console.cloudflare_access: operators and default_tenant are both required")
+        for k in console:
+            problems.append(f"console.{k}: unknown key")
+
     for k in doc:
         problems.append(f"{k}: unknown key")
     if problems:
@@ -157,4 +190,5 @@ def parse(text: str, source: str = "lux-host.toml") -> Desired:
         release_base_url=base_url.rstrip("/"),
         luxd=top,
         luxd_tables=tables,
+        cloudflare_access=access,
     )

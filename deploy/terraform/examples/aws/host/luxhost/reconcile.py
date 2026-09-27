@@ -165,6 +165,14 @@ class Run:
         infra = load_infra(self.host, self.boot)
         self.sync_checkout(infra)
         want = self.load_desired()
+        self.step = "console-access"
+        if infra["cf_access_team"] and infra["cf_access_aud"]:
+            if not want.cloudflare_access:
+                raise HostError("console.cloudflare_access needs operators and default_tenant in private lux-host.toml")
+        elif want.cloudflare_access:
+            raise HostError("console.cloudflare_access needs a Cloudflare Access team and AUD in SSM")
+        elif infra["cf_access_team"] or infra["cf_access_aud"]:
+            raise HostError("Cloudflare Access needs both team and AUD in SSM")
         self.remove_legacy()
         self.packages()
         creds = self.postgres(infra)

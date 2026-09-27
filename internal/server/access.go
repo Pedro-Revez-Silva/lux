@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/mail"
 	"strings"
@@ -10,6 +12,9 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/store"
 )
 
 // ConsoleAuth configures key or Cloudflare Access authentication.
@@ -139,6 +144,39 @@ func (a *cfAccess) name(ctx context.Context, email, token string) string {
 	return name
 }
 
+// initCFTenant binds the configured name to its current ID before serving.
+// An absent tenant leaves operator access available but no tenant access.
+func (s *Server) initCFTenant(ctx context.Context) error {
+	if s.cfAccess == nil || s.cfg.ConsoleAuth.CFDefaultTenant == "" {
+		return nil
+	}
+	id, err := s.resolveTenant(ctx, s.cfg.ConsoleAuth.CFDefaultTenant)
+	if he, ok := err.(*HTTPError); ok && he.Status == http.StatusNotFound {
+		s.cfTenantID = ""
+		s.log.Warn("Cloudflare Access default tenant is unavailable", "tenant", s.cfg.ConsoleAuth.CFDefaultTenant)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("resolve Cloudflare Access default tenant: %w", err)
+	}
+	s.cfTenantID = id
+	return nil
+}
+
+func (s *Server) accessTenant(ctx context.Context) (string, error) {
+	if s.cfTenantID == "" {
+		return "", errf(http.StatusForbidden, "forbidden", "Cloudflare Access default tenant is unavailable")
+	}
+	var id string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT id FROM tenants WHERE id = $1`, s.cfTenantID).Scan(&id)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", errf(http.StatusForbidden, "forbidden", "Cloudflare Access default tenant is unavailable")
+	}
+	return id, err
+}
+
 // consoleUser authenticates an Access user as an allowlisted operator or as
 // the configured default tenant. Only the verified JWT email selects a role.
 func (s *Server) consoleUser(r *http.Request, scope string) (Principal, error) {
@@ -169,11 +207,8 @@ func (s *Server) consoleUser(r *http.Request, scope string) (Principal, error) {
 		if !p.Can(scope) {
 			return p, errf(http.StatusForbidden, "forbidden", "scope %q", scope)
 		}
-		id, err := s.resolveTenant(r.Context(), ref)
+		id, err := s.accessTenant(r.Context())
 		if err != nil {
-			if httpErr, ok := err.(*HTTPError); ok && httpErr.Status == http.StatusNotFound {
-				return p, errf(http.StatusForbidden, "forbidden", "Cloudflare Access default tenant is unavailable")
-			}
 			return p, err
 		}
 		p.TenantID = id
