@@ -45,6 +45,14 @@ minutes = "720h"                   # LUX_HISTORY_MINUTES
 hours = "9600h"                    # LUX_HISTORY_HOURS
 disk_paths = ["/"]                 # LUX_HISTORY_DISK_PATHS (comma-separated): filesystems of luxd's own machine to chart; a missing one is skipped; [] tracks none
 
+[costs]
+# What each Run costs (docs/costs.md): a tick queues every live Run, and every
+# luxd drains the queue. Off stops both (state changes still queue their Runs).
+enabled = true                     # LUX_COSTS
+every = "2m"                       # LUX_COSTS_EVERY: the active-Run tick
+drain_every = "2s"                 # LUX_COSTS_DRAIN_EVERY: queue poll (also woken by Run events)
+batch = 1000                       # LUX_COSTS_BATCH: Runs one drain claims
+
 [ec2]
 endpoint = ""                      # LUX_EC2_ENDPOINT (tests)
 
