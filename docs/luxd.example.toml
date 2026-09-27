@@ -53,6 +53,12 @@ every = "2m"                       # LUX_COSTS_EVERY: the active-Run tick
 drain_every = "2s"                 # LUX_COSTS_DRAIN_EVERY: queue poll (also woken by Run events)
 batch = 1000                       # LUX_COSTS_BATCH: Runs one drain claims
 
+[costs.compute]
+ec2 = true                         # LUX_COSTS_COMPUTE_EC2: price EC2 hosts
+prices_refresh = "24h"             # LUX_COSTS_PRICES_REFRESH: on-demand price cache
+pricing_region = "us-east-1"       # LUX_COSTS_PRICING_REGION: where the Pricing API is called
+pricing_endpoint = ""              # LUX_PRICING_ENDPOINT (tests)
+
 [ec2]
 endpoint = ""                      # LUX_EC2_ENDPOINT (tests)
 

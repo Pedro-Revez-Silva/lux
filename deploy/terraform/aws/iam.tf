@@ -215,6 +215,15 @@ resource "aws_iam_role_policy" "control_luxd" {
         Resource = "*" # DescribeInstances does not support resource-level permissions.
       },
       {
+        Sid    = "ReadPrices"
+        Effect = "Allow"
+        Action = [
+          "pricing:GetProducts",
+          "ec2:DescribeSpotPriceHistory",
+        ]
+        Resource = "*" # Neither pricing action supports resource-level permissions.
+      },
+      {
         Sid    = "Blobs"
         Effect = "Allow"
         Action = [

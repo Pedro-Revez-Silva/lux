@@ -88,6 +88,10 @@ its variable; the table below lists them by variable.
 | `LUX_COSTS_EVERY` | `2m` | The cost tick: every live Run's costs are evaluated once per interval, by one luxd. |
 | `LUX_COSTS_DRAIN_EVERY` | `2s` | How often each luxd polls the cost queue, besides being woken by Run events. |
 | `LUX_COSTS_BATCH` | `1000` | How many Runs one drain claims. |
+| `LUX_COSTS_COMPUTE_EC2` | `true` | Price EC2 hosts using AWS on-demand and spot list prices. |
+| `LUX_COSTS_PRICES_REFRESH` | `24h` | Refresh interval for the on-demand price cache. |
+| `LUX_COSTS_PRICING_REGION` | `us-east-1` | AWS region for the Pricing API, independent of the host's region. |
+| `LUX_PRICING_ENDPOINT` | AWS | Overrides the Pricing API endpoint (tests). |
 | `LUX_DEBUG` | — | Debug logging. |
 | `LUX_CONSOLE_AUTH` | `key` | How the console signs people in: `key` or `cloudflare-access` ([Operators](operators.md#signing-in)). |
 | `LUX_CF_ACCESS_TEAM`, `LUX_CF_ACCESS_AUD` | — | For `cloudflare-access`: the Access team (`acme` or `acme.cloudflareaccess.com`) and the application's AUD tag. |
@@ -368,9 +372,14 @@ What an instance needs:
   wherever images, git remotes and model APIs live, and an instance
   profile if the runner needs one (it doesn't hold S3 credentials).
 - luxd needs EC2 permissions for `RunInstances` (with the launch template
-  and `CreateTags`), `TerminateInstances` and `DescribeInstances`, from its
-  standard AWS configuration (environment or instance role).
-  `LUX_EC2_ENDPOINT` overrides the endpoint.
+  and `CreateTags`), `TerminateInstances` and `DescribeInstances`, plus
+  `pricing:GetProducts` for on-demand prices and
+  `ec2:DescribeSpotPriceHistory` for spot prices, from its standard AWS
+  configuration (environment or instance role). Both pricing actions are
+  read-only and require `Resource: "*"`; the runner needs neither. The
+  Pricing API uses `LUX_COSTS_PRICING_REGION` regardless of the host's
+  region. `LUX_EC2_ENDPOINT` and `LUX_PRICING_ENDPOINT` override their
+  respective endpoints for tests.
 
 `template.userData` picks the format (default `"ignition"`); a pool set
 with an unrecognized value is refused, not left to fail at boot:
