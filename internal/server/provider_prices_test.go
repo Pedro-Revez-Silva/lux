@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"net/http"
 	"reflect"
 	"testing"
 	"time"
@@ -144,7 +145,7 @@ func TestProviderPricesOnDemandCacheRefreshAndRetry(t *testing.T) {
 		t.Fatalf("first refresh: calls=%d cached=%q, want one call and 0.1", p.onDemandCalls, cachedProviderRate(t, s))
 	}
 	first := providerRates(t, s, "od")
-	if len(first) != 1 || first[0].perHour != "0.1" || !first[0].open || !first[0].from.Equal(from) {
+	if len(first) != 1 || first[0].perHour != "0.1" || !first[0].open || !first[0].from.After(from) {
 		t.Fatalf("first on-demand period: %+v", first)
 	}
 
@@ -273,5 +274,161 @@ func TestProviderPricesSpotPeriodsFillGapsWithoutRewritingClosedRates(t *testing
 		if rate.source != "ec2-spot-history" {
 			t.Errorf("spot period source = %q, want ec2-spot-history", rate.source)
 		}
+	}
+}
+
+func TestProviderPricesSpotWindowBoundaryLeavesUnknownPriceMissing(t *testing.T) {
+	from := time.Now().UTC().Add(-49 * time.Hour).Truncate(time.Microsecond)
+	boundary := from.Add(24 * time.Hour)
+	change := boundary.Add(time.Hour)
+	p := &fakePriceProvider{spot: [][]SpotRate{
+		{{At: from, HourlyRate: HourlyRate{PerHour: "0.1", Currency: "USD"}}},
+		{{At: change, HourlyRate: HourlyRate{PerHour: "0.2", Currency: "USD"}}},
+	}}
+	s := providerPriceServer(t, p)
+	execSQL(t, s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	insertProviderHost(t, s, "t1", "spot", "ec2", "spot-boundary", MarketSpot, from)
+	var h pricedHost
+	hosts, err := s.pricedHosts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range hosts {
+		if host.ID == "spot-boundary" {
+			h = host
+		}
+	}
+	if h.ID == "" {
+		t.Fatal("spot host not found")
+	}
+	first, err := p.SpotHistory(context.Background(), h.Zone, h.Type, from, boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.applySpotHistory(context.Background(), h, first, from, boundary, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	second, err := p.SpotHistory(context.Background(), h.Zone, h.Type, boundary, change.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.applySpotHistory(context.Background(), h, second, boundary, change.Add(time.Hour), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	rates := providerRates(t, s, "spot-boundary")
+	if len(p.spotCalls) != 2 || len(rates) != 2 || !rates[0].from.Equal(from) || rates[0].perHour != "0.1" ||
+		rates[0].open || !rates[0].to.Equal(change) || !rates[1].from.Equal(change) || rates[1].perHour != "0.2" || !rates[1].open {
+		t.Fatalf("unknown window start must not acquire a synthetic price: calls=%+v rates=%+v", p.spotCalls, rates)
+	}
+	if !p.spotCalls[0].to.Equal(boundary) || !p.spotCalls[1].from.Equal(boundary) {
+		t.Fatalf("history requests must meet at the 24-hour boundary: %+v", p.spotCalls)
+	}
+}
+
+func TestProviderPricesSpotLateHistorySettlesRunCost(t *testing.T) {
+	from := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Microsecond)
+	change := from.Add(time.Hour)
+	end := change.Add(time.Hour)
+	p := &fakePriceProvider{spot: [][]SpotRate{
+		{{At: change, HourlyRate: HourlyRate{PerHour: "0.20", Currency: "USD"}}},
+		{{At: from, HourlyRate: HourlyRate{PerHour: "0.10", Currency: "USD"}},
+			{At: change, HourlyRate: HourlyRate{PerHour: "0.90", Currency: "USD"}}},
+		{{At: from, HourlyRate: HourlyRate{PerHour: "0.10", Currency: "USD"}},
+			{At: change, HourlyRate: HourlyRate{PerHour: "0.90", Currency: "USD"}}},
+	}}
+	s, keys := costFixture(t)
+	s.cfg.Costs = CostsConfig{Enabled: true, ComputeEC2: true, Every: time.Minute, Batch: DefaultCostsBatch,
+		PricesRefresh: time.Hour, Prices: map[string]PriceProvider{"ec2": p}}
+	insertProviderHost(t, s, "t1", "burst", "ec2", "spot-cost", MarketSpot, from)
+	placeRun(t, s, "t1", "spot-run", StateRunning, "spot-cost", placementWindow{
+		From: from, To: &end, CPUs: 2, Memory: 4 * gib,
+	})
+	finish(t, s, "t1", "spot-run", StateSucceeded)
+	if got := pending(t, s, "spot-run"); got == "" {
+		t.Fatal("finishing spot run did not queue its cost")
+	}
+
+	s.refreshPrices(context.Background())
+	drain(t, s)
+	code, c := getCost(t, s, keys["t1"], "spot-run")
+	if code != http.StatusOK || c.Status != "incomplete" || len(c.Lines) != 1 ||
+		c.Lines[0].Item != "m7i.large:spot" || c.Lines[0].Amount != "0.1" || c.Lines[0].Final ||
+		c.Lines[0].Details["missingRate"] != true || len(c.Sources) != 1 || c.Sources[0].NextAt == nil {
+		t.Fatalf("spot history with leading gap: HTTP %d, cost %+v", code, c)
+	}
+
+	s.refreshPrices(context.Background())
+	execSQL(t, s, context.Background(), `UPDATE cost_sources SET next_at = now() - interval '1 second' WHERE run_id = 'spot-run'`)
+	if _, err := s.costTick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, s)
+	code, c = getCost(t, s, keys["t1"], "spot-run")
+	if code != http.StatusOK || c.Status != "complete" || c.Final || len(c.Lines) != 1 ||
+		c.Lines[0].Amount != "0.15" || c.Lines[0].Final || c.Lines[0].Details["missingRate"] != nil ||
+		len(c.Sources) != 1 || c.Sources[0].NextAt == nil || totals(c.Totals) != "/USD=0.15(f0,e0.15) " {
+		t.Fatalf("late history should fill gap without repricing or finalizing before settle: HTTP %d, cost %+v", code, c)
+	}
+
+	s.refreshPrices(context.Background())
+	execSQL(t, s, context.Background(), `UPDATE cost_sources SET next_at = now() - interval '1 second' WHERE run_id = 'spot-run'`)
+	execSQL(t, s, context.Background(), `DELETE FROM cost_ticks`)
+	if _, err := s.costTick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, s)
+	code, c = getCost(t, s, keys["t1"], "spot-run")
+	if code != http.StatusOK || c.Status != "final" || !c.Final || len(c.Lines) != 1 ||
+		c.Lines[0].Amount != "0.15" || !c.Lines[0].Final || len(c.Sources) != 1 ||
+		c.Sources[0].NextAt != nil || totals(c.Totals) != "/USD=0.15(f0.15,e0) " {
+		t.Fatalf("spot cost after settle: HTTP %d, cost %+v", code, c)
+	}
+}
+
+func TestProviderPricesOnDemandLatePriceLeavesRunGap(t *testing.T) {
+	from := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Microsecond)
+	registered := from.Add(time.Hour)
+	end := registered.Add(time.Hour)
+	p := &fakePriceProvider{onDemand: []fakeOnDemandAnswer{
+		{err: errors.New("pricing temporarily unavailable")},
+		{rate: HourlyRate{PerHour: "0.40", Currency: "USD"}},
+	}}
+	s, keys := costFixture(t)
+	s.cfg.Costs = CostsConfig{Enabled: true, ComputeEC2: true, Every: time.Minute, Batch: DefaultCostsBatch,
+		PricesRefresh: time.Hour, Prices: map[string]PriceProvider{"ec2": p}}
+	insertProviderHost(t, s, "t1", "burst", "ec2", "od-cost", MarketOnDemand, from)
+	execSQL(t, s, context.Background(), `UPDATE hosts SET registered_at = $1 WHERE id = 'od-cost'`, registered)
+	placeRun(t, s, "t1", "od-run", StateRunning, "od-cost", placementWindow{
+		From: from.Add(30 * time.Minute), To: &end, CPUs: 2, Memory: 4 * gib,
+	})
+	finish(t, s, "t1", "od-run", StateSucceeded)
+	if got := pending(t, s, "od-run"); got == "" {
+		t.Fatal("finishing on-demand run did not queue its cost")
+	}
+
+	s.refreshPrices(context.Background())
+	drain(t, s)
+	code, c := getCost(t, s, keys["t1"], "od-run")
+	if code != http.StatusOK || c.Status != "incomplete" || len(c.Lines) != 0 ||
+		len(c.Sources) != 1 || c.Sources[0].NextAt == nil {
+		t.Fatalf("on-demand lookup failed: HTTP %d, cost %+v", code, c)
+	}
+
+	s.refreshPrices(context.Background())
+	execSQL(t, s, context.Background(), `UPDATE cost_sources SET next_at = now() - interval '1 second' WHERE run_id = 'od-run'`)
+	if _, err := s.costTick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, s)
+	code, c = getCost(t, s, keys["t1"], "od-run")
+	if code != http.StatusOK || c.Status != "incomplete" || c.Final || len(c.Lines) != 0 ||
+		len(c.Sources) != 1 || c.Sources[0].NextAt == nil || len(c.Totals) != 0 {
+		t.Fatalf("price fetched after placement ended must not backfill its gap: HTTP %d, cost %+v", code, c)
+	}
+	if rates := providerRates(t, s, "od-cost"); len(rates) != 1 || !rates[0].from.After(end) {
+		t.Fatalf("late on-demand period must start after the unpriced placement: %+v", rates)
+	}
+	if p.onDemandCalls != 2 {
+		t.Errorf("on-demand lookups = %d, want failed fetch and retry", p.onDemandCalls)
 	}
 }

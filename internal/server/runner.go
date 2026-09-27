@@ -152,6 +152,9 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 				return err
 			}
 		}
+		if err := syncProviderCapacity(ctx, tx, hostID, registering); err != nil {
+			return err
+		}
 		if undrainOutdated {
 			if _, err := tx.Exec(ctx, `UPDATE host_messages SET acked_at = now()
 				WHERE host_id = $1 AND type = $2 AND acked_at IS NULL`, hostID, proto.MsgExit); err != nil {
@@ -212,6 +215,39 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		s.notifyAll(outdatedDrained)
 	}
 	return w, err
+}
+
+// syncProviderCapacity splits only the open provider period. A price fetched
+// after registration cannot price the time before that fetch.
+func syncProviderCapacity(ctx context.Context, tx pgx.Tx, hostID string, registering bool) error {
+	_, err := tx.Exec(ctx, `WITH host AS (
+		SELECT h.id, h.registered_at, h.market, h.instance_type,
+			coalesce((h.capacity->>'cpus')::float8, 0) AS cpus,
+			coalesce((h.capacity->>'memory')::int8, 0) AS memory,
+			p.provider, h.launch_template->>'region' AS region
+		FROM hosts h JOIN pools p ON p.name = h.pool AND p.tenant_id IS NOT DISTINCT FROM h.tenant_id
+		WHERE h.id = $1 AND h.provision_requested_at IS NOT NULL AND h.provider_id IS NOT NULL
+			AND p.provider <> 'static' AND h.terminated_at IS NULL
+	), at AS (SELECT clock_timestamp() AS instant),
+		closed AS (
+			UPDATE host_rates r SET valid_to = (SELECT instant FROM at)
+			FROM host h WHERE r.host_id = h.id AND r.valid_to IS NULL
+				AND r.valid_from < (SELECT instant FROM at)
+				AND (r.cap_cpus <> h.cpus OR r.cap_memory <> h.memory)
+			RETURNING r.host_id, r.per_hour, r.currency, r.source
+		)
+	INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
+	SELECT h.id, (SELECT instant FROM at), c.per_hour, c.currency, h.cpus, h.memory, c.source
+	FROM closed c JOIN host h ON h.id = c.host_id
+	UNION ALL
+	SELECT h.id, h.registered_at, pc.per_hour, pc.currency, h.cpus, h.memory, h.provider || '-pricing'
+	FROM host h JOIN price_cache pc ON pc.provider = h.provider AND pc.region = h.region
+		AND pc.instance_type = h.instance_type AND pc.os = 'Linux'
+	WHERE $2 AND h.market = 'on-demand' AND pc.fetched_at <= h.registered_at
+		AND (h.cpus > 0 OR h.memory > 0)
+		AND NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.valid_to IS NULL)
+		AND NOT EXISTS (SELECT 1 FROM closed)`, hostID, registering)
+	return err
 }
 
 func nonNil[T any](v []T) []T {

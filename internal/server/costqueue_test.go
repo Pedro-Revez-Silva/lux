@@ -525,7 +525,7 @@ func TestDrainComputeUnpricedAndMissing(t *testing.T) {
 		t.Errorf("ec2 after its retry: attempt %d, next in %s", attempts, next)
 	}
 
-	// The gap filled: final.
+	// The gap filled: the first complete answer starts the spot settle round.
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('ec2', $1, $2, 0.40, 'USD', 8, $3, 'aws-spot-history')`, at("10:20"), at("10:40"), 32*gib)
 	execSQL(t, s, ctx, `UPDATE cost_sources SET next_at = now() - interval '1 second' WHERE run_id = 'ec2'`)
@@ -534,8 +534,75 @@ func TestDrainComputeUnpricedAndMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	drain(t, s)
-	if lines, src := computeView(t, s, keys["t1"], "ec2"); fmt.Sprint(lines) != "[m7i.2xlarge:spot 0.1 USD true]" || src != "final" {
+	if lines, src := computeView(t, s, keys["t1"], "ec2"); fmt.Sprint(lines) != "[m7i.2xlarge:spot 0.1 USD false]" || src != "ok" {
 		t.Errorf("ec2 gap filled: %v, source %q", lines, src)
+	}
+	var settles int
+	systemScan(t, s, `SELECT settles_left FROM cost_sources WHERE run_id = 'ec2'`, nil, &settles)
+	if settles != 1 {
+		t.Errorf("ec2 has %d settle rounds left, want 1", settles)
+	}
+	// The next successful evaluation, including after a luxd restart, finalizes it.
+	execSQL(t, s, ctx, `UPDATE cost_sources SET next_at = now() - interval '1 second' WHERE run_id = 'ec2'`)
+	execSQL(t, s, ctx, `DELETE FROM cost_ticks`)
+	if _, err := peer(s, "restarted").costTick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, peer(s, "restarted"))
+	if lines, src := computeView(t, s, keys["t1"], "ec2"); fmt.Sprint(lines) != "[m7i.2xlarge:spot 0.1 USD true]" || src != "final" {
+		t.Errorf("ec2 settled: %v, source %q", lines, src)
+	}
+}
+
+func TestDrainComputeSpotSettleErrorAndResume(t *testing.T) {
+	s, keys := costFixture(t)
+	costHosts(t, s)
+	ctx := context.Background()
+	placeRun(t, s, "t1", "spot", StateRunning, "ec2", place("", 2, 8, "10:00", "10:20"))
+	finish(t, s, "t1", "spot", StateFailed)
+	drain(t, s)
+	if row, _ := sourceRow(t, s, "spot"); row != "ok 1 t f" {
+		t.Fatalf("first complete spot answer: %s", row)
+	}
+	var settles int
+	systemScan(t, s, `SELECT settles_left FROM cost_sources WHERE run_id = 'spot'`, nil, &settles)
+	if settles != 1 {
+		t.Fatalf("settles left: %d", settles)
+	}
+	// A pricing error keeps the earlier lines and the settle round.
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('ec2', $1, $2, 0.80, 'USD', 8, $3, 'aws-spot-history')`, at("10:10"), at("10:15"), 32*gib)
+	execSQL(t, s, ctx, `SELECT lux_cost_enqueue('spot', 'retry')`)
+	drain(t, s)
+	if lines, src := computeView(t, s, keys["t1"], "spot"); fmt.Sprint(lines) != "[m7i.2xlarge:spot 0.033333333 USD false]" || src != "incomplete" {
+		t.Errorf("pricing error: %v, %s", lines, src)
+	}
+	systemScan(t, s, `SELECT settles_left FROM cost_sources WHERE run_id = 'spot'`, nil, &settles)
+	if settles != 1 {
+		t.Errorf("pricing error consumed settle: %d", settles)
+	}
+	execSQL(t, s, ctx, `DELETE FROM host_rates WHERE host_id = 'ec2' AND valid_from = $1`, at("10:10"))
+	// A missing rate on the second pass cannot consume the settle round.
+	execSQL(t, s, ctx, `DELETE FROM host_rates WHERE host_id = 'ec2' AND valid_from = $1`, at("10:00"))
+	execSQL(t, s, ctx, `SELECT lux_cost_enqueue('spot', 'retry')`)
+	drain(t, s)
+	var left int
+	systemScan(t, s, `SELECT settles_left FROM cost_sources WHERE run_id = 'spot'`, nil, &left)
+	if left != 1 {
+		t.Errorf("missing rate consumed settle: %d", left)
+	}
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('ec2', $1, $2, 0.40, 'USD', 8, $3, 'aws-spot-history')`, at("10:00"), at("10:20"), 32*gib)
+	execSQL(t, s, ctx, `SELECT lux_cost_enqueue('spot', 'retry')`)
+	drain(t, s)
+	if lines, src := computeView(t, s, keys["t1"], "spot"); fmt.Sprint(lines) != "[m7i.2xlarge:spot 0.033333333 USD true]" || src != "final" {
+		t.Errorf("after recovered rate: %v, %s", lines, src)
+	}
+	resume(t, s, "spot")
+	var reset *int
+	systemScan(t, s, `SELECT settles_left FROM cost_sources WHERE run_id = 'spot'`, nil, &reset)
+	if reset != nil {
+		t.Errorf("resume left settle round: %d", *reset)
 	}
 }
 

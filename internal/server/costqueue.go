@@ -81,7 +81,6 @@ func (s *Server) costLoop(ctx context.Context) {
 	for ctx.Err() == nil {
 		woken := s.wakeups.next("")
 		if !time.Now().Before(nextTick) {
-			s.refreshPrices(ctx)
 			nextTick = s.tryCostTick(ctx, nextTick)
 		}
 		n, err := s.drainCosts(ctx)
@@ -240,15 +239,14 @@ type computeEval struct {
 	Missing []string
 	// Open: a placement has not ended yet.
 	Open bool
+	// Spot: at least one placement ran on a spot host.
+	Spot bool
 	// Err: a host it ran on could not be priced (overlapping periods).
 	Err error
 }
 
 // final: nothing about the Run's compute can change any more. Only a
 // terminal Run's; a stopped or lost one may still be resumed.
-//
-// TODO(costs step 6): a Run that ran on spot waits one settle round before
-// it is final, since spot price history can lag.
 func (e *computeEval) final() bool {
 	return terminal(e.State) && !e.Open && len(e.Missing) == 0 && e.Err == nil
 }
@@ -345,6 +343,13 @@ func evaluateCompute(ctx context.Context, tx pgx.Tx, runs []string) (map[string]
 		in, err := loadHostCompute(ctx, tx, hostID, w.from, w.to)
 		if err != nil {
 			return nil, now, err
+		}
+		if hosts[hostID].Market == "spot" {
+			for _, p := range in.Placements {
+				if e := evals[p.RunID]; e != nil {
+					e.Spot = true
+				}
+			}
 		}
 		res, err := computeCost(in)
 		if err != nil {
@@ -516,6 +521,26 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *c
 		return err
 	}
 	final := e.final()
+	var settlesLeft *int
+	var attempts int
+	if terminal(e.State) && (e.Spot || !final) {
+		err := tx.QueryRow(ctx, `SELECT attempts, settles_left FROM cost_sources WHERE run_id = $1 AND source = 'compute'`, runID).
+			Scan(&attempts, &settlesLeft)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+	}
+	if terminal(e.State) && e.Spot {
+		if final {
+			if settlesLeft == nil {
+				n := 1
+				settlesLeft = &n
+			} else if *settlesLeft > 0 {
+				*settlesLeft--
+			}
+			final = *settlesLeft == 0
+		}
+	}
 	status, lastError := "ok", ""
 	switch {
 	case final:
@@ -529,16 +554,14 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *c
 	// is queued by every tick anyway; a stopped or lost one stays quiet
 	// until it is resumed.
 	var nextAt *time.Time
-	var attempts int
 	if terminal(e.State) && !final {
-		if err := tx.QueryRow(ctx, `SELECT coalesce((SELECT attempts FROM cost_sources WHERE run_id = $1 AND source = 'compute'), 0) + 1`,
-			runID).Scan(&attempts); err != nil {
-			return err
-		}
+		attempts++
 		if e.FinishedAt == nil || now.Sub(*e.FinishedAt) < costGiveUp {
 			t := now.Add(min(s.cfg.Costs.Every<<min(attempts-1, 16), costRetryMax))
 			nextAt = &t
 		}
+	} else {
+		attempts = 0
 	}
 	if e.Err == nil {
 		for i := range e.Lines {
@@ -548,12 +571,13 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *c
 			return err
 		}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, attempts, next_at, last_error)
-			VALUES ($1, $2, 'compute', $3, CASE WHEN $4 THEN now() END, $5, $6, $7)
+	if _, err := tx.Exec(ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, attempts, next_at, settles_left, last_error)
+			VALUES ($1, $2, 'compute', $3, CASE WHEN $4 THEN now() END, $5, $6, $7, $8)
 		ON CONFLICT (run_id, source) DO UPDATE SET status = EXCLUDED.status,
 			answered_at = coalesce(EXCLUDED.answered_at, cost_sources.answered_at),
-			attempts = EXCLUDED.attempts, next_at = EXCLUDED.next_at, last_error = EXCLUDED.last_error`,
-		runID, e.TenantID, status, e.Err == nil, attempts, nextAt, lastError); err != nil {
+			attempts = EXCLUDED.attempts, next_at = EXCLUDED.next_at,
+			settles_left = EXCLUDED.settles_left, last_error = EXCLUDED.last_error`,
+		runID, e.TenantID, status, e.Err == nil, attempts, nextAt, settlesLeft, lastError); err != nil {
 		return err
 	}
 	_, err := tx.Exec(ctx, `DELETE FROM cost_pending WHERE run_id = $1`, runID)
@@ -566,7 +590,7 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *c
 // tenant's scope, from the API: these are its own rows).
 func resetCostFinality(ctx context.Context, tx pgx.Tx, runID string) error {
 	if _, err := tx.Exec(ctx, `UPDATE cost_sources SET status = CASE WHEN status = 'final' THEN 'ok' ELSE status END,
-			next_at = NULL, attempts = 0
+			next_at = NULL, attempts = 0, settles_left = NULL
 		WHERE run_id = $1`, runID); err != nil {
 		return err
 	}

@@ -490,7 +490,6 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow) error {
 	}); err != nil {
 		return err
 	}
-	s.priceLaunchedHost(ctx, pl.Provider, pl.Template, l)
 	return nil
 }
 

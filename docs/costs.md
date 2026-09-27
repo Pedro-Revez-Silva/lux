@@ -1,6 +1,6 @@
 # Run costs (design)
 
-Status: **design for review. Build steps 1–5 (section 12) are built**, and
+Status: **design for review. Build steps 1–6 (section 12) are built**, and
 the sections they touch say so and note where the build differs. The rest
 is not built. The build order at the end breaks it into small steps.
 
@@ -424,7 +424,7 @@ CREATE TABLE host_rates (
 
 **Built**: this table, in migration `021_host_rates.sql`, with a unique
 index allowing one open period per host and a CHECK that a period closes
-after it opens. Only static prices write it so far (section 2).
+after it opens. Static and EC2 provider prices write periods.
 
 A provider's first period takes its capacity from the instance type, or
 opens at the host's first hello: before then `hosts.capacity` is empty,
@@ -451,14 +451,26 @@ every `provider_check_every`) would tighten the start. See open question 5.
 
 - On-demand prices are cached per (region, instance type, OS) in a
   `price_cache` table (system_only, with `fetched_at`) and refreshed after
-  `costs.prices.refresh` (default 24h). A new host copies the cached rate
-  into its first `host_rates` row, so a launch never waits for the Pricing
-  API. If the cache is empty, luxd fetches then and there. If the fetch
-  fails, the host has no period and its compute is `incomplete` until one
-  succeeds.
-- Spot history is fetched on the cost tick for each (zone, instance type)
-  with a live spot host, covering since the last period's start. That is
-  one call per pair per tick, which is small.
+  `costs.prices.refresh` (default 24h). Launch does not wait for Pricing.
+  A cached price known before the first hello opens a rate at registration;
+  otherwise a successful later fetch starts a rate when it becomes known.
+  A failure leaves the earlier time incomplete.
+- Spot history is fetched for each (zone, instance type) with a live spot
+  host or a terminated host with incomplete compute. Recent changes are
+  revisited while older missing intervals are repaired in bounded windows.
+
+**Built in step 6:** price refresh runs separately from provisioning and the
+cost queue, with a 30-second pass deadline. It discovers launched hosts even
+before their first hello. On-demand lookups share a cache key within each
+pass; a first rate cannot start before the cached price was fetched. Spot
+history is requested in at most 24-hour windows, with bounded indexed gap
+repair and a recent-history overlap; closed periods are not repriced. A
+provider's current rate splits on a runner hello that changes capacity.
+
+**Deferred:** multiple luxd processes can still fetch the same expired
+on-demand cache key concurrently. A terminated on-demand host whose first
+price becomes known only after termination retains an incomplete historical
+gap; backdating the new price would violate the no-retroactive-pricing rule.
 
 ## 4. Cost plugins
 
@@ -782,8 +794,10 @@ where it differs from the above:
   the resume's transaction. It also queues the Run (`state:resuming`),
   which frees any claim: a drainer's result, read while the Run was still
   finished, is not written.
-- The spot settle round (point 4) is not built: it comes with spot prices
-  in step 6.
+- Spot compute waits for one additional complete evaluation after the first
+  complete terminal answer. Missing rates and errors do not consume that
+  round; the pending retry and `settles_left` survive a restart. A resume
+  clears the round along with finality.
 
 ## 6. Sessions: where the full list comes from
 
