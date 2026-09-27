@@ -35,6 +35,9 @@ const (
 	// costSettleWake: how long the drainer lets Run events gather after one
 	// wakes it.
 	costSettleWake = 200 * time.Millisecond
+	// costTickSlack: the tick is tried this long after its bucket starts
+	// (at most a tenth of costs.every).
+	costTickSlack = time.Second
 	// A terminal Run whose compute is not final yet (a provider rate still
 	// missing) is tried again after costs.every, doubling up to
 	// costRetryMax, and no longer once it finished costGiveUp ago. (The
@@ -68,10 +71,7 @@ func (s *Server) costLoop(ctx context.Context) {
 	for ctx.Err() == nil {
 		woken := s.wakeups.next("")
 		if !time.Now().Before(nextTick) {
-			nextTick = time.Now().Add(c.Every)
-			if _, err := s.costTick(ctx); err != nil && ctx.Err() == nil {
-				s.log.Warn("costs: tick", "err", err)
-			}
+			nextTick = s.tryCostTick(ctx, nextTick)
 		}
 		n, err := s.drainCosts(ctx)
 		if err != nil && ctx.Err() == nil {
@@ -80,11 +80,39 @@ func (s *Server) costLoop(ctx context.Context) {
 		if err == nil && n == c.Batch {
 			continue // more may be due
 		}
-		wait(ctx, woken, min(c.DrainEvery, time.Until(nextTick)))
+		untilTick := time.Until(nextTick)
+		if untilTick <= 0 {
+			untilTick = c.DrainEvery // the tick failed: again after drain_every
+		}
+		wait(ctx, woken, min(c.DrainEvery, untilTick))
 		// Every Run event wakes it, not only state changes: a short pause
 		// lets a burst of them (a pool draining) become one claim.
 		wait(ctx, nil, min(c.DrainEvery, costSettleWake))
 	}
+}
+
+// tryCostTick runs the tick, and returns when to try it next: at the next
+// bucket, or, if it failed, at the next pass (the same nextTick), still
+// within its bucket.
+func (s *Server) tryCostTick(ctx context.Context, nextTick time.Time) time.Time {
+	if _, err := s.costTick(ctx); err != nil {
+		if ctx.Err() == nil {
+			s.log.Warn("costs: tick", "err", err)
+		}
+		return nextTick
+	}
+	return nextCostTick(time.Now(), s.cfg.Costs.Every)
+}
+
+// nextCostTick is when to try the tick after one at now: the start of the
+// next bucket of every (the buckets cost_ticks counts, whole multiples
+// since the Unix epoch), a little after it so that this luxd's clock
+// running ahead of the database's doesn't land it in the bucket before.
+// Timed from the tick itself, it would drift across buckets and skip one
+// now and then.
+func nextCostTick(now time.Time, every time.Duration) time.Time {
+	epoch := time.Unix(0, 0)
+	return epoch.Add(now.Sub(epoch).Truncate(every) + every + min(costTickSlack, every/10))
 }
 
 // costTick queues every active Run, if this luxd is the first to claim the

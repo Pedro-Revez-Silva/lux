@@ -643,3 +643,37 @@ func TestCostTickLockOrder(t *testing.T) {
 		}
 	}
 }
+
+// The tick is tried at the start of the next bucket (not a whole
+// costs.every after the last try, which drifts across buckets), and a tick
+// that failed is tried again within its bucket.
+func TestNextCostTick(t *testing.T) {
+	every := 2 * time.Minute
+	day := func(clock string) time.Time {
+		t, _ := time.Parse(time.RFC3339Nano, "2026-09-27T"+clock+"Z")
+		return t
+	}
+	for _, now := range []string{"10:00:00", "10:00:01", "10:01:59.9"} {
+		if got := nextCostTick(day(now), every); !got.Equal(day("10:02:01")) {
+			t.Errorf("after %s: %s, want 10:02:01", now, got.Format("15:04:05.0"))
+		}
+	}
+	// Buckets are counted from the Unix epoch, as cost_ticks counts them.
+	if got := nextCostTick(day("10:00:00"), 7*time.Second); !got.Equal(day("10:00:04.7")) {
+		t.Errorf("every 7s: %s", got.Format("15:04:05.0"))
+	}
+
+	s, _ := costFixture(t)
+	s.cfg.Costs.Every = every
+	last := time.Now().Add(-time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := s.tryCostTick(ctx, last); !got.Equal(last) {
+		t.Errorf("failed tick: next at %s, want %s (unchanged)", got, last)
+	}
+	before := nextCostTick(time.Now(), every)
+	got := s.tryCostTick(context.Background(), last)
+	if after := nextCostTick(time.Now(), every); !got.Equal(before) && !got.Equal(after) {
+		t.Errorf("tick: next at %s, want %s", got, before)
+	}
+}
