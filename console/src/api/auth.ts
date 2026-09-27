@@ -10,11 +10,18 @@ const listeners = new Set<() => void>();
 
 export type Role = "unknown" | "operator" | "tenant";
 
+/** A person signed in by Cloudflare Access; picture: their photo's URL, if the identity provider has one. */
+export interface User {
+  email: string;
+  name: string;
+  picture?: string;
+}
+
 interface Session {
   key: string | null;
   role: Role;
   /** Signed in by Cloudflare Access, as this person (no key). */
-  user: { email: string; name: string } | null;
+  user: User | null;
 }
 
 let session: Session = { key: readKey(), role: "unknown", user: null };
@@ -48,7 +55,7 @@ export function signIn(key: string) {
 }
 
 /** Signed in by the console auth luxd sits behind (Cloudflare Access). */
-export function signInAs(user: { email: string; name: string }, role: Role) {
+export function signInAs(user: User, role: Role) {
   session = { key: null, role, user };
   emit();
 }

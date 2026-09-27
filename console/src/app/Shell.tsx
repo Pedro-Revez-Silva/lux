@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { IconButton, LiveDot, Logo, TenantPicker, TimeRangePicker, useDensity, useTheme, type Tenant } from "@lux/design-system";
-import { IconClose, IconGrid, IconLayers, IconLogout, IconMenu, IconMoon, IconPlay, IconRows, IconRowsLoose, IconServer, IconSidebar, IconSliders, IconSun, IconUsers } from "@lux/design-system/icons";
+import { IconChevronLeft, IconChevronRight, IconClose, IconGrid, IconKey, IconLayers, IconLogout, IconMenu, IconMoon, IconPlay, IconRows, IconRowsLoose, IconServer, IconSliders, IconSun, IconUsers } from "@lux/design-system/icons";
 import { liveLabel, signOut, useLiveState, useSession } from "../api/index.ts";
 import { Link, usePath } from "./router.tsx";
 import { useScope } from "./scope.tsx";
@@ -111,22 +111,38 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
       {density === "compact" ? <IconRowsLoose size={15} /> : <IconRows size={15} />}
     </IconButton>
   );
+  // Who is signed in, at the foot of the sidebar: the person and a way out.
   const user = session.user ? (
-    // Signed in by Cloudflare Access: signing out is Access's.
-    <a className="topbar-user" href="/cdn-cgi/access/logout" title={`${session.user.email} · sign out of Cloudflare Access`}>
-      {session.user.name}
-    </a>
+    <div className="sidebar-user">
+      <Avatar name={session.user.name} email={session.user.email} picture={session.user.picture} />
+      <span className="sidebar-user-text">
+        <span className="sidebar-user-name">{session.user.name}</span>
+        <span className="sidebar-user-sub">{session.user.email}</span>
+      </span>
+      {/* Signed in by Cloudflare Access: signing out is Access's. */}
+      <a className="btn btn-iconOnly btn-ghost btn-sm" href="/cdn-cgi/access/logout" aria-label="Sign out" title="Sign out of Cloudflare Access">
+        <IconLogout size={15} />
+      </a>
+    </div>
   ) : (
-    <IconButton size="sm" label="Sign out" onClick={signOut}>
-      <IconLogout size={15} />
-    </IconButton>
+    <div className="sidebar-user">
+      <span className="avatar" title="API key session">
+        <IconKey size={15} />
+      </span>
+      <span className="sidebar-user-text">
+        <span className="sidebar-user-name">{session.role === "operator" ? "Operator key" : "API key"}</span>
+        <span className="sidebar-user-sub">API key session</span>
+      </span>
+      <IconButton size="sm" label="Sign out" onClick={signOut}>
+        <IconLogout size={15} />
+      </IconButton>
+    </div>
   );
 
   const brand = (
-    <Link to="/" className="brand" aria-label="lux console">
-      <Logo className="brand-mark" />
-      <span className="brand-name">lux</span>
-      <span className="brand-sub">console</span>
+    <Link to="/" className="brand" aria-label="Lux">
+      <Logo size={26} className="brand-mark" />
+      <span className="brand-name">Lux</span>
     </Link>
   );
 
@@ -136,6 +152,9 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
       <aside className="sidebar" aria-label="Sidebar">
         <div className="sidebar-top">
           {brand}
+          <IconButton size="sm" label={rail ? "Expand sidebar" : "Collapse sidebar"} className="sidebar-toggle" onClick={toggleRail}>
+            {rail ? <IconChevronRight size={15} /> : <IconChevronLeft size={15} />}
+          </IconButton>
           <IconButton size="sm" label="Close menu" className="sidebar-close" onClick={() => setDrawer(false)}>
             <IconClose size={15} />
           </IconButton>
@@ -148,14 +167,7 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
             </Link>
           ))}
         </nav>
-        <div className="sidebar-foot">
-          <button type="button" className="nav-item nav-collapse" onClick={toggleRail} title={rail ? "Expand sidebar" : "Collapse sidebar"} aria-label={rail ? "Expand sidebar" : "Collapse sidebar"} aria-pressed={rail}>
-            <span className="nav-icon">
-              <IconSidebar />
-            </span>
-            <span className="nav-label">Collapse</span>
-          </button>
-        </div>
+        <div className="sidebar-foot">{user}</div>
       </aside>
       <div className="main">
         <header className="topbar">
@@ -174,7 +186,6 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
               <span className="topbar-sep" aria-hidden="true" />
               {densityButton}
               {themeButton}
-              {user}
             </div>
             <div className="topbar-narrow" ref={menuRef}>
               <IconButton size="sm" label="Scope and settings" active={menu} onClick={() => setMenu((m) => !m)} aria-expanded={menu}>
@@ -199,10 +210,6 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
                       {themeButton}
                     </span>
                   </div>
-                  <div className="topbar-pop-row">
-                    <span className="topbar-pop-label">{session.user ? "Signed in" : "Session"}</span>
-                    {user}
-                  </div>
                 </div>
               )}
             </div>
@@ -212,6 +219,24 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
       </div>
     </div>
   );
+}
+
+/** The person's photo from the identity provider; their initials without one, or if it fails to load. */
+function Avatar({ name, email, picture }: { name: string; email: string; picture?: string }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <span className="avatar" title={email}>
+      {picture && !failed ? <img src={picture} alt="" referrerPolicy="no-referrer" onError={() => setFailed(true)} /> : initials(name)}
+    </span>
+  );
+}
+
+/** "Ada Lovelace" → "AL"; "ada@example.com" → "A". */
+function initials(name: string): string {
+  const words = (name.split("@")[0] ?? "").split(/[\s._-]+/).filter(Boolean);
+  const first = [...(words[0] ?? "?")][0];
+  const last = words.length > 1 ? [...(words[words.length - 1] ?? "")][0] : "";
+  return ((first ?? "") + (last ?? "")).toUpperCase();
 }
 
 /** Whether the event stream is up: pages update as things happen, or fall back to polling. */

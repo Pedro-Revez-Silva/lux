@@ -44,6 +44,16 @@ def test_an_access_user_is_an_operator(env, access, tenant_factory):
     r = requests.post(f"{env.luxd_url}/v1/runs/{run_id}/cancel", headers=hdr, timeout=10)
     assert r.status_code == 202, r.text
     assert [e["data"]["by"] for e in t.events(run_id, "cancel.requested")] == ["ada@example.com"]
+    assert "picture" not in me  # the identity provider sent none
+
+
+def test_an_access_users_picture(env, access):
+    # From the identity provider's picture claim, via Access; https only.
+    photo = "https://photos.example.com/pictured.png"
+    me = _get(env, "/v1/whoami", headers={"Cf-Access-Jwt-Assertion": access.token("pictured@example.com", "Pic Tured", picture=photo)}).json()
+    assert me["name"] == "Pic Tured" and me["picture"] == photo, me
+    plain = access.token("plain-http@example.com", picture="http://photos.example.com/plain.png")
+    assert "picture" not in _get(env, "/v1/whoami", headers={"Cf-Access-Jwt-Assertion": plain}).json()
 
 
 def test_operator_allowlist_ignores_email_case(env, access, tenant_factory):

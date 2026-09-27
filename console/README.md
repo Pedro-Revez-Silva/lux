@@ -43,7 +43,7 @@ The key is entered in the UI (sign-in screen), never configured in the server.
 
 Every API call sends `Authorization: Bearer <key>`. The key lives in
 `sessionStorage["lux.key"]` (`src/api/auth.ts`): a reload keeps it, closing the
-tab drops it, and "Sign out" in the top bar clears it. A 401 from any call signs
+tab drops it, and "Sign out" at the foot of the sidebar clears it. A 401 from any call signs
 out and shows the sign-in screen again.
 
 Operator keys see every tenant; tenant keys their own. The role is learned from
@@ -99,6 +99,7 @@ workspace package with its own gallery (`bun run gallery` there): the
 principles, density, breakpoints and tokens are documented there.
 
 The shell (`src/app/Shell.tsx`, `shell.css`) owns the sidebar (full, rail,
-drawer), the top bar (section name, live indicator, tenant and range
-pickers, density and theme toggles, session; folded into one menu on
-phones) and the scrolling content area.
+drawer; the collapse arrow at its top, who is signed in and "Sign out" at
+its foot), the top bar (section name, live indicator, tenant and range
+pickers, density and theme toggles; folded into one menu on phones) and the
+scrolling content area.
