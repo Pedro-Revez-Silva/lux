@@ -34,8 +34,11 @@ const (
 	// dies mid-drain leaves claims that expire, and another takes them.
 	costClaim = 2 * time.Minute
 	// costSettleWake: how long the drainer lets Run events gather after one
-	// wakes it.
-	costSettleWake = 200 * time.Millisecond
+	// wakes it. Every Run event wakes it (activity, sessions, input), not
+	// only the state changes that queue costs, so this is also the floor
+	// between claims while events flow: about one a second per luxd, not
+	// five, for a state change's costs shown a second later.
+	costSettleWake = time.Second
 	// costTickSlack: the tick is tried this long after its bucket starts
 	// (at most a tenth of costs.every).
 	costTickSlack = time.Second
@@ -506,7 +509,8 @@ func (s *Server) writeCosts(ctx context.Context, tx pgx.Tx, runs []string, evals
 // earlier lines stay.
 func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *computeEval, now time.Time) error {
 	if e == nil {
-		// Not a Run any more: nothing to evaluate.
+		// Defensive: a queued Run always has its runs row (cost_pending's
+		// foreign key, and Runs are never deleted), so it is evaluated.
 		_, err := tx.Exec(ctx, `DELETE FROM cost_pending WHERE run_id = $1`, runID)
 		return err
 	}
