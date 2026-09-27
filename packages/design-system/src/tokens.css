@@ -200,7 +200,9 @@
     --chart-h: 240px;
   }
 }
-@media (max-width: 1279px) {
+/* Below large (1280px): written as the exact complement of
+   "(min-width: 1280px)", so no zoomed fractional width falls between the two. */
+@media not all and (min-width: 1280px) {
   :root,
   :root[data-density="compact"] {
     --pad-page: 24px;
