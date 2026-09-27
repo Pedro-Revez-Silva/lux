@@ -137,6 +137,187 @@ func TestHostHourRefreshWaitsForPlacementEnd(t *testing.T) {
 	}
 }
 
+func TestHostHoursSkipUnpricedStaticHourAndPriceLaterHour(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 1
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
+	priceAt := hour.Add(time.Hour)
+	end := priceAt.Add(time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at, terminated_at)
+		VALUES ('h-static-gap', 'h-static-gap', 'p', 'terminated', $1, $2)`, hour, end)
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('h-static-gap', $1, $2, 6, 'USD', 1, 1, 'static')`, priceAt, end)
+	for i := 0; i < 2; i++ {
+		if err := s.updateHostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var next time.Time
+	systemScan(t, s, `SELECT next_hour FROM cost_host_refresh WHERE host_id = 'h-static-gap'`, nil, &next)
+	if !next.Equal(end) {
+		t.Fatalf("static gap blocked later priced hour: cursor %s, want %s", next, end)
+	}
+	var count int
+	systemScan(t, s, `SELECT count(*) FROM cost_hourly WHERE host_id = 'h-static-gap' AND hour = $1 AND run_id IS NULL`, []any{hour}, &count)
+	if count != 0 {
+		t.Fatalf("unpriced static hour wrote %d rows", count)
+	}
+	var missingFrom, missingTo time.Time
+	var reason, status string
+	systemScan(t, s, `SELECT missing_from, missing_to, reason, status FROM cost_host_hour_gaps
+		WHERE host_id = 'h-static-gap' AND hour = $1`, []any{hour}, &missingFrom, &missingTo, &reason, &status)
+	if !missingFrom.Equal(hour) || !missingTo.Equal(priceAt) || reason != "static_unpriced" || status != "incomplete" {
+		t.Fatalf("static incomplete interval %s to %s: %s, %s", missingFrom, missingTo, reason, status)
+	}
+	var idle string
+	systemScan(t, s, `SELECT trim_scale(unallocated)::text FROM cost_hourly
+		WHERE host_id = 'h-static-gap' AND hour = $1 AND run_id IS NULL`, []any{priceAt}, &idle)
+	if idle != "6" {
+		t.Fatalf("later static hour idle %s, want 6", idle)
+	}
+}
+
+func TestHostHoursSkipTerminatedProviderProvisioningGap(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 1
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
+	registered := hour.Add(30 * time.Minute)
+	end := hour.Add(2 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, provision_requested_at, registered_at, terminated_at)
+		VALUES ('h-provider-gap', 'h-provider-gap', 'p', 'terminated', $1, $2, $3)`, hour, registered, end)
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('h-provider-gap', $1, $2, 8, 'USD', 1, 1, 'aws-pricing')`, registered, end)
+	for i := 0; i < 2; i++ {
+		if err := s.updateHostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var next time.Time
+	systemScan(t, s, `SELECT next_hour FROM cost_host_refresh WHERE host_id = 'h-provider-gap'`, nil, &next)
+	if !next.Equal(end) {
+		t.Fatalf("provisioning gap blocked later priced hour: cursor %s, want %s", next, end)
+	}
+	var partial, later string
+	systemScan(t, s, `SELECT trim_scale(unallocated)::text FROM cost_hourly
+		WHERE host_id = 'h-provider-gap' AND hour = $1 AND run_id IS NULL`, []any{hour}, &partial)
+	systemScan(t, s, `SELECT trim_scale(unallocated)::text FROM cost_hourly
+		WHERE host_id = 'h-provider-gap' AND hour = $1 AND run_id IS NULL`, []any{hour.Add(time.Hour)}, &later)
+	if partial != "4" || later != "8" {
+		t.Fatalf("provider hours idle %s, %s; want 4, 8", partial, later)
+	}
+	var missingFrom, missingTo time.Time
+	var reason, status string
+	systemScan(t, s, `SELECT missing_from, missing_to, reason, status FROM cost_host_hour_gaps
+		WHERE host_id = 'h-provider-gap' AND hour = $1`, []any{hour}, &missingFrom, &missingTo, &reason, &status)
+	if !missingFrom.Equal(hour) || !missingTo.Equal(registered) || reason != "provider_pre_registration" || status != "incomplete" {
+		t.Fatalf("provider incomplete interval %s to %s: %s, %s", missingFrom, missingTo, reason, status)
+	}
+}
+
+func TestHostHoursRetryProviderGapAfterRegistration(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 1
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
+	end := hour.Add(2 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, provision_requested_at, registered_at, terminated_at)
+		VALUES ('h-provider-retry', 'h-provider-retry', 'p', 'terminated', $1, $1, $2)`, hour, end)
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('h-provider-retry', $1, $2, 8, 'USD', 1, 1, 'aws-pricing')`, hour.Add(time.Hour), end)
+	if err := s.updateHostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var next time.Time
+	systemScan(t, s, `SELECT next_hour FROM cost_host_refresh WHERE host_id = 'h-provider-retry'`, nil, &next)
+	if !next.Equal(hour) {
+		t.Fatalf("recoverable provider gap advanced cursor to %s", next)
+	}
+	var gaps int
+	systemScan(t, s, `SELECT count(*) FROM cost_host_hour_gaps WHERE host_id = 'h-provider-retry'`, nil, &gaps)
+	if gaps != 0 {
+		t.Fatalf("recoverable provider gap recorded %d irrecoverable intervals", gaps)
+	}
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('h-provider-retry', $1, $2, 4, 'USD', 1, 1, 'aws-pricing')`, hour, hour.Add(time.Hour))
+	execSQL(t, s, ctx, `UPDATE cost_host_refresh SET retry_at = NULL WHERE host_id = 'h-provider-retry'`)
+	for i := 0; i < 2; i++ {
+		if err := s.updateHostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	systemScan(t, s, `SELECT next_hour FROM cost_host_refresh WHERE host_id = 'h-provider-retry'`, nil, &next)
+	if !next.Equal(end) {
+		t.Fatalf("recovered provider gap blocked later hour: cursor %s, want %s", next, end)
+	}
+	var total string
+	systemScan(t, s, `SELECT trim_scale(sum(unallocated))::text FROM cost_hourly
+		WHERE host_id = 'h-provider-retry' AND run_id IS NULL`, nil, &total)
+	if total != "12" {
+		t.Fatalf("recovered provider hours total %s, want 12", total)
+	}
+}
+
+func TestHostHoursRetryPartiallyPricedProviderAfterRegistration(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 1
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
+	registered := hour.Add(15 * time.Minute)
+	priceAt := hour.Add(30 * time.Minute)
+	end := hour.Add(2 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, provision_requested_at, registered_at, terminated_at)
+		VALUES ('h-provider-partial', 'h-provider-partial', 'p', 'terminated', $1, $2, $3)`, hour, registered, end)
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('h-provider-partial', $1, $2, 8, 'USD', 1, 1, 'aws-pricing')`, priceAt, end)
+	if err := s.updateHostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var next time.Time
+	systemScan(t, s, `SELECT next_hour FROM cost_host_refresh WHERE host_id = 'h-provider-partial'`, nil, &next)
+	if !next.Equal(hour) {
+		t.Fatalf("partially priced provider gap advanced cursor to %s", next)
+	}
+	var gaps, rows int
+	systemScan(t, s, `SELECT count(*) FROM cost_host_hour_gaps WHERE host_id = 'h-provider-partial'`, nil, &gaps)
+	systemScan(t, s, `SELECT count(*) FROM cost_hourly WHERE host_id = 'h-provider-partial' AND run_id IS NULL`, nil, &rows)
+	if gaps != 0 || rows != 0 {
+		t.Fatalf("pending hour wrote %d gaps and %d priced rows", gaps, rows)
+	}
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('h-provider-partial', $1, $2, 4, 'USD', 1, 1, 'aws-pricing')`, registered, priceAt)
+	execSQL(t, s, ctx, `UPDATE cost_host_refresh SET retry_at = NULL WHERE host_id = 'h-provider-partial'`)
+	for i := 0; i < 2; i++ {
+		if err := s.updateHostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	systemScan(t, s, `SELECT next_hour FROM cost_host_refresh WHERE host_id = 'h-provider-partial'`, nil, &next)
+	if !next.Equal(end) {
+		t.Fatalf("recovered partial hour blocked later priced hour: cursor %s", next)
+	}
+	var missingFrom, missingTo time.Time
+	var reason string
+	systemScan(t, s, `SELECT missing_from, missing_to, reason FROM cost_host_hour_gaps
+		WHERE host_id = 'h-provider-partial' AND hour = $1`, []any{hour}, &missingFrom, &missingTo, &reason)
+	if !missingFrom.Equal(hour) || !missingTo.Equal(registered) || reason != "provider_pre_registration" {
+		t.Fatalf("recovered hour incomplete interval %s to %s: %s", missingFrom, missingTo, reason)
+	}
+	var first, later string
+	systemScan(t, s, `SELECT trim_scale(unallocated)::text FROM cost_hourly
+		WHERE host_id = 'h-provider-partial' AND hour = $1 AND run_id IS NULL`, []any{hour}, &first)
+	systemScan(t, s, `SELECT trim_scale(unallocated)::text FROM cost_hourly
+		WHERE host_id = 'h-provider-partial' AND hour = $1 AND run_id IS NULL`, []any{hour.Add(time.Hour)}, &later)
+	if first != "5" || later != "8" {
+		t.Fatalf("recovered priced hours %s and %s, want 5 and 8", first, later)
+	}
+}
+
 func TestPluginHourlyCumulativeRoundingInPostgres(t *testing.T) {
 	s, _ := costFixture(t)
 	ctx := context.Background()

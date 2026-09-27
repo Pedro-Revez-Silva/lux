@@ -1544,16 +1544,18 @@ func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostO
 	p := principal(ctx)
 	stopReason := evictReason(in.Body != nil && in.Body.ForceEvict)
 	var hosts []string
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		id, err := s.resolveHost(ctx, tx, p, in.ID, false)
-		if err != nil {
+	err := retryHostPlacements(ctx, func() error {
+		return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			id, err := s.resolveHost(ctx, tx, p, in.ID, false)
+			if err != nil {
+				return err
+			}
+			hosts, err = s.drainHosts(ctx, tx, "drain requested", causeManual, stopReason, "id = $1 AND (tenant_id = $2 OR $3)", id, p.TenantID, p.Operator)
+			if err == nil && len(hosts) == 0 {
+				return errNotFound
+			}
 			return err
-		}
-		hosts, err = s.drainHosts(ctx, tx, "drain requested", causeManual, stopReason, "id = $1 AND (tenant_id = $2 OR $3)", id, p.TenantID, p.Operator)
-		if err == nil && len(hosts) == 0 {
-			return errNotFound
-		}
-		return err
+		})
 	})
 	if err != nil {
 		return nil, err
@@ -1583,13 +1585,96 @@ const (
 // (provisioned) takes it once idle. Returns their ids, to notify once the
 // transaction commits.
 func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, cause, stopReason, where string, args ...any) ([]string, error) {
+	var candidates []string
+	if stopReason != "" {
+		rows, err := tx.Query(ctx, `SELECT id FROM hosts WHERE state <> 'terminated' AND `+where+` ORDER BY id`, args...)
+		if err != nil {
+			return nil, err
+		}
+		candidates, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, err
+		}
+		live, err := livePlacements(ctx, tx, "p.host_id = ANY($1)", candidates)
+		if err != nil {
+			return nil, err
+		}
+		runs := make([]string, 0, len(live))
+		for _, p := range live {
+			runs = append(runs, p.RunID)
+		}
+		if err := lockReaperRuns(ctx, tx, runs); err != nil {
+			return nil, err
+		}
+		rows, err = tx.Query(ctx, `SELECT host_id FROM (
+			SELECT unnest($1::text[]) AS host_id
+			UNION SELECT host_id FROM placements WHERE run_id = ANY($2)
+		) all_hosts ORDER BY host_id`, candidates, runs)
+		if err != nil {
+			return nil, err
+		}
+		allHosts, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, err
+		}
+		for _, host := range allHosts {
+			if err := lockCostHost(ctx, tx, host); err != nil {
+				return nil, err
+			}
+		}
+		rows, err = tx.Query(ctx, `SELECT id FROM hosts WHERE id = ANY($1) ORDER BY id FOR NO KEY UPDATE`, candidates)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
+			return nil, err
+		}
+		// Check membership after the host rows are locked. A host that joins
+		// the pool during discovery has no advisory lock in this transaction.
+		rows, err = tx.Query(ctx, `SELECT id FROM hosts WHERE state <> 'terminated' AND `+where+` ORDER BY id`, args...)
+		if err != nil {
+			return nil, err
+		}
+		eligible, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, err
+		}
+		candidateSet := make(map[string]bool, len(candidates))
+		for _, host := range candidates {
+			candidateSet[host] = true
+		}
+		for _, host := range eligible {
+			if !candidateSet[host] {
+				return nil, errHostPlacementsChanged
+			}
+		}
+		current, err := livePlacements(ctx, tx, "p.host_id = ANY($1)", candidates)
+		if err != nil {
+			return nil, err
+		}
+		locked := make(map[string]bool, len(runs))
+		for _, run := range runs {
+			locked[run] = true
+		}
+		for _, p := range current {
+			if !locked[p.RunID] {
+				return nil, errHostPlacementsChanged
+			}
+		}
+	}
+	updateWhere := where
+	updateArgs := args
+	if stopReason != "" {
+		updateWhere = where + fmt.Sprintf(" AND id = ANY($%d)", len(args)+1)
+		updateArgs = append(append([]any{}, args...), candidates)
+	}
 	rows, err := tx.Query(ctx, fmt.Sprintf(`UPDATE hosts SET draining = true,
 			state = CASE WHEN state = 'ready' THEN 'draining' ELSE state END,
 			state_reason = $%d,
 			drain_causes = CASE WHEN $%d = ANY(drain_causes) THEN drain_causes ELSE array_append(drain_causes, $%d) END,
 			drain_requested_at = coalesce(drain_requested_at, now())
 		WHERE state <> 'terminated' AND %s
-		RETURNING id`, len(args)+1, len(args)+2, len(args)+2, where), append(args, reason, cause)...)
+		RETURNING id`, len(updateArgs)+1, len(updateArgs)+2, len(updateArgs)+2, updateWhere), append(updateArgs, reason, cause)...)
 	if err != nil {
 		return nil, err
 	}
@@ -1708,18 +1793,37 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 	name := in.Name
 	stopReason := evictReason(in.ForceEvict)
 	var hosts []string
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0
-			WHERE tenant_id = $1 AND name = $2 AND NOT retired`, p.TenantID, name)
-		if err != nil {
+	err := retryHostPlacements(ctx, func() error {
+		return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			if stopReason != "" {
+				var exists bool
+				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pools WHERE tenant_id = $1 AND name = $2 AND NOT retired)`, p.TenantID, name).Scan(&exists); err != nil {
+					return err
+				}
+				if !exists {
+					return errNotFound
+				}
+				var err error
+				hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
+					"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
+				if err != nil {
+					return err
+				}
+			}
+			tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0
+				WHERE tenant_id = $1 AND name = $2 AND NOT retired`, p.TenantID, name)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() == 0 {
+				return errNotFound
+			}
+			if stopReason == "" {
+				hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
+					"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
+			}
 			return err
-		}
-		if tag.RowsAffected() == 0 {
-			return errNotFound
-		}
-		hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
-			"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
-		return err
+		})
 	})
 	if err != nil {
 		return nil, err

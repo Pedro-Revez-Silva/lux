@@ -132,14 +132,15 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 			return nil
 		}
 		last = cursorPos{items[n-1].updated, items[n-1].r.ID}
-		// Reserve each candidate host before reading occupancy or inserting a
-		// placement. Host locks follow the already-held Run locks.
-		hostRows, err := tx.Query(ctx, `SELECT id FROM hosts WHERE state = 'ready' AND NOT draining
-			AND last_heartbeat > now() - $1::interval ORDER BY id`, interval(s.cfg.LeaseDuration))
-		if err != nil {
-			return err
+		pools, tenants, chosen := make([]string, 0, n), make([]string, 0, n), make([]string, 0, n)
+		for _, it := range items {
+			pools = append(pools, it.r.Spec.Placement.Pool)
+			tenants = append(tenants, it.r.TenantID)
+			chosen = append(chosen, it.r.PlaceOn)
 		}
-		hostIDs, err := pgx.CollectRows(hostRows, pgx.RowTo[string])
+		// Discovery is not a reservation; candidateHosts rechecks the same
+		// IDs after the advisory locks are acquired.
+		hostIDs, err := s.eligibleHostIDs(ctx, tx, pools, tenants, chosen)
 		if err != nil {
 			return err
 		}
@@ -148,7 +149,7 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 				return err
 			}
 		}
-		hosts, err := s.candidateHosts(ctx, tx)
+		hosts, err := s.candidateHosts(ctx, tx, hostIDs)
 		if err != nil {
 			return err
 		}
@@ -192,14 +193,34 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 	return last, n == 20, nil
 }
 
-func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx) ([]*candidateHost, error) {
+// eligibleHostIDs finds hosts in the requested pools (or explicitly chosen
+// hosts) whose tenancy permits at least one Run in the batch. The result is
+// ordered so all schedulers acquire advisory locks in the same order.
+func (s *Server) eligibleHostIDs(ctx context.Context, tx pgx.Tx, pools, tenants, chosen []string) ([]string, error) {
+	rows, err := tx.Query(ctx, `SELECT h.id FROM hosts h
+		WHERE h.state = 'ready' AND NOT h.draining AND h.last_heartbeat > now() - $1::interval
+		  AND EXISTS (SELECT 1 FROM unnest($2::text[], $3::text[], $4::text[]) AS run(pool, tenant, chosen)
+			WHERE (h.tenant_id IS NULL OR h.tenant_id = run.tenant)
+			  AND (h.pool = run.pool OR h.id = run.chosen))
+		ORDER BY h.id`, interval(s.cfg.LeaseDuration), pools, tenants, chosen)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
+func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []string) ([]*candidateHost, error) {
+	if len(lockedIDs) == 0 {
+		return nil, nil
+	}
 	rows, err := tx.Query(ctx, `
 		SELECT h.id, h.tenant_id, h.pool, h.labels, h.capacity, coalesce(h.caches->'images', '[]'),
 			coalesce(h.caches->'gitMirrors', '[]'),
 			coalesce((SELECT bool_or(p.shared) FROM pools p WHERE p.tenant_id IS NULL AND p.name = h.pool), false)
 		FROM hosts h
-		WHERE h.state = 'ready' AND NOT h.draining AND h.last_heartbeat > now() - $1::interval`,
-		interval(s.cfg.LeaseDuration))
+		WHERE h.id = ANY($2) AND h.state = 'ready' AND NOT h.draining
+		  AND h.last_heartbeat > now() - $1::interval`,
+		interval(s.cfg.LeaseDuration), lockedIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +240,7 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx) ([]*candidateHos
 	}
 	rows.Close()
 	used, err := tx.Query(ctx, `SELECT host_id, tenant_id, resources FROM placements
-		WHERE state IN `+livePlacementStates+``)
+		WHERE host_id = ANY($1) AND state IN `+livePlacementStates+``, lockedIDs)
 	if err != nil {
 		return nil, err
 	}

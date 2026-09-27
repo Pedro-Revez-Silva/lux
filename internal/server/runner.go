@@ -173,10 +173,9 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		return nil
 	})
 	if err == nil {
-		// Registration owns the host row; reconciliation takes Run locks first
-		// in a separate transaction so an exiting placement can update the host.
-		for attempt := 0; attempt < 3; attempt++ {
-			err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// Reconciliation discovers Runs anew after registration commits.
+		err = retryHostPlacements(ctx, func() error {
+			return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 				rows, err := tx.Query(ctx, `SELECT DISTINCT run_id FROM placements
 					WHERE host_id = $1 AND state IN `+livePlacementStates+` ORDER BY run_id`, w.HostID)
 				if err != nil {
@@ -189,15 +188,28 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 				if err := lockReaperRuns(ctx, tx, runs); err != nil {
 					return err
 				}
-				if err := lockCostHosts(ctx, tx, runs); err != nil {
+				rows, err = tx.Query(ctx, `SELECT host_id FROM (
+					SELECT $1::text AS host_id
+					UNION SELECT host_id FROM placements WHERE run_id = ANY($2)
+				) all_hosts ORDER BY host_id`, w.HostID, runs)
+				if err != nil {
+					return err
+				}
+				hosts, err := pgx.CollectRows(rows, pgx.RowTo[string])
+				if err != nil {
+					return err
+				}
+				for _, host := range hosts {
+					if err := lockCostHost(ctx, tx, host); err != nil {
+						return err
+					}
+				}
+				if _, err := tx.Exec(ctx, `SELECT 1 FROM hosts WHERE id = $1 FOR NO KEY UPDATE`, w.HostID); err != nil {
 					return err
 				}
 				return s.reconcileHostPlacements(ctx, tx, w.HostID, h.Live, runs, &w)
 			})
-			if !errors.Is(err, errHostPlacementsChanged) {
-				break
-			}
-		}
+		})
 	}
 	if err == nil {
 		s.Kick()
@@ -207,6 +219,18 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 }
 
 var errHostPlacementsChanged = errors.New("host placements changed during reconciliation")
+
+func retryHostPlacements(ctx context.Context, fn func() error) error {
+	for {
+		err := fn()
+		if !errors.Is(err, errHostPlacementsChanged) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+}
 
 func (s *Server) reconcileHostPlacements(ctx context.Context, tx pgx.Tx, hostID string, reported []proto.LivePlacement, runs []string, w *proto.Welcome) error {
 	// A new assignment after discovery has no Run lock. Retry discovery
@@ -685,14 +709,16 @@ func msToTime(ms int64) *time.Time {
 // on it.
 func (s *Server) hostEvicting(ctx context.Context, hostID string, ev proto.Evicting) error {
 	var hosts []string
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		var err error
-		reason := "evicting: " + truncate(ev.Reason, 100)
-		if !ev.Deadline.IsZero() {
-			reason += " at " + ev.Deadline.UTC().Format(time.RFC3339)
-		}
-		hosts, err = s.drainHosts(ctx, tx, reason, causePreempt, "preempt", "id = $1", hostID)
-		return err
+	err := retryHostPlacements(ctx, func() error {
+		return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			var err error
+			reason := "evicting: " + truncate(ev.Reason, 100)
+			if !ev.Deadline.IsZero() {
+				reason += " at " + ev.Deadline.UTC().Format(time.RFC3339)
+			}
+			hosts, err = s.drainHosts(ctx, tx, reason, causePreempt, "preempt", "id = $1", hostID)
+			return err
+		})
 	})
 	if err != nil {
 		return err
