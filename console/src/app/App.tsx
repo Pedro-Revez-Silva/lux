@@ -142,7 +142,7 @@ function useConsoleAuth(enabled: boolean): "checking" | "done" {
     api
       .whoami(ctrl.signal)
       .then((me) => {
-        if (me.email) signInAs({ email: me.email, name: me.name || me.email }, me.operator ? "operator" : "tenant");
+        if (me.email) signInAs({ email: me.email, name: me.name || me.email, picture: me.picture }, me.operator ? "operator" : "tenant");
       })
       .catch(() => {})
       .finally(() => !ctrl.signal.aborted && setState({ for: true, value: "done" }));

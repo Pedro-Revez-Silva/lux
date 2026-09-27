@@ -155,9 +155,13 @@ or load balancer you already use for luxd.
   signature, issuer, audience and expiry. API keys still work alongside.
   The Access cookie authenticates reads and same-origin writes only
   (`Sec-Fetch-Site`). Service tokens without email are refused. Actions are
-  recorded as the JWT email. The top bar shows who is signed in; clicking
-  the name signs out of Access (`/cdn-cgi/access/logout`). In key mode,
-  "Sign out" forgets the key.
+  recorded as the JWT email. The foot of the sidebar shows who is signed
+  in, with a button to sign out of Access (`/cdn-cgi/access/logout`). Their
+  photo comes from the identity provider's `picture` claim: in Zero Trust,
+  add `picture` under the identity provider's OIDC claims (and make sure it
+  requests the `profile` scope); luxd reads it from Access's identity
+  endpoint (`oidc_fields.picture`, https URLs only). Without one, the
+  sidebar shows initials. In key mode, "Sign out" forgets the key.
 
   With a tunnel (`cloudflared`), `originRequest.access.required` can also
   refuse unauthenticated requests before they reach luxd.

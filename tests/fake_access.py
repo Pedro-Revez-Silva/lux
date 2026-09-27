@@ -31,6 +31,7 @@ class FakeAccess:
         self.key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         self.kid = "test-key-1"
         self.names: dict[str, str] = {}  # email → name, for get-identity
+        self.pictures: dict[str, str] = {}  # email → photo URL (oidc_fields.picture)
         self.server = ThreadingHTTPServer((host, 0), self._handler())
         self.team = f"http://{host}:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -38,12 +39,14 @@ class FakeAccess:
     def close(self):
         self.server.shutdown()
 
-    def token(self, email: str, name: str = "", *, aud: str | None = None, iss: str | None = None,
+    def token(self, email: str, name: str = "", *, picture: str = "", aud: str | None = None, iss: str | None = None,
               ttl: int = 300, key=None) -> str:
         """An Access application token for email (as Access puts in
         Cf-Access-Jwt-Assertion and the CF_Authorization cookie)."""
         if name:
             self.names[email] = name
+        if picture:
+            self.pictures[email] = picture
         now = int(time.time())
         header = {"alg": "RS256", "kid": self.kid, "typ": "JWT"}
         claims = {"aud": [aud or self.AUD], "email": email, "iss": iss or self.team, "sub": email,
@@ -81,7 +84,10 @@ class FakeAccess:
                         self._json(401, {"err": "no token"})
                         return
                     email = claims.get("email", "")
-                    self._json(200, {"email": email, "name": access.names.get(email, ""), "id": email})
+                    body = {"email": email, "name": access.names.get(email, ""), "id": email}
+                    if email in access.pictures:
+                        body["oidc_fields"] = {"picture": access.pictures[email]}
+                    self._json(200, body)
                 else:
                     self._json(404, {})
 

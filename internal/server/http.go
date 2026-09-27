@@ -25,9 +25,9 @@ type Principal struct {
 	KeyID    string
 	Scopes   []string
 	Operator bool
-	// Email and Name: a person's, when authenticated as one (console
-	// auth) rather than by an API key.
-	Email, Name string
+	// Email, Name and Picture (a photo's URL, if any): a person's, when
+	// authenticated as one (console auth) rather than by an API key.
+	Email, Name, Picture string
 }
 
 // Actor names who a request is from in events: the person, or the key.

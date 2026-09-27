@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -77,4 +78,27 @@ func TestAccessTenantBindingAndDeletion(t *testing.T) {
 func accessForbidden(err error) bool {
 	var he *HTTPError
 	return errors.As(err, &he) && he.Status == http.StatusForbidden
+}
+
+// The picture comes from the identity's OIDC fields, and only as an https URL.
+func TestAccessIdentityPicture(t *testing.T) {
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	for _, tc := range []struct{ body, name, picture string }{
+		{`{"name":"Ada","oidc_fields":{"picture":"https://img.example/ada.png"}}`, "Ada", "https://img.example/ada.png"},
+		{`{"name":"Ada","oidc_fields":{"picture":"http://img.example/ada.png"}}`, "Ada", ""},
+		{`{"name":"Ada","oidc_fields":{"picture":"javascript:alert(1)"}}`, "Ada", ""},
+		{`{"name":"Ada"}`, "Ada", ""},
+		{`{}`, "ada@example.com", ""},
+	} {
+		body = tc.body
+		a := &cfAccess{team: srv.URL, client: srv.Client(), names: map[string]cachedIdentity{}}
+		id := a.identity(context.Background(), "ada@example.com", "token")
+		if id.Name != tc.name || id.Picture != tc.picture {
+			t.Errorf("%s: got %+v, want name %q picture %q", tc.body, id, tc.name, tc.picture)
+		}
+	}
 }

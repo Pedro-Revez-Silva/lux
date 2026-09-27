@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/mail"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -27,20 +28,28 @@ type ConsoleAuth struct {
 
 // cfAccess verifies Cloudflare Access tokens: signed by the team's keys
 // (fetched and cached by go-oidc), issued by the team, for this
-// application, not expired. The user's name comes from Access's identity
-// endpoint, cached by email.
+// application, not expired. The user's name and picture come from Access's
+// identity endpoint, cached by email.
 type cfAccess struct {
 	team     string // https://<team>.cloudflareaccess.com
 	verifier *oidc.IDTokenVerifier
 	client   *http.Client
 
 	mu    sync.Mutex
-	names map[string]cachedName
+	names map[string]cachedIdentity
 }
 
-type cachedName struct {
-	name string
-	at   time.Time
+type cachedIdentity struct {
+	identity
+	at time.Time
+}
+
+// identity is what Access's identity endpoint says of a user.
+type identity struct {
+	Name string
+	// Picture: the photo's URL from the identity provider's picture claim,
+	// when Access passes it (the IdP's OIDC claims); https only.
+	Picture string
 }
 
 func newCFAccess(team, aud string) *cfAccess {
@@ -56,7 +65,7 @@ func newCFAccess(team, aud string) *cfAccess {
 		team:     team,
 		verifier: oidc.NewVerifier(team, keys, &oidc.Config{ClientID: aud}),
 		client:   &http.Client{Timeout: 5 * time.Second},
-		names:    map[string]cachedName{},
+		names:    map[string]cachedIdentity{},
 	}
 }
 
@@ -83,18 +92,18 @@ func accessToken(r *http.Request) string {
 
 // user verifies a token and says who it is. A service token (no email) is
 // refused: the console is for people.
-func (a *cfAccess) user(ctx context.Context, token string) (email, name string, err error) {
+func (a *cfAccess) user(ctx context.Context, token string) (email string, id identity, err error) {
 	t, err := a.verifier.Verify(ctx, token)
 	if err != nil {
-		return "", "", errf(http.StatusUnauthorized, "unauthorized", "invalid Cloudflare Access token: %v", err)
+		return "", identity{}, errf(http.StatusUnauthorized, "unauthorized", "invalid Cloudflare Access token: %v", err)
 	}
 	var claims struct {
 		Email string `json:"email"`
 	}
 	if err := t.Claims(&claims); err != nil || !ValidAccessOperatorEmail(claims.Email) {
-		return "", "", errf(http.StatusUnauthorized, "unauthorized", "the Cloudflare Access token names no valid user")
+		return "", identity{}, errf(http.StatusUnauthorized, "unauthorized", "the Cloudflare Access token names no valid user")
 	}
-	return claims.Email, a.name(ctx, claims.Email, token), nil
+	return claims.Email, a.identity(ctx, claims.Email, token), nil
 }
 
 // ValidAccessOperatorEmail accepts a single plain ASCII mailbox.
@@ -115,33 +124,49 @@ func isASCII(s string) bool {
 	return true
 }
 
-// name is the user's name from Access's identity endpoint (the token's
-// claims carry only the email), cached for an hour; the email if unknown.
-func (a *cfAccess) name(ctx context.Context, email, token string) string {
+// identity is the user's name and picture from Access's identity endpoint
+// (the token's claims carry only the email), cached for an hour; the name
+// is the email if unknown.
+func (a *cfAccess) identity(ctx context.Context, email, token string) identity {
 	a.mu.Lock()
 	c, ok := a.names[email]
 	a.mu.Unlock()
 	if ok && time.Since(c.at) < time.Hour {
-		return c.name
+		return c.identity
 	}
-	name := email
+	id := identity{Name: email}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.team+"/cdn-cgi/access/get-identity", nil)
 	if err == nil {
 		req.AddCookie(&http.Cookie{Name: "CF_Authorization", Value: token})
 		if resp, err := a.client.Do(req); err == nil {
-			var id struct {
-				Name string `json:"name"`
+			var body struct {
+				Name       string `json:"name"`
+				OIDCFields struct {
+					Picture string `json:"picture"`
+				} `json:"oidc_fields"`
 			}
-			if resp.StatusCode == http.StatusOK && json.NewDecoder(resp.Body).Decode(&id) == nil && id.Name != "" {
-				name = id.Name
+			if resp.StatusCode == http.StatusOK && json.NewDecoder(resp.Body).Decode(&body) == nil {
+				if body.Name != "" {
+					id.Name = body.Name
+				}
+				id.Picture = httpsURL(body.OIDCFields.Picture)
 			}
 			resp.Body.Close()
 		}
 	}
 	a.mu.Lock()
-	a.names[email] = cachedName{name, time.Now()}
+	a.names[email] = cachedIdentity{id, time.Now()}
 	a.mu.Unlock()
-	return name
+	return id
+}
+
+// httpsURL is s if it is an absolute https URL, else "".
+func httpsURL(s string) string {
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return ""
+	}
+	return u.String()
 }
 
 // initCFTenant binds the configured name to its current ID before serving.
@@ -187,11 +212,11 @@ func (s *Server) consoleUser(r *http.Request, scope string) (Principal, error) {
 	if token == "" {
 		return Principal{}, errf(http.StatusUnauthorized, "unauthorized", "missing API key or Cloudflare Access token")
 	}
-	email, name, err := s.cfAccess.user(r.Context(), token)
+	email, id, err := s.cfAccess.user(r.Context(), token)
 	if err != nil {
 		return Principal{}, err
 	}
-	p := Principal{Email: email, Name: name}
+	p := Principal{Email: email, Name: id.Name, Picture: id.Picture}
 	ref := s.cfg.ConsoleAuth.CFDefaultTenant
 	if ref == "" || len(s.cfg.ConsoleAuth.CFOperators) == 0 {
 		return p, errf(http.StatusForbidden, "forbidden", "Cloudflare Access authorization is not configured")
