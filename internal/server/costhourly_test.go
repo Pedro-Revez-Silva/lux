@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
@@ -280,5 +281,38 @@ func TestHostHoursRefreshesCurrentHourWithBacklog(t *testing.T) {
 	systemScan(t, s, `SELECT count(*) FROM cost_host_refresh WHERE host_id IN ('a-old', 'b-old', 'c-old')`, nil, &refreshed)
 	if refreshed > s.cfg.Costs.Batch-1 {
 		t.Errorf("advanced %d old host cursors, leaving no slot for current host in a batch of %d", refreshed, s.cfg.Costs.Batch)
+	}
+}
+
+func TestHostHoursBatchOneAlternatesAcrossRestarts(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 1
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	current := time.Now().UTC().Truncate(time.Hour)
+	old := current.Add(-4 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at) VALUES
+		('a-old', 'a-old', 'p', 'ready', $1), ('b-old', 'b-old', 'p', 'ready', $1),
+		('z-current', 'z-current', 'p', 'ready', $2)`, old, current)
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source) VALUES
+		('a-old', $1, 4, 'USD', 1, 1, 'static'), ('b-old', $1, 4, 'USD', 1, 1, 'static'),
+		('z-current', $2, 4, 'USD', 1, 1, 'static')`, old, current)
+	for pass := 0; pass < 4; pass++ {
+		// Keep the current host eligible even after a successful refresh.
+		execSQL(t, s, ctx, `UPDATE cost_host_refresh SET retry_at = NULL WHERE host_id = 'z-current'`)
+		if err := peer(s, fmt.Sprintf("host-restart-%d", pass)).updateHostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var oldCount int
+		systemScan(t, s, `SELECT count(*) FROM cost_host_refresh WHERE host_id IN ('a-old', 'b-old')`, nil, &oldCount)
+		if want := (pass + 1) / 2; oldCount != want {
+			t.Fatalf("pass %d: %d backlog hosts progressed, want %d", pass, oldCount, want)
+		}
+		var currentAmount string
+		systemScan(t, s, `SELECT trim_scale(unallocated)::text FROM cost_hourly
+			WHERE host_id = 'z-current' AND hour = $1 AND run_id IS NULL`, []any{current}, &currentAmount)
+		if currentAmount == "0" {
+			t.Fatal("current host did not progress")
+		}
 	}
 }

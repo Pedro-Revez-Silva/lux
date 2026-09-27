@@ -583,6 +583,10 @@ func (s *Server) writePluginCost(ctx context.Context, tx pgx.Tx, cfg CostPluginC
 		for i := range lines {
 			lines[i].Final = status == "final"
 		}
+		var locked string
+		if err := tx.QueryRow(ctx, `SELECT source FROM cost_sources WHERE run_id = $1 AND source = $2 FOR UPDATE`, id, cfg.Name).Scan(&locked); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
 		if err := replaceCostLines(ctx, tx, e.TenantID, id, cfg.Name, lines); err != nil {
 			return err
 		}

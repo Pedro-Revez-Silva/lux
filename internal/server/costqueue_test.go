@@ -399,6 +399,105 @@ func TestFinalCostHoursDiscoveryRetainedPages(t *testing.T) {
 	}
 }
 
+func TestFinalCostHoursDiscoveryRevisitsOldWriterFinalization(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 1
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status)
+		VALUES ('r1', 't1', 'ledger', 'ok')`)
+	if err := s.discoverFinalCostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// A pre-hourly writer commits final lines after the checkpoint passes r1.
+	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final)
+		VALUES ('t1', 'r1', 'ledger', 'a', 'ai', 5, 'USD', $1, $2, true)`, hour, hour.Add(time.Hour))
+	execSQL(t, s, ctx, `UPDATE cost_sources SET status = 'final' WHERE run_id = 'r1' AND source = 'ledger'`)
+	for pass := 0; pass < 5; pass++ {
+		if err := peer(s, fmt.Sprintf("sweep-%d", pass)).backfillFinalCostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count int
+	var total string
+	systemScan(t, s, `SELECT count(*), trim_scale(sum(amount))::text FROM cost_hourly
+		WHERE run_id = 'r1' AND source = 'ledger'`, nil, &count, &total)
+	if count != 1 || total != "5" {
+		t.Fatalf("finalized behind checkpoint: %d rows totaling %s, want one row totaling 5", count, total)
+	}
+}
+
+func TestFinalCostHoursLiveReplacementWaitsForSourceLock(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s.cfg.Costs.Batch = 1
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state) VALUES ('cost-test-host', 'cost-test-host', 'p', 'ready')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES ('r1', 't1', 'compute', 'final')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final)
+		VALUES ('t1', 'r1', 'compute', 'old', 'compute', 3, 'USD', $1, $2, true)`, hour, hour.Add(time.Hour))
+	execSQL(t, s, ctx, `INSERT INTO cost_final_hour_backfill (run_id, source, next_hour) VALUES ('r1', 'compute', $1)`, hour)
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	backfill := make(chan error, 1)
+	go func() {
+		backfill <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			var status string
+			if err := tx.QueryRow(ctx, `SELECT status FROM cost_sources WHERE run_id = 'r1' AND source = 'compute' FOR UPDATE`).Scan(&status); err != nil {
+				return err
+			}
+			close(locked)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			return backfillFinalCostHour(ctx, tx, "r1", "compute", hour)
+		})
+	}()
+	<-locked
+	live := make(chan error, 1)
+	go func() {
+		live <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SET LOCAL application_name = 'cost-live-replacement-test'`); err != nil {
+				return err
+			}
+			e := &computeEval{TenantID: "t1", State: StateSucceeded,
+				Lines: []costReport{{Family: "compute", Item: "new", Amount: "5", Currency: "USD", From: hour, To: hour.Add(time.Hour)}},
+				Hours: []computeHour{{Hour: hour, Host: "cost-test-host", Currency: "USD", Amount: mustRat("5")}}}
+			return s.writeCompute(ctx, tx, "r1", e, time.Now())
+		})
+	}()
+	// With the source held, a competing live replacement cannot insert hourly first.
+	var waiting bool
+	for !waiting && ctx.Err() == nil {
+		systemScan(t, s, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE application_name = 'cost-live-replacement-test' AND cardinality(pg_blocking_pids(pid)) > 0)`, nil, &waiting)
+		if !waiting {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if !waiting {
+		t.Fatal("live transaction did not wait for source lock")
+	}
+	close(release)
+	if err := <-backfill; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-live; err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	var total string
+	systemScan(t, s, `SELECT count(*), trim_scale(sum(amount))::text FROM cost_hourly WHERE run_id = 'r1' AND source = 'compute'`, nil, &count, &total)
+	if count != 1 || total != "5" {
+		t.Fatalf("concurrent replacement: %d rows totaling %s, want one row totaling 5", count, total)
+	}
+}
+
 func TestFinalCostHoursBackfillBoundedCursorWork(t *testing.T) {
 	s, _ := costFixture(t)
 	ctx := context.Background()
