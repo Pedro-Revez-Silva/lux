@@ -285,8 +285,8 @@ func (s *Server) discoverFinalCostHours(ctx context.Context) error {
 				AND EXISTS (SELECT 1 FROM generate_series(greatest(date_trunc('hour', l.period_from), $3),
 					least(date_trunc('hour', l.period_to), date_trunc('hour', now())), interval '1 hour') h(hour)
 					WHERE (h.hour < l.period_to OR (l.period_from = l.period_to AND h.hour = date_trunc('hour', l.period_from)))
-					AND NOT EXISTS (SELECT 1 FROM cost_hourly ch
-						WHERE ch.run_id = l.run_id AND ch.source = l.source AND ch.hour = h.hour))`, c.run, c.source, oldest).Scan(&start); err != nil {
+				AND (s.hourly_generation = 0 OR NOT EXISTS (SELECT 1 FROM cost_hourly ch
+						WHERE ch.run_id = l.run_id AND ch.source = l.source AND ch.hour = h.hour)))`, c.run, c.source, oldest).Scan(&start); err != nil {
 				return err
 			}
 			if start == nil {
@@ -344,11 +344,21 @@ func (s *Server) backfillFinalCostHoursAt(ctx context.Context, now time.Time) er
 		if err != nil {
 			return err
 		}
+		lockOrder := slices.Clone(cursors)
+		slices.SortFunc(lockOrder, func(a, b cursor) int {
+			return cmp.Or(cmp.Compare(a.run, b.run), cmp.Compare(a.source, b.source))
+		})
+		for _, c := range lockOrder {
+			if _, err := tx.Exec(ctx, `SELECT 1 FROM cost_sources WHERE run_id = $1 AND source = $2 FOR UPDATE`, c.run, c.source); err != nil {
+				return err
+			}
+		}
 		remaining := limit
 		for _, c := range cursors {
 			run, source, hour := c.run, c.source, c.hour
 			var status string
-			if err := tx.QueryRow(ctx, `SELECT status FROM cost_sources WHERE run_id = $1 AND source = $2 FOR UPDATE`, run, source).Scan(&status); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			var generation int64
+			if err := tx.QueryRow(ctx, `SELECT status, hourly_generation FROM cost_sources WHERE run_id = $1 AND source = $2 FOR UPDATE`, run, source).Scan(&status, &generation); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return err
 			}
 			if status != "final" {
@@ -367,7 +377,7 @@ func (s *Server) backfillFinalCostHoursAt(ctx context.Context, now time.Time) er
 				hour = oldest
 			}
 			for remaining > 0 && last != nil && !hour.After(*last) && !hour.After(now.Truncate(time.Hour)) {
-				if err := backfillFinalCostHour(ctx, tx, run, source, hour); err != nil {
+				if err := backfillFinalCostHour(ctx, tx, run, source, hour, generation == 0); err != nil {
 					return err
 				}
 				hour = hour.Add(time.Hour)
@@ -376,6 +386,11 @@ func (s *Server) backfillFinalCostHoursAt(ctx context.Context, now time.Time) er
 			if last == nil || hour.After(*last) {
 				if _, err := tx.Exec(ctx, `DELETE FROM cost_final_hour_backfill WHERE run_id = $1 AND source = $2`, run, source); err != nil {
 					return err
+				}
+				if generation == 0 {
+					if _, err := tx.Exec(ctx, `UPDATE cost_sources SET hourly_generation = hourly_generation + 1 WHERE run_id = $1 AND source = $2`, run, source); err != nil {
+						return err
+					}
 				}
 			} else {
 				if _, err := tx.Exec(ctx, `UPDATE cost_final_hour_backfill SET next_hour = $3 WHERE run_id = $1 AND source = $2`, run, source, hour); err != nil {
@@ -390,10 +405,16 @@ func (s *Server) backfillFinalCostHoursAt(ctx context.Context, now time.Time) er
 	})
 }
 
-func backfillFinalCostHour(ctx context.Context, tx pgx.Tx, run, source string, hour time.Time) error {
+func backfillFinalCostHour(ctx context.Context, tx pgx.Tx, run, source string, hour time.Time, replace bool) error {
 	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM cost_hourly WHERE run_id = $1 AND source = $2 AND hour = $3)`, run, source, hour).Scan(&exists); err != nil || exists {
-		return err
+	if replace {
+		if _, err := tx.Exec(ctx, `DELETE FROM cost_hourly WHERE run_id = $1 AND source = $2 AND hour = $3`, run, source, hour); err != nil {
+			return err
+		}
+	} else {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM cost_hourly WHERE run_id = $1 AND source = $2 AND hour = $3)`, run, source, hour).Scan(&exists); err != nil || exists {
+			return err
+		}
 	}
 	type key struct{ tenant, family, currency string }
 	amounts := map[key]*big.Rat{}
@@ -994,12 +1015,13 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *c
 			return err
 		}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, attempts, next_at, settles_left, last_error)
-			VALUES ($1, $2, 'compute', $3, CASE WHEN $4 THEN now() END, $5, $6, $7, $8)
+	if _, err := tx.Exec(ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, attempts, next_at, settles_left, last_error, hourly_generation)
+			VALUES ($1, $2, 'compute', $3, CASE WHEN $4 THEN now() END, $5, $6, $7, $8, CASE WHEN $4 THEN 1 ELSE 0 END)
 		ON CONFLICT (run_id, source) DO UPDATE SET status = EXCLUDED.status,
 			answered_at = coalesce(EXCLUDED.answered_at, cost_sources.answered_at),
 			attempts = EXCLUDED.attempts, next_at = EXCLUDED.next_at,
-			settles_left = EXCLUDED.settles_left, last_error = EXCLUDED.last_error`,
+			settles_left = EXCLUDED.settles_left, last_error = EXCLUDED.last_error,
+			hourly_generation = CASE WHEN $4 THEN cost_sources.hourly_generation + 1 ELSE cost_sources.hourly_generation END`,
 		runID, e.TenantID, status, e.Err == nil, attempts, nextAt, nil, lastError); err != nil {
 		return err
 	}

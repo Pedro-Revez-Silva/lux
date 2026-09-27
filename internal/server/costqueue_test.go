@@ -245,6 +245,7 @@ func TestFinalCostHoursBackfillProgressWithoutRequeue(t *testing.T) {
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state) VALUES ('old-host', 'old-host', 'p', 'terminated')`)
 	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, amount)
 		VALUES ($1, 't1', 'r1', 'compute', 'compute', 'USD', 'old-host', 2)`, from)
+	execSQL(t, s, ctx, `UPDATE cost_sources SET hourly_generation = 1 WHERE run_id = 'r1'`)
 	for i := 0; i < 8; i++ {
 		if err := peer(s, fmt.Sprintf("restart-%d", i)).backfillFinalCostHours(ctx); err != nil {
 			t.Fatal(err)
@@ -428,6 +429,115 @@ func TestFinalCostHoursDiscoveryRevisitsOldWriterFinalization(t *testing.T) {
 	}
 }
 
+func TestFinalCostHoursReplacesLegacyFinalEstimate(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 1
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, hourly_generation)
+		VALUES ('r1', 't1', 'ledger', 'ok', 1)`)
+	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, amount)
+		VALUES ($1, 't1', 'r1', 'ledger', 'ai', 'USD', 3)`, hour)
+	if err := s.discoverFinalCostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// An older writer replaces lines and status but cannot supply an hourly generation.
+	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final)
+		VALUES ('t1', 'r1', 'ledger', 'a', 'ai', 5, 'USD', $1, $2, true)`, hour, hour.Add(time.Hour))
+	execSQL(t, s, ctx, `UPDATE cost_sources SET status = 'final' WHERE run_id = 'r1' AND source = 'ledger'`)
+	for pass := 0; pass < 5; pass++ {
+		if err := peer(s, fmt.Sprintf("legacy-pass-%d", pass)).backfillFinalCostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count int
+	var total string
+	systemScan(t, s, `SELECT count(*), trim_scale(sum(amount))::text FROM cost_hourly
+		WHERE run_id = 'r1' AND source = 'ledger'`, nil, &count, &total)
+	if count != 1 || total != "5" {
+		t.Fatalf("legacy final: %d rows totaling %s, want one row totaling 5", count, total)
+	}
+	var generation int64
+	systemScan(t, s, `SELECT hourly_generation FROM cost_sources WHERE run_id = 'r1' AND source = 'ledger'`, nil, &generation)
+	if generation == 0 {
+		t.Fatal("reconciled source remains marked for replacement")
+	}
+}
+
+func TestFinalCostHoursInvertedSourceLockOrder(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s.cfg.Costs.Batch = 2
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state) VALUES ('lock-host', 'lock-host', 'p', 'ready')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES
+		('r1', 't1', 'compute', 'final'), ('r2', 't2', 'compute', 'final')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final) VALUES
+		('t1', 'r1', 'compute', 'a', 'compute', 3, 'USD', $1, $2, true),
+		('t2', 'r2', 'compute', 'a', 'compute', 4, 'USD', $3, $4, true)`, hour.Add(time.Hour), hour.Add(2*time.Hour), hour, hour.Add(time.Hour).Add(-time.Nanosecond))
+	execSQL(t, s, ctx, `INSERT INTO cost_final_hour_backfill (run_id, source, next_hour) VALUES
+		('r1', 'compute', $1), ('r2', 'compute', $2)`, hour.Add(time.Hour), hour)
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	livePID := make(chan int, 1)
+	live := make(chan error, 1)
+	go func() {
+		live <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			var pid int
+			if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `SELECT 1 FROM cost_sources WHERE run_id = 'r1' AND source = 'compute' FOR UPDATE`); err != nil {
+				return err
+			}
+			livePID <- pid
+			close(locked)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			e := &computeEval{TenantID: "t2", State: StateSucceeded,
+				Lines: []costReport{{Family: "compute", Item: "new", Amount: "5", Currency: "USD", From: hour, To: hour.Add(time.Hour)}},
+				Hours: []computeHour{{Hour: hour, Host: "lock-host", Currency: "USD", Amount: mustRat("5")}}}
+			return s.writeCompute(ctx, tx, "r2", e, time.Now())
+		})
+	}()
+	<-locked
+	pid := <-livePID
+	backfill := make(chan error, 1)
+	go func() { backfill <- s.backfillFinalCostHours(ctx) }()
+	var waiting bool
+	for !waiting && ctx.Err() == nil {
+		systemScan(t, s, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			WHERE $1 = ANY(pg_blocking_pids(pid)))`, []any{pid}, &waiting)
+		if !waiting {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	close(release)
+	if !waiting {
+		t.Fatal("backfill did not wait for the first source")
+	}
+	if err := <-live; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-backfill; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.backfillFinalCostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var total string
+	systemScan(t, s, `SELECT trim_scale(sum(amount))::text FROM cost_hourly WHERE source = 'compute'`, nil, &total)
+	if total != "8" {
+		t.Fatalf("concurrent sources total %s, want 8", total)
+	}
+}
+
 func TestFinalCostHoursLiveReplacementWaitsForSourceLock(t *testing.T) {
 	s, _ := costFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -455,7 +565,7 @@ func TestFinalCostHoursLiveReplacementWaitsForSourceLock(t *testing.T) {
 			case <-ctx.Done():
 				return ctx.Err()
 			}
-			return backfillFinalCostHour(ctx, tx, "r1", "compute", hour)
+			return backfillFinalCostHour(ctx, tx, "r1", "compute", hour, false)
 		})
 	}()
 	<-locked
