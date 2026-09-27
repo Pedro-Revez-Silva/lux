@@ -33,6 +33,9 @@ bucket = "from-file"
 memory = "4Gi"
 [history]
 raw = "24h"
+[costs]
+every = "5m"
+batch = 50
 [console]
 auth = "cloudflare-access"
 [console.cloudflare_access]
@@ -41,6 +44,7 @@ aud = "aud-from-file"
 `)
 	t.Setenv("LUX_S3_BUCKET", "from-env")
 	t.Setenv("LUX_DEFAULT_CPUS", "1.5")
+	t.Setenv("LUX_COSTS", "false")
 	c, err := loadConfig(path)
 	if err != nil {
 		t.Fatal(err)
@@ -54,6 +58,8 @@ aud = "aud-from-file"
 		t.Errorf("defaults: %+v", c.Defaults)
 	case c.History.Raw.Duration != 24*time.Hour || c.History.Hours.Duration == 0:
 		t.Errorf("history: %+v", c.History)
+	case c.Costs.Enabled || c.Costs.Every.Duration != 5*time.Minute || c.Costs.Batch != 50 || c.Costs.DrainEvery.Duration != 2*time.Second:
+		t.Errorf("costs: %+v", c.Costs)
 	case c.Console.Auth != "cloudflare-access" || c.Console.CloudflareAccess.Team != "acme":
 		t.Errorf("console: %+v", c.Console)
 	case c.S3.Region != "us-east-1" || c.Tick.Duration != time.Second:
@@ -67,9 +73,12 @@ aud = "aud-from-file"
 		{"[defaults]\ncpus = -1", "", "defaults.cpus"},
 		{"[console]\nauth = \"cloudflare-access\"", "", "console.cloudflare_access.team"},
 		{"[console]\nauth = \"magic\"", "", "want key or cloudflare-access"},
+		{"[costs]\nbatch = 0", "", "costs.batch"},
+		{"", "LUX_COSTS_EVERY=0s", "costs.every"},
 	} {
 		os.Unsetenv("LUX_LEASE")
 		os.Unsetenv("LUX_DEFAULT_CPUS")
+		os.Unsetenv("LUX_COSTS_EVERY")
 		write(bad.file)
 		if bad.env != "" {
 			k, v, _ := strings.Cut(bad.env, "=")

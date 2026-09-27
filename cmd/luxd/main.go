@@ -167,7 +167,13 @@ func serve(ctx context.Context, c config) error {
 		HistoryMinutes:       c.History.Minutes.Duration,
 		HistoryHours:         c.History.Hours.Duration,
 		DiskPaths:            c.History.DiskPaths,
-		Providers:            providers(c),
+		Costs: server.CostsConfig{
+			Enabled:    c.Costs.Enabled,
+			Every:      c.Costs.Every.Duration,
+			DrainEvery: c.Costs.DrainEvery.Duration,
+			Batch:      c.Costs.Batch,
+		},
+		Providers: providers(c),
 		ConsoleAuth: server.ConsoleAuth{
 			Mode:   c.Console.Auth,
 			CFTeam: c.Console.CloudflareAccess.Team,

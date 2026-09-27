@@ -76,6 +76,14 @@ type config struct {
 		// ([] or only commas): no disk samples.
 		DiskPaths []string `toml:"disk_paths" env:"LUX_HISTORY_DISK_PATHS"`
 	} `toml:"history"`
+	// Costs: the cost tick and the drainer of the cost queue
+	// (docs/costs.md, section 5). Off: neither runs.
+	Costs struct {
+		Enabled    bool     `toml:"enabled" env:"LUX_COSTS"`
+		Every      duration `toml:"every" env:"LUX_COSTS_EVERY"`
+		DrainEvery duration `toml:"drain_every" env:"LUX_COSTS_DRAIN_EVERY"`
+		Batch      int      `toml:"batch" env:"LUX_COSTS_BATCH"`
+	} `toml:"costs"`
 	EC2 struct {
 		Endpoint string `toml:"endpoint" env:"LUX_EC2_ENDPOINT"`
 	} `toml:"ec2"`
@@ -166,6 +174,10 @@ func defaultConfig() config {
 	c.History.Minutes.Duration = server.DefaultHistoryMinutes
 	c.History.Hours.Duration = server.DefaultHistoryHours
 	c.History.DiskPaths = slices.Clone(server.DefaultDiskPaths)
+	c.Costs.Enabled = true
+	c.Costs.Every.Duration = server.DefaultCostsEvery
+	c.Costs.DrainEvery.Duration = server.DefaultCostsDrainEvery
+	c.Costs.Batch = server.DefaultCostsBatch
 	c.Console.Auth = "key"
 	return c
 }
@@ -285,6 +297,15 @@ func (c config) check() error {
 		if !filepath.IsAbs(p) {
 			problems = append(problems, fmt.Sprintf("history.disk_paths (LUX_HISTORY_DISK_PATHS) %q: want an absolute path", p))
 		}
+	}
+	if c.Costs.Every.Duration <= 0 {
+		problems = append(problems, "costs.every (LUX_COSTS_EVERY) must be positive")
+	}
+	if c.Costs.DrainEvery.Duration <= 0 {
+		problems = append(problems, "costs.drain_every (LUX_COSTS_DRAIN_EVERY) must be positive")
+	}
+	if c.Costs.Batch <= 0 {
+		problems = append(problems, "costs.batch (LUX_COSTS_BATCH) must be a positive number")
 	}
 	switch c.Console.Auth {
 	case "key":

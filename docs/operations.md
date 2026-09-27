@@ -84,6 +84,10 @@ its variable; the table below lists them by variable.
 | `LUX_HISTORY_MINUTES` | `720h` | How long minute rollups are kept. |
 | `LUX_HISTORY_HOURS` | `9600h` | How long hour rollups are kept. |
 | `LUX_HISTORY_DISK_PATHS` | `/` | Directories on luxd's own machine whose filesystems (used, free, total) the operators' Overview charts, comma-separated (`history.disk_paths`, a list, in the file). A path that cannot be read is skipped and logged. An empty list (`[]`, or only commas such as `,`) tracks no filesystem. |
+| `LUX_COSTS` | `true` | Run costs ([Costs](costs.md)): `false` stops the cost tick and the queue's drainer on this luxd. State changes still queue their Runs, for whichever luxd drains. |
+| `LUX_COSTS_EVERY` | `2m` | The cost tick: every live Run's costs are evaluated once per interval, by one luxd. |
+| `LUX_COSTS_DRAIN_EVERY` | `2s` | How often each luxd polls the cost queue, besides being woken by Run events. |
+| `LUX_COSTS_BATCH` | `1000` | How many Runs one drain claims. |
 | `LUX_DEBUG` | — | Debug logging. |
 | `LUX_CONSOLE_AUTH` | `key` | How the console signs people in: `key` or `cloudflare-access` ([Operators](operators.md#signing-in)). |
 | `LUX_CF_ACCESS_TEAM`, `LUX_CF_ACCESS_AUD` | — | For `cloudflare-access`: the Access team (`acme` or `acme.cloudflareaccess.com`) and the application's AUD tag. |
