@@ -413,10 +413,21 @@ func (s *Server) reportCostPlugins(ctx context.Context, runs map[string]pluginRu
 						}
 						seen[a.RunID] = true
 						items := map[string]bool{}
+						bucketBudget := 0
 						if a.Status == "ok" {
 							for _, l := range a.Lines {
 								if items[l.Item] || !costAmount.MatchString(l.Amount) || l.Family == "" || l.Currency == "" || l.From.IsZero() || l.To.IsZero() || l.To.Before(l.From) {
 									a.err = errors.New("invalid or duplicate cost line")
+									break
+								}
+								// Limit both one line's span and total hourly expansion per answer.
+								if l.To.Sub(l.From) > 90*24*time.Hour {
+									a.err = errors.New("cost line exceeds 90 days")
+									break
+								}
+								bucketBudget += int(l.To.UTC().Truncate(time.Hour).Sub(l.From.UTC().Truncate(time.Hour))/time.Hour) + 1
+								if bucketBudget > 2161 {
+									a.err = errors.New("cost report exceeds hourly bucket budget")
 									break
 								}
 								items[l.Item] = true
@@ -575,7 +586,7 @@ func (s *Server) writePluginCost(ctx context.Context, tx pgx.Tx, cfg CostPluginC
 		if err := replaceCostLines(ctx, tx, e.TenantID, id, cfg.Name, lines); err != nil {
 			return err
 		}
-		if err := replacePluginHours(ctx, tx, e.TenantID, id, cfg.Name, lines); err != nil {
+		if err := replacePluginHours(ctx, tx, e.TenantID, id, cfg.Name, lines, s.cfg.Costs.Hourly); err != nil {
 			return err
 		}
 		attempts = 0

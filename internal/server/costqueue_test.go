@@ -202,6 +202,110 @@ func TestCostTickOnePerBucket(t *testing.T) {
 	}
 }
 
+func TestCostTickBackfillsTerminalComputeInBatches(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 1
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES
+		('historical-a','t1','{}','succeeded'), ('historical-b','t2','{}','failed'),
+		('historical-c','t1','{}','cancelled'), ('historical-stopped','t1','{}','stopped')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES ('historical-c','t1','compute','final')`)
+	if _, err := s.costTick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if pending(t, s, "historical-a") == "" || pending(t, s, "historical-b") != "" || pending(t, s, "historical-stopped") != "" || pending(t, s, "historical-c") != "" {
+		t.Fatal("first tick should queue only the first missing terminal compute source")
+	}
+	execSQL(t, s, ctx, `DELETE FROM cost_ticks`)
+	if _, err := s.costTick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if pending(t, s, "historical-b") == "" {
+		t.Fatal("next tick did not advance past an already queued Run")
+	}
+}
+
+func TestFinalCostHoursBackfillProgressWithoutRequeue(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 1
+	s.cfg.Costs.Hourly = 24 * time.Hour
+	from := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'succeeded' WHERE id = 'r1'`)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES
+		('r1', 't1', 'ledger', 'final'), ('r1', 't1', 'compute', 'final')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final) VALUES
+		('t1', 'r1', 'ledger', 'a', 'ai', 3, 'USD', $1, $2, true),
+		('t1', 'r1', 'compute', 'a', 'compute', 4, 'USD', $1, $2, true)`, from, from.Add(2*time.Hour))
+	execSQL(t, s, ctx, `INSERT INTO cost_final_hour_backfill (run_id, source, next_hour) VALUES
+		('r1', 'ledger', $1), ('r1', 'compute', $1)`, from)
+	// A post-upgrade write wins over the historical copy for its hour.
+	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, amount)
+		VALUES ($1, 't1', 'r1', 'ledger', 'ai', 'USD', 1.5)`, from)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state) VALUES ('old-host', 'old-host', 'p', 'terminated')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, amount)
+		VALUES ($1, 't1', 'r1', 'compute', 'compute', 'USD', 'old-host', 2)`, from)
+	for i := 0; i < 8; i++ {
+		if err := peer(s, fmt.Sprintf("restart-%d", i)).backfillFinalCostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		systemScan(t, s, `SELECT count(*) FROM cost_hourly WHERE run_id = 'r1'`, nil, &n)
+		if n < 2 || n > min(i+2, 4) {
+			t.Fatalf("pass %d: %d hours, want between 2 and %d", i, n, min(i+2, 4))
+		}
+	}
+	var total string
+	systemScan(t, s, `SELECT trim_scale(sum(amount))::text FROM cost_hourly WHERE run_id = 'r1'`, nil, &total)
+	if total != "7" {
+		t.Errorf("hourly total %s, want 7", total)
+	}
+	var computeFirst int
+	systemScan(t, s, `SELECT count(*) FROM cost_hourly WHERE run_id = 'r1' AND source = 'compute' AND hour = $1`, []any{from}, &computeFirst)
+	if computeFirst != 1 {
+		t.Errorf("backfill duplicated host-attributed compute hour: %d", computeFirst)
+	}
+	var overwritten string
+	systemScan(t, s, `SELECT trim_scale(amount)::text FROM cost_hourly
+		WHERE run_id = 'r1' AND source = 'ledger' AND hour = $1`, []any{from}, &overwritten)
+	if overwritten != "1.5" {
+		t.Errorf("live hourly row replaced with %s", overwritten)
+	}
+	var pendingSources int
+	systemScan(t, s, `SELECT count(*) FROM cost_final_hour_backfill`, nil, &pendingSources)
+	if pendingSources != 0 {
+		t.Errorf("%d cursors left after backfill", pendingSources)
+	}
+	if err := s.backfillFinalCostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	systemScan(t, s, `SELECT status FROM cost_sources WHERE run_id = 'r1' AND source = 'ledger'`, nil, &status)
+	if status != "final" || pending(t, s, "r1") != "" {
+		t.Errorf("backfill changed final plugin status %s or queued Run %q", status, pending(t, s, "r1"))
+	}
+}
+
+func TestFinalCostHoursBackfillDropsEmptyAndNoLongerFinalSources(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 2
+	s.cfg.Costs.Hourly = 24 * time.Hour
+	from := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES
+		('r1', 't1', 'empty', 'final'), ('r2', 't2', 'resumed', 'ok')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_final_hour_backfill (run_id, source, next_hour) VALUES
+		('r1', 'empty', $1), ('r2', 'resumed', $1)`, from)
+	if err := s.backfillFinalCostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var remaining int
+	systemScan(t, s, `SELECT count(*) FROM cost_final_hour_backfill`, nil, &remaining)
+	if remaining != 0 {
+		t.Errorf("%d stale cursors remain", remaining)
+	}
+}
+
 func TestCostTickDiscoversHistoricalPluginSources(t *testing.T) {
 	s, keys, _ := pluginFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		if pluginDescribeHandler(w, r) {
@@ -237,7 +341,7 @@ func TestCostTickDiscoversHistoricalPluginSources(t *testing.T) {
 	if won, err := s.costTick(ctx); err != nil || !won {
 		t.Fatalf("tick: won %v, %v", won, err)
 	}
-	for run, want := range map[string]string{"old-t1": "tick -", "old-t2": "tick -", "existing": "", "quiet": "", "r1": "tick -", "r2": "tick -"} {
+	for run, want := range map[string]string{"old-t1": "tick -", "old-t2": "tick -", "existing": "tick -", "quiet": "", "r1": "tick -", "r2": "tick -"} {
 		if got := pending(t, s, run); got != want {
 			t.Errorf("%s: queued %q, want %q", run, got, want)
 		}

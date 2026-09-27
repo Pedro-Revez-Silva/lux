@@ -98,6 +98,12 @@ func (s *Server) costLoop(ctx context.Context) {
 		if !time.Now().Before(nextTick) {
 			nextTick = s.tryCostTick(ctx, nextTick)
 		}
+		if err := s.updateHostHours(ctx); err != nil && ctx.Err() == nil {
+			s.log.Warn("costs: host hours", "err", err)
+		}
+		if err := s.backfillFinalCostHours(ctx); err != nil && ctx.Err() == nil {
+			s.log.Warn("costs: final hourly backfill", "err", err)
+		}
 		if err := s.pollDueCostSources(ctx); err != nil && ctx.Err() == nil {
 			s.log.Warn("costs: poll due sources", "err", err)
 		}
@@ -184,8 +190,10 @@ func (s *Server) costTick(ctx context.Context) (bool, error) {
 					SELECT id FROM (
 						SELECT missing.id FROM runs missing
 						WHERE missing.state IN ('succeeded', 'failed', 'cancelled', 'stopped', 'lost')
-							AND EXISTS (SELECT 1 FROM unnest($1::text[]) AS plugin(source)
+							AND (EXISTS (SELECT 1 FROM unnest($1::text[]) AS plugin(source)
 								WHERE NOT EXISTS (SELECT 1 FROM cost_sources c WHERE c.run_id = missing.id AND c.source = plugin.source))
+								OR (missing.state IN ('succeeded', 'failed', 'cancelled')
+									AND NOT EXISTS (SELECT 1 FROM cost_sources c WHERE c.run_id = missing.id AND c.source = 'compute')))
 							AND NOT EXISTS (SELECT 1 FROM cost_pending p WHERE p.run_id = missing.id)
 						ORDER BY missing.id LIMIT $2) AS missing_sources)
 				AND NOT EXISTS (SELECT 1 FROM cost_pending p WHERE p.run_id = r.id)
@@ -203,11 +211,7 @@ func (s *Server) costTick(ctx context.Context) (bool, error) {
 		if err != nil {
 			return err
 		}
-		var now time.Time
-		if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&now); err != nil {
-			return err
-		}
-		return s.updateHostHours(ctx, tx, now)
+		return nil
 	})
 	return won && err == nil, err
 }
@@ -231,6 +235,117 @@ func (s *Server) pollDueCostSources(ctx context.Context) error {
 			ON CONFLICT (run_id) DO NOTHING`, plugins, s.cfg.Costs.Batch)
 		return err
 	})
+}
+
+// backfillFinalCostHours copies one retained hour per source in each bounded
+// pass. The cursor and hourly rows commit together; final reports are never
+// sent back through the plugin or compute evaluation paths.
+func (s *Server) backfillFinalCostHours(ctx context.Context) error {
+	for range s.cfg.Costs.Batch {
+		var worked bool
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			var run, source string
+			var hour time.Time
+			err := tx.QueryRow(ctx, `SELECT run_id, source, next_hour FROM cost_final_hour_backfill
+				ORDER BY next_hour, run_id, source LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&run, &source, &hour)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			worked = true
+			var status string
+			if err := tx.QueryRow(ctx, `SELECT status FROM cost_sources WHERE run_id = $1 AND source = $2 FOR UPDATE`, run, source).Scan(&status); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if status != "final" {
+				_, err := tx.Exec(ctx, `DELETE FROM cost_final_hour_backfill WHERE run_id = $1 AND source = $2`, run, source)
+				return err
+			}
+			var last *time.Time
+			err = tx.QueryRow(ctx, `SELECT max(period_to) FROM cost_lines WHERE run_id = $1 AND source = $2 AND final`, run, source).Scan(&last)
+			if err != nil {
+				return err
+			}
+			oldest := time.Now().UTC().Add(-s.cfg.Costs.Hourly).Truncate(time.Hour).Add(time.Hour)
+			if hour.Before(oldest) {
+				hour = oldest
+			}
+			if last == nil || hour.After(*last) || hour.After(time.Now()) {
+				_, err := tx.Exec(ctx, `DELETE FROM cost_final_hour_backfill WHERE run_id = $1 AND source = $2`, run, source)
+				return err
+			}
+			if err := backfillFinalCostHour(ctx, tx, run, source, hour); err != nil {
+				return err
+			}
+			_, err = tx.Exec(ctx, `UPDATE cost_final_hour_backfill SET next_hour = $3 WHERE run_id = $1 AND source = $2`, run, source, hour.Add(time.Hour))
+			return err
+		})
+		if err != nil || !worked {
+			return err
+		}
+	}
+	return nil
+}
+
+func backfillFinalCostHour(ctx context.Context, tx pgx.Tx, run, source string, hour time.Time) error {
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM cost_hourly WHERE run_id = $1 AND source = $2 AND hour = $3)`, run, source, hour).Scan(&exists); err != nil || exists {
+		return err
+	}
+	type key struct{ tenant, family, currency string }
+	amounts := map[key]*big.Rat{}
+	rows, err := tx.Query(ctx, `SELECT tenant_id, family, currency, amount::text, period_from, period_to
+		FROM cost_lines WHERE run_id = $1 AND source = $2 AND final
+			AND period_from < $3 AND period_to >= $4`, run, source, hour.Add(time.Hour), hour)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var tenant, family, currency, amount string
+		var from, to time.Time
+		if err := rows.Scan(&tenant, &family, &currency, &amount, &from, &to); err != nil {
+			rows.Close()
+			return err
+		}
+		if from.Equal(to) && !from.UTC().Truncate(time.Hour).Equal(hour) {
+			continue
+		}
+		v := mustRat(amount)
+		if to.After(from) {
+			start := maxTime(from, hour)
+			end := minTime(to, hour.Add(time.Hour))
+			if !end.After(start) {
+				continue
+			}
+			// Cumulative rounding assigns any remainder to the final hour.
+			cumulative := func(at time.Time) *big.Rat {
+				return mustRat(moneyString(new(big.Rat).Mul(v, big.NewRat(int64(at.Sub(from)), int64(to.Sub(from))))))
+			}
+			v = new(big.Rat).Sub(cumulative(end), cumulative(start))
+		}
+		k := key{tenant, family, currency}
+		if amounts[k] == nil {
+			amounts[k] = new(big.Rat)
+		}
+		amounts[k].Add(amounts[k], v)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for k, v := range amounts {
+		_, err := tx.Exec(ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, amount)
+			VALUES ($1, $2, $3, $4, $5, $6, $7::numeric)
+			ON CONFLICT (run_id, source, hour, family, currency, (coalesce(host_id, '')))
+			WHERE run_id IS NOT NULL DO NOTHING`, hour, k.tenant, run, source, k.family, k.currency, moneyString(v))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // claimCosts claims up to costs.batch due Runs for this luxd, in a
@@ -769,7 +884,7 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *c
 		if err := replaceCostLines(ctx, tx, e.TenantID, runID, "compute", e.Lines); err != nil {
 			return err
 		}
-		if err := replaceComputeHours(ctx, tx, e.TenantID, runID, e.Hours); err != nil {
+		if err := replaceComputeHours(ctx, tx, e.TenantID, runID, e.Hours, s.cfg.Costs.Hourly); err != nil {
 			return err
 		}
 	}
