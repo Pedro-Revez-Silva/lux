@@ -130,6 +130,8 @@ type Server struct {
 	diskMu       sync.Mutex
 	diskFailing  map[string]bool
 	wg           sync.WaitGroup
+	pluginsOnce  sync.Once
+	plugins      []*costPlugin
 }
 
 func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Server {
@@ -172,6 +174,13 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 	cfg.Costs.DrainEvery = cmp.Or(cfg.Costs.DrainEvery, DefaultCostsDrainEvery)
 	cfg.Costs.Batch = cmp.Or(cfg.Costs.Batch, DefaultCostsBatch)
 	cfg.Costs.PricesRefresh = cmp.Or(cfg.Costs.PricesRefresh, DefaultPricesRefresh)
+	cfg.Costs.Backoff = cmp.Or(cfg.Costs.Backoff, 10*time.Second)
+	cfg.Costs.BackoffMax = cmp.Or(cfg.Costs.BackoffMax, 10*time.Minute)
+	cfg.Costs.SettleGiveUp = cmp.Or(cfg.Costs.SettleGiveUp, 7*24*time.Hour)
+	cfg.Costs.DescribeEvery = cmp.Or(cfg.Costs.DescribeEvery, time.Hour)
+	if cfg.Costs.Settle == nil {
+		cfg.Costs.Settle = []time.Duration{10 * time.Minute, time.Hour}
+	}
 	s := &Server{
 		cfg:         cfg,
 		db:          db,

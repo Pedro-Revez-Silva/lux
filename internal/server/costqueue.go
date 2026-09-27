@@ -18,7 +18,7 @@ import (
 
 // The cost queue (docs/costs.md, section 5): Runs whose costs are due wait
 // in cost_pending, queued by their state changes (setRunState) and by the
-// cost tick; every luxd drains it. compute is the only source so far.
+// cost tick; every luxd drains it. Each claim evaluates compute and plugins.
 
 // Cost defaults (luxd's [costs] every, drain_every, batch).
 const (
@@ -43,10 +43,7 @@ const (
 	// costTickSlack: the tick is tried this long after its bucket starts
 	// (at most a tenth of costs.every).
 	costTickSlack = time.Second
-	// A terminal Run whose compute is not final yet (a provider rate still
-	// missing) is tried again after costs.every, doubling up to
-	// costRetryMax, and no longer once it finished costGiveUp ago. (The
-	// [costs] backoff and settle keys, with the plugins, will replace these.)
+	// Compute's price retry is independent of plugin retry and settlement.
 	costRetryMax = time.Hour
 	costGiveUp   = 7 * 24 * time.Hour
 	// Spot history can arrive after multiple successful cost evaluations.
@@ -69,6 +66,12 @@ type CostsConfig struct {
 	ComputeEC2    bool
 	PricesRefresh time.Duration
 	Prices        map[string]PriceProvider
+	Plugins       []CostPluginConfig
+	Settle        []time.Duration
+	SettleGiveUp  time.Duration
+	Backoff       time.Duration
+	BackoffMax    time.Duration
+	DescribeEvery time.Duration
 }
 
 // costLoop ticks and drains, when costs are enabled. The drainer wakes at
@@ -79,7 +82,16 @@ func (s *Server) costLoop(ctx context.Context) {
 	if !c.Enabled {
 		return
 	}
+	s.initCostPlugins()
 	var nextTick time.Time
+	if len(s.plugins) > 0 {
+		go func() {
+			for ctx.Err() == nil {
+				s.describeCostPlugins(ctx)
+				wait(ctx, nil, c.DescribeEvery)
+			}
+		}()
+	}
 	for ctx.Err() == nil {
 		woken := s.wakeups.next("")
 		if !time.Now().Before(nextTick) {
@@ -149,7 +161,7 @@ func (s *Server) costTick(ctx context.Context) (bool, error) {
 				SELECT id FROM runs WHERE id IN (
 					SELECT id FROM runs WHERE state IN ('scheduled', 'starting', 'running', 'stopping')
 					UNION
-					SELECT run_id FROM cost_sources WHERE source = 'compute' AND status <> 'final' AND next_at <= now())
+					SELECT run_id FROM cost_sources WHERE status <> 'final' AND next_at <= now())
 				ORDER BY id FOR KEY SHARE SKIP LOCKED)
 			INSERT INTO cost_pending (run_id, due_at, reason)
 				SELECT id, now(), 'tick' FROM due ORDER BY id
@@ -192,10 +204,18 @@ func (s *Server) drainCosts(ctx context.Context) (int, error) {
 	}
 	slices.Sort(runs) // each chunk locks its Runs in id order
 	var evals map[string]*computeEval
+	var pluginRuns map[string]pluginRun
+	var pluginDue map[string]map[string]bool
 	var now time.Time
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var err error
 		evals, now, err = evaluateCompute(ctx, tx, runs)
+		if err == nil && len(s.cfg.Costs.Plugins) > 0 {
+			pluginRuns, err = loadPluginRuns(ctx, tx, runs)
+			if err == nil {
+				pluginDue, err = loadPluginDue(ctx, tx, runs, now)
+			}
+		}
 		return err
 	})
 	if err != nil {
@@ -203,11 +223,12 @@ func (s *Server) drainCosts(ctx context.Context) (int, error) {
 		s.releaseCosts(ctx, runs)
 		return len(runs), err
 	}
+	pluginResults := s.reportCostPlugins(ctx, pluginRuns, pluginDue)
 	// A chunk that fails is tried again later; the others go on.
 	var first error
 	for chunk := range slices.Chunk(runs, costChunk) {
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			return s.writeCosts(ctx, tx, chunk, evals, now)
+			return s.writeCosts(ctx, tx, chunk, evals, now, pluginResults)
 		})
 		if err != nil {
 			s.releaseCosts(ctx, chunk)
@@ -235,6 +256,7 @@ type computeEval struct {
 	TenantID   string
 	State      string
 	FinishedAt *time.Time
+	StateAt    time.Time
 	Lines      []costReport
 	// Missing: some of its time on a provider's host has no rate. (A static
 	// host's time with no price is unbilled, not missing.)
@@ -292,13 +314,13 @@ func evaluateCompute(ctx context.Context, tx pgx.Tx, runs []string) (map[string]
 		return nil, now, err
 	}
 	evals := map[string]*computeEval{}
-	rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, finished_at FROM runs WHERE id = ANY($1)`, runs)
+	rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, finished_at, updated_at FROM runs WHERE id = ANY($1)`, runs)
 	if err != nil {
 		return nil, now, err
 	}
 	var id string
 	var e computeEval
-	if _, err := pgx.ForEachRow(rows, []any{&id, &e.TenantID, &e.State, &e.FinishedAt}, func() error {
+	if _, err := pgx.ForEachRow(rows, []any{&id, &e.TenantID, &e.State, &e.FinishedAt, &e.StateAt}, func() error {
 		c := e
 		evals[id] = &c
 		return nil
@@ -516,7 +538,7 @@ func (b *computeLines) lines(runID string) []costReport {
 // then their queue rows, each in id order: the order a state change takes
 // them in (it holds its Run's row when it queues it), so the two wait for
 // each other rather than deadlock.
-func (s *Server) writeCosts(ctx context.Context, tx pgx.Tx, runs []string, evals map[string]*computeEval, now time.Time) error {
+func (s *Server) writeCosts(ctx context.Context, tx pgx.Tx, runs []string, evals map[string]*computeEval, now time.Time, results ...map[string]map[string]pluginAnswer) error {
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR KEY SHARE`, runs); err != nil {
 		return err
 	}
@@ -531,6 +553,20 @@ func (s *Server) writeCosts(ctx context.Context, tx pgx.Tx, runs []string, evals
 	}
 	for _, id := range held {
 		if err := s.writeCompute(ctx, tx, id, evals[id], now); err != nil {
+			return err
+		}
+		if len(results) > 0 {
+			for _, p := range s.cfg.Costs.Plugins {
+				answer, due := results[0][p.Name][id]
+				if !due {
+					continue
+				}
+				if err := s.writePluginCost(ctx, tx, p, id, evals[id], answer, now); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM cost_pending WHERE run_id = $1 AND claimed_by = $2`, id, s.id); err != nil {
 			return err
 		}
 	}
@@ -604,8 +640,7 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *c
 		runID, e.TenantID, status, e.Err == nil, attempts, nextAt, nil, lastError); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, `DELETE FROM cost_pending WHERE run_id = $1`, runID)
-	return err
+	return nil
 }
 
 // resetCostFinality: a resumed Run is active again. Its final sources go

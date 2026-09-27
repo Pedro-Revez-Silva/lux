@@ -2,10 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
+	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -79,11 +83,17 @@ type config struct {
 	// Costs: the cost tick and the drainer of the cost queue
 	// (docs/costs.md, section 5). Off: neither runs.
 	Costs struct {
-		Enabled    bool     `toml:"enabled" env:"LUX_COSTS"`
-		Every      duration `toml:"every" env:"LUX_COSTS_EVERY"`
-		DrainEvery duration `toml:"drain_every" env:"LUX_COSTS_DRAIN_EVERY"`
-		Batch      int      `toml:"batch" env:"LUX_COSTS_BATCH"`
-		Compute    struct {
+		Enabled       bool               `toml:"enabled" env:"LUX_COSTS"`
+		Every         duration           `toml:"every" env:"LUX_COSTS_EVERY"`
+		DrainEvery    duration           `toml:"drain_every" env:"LUX_COSTS_DRAIN_EVERY"`
+		Batch         int                `toml:"batch" env:"LUX_COSTS_BATCH"`
+		Settle        []duration         `toml:"settle" env:"LUX_COSTS_SETTLE"`
+		SettleGiveUp  duration           `toml:"settle_give_up" env:"LUX_COSTS_SETTLE_GIVE_UP"`
+		Backoff       duration           `toml:"backoff" env:"LUX_COSTS_BACKOFF"`
+		BackoffMax    duration           `toml:"backoff_max" env:"LUX_COSTS_BACKOFF_MAX"`
+		DescribeEvery duration           `toml:"describe_every" env:"LUX_COSTS_DESCRIBE_EVERY"`
+		Plugin        []costPluginConfig `toml:"plugin" env:"LUX_COSTS_PLUGINS"`
+		Compute       struct {
 			EC2             bool     `toml:"ec2" env:"LUX_COSTS_COMPUTE_EC2"`
 			PricesRefresh   duration `toml:"prices_refresh" env:"LUX_COSTS_PRICES_REFRESH"`
 			PricingRegion   string   `toml:"pricing_region" env:"LUX_COSTS_PRICING_REGION"`
@@ -101,6 +111,18 @@ type config struct {
 			AUD  string `toml:"aud" env:"LUX_CF_ACCESS_AUD"`
 		} `toml:"cloudflare_access"`
 	} `toml:"console"`
+}
+
+// Nil timeout and max_batch use the transport defaults; explicit zero is invalid.
+type costPluginConfig struct {
+	Name      string     `toml:"name" json:"name"`
+	URL       string     `toml:"url" json:"url"`
+	TokenFile string     `toml:"token_file" json:"token_file"`
+	TokenEnv  string     `toml:"token_env" json:"token_env"`
+	Timeout   *duration  `toml:"timeout" json:"timeout"`
+	MaxBatch  *int       `toml:"max_batch" json:"max_batch"`
+	Settle    []duration `toml:"settle" json:"settle"`
+	Insecure  bool       `toml:"insecure" json:"insecure"`
 }
 
 // onFlag is a bool the environment sets with any non-empty value
@@ -122,6 +144,14 @@ func (d *duration) UnmarshalText(b []byte) error {
 	}
 	d.Duration = v
 	return nil
+}
+
+func (d *duration) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	return d.UnmarshalText([]byte(s))
 }
 
 // size is a number of bytes written as a string: a size ("8Gi") or digits.
@@ -184,6 +214,11 @@ func defaultConfig() config {
 	c.Costs.Every.Duration = server.DefaultCostsEvery
 	c.Costs.DrainEvery.Duration = server.DefaultCostsDrainEvery
 	c.Costs.Batch = server.DefaultCostsBatch
+	c.Costs.Settle = []duration{{10 * time.Minute}, {time.Hour}}
+	c.Costs.SettleGiveUp.Duration = 168 * time.Hour
+	c.Costs.Backoff.Duration = 10 * time.Second
+	c.Costs.BackoffMax.Duration = 10 * time.Minute
+	c.Costs.DescribeEvery.Duration = time.Hour
 	c.Costs.Compute.EC2 = true
 	c.Costs.Compute.PricesRefresh.Duration = server.DefaultPricesRefresh
 	c.Costs.Compute.PricingRegion = "us-east-1"
@@ -265,6 +300,21 @@ func setField(v reflect.Value, s string) error {
 		}
 		v.SetInt(int64(n))
 	case reflect.Slice:
+		if v.Type() == reflect.TypeFor[[]duration]() || v.Type() == reflect.TypeFor[[]costPluginConfig]() {
+			dec := json.NewDecoder(strings.NewReader(s))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(v.Addr().Interface()); err != nil {
+				return err
+			}
+			var extra any
+			if err := dec.Decode(&extra); err != io.EOF {
+				return errors.New("expected one JSON array")
+			}
+			if v.IsNil() {
+				return errors.New("expected a JSON array, not null")
+			}
+			return nil
+		}
 		if v.Type().Elem().Kind() != reflect.String {
 			return fmt.Errorf("unsupported kind %s", v.Kind())
 		}
@@ -315,6 +365,68 @@ func (c config) check() error {
 	}
 	if c.Costs.Batch <= 0 {
 		problems = append(problems, "costs.batch (LUX_COSTS_BATCH) must be a positive number")
+	}
+	for key, value := range map[string]time.Duration{
+		"settle_give_up": c.Costs.SettleGiveUp.Duration,
+		"backoff":        c.Costs.Backoff.Duration,
+		"backoff_max":    c.Costs.BackoffMax.Duration,
+		"describe_every": c.Costs.DescribeEvery.Duration,
+	} {
+		if value <= 0 {
+			problems = append(problems, "costs."+key+" must be positive")
+		}
+	}
+	if c.Costs.BackoffMax.Duration < c.Costs.Backoff.Duration {
+		problems = append(problems, "costs.backoff_max must be at least costs.backoff")
+	}
+	checkSettle := func(key string, settle []duration) {
+		var previous time.Duration
+		for _, d := range settle {
+			if d.Duration <= previous {
+				problems = append(problems, key+" must contain positive, increasing durations")
+				break
+			}
+			previous = d.Duration
+		}
+	}
+	checkSettle("costs.settle", c.Costs.Settle)
+	names := map[string]bool{"compute": true}
+	for i, p := range c.Costs.Plugin {
+		key := fmt.Sprintf("costs.plugin[%d]", i)
+		if p.Name == "" || strings.TrimSpace(p.Name) != p.Name || strings.ContainsAny(p.Name, " \t\r\n") || names[p.Name] {
+			problems = append(problems, key+".name must be nonempty, unique and not compute")
+		}
+		names[p.Name] = true
+		u, err := url.Parse(p.URL)
+		if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && u.Scheme != "http") {
+			problems = append(problems, key+".url must be an http(s) base URL without credentials, query or fragment")
+		} else if u.Scheme == "http" && !p.Insecure {
+			ip, ipErr := netip.ParseAddr(u.Hostname())
+			if u.Hostname() != "localhost" && (ipErr != nil || !ip.IsValid() || !(ip.IsPrivate() || ip.IsLoopback())) {
+				problems = append(problems, key+".url plain HTTP requires a loopback/private IP or insecure = true")
+			}
+		}
+		if p.TokenFile != "" && p.TokenEnv != "" {
+			problems = append(problems, key+" token_file and token_env are mutually exclusive")
+		}
+		if p.TokenFile != "" && !filepath.IsAbs(p.TokenFile) {
+			problems = append(problems, key+".token_file must be an absolute path")
+		}
+		if p.TokenEnv != "" {
+			for j, r := range p.TokenEnv {
+				if !(r == '_' || r >= 'A' && r <= 'Z' || j > 0 && r >= '0' && r <= '9') {
+					problems = append(problems, key+".token_env must name an environment variable (A-Z, 0-9, _)")
+					break
+				}
+			}
+		}
+		if p.Timeout != nil && p.Timeout.Duration <= 0 {
+			problems = append(problems, key+".timeout must be positive")
+		}
+		if p.MaxBatch != nil && *p.MaxBatch <= 0 {
+			problems = append(problems, key+".max_batch must be positive")
+		}
+		checkSettle(key+".settle", p.Settle)
 	}
 	if c.Costs.Compute.PricesRefresh.Duration <= 0 {
 		problems = append(problems, "costs.compute.prices_refresh (LUX_COSTS_PRICES_REFRESH) must be positive")

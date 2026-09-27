@@ -88,6 +88,11 @@ its variable; the table below lists them by variable.
 | `LUX_COSTS_EVERY` | `2m` | The cost tick: every live Run's costs are evaluated once per interval, by one luxd. |
 | `LUX_COSTS_DRAIN_EVERY` | `2s` | How often each luxd polls the cost queue, besides being woken by Run events. |
 | `LUX_COSTS_BATCH` | `1000` | How many Runs one drain claims. |
+| `LUX_COSTS_SETTLE` | `["10m","1h"]` | Increasing durations after a Run finishes, JSON array in the environment. Plugin-specific `settle` overrides this. |
+| `LUX_COSTS_SETTLE_GIVE_UP` | `168h` | Stop retrying a failed source after seven days. |
+| `LUX_COSTS_BACKOFF`, `LUX_COSTS_BACKOFF_MAX` | `10s`, `10m` | Retry delays for plugin failures. |
+| `LUX_COSTS_DESCRIBE_EVERY` | `1h` | Refresh cost plugin descriptions. |
+| `LUX_COSTS_PLUGINS` | `[]` | JSON array replacing the entire `[[costs.plugin]]` list from the file. |
 | `LUX_COSTS_COMPUTE_EC2` | `true` | Price EC2 hosts using AWS on-demand and spot list prices. |
 | `LUX_COSTS_PRICES_REFRESH` | `24h` | Refresh interval for the on-demand price cache. |
 | `LUX_COSTS_PRICING_REGION` | `us-east-1` | AWS region for the Pricing API, independent of the host's region. |
@@ -98,6 +103,17 @@ its variable; the table below lists them by variable.
 | `LUX_CONFIG` | `/etc/lux/luxd.toml` | The configuration file. |
 
 luxd also serves the operator console at `/` ([Operators](operators.md#the-console)).
+
+Cost plugins are configured under `[[costs.plugin]]` (see
+[the example](luxd.example.toml)). Each needs a unique `name` other than
+`compute` and an HTTP(S) base `url`. A bearer token may be read from
+`token_file` or from the variable named by `token_env`, never inline in the
+configuration. Optional `timeout` defaults to 30s, `max_batch` to 200;
+`settle` overrides the global schedule. Plain HTTP is accepted for loopback
+and private IPs; public HTTP requires `insecure = true`. Prefer HTTPS for
+any plugin outside the private network. `LUX_COSTS_PLUGINS` takes a JSON
+array of objects with the same keys (including duration strings), for example
+`[{"name":"ledger","url":"https://ledger.example","token_env":"LEDGER_TOKEN"}]`.
 
 ### Tenants, keys and quotas
 

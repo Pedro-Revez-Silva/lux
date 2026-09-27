@@ -149,6 +149,24 @@ func serve(ctx context.Context, c config) error {
 	if err := blobs.Check(ctx); err != nil {
 		return fmt.Errorf("blob store: %w", err)
 	}
+	plugins := make([]server.CostPluginConfig, 0, len(c.Costs.Plugin))
+	for _, p := range c.Costs.Plugin {
+		plugin := server.CostPluginConfig{Name: p.Name, URL: p.URL, TokenFile: p.TokenFile, TokenEnv: p.TokenEnv, Insecure: p.Insecure}
+		if p.Timeout != nil {
+			plugin.Timeout = p.Timeout.Duration
+		}
+		if p.MaxBatch != nil {
+			plugin.MaxBatch = *p.MaxBatch
+		}
+		for _, d := range p.Settle {
+			plugin.Settle = append(plugin.Settle, d.Duration)
+		}
+		plugins = append(plugins, plugin)
+	}
+	settle := make([]time.Duration, 0, len(c.Costs.Settle))
+	for _, d := range c.Costs.Settle {
+		settle = append(settle, d.Duration)
+	}
 	srv := server.New(server.Config{
 		Listen:               c.Listen,
 		PublicURL:            c.PublicURL,
@@ -173,6 +191,12 @@ func serve(ctx context.Context, c config) error {
 			Every:         c.Costs.Every.Duration,
 			DrainEvery:    c.Costs.DrainEvery.Duration,
 			Batch:         c.Costs.Batch,
+			Plugins:       plugins,
+			Settle:        settle,
+			SettleGiveUp:  c.Costs.SettleGiveUp.Duration,
+			Backoff:       c.Costs.Backoff.Duration,
+			BackoffMax:    c.Costs.BackoffMax.Duration,
+			DescribeEvery: c.Costs.DescribeEvery.Duration,
 			ComputeEC2:    c.Costs.Compute.EC2,
 			PricesRefresh: c.Costs.Compute.PricesRefresh.Duration,
 			Prices: map[string]server.PriceProvider{

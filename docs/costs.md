@@ -1040,6 +1040,7 @@ settle = ["10m", "1h"]             # LUX_COSTS_SETTLE: re-asks after terminal be
 settle_give_up = "168h"            # LUX_COSTS_SETTLE_GIVE_UP
 backoff = "10s"                    # LUX_COSTS_BACKOFF
 backoff_max = "10m"                # LUX_COSTS_BACKOFF_MAX
+describe_every = "1h"             # LUX_COSTS_DESCRIBE_EVERY
 hourly = "9600h"                   # LUX_COSTS_HOURLY: cost_hourly retention
 
 [costs.compute]
@@ -1058,10 +1059,13 @@ settle = ["15m", "2h"]             # optional; else describe's, else costs.settl
 insecure = false                   # allow plain http to a public address
 ```
 
-**Built** (step 5): `enabled`, `every`, `drain_every` and `batch`, in
-`docs/luxd.example.toml` and `docs/operations.md`. With `enabled = false`
-a luxd neither ticks nor drains; state changes still queue their Runs.
-The other keys come with the steps that use them.
+**Built** (step 5): `enabled`, `every`, `drain_every` and `batch`.
+**Built** (step 7): `settle`, `settle_give_up`, `backoff`,
+`backoff_max`, `describe_every`, and `[[costs.plugin]]`, including the JSON
+environment override `LUX_COSTS_PLUGINS`. The drainer calls configured plugins
+and tracks their retries and settlement. With
+`enabled = false` a luxd neither ticks nor drains; state changes still queue
+their Runs. `hourly` comes with step 8.
 
 Renaming a plugin starts a new source. The old name's lines stay, and
 operators can delete them with `luxd admin costs forget-source <name>`

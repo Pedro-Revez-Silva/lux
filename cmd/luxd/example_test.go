@@ -15,7 +15,7 @@ func TestExampleConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := defaultConfig(); c.Listen != want.Listen || c.Defaults != want.Defaults || !reflect.DeepEqual(c.History, want.History) || c.Costs != want.Costs {
+	if want := defaultConfig(); c.Listen != want.Listen || c.Defaults != want.Defaults || !reflect.DeepEqual(c.History, want.History) || !reflect.DeepEqual(c.Costs, want.Costs) {
 		t.Errorf("the example's values are not the defaults it says they are:\n%+v\n%+v", c, want)
 	}
 }
