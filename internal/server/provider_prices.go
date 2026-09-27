@@ -212,6 +212,8 @@ func (s *Server) refreshPrices(ctx context.Context) {
 				if recent.Before(until) {
 					windows = append(windows, spotWindowRequest{recent, until})
 				}
+			} else if !gapFrom.Before(gapTo) && recent.Before(until) {
+				windows = append(windows, spotWindowRequest{recent, until})
 			}
 			if gapFrom.Before(gapTo) && (h.To != nil || gapFrom.Before(recent)) {
 				windows = append(windows, spotWindowRequest{gapFrom, minTime(gapTo, gapFrom.Add(spotWindow))})
@@ -495,12 +497,14 @@ func (s *Server) applySpotHistory(ctx context.Context, h pricedHost, history []S
 					cursor = limit
 					continue
 				}
-				// A segment ending at now is open for a live host, so the next tick
-				// can close it when it discovers a change. Historical gaps stay closed.
+				// Only a live host's current edge is open. A bounded historical
+				// response cannot establish a price beyond its queried boundary.
 				var stop *time.Time
 				if next.Before(end) {
 					stop = &next
-				} else if (i+1 < len(history) && !history[i+1].At.After(until)) || (ended != nil && !until.Before(*ended)) {
+				} else if (i+1 < len(history) && !history[i+1].At.After(until)) ||
+					(ended != nil && until.Before(*ended)) ||
+					(ended == nil && until.Before(now)) {
 					stop = &end
 				}
 				if _, err = tx.Exec(ctx, `INSERT INTO host_rates (host_id,valid_from,valid_to,per_hour,currency,cap_cpus,cap_memory,source)
