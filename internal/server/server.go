@@ -99,6 +99,8 @@ type Server struct {
 	// cfAccess verifies Cloudflare Access tokens, when that is the console
 	// auth (access.go).
 	cfAccess *cfAccess
+	// cfTenantID is bound at startup, never re-resolved by name on requests.
+	cfTenantID string
 	// wakeups wake followers of Run events (wakeups.go).
 	wakeups *wakeups
 	kick    chan struct{}
@@ -227,6 +229,9 @@ func redirectConsole(w http.ResponseWriter, r *http.Request) {
 
 // Run starts the background loops and serves until ctx ends.
 func (s *Server) Run(ctx context.Context) error {
+	if err := s.initCFTenant(ctx); err != nil {
+		return err
+	}
 	srv := &http.Server{Addr: s.cfg.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	s.wg.Add(6)
 	go func() { defer s.wg.Done(); s.schedulerLoop(ctx) }()

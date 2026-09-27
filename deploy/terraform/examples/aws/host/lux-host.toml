@@ -18,3 +18,6 @@ scale_down_after = "10m"
 cpus = 2
 memory = "8Gi"
 disk = "20Gi"
+
+# Cloudflare Access authorization belongs in the PRIVATE config repo's
+# lux-host.toml, never in this public example. See host/README.md.

@@ -79,7 +79,10 @@ def test_luxd_toml_carries_infra_and_desired_settings(env, capsys):
     assert cfg["defaults"] == {"memory": "16Gi", "cpus": 4}
     assert cfg["s3"] == {"bucket": "lux-blobs-123456789012-eu-north-1", "region": "eu-north-1"}
     assert cfg["console"]["auth"] == "cloudflare-access"
-    assert cfg["console"]["cloudflare_access"] == {"team": "acme", "aud": "aud-tag"}
+    assert cfg["console"]["cloudflare_access"] == {
+        "team": "acme", "aud": "aud-tag", "operators": ["operator@example.com"],
+        "default_tenant": "ten_aaaaaaaaaaaaaaaa",
+    }
     app_pw = read(env, "root/.lux-app-password")
     assert cfg["database"]["app_password"] == app_pw
     assert cfg["database"]["url"] == f"postgres://lux_app:{app_pw}@127.0.0.1:5432/lux?sslmode=disable"
@@ -97,8 +100,70 @@ def test_luxd_tracks_the_root_and_postgres_filesystems(env, capsys):
 def test_no_access_team_means_key_auth(env, capsys):
     del env.sh.ssm[f"{PREFIX}/cf_access_team"]
     del env.sh.ssm[f"{PREFIX}/cf_access_aud"]
+    env.repo.set_desired('lux_version = "none"\n')
     assert env.run() == 0
     assert luxd_toml(env)["console"]["auth"] == "key"
+
+
+def test_access_settings_without_team_fail_before_host_changes(env, capsys):
+    del env.sh.ssm[f"{PREFIX}/cf_access_team"]
+    del env.sh.ssm[f"{PREFIX}/cf_access_aud"]
+    assert env.run() == 1
+    assert "console.cloudflare_access" in summary(capsys)
+    assert not os.path.exists(env.path("etc/lux/luxd.toml"))
+    assert not env.sh.mounted
+
+
+def test_existing_access_host_upgrades_with_private_settings(env, capsys):
+    deploy_version(env, capsys, "v1.0.0")
+    assert luxd_toml(env)["console"]["auth"] == "cloudflare-access"
+    env.web.releases["v2.0.0"] = make_release("v2.0.0")
+    env.sh.healthy_versions.add("v2.0.0")
+    env.repo.set_desired(desired("v2.0.0", '[luxd]\ndebug = true\n'))
+    env.sh.calls.clear()
+    assert env.run() == 0, summary(capsys)
+    assert installed(env) == "v2.0.0"
+    assert os.path.realpath(env.path("usr/local/bin/luxd")) == env.path("usr/local/lux/versions/v2.0.0/bin/luxd")
+    assert [c for c in env.sh.calls if c[-1] == "migrate"] == [
+        [env.path("usr/local/lux/versions/v2.0.0/bin/luxd"), "migrate"]
+    ]
+    cfg = luxd_toml(env)
+    assert cfg["debug"] is True
+    assert cfg["console"] == {
+        "auth": "cloudflare-access",
+        "cloudflare_access": {
+            "team": "acme", "aud": "aud-tag", "operators": ["operator@example.com"],
+            "default_tenant": "ten_aaaaaaaaaaaaaaaa",
+        },
+    }
+    assert len(restarts(env)) == 1
+
+
+@pytest.mark.parametrize("text", [
+    'lux_version = "v2.0.0"\n',
+    'lux_version = "v2.0.0"\n[console.cloudflare_access]\n',
+    'lux_version = "v2.0.0"\n[console.cloudflare_access]\noperators = ["operator@example.com"]\n',
+    'lux_version = "v2.0.0"\n[console.cloudflare_access]\noperators = []\ndefault_tenant = "ten_aaaaaaaaaaaaaaaa"\n',
+    'lux_version = "v2.0.0"\n[console.cloudflare_access]\noperators = ["operator@example.com", "OPERATOR@example.com"]\ndefault_tenant = "ten_aaaaaaaaaaaaaaaa"\n',
+    'lux_version = "v2.0.0"\n[console.cloudflare_access]\noperators = ["Name <operator@example.com>"]\ndefault_tenant = "ten_aaaaaaaaaaaaaaaa"\n',
+    'lux_version = "v2.0.0"\n[console.cloudflare_access]\noperators = [" operator@example.com"]\ndefault_tenant = "ten_aaaaaaaaaaaaaaaa"\n',
+    'lux_version = "v2.0.0"\n[console.cloudflare_access]\noperators = ["operator@example.com"]\ndefault_tenant = "example"\n',
+    'lux_version = "v2.0.0"\n[console.cloudflare_access]\noperators = ["operator@example.com"]\ndefault_tenant = " ten_aaaaaaaaaaaaaaaa"\n',
+])
+def test_missing_or_invalid_access_state_preserves_existing_host(env, capsys, text):
+    deploy_version(env, capsys, "v1.0.0")
+    before = read(env, "etc/lux/luxd.toml")
+    env.web.releases["v2.0.0"] = make_release("v2.0.0")
+    env.repo.set_desired(text)
+    env.sh.calls.clear()
+    env.web.fetched.clear()
+    assert env.run() == 1
+    assert "console.cloudflare_access" in summary(capsys)
+    assert read(env, "etc/lux/luxd.toml") == before
+    assert installed(env) == "v1.0.0"
+    assert os.path.realpath(env.path("usr/local/bin/luxd")) == env.path("usr/local/lux/versions/v1.0.0/bin/luxd")
+    assert env.web.fetched == []
+    assert {c[0] for c in env.sh.calls} == {"aws"}
 
 
 def test_config_change_restarts_a_running_luxd_once_and_only_then(env, capsys):
