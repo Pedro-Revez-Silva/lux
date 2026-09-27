@@ -774,7 +774,9 @@ where it differs from the above:
   A stopped or lost Run gets no `next_at`.
 - A resume (`requestResume`) sets final sources back to `ok`, clears their
   `next_at` and attempts, and marks the Run's lines estimates again, in
-  the resume's transaction.
+  the resume's transaction. It also queues the Run (`state:resuming`),
+  which frees any claim: a drainer's result, read while the Run was still
+  finished, is not written.
 - The spot settle round (point 4) is not built: it comes with spot prices
   in step 6.
 

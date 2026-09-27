@@ -462,7 +462,12 @@ func (s *Server) requestResume(ctx context.Context, tx pgx.Tx, tenantID, runID s
 	if err != nil {
 		return err
 	}
+	// Queued too, which frees any claim: a drainer's result, read while
+	// the Run was still finished, would make it final again.
 	if err := resetCostFinality(ctx, tx, runID); err != nil {
+		return err
+	}
+	if err := enqueueCost(ctx, tx, runID, "state:"+StateResuming); err != nil {
 		return err
 	}
 	return addEvent(ctx, tx, tenantID, runID, 0, "state", map[string]any{"state": StateResuming, "reason": why})
