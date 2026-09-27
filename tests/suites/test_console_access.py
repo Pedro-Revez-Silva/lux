@@ -91,7 +91,6 @@ def test_missing_default_tenant_denies_nonoperators(env, access):
                        LUX_CF_ACCESS_DEFAULT_TENANT="access-default")
 
 
-
 @pytest.mark.parametrize("email", ["", " ADA@example.com", "Ada <ada@example.com>", "ada@example.com.evil"])
 def test_access_does_not_promote_bad_or_unlisted_email(env, access, email):
     r = _get(env, "/v1/whoami", headers={"Cf-Access-Jwt-Assertion": access.token(email)})
