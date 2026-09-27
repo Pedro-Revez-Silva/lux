@@ -345,9 +345,6 @@ design left open:
   one line per currency, the item suffixed `:<currency>`, since the key is
   (source, run, item).
 
-Static hosts without a price have no period, so their Runs get no
-compute line for that time, and it is unbilled, not missing (above).
-
 ### Reserved vs used (efficiency)
 
 Shown next to the cost and never charged. It comes from what lux already
