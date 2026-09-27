@@ -524,8 +524,9 @@ func TestDrainComputeStaleClaim(t *testing.T) {
 	}
 }
 
-// waitLocked waits until n of s's sessions wait on a lock.
-func waitLocked(s *Server, n int) error {
+// waitLocked waits until n of s's sessions wait on a lock, or until done
+// is closed.
+func waitLocked(s *Server, n int, done <-chan struct{}) error {
 	ctx := context.Background()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -538,6 +539,11 @@ func waitLocked(s *Server, n int) error {
 		}
 		if got >= n {
 			return nil
+		}
+		select {
+		case <-done:
+			return nil
+		default:
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("%d sessions waiting on a lock, want %d", got, n)
@@ -577,7 +583,7 @@ func TestDrainComputeLockOrder(t *testing.T) {
 				return err
 			}
 			close(locked)
-			if err := waitLocked(s, 1); err != nil { // the drainer, on A
+			if err := waitLocked(s, 1, nil); err != nil { // the drainer, on A
 				return err
 			}
 			return setRunState(ctx, tx, "t1", "A", StateSucceeded, "", 1)
@@ -597,5 +603,43 @@ func TestDrainComputeLockOrder(t *testing.T) {
 	}
 	if lines, _ := computeView(t, s, keys["t1"], "A"); len(lines) != 0 || pending(t, s, "A") != "state:succeeded -" {
 		t.Errorf("stale result written: %v, queued %q", lines, pending(t, s, "A"))
+	}
+}
+
+// A state change holds a live Run's row while the tick runs: the tick
+// skips that Run (its state change queues it) rather than wait on it while
+// holding the queue row the state change needs next. Neither deadlocks.
+func TestCostTickLockOrder(t *testing.T) {
+	s, _ := costFixture(t)
+	s.cfg.Costs.Every = time.Hour
+	ctx := context.Background()
+	locked, ticked := make(chan struct{}), make(chan struct{})
+	change := make(chan error, 1)
+	go func() {
+		change <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = 'r1' FOR UPDATE`); err != nil {
+				return err
+			}
+			close(locked)
+			// The tick, waiting on r1 or done with it.
+			if err := waitLocked(s, 1, ticked); err != nil {
+				return err
+			}
+			return setRunState(ctx, tx, "t1", "r1", StateStopping, "", 1)
+		})
+	}()
+	<-locked
+	won, err := s.costTick(ctx)
+	close(ticked)
+	if err != nil || !won {
+		t.Errorf("tick: won %v, %v", won, err)
+	}
+	if err := <-change; err != nil {
+		t.Errorf("state change: %v", err)
+	}
+	for run, want := range map[string]string{"r1": "state:stopping -", "r2": "tick -"} {
+		if got := pending(t, s, run); got != want {
+			t.Errorf("%s: queued %q, want %q", run, got, want)
+		}
 	}
 }
