@@ -51,10 +51,12 @@ endpoint = ""                      # LUX_EC2_ENDPOINT (tests)
 [console]
 # How the web console signs people in (docs/operators.md#signing-in):
 #   key                a pasted API key (the default)
-#   cloudflare-access  luxd is behind a Cloudflare Access application; whoever
-#                      Access lets in is an operator. API keys still work.
+#   cloudflare-access  only allowlisted emails are operators; others use the default tenant.
+#                      API keys still work.
 auth = "key"                       # LUX_CONSOLE_AUTH
 
 [console.cloudflare_access]
 team = ""                          # LUX_CF_ACCESS_TEAM: acme, or acme.cloudflareaccess.com
 aud = ""                           # LUX_CF_ACCESS_AUD: the application's AUD tag
+operators = []                     # LUX_CF_ACCESS_OPERATORS: comma-separated operator emails (required in Access mode)
+default_tenant = ""                # LUX_CF_ACCESS_DEFAULT_TENANT: existing tenant ID or exact name (e.g. absmartly)

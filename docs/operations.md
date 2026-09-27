@@ -87,6 +87,8 @@ its variable; the table below lists them by variable.
 | `LUX_DEBUG` | — | Debug logging. |
 | `LUX_CONSOLE_AUTH` | `key` | How the console signs people in: `key` or `cloudflare-access` ([Operators](operators.md#signing-in)). |
 | `LUX_CF_ACCESS_TEAM`, `LUX_CF_ACCESS_AUD` | — | For `cloudflare-access`: the Access team (`acme` or `acme.cloudflareaccess.com`) and the application's AUD tag. |
+| `LUX_CF_ACCESS_OPERATORS` | — | Comma-separated explicit operator emails (TOML: `console.cloudflare_access.operators` list). Required in Access mode; matched case-insensitively against verified JWT email only. |
+| `LUX_CF_ACCESS_DEFAULT_TENANT` | — | Existing tenant ID (preferred) or exact tenant name (e.g. `absmartly`) for non-operator Access users. Required in Access mode; missing tenants deny requests. |
 | `LUX_CONFIG` | `/etc/lux/luxd.toml` | The configuration file. |
 
 luxd also serves the operator console at `/` ([Operators](operators.md#the-console)).

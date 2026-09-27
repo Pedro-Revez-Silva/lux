@@ -168,9 +168,11 @@ func serve(ctx context.Context, c config) error {
 		DiskPaths:            c.History.DiskPaths,
 		Providers:            providers(c),
 		ConsoleAuth: server.ConsoleAuth{
-			Mode:   c.Console.Auth,
-			CFTeam: c.Console.CloudflareAccess.Team,
-			CFAud:  c.Console.CloudflareAccess.AUD,
+			Mode:            c.Console.Auth,
+			CFTeam:          c.Console.CloudflareAccess.Team,
+			CFAud:           c.Console.CloudflareAccess.AUD,
+			CFOperators:     c.Console.CloudflareAccess.Operators,
+			CFDefaultTenant: c.Console.CloudflareAccess.DefaultTenant,
 		},
 	}, db, blobs, log)
 	return srv.Run(ctx)

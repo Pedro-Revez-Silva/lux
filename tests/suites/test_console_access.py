@@ -1,7 +1,4 @@
-"""The console behind Cloudflare Access: luxd verifies Access's token and
-takes whoever Access let in as an operator (docs/operators.md). A fake
-Access (fake_access.py) signs tokens as Access does; luxd runs its real
-verification against it."""
+"""Cloudflare Access authentication with an operator allowlist and default tenant."""
 
 from __future__ import annotations
 
@@ -18,7 +15,10 @@ def access(env):
     """luxd restarted in cloudflare-access mode for this module, then back."""
     fake = FakeAccess(env.gateway)
     env.stop_luxd()
-    env.start_luxd(LUX_CONSOLE_AUTH="cloudflare-access", LUX_CF_ACCESS_TEAM=fake.team, LUX_CF_ACCESS_AUD=fake.AUD)
+    tenant = env.luxd_admin("create-tenant", "--name", "access-default")
+    env.start_luxd(LUX_CONSOLE_AUTH="cloudflare-access", LUX_CF_ACCESS_TEAM=fake.team, LUX_CF_ACCESS_AUD=fake.AUD,
+                   LUX_CF_ACCESS_OPERATORS="ada@example.com,grace@example.com,mallory-victim@example.com",
+                   LUX_CF_ACCESS_DEFAULT_TENANT=tenant["tenantId"])
     yield fake
     env.stop_luxd()
     env.start_luxd()
@@ -44,6 +44,33 @@ def test_an_access_user_is_an_operator(env, access, tenant_factory):
     r = requests.post(f"{env.luxd_url}/v1/runs/{run_id}/cancel", headers=hdr, timeout=10)
     assert r.status_code == 202, r.text
     assert [e["data"]["by"] for e in t.events(run_id, "cancel.requested")] == ["ada@example.com"]
+
+
+def test_access_tenant_is_isolated(env, access, tenant_factory):
+    other = tenant_factory()
+    run_id = other.submit(generic(ALPINE_IMAGE, "true", placement={"requires": {"nowhere": "yes"}}))
+    hdr = {"Cf-Access-Jwt-Assertion": access.token("ordinary@example.com", "Ordinary")}
+    me = _get(env, "/v1/whoami", headers=hdr)
+    assert me.status_code == 200, me.text
+    assert me.json()["operator"] is False and me.json()["tenant"] == "access-default"
+    assert me.json()["email"] == "ordinary@example.com" and me.json()["scopes"] == ["admin"]
+    assert run_id not in {r["id"] for r in _get(env, "/v1/runs?limit=1000&tenant=" + other.tenant_id,
+                                                   headers=hdr).json()["runs"]}
+    assert _get(env, "/v1/runs/" + run_id, headers=hdr).status_code == 404
+    assert _get(env, "/v1/tenants", headers=hdr).status_code == 403
+    r = requests.post(f"{env.luxd_url}/v1/runs/{run_id}/cancel", headers=hdr, timeout=10)
+    assert r.status_code == 404, r.text
+    other.run("cancel", run_id)
+
+
+@pytest.mark.parametrize("email", ["", " ADA@example.com", "Ada <ada@example.com>", "ada@example.com.evil"])
+def test_access_does_not_promote_bad_or_unlisted_email(env, access, email):
+    r = _get(env, "/v1/whoami", headers={"Cf-Access-Jwt-Assertion": access.token(email)})
+    if not email or email != email.strip() or "<" in email:
+        assert r.status_code == 401, r.text
+    else:
+        assert r.status_code == 200 and not r.json()["operator"], r.text
+
 
 
 @pytest.mark.parametrize("bad", ["expired", "wrong audience", "wrong issuer", "forged", "garbage"])
