@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 type fakePriceProvider struct {
 	onDemand []fakeOnDemandAnswer
 	spot     [][]SpotRate
+	spotErr  []error
 
 	onDemandCalls int
 	spotCalls     []spotPriceCall
@@ -45,6 +47,9 @@ func (p *fakePriceProvider) SpotHistory(_ context.Context, zone, kind string, fr
 	p.spotCalls = append(p.spotCalls, spotPriceCall{zone: zone, kind: kind, from: from, to: to})
 	if i >= len(p.spot) {
 		return nil, errors.New("unexpected spot price request")
+	}
+	if i < len(p.spotErr) && p.spotErr[i] != nil {
+		return nil, p.spotErr[i]
 	}
 	return p.spot[i], nil
 }
@@ -195,6 +200,35 @@ func TestProviderPricesRespectPoolTenantBoundary(t *testing.T) {
 // Spot history begins only where the provider supplies a price. Later history
 // can fill that historical gap, but cannot rewrite a closed period; its exact
 // boundaries remain the provider's reported changes.
+func TestProviderPricesSpotFailureRetriesWithoutChangingClosedPeriod(t *testing.T) {
+	from := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Microsecond)
+	change := from.Add(time.Hour)
+	p := &fakePriceProvider{
+		spot: [][]SpotRate{
+			{{At: change, HourlyRate: HourlyRate{PerHour: "0.2", Currency: "USD"}}},
+			nil,
+			{{At: from, HourlyRate: HourlyRate{PerHour: "0.1", Currency: "USD"}},
+				{At: change, HourlyRate: HourlyRate{PerHour: "0.9", Currency: "USD"}}},
+		},
+		spotErr: []error{nil, errors.New("spot history unavailable")},
+	}
+	s := providerPriceServer(t, p)
+	execSQL(t, s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	insertProviderHost(t, s, "t1", "spot", "ec2", "spot-retry", MarketSpot, from)
+	s.refreshPrices(context.Background())
+	before := providerRates(t, s, "spot-retry")
+	s.refreshPrices(context.Background())
+	if got := providerRates(t, s, "spot-retry"); !reflect.DeepEqual(got, before) {
+		t.Fatalf("failed fetch changed periods: before=%+v after=%+v", before, got)
+	}
+	s.refreshPrices(context.Background())
+	got := providerRates(t, s, "spot-retry")
+	if len(p.spotCalls) != 3 || len(got) != 2 || got[0].perHour != "0.1" || !got[0].from.Equal(from) || !got[0].to.Equal(change) ||
+		got[1].perHour != "0.2" || !got[1].from.Equal(change) || !got[1].open {
+		t.Fatalf("retry did not fill gap while preserving old period: calls=%d rates=%+v", len(p.spotCalls), got)
+	}
+}
+
 func TestProviderPricesSpotPeriodsFillGapsWithoutRewritingClosedRates(t *testing.T) {
 	from := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Microsecond)
 	change1 := from.Add(time.Hour)
