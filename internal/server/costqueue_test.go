@@ -524,6 +524,40 @@ func TestDrainComputeStaleClaim(t *testing.T) {
 	if lines, src := computeView(t, s, keys["t1"], "A"); fmt.Sprint(lines) != "[static 0.05 USD true]" || src != "final" {
 		t.Errorf("A: %v, source %q", lines, src)
 	}
+
+	// A resume while a luxd works the Run: its result, read while the Run
+	// was finished, would make it final again.
+	placeRun(t, s, "t1", "B", StateRunning, "static", workedExample[1])
+	finish(t, s, "t1", "B", StateFailed)
+	if runs, err = s.claimCosts(ctx); err != nil || len(runs) != 1 {
+		t.Fatalf("claimed %v (%v)", runs, err)
+	}
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		evals, now, err = evaluateCompute(ctx, tx, runs)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !evals["B"].final() {
+		t.Fatalf("B evaluated as not final: %+v", evals["B"])
+	}
+	if err := s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
+		return s.requestResume(ctx, tx, "t1", "B", nil, "resume")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return s.writeCosts(ctx, tx, runs, evals, now)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if lines, src := computeView(t, s, keys["t1"], "B"); len(lines) != 0 || src != "" || pending(t, s, "B") != "state:resuming -" {
+		t.Errorf("stale result written after a resume: %v %q, queued %q", lines, src, pending(t, s, "B"))
+	}
+	drain(t, s)
+	if lines, src := computeView(t, s, keys["t1"], "B"); fmt.Sprint(lines) != "[static 0.15 USD false]" || src != "ok" {
+		t.Errorf("B resumed: %v, source %q", lines, src)
+	}
 }
 
 // waitLocked waits until n of s's sessions wait on a lock, or until done
