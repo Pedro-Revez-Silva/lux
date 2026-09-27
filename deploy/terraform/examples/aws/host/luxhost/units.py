@@ -46,7 +46,7 @@ RequiresMountsFor={pg_mount}
 # not know the setting still starts.
 Environment=LUX_HISTORY_DISK_PATHS=/,{pg_mount}
 ExecStartPre=/usr/bin/python3 {host_dir}/recover.py
-ExecStart=/usr/local/bin/luxd serve
+ExecStart=/usr/bin/python3 {host_dir}/recover.py start
 Restart=on-failure
 RestartSec=5s
 

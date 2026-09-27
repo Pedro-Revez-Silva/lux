@@ -9,6 +9,7 @@ the restart is polled (systemctl is-active plus GET /health) for about 30s.
 On failure, the old config and symlinks are restored before restarting luxd.
 """
 import hashlib
+import fcntl
 import json
 import os
 import shutil
@@ -17,6 +18,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 
 from .host import Host, HostError, read_file, write_if_changed
 
@@ -25,6 +27,15 @@ RUNNER_ARCHES = ["linux-arm64", "linux-amd64"]
 DISCARDED_JOURNAL = ".switch-discard"
 HEALTH_TIMEOUT_S = 30
 HEALTH_POLL_INTERVAL_S = 2
+
+
+@contextmanager
+def pair_lock(install_root: str):
+    # Kept outside the journal so its inode is stable across journal disposal.
+    os.makedirs(install_root, exist_ok=True)
+    with open(os.path.join(install_root, ".pair.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def arch() -> str:
@@ -180,6 +191,11 @@ def _discard_journal(install_root: str) -> None:
 
 
 def recover(install_root: str) -> bool:
+    with pair_lock(install_root):
+        return _recover_locked(install_root)
+
+
+def _recover_locked(install_root: str) -> bool:
     """Restore the last paired state before any service start or retry."""
     journal = os.path.join(install_root, ".switch")
     if not os.path.lexists(journal):
@@ -367,13 +383,14 @@ def deploy(host: Host, wanted: str, base_url: str, migrate_dsn: str, health_url:
             shutil.rmtree(journal)
         raise
     try:
-        switch_symlinks(version_dir, current_link, links)
-        write_if_changed(config_path, config, 0o600)
-        write_if_changed(os.path.join(install_root, "CURRENT_VERSION"), wanted + "\n")
-        _persist_pair(install_root, config_path, links)
-        ready = os.path.join(journal, "ready")
-        write_if_changed(ready, "", 0o600)
-        _sync_dir(journal)
+        with pair_lock(install_root):
+            switch_symlinks(version_dir, current_link, links)
+            write_if_changed(config_path, config, 0o600)
+            write_if_changed(os.path.join(install_root, "CURRENT_VERSION"), wanted + "\n")
+            _persist_pair(install_root, config_path, links)
+            ready = os.path.join(journal, "ready")
+            write_if_changed(ready, "", 0o600)
+            _sync_dir(journal)
         restarted, restart_err = restart_luxd(host)
         healthy = restarted and wait_healthy(
             lambda: is_luxd_active(host),

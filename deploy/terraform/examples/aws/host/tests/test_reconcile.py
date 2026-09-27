@@ -2,7 +2,9 @@
 import datetime
 import os
 import runpy
+import shutil
 import subprocess
+import threading
 import tomllib
 
 import pytest
@@ -527,6 +529,141 @@ def test_boot_helper_denies_contended_switch_until_pair_is_ready(env, capsys, mo
         assert env.run() == 0, summary(capsys)
     assert observed == [1, 0]
     assert installed(env) == "v2.0.0"
+
+
+def test_admitted_start_cannot_cross_rollback_with_mixed_pair(env, capsys, monkeypatch):
+    deploy_version(env, capsys, "v1.0.0")
+    path = env.path("etc/lux/luxd.toml")
+    old = read(env, "etc/lux/luxd.toml").replace('operators = ["operator@example.com"]\n', '').replace(
+        'default_tenant = "ten_aaaaaaaaaaaaaaaa"\n', ''
+    )
+    with open(path, "w") as f:
+        f.write(old)
+    env.web.releases["v2.0.0"] = make_release("v2.0.0")
+    env.repo.set_desired(desired("v2.0.0"))
+    entered = threading.Event()
+    resume = threading.Event()
+    original_restart = release.restart_luxd
+    original_write = release.write_if_changed
+    real_open = open
+    failures = []
+    script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "recover.py")
+
+    def open_lock(name, *args, **kwargs):
+        if name == "/etc/lux/.reconcile.lock":
+            name = env.path("etc/lux/.reconcile.lock")
+        return real_open(name, *args, **kwargs)
+
+    def restart(host):
+        if not entered.is_set():
+            namespace = runpy.run_path(script, run_name="lux_start_test")
+            admit = namespace["admit"]
+            start = namespace["start"]
+
+            def admitted(*args):
+                assert admit(*args)
+                entered.set()
+                assert resume.wait(10)
+                return True
+
+            def attempt():
+                try:
+                    with monkeypatch.context() as patch:
+                        patch.setitem(start.__globals__, "admit", admitted)
+                        with pytest.raises(SystemExit) as exit_info:
+                            start(env.host.paths.install_root, path, env.path("etc/lux/.reconcile.lock"),
+                                  execute=lambda *_: failures.append("executed"))
+                        assert exit_info.value.code == 1
+                except BaseException as exc:
+                    failures.append(exc)
+
+            worker = threading.Thread(target=attempt)
+            worker.start()
+            assert entered.wait(10)
+            host._admitted_worker = worker
+        return original_restart(host)
+
+    def write(name, content, mode=0o644):
+        if name == path and content == old and entered.is_set():
+            resume.set()
+        return original_write(name, content, mode)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("builtins.open", open_lock)
+        patch.setattr(release, "restart_luxd", restart)
+        patch.setattr(release, "write_if_changed", write)
+        result = env.run()
+        line = summary(capsys)
+        assert result == 1, line
+        assert entered.is_set(), line
+        assert resume.is_set(), line
+        env.host._admitted_worker.join(10)
+    assert not env.host._admitted_worker.is_alive()
+    assert failures == []
+    assert installed(env) == "v1.0.0"
+    assert read(env, "etc/lux/luxd.toml") == old
+    old_bin = os.environ.get("LUX_TEST_OLD_LUXD")
+    new_bin = os.environ.get("LUX_TEST_NEW_LUXD")
+    if old_bin and new_bin:
+        for binary, valid in ((old_bin, True), (new_bin, False)):
+            result = subprocess.run([binary, "--config", path, "admin", "create-key"],
+                                    capture_output=True, text=True, timeout=10)
+            assert ("connect to database" in result.stderr.lower()) == valid, result.stderr
+
+
+def test_pinned_start_survives_rollback_with_strict_loader(env, capsys, monkeypatch):
+    old_bin = os.environ.get("LUX_TEST_OLD_LUXD")
+    new_bin = os.environ.get("LUX_TEST_NEW_LUXD")
+    if not old_bin or not new_bin:
+        pytest.skip("set LUX_TEST_OLD_LUXD and LUX_TEST_NEW_LUXD to real old/new binaries")
+    deploy_version(env, capsys, "v1.0.0")
+    shutil.copyfile(old_bin, env.path("usr/local/lux/versions/v1.0.0/bin/luxd"))
+    path = env.path("etc/lux/luxd.toml")
+    old = read(env, "etc/lux/luxd.toml").replace('operators = ["operator@example.com"]\n', '').replace(
+        'default_tenant = "ten_aaaaaaaaaaaaaaaa"\n', ''
+    )
+    with open(path, "w") as f:
+        f.write(old)
+    env.web.releases["v2.0.0"] = make_release("v2.0.0")
+    env.repo.set_desired(desired("v2.0.0"))
+    original_restart = release.restart_luxd
+    namespace = runpy.run_path(os.path.join(os.path.dirname(os.path.dirname(__file__)), "recover.py"),
+                               run_name="lux_start_test")
+    start = namespace["start"]
+    selected = []
+
+    def restart(host):
+        if not selected:
+            shutil.copyfile(new_bin, env.path("usr/local/lux/versions/v2.0.0/bin/luxd"))
+
+            def execute(binary, argv, environment):
+                # The wrapper hands off immutable descriptors before rollback can rewrite either path.
+                assert os.readlink(binary).endswith("/versions/v2.0.0/bin/luxd")
+                assert release.recover(env.host.paths.install_root)
+                assert read(env, "etc/lux/luxd.toml") == old
+                with open(argv[2]) as f:
+                    candidate = f.read()
+                assert candidate != old
+                result = subprocess.run([binary, "--config", argv[2], "admin", "create-key"],
+                                        pass_fds=(int(binary.rsplit("/", 1)[1]),
+                                                  int(argv[2].rsplit("/", 1)[1])),
+                                        capture_output=True, text=True, timeout=10)
+                assert "connect to database" in result.stderr.lower(), result.stderr
+                selected.append((binary, candidate))
+
+            with monkeypatch.context() as patch:
+                patch.setitem(start.__globals__, "admit", lambda *args: True)
+                start(env.host.paths.install_root, path, execute=execute)
+        return original_restart(host)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(release, "restart_luxd", restart)
+        assert env.run() == 1, summary(capsys)
+    assert len(selected) == 1
+    assert read(env, "etc/lux/luxd.toml") == old
+    result = subprocess.run([old_bin, "--config", path, "admin", "create-key"],
+                            capture_output=True, text=True, timeout=10)
+    assert "connect to database" in result.stderr.lower(), result.stderr
 
 
 def test_interrupted_disposal_with_missing_state_does_not_block_boot_or_retry(env, capsys, monkeypatch):

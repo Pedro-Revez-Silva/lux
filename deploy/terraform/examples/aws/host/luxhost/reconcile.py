@@ -134,9 +134,11 @@ class Run:
                 # The previous version is still in place: keep the tunnel
                 # and timers reconciled, and fail the run at the end.
                 self.deferred_error = HostError(f"version: {e}")
-        elif write_if_changed(config_path, toml, 0o600):
-            self.changed.append("luxd.toml")
-            restart["luxd"] = True
+        else:
+            with release.pair_lock(host.paths.install_root):
+                if write_if_changed(config_path, toml, 0o600):
+                    self.changed.append("luxd.toml")
+                    restart["luxd"] = True
         # A successful deploy has restarted luxd on the new config already.
         if not deploying or self.deferred_error:
             if restart["luxd"] and installed and release.is_luxd_active(host):
