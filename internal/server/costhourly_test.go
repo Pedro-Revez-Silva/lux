@@ -12,6 +12,158 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
+func TestAllocateCostHoursNonnegativeAndConserved(t *testing.T) {
+	from := t0
+	to := from.Add(4 * time.Hour)
+	amount := mustRat("0.000000002")
+	var parts []string
+	sum := new(big.Rat)
+	allocateCostHours(from, to, amount, func(_ time.Time, part *big.Rat) {
+		if part.Sign() < 0 {
+			t.Fatalf("negative hourly allocation: %s", part)
+		}
+		parts = append(parts, moneyString(part))
+		sum.Add(sum, part)
+	})
+	if len(parts) != 4 || strings.Join(parts, ",") != "0.000000001,0,0.000000001,0" || moneyString(sum) != moneyString(amount) {
+		t.Fatalf("hourly allocations %v sum to %s, want %s", parts, sum, amount)
+	}
+}
+
+func TestHostHourOnceRoundedAndMissingRateRetry(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 1
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at, terminated_at, capacity)
+		VALUES ('h-round','h-round','p','terminated',$1,$2,'{"cpus":2,"memory":2}')`, hour, hour.Add(time.Hour))
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('h-round',$1,$2,0.000000001,'USD',2,2,'static')`, hour, hour.Add(30*time.Minute))
+	if err := s.updateHostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var next time.Time
+	systemScan(t, s, `SELECT next_hour FROM cost_host_refresh WHERE host_id = 'h-round'`, nil, &next)
+	if !next.Equal(hour) {
+		t.Fatalf("missing rate advanced cursor to %s", next)
+	}
+	var pendingRows int
+	systemScan(t, s, `SELECT count(*) FROM cost_hourly WHERE host_id = 'h-round' AND run_id IS NULL`, nil, &pendingRows)
+	if pendingRows != 0 {
+		t.Fatalf("missing-rate hour wrote %d partial rows", pendingRows)
+	}
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('h-round',$1,$2,0.000000001,'USD',2,2,'static')`, hour.Add(30*time.Minute), hour.Add(time.Hour))
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at, ended_at)
+		VALUES ('p-round','t1','r1','h-round',1,'exited','{"cpus":1,"memory":1}',$1,$2)`, hour, hour.Add(time.Hour))
+	execSQL(t, s, ctx, `UPDATE cost_host_refresh SET retry_at = NULL WHERE host_id = 'h-round'`)
+	if err := s.updateHostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var allocated, idle, billed string
+	systemScan(t, s, `SELECT trim_scale(allocated)::text, trim_scale(unallocated)::text,
+		trim_scale(allocated + unallocated)::text FROM cost_hourly
+		WHERE host_id = 'h-round' AND run_id IS NULL`, nil, &allocated, &idle, &billed)
+	if allocated != "0.000000001" || idle != "0" || billed != "0.000000001" {
+		t.Fatalf("once-rounded host hour: allocated %s idle %s total %s", allocated, idle, billed)
+	}
+}
+
+func TestHostHourRefreshWaitsForPlacementEnd(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	s.cfg.Costs.Batch = 1
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at, terminated_at)
+		VALUES ('h-end','h-end','p','terminated',$1,$2)`, hour, hour.Add(time.Hour))
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('h-end',$1,4,'USD',4,400,'static')`, hour)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at)
+		VALUES ('p-end','t1','r1','h-end',1,'running','{"cpus":2,"memory":200}',$1)`, hour)
+
+	locked, release := make(chan struct{}), make(chan struct{})
+	ended := make(chan error, 1)
+	go func() {
+		ended <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			if err := lockCostHost(ctx, tx, "h-end"); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE placements SET state = 'exited', ended_at = $1 WHERE id = 'p-end'`, hour.Add(30*time.Minute)); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-locked:
+	case err := <-ended:
+		t.Fatalf("placement end before refresh: %v", err)
+	}
+	refreshed, done := make(chan error, 1), make(chan struct{})
+	go func() {
+		refreshed <- s.updateHostHours(ctx)
+		close(done)
+	}()
+	waitErr := waitLocked(s, 1, done)
+	blocked := true
+	select {
+	case <-done:
+		blocked = false
+	default:
+	}
+	close(release)
+	endErr := <-ended
+	refreshErr := <-refreshed
+	if waitErr != nil {
+		t.Fatal(waitErr)
+	}
+	if !blocked {
+		t.Fatal("host-hour refresh completed before the placement end committed")
+	}
+	if endErr != nil || refreshErr != nil {
+		t.Fatalf("placement end: %v; host-hour refresh: %v", endErr, refreshErr)
+	}
+	var allocated, idle string
+	systemScan(t, s, `SELECT trim_scale(allocated)::text, trim_scale(unallocated)::text
+		FROM cost_hourly WHERE host_id = 'h-end' AND hour = $1 AND run_id IS NULL AND currency = 'USD'`,
+		[]any{hour}, &allocated, &idle)
+	if allocated != "1" || idle != "3" {
+		t.Fatalf("committed half-hour placement: allocated %s idle %s, want 1 and 3", allocated, idle)
+	}
+}
+
+func TestPluginHourlyCumulativeRoundingInPostgres(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	from := time.Now().UTC().Truncate(time.Hour).Add(-4 * time.Hour)
+	line := costReport{Family: "ai", Item: "m", Currency: "USD", Amount: "0.000000002", From: from, To: from.Add(4 * time.Hour)}
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return replacePluginHours(ctx, tx, "t1", "r1", "plugin", []costReport{line}, s.cfg.Costs.Hourly)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var amounts []string
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT trim_scale(amount)::text FROM cost_hourly
+			WHERE run_id = 'r1' AND source = 'plugin' ORDER BY hour`)
+		if err != nil {
+			return err
+		}
+		amounts, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(amounts, ","); got != "0.000000001,0,0.000000001,0" {
+		t.Fatalf("stored hourly amounts: %s", got)
+	}
+}
+
 func TestPluginHourlyReplacementAndRLS(t *testing.T) {
 	s, keys := costFixture(t)
 	ctx := context.Background()

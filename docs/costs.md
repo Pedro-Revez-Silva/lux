@@ -389,7 +389,7 @@ For A above, 1,080 CPU seconds against 2 CPU × 1,800 s is 30%, and a
   such as `us-east-1`, whatever region the host is in.
 - **EC2 spot**: `DescribeSpotPriceHistory` for the host's availability
   zone and instance type, product `Linux/UNIX`. Refresh takes the latest
-  observation in the recent lookback for live hosts; a new observation
+  valid observation in the recent lookback for live hosts; a new observation
   changes the current host rate, not historical periods. Run placements
   use the rate selected for their start, not a reconstructed spot history.
 - **List prices only.** Savings Plans, Reserved Instances, EDP or other
@@ -454,7 +454,10 @@ and a period with neither cpus nor memory prices nothing (its time is
 missing).
 
 **Past host rate periods are not repriced.** A changed current rate closes
-its period and opens another. A placement ending with a usable selected
+its period and opens another. The exception is a terminated provider host
+with no rate periods and a pending unpriced placement: recovery creates one
+estimated period for its registered-to-terminated window, without claiming
+historical spot accuracy. A placement ending with a usable selected
 rate freezes its own estimate; a placement with no matching rate remains
 incomplete, including on a static host with no price. A later matching
 observation may price an incomplete placement, but does not change frozen
@@ -476,9 +479,16 @@ every `provider_check_every`) would tighten the start. See open question 5.
   otherwise a successful later fetch starts a rate when it becomes known.
   A failure leaves the earlier time incomplete.
 - Spot prices are requested for live hosts sharing a (provider, zone,
-  instance type) key over a recent 24-hour lookback. Only the latest
-  observation is applied to each live host; terminated hosts are not
-  revisited for spot settlement.
+  instance type) key over a recent 24-hour lookback. Only the latest valid
+  observation is applied to each live host. A terminated host with no rate
+  periods is retried only while one of its placements has an unpriced snapshot
+  (or no snapshot) and its Run's compute source is incomplete. Recovery writes one
+  estimated rate from registration (or provision request) to termination,
+  using the latest valid observation, **not** a reconstructed history of
+  spot transitions. On-demand recovery uses the same single-rate window
+  with the current cached or fetched list price. Host-hour rows therefore
+  show an estimate for that window, not provider billing; already priced
+  periods and frozen placement snapshots are never rewritten.
 
 **Built:** price refresh runs separately from provisioning and the cost
 queue, with a 30-second pass deadline. On-demand lookups share a cache key
@@ -488,9 +498,9 @@ historical gap repair. A provider's current rate splits on a runner hello
 that changes capacity.
 
 **Deferred:** multiple luxd processes can still fetch the same expired
-on-demand cache key concurrently. A terminated on-demand host whose first
-price becomes known only after termination retains a historical host-rate
-gap; Run estimates may use a matching known rate from another host or cache.
+on-demand cache key concurrently. Terminated hosts with existing rate periods
+are not historically gap-filled; their incomplete Run estimates can use a
+matching rate from another host or the on-demand cache.
 
 ## 4. Cost plugins
 

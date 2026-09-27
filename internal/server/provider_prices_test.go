@@ -236,6 +236,109 @@ func TestProviderPricesSpotDoesNotUseOnDemandFallback(t *testing.T) {
 	}
 }
 
+func TestProviderPricesRecoverTerminatedIncompleteHosts(t *testing.T) {
+	for _, tc := range []struct {
+		market, price, amount, item string
+	}{
+		{MarketSpot, "0.2", "0.15", "m7i.large:spot"},
+		{MarketOnDemand, "0.4", "0.3", "m7i.large"},
+	} {
+		t.Run(tc.market, func(t *testing.T) {
+			from := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Microsecond)
+			end := from.Add(2 * time.Hour)
+			p := &fakePriceProvider{
+				onDemand: []fakeOnDemandAnswer{
+					{err: errors.New("pricing temporarily unavailable")},
+					{rate: HourlyRate{PerHour: "0.4", Currency: "USD"}},
+				},
+				spot: [][]SpotRate{
+					nil,
+					{{At: from.Add(time.Hour), HourlyRate: HourlyRate{PerHour: "0.2", Currency: "USD"}},
+						{At: from.Add(90 * time.Minute), HourlyRate: HourlyRate{PerHour: "bad", Currency: "USD"}}},
+				},
+				spotErr: []error{errors.New("spot temporarily unavailable")},
+			}
+			s, keys := costFixture(t)
+			s.cfg.Costs = CostsConfig{Enabled: true, ComputeEC2: true, Every: time.Minute,
+				Batch: DefaultCostsBatch, PricesRefresh: time.Hour,
+				Prices: map[string]PriceProvider{"ec2": p}}
+			insertProviderHost(t, s, "t1", "burst", "ec2", "recover", tc.market, from)
+			placeRun(t, s, "t1", "pending-run", StateRunning, "recover", placementWindow{
+				From: from.Add(30 * time.Minute), To: &end, CPUs: 2, Memory: 4 * gib,
+			})
+			s.refreshPrices(context.Background())
+			if got := providerRates(t, s, "recover"); len(got) != 0 {
+				t.Fatalf("failed live lookup wrote rates: %+v", got)
+			}
+			finish(t, s, "t1", "pending-run", StateSucceeded)
+			drain(t, s)
+			code, cost := getCost(t, s, keys["t1"], "pending-run")
+			if code != http.StatusOK || cost.Status != "incomplete" || cost.Final || len(cost.Lines) != 0 ||
+				len(cost.Sources) != 1 || cost.Sources[0].NextAt == nil || pending(t, s, "pending-run") != "" {
+				t.Fatalf("unpriced terminal run: HTTP %d, cost %+v", code, cost)
+			}
+			execSQL(t, s, context.Background(), `UPDATE hosts SET state='terminated', terminated_at=$1 WHERE id='recover'`, end)
+			s.refreshPrices(context.Background())
+			rates := providerRates(t, s, "recover")
+			if len(rates) != 1 || rates[0].open || rates[0].perHour != tc.price || !rates[0].from.Equal(from) || !rates[0].to.Equal(end) {
+				t.Fatalf("recovered host window: %+v", rates)
+			}
+			if tc.market == MarketSpot {
+				if len(p.spotCalls) != 2 || p.onDemandCalls != 0 {
+					t.Fatalf("spot recovery used wrong market: spot=%d on-demand=%d", len(p.spotCalls), p.onDemandCalls)
+				}
+			} else if p.onDemandCalls != 2 || len(p.spotCalls) != 0 {
+				t.Fatalf("on-demand recovery used wrong market: on-demand=%d spot=%d", p.onDemandCalls, len(p.spotCalls))
+			}
+			execSQL(t, s, context.Background(), `UPDATE cost_sources SET next_at = now() - interval '1 second' WHERE run_id = 'pending-run'`)
+			if _, err := s.costTick(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got := pending(t, s, "pending-run"); got == "" {
+				t.Fatal("terminal incomplete run was not queued for recovery")
+			}
+			drain(t, s)
+			code, cost = getCost(t, s, keys["t1"], "pending-run")
+			if code != http.StatusOK || cost.Status != "final" || !cost.Final || len(cost.Lines) != 1 ||
+				cost.Lines[0].Item != tc.item || cost.Lines[0].Amount != tc.amount || !cost.Lines[0].Final ||
+				len(cost.Totals) != 1 || cost.Totals[0].Amount != tc.amount ||
+				len(cost.Sources) != 1 || cost.Sources[0].Status != "final" || cost.Sources[0].NextAt != nil {
+				t.Fatalf("recovered terminal estimate: HTTP %d, cost %+v", code, cost)
+			}
+			var rate, amount string
+			var finalized bool
+			systemScan(t, s, `SELECT trim_scale(per_hour)::text, trim_scale(amount)::text, finalized
+				FROM cost_placement_snapshots WHERE placement_id = 'p-pending-run'`, nil, &rate, &amount, &finalized)
+			if rate != tc.price || amount != tc.amount || !finalized {
+				t.Fatalf("placement snapshot: rate=%s amount=%s finalized=%v", rate, amount, finalized)
+			}
+			s.refreshPrices(context.Background())
+			if got := providerRates(t, s, "recover"); len(got) != 1 {
+				t.Fatalf("repeated refresh changed recovered period: %+v", got)
+			}
+		})
+	}
+}
+
+func TestProviderPricesRecoveryRequiresPendingUnpricedPlacement(t *testing.T) {
+	p := &fakePriceProvider{spot: [][]SpotRate{{{At: time.Now().Add(-time.Hour), HourlyRate: HourlyRate{PerHour: "0.2", Currency: "USD"}}}}}
+	s, _ := costFixture(t)
+	s.cfg.Costs = CostsConfig{Enabled: true, ComputeEC2: true, PricesRefresh: time.Hour,
+		Prices: map[string]PriceProvider{"ec2": p}}
+	from := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Microsecond)
+	insertProviderHost(t, s, "t1", "burst", "ec2", "idle", MarketSpot, from)
+	insertProviderHost(t, s, "t1", "other", "ec2", "not-pending", MarketSpot, from)
+	end := from.Add(2 * time.Hour)
+	placeRun(t, s, "t1", "unqueued-run", StateRunning, "not-pending", placementWindow{
+		From: from.Add(time.Minute), To: &end, CPUs: 2, Memory: 4 * gib,
+	})
+	execSQL(t, s, context.Background(), `UPDATE hosts SET state='terminated', terminated_at=$1 WHERE id IN ('idle','not-pending')`, end)
+	s.refreshPrices(context.Background())
+	if len(p.spotCalls) != 0 || len(providerRates(t, s, "idle")) != 0 || len(providerRates(t, s, "not-pending")) != 0 {
+		t.Fatalf("unneeded recovery: calls=%d", len(p.spotCalls))
+	}
+}
+
 func TestProviderPricesOnDemandLatePriceResolvesIncompletePlacement(t *testing.T) {
 	from := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Microsecond)
 	registered := from.Add(time.Hour)

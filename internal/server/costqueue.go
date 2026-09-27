@@ -327,7 +327,7 @@ func (s *Server) drainCosts(ctx context.Context) (int, error) {
 			continue
 		}
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR KEY SHARE`, done); err != nil {
+			if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR UPDATE`, done); err != nil {
 				return err
 			}
 			_, err := tx.Exec(ctx, `DELETE FROM cost_pending WHERE run_id = ANY($1) AND claimed_by = $2`, done, s.id)
@@ -341,8 +341,35 @@ func (s *Server) drainCosts(ctx context.Context) (int, error) {
 	return len(runs), first
 }
 
+// lockCostHost serializes placement-window changes with compute snapshots on
+// the same host. Callers acquire Run locks first, then host locks in id order.
+func lockCostHost(ctx context.Context, tx pgx.Tx, hostID string) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('cost-host:' || $1, 0))`, hostID)
+	return err
+}
+
+func lockCostHosts(ctx context.Context, tx pgx.Tx, runs []string) error {
+	rows, err := tx.Query(ctx, `SELECT DISTINCT host_id FROM placements WHERE run_id = ANY($1) ORDER BY host_id`, runs)
+	if err != nil {
+		return err
+	}
+	hosts, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	for _, host := range hosts {
+		if err := lockCostHost(ctx, tx, host); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Server) writeComputeChunk(ctx context.Context, tx pgx.Tx, runs []string, evals map[string]*computeEval, now time.Time) error {
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR KEY SHARE`, runs); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR UPDATE`, runs); err != nil {
+		return err
+	}
+	if err := lockCostHosts(ctx, tx, runs); err != nil {
 		return err
 	}
 	rows, err := tx.Query(ctx, `SELECT run_id FROM cost_pending WHERE run_id = ANY($1) AND claimed_by = $2 ORDER BY run_id FOR UPDATE`, runs, s.id)
@@ -486,12 +513,13 @@ func (b *computeLines) lines(runID string) []costReport {
 
 // writeCosts writes one chunk of claimed Runs, those whose claim this luxd
 // still holds: a state change since (which frees the claim) makes a
-// result stale, and the Run is evaluated again. It locks the chunk's Runs,
-// then their queue rows, each in id order: the order a state change takes
-// them in (it holds its Run's row when it queues it), so the two wait for
-// each other rather than deadlock.
+// result stale, and the Run is evaluated again. It locks Runs, hosts and
+// queue rows in that order, each in id order, as the placement writers do.
 func (s *Server) writeCosts(ctx context.Context, tx pgx.Tx, runs []string, evals map[string]*computeEval, now time.Time, results ...map[string]map[string]pluginAnswer) error {
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR KEY SHARE`, runs); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR UPDATE`, runs); err != nil {
+		return err
+	}
+	if err := lockCostHosts(ctx, tx, runs); err != nil {
 		return err
 	}
 	rows, err := tx.Query(ctx, `SELECT run_id FROM cost_pending WHERE run_id = ANY($1) AND claimed_by = $2
@@ -669,14 +697,7 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, _ *c
 		l.amount.Add(l.amount, amount)
 		l.from, l.to = minTime(l.from, v.p.From), maxTime(l.to, end)
 		l.placements = append(l.placements, d)
-		remaining := new(big.Rat).Set(amount)
-		forEachCostHour(v.p.From, end, func(hour time.Time, fraction *big.Rat) {
-			part := moneyString(new(big.Rat).Mul(amount, fraction))
-			if !hour.Add(time.Hour).Before(end) {
-				part = moneyString(remaining)
-			}
-			allocated := mustRat(part)
-			remaining.Sub(remaining, allocated)
+		allocateCostHours(v.p.From, end, amount, func(hour time.Time, allocated *big.Rat) {
 			e.Hours = append(e.Hours, computeHour{hour, v.hostID, *v.currency, allocated})
 		})
 	}

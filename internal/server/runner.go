@@ -116,7 +116,7 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		// cannot add a cause the UPDATE below would then overwrite.
 		var wasDraining, registering bool
 		var causes []string
-		if err := tx.QueryRow(ctx, `SELECT draining, drain_causes, registered_at IS NULL FROM hosts WHERE id = $1 FOR UPDATE`, hostID).Scan(&wasDraining, &causes, &registering); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT draining, drain_causes, registered_at IS NULL FROM hosts WHERE id = $1 FOR NO KEY UPDATE`, hostID).Scan(&wasDraining, &causes, &registering); err != nil {
 			return err
 		}
 		undrainOutdated := wasDraining && slices.Contains(causes, causeOutdated) && s.binariesMatch(h.Arch, h.RunnerSHA256, h.ShimSHA256)

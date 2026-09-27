@@ -199,6 +199,12 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 // resumable once it has.
 func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, st proto.Status, runState string, cancel bool) error {
 	var stopReason, hostID string
+	if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID); err != nil {
+		return err
+	}
+	if err := lockCostHost(ctx, tx, hostID); err != nil {
+		return err
+	}
 	err := tx.QueryRow(ctx, `UPDATE placements SET state = 'exited', ended_at = now(),
 			exited_at = coalesce(exited_at, now()), exit_code = $3, exit_reason = $4, output_seq = nullif($5, 0),
 			lease_expires_at = NULL
@@ -261,6 +267,13 @@ func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epo
 	var tenantID, runState string
 	var current int
 	if err := tx.QueryRow(ctx, `SELECT tenant_id, state, current_epoch FROM runs WHERE id = $1 FOR UPDATE`, runID).Scan(&tenantID, &runState, &current); err != nil {
+		return err
+	}
+	var hostID string
+	if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID); err != nil {
+		return err
+	}
+	if err := lockCostHost(ctx, tx, hostID); err != nil {
 		return err
 	}
 	tag, err := tx.Exec(ctx, `UPDATE placements SET state = 'lost', ended_at = now(), exit_reason = $3, lease_expires_at = NULL

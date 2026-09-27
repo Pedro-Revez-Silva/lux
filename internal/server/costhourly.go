@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"time"
 
@@ -28,6 +29,19 @@ func forEachCostHour(from, to time.Time, visit func(time.Time, *big.Rat)) {
 		visit(hour, big.NewRat(int64(end.Sub(at)), int64(to.Sub(from))))
 		at = end
 	}
+}
+
+// allocateCostHours rounds cumulative exact charges, keeping each hourly part
+// nonnegative for nonnegative amounts and preserving the once-rounded total.
+func allocateCostHours(from, to time.Time, amount *big.Rat, visit func(time.Time, *big.Rat)) {
+	cumulative := new(big.Rat)
+	previous := new(big.Rat)
+	forEachCostHour(from, to, func(hour time.Time, fraction *big.Rat) {
+		cumulative.Add(cumulative, new(big.Rat).Mul(amount, fraction))
+		part := mustRat(moneyString(cumulative))
+		visit(hour, new(big.Rat).Sub(part, previous))
+		previous.Set(part)
+	})
 }
 
 func replaceComputeHours(ctx context.Context, tx pgx.Tx, tenant, run string, hours []computeHour, retention time.Duration) error {
@@ -86,21 +100,15 @@ func replacePluginHours(ctx context.Context, tx pgx.Tx, tenant, run, source stri
 			amounts[k].Add(amounts[k], amount)
 			continue
 		}
-		remaining := new(big.Rat).Set(amount)
-		forEachCostHour(l.From, l.To, func(hour time.Time, fraction *big.Rat) {
+		allocateCostHours(l.From, l.To, amount, func(hour time.Time, part *big.Rat) {
 			k := key{hour, l.Family, l.Currency}
-			part := moneyString(new(big.Rat).Mul(amount, fraction))
-			if !hour.Add(time.Hour).Before(l.To) {
-				part = moneyString(remaining)
-			}
-			remaining.Sub(remaining, mustRat(part))
 			if k.hour.Before(cutoff) {
 				return
 			}
 			if amounts[k] == nil {
 				amounts[k] = new(big.Rat)
 			}
-			amounts[k].Add(amounts[k], mustRat(part))
+			amounts[k].Add(amounts[k], part)
 		})
 	}
 	for k, v := range amounts {
@@ -195,17 +203,21 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 	}
 	for _, job := range jobs {
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			// Recheck the cursor under the host lock when another luxd is refreshing.
+			// Serialize occupancy changes before reading the host or its placements.
+			if err := lockCostHost(ctx, tx, job.id); err != nil {
+				return err
+			}
 			var end *time.Time
-			if err := tx.QueryRow(ctx, `SELECT terminated_at FROM hosts WHERE id = $1 FOR UPDATE`, job.id).Scan(&end); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT terminated_at FROM hosts WHERE id = $1`, job.id).Scan(&end); err != nil {
 				return err
 			}
 			var cursor time.Time
-			err := tx.QueryRow(ctx, `SELECT next_hour FROM cost_host_refresh WHERE host_id = $1`, job.id).Scan(&cursor)
+			var retryAt *time.Time
+			err := tx.QueryRow(ctx, `SELECT next_hour, retry_at FROM cost_host_refresh WHERE host_id = $1`, job.id).Scan(&cursor, &retryAt)
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return err
 			}
-			if err == nil && cursor.After(job.hour) {
+			if err == nil && (cursor.After(job.hour) || (retryAt != nil && retryAt.After(now))) {
 				return nil
 			}
 			to := minTime(now, job.hour.Add(time.Hour))
@@ -236,9 +248,13 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 			}
 			s.log.Warn("costs: host hour", "host", job.id, "hour", job.hour, "err", err)
 			if retryErr := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				if err := lockCostHost(ctx, tx, job.id); err != nil {
+					return err
+				}
 				_, err := tx.Exec(ctx, `INSERT INTO cost_host_refresh (host_id, next_hour, retry_at)
 					VALUES ($1, $2, now() + interval '1 hour')
-					ON CONFLICT (host_id) DO UPDATE SET retry_at = EXCLUDED.retry_at`, job.id, job.hour)
+					ON CONFLICT (host_id) DO UPDATE SET retry_at = EXCLUDED.retry_at
+					WHERE cost_host_refresh.next_hour <= EXCLUDED.next_hour`, job.id, job.hour)
 				return err
 			}); retryErr != nil {
 				return retryErr
@@ -257,11 +273,14 @@ func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, 
 	if err != nil {
 		return err
 	}
+	if len(res.Missing) > 0 {
+		return fmt.Errorf("host %s: missing rate in hour %s", id, hour)
+	}
 	type key struct {
 		hour     time.Time
 		currency string
 	}
-	allocated, unallocated := map[key]*big.Rat{}, map[key]*big.Rat{}
+	allocated, total := map[key]*big.Rat{}, map[key]*big.Rat{}
 	for _, piece := range res.Pieces {
 		if piece.Rate == nil {
 			continue
@@ -269,21 +288,24 @@ func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, 
 		forEachCostHour(piece.From, piece.To, func(at time.Time, fraction *big.Rat) {
 			k := key{at, piece.Rate.Currency}
 			if allocated[k] == nil {
-				allocated[k], unallocated[k] = new(big.Rat), new(big.Rat)
+				allocated[k], total[k] = new(big.Rat), new(big.Rat)
 			}
 			for _, v := range piece.Charged {
 				allocated[k].Add(allocated[k], new(big.Rat).Mul(v, fraction))
 			}
-			unallocated[k].Add(unallocated[k], new(big.Rat).Mul(piece.Unallocated, fraction))
+			total[k].Add(total[k], new(big.Rat).Mul(piece.Host, fraction))
 		})
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM cost_hourly WHERE host_id = $1 AND run_id IS NULL AND hour = $2`, id, hour); err != nil {
 		return err
 	}
 	for k, v := range allocated {
+		billed := mustRat(moneyString(total[k]))
+		charged := mustRat(moneyString(v))
+		idle := new(big.Rat).Sub(billed, charged)
 		_, err := tx.Exec(ctx, `INSERT INTO cost_hourly (hour, source, family, currency, host_id, pool, allocated, unallocated)
 				SELECT $1, 'compute', 'compute', $2, id, pool, $3::numeric, $4::numeric FROM hosts WHERE id = $5`,
-			k.hour, k.currency, moneyString(v), moneyString(unallocated[k]), id)
+			k.hour, k.currency, moneyString(charged), moneyString(idle), id)
 		if err != nil {
 			return err
 		}
