@@ -25,13 +25,14 @@ are in the linked pages.
   storage only, or through Cloudflare Access (`console.auth =
   "cloudflare-access"`). There luxd verifies every Access token itself:
   signed by the team's keys, for the configured application (AUD), not
-  expired. Whoever Access issues a token with an email for is an operator,
-  so the Access application's policy is the only gate: keep it to the
-  people who should be operators, with no bypass or everyone rules.
-  Service tokens (no email) are refused. The Access cookie authenticates
-  reads, and writes only when the browser marks them same-origin
-  (`Sec-Fetch-Site`), so another site cannot act with it
-  ([Operators](operators.md#signing-in)).
+  expired. Only explicitly allowlisted verified JWT emails are operators;
+  other users with a valid email are scoped to the configured default tenant
+  (which must exist). Missing or invalid settings fail startup, and a missing
+  tenant denies its users. Keep the Access application's policy restrictive:
+  every admitted user can administer the default tenant. Service tokens (no
+  email) are refused. The Access cookie authenticates reads, and writes
+  only when the browser marks them same-origin (`Sec-Fetch-Site`), so another
+  site cannot act with it ([Operators](operators.md#signing-in)).
 
 ## Workloads
 

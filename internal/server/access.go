@@ -3,24 +3,25 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/mail"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/store"
 )
 
-// ConsoleAuth is how requests without an API key may authenticate: "key"
-// (they may not: the console asks for a key), or "cloudflare-access":
-// luxd sits behind a Cloudflare Access application, and a request carrying
-// a valid Access token (the Cf-Access-Jwt-Assertion header, or the
-// CF_Authorization cookie) is an operator's, as the user Access let in.
+// ConsoleAuth configures key or Cloudflare Access authentication.
 type ConsoleAuth struct {
-	Mode string
-	// CFTeam is the Access team domain (acme, or acme.cloudflareaccess.com);
-	// CFAud the application's AUD tag.
-	CFTeam, CFAud string
+	Mode            string
+	CFTeam, CFAud   string
+	CFOperators     []string
+	CFDefaultTenant string
 }
 
 // cfAccess verifies Cloudflare Access tokens: signed by the team's keys
@@ -89,10 +90,28 @@ func (a *cfAccess) user(ctx context.Context, token string) (email, name string, 
 	var claims struct {
 		Email string `json:"email"`
 	}
-	if err := t.Claims(&claims); err != nil || claims.Email == "" {
-		return "", "", errf(http.StatusUnauthorized, "unauthorized", "the Cloudflare Access token names no user")
+	if err := t.Claims(&claims); err != nil || !ValidAccessOperatorEmail(claims.Email) {
+		return "", "", errf(http.StatusUnauthorized, "unauthorized", "the Cloudflare Access token names no valid user")
 	}
 	return claims.Email, a.name(ctx, claims.Email, token), nil
+}
+
+// ValidAccessOperatorEmail accepts a single plain ASCII mailbox.
+func ValidAccessOperatorEmail(email string) bool {
+	if email == "" || email != strings.TrimSpace(email) || !isASCII(email) {
+		return false
+	}
+	addr, err := mail.ParseAddress(email)
+	return err == nil && addr.Address == email && strings.Contains(email, "@")
+}
+
+func isASCII(s string) bool {
+	for i := range len(s) {
+		if s[i] > 127 {
+			return false
+		}
+	}
+	return true
 }
 
 // name is the user's name from Access's identity endpoint (the token's
@@ -124,8 +143,8 @@ func (a *cfAccess) name(ctx context.Context, email, token string) string {
 	return name
 }
 
-// consoleUser authenticates a request with no API key by the configured
-// console auth: an operator, as the user Cloudflare Access let in.
+// consoleUser authenticates an Access user as an allowlisted operator or as
+// the configured default tenant. Only the verified JWT email selects a role.
 func (s *Server) consoleUser(r *http.Request, scope string) (Principal, error) {
 	if s.cfAccess == nil {
 		return Principal{}, errf(http.StatusUnauthorized, "unauthorized", "missing API key")
@@ -138,7 +157,32 @@ func (s *Server) consoleUser(r *http.Request, scope string) (Principal, error) {
 	if err != nil {
 		return Principal{}, err
 	}
-	p := Principal{Operator: true, Scopes: []string{"operator"}, Email: email, Name: name}
+	p := Principal{Email: email, Name: name}
+	ref := s.cfg.ConsoleAuth.CFDefaultTenant
+	if ref == "" || len(s.cfg.ConsoleAuth.CFOperators) == 0 {
+		return p, errf(http.StatusForbidden, "forbidden", "Cloudflare Access authorization is not configured")
+	}
+	for _, allowed := range s.cfg.ConsoleAuth.CFOperators {
+		if strings.EqualFold(email, allowed) {
+			p.Operator, p.Scopes = true, []string{"operator"}
+			break
+		}
+	}
+	if !p.Operator {
+		p.Scopes = []string{"admin"}
+		if !p.Can(scope) {
+			return p, errf(http.StatusForbidden, "forbidden", "scope %q", scope)
+		}
+		err = s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(r.Context(), `SELECT id FROM tenants WHERE id = $1 OR name = $1 ORDER BY id = $1 DESC LIMIT 1`, ref).Scan(&p.TenantID)
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return p, errf(http.StatusForbidden, "forbidden", "Cloudflare Access default tenant is unavailable")
+		}
+		if err != nil {
+			return p, err
+		}
+	}
 	if !p.Can(scope) {
 		return p, errf(http.StatusForbidden, "forbidden", "scope %q", scope)
 	}

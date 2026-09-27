@@ -38,6 +38,8 @@ auth = "cloudflare-access"
 [console.cloudflare_access]
 team = "acme"
 aud = "aud-from-file"
+operators = ["ada@example.com"]
+default_tenant = "absmartly"
 `)
 	t.Setenv("LUX_S3_BUCKET", "from-env")
 	t.Setenv("LUX_DEFAULT_CPUS", "1.5")
@@ -54,7 +56,8 @@ aud = "aud-from-file"
 		t.Errorf("defaults: %+v", c.Defaults)
 	case c.History.Raw.Duration != 24*time.Hour || c.History.Hours.Duration == 0:
 		t.Errorf("history: %+v", c.History)
-	case c.Console.Auth != "cloudflare-access" || c.Console.CloudflareAccess.Team != "acme":
+	case c.Console.Auth != "cloudflare-access" || c.Console.CloudflareAccess.Team != "acme" ||
+		!slices.Equal(c.Console.CloudflareAccess.Operators, []string{"ada@example.com"}) || c.Console.CloudflareAccess.DefaultTenant != "absmartly":
 		t.Errorf("console: %+v", c.Console)
 	case c.S3.Region != "us-east-1" || c.Tick.Duration != time.Second:
 		t.Errorf("defaults kept: region %q tick %v", c.S3.Region, c.Tick)
@@ -66,6 +69,9 @@ aud = "aud-from-file"
 		{"", "LUX_LEASE=soon", "LUX_LEASE"},
 		{"[defaults]\ncpus = -1", "", "defaults.cpus"},
 		{"[console]\nauth = \"cloudflare-access\"", "", "console.cloudflare_access.team"},
+		{"[console]\nauth = \"cloudflare-access\"\n[console.cloudflare_access]\nteam = \"acme\"\naud = \"aud\"", "", "default_tenant"},
+		{"[console]\nauth = \"cloudflare-access\"\n[console.cloudflare_access]\nteam = \"acme\"\naud = \"aud\"\ndefault_tenant = \"absmartly\"", "", "operators"},
+		{"[console]\nauth = \"cloudflare-access\"\n[console.cloudflare_access]\nteam = \"acme\"\naud = \"aud\"\ndefault_tenant = \"absmartly\"\noperators = [\"ada@example.com\", \"ADA@example.com\"]", "", "operators"},
 		{"[console]\nauth = \"magic\"", "", "want key or cloudflare-access"},
 	} {
 		os.Unsetenv("LUX_LEASE")
