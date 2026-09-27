@@ -54,12 +54,24 @@ def test_access_tenant_is_isolated(env, access, tenant_factory):
     assert me.status_code == 200, me.text
     assert me.json()["operator"] is False and me.json()["tenant"] == "access-default"
     assert me.json()["email"] == "ordinary@example.com" and me.json()["scopes"] == ["admin"]
+    mine = requests.post(f"{env.luxd_url}/v1/runs", headers=hdr,
+                         json=generic(ALPINE_IMAGE, "true", placement={"requires": {"nowhere": "yes"}}), timeout=10)
+    assert mine.status_code in (200, 201, 202), mine.text
+    mine_id = mine.json()["id"]
+    own = _get(env, "/v1/runs/" + mine_id, headers=hdr)
+    assert own.status_code == 200 and own.json()["id"] == mine_id, own.text
+    assert mine_id in {r["id"] for r in _get(env, "/v1/runs?limit=1000", headers=hdr).json()["runs"]}
     assert run_id not in {r["id"] for r in _get(env, "/v1/runs?limit=1000&tenant=" + other.tenant_id,
                                                    headers=hdr).json()["runs"]}
     assert _get(env, "/v1/runs/" + run_id, headers=hdr).status_code == 404
     assert _get(env, "/v1/tenants", headers=hdr).status_code == 403
     r = requests.post(f"{env.luxd_url}/v1/runs/{run_id}/cancel", headers=hdr, timeout=10)
     assert r.status_code == 404, r.text
+    cancel = requests.post(f"{env.luxd_url}/v1/runs/{mine_id}/cancel", headers=hdr, timeout=10)
+    assert cancel.status_code == 202, cancel.text
+    events = _get(env, f"/v1/runs/{mine_id}/events", headers=hdr)
+    assert events.status_code == 200, events.text
+    assert [e["data"]["by"] for e in events.json()["events"] if e["type"] == "cancel.requested"] == ["ordinary@example.com"]
     other.run("cancel", run_id)
 
 
