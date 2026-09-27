@@ -128,6 +128,38 @@ func TestMigrateIdempotent(t *testing.T) {
 	}
 }
 
+// The hourly schema needs only per-host refresh state, including the
+// single-slot priority turn; final-source reconciliation is not installed.
+func TestHourlyMigration(t *testing.T) {
+	owner, _ := testDB(t)
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	for name, want := range map[string]bool{
+		"cost_host_refresh": true, "cost_host_turn": true,
+		"cost_final_hour_backfill": false, "cost_final_hour_discovery": false,
+	} {
+		var exists bool
+		if err := conn.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, name).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists != want {
+			t.Errorf("table %s exists: %v, want %v", name, exists, want)
+		}
+	}
+	var generation bool
+	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		WHERE table_name = 'cost_sources' AND column_name = 'hourly_generation')`).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+	if generation {
+		t.Error("legacy hourly generation column installed")
+	}
+}
+
 // lux_cost_enqueue runs as its owner (it queues from a tenant's scope):
 // only lux_app may call it, not every role, and only with a reason the
 // queue knows.

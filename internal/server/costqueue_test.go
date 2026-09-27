@@ -225,420 +225,6 @@ func TestCostTickBackfillsTerminalComputeInBatches(t *testing.T) {
 	}
 }
 
-func TestFinalCostHoursBackfillProgressWithoutRequeue(t *testing.T) {
-	s, _ := costFixture(t)
-	ctx := context.Background()
-	s.cfg.Costs.Batch = 1
-	s.cfg.Costs.Hourly = 24 * time.Hour
-	from := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
-	execSQL(t, s, ctx, `UPDATE runs SET state = 'succeeded' WHERE id = 'r1'`)
-	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES
-		('r1', 't1', 'ledger', 'final'), ('r1', 't1', 'compute', 'final')`)
-	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final) VALUES
-		('t1', 'r1', 'ledger', 'a', 'ai', 3, 'USD', $1, $2, true),
-		('t1', 'r1', 'compute', 'a', 'compute', 4, 'USD', $1, $2, true)`, from, from.Add(2*time.Hour))
-	execSQL(t, s, ctx, `INSERT INTO cost_final_hour_backfill (run_id, source, next_hour) VALUES
-		('r1', 'ledger', $1), ('r1', 'compute', $1)`, from)
-	// A post-upgrade write wins over the historical copy for its hour.
-	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, amount)
-		VALUES ($1, 't1', 'r1', 'ledger', 'ai', 'USD', 1.5)`, from)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state) VALUES ('old-host', 'old-host', 'p', 'terminated')`)
-	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, amount)
-		VALUES ($1, 't1', 'r1', 'compute', 'compute', 'USD', 'old-host', 2)`, from)
-	execSQL(t, s, ctx, `UPDATE cost_sources SET hourly_generation = 1 WHERE run_id = 'r1'`)
-	for i := 0; i < 8; i++ {
-		if err := peer(s, fmt.Sprintf("restart-%d", i)).backfillFinalCostHours(ctx); err != nil {
-			t.Fatal(err)
-		}
-		var n int
-		systemScan(t, s, `SELECT count(*) FROM cost_hourly WHERE run_id = 'r1'`, nil, &n)
-		if n < 2 || n > min(i+2, 4) {
-			t.Fatalf("pass %d: %d hours, want between 2 and %d", i, n, min(i+2, 4))
-		}
-	}
-	var total string
-	systemScan(t, s, `SELECT trim_scale(sum(amount))::text FROM cost_hourly WHERE run_id = 'r1'`, nil, &total)
-	if total != "7" {
-		t.Errorf("hourly total %s, want 7", total)
-	}
-	var computeFirst int
-	systemScan(t, s, `SELECT count(*) FROM cost_hourly WHERE run_id = 'r1' AND source = 'compute' AND hour = $1`, []any{from}, &computeFirst)
-	if computeFirst != 1 {
-		t.Errorf("backfill duplicated host-attributed compute hour: %d", computeFirst)
-	}
-	var overwritten string
-	systemScan(t, s, `SELECT trim_scale(amount)::text FROM cost_hourly
-		WHERE run_id = 'r1' AND source = 'ledger' AND hour = $1`, []any{from}, &overwritten)
-	if overwritten != "1.5" {
-		t.Errorf("live hourly row replaced with %s", overwritten)
-	}
-	var pendingSources int
-	systemScan(t, s, `SELECT count(*) FROM cost_final_hour_backfill`, nil, &pendingSources)
-	if pendingSources != 0 {
-		t.Errorf("%d cursors left after backfill", pendingSources)
-	}
-	if err := s.backfillFinalCostHours(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var status string
-	systemScan(t, s, `SELECT status FROM cost_sources WHERE run_id = 'r1' AND source = 'ledger'`, nil, &status)
-	if status != "final" || pending(t, s, "r1") != "" {
-		t.Errorf("backfill changed final plugin status %s or queued Run %q", status, pending(t, s, "r1"))
-	}
-}
-
-func TestFinalCostHoursBackfillDropsEmptyAndNoLongerFinalSources(t *testing.T) {
-	s, _ := costFixture(t)
-	ctx := context.Background()
-	s.cfg.Costs.Batch = 2
-	s.cfg.Costs.Hourly = 24 * time.Hour
-	from := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES
-		('r1', 't1', 'empty', 'final'), ('r2', 't2', 'resumed', 'ok')`)
-	execSQL(t, s, ctx, `INSERT INTO cost_final_hour_backfill (run_id, source, next_hour) VALUES
-		('r1', 'empty', $1), ('r2', 'resumed', $1)`, from)
-	if err := s.backfillFinalCostHours(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var remaining int
-	systemScan(t, s, `SELECT count(*) FROM cost_final_hour_backfill`, nil, &remaining)
-	if remaining != 0 {
-		t.Errorf("%d stale cursors remain", remaining)
-	}
-}
-
-func TestFinalCostHoursBackfillWaitsForFutureHour(t *testing.T) {
-	s, _ := costFixture(t)
-	ctx := context.Background()
-	s.cfg.Costs.Batch = 2
-	s.cfg.Costs.Hourly = 48 * time.Hour
-	due := time.Now().UTC().Truncate(time.Hour)
-	future := due.Add(time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES ('r1', 't1', 'ledger', 'final')`)
-	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final)
-		VALUES ('t1', 'r1', 'ledger', 'future', 'ai', 6, 'USD', $1, $2, true)`, due, future.Add(time.Hour))
-	execSQL(t, s, ctx, `INSERT INTO cost_final_hour_backfill (run_id, source, next_hour) VALUES ('r1', 'ledger', $1)`, due)
-	for pass := 0; pass < 2; pass++ {
-		if err := peer(s, fmt.Sprintf("future-pass-%d", pass)).backfillFinalCostHours(ctx); err != nil {
-			t.Fatal(err)
-		}
-		var count int
-		var amount string
-		systemScan(t, s, `SELECT count(*), trim_scale(sum(amount))::text FROM cost_hourly
-			WHERE run_id = 'r1' AND source = 'ledger' AND hour = $1`, []any{due}, &count, &amount)
-		if count != 1 || amount != "3" {
-			t.Fatalf("pass %d: due hour has %d rows totaling %s, want one row totaling 3", pass, count, amount)
-		}
-		systemScan(t, s, `SELECT count(*) FROM cost_hourly WHERE run_id = 'r1' AND source = 'ledger' AND hour = $1`, []any{future}, &count)
-		if count != 0 {
-			t.Fatalf("pass %d: projected %d future-hour rows before the hour was due", pass, count)
-		}
-		var next time.Time
-		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT next_hour FROM cost_final_hour_backfill WHERE run_id = 'r1' AND source = 'ledger'`).Scan(&next)
-		})
-		if errors.Is(err, pgx.ErrNoRows) {
-			t.Fatalf("pass %d: future-hour cursor discarded before the hour was due", pass)
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !next.Equal(future) {
-			t.Fatalf("pass %d: cursor %s, want future hour %s retained", pass, next, future)
-		}
-	}
-	if err := peer(s, "after-hour").backfillFinalCostHoursAt(ctx, future.Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	var projected string
-	systemScan(t, s, `SELECT trim_scale(sum(amount))::text FROM cost_hourly
-		WHERE run_id = 'r1' AND source = 'ledger' AND hour = $1`, []any{future}, &projected)
-	if projected != "3" {
-		t.Errorf("future hour after arrival: %s, want 3", projected)
-	}
-}
-
-func TestFinalCostHoursDiscoveryRetainedPages(t *testing.T) {
-	s, _ := costFixture(t)
-	ctx := context.Background()
-	s.cfg.Costs.Batch = 1
-	s.cfg.Costs.Hourly = 48 * time.Hour
-	old := time.Now().UTC().Truncate(time.Hour).Add(-72 * time.Hour)
-	recent := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES
-		('r1', 't1', 'old', 'final'), ('r1', 't1', 'ledger', 'final'), ('r2', 't2', 'ledger', 'final')`)
-	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final) VALUES
-		('t1', 'r1', 'old', 'a', 'ai', 1, 'USD', $1, $2, true),
-		('t1', 'r1', 'ledger', 'a', 'ai', 1, 'USD', $3, $4, true),
-		('t2', 'r2', 'ledger', 'a', 'ai', 1, 'USD', $4, $5, true)`, old, old.Add(time.Hour), recent, recent.Add(time.Hour), recent.Add(2*time.Hour))
-	for pass := 1; pass <= 3; pass++ {
-		if err := peer(s, fmt.Sprintf("discovery-%d", pass)).discoverFinalCostHours(ctx); err != nil {
-			t.Fatal(err)
-		}
-		var count int
-		systemScan(t, s, `SELECT count(*) FROM cost_final_hour_backfill`, nil, &count)
-		want := 1
-		if pass == 3 {
-			want = 2
-		}
-		if count != want {
-			t.Fatalf("pass %d seeded %d retained sources, want %d", pass, count, want)
-		}
-	}
-	if err := s.discoverFinalCostHours(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var completed bool
-	systemScan(t, s, `SELECT completed FROM cost_final_hour_discovery WHERE id`, nil, &completed)
-	if !completed {
-		t.Fatal("discovery did not persist completion")
-	}
-	var oldCount int
-	systemScan(t, s, `SELECT count(*) FROM cost_final_hour_backfill WHERE source = 'old'`, nil, &oldCount)
-	if oldCount != 0 {
-		t.Fatal("discovery seeded an expired line")
-	}
-}
-
-func TestFinalCostHoursDiscoveryRevisitsOldWriterFinalization(t *testing.T) {
-	s, _ := costFixture(t)
-	ctx := context.Background()
-	s.cfg.Costs.Batch = 1
-	s.cfg.Costs.Hourly = 48 * time.Hour
-	hour := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status)
-		VALUES ('r1', 't1', 'ledger', 'ok')`)
-	if err := s.discoverFinalCostHours(ctx); err != nil {
-		t.Fatal(err)
-	}
-	// A pre-hourly writer commits final lines after the checkpoint passes r1.
-	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final)
-		VALUES ('t1', 'r1', 'ledger', 'a', 'ai', 5, 'USD', $1, $2, true)`, hour, hour.Add(time.Hour))
-	execSQL(t, s, ctx, `UPDATE cost_sources SET status = 'final' WHERE run_id = 'r1' AND source = 'ledger'`)
-	for pass := 0; pass < 5; pass++ {
-		if err := peer(s, fmt.Sprintf("sweep-%d", pass)).backfillFinalCostHours(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var count int
-	var total string
-	systemScan(t, s, `SELECT count(*), trim_scale(sum(amount))::text FROM cost_hourly
-		WHERE run_id = 'r1' AND source = 'ledger'`, nil, &count, &total)
-	if count != 1 || total != "5" {
-		t.Fatalf("finalized behind checkpoint: %d rows totaling %s, want one row totaling 5", count, total)
-	}
-}
-
-func TestFinalCostHoursReplacesLegacyFinalEstimate(t *testing.T) {
-	s, _ := costFixture(t)
-	ctx := context.Background()
-	s.cfg.Costs.Batch = 1
-	s.cfg.Costs.Hourly = 48 * time.Hour
-	hour := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, hourly_generation)
-		VALUES ('r1', 't1', 'ledger', 'ok', 1)`)
-	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, amount)
-		VALUES ($1, 't1', 'r1', 'ledger', 'ai', 'USD', 3)`, hour)
-	if err := s.discoverFinalCostHours(ctx); err != nil {
-		t.Fatal(err)
-	}
-	// An older writer replaces lines and status but cannot supply an hourly generation.
-	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final)
-		VALUES ('t1', 'r1', 'ledger', 'a', 'ai', 5, 'USD', $1, $2, true)`, hour, hour.Add(time.Hour))
-	execSQL(t, s, ctx, `UPDATE cost_sources SET status = 'final' WHERE run_id = 'r1' AND source = 'ledger'`)
-	for pass := 0; pass < 5; pass++ {
-		if err := peer(s, fmt.Sprintf("legacy-pass-%d", pass)).backfillFinalCostHours(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var count int
-	var total string
-	systemScan(t, s, `SELECT count(*), trim_scale(sum(amount))::text FROM cost_hourly
-		WHERE run_id = 'r1' AND source = 'ledger'`, nil, &count, &total)
-	if count != 1 || total != "5" {
-		t.Fatalf("legacy final: %d rows totaling %s, want one row totaling 5", count, total)
-	}
-	var generation int64
-	systemScan(t, s, `SELECT hourly_generation FROM cost_sources WHERE run_id = 'r1' AND source = 'ledger'`, nil, &generation)
-	if generation == 0 {
-		t.Fatal("reconciled source remains marked for replacement")
-	}
-}
-
-func TestFinalCostHoursInvertedSourceLockOrder(t *testing.T) {
-	s, _ := costFixture(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	s.cfg.Costs.Batch = 2
-	s.cfg.Costs.Hourly = 48 * time.Hour
-	hour := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state) VALUES ('lock-host', 'lock-host', 'p', 'ready')`)
-	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES
-		('r1', 't1', 'compute', 'final'), ('r2', 't2', 'compute', 'final')`)
-	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final) VALUES
-		('t1', 'r1', 'compute', 'a', 'compute', 3, 'USD', $1, $2, true),
-		('t2', 'r2', 'compute', 'a', 'compute', 4, 'USD', $3, $4, true)`, hour.Add(time.Hour), hour.Add(2*time.Hour), hour, hour.Add(time.Hour).Add(-time.Nanosecond))
-	execSQL(t, s, ctx, `INSERT INTO cost_final_hour_backfill (run_id, source, next_hour) VALUES
-		('r1', 'compute', $1), ('r2', 'compute', $2)`, hour.Add(time.Hour), hour)
-	locked := make(chan struct{})
-	release := make(chan struct{})
-	livePID := make(chan int, 1)
-	live := make(chan error, 1)
-	go func() {
-		live <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			var pid int
-			if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(ctx, `SELECT 1 FROM cost_sources WHERE run_id = 'r1' AND source = 'compute' FOR UPDATE`); err != nil {
-				return err
-			}
-			livePID <- pid
-			close(locked)
-			select {
-			case <-release:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-			e := &computeEval{TenantID: "t2", State: StateSucceeded,
-				Lines: []costReport{{Family: "compute", Item: "new", Amount: "5", Currency: "USD", From: hour, To: hour.Add(time.Hour)}},
-				Hours: []computeHour{{Hour: hour, Host: "lock-host", Currency: "USD", Amount: mustRat("5")}}}
-			return s.writeCompute(ctx, tx, "r2", e, time.Now())
-		})
-	}()
-	<-locked
-	pid := <-livePID
-	backfill := make(chan error, 1)
-	go func() { backfill <- s.backfillFinalCostHours(ctx) }()
-	var waiting bool
-	for !waiting && ctx.Err() == nil {
-		systemScan(t, s, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			WHERE $1 = ANY(pg_blocking_pids(pid)))`, []any{pid}, &waiting)
-		if !waiting {
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-	close(release)
-	if !waiting {
-		t.Fatal("backfill did not wait for the first source")
-	}
-	if err := <-live; err != nil {
-		t.Fatal(err)
-	}
-	if err := <-backfill; err != nil {
-		t.Fatal(err)
-	}
-	if err := s.backfillFinalCostHours(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var total string
-	systemScan(t, s, `SELECT trim_scale(sum(amount))::text FROM cost_hourly WHERE source = 'compute'`, nil, &total)
-	if total != "8" {
-		t.Fatalf("concurrent sources total %s, want 8", total)
-	}
-}
-
-func TestFinalCostHoursLiveReplacementWaitsForSourceLock(t *testing.T) {
-	s, _ := costFixture(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	s.cfg.Costs.Batch = 1
-	s.cfg.Costs.Hourly = 48 * time.Hour
-	hour := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state) VALUES ('cost-test-host', 'cost-test-host', 'p', 'ready')`)
-	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES ('r1', 't1', 'compute', 'final')`)
-	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final)
-		VALUES ('t1', 'r1', 'compute', 'old', 'compute', 3, 'USD', $1, $2, true)`, hour, hour.Add(time.Hour))
-	execSQL(t, s, ctx, `INSERT INTO cost_final_hour_backfill (run_id, source, next_hour) VALUES ('r1', 'compute', $1)`, hour)
-	locked := make(chan struct{})
-	release := make(chan struct{})
-	backfill := make(chan error, 1)
-	go func() {
-		backfill <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			var status string
-			if err := tx.QueryRow(ctx, `SELECT status FROM cost_sources WHERE run_id = 'r1' AND source = 'compute' FOR UPDATE`).Scan(&status); err != nil {
-				return err
-			}
-			close(locked)
-			select {
-			case <-release:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-			return backfillFinalCostHour(ctx, tx, "r1", "compute", hour, false)
-		})
-	}()
-	<-locked
-	live := make(chan error, 1)
-	go func() {
-		live <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx, `SET LOCAL application_name = 'cost-live-replacement-test'`); err != nil {
-				return err
-			}
-			e := &computeEval{TenantID: "t1", State: StateSucceeded,
-				Lines: []costReport{{Family: "compute", Item: "new", Amount: "5", Currency: "USD", From: hour, To: hour.Add(time.Hour)}},
-				Hours: []computeHour{{Hour: hour, Host: "cost-test-host", Currency: "USD", Amount: mustRat("5")}}}
-			return s.writeCompute(ctx, tx, "r1", e, time.Now())
-		})
-	}()
-	// With the source held, a competing live replacement cannot insert hourly first.
-	var waiting bool
-	for !waiting && ctx.Err() == nil {
-		systemScan(t, s, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			WHERE application_name = 'cost-live-replacement-test' AND cardinality(pg_blocking_pids(pid)) > 0)`, nil, &waiting)
-		if !waiting {
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-	if !waiting {
-		t.Fatal("live transaction did not wait for source lock")
-	}
-	close(release)
-	if err := <-backfill; err != nil {
-		t.Fatal(err)
-	}
-	if err := <-live; err != nil {
-		t.Fatal(err)
-	}
-	var count int
-	var total string
-	systemScan(t, s, `SELECT count(*), trim_scale(sum(amount))::text FROM cost_hourly WHERE run_id = 'r1' AND source = 'compute'`, nil, &count, &total)
-	if count != 1 || total != "5" {
-		t.Fatalf("concurrent replacement: %d rows totaling %s, want one row totaling 5", count, total)
-	}
-}
-
-func TestFinalCostHoursBackfillBoundedCursorWork(t *testing.T) {
-	s, _ := costFixture(t)
-	ctx := context.Background()
-	s.cfg.Costs.Batch = 2
-	s.cfg.Costs.Hourly = 48 * time.Hour
-	start := time.Now().UTC().Truncate(time.Hour).Add(-4 * time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES
-		('r1', 't1', 'ledger', 'final'), ('r2', 't2', 'ledger', 'final')`)
-	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final) VALUES
-		('t1', 'r1', 'ledger', 'a', 'ai', 4, 'USD', $1, $2, true),
-		('t2', 'r2', 'ledger', 'a', 'ai', 4, 'USD', $1, $2, true)`, start, start.Add(4*time.Hour))
-	execSQL(t, s, ctx, `INSERT INTO cost_final_hour_backfill (run_id, source, next_hour) VALUES
-		('r1', 'ledger', $1), ('r2', 'ledger', $1)`, start)
-	for pass := 1; pass <= 4; pass++ {
-		if err := s.backfillFinalCostHours(ctx); err != nil {
-			t.Fatal(err)
-		}
-		var count int
-		var total string
-		systemScan(t, s, `SELECT count(*), trim_scale(sum(amount))::text FROM cost_hourly WHERE source = 'ledger'`, nil, &count, &total)
-		if count != pass*2 || total != fmt.Sprint(pass*2) {
-			t.Fatalf("pass %d: %d rows totaling %s, want %d", pass, count, total, pass*2)
-		}
-		var progressed int
-		systemScan(t, s, `SELECT sum(extract(epoch FROM next_hour - $1) / 3600)::int FROM cost_final_hour_backfill WHERE source = 'ledger'`, []any{start}, &progressed)
-		if progressed != pass*2 {
-			t.Errorf("pass %d: advanced %d source-hours, want %d", pass, progressed, pass*2)
-		}
-	}
-}
-
 func TestCostTickDiscoversHistoricalPluginSources(t *testing.T) {
 	s, keys, _ := pluginFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		if pluginDescribeHandler(w, r) {
@@ -1216,7 +802,7 @@ func TestDrainComputeWorkedExample(t *testing.T) {
 	_, c := getCost(t, s, keys["t1"], "B")
 	d := c.Lines[0].Details["placements"].([]any)[0].(map[string]any)
 	if len(c.Lines[0].Details["placements"].([]any)) != 1 || d["hostId"] != "static" || d["amount"] != "0.15" ||
-		d["ratePerHour"] != "0.4" || d["share"] != 0.5 || d["cpus"] != 1.0 || d["epoch"] != 1.0 || c.Lines[0].Details["missingRate"] != nil {
+		d["ratePerHour"] != "0.400000000" || d["share"] != 0.5 || d["cpus"] != 1.0 || d["epoch"] != 1.0 || c.Lines[0].Details["missingRate"] != nil {
 		t.Errorf("B's details: %v", c.Lines[0].Details)
 	}
 	if !c.Lines[0].From.Equal(at("10:15")) || !c.Lines[0].To.Equal(at("11:00")) || c.Lines[0].Family != "compute" {
@@ -1254,123 +840,63 @@ func TestDrainComputeWorkedExample(t *testing.T) {
 	}
 }
 
-// A static host's time before it had a price is unbilled: no line for it,
-// and it keeps nothing from being final. A provider's host with no rate
-// for part of a placement is missing: the line says so, and the Run is not
-// final.
-func TestDrainComputeUnpricedAndMissing(t *testing.T) {
+// A missing rate leaves a placement unpriced until a retry finds an observation.
+// A later observation covers the whole placement, and a finalized snapshot is
+// not repriced by subsequent changes to the host's rate history.
+func TestDrainComputeMissingRateRecovery(t *testing.T) {
 	s, keys := costFixture(t)
 	costHosts(t, s)
-	whole := place("", 2, 8, "10:00", "11:00") // share 1/4
-	placeRun(t, s, "t1", "unpriced", StateRunning, "unpriced", whole)
-	placeRun(t, s, "t1", "late", StateRunning, "late", whole)
-	placeRun(t, s, "t1", "ec2", StateRunning, "ec2", whole)
-	for _, id := range []string{"unpriced", "late", "ec2"} {
-		finish(t, s, "t1", id, StateSucceeded)
-	}
-	drain(t, s)
-	for _, c := range []struct {
-		run, lines, source string
-	}{
-		{"unpriced", "[]", "final"},
-		{"late", "[static 0.05 USD true]", "final"},
-		// 40 of its 60 minutes priced: $0.40/h × 1/4 × 2/3.
-		{"ec2", "[m7i.2xlarge:spot 0.066666667 USD false]", "incomplete"},
-	} {
-		lines, src := computeView(t, s, keys["t1"], c.run)
-		if fmt.Sprint(lines) != c.lines || src != c.source {
-			t.Errorf("%s: %v, source %q; want %s, %s", c.run, lines, src, c.lines, c.source)
-		}
-	}
-	_, c := getCost(t, s, keys["t1"], "ec2")
-	d := c.Lines[0].Details["placements"].([]any)[0].(map[string]any)
-	if c.Lines[0].Details["missingRate"] != true || d["missingRate"] != true || d["market"] != "spot" || d["zone"] != "eu-west-1a" {
-		t.Errorf("ec2's details: %v", c.Lines[0].Details)
-	}
-	if c.Status != "incomplete" || len(c.Sources) != 1 || c.Sources[0].NextAt == nil {
-		t.Errorf("ec2: status %s, sources %+v", c.Status, c.Sources)
-	}
-
-	// The retry comes with a tick once next_at has passed; still missing,
-	// it backs off further.
 	ctx := context.Background()
-	execSQL(t, s, ctx, `UPDATE cost_sources SET next_at = now() - interval '1 second' WHERE run_id = 'ec2'`)
-	if _, err := s.costTick(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if p := pending(t, s, "ec2"); p != "tick -" {
-		t.Fatalf("ec2 queued %q", p)
-	}
+	whole := place("", 2, 8, "10:00", "11:00")
+	placeRun(t, s, "t1", "unpriced", StateRunning, "unpriced", whole)
+	finish(t, s, "t1", "unpriced", StateSucceeded)
 	drain(t, s)
-	var attempts int
-	var next time.Duration
-	systemScan(t, s, `SELECT attempts, next_at - now() FROM cost_sources WHERE run_id = 'ec2'`, nil, &attempts, &next)
-	if attempts != 2 || next < 3*time.Minute || next > 4*time.Minute {
-		t.Errorf("ec2 after its retry: attempt %d, next in %s", attempts, next)
+	if lines, src := computeView(t, s, keys["t1"], "unpriced"); len(lines) != 0 || src != "incomplete" {
+		t.Fatalf("missing rate: %v, source %q", lines, src)
 	}
-
-	// The gap filled, but the spot host's recent history is still settling.
-	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
-		VALUES ('ec2', $1, $2, 0.40, 'USD', 8, $3, 'aws-spot-history')`, at("10:20"), at("10:40"), 32*gib)
-	execSQL(t, s, ctx, `UPDATE cost_sources SET next_at = now() - interval '1 second' WHERE run_id = 'ec2'`)
-	execSQL(t, s, ctx, `DELETE FROM cost_ticks`)
-	if _, err := s.costTick(ctx); err != nil {
+	if row, next := sourceRow(t, s, "unpriced"); row != "incomplete 1 t t" || next <= 0 {
+		t.Fatalf("missing rate retry: %s, next in %s", row, next)
+	}
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('unpriced', $1, 0.40, 'USD', 8, $2, 'static')`, at("10:30"), 32*gib)
+	execSQL(t, s, ctx, `UPDATE cost_sources SET next_at = now() - interval '1 second' WHERE run_id = 'unpriced'`)
+	if err := s.pollDueCostSources(ctx); err != nil {
 		t.Fatal(err)
 	}
 	drain(t, s)
-	if lines, src := computeView(t, s, keys["t1"], "ec2"); fmt.Sprint(lines) != "[m7i.2xlarge:spot 0.1 USD false]" || src != "ok" {
-		t.Errorf("ec2 gap filled: %v, source %q", lines, src)
+	if lines, src := computeView(t, s, keys["t1"], "unpriced"); fmt.Sprint(lines) != "[static 0.1 USD true]" || src != "final" {
+		t.Errorf("recovered rate: %v, source %q", lines, src)
 	}
-	// A second successful evaluation, including after a restart, cannot finalize it yet.
-	execSQL(t, s, ctx, `UPDATE cost_sources SET next_at = now() - interval '1 second' WHERE run_id = 'ec2'`)
-	execSQL(t, s, ctx, `DELETE FROM cost_ticks`)
-	if _, err := peer(s, "restarted").costTick(ctx); err != nil {
-		t.Fatal(err)
-	}
-	drain(t, peer(s, "restarted"))
-	if lines, src := computeView(t, s, keys["t1"], "ec2"); fmt.Sprint(lines) != "[m7i.2xlarge:spot 0.1 USD false]" || src != "ok" {
-		t.Errorf("ec2 prematurely settled: %v, source %q", lines, src)
+	if row, _ := sourceRow(t, s, "unpriced"); row != "final 0 f f" {
+		t.Errorf("recovered source: %s", row)
 	}
 }
 
-func TestDrainComputeSpotSettleErrorAndResume(t *testing.T) {
+// A spot placement freezes its first complete observation when it ends;
+// later spot history does not reopen or reprice its compute source.
+func TestDrainComputeSpotSnapshotFinal(t *testing.T) {
 	s, keys := costFixture(t)
 	costHosts(t, s)
 	ctx := context.Background()
 	placeRun(t, s, "t1", "spot", StateRunning, "ec2", place("", 2, 8, "10:00", "10:20"))
 	finish(t, s, "t1", "spot", StateFailed)
 	drain(t, s)
-	if row, _ := sourceRow(t, s, "spot"); row != "ok 1 t f" {
-		t.Fatalf("first complete spot answer: %s", row)
+	if lines, src := computeView(t, s, keys["t1"], "spot"); fmt.Sprint(lines) != "[m7i.2xlarge:spot 0.033333333 USD true]" || src != "final" {
+		t.Fatalf("initial spot snapshot: %v, source %q", lines, src)
 	}
-	// A pricing error keeps the earlier lines and the retry eligibility.
+	var before string
+	systemScan(t, s, `SELECT amount::text FROM cost_placement_snapshots WHERE placement_id = 'p-spot'`, nil, &before)
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('ec2', $1, $2, 0.80, 'USD', 8, $3, 'aws-spot-history')`, at("10:10"), at("10:15"), 32*gib)
 	execSQL(t, s, ctx, `SELECT lux_cost_enqueue('spot', 'retry')`)
-	drain(t, s)
-	if lines, src := computeView(t, s, keys["t1"], "spot"); fmt.Sprint(lines) != "[m7i.2xlarge:spot 0.033333333 USD false]" || src != "incomplete" {
-		t.Errorf("pricing error: %v, %s", lines, src)
+	drain(t, peer(s, "restarted"))
+	var after string
+	systemScan(t, s, `SELECT amount::text FROM cost_placement_snapshots WHERE placement_id = 'p-spot'`, nil, &after)
+	if after != before {
+		t.Errorf("spot snapshot repriced from %s to %s", before, after)
 	}
-	execSQL(t, s, ctx, `DELETE FROM host_rates WHERE host_id = 'ec2' AND valid_from = $1`, at("10:10"))
-	// A missing rate on the second pass cannot finalize the cost.
-	execSQL(t, s, ctx, `DELETE FROM host_rates WHERE host_id = 'ec2' AND valid_from = $1`, at("10:00"))
-	execSQL(t, s, ctx, `SELECT lux_cost_enqueue('spot', 'retry')`)
-	drain(t, s)
-	if lines, src := computeView(t, s, keys["t1"], "spot"); src != "incomplete" {
-		t.Errorf("missing rate finalized compute: %v, %s", lines, src)
-	}
-	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
-		VALUES ('ec2', $1, $2, 0.40, 'USD', 8, $3, 'aws-spot-history')`, at("10:00"), at("10:20"), 32*gib)
-	execSQL(t, s, ctx, `SELECT lux_cost_enqueue('spot', 'retry')`)
-	drain(t, s)
-	if lines, src := computeView(t, s, keys["t1"], "spot"); fmt.Sprint(lines) != "[m7i.2xlarge:spot 0.033333333 USD false]" || src != "ok" {
-		t.Errorf("after recovered rate: %v, %s", lines, src)
-	}
-	resume(t, s, "spot")
-	var reset *int
-	systemScan(t, s, `SELECT settles_left FROM cost_sources WHERE run_id = 'spot'`, nil, &reset)
-	if reset != nil {
-		t.Errorf("resume left settle round: %d", *reset)
+	if lines, src := computeView(t, s, keys["t1"], "spot"); fmt.Sprint(lines) != "[m7i.2xlarge:spot 0.033333333 USD true]" || src != "final" {
+		t.Errorf("later spot history: %v, source %q", lines, src)
 	}
 }
 
@@ -1392,7 +918,7 @@ func claimOne(t *testing.T, s *Server) claimed {
 	}
 	c := claimed{runs: runs}
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		c.evals, c.now, err = evaluateCompute(ctx, tx, runs)
+		c.evals, c.now, err = loadComputeRuns(ctx, tx, runs)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -1687,9 +1213,8 @@ func sourceRow(t *testing.T, s *Server, runID string) (string, time.Duration) {
 	return out, *next
 }
 
-// A host that cannot be priced (its rates overlap): the Run's earlier
-// lines stay, and its source is incomplete, saying why.
-func TestDrainComputeUnpriceableHost(t *testing.T) {
+// A finalized placement keeps its price when a later overlapping rate arrives.
+func TestDrainComputeFrozenHostRate(t *testing.T) {
 	s, keys := costFixture(t)
 	costHosts(t, s)
 	placeRun(t, s, "t1", "A", StateStopping, "static", workedExample[0])
@@ -1703,11 +1228,8 @@ func TestDrainComputeUnpriceableHost(t *testing.T) {
 		VALUES ('static', $1, $2, 0.80, 'USD', 8, $3, 'static')`, at("10:10"), at("10:20"), 32*gib)
 	finish(t, s, "t1", "A", StateStopped)
 	drain(t, s)
-	if lines, src := computeView(t, s, keys["t1"], "A"); fmt.Sprint(lines) != "[static 0.05 USD false]" || src != "incomplete" {
-		t.Errorf("A, host unpriceable: %v, source %q; want its earlier line, incomplete", lines, src)
-	}
-	if row, _ := sourceRow(t, s, "A"); row != "incomplete 0 f t" {
-		t.Errorf("A's source: %s, want incomplete with its error", row)
+	if lines, src := computeView(t, s, keys["t1"], "A"); fmt.Sprint(lines) != "[static 0.05 USD false]" || src != "ok" {
+		t.Errorf("frozen A: %v, source %q", lines, src)
 	}
 }
 
@@ -1821,40 +1343,232 @@ func TestDrainComputeLivePlacement(t *testing.T) {
 	}
 }
 
-// A terminal Run whose compute is not final backs off up to an hour. A spot
-// host still running keeps the Run eligible beyond a week; a resume resets it.
+// A terminal Run with an open placement retries compute with exponential
+// backoff capped at an hour. Resuming clears the scheduled retry.
 func TestDrainComputeBackoff(t *testing.T) {
 	s, keys := costFixture(t)
 	costHosts(t, s)
 	ctx := context.Background()
-	placeRun(t, s, "t1", "ec2", StateRunning, "ec2", place("", 2, 8, "10:00", "11:00"))
+	placeRun(t, s, "t1", "ec2", StateRunning, "ec2", placementWindow{From: time.Now().Add(-time.Hour), CPUs: 2, Memory: 8 * gib})
 	finish(t, s, "t1", "ec2", StateFailed)
 	drain(t, s)
+	if row, next := sourceRow(t, s, "ec2"); row != "ok 1 t f" || next <= 0 {
+		t.Fatalf("open placement: %s, next in %s", row, next)
+	}
 
-	// Capped at an hour.
 	execSQL(t, s, ctx, `UPDATE cost_sources SET attempts = 10 WHERE run_id = 'ec2'`)
 	finish(t, s, "t1", "ec2", StateFailed)
 	drain(t, s)
-	if row, next := sourceRow(t, s, "ec2"); row != "incomplete 11 t t" || next > time.Hour || next < 59*time.Minute {
-		t.Errorf("ec2, attempt 11: %s, next in %s; want within the hour", row, next)
+	if row, next := sourceRow(t, s, "ec2"); row != "ok 11 t f" || next > time.Hour || next < 59*time.Minute {
+		t.Errorf("attempt 11: %s, next in %s", row, next)
 	}
 
-	// Finished over a week ago, but the spot host is still running.
 	execSQL(t, s, ctx, `UPDATE runs SET finished_at = now() - interval '8 days' WHERE id = 'ec2'`)
 	execSQL(t, s, ctx, `SELECT lux_cost_enqueue('ec2', 'retry')`)
 	drain(t, s)
-	if row, _ := sourceRow(t, s, "ec2"); row != "incomplete 12 t t" {
-		t.Errorf("ec2, a week on: %s; want continued retry", row)
+	if row, _ := sourceRow(t, s, "ec2"); row != "ok 12 t f" {
+		t.Errorf("a week on: %s; want continued retry", row)
 	}
 
-	// Resumed while incomplete: no retry pending, attempts start over.
-	execSQL(t, s, ctx, `UPDATE cost_sources SET next_at = now() + interval '1 hour' WHERE run_id = 'ec2'`)
 	resume(t, s, "ec2")
-	if row, _ := sourceRow(t, s, "ec2"); row != "incomplete 0 f t" {
-		t.Errorf("ec2 resumed: %s; want no next attempt, attempts 0", row)
+	if row, _ := sourceRow(t, s, "ec2"); row != "ok 0 f f" {
+		t.Errorf("resumed: %s; want no next attempt, attempts 0", row)
 	}
-	if _, src := computeView(t, s, keys["t1"], "ec2"); src != "incomplete" {
-		t.Errorf("ec2 resumed: source %q", src)
+	if _, src := computeView(t, s, keys["t1"], "ec2"); src != "ok" {
+		t.Errorf("resumed: source %q", src)
+	}
+}
+
+// A live placement refreshes its snapshot; an ended one freezes its amount
+// even if rates change, while a new placement gets its own snapshot.
+func TestDrainComputePlacementSnapshotsFreezeAndNewHost(t *testing.T) {
+	s, keys := costFixture(t)
+	ctx := context.Background()
+	from := time.Now().UTC().Add(-2 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, registered_at) VALUES
+		('snap-a', 't1', 'snap-a', 'ready', $1), ('snap-b', 't1', 'snap-b', 'ready', $1)`, from)
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source) VALUES
+		('snap-a', $1, 0.40, 'USD', 8, $2, 'static'), ('snap-b', $1, 0.80, 'USD', 8, $2, 'static')`, from, 32*gib)
+	placeRun(t, s, "t1", "snap-run", StateRunning, "snap-a", placementWindow{From: from, CPUs: 2, Memory: 8 * gib})
+	execSQL(t, s, ctx, `SELECT lux_cost_enqueue('snap-run', 'tick')`)
+	drain(t, s)
+	var first, updated string
+	var finalized bool
+	systemScan(t, s, `SELECT amount::text, finalized FROM cost_placement_snapshots WHERE placement_id = 'p-snap-run'`, nil, &first, &finalized)
+	if finalized {
+		t.Fatal("open placement frozen")
+	}
+	lines, src := computeView(t, s, keys["t1"], "snap-run")
+	if len(lines) != 1 || src != "ok" {
+		t.Fatalf("open placement: lines %v, source %q", lines, src)
+	}
+	execSQL(t, s, ctx, `UPDATE host_rates SET per_hour = 0.80 WHERE host_id = 'snap-a'`)
+	execSQL(t, s, ctx, `SELECT lux_cost_enqueue('snap-run', 'tick')`)
+	drain(t, s)
+	systemScan(t, s, `SELECT amount::text FROM cost_placement_snapshots WHERE placement_id = 'p-snap-run'`, nil, &updated)
+	if updated == first {
+		t.Fatalf("active placement did not refresh: amount %s", updated)
+	}
+	ended := time.Now().UTC().Add(-time.Minute)
+	execSQL(t, s, ctx, `UPDATE placements SET ended_at = $1, state = 'exited' WHERE id = 'p-snap-run'`, ended)
+	finish(t, s, "t1", "snap-run", StateSucceeded)
+	drain(t, s)
+	var frozen, rate string
+	var pricedTo time.Time
+	systemScan(t, s, `SELECT amount::text, per_hour::text, priced_to, finalized FROM cost_placement_snapshots WHERE placement_id = 'p-snap-run'`, nil, &frozen, &rate, &pricedTo, &finalized)
+	if !finalized || !pricedTo.Equal(ended.Truncate(time.Microsecond)) || rate != "0.800000000" {
+		t.Fatalf("ended snapshot: amount %s, rate %s, priced to %s, finalized %v", frozen, rate, pricedTo, finalized)
+	}
+	if _, src := computeView(t, s, keys["t1"], "snap-run"); src != "final" {
+		t.Fatalf("ended source %q, want final", src)
+	}
+	execSQL(t, s, ctx, `UPDATE host_rates SET per_hour = 4 WHERE host_id = 'snap-a'`)
+	execSQL(t, s, ctx, `SELECT lux_cost_enqueue('snap-run', 'retry')`)
+	drain(t, s)
+	var after, afterRate string
+	systemScan(t, s, `SELECT amount::text, per_hour::text FROM cost_placement_snapshots WHERE placement_id = 'p-snap-run'`, nil, &after, &afterRate)
+	if after != frozen || afterRate != rate {
+		t.Fatalf("late rate changed frozen snapshot: %s/%s -> %s/%s", frozen, rate, after, afterRate)
+	}
+	// A later placement on a different host gets its own snapshot without repricing the first.
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at, ended_at)
+		VALUES ('snap-second', 't1', 'snap-run', 'snap-b', 2, 'exited', '{"cpus":2,"memory":8589934592}', $1, $2)`, ended, time.Now().UTC())
+	execSQL(t, s, ctx, `SELECT lux_cost_enqueue('snap-run', 'retry')`)
+	drain(t, s)
+	var second string
+	systemScan(t, s, `SELECT amount::text, finalized FROM cost_placement_snapshots WHERE placement_id = 'snap-second'`, nil, &second, &finalized)
+	if !finalized || second == "0.000000000" {
+		t.Fatalf("second host snapshot: amount %s, finalized %v", second, finalized)
+	}
+	systemScan(t, s, `SELECT amount::text FROM cost_placement_snapshots WHERE placement_id = 'p-snap-run'`, nil, &after)
+	if after != frozen {
+		t.Errorf("second placement changed frozen first amount %s to %s", frozen, after)
+	}
+	var count int
+	systemScan(t, s, `SELECT count(*) FROM cost_placement_snapshots WHERE run_id = 'snap-run'`, nil, &count)
+	if count != 2 {
+		t.Errorf("%d snapshots, want two", count)
+	}
+	_, cost := getCost(t, s, keys["t1"], "snap-run")
+	if len(cost.Lines) != 1 || !cost.Lines[0].Final || len(cost.Lines[0].Details["placements"].([]any)) != 2 {
+		t.Errorf("two-host derived line: %+v", cost.Lines)
+	}
+}
+
+// Rounded placement snapshots retain their total when split across hours,
+// including when two placements share the same host-hour aggregation key.
+func TestDrainComputeSnapshotHourlyRounding(t *testing.T) {
+	s, keys := costFixture(t)
+	ctx := context.Background()
+	from := time.Now().UTC().Truncate(time.Hour).Add(-4 * time.Hour)
+	end := from.Add(3 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, registered_at)
+		VALUES ('round-host', 't1', 'round-host', 'ready', $1)`, from)
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('round-host', $1, 0.000000001, 'USD', 3, $2, 'static')`, from, 3*gib)
+	placeRun(t, s, "t1", "round-run", StateRunning, "round-host",
+		placementWindow{From: from, To: &end, CPUs: 1, Memory: gib})
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, created_at, ended_at)
+		VALUES ('round-second', 't1', 'round-run', 'round-host', 2, 'exited',
+			'{"cpus":1,"memory":1073741824}', $1, $2)`, from, end)
+	finish(t, s, "t1", "round-run", StateSucceeded)
+	drain(t, s)
+	var count int
+	var snapshot string
+	systemScan(t, s, `SELECT count(*), trim_scale(sum(amount))::text FROM cost_placement_snapshots
+		WHERE run_id = 'round-run'`, nil, &count, &snapshot)
+	if count != 2 || snapshot != "0.000000002" {
+		t.Fatalf("%d snapshots totaling %s, want two totaling 0.000000002", count, snapshot)
+	}
+	lines, source := computeView(t, s, keys["t1"], "round-run")
+	if fmt.Sprint(lines) != "[static 0.000000002 USD true]" || source != "final" {
+		t.Errorf("lines %v, source %s", lines, source)
+	}
+	var total string
+	systemScan(t, s, `SELECT trim_scale(sum(amount))::text FROM cost_hourly
+		WHERE run_id = 'round-run' AND source = 'compute'`, nil, &total)
+	if total != snapshot {
+		t.Errorf("hours total %s, snapshots %s", total, snapshot)
+	}
+	for hour, want := range []string{"0", "0", "0.000000002"} {
+		systemScan(t, s, `SELECT count(*), trim_scale(sum(amount))::text FROM cost_hourly
+			WHERE run_id = 'round-run' AND source = 'compute' AND host_id = 'round-host' AND hour = $1`,
+			[]any{from.Add(time.Duration(hour) * time.Hour)}, &count, &total)
+		if count != 1 || total != want {
+			t.Errorf("hour %d: %d rows totaling %s, want one totaling %s", hour, count, total, want)
+		}
+	}
+}
+
+func TestDrainComputeSnapshotOnDemandFiltersRateSource(t *testing.T) {
+	s, keys := costFixture(t)
+	ctx := context.Background()
+	from, end := at("10:00"), at("11:00")
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, provision_requested_at, registered_at, instance_type, market)
+		VALUES ('snap-od', 't1', 'snap-od', 'ready', $1, $1, 'm7i.large', 'on-demand')`, from)
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source) VALUES
+		('snap-od', $1, $3, 0.40, 'USD', 8, $2, 'aws-pricing'),
+		('snap-od', $3, NULL, 9.00, 'USD', 8, $2, 'aws-spot-history')`, from, 32*gib, from.Add(time.Minute))
+	placeRun(t, s, "t1", "snap-od-run", StateRunning, "snap-od", placementWindow{From: from, To: &end, CPUs: 2, Memory: 8 * gib})
+	finish(t, s, "t1", "snap-od-run", StateSucceeded)
+	drain(t, s)
+	lines, src := computeView(t, s, keys["t1"], "snap-od-run")
+	if fmt.Sprint(lines) != "[m7i.large 0.1 USD true]" || src != "final" {
+		t.Errorf("on-demand cost: %v, source %q", lines, src)
+	}
+	var rate, amount string
+	systemScan(t, s, `SELECT per_hour::text, amount::text FROM cost_placement_snapshots WHERE placement_id = 'p-snap-od-run'`, nil, &rate, &amount)
+	if rate != "0.400000000" || amount != "0.100000000" {
+		t.Errorf("on-demand snapshot: rate %s, amount %s", rate, amount)
+	}
+}
+
+func TestDrainComputeSnapshotMissingRateRetriesAndTenantRLS(t *testing.T) {
+	s, keys := costFixture(t)
+	ctx := context.Background()
+	from, end := at("10:00"), at("11:00")
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, provision_requested_at, registered_at, instance_type, market)
+		VALUES ('snap-missing', 't1', 'snap-missing', 'ready', $1, $1, 'm7i.large', 'on-demand')`, from)
+	placeRun(t, s, "t1", "snap-missing-run", StateRunning, "snap-missing", placementWindow{From: from, To: &end, CPUs: 2, Memory: 8 * gib})
+	finish(t, s, "t1", "snap-missing-run", StateSucceeded)
+	drain(t, s)
+	lines, src := computeView(t, s, keys["t1"], "snap-missing-run")
+	if len(lines) != 0 || src != "incomplete" {
+		t.Fatalf("missing rate: lines %v, source %q", lines, src)
+	}
+	if row, next := sourceRow(t, s, "snap-missing-run"); row != "incomplete 1 t t" || next <= 0 {
+		t.Fatalf("missing rate retry: %s, next in %s", row, next)
+	}
+	var visible int
+	for _, tc := range []struct {
+		scope store.Scope
+		want  int
+	}{{store.Tenant("t1"), 0}, {store.Tenant("t2"), 0}, {store.System(), 1}} {
+		if err := s.db.Tx(ctx, tc.scope, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM cost_placement_snapshots WHERE run_id = 'snap-missing-run'`).Scan(&visible)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if visible != tc.want {
+			t.Errorf("scope %+v sees %d snapshots, want %d", tc.scope, visible, tc.want)
+		}
+	}
+	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
+		VALUES ('snap-missing', $1, 0.40, 'USD', 8, $2, 'aws-pricing')`, from, 32*gib)
+	execSQL(t, s, ctx, `UPDATE cost_sources SET next_at = now() - interval '1 second' WHERE run_id = 'snap-missing-run'`)
+	if err := s.pollDueCostSources(ctx); err != nil {
+		t.Fatal(err)
+	}
+	drain(t, s)
+	lines, src = computeView(t, s, keys["t1"], "snap-missing-run")
+	if fmt.Sprint(lines) != "[m7i.large 0.1 USD true]" || src != "final" {
+		t.Errorf("recovered rate: lines %v, source %q", lines, src)
+	}
+	if row, _ := sourceRow(t, s, "snap-missing-run"); row != "final 0 f f" {
+		t.Errorf("recovered retry: %s", row)
+	}
+	if code, _ := getCost(t, s, keys["t2"], "snap-missing-run"); code != http.StatusNotFound {
+		t.Errorf("other tenant reads run cost: HTTP %d", code)
 	}
 }
 
@@ -1881,9 +1595,9 @@ func TestDrainComputeItems(t *testing.T) {
 	finish(t, s, "t1", "M", StateStopped)
 	finish(t, s, "t1", "X", StateLost)
 	drain(t, s)
-	want := "[m7i.2xlarge:spot 0.066666667 USD false m7i.large 0.1 USD false static:EUR 0.2 EUR false static:USD 0.1 USD false]"
-	if lines, src := computeView(t, s, keys["t1"], "M"); fmt.Sprint(lines) != want || src != "incomplete" {
-		t.Errorf("M: %v, source %q; want %s, incomplete", lines, src, want)
+	want := "[m7i.2xlarge:spot 0.1 USD false m7i.large 0.1 USD false static:EUR 0.2 EUR false static:USD 0.1 USD false]"
+	if lines, src := computeView(t, s, keys["t1"], "M"); fmt.Sprint(lines) != want || src != "ok" {
+		t.Errorf("M: %v, source %q; want %s, ok", lines, src, want)
 	}
 	for _, run := range []string{"M", "X"} {
 		if _, c := getCost(t, s, keys["t1"], run); len(c.Sources) != 1 || c.Sources[0].NextAt != nil {

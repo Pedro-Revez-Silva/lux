@@ -1,8 +1,8 @@
 # Run costs (design)
 
-Status: **design for review. Build steps 1–6 (section 12) are built**, and
-the sections they touch say so and note where the build differs. The rest
-is not built. The build order at the end breaks it into small steps.
+Status: **compute, prices, plugins and hourly views are built**, with the
+per-placement estimate rules described below. CLI and console work remain
+planned. These are list-price estimates, not invoice-accurate charges.
 
 This doc covers what each Run costs: the hosts it ran on (built in) and
 anything outside lux that it used, such as model tokens, video or image
@@ -207,24 +207,20 @@ downstream changes.
   host's price and advertised capacity (`cpus`, `memory`) with its open
   `static` period. If either changed, the open period is closed and a new
   one opens at the same instant, with the current capacity and price.
-  So a priced host's first registration opens its first period (from the
-  instant it registered, so its billed window has no gap at the start), a
-  re-hello with the same capacity changes nothing, and clearing the price
-  closes the open period and opens none. **No price, no period**: a
-  static host's time with no period is **unbilled, not missing**. Its Runs
-  get no compute line for that time, no `details.missingRate`, and it does
-  not keep their compute from becoming final: nobody is owed a price for
-  a machine its owner never priced, and pricing it later does not bill
-  the past (a period opens from the moment the price is set). Nor does a
-  host advertising neither cpus nor memory get a period (no share can be
-  worked out against nothing); `computeCost` returns such time as missing,
-  and on a static host it is unbilled the same way. Only a **provider's**
-  host (one luxd launched, `provision_requested_at` set) is owed rates for
-  its whole billed window: there, a gap is missing (section 3).
+  A priced host's first registration opens its first period; clearing the
+  price closes the open period and opens none. **No price, no period:**
+    time without a static price is missing for a placement starting then.
+  Clearing the price later does not invalidate a rate selected at that
+  placement's start. An unpriced placement is not zero-cost and remains
+  incomplete until a matching rate can be resolved; setting a price later
+ does not create a historical
+  static period. A host advertising neither cpus nor memory cannot supply
+  a usable rate either. Provider hosts also need a usable rate (section 3).
 
 ### Formula
 
-For a placement `p` of Run `r` on host `h`, at any instant `t`:
+For a placement `p` of Run `r` on host `h`, at any instant `t`, the
+host-hour allocation uses:
 
 ```
 share(p)   = max(p.cpus / h.capacity.cpus, p.memory / h.capacity.memory)
@@ -248,14 +244,12 @@ unalloc(h) = ∫ rate(h, t) × max(0, 1 − S(h, t)) dt   over h's billed window
 - **Why `max(1, S)`:** the scheduler keeps Σ cpus ≤ capacity and
   Σ memory ≤ capacity separately, but the sum of each Run's *larger*
   share can go above 1 (one CPU-heavy Run plus one memory-heavy Run).
-  Scaling by `1/S` when `S > 1` keeps allocated + unallocated exactly equal
-  to the host's cost. When `S ≤ 1` (the usual case), each Run pays its
-  share as is.
-- The integral is exact, with no sampling. `S` only changes when a
-  placement on the host starts or ends, and `rate` only changes at a price
-  period boundary. So luxd splits the host's timeline at those instants and
-  sums over the pieces. It needs only `placements` and `host_rates`, never
-  the heartbeat samples.
+  Scaling by `1/S` when `S > 1` keeps host-hour allocated + unallocated
+  equal to the host's cost. A placement estimate uses the same occupancy
+  share at its evaluation, but freezes when that placement ends.
+- The host-hour integral uses rate-period boundaries and placement windows,
+  without heartbeat sampling. Run placement snapshots instead use one
+  selected rate for the entire placement (see below).
 
 **Built** (`internal/server/compute.go`): `computeCost`, a pure function
 over one host's rate periods, billed window and placements (anything still
@@ -271,14 +265,38 @@ live in it, never priced at zero. Overlapping periods are refused as an
 error. It is one sweep over the cut instants, so its cost grows with the
 number of placements and periods, not with their square. `loadHostCompute`
 reads a host's `host_rates` and placements overlapping a window
-`[from, to)` (a Run's placement, a billing hour) into it, never the host's
-whole history (an index on `placements (host_id, ended_at)` finds them);
-the billed window is from `provision_requested_at` (a self-registered host:
-`registered_at`) to `terminated_at`, or still open, clipped to that
-window. The drainer calls them (section 5): each claimed Run's hosts are
-loaded once, over the window its placements span.
+`[from, to)` (a billing hour) into it, never the host's whole history (an
+index on `placements (host_id, ended_at)` finds them). It supplies host-hour
+reporting; Run compute lines use placement snapshots instead.
 
-**allocated + unallocated = host cost**, for every piece of the timeline:
+For Run compute lines, the drainer uses a **per-placement snapshot**
+(`cost_placement_snapshots`, migration `027_cost_placement_snapshots.sql`).
+It selects a usable rate covering the placement's `created_at`, preferring
+its own host, or the latest matching known rate if none covers that start.
+Provider matches require the same provider, instance type and market, plus
+zone for spot or region for on-demand; on-demand may also use a matching
+cached price. A borrowed rate uses the placement host's capacity, not the
+other host's. Static placements use only their own host's static rates.
+That selected hourly rate and capacity price the **entire placement window**,
+including after rate changes; an open placement is re-estimated on each
+cost evaluation. Once it ends with a usable rate, its amount and rate are
+frozen independently of the Run and later placements or prices do not
+reprice it. A placement without a usable rate has no amount, not a zero
+amount: compute stays `incomplete` and terminal Runs retry until a matching
+rate is available. A priced placement can freeze even when another placement
+on the Run is missing a rate. The Run's compute line becomes final only when
+it is terminal and all placements are ended and priced; resuming resets the
+Run line's final flag, not its frozen placement amounts. This is an
+estimate contract, not reconciliation with provider billing.
+
+**Host-hour reporting is separate:** `computeCost` still integrates host
+rate periods and occupancy for allocated and unallocated host-hour rows.
+Run compute lines and Run hourly rows instead use placement snapshots; the
+latter spread each snapshot amount across its placement hours. Thus Run
+amounts need not equal the host-hour allocated totals, especially when a
+placement's frozen or borrowed rate differs from the host's later rates.
+Within each host-hour piece, **allocated + unallocated = host cost**:
+
 `Σ charged + max(0, 1 − S)` is `S + (1 − S) = 1` when `S ≤ 1`, and
 `S/S + 0 = 1` when `S > 1`. Unallocated covers the whole billed window,
 including the time before any placement (provisioning, boot, registration),
@@ -296,6 +314,7 @@ host with 8 CPUs and 32 GiB, on demand at **$0.40/h**, billed 10:00–11:00.
 | B | 1 CPU, 16 GiB | 0.125 | 0.5 | **0.5** | 10:15–11:00 |
 | C | 4 CPU, 4 GiB | 0.5 | 0.125 | **0.5** | 10:30–10:45 |
 
+The table illustrates the host-hour allocation when the rate is constant.
 Each 15-minute piece of the host costs $0.10:
 
 | piece | live | S | A | B | C | unallocated |
@@ -328,19 +347,20 @@ placements:
 ```
 
 **Built** (`internal/server/costqueue.go`, step 5). A line's `from`–`to`
-spans its placements (to now while one is live); `details.placements`
-holds, per placement, `epoch`, `hostId`, `from`, `to` (null while live),
-`cpus`, `memory`, `amount`, and, from its last priced period, `share` and
-`ratePerHour`; `market` and `zone` when the host has them. Choices the
-design left open:
+spans its priced placements (to now while one is live); `details.placements`
+holds, per priced placement, `epoch`, `hostId`, `from`, `to` (null while live),
+`cpus`, `memory`, `amount`, `share`, `ratePerHour` and `finalized`; `market`
+and `zone` appear when the host has them. Missing placements have no amount
+and need not appear in a line. Other choices:
 
 - **A static host has no instance type**: its time is the item `static`
   (all of a Run's static hosts in one line). A provider's host whose type
   is not known is `unknown`.
-- **Missing rate**: when a provider's host has no rate for part of a
-  placement, the placement and its line carry `"missingRate": true`, the
-  priced part is still charged, and the source is `incomplete` with the
-  gaps in `last_error` (operators only).
+- **Missing rate**: any placement, static or provider, without a usable
+  matching rate has no amount; compute is `incomplete` even if no line can
+  yet be emitted. Priced placements remain on the line with
+  `details.missingRate: true`; gaps are recorded in `last_error` (operators
+  only). Missing is never priced at zero.
 - **Two currencies for one item** (hosts priced in different currencies):
   one line per currency, the item suffixed `:<currency>`, since the key is
   (source, run, item).
@@ -368,8 +388,10 @@ For A above, 1,080 CPU seconds against 2 CPU × 1,800 s is 30%, and a
   `capacitystatus=Used`. The Pricing API is only served in a few regions,
   such as `us-east-1`, whatever region the host is in.
 - **EC2 spot**: `DescribeSpotPriceHistory` for the host's availability
-  zone and instance type, product `Linux/UNIX`, from the host's start to
-  now. Each price change inside a host's window becomes one rate period.
+  zone and instance type, product `Linux/UNIX`. Refresh takes the latest
+  observation in the recent lookback for live hosts; a new observation
+  changes the current host rate, not historical periods. Run placements
+  use the rate selected for their start, not a reconstructed spot history.
 - **List prices only.** Savings Plans, Reserved Instances, EDP or other
   discounts, credits, and tax appear only in the provider's bill. lux
   shows list-price costs and says so in the UI and the API
@@ -431,14 +453,12 @@ opens at the host's first hello: before then `hosts.capacity` is empty,
 and a period with neither cpus nor memory prices nothing (its time is
 missing).
 
-**Past costs never change.** A period is closed (`valid_to` set) and never
-updated again. A later price fetch opens a new period from that moment and
-does not touch old ones. When spot history for a past interval arrives
-late (the API can lag), luxd may **only fill a gap** that has no period
-yet. It never overwrites an existing one. If no price is known for part of
-a provider's host's window, the Run's compute line is `incomplete` for that
-part (`details.missingRate: true`), rather than priced at zero. (A static
-host's time with no price is unbilled instead, section 2.)
+**Past host rate periods are not repriced.** A changed current rate closes
+its period and opens another. A placement ending with a usable selected
+rate freezes its own estimate; a placement with no matching rate remains
+incomplete, including on a static host with no price. A later matching
+observation may price an incomplete placement, but does not change frozen
+amounts or fill historical host-rate gaps.
 
 **Billed window** of an EC2 host: from `provision_requested_at` to
 `terminated_at` (or now). AWS bills from when the instance enters
@@ -455,22 +475,22 @@ every `provider_check_every`) would tighten the start. See open question 5.
   A cached price known before the first hello opens a rate at registration;
   otherwise a successful later fetch starts a rate when it becomes known.
   A failure leaves the earlier time incomplete.
-- Spot history is fetched for each (zone, instance type) with a live spot
-  host or a terminated host with incomplete compute. Recent changes are
-  revisited while older missing intervals are repaired in bounded windows.
+- Spot prices are requested for live hosts sharing a (provider, zone,
+  instance type) key over a recent 24-hour lookback. Only the latest
+  observation is applied to each live host; terminated hosts are not
+  revisited for spot settlement.
 
-**Built in step 6:** price refresh runs separately from provisioning and the
-cost queue, with a 30-second pass deadline. It discovers launched hosts even
-before their first hello. On-demand lookups share a cache key within each
-pass; a first rate cannot start before the cached price was fetched. Spot
-history is requested in at most 24-hour windows, with bounded indexed gap
-repair and a recent-history overlap; closed periods are not repriced. A
-provider's current rate splits on a runner hello that changes capacity.
+**Built:** price refresh runs separately from provisioning and the cost
+queue, with a 30-second pass deadline. On-demand lookups share a cache key
+within each pass; a first host rate cannot start before the cached price
+was fetched. Spot refresh uses the latest recent observation without
+historical gap repair. A provider's current rate splits on a runner hello
+that changes capacity.
 
 **Deferred:** multiple luxd processes can still fetch the same expired
 on-demand cache key concurrently. A terminated on-demand host whose first
-price becomes known only after termination retains an incomplete historical
-gap; backdating the new price would violate the no-retroactive-pricing rule.
+price becomes known only after termination retains a historical host-rate
+gap; Run estimates may use a matching known rate from another host or cache.
 
 ## 4. Cost plugins
 
@@ -689,17 +709,15 @@ that expire and are picked up again.
 
 For the claimed Runs, the drainer:
 
-1. reads the Runs, their placements, sessions and host rates in one
-   read-only transaction;
-2. computes the `compute` lines in memory;
-3. sends each plugin one request with every claimed Run (split into
-   `max_batch` chunks), all plugins in parallel, each bounded by its
-   `timeout`;
-4. writes, for each (source, Run) that answered, the replaced lines and
-   the source state (below). For each that didn't, only the source state.
-   These are short transactions, one per chunk;
-5. deletes the Runs' `cost_pending` rows, or moves `due_at` forward for
-   retries and settle attempts.
+1. reads the Runs, their placements and sessions;
+2. refreshes unfrozen placement snapshots and rebuilds compute lines and
+   Run hourly rows from them;
+3. sends each due plugin a request with its claimed Runs (split into
+   `max_batch` chunks), bounded by its `timeout`;
+4. writes each answered plugin's replaced lines, hours and source state,
+   or only its source state on failure;
+5. deletes the Runs' `cost_pending` rows. Source retries and plugin settle
+   attempts are queued independently.
 
 Because several state changes in a few seconds merge into one row, and a
 drain takes every due row, a burst of 300 Runs stopping (a drain, a scale
@@ -731,30 +749,30 @@ A **terminal** Run becomes final like this:
 
 1. The state change queues it at once. Every source is asked with
    `terminal: true`.
-2. After each source's first successful answer, `settles_left` is set to
-   that source's `settle` list (default `["10m", "1h"]`), and the next
-   attempt is set for `terminal_at + 10m`, then `terminal_at + 1h`.
-3. A source is `final` when it answers `final: true`, or when it answers
-   the last settle attempt. Failed attempts don't use up a settle slot:
+2. Each plugin schedules its own `settle` list after a terminal answer
+   (default `["10m", "1h"]`); compute does not use these slots.
+3. A plugin source is `final` when it answers `final: true`, or when it
+   answers the last settle attempt. Failed attempts don't use up a settle
+ slot:
    they back off and retry, up to `costs.settle_give_up` (7 days). After
    that, the source is `incomplete` for good and flagged to operators.
-4. `compute` is final once every placement has `ended_at` and every piece
-   of the host's billed window that overlaps them has a rate. For spot,
-   luxd waits one settle round (spot history can lag).
+4. `compute` is final when the Run is terminal, every placement has ended
+   and each has a frozen, priced snapshot. There is no spot-specific
+   24-hour settlement wait. Plugin settlement is independent of compute.
 5. The Run is **final** when every source is final. Lines are then marked
    `final = true`.
+
 
 A `failed` Run that is **resumed** leaves the terminal state. Its sources
 go back to `ok` (not final), and it is active again.
 
 `stopped` and `lost` Runs are not terminal. They are evaluated when they
-enter the state and go through the same settle attempts (so late plugin
-answers still arrive), but they are never marked final. After that they
-stay quiet (no ticks) until resumed.
+enter the state; plugins may settle late answers, but compute has no
+settlement timer. Neither source is marked final until the Run becomes
+terminal. After that these Runs stay quiet until resumed.
 
-**Built** (step 5; migration `022_cost_queue.sql`,
-`internal/server/costqueue.go`), with `compute` as the only source, and
-where it differs from the above:
+**Built** (migrations `022_cost_queue.sql` and
+`027_cost_placement_snapshots.sql`, `internal/server/costqueue.go`):
 
 - `setRunState` queues through `lux_cost_enqueue(run, reason)`, a
   `SECURITY DEFINER` function: an API stop or cancel runs in the tenant's
@@ -775,41 +793,32 @@ where it differs from the above:
   skipped, as it is changing state, which queues it.
 - The drainer wakes on any `lux_events` notification (any Run event, not
   only a state change), then waits 1 s so a burst becomes one claim: at
-  most about one claim a second per luxd while events flow. Its read is
-  one transaction for every claimed Run (each host loaded once); the
-  writes are one transaction per 100 Runs. A read that fails frees the
-  claims and moves `due_at` one tick on; so does a write that fails, for
-  its own 100 Runs, and the next ones are still written. Each write locks
+  most about one claim a second per luxd while events flow. Run metadata
+  is read for claimed Runs; compute snapshots and derived lines are written
+  under the Run and queue-row locks, in transactions of up to 100 Runs.
+  A read that fails frees the claims and moves `due_at` one tick on; so
+  does a write that fails, for its own 100 Runs, and the next ones are
+  still written. Each write locks
   its Runs' `runs` rows, then their `cost_pending` rows, in id order: the
   order a state change takes them in (it holds the Run when it queues it),
   so the two wait for each other, never deadlock.
-- A long-lived Run's host is re-read and re-priced every tick over the
-  whole window since the Run's first placement on it (with every other
-  placement there in that window); settling the pieces that can no longer
-  change (ended placements, closed rate periods) is planned before
-  `cost_hourly` (step 8).
-- Compute's source row: `ok` after an answer; `incomplete` with the
-  missing gaps (or the pricing error, such as overlapping periods, in which
-  case the earlier lines stay) in `last_error`; `final` as in point 4. A
-  terminal Run that is not final gets `next_at` = now + `costs.every`,
-  doubling per attempt up to 1h, and none once it finished 7 days ago
-  (`costs.backoff`, `backoff_max` and `settle_give_up` come with step 7).
-  A stopped or lost Run gets no `next_at`.
+- Open placements are re-estimated at each evaluation; ended placements
+  with a usable rate freeze their snapshots. Host-hour reporting is
+  independently refreshed from host rates and occupancy (section 7).
+- Compute's source row is `ok` after a priced answer, `incomplete` if any
+  placement (including static) has no usable matching rate, and `final`
+  when the Run is terminal and every placement is frozen. Missing placements
+  are listed in `last_error`; they are not counted as zero. An incomplete
+  terminal Run gets a retry at `costs.every`, doubling up to 1h. A stopped
+  or lost Run gets no compute retry until resumed.
 - A resume (`requestResume`) sets final sources back to `ok`, clears their
   `next_at` and attempts, and marks the Run's lines estimates again, in
   the resume's transaction. It also queues the Run (`state:resuming`),
   which frees any claim: a drainer's result, read while the Run was still
   finished, is not written.
-- Spot compute remains estimated for at least 24 hours after both the Run
-  finishes and every spot host it used terminates. A successful refresh of each
-  terminated host's recent history after that threshold is required before the
-  cost becomes final. Until then terminated hosts remain eligible for spot
-  refresh and fully priced estimated Runs keep
-  retrying. Bounded history requests close rates at historical window edges
-  so unchecked hours remain missing until queried. The refresh revisits only
-  the latest 24 hours of a fully covered terminated host: corrections outside
-  that finite lookback, or arriving after settlement, cannot change final costs.
-  A resume clears finality as usual.
+- Spot compute has no separate settlement clock: a terminal Run becomes
+  compute-final as soon as every ended placement has a priced snapshot.
+  Later spot observations do not revise frozen placement amounts.
 
 ## 6. Sessions: where the full list comes from
 
@@ -876,43 +885,41 @@ once.
 | `cost_ticks` | per tick | system | 1 day |
 | `run_sessions` | per (Run, epoch, session) | tenant (RLS) | as long as the Run |
 | `hosts` + 5 columns, `host_rates` | per host / price period | system | as long as the host row |
-| `price_cache` | per (region, type, OS) | system | overwritten |
+| `price_cache` | per (provider, region, type, OS) | system | overwritten |
+| `cost_placement_snapshots` | per placement, frozen when ended and priced | tenant (RLS) | as long as the placement |
+| `cost_host_refresh`, `cost_host_turn` | host-hour cursor and work priority | system | as long as needed for host-hour refresh |
 | `cost_hourly` | per hour × (tenant, Run, source, family, currency), plus host rows | tenant rows RLS, host rows system | `costs.hourly` (default 400d, like `history.hours`) |
 
 **Relation to history.** Cost is money, not a sample, so it doesn't go in
 `host_samples` or `placement_samples`. Those samples are expired after 48h
 raw and 30d at minute resolution, while a Run's cost must last as long as
-the Run. Compute cost is computed from `placements` and `host_rates`, which
-are never expired, so it can always be recomputed exactly. Heartbeat
-samples are used only for the average-memory efficiency figure, and only
-while they exist.
+the Run. Run compute amounts are retained as per-placement snapshots:
+priced ended placements do not change even if host rates or other
+placements change. Host-hour allocations can be recomputed from
+ `placements` and `host_rates`
+but are not a ledger of those frozen Run amounts. Heartbeat samples are
+used only for the average-memory efficiency figure, and only while they
+exist.
 
 **`cost_hourly`** feeds the charts over time; it is not a permanent ledger.
 The tick deletes hours older than `costs.hourly` (default 400d), while
 `cost_lines` and final source state remain. A changed Run's hourly rows are
 replaced in the same transaction as its lines, but only hours inside that
-retention window are written. Compute rows are split exactly by hour (the
-pieces from section 2). A plugin line is spread evenly over its `from`–`to`
-hours, because the protocol gives one amount per item, not a time series.
+retention window are written. Run compute rows spread each placement's
+frozen or current estimate over its placement hours; host allocated and
+unallocated rows are calculated separately from the host's rate periods
+and occupancy, so their amounts can differ. A plugin line is spread evenly
+over its `from`–`to` hours, because the protocol gives one amount per item,
+not a time series.
 Plugin charts are approximate in time and exact in total only while all
 hours are retained. Host rows hold `allocated` and `unallocated` per host
 per hour. A bounded refresh advances through each host's billed window,
 including idle hours, and revisits the current open hour; old hours outside
-retention are not rebuilt. When upgrading existing final sources, a bounded
-cursor backfills their retained hourly rows from stored final lines without
-calling plugins again. Non-final sources are evaluated through the normal
-queue. The backfill skips hours outside retention and does not reconstruct
-historical host allocations or unallocated cost from those final lines.
-Migration 030 adds `cost_sources.hourly_generation`: a successful hourly-aware
-writer stamps its source in the same transaction as its lines and hours. The
-database resets the stamp when an older writer updates the source without
-stamping it. Repeated bounded discovery sweeps revisit final unstamped sources
-even when an estimated hourly row exists; backfill replaces those retained
-hours from final lines and stamps the source when complete. This detects legacy
-writes after migration 030, including during a rolling upgrade, but cannot
-identify stale hours already written before that migration. Reconstructed
-compute hours have no host attribution and use proportional final-line timing;
-the original compute allocation cannot be recovered from final lines alone.
+retention are not rebuilt. Host refresh uses a per-host cursor and retries
+open hours; when `costs.batch` is one, a durable turn alternates priority
+between current-hour and older work so neither starves. Hourly rows for a
+Run are produced when that Run is evaluated, including final evaluations;
+previously finalized sources are not reconstructed from stored lines.
 
 ## 8. API and visibility
 
@@ -1102,7 +1109,7 @@ insecure = false                   # allow plain http to a public address
 environment override `LUX_COSTS_PLUGINS`. The drainer calls configured plugins
 and tracks their retries and settlement. With
 `enabled = false` a luxd neither ticks nor drains; state changes still queue
-their Runs. `hourly` comes with step 8.
+their Runs. `hourly` and the range endpoints are built (step 8).
 
 Renaming a plugin starts a new source. The old name's lines stay, and
 operators can delete them with `luxd admin costs forget-source <name>`
@@ -1157,9 +1164,11 @@ Decided:
   `currency` on a static pool). Built in step 4 (section 2).
 - **Host facts** (`instanceType`, `zone`, `market`) are in the host API
   now (section 3).
-- **A static host's time before it had a price** is unbilled, not missing:
-  no line, no `missingRate`, and it does not keep compute from becoming
-  final. Only a provider's rate gaps are missing (section 2).
+- **A static host without a price** has no usable rate for an unpriced
+  placement. It remains missing and compute stays incomplete, not zero.
+  A later static price opens a new period rather than backdating one;
+  matching rates at the placement start (or the latest known rate when
+  none covers it) determine its estimate (section 2).
 
 ## 12. Build order
 
@@ -1190,15 +1199,15 @@ Each step can be reviewed and shipped on its own.
    claim is retaken. **Built**: migration `022_cost_queue.sql`,
    `internal/server/costqueue.go` and the `[costs]` config (sections 2, 5
    and 10); `GET /v1/runs/{id}/cost` shows the compute lines and source.
-6. **EC2 prices**: the Pricing API and spot history (behind the fake
-   endpoint), `price_cache`, and closed periods that are never rewritten.
+6. **EC2 prices (built)**: the Pricing API and recent spot lookback
+   (behind the fake endpoint), `price_cache`, and current rate periods.
+   Historical gap backfill and spot settlement are not performed.
    Docs: the IAM permissions in `operations.md`.
-7. **Plugins**: config, describe, the report protocol, chunks, backoff and
-   settle, and finality. Tests against an in-process fake plugin: down,
-   slow, duplicate items, missing Runs, `final: true`.
-8. **`cost_hourly` and `GET /v1/costs`, `GET /v1/hosts/{id}/cost`**, with
-   the visibility rules. Tests: a tenant never gets unallocated, and an
-   operator's `?tenant=` doesn't either.
+7. **Plugins (built)**: config, describe, the report protocol, chunks,
+   backoff and plugin settlement, independent of compute finality.
+8. **`cost_hourly` and `GET /v1/costs`, `GET /v1/hosts/{id}/cost`
+   (built)**: host-hour refresh is separate from frozen Run placement
+   estimates; previously finalized sources are not backfilled from lines.
 9. **CLI**: `lux cost`, `lux costs`, and a COST column in `lux ls`.
 10. **Console**: the Run page Cost card, then the Runs list column, the
     host page, and the Overview.
