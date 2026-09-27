@@ -1,6 +1,6 @@
 # Run costs (design)
 
-Status: **design for review. Build steps 1–4 (section 12) are built**, and
+Status: **design for review. Build steps 1–5 (section 12) are built**, and
 the sections they touch say so and note where the build differs. The rest
 is not built. The build order at the end breaks it into small steps.
 
@@ -88,12 +88,12 @@ The parts this design builds on:
 - The instance's real launch and termination times at the provider.
   lux has its own `provision_requested_at` and `terminated_at`, which are
   close but not exact.
-- Any price from a provider, and the money tables beyond the lines and
-  rates: `price_cache`, `cost_pending`, `cost_ticks` and `cost_hourly` do
-  not exist, and nothing writes a cost line yet. (Built: `cost_lines.amount`
-  and `cost_sources`, section 1; `host_rates` and static hosts' prices,
-  sections 2 and 3; the per-run list of every session, `run_sessions`,
-  section 6.)
+- Any price from a provider, and the money tables beyond the lines, rates
+  and queue: `price_cache` and `cost_hourly` do not exist. (Built:
+  `cost_lines.amount` and `cost_sources`, section 1; `host_rates` and
+  static hosts' prices, sections 2 and 3; `cost_pending`, `cost_ticks` and
+  the compute lines, section 5; the per-run list of every session,
+  `run_sessions`, section 6.)
 
 ## 1. The cost line
 
@@ -122,10 +122,10 @@ CREATE INDEX cost_lines_run ON cost_lines (run_id);  -- the read API: the key le
 
 **Built**: migration `019_cost_lines.sql` (this table and `cost_sources`
 from section 5), and `replaceCostLines` in `internal/server/costs.go`,
-which no producer calls yet. It refuses a whole answer that names an item
-twice, or an amount that is not a decimal string with at most 15 integer
-and 9 fractional digits. Amounts come back with trailing zeros trimmed:
-`"1.284310"` is returned as `"1.28431"`.
+which the drainer calls for compute (section 5). It refuses a whole
+answer that names an item twice, or an amount that is not a decimal
+string with at most 15 integer and 9 fractional digits. Amounts come back
+with trailing zeros trimmed: `"1.284310"` is returned as `"1.28431"`.
 
 As JSON (API and plugin responses):
 
@@ -210,12 +210,17 @@ downstream changes.
   So a priced host's first registration opens its first period (from the
   instant it registered, so its billed window has no gap at the start), a
   re-hello with the same capacity changes nothing, and clearing the price
-  closes the open period and opens none. **No price, no period**: its Runs
-  get no compute line (and, once lines are written, `details.missingRate`
-  for that time). Nor does a host advertising neither cpus nor memory get
-  a period (no share can be worked out against nothing): its time is
-  missing, never shared out at zero; `computeCost` counts such a period's
-  time as missing too.
+  closes the open period and opens none. **No price, no period**: a
+  static host's time with no period is **unbilled, not missing**. Its Runs
+  get no compute line for that time, no `details.missingRate`, and it does
+  not keep their compute from becoming final: nobody is owed a price for
+  a machine its owner never priced, and pricing it later does not bill
+  the past (a period opens from the moment the price is set). Nor does a
+  host advertising neither cpus nor memory get a period (no share can be
+  worked out against nothing); `computeCost` returns such time as missing,
+  and on a static host it is unbilled the same way. Only a **provider's**
+  host (one luxd launched, `provision_requested_at` set) is owed rates for
+  its whole billed window: there, a gap is missing (section 3).
 
 ### Formula
 
@@ -270,7 +275,8 @@ reads a host's `host_rates` and placements overlapping a window
 whole history (an index on `placements (host_id, ended_at)` finds them);
 the billed window is from `provision_requested_at` (a self-registered host:
 `registered_at`) to `terminated_at`, or still open, clipped to that
-window. Nothing calls them yet: the drainer (step 5) will.
+window. The drainer calls them (section 5): each claimed Run's hosts are
+loaded once, over the window its placements span.
 
 **allocated + unallocated = host cost**, for every piece of the timeline:
 `Σ charged + max(0, 1 − S)` is `S + (1 − S) = 1` when `S ≤ 1`, and
@@ -321,8 +327,26 @@ placements:
   "market": "on-demand", "zone": "eu-west-1a", "amount": "0.05"}]}
 ```
 
+**Built** (`internal/server/costqueue.go`, step 5). A line's `from`–`to`
+spans its placements (to now while one is live); `details.placements`
+holds, per placement, `epoch`, `hostId`, `from`, `to` (null while live),
+`cpus`, `memory`, `amount`, and, from its last priced period, `share` and
+`ratePerHour`; `market` and `zone` when the host has them. Choices the
+design left open:
+
+- **A static host has no instance type**: its time is the item `static`
+  (all of a Run's static hosts in one line). A provider's host whose type
+  is not known is `unknown`.
+- **Missing rate**: when a provider's host has no rate for part of a
+  placement, the placement and its line carry `"missingRate": true`, the
+  priced part is still charged, and the source is `incomplete` with the
+  gaps in `last_error` (operators only).
+- **Two currencies for one item** (hosts priced in different currencies):
+  one line per currency, the item suffixed `:<currency>`, since the key is
+  (source, run, item).
+
 Static hosts without a price have no period, so their Runs get no
-compute line.
+compute line for that time, and it is unbilled, not missing (above).
 
 ### Reserved vs used (efficiency)
 
@@ -415,8 +439,9 @@ updated again. A later price fetch opens a new period from that moment and
 does not touch old ones. When spot history for a past interval arrives
 late (the API can lag), luxd may **only fill a gap** that has no period
 yet. It never overwrites an existing one. If no price is known for part of
-a host's window, the Run's compute line is `incomplete` for that part
-(`details.missingRate: true`), rather than priced at zero.
+a provider's host's window, the Run's compute line is `incomplete` for that
+part (`details.missingRate: true`), rather than priced at zero. (A static
+host's time with no price is unbilled instead, section 2.)
 
 **Billed window** of an EC2 host: from `provision_requested_at` to
 `terminated_at` (or now). AWS bills from when the instance enters
@@ -712,6 +737,38 @@ enter the state and go through the same settle attempts (so late plugin
 answers still arrive), but they are never marked final. After that they
 stay quiet (no ticks) until resumed.
 
+**Built** (step 5; migration `022_cost_queue.sql`,
+`internal/server/costqueue.go`), with `compute` as the only source, and
+where it differs from the above:
+
+- `setRunState` queues through `lux_cost_enqueue(run, reason)`, a
+  `SECURITY DEFINER` function: an API stop or cancel runs in the tenant's
+  scope, where the system-only `cost_pending` is out of reach. It queues
+  only a Run that scope can see. The merge also sets `reason` to the latest
+  trigger and **frees any claim**: a drainer's result read before the
+  change is then not written (it writes only under its own claim), and the
+  Run is evaluated again.
+- The tick's bucket is `costs.every` (not a fixed 120 s), and its
+  "settling or backing off" Runs are those whose `compute` source is not
+  final and whose `next_at` has passed. The drainer runs the tick itself,
+  every `costs.every`, before draining.
+- The drainer wakes on any `lux_events` notification, then waits 200 ms so
+  a burst becomes one claim. Its read is one transaction for every claimed
+  Run (each host loaded once); the writes are one transaction per 100
+  Runs. A read that fails frees the claims and moves `due_at` one tick on.
+- Compute's source row: `ok` after an answer; `incomplete` with the
+  missing gaps (or the pricing error, such as overlapping periods, in which
+  case the earlier lines stay) in `last_error`; `final` as in point 4. A
+  terminal Run that is not final gets `next_at` = now + `costs.every`,
+  doubling per attempt up to 1h, and none once it finished 7 days ago
+  (`costs.backoff`, `backoff_max` and `settle_give_up` come with step 7).
+  A stopped or lost Run gets no `next_at`.
+- A resume (`requestResume`) sets final sources back to `ok`, clears their
+  `next_at` and attempts, and marks the Run's lines estimates again, in
+  the resume's transaction.
+- The spot settle round (point 4) is not built: it comes with spot prices
+  in step 6.
+
 ## 6. Sessions: where the full list comes from
 
 `runs.session_id` keeps only the latest id. Suppose a resume can't load
@@ -838,7 +895,7 @@ Run). What it returns today:
 - `status` adds `pending`: no source has reported yet (for example, a
   Run that just started, before the first cost tick). It means no cost has
   been reported yet, not that the Run costs nothing. Lines with no
-  `cost_sources` row count as `complete`, until a producer writes them.
+  `cost_sources` row count as `complete` (the drainer writes both).
 - `last_error` is never returned here, to anyone. Operators get it with
   plugin health (step 7).
 
@@ -965,6 +1022,11 @@ settle = ["15m", "2h"]             # optional; else describe's, else costs.settl
 insecure = false                   # allow plain http to a public address
 ```
 
+**Built** (step 5): `enabled`, `every`, `drain_every` and `batch`, in
+`docs/luxd.example.toml` and `docs/operations.md`. With `enabled = false`
+a luxd neither ticks nor drains; state changes still queue their Runs.
+The other keys come with the steps that use them.
+
 Renaming a plugin starts a new source. The old name's lines stay, and
 operators can delete them with `luxd admin costs forget-source <name>`
 (which needs a new admin command).
@@ -1018,6 +1080,9 @@ Decided:
   `currency` on a static pool). Built in step 4 (section 2).
 - **Host facts** (`instanceType`, `zone`, `market`) are in the host API
   now (section 3).
+- **A static host's time before it had a price** is unbilled, not missing:
+  no line, no `missingRate`, and it does not keep compute from becoming
+  final. Only a provider's rate gaps are missing (section 2).
 
 ## 12. Build order
 
@@ -1045,7 +1110,9 @@ Each step can be reviewed and shipped on its own.
    the `setRunState` enqueue, with compute as the only source. Tests: a
    state change queues in the same transaction (rolled back means nothing
    queued), two luxd instances produce one tick per bucket, and an expired
-   claim is retaken.
+   claim is retaken. **Built**: migration `022_cost_queue.sql`,
+   `internal/server/costqueue.go` and the `[costs]` config (sections 2, 5
+   and 10); `GET /v1/runs/{id}/cost` shows the compute lines and source.
 6. **EC2 prices**: the Pricing API and spot history (behind the fake
    endpoint), `price_cache`, and closed periods that are never rewritten.
    Docs: the IAM permissions in `operations.md`.
