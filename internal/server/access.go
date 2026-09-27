@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/mail"
 	"strings"
@@ -11,9 +10,6 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/jackc/pgx/v5"
-
-	"github.com/marcioapm/lux/internal/store"
 )
 
 // ConsoleAuth configures key or Cloudflare Access authentication.
@@ -173,15 +169,14 @@ func (s *Server) consoleUser(r *http.Request, scope string) (Principal, error) {
 		if !p.Can(scope) {
 			return p, errf(http.StatusForbidden, "forbidden", "scope %q", scope)
 		}
-		err = s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
-			return tx.QueryRow(r.Context(), `SELECT id FROM tenants WHERE id = $1 OR name = $1 ORDER BY id = $1 DESC LIMIT 1`, ref).Scan(&p.TenantID)
-		})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return p, errf(http.StatusForbidden, "forbidden", "Cloudflare Access default tenant is unavailable")
-		}
+		id, err := s.resolveTenant(r.Context(), ref)
 		if err != nil {
+			if httpErr, ok := err.(*HTTPError); ok && httpErr.Status == http.StatusNotFound {
+				return p, errf(http.StatusForbidden, "forbidden", "Cloudflare Access default tenant is unavailable")
+			}
 			return p, err
 		}
+		p.TenantID = id
 	}
 	if !p.Can(scope) {
 		return p, errf(http.StatusForbidden, "forbidden", "scope %q", scope)

@@ -75,6 +75,23 @@ def test_access_tenant_is_isolated(env, access, tenant_factory):
     other.run("cancel", run_id)
 
 
+def test_missing_default_tenant_denies_nonoperators(env, access):
+    env.stop_luxd()
+    env.start_luxd(LUX_CONSOLE_AUTH="cloudflare-access", LUX_CF_ACCESS_TEAM=access.team, LUX_CF_ACCESS_AUD=access.AUD,
+                   LUX_CF_ACCESS_OPERATORS="ada@example.com", LUX_CF_ACCESS_DEFAULT_TENANT="missing-access-tenant")
+    try:
+        tenant = _get(env, "/v1/whoami", headers={"Cf-Access-Jwt-Assertion": access.token("ordinary@example.com")})
+        assert tenant.status_code == 403, tenant.text
+        operator = _get(env, "/v1/whoami", headers={"Cf-Access-Jwt-Assertion": access.token("ada@example.com")})
+        assert operator.status_code == 200 and operator.json()["operator"], operator.text
+    finally:
+        env.stop_luxd()
+        env.start_luxd(LUX_CONSOLE_AUTH="cloudflare-access", LUX_CF_ACCESS_TEAM=access.team, LUX_CF_ACCESS_AUD=access.AUD,
+                       LUX_CF_ACCESS_OPERATORS="ada@example.com,grace@example.com,mallory-victim@example.com",
+                       LUX_CF_ACCESS_DEFAULT_TENANT="access-default")
+
+
+
 @pytest.mark.parametrize("email", ["", " ADA@example.com", "Ada <ada@example.com>", "ada@example.com.evil"])
 def test_access_does_not_promote_bad_or_unlisted_email(env, access, email):
     r = _get(env, "/v1/whoami", headers={"Cf-Access-Jwt-Assertion": access.token(email)})
