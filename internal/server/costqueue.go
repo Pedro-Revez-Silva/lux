@@ -1,0 +1,540 @@
+package server
+
+import (
+	"cmp"
+	"context"
+	"errors"
+	"fmt"
+	"math/big"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/store"
+)
+
+// The cost queue (docs/costs.md, section 5): Runs whose costs are due wait
+// in cost_pending, queued by their state changes (setRunState) and by the
+// cost tick; every luxd drains it. compute is the only source so far.
+
+// Cost defaults (luxd's [costs] every, drain_every, batch).
+const (
+	DefaultCostsEvery      = 2 * time.Minute
+	DefaultCostsDrainEvery = 2 * time.Second
+	DefaultCostsBatch      = 1000
+)
+
+const (
+	// costClaim is how long a drainer holds the Runs it claimed: a luxd that
+	// dies mid-drain leaves claims that expire, and another takes them.
+	costClaim = 2 * time.Minute
+	// costChunk Runs are written per transaction.
+	costChunk = 100
+	// costSettleWake: how long the drainer lets Run events gather after one
+	// wakes it.
+	costSettleWake = 200 * time.Millisecond
+	// A terminal Run whose compute is not final yet (a provider rate still
+	// missing) is tried again after costs.every, doubling up to
+	// costRetryMax, and no longer once it finished costGiveUp ago. (The
+	// [costs] backoff and settle keys, with the plugins, will replace these.)
+	costRetryMax = time.Hour
+	costGiveUp   = 7 * 24 * time.Hour
+)
+
+// CostsConfig: the cost tick and drainer. Not Enabled: neither runs (state
+// changes still queue their Runs, which wait for a luxd that has it on).
+type CostsConfig struct {
+	Enabled bool
+	// Every is the tick: every live Run is queued once per bucket of it.
+	Every time.Duration
+	// DrainEvery is how often the queue is polled when no Run event wakes
+	// the drainer first.
+	DrainEvery time.Duration
+	// Batch is how many Runs one drain claims.
+	Batch int
+}
+
+// costLoop ticks and drains, when costs are enabled. The drainer wakes at
+// every Run event (a state change queues its Run in the same transaction
+// that writes the event), and every drain_every in case one is missed.
+func (s *Server) costLoop(ctx context.Context) {
+	c := s.cfg.Costs
+	if !c.Enabled {
+		return
+	}
+	var nextTick time.Time
+	for ctx.Err() == nil {
+		woken := s.wakeups.next("")
+		if !time.Now().Before(nextTick) {
+			nextTick = time.Now().Add(c.Every)
+			if _, err := s.costTick(ctx); err != nil && ctx.Err() == nil {
+				s.log.Warn("costs: tick", "err", err)
+			}
+		}
+		n, err := s.drainCosts(ctx)
+		if err != nil && ctx.Err() == nil {
+			s.log.Warn("costs: drain", "err", err)
+		}
+		if err == nil && n == c.Batch {
+			continue // more may be due
+		}
+		wait(ctx, woken, min(c.DrainEvery, time.Until(nextTick)))
+		// Every Run event wakes it, not only state changes: a short pause
+		// lets a burst of them (a pool draining) become one claim.
+		wait(ctx, nil, min(c.DrainEvery, costSettleWake))
+	}
+}
+
+// costTick queues every active Run, if this luxd is the first to claim the
+// current bucket of costs.every (one cost_ticks row per bucket): the live
+// ones, and those whose compute is owed another attempt. It reports whether
+// it ran the tick.
+func (s *Server) costTick(ctx context.Context) (bool, error) {
+	var won bool
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `INSERT INTO cost_ticks (tick_at)
+				VALUES (to_timestamp(floor(extract(epoch FROM now())::float8 / $1::float8) * $1::float8))
+			ON CONFLICT DO NOTHING RETURNING true`, s.cfg.Costs.Every.Seconds()).Scan(&won)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO cost_pending (run_id, due_at, reason)
+				SELECT id, now(), 'tick' FROM runs WHERE state IN ('scheduled', 'starting', 'running', 'stopping')
+				UNION
+				SELECT run_id, now(), 'tick' FROM cost_sources
+				WHERE source = 'compute' AND status <> 'final' AND next_at <= now()
+			ON CONFLICT (run_id) DO UPDATE SET due_at = least(cost_pending.due_at, EXCLUDED.due_at)`); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `DELETE FROM cost_ticks WHERE tick_at < now() - interval '1 day'`)
+		return err
+	})
+	return won && err == nil, err
+}
+
+// claimCosts claims up to costs.batch due Runs for this luxd, in a
+// transaction of its own that commits at once: no row stays locked while
+// the Runs are worked. A claim that expired is taken again.
+func (s *Server) claimCosts(ctx context.Context) ([]string, error) {
+	var runs []string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `UPDATE cost_pending SET claimed_by = $1, claimed_until = now() + $2::interval
+			WHERE run_id IN (SELECT run_id FROM cost_pending
+				WHERE due_at <= now() AND (claimed_until IS NULL OR claimed_until < now())
+				ORDER BY due_at LIMIT $3 FOR UPDATE SKIP LOCKED)
+			RETURNING run_id`, s.id, interval(costClaim), s.cfg.Costs.Batch)
+		if err != nil {
+			return err
+		}
+		runs, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	})
+	return runs, err
+}
+
+// drainCosts claims the due Runs, works out their compute cost from one
+// read, and writes each Run's lines and source state in short transactions,
+// one per chunk. It returns how many Runs it claimed.
+func (s *Server) drainCosts(ctx context.Context) (int, error) {
+	runs, err := s.claimCosts(ctx)
+	if err != nil || len(runs) == 0 {
+		return 0, err
+	}
+	var evals map[string]*computeEval
+	var now time.Time
+	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var err error
+		evals, now, err = evaluateCompute(ctx, tx, runs)
+		return err
+	})
+	if err != nil {
+		// Nothing was read: every claimed Run is tried again later.
+		s.releaseCosts(ctx, runs)
+		return len(runs), err
+	}
+	for chunk := range slices.Chunk(runs, costChunk) {
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			for _, id := range chunk {
+				if err := s.writeCompute(ctx, tx, id, evals[id], now); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			s.releaseCosts(ctx, chunk)
+			return len(runs), err
+		}
+	}
+	return len(runs), nil
+}
+
+// releaseCosts gives up this luxd's claims on runs after a failure, and
+// moves them a tick later.
+func (s *Server) releaseCosts(ctx context.Context, runs []string) {
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE cost_pending SET claimed_by = NULL, claimed_until = NULL, due_at = now() + $3::interval, reason = 'retry'
+			WHERE run_id = ANY($1) AND claimed_by = $2`, runs, s.id, interval(s.cfg.Costs.Every))
+		return err
+	})
+	if err != nil && ctx.Err() == nil {
+		s.log.Warn("costs: release claims", "err", err)
+	}
+}
+
+// computeEval is one Run's compute cost as evaluated from one read.
+type computeEval struct {
+	TenantID   string
+	State      string
+	FinishedAt *time.Time
+	Lines      []costReport
+	// Missing: some of its time on a provider's host has no rate. (A static
+	// host's time with no price is unbilled, not missing.)
+	Missing []string
+	// Open: a placement has not ended yet.
+	Open bool
+	// Err: a host it ran on could not be priced (overlapping periods).
+	Err error
+}
+
+// final: nothing about the Run's compute can change any more. Only a
+// terminal Run's; a stopped or lost one may still be resumed.
+//
+// TODO(costs step 6): a Run that ran on spot waits one settle round before
+// it is final, since spot price history can lag.
+func (e *computeEval) final() bool {
+	return terminal(e.State) && !e.Open && len(e.Missing) == 0 && e.Err == nil
+}
+
+// costHost is what a line says about the host a placement ran on.
+type costHost struct {
+	Provider bool // launched by a provider (it prices it); false: static
+	Type     string
+	Market   string
+	Zone     string
+}
+
+// item names a line: the instance type, with :spot for spot. A static
+// host has no instance type: its time is the item "static".
+func (h costHost) item() string {
+	switch {
+	case !h.Provider:
+		return "static"
+	case h.Type == "":
+		return "unknown"
+	case h.Market == "spot":
+		return h.Type + ":spot"
+	}
+	return h.Type
+}
+
+// evaluateCompute prices the claimed Runs' placements, in a read-only
+// system transaction. Each host is loaded once, over the window its
+// claimed placements span (to now while one is live), and priced with every
+// placement on it in that window, since they share it.
+func evaluateCompute(ctx context.Context, tx pgx.Tx, runs []string) (map[string]*computeEval, time.Time, error) {
+	var now time.Time
+	if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&now); err != nil {
+		return nil, now, err
+	}
+	evals := map[string]*computeEval{}
+	rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, finished_at FROM runs WHERE id = ANY($1)`, runs)
+	if err != nil {
+		return nil, now, err
+	}
+	var id string
+	var e computeEval
+	if _, err := pgx.ForEachRow(rows, []any{&id, &e.TenantID, &e.State, &e.FinishedAt}, func() error {
+		c := e
+		evals[id] = &c
+		return nil
+	}); err != nil {
+		return nil, now, err
+	}
+
+	// The window each host is loaded over.
+	type window struct{ from, to time.Time }
+	windows := map[string]*window{}
+	rows, err = tx.Query(ctx, `SELECT run_id, host_id, created_at, coalesce(ended_at, $2), ended_at IS NULL
+		FROM placements WHERE run_id = ANY($1)`, runs, now)
+	if err != nil {
+		return nil, now, err
+	}
+	var host string
+	var from, to time.Time
+	var open bool
+	if _, err := pgx.ForEachRow(rows, []any{&id, &host, &from, &to, &open}, func() error {
+		if e := evals[id]; e != nil && open {
+			e.Open = true
+		}
+		if w := windows[host]; w == nil {
+			windows[host] = &window{from, to}
+		} else {
+			w.from, w.to = minTime(w.from, from), maxTime(w.to, to)
+		}
+		return nil
+	}); err != nil {
+		return nil, now, err
+	}
+	hostIDs := make([]string, 0, len(windows))
+	for h := range windows {
+		hostIDs = append(hostIDs, h)
+	}
+	slices.Sort(hostIDs)
+	hosts := map[string]costHost{}
+	rows, err = tx.Query(ctx, `SELECT id, provision_requested_at IS NOT NULL,
+			coalesce(instance_type, launch_template->>'instanceType', ''), coalesce(market, ''), coalesce(zone, '')
+		FROM hosts WHERE id = ANY($1)`, hostIDs)
+	if err != nil {
+		return nil, now, err
+	}
+	var h costHost
+	if _, err := pgx.ForEachRow(rows, []any{&host, &h.Provider, &h.Type, &h.Market, &h.Zone}, func() error {
+		hosts[host] = h
+		return nil
+	}); err != nil {
+		return nil, now, err
+	}
+
+	b := newComputeLines(now)
+	for _, hostID := range hostIDs {
+		w := windows[hostID]
+		in, err := loadHostCompute(ctx, tx, hostID, w.from, w.to)
+		if err != nil {
+			return nil, now, err
+		}
+		res, err := computeCost(in)
+		if err != nil {
+			// A host that cannot be priced (overlapping periods): its Runs
+			// are incomplete, the others go on.
+			for _, p := range in.Placements {
+				if e := evals[p.RunID]; e != nil {
+					e.Err = err
+				}
+			}
+			continue
+		}
+		b.add(evals, in, res, hosts[hostID])
+	}
+	for id, e := range evals {
+		e.Lines = b.lines(id)
+		slices.Sort(e.Missing)
+	}
+	return evals, now, nil
+}
+
+// computeLines gathers placements' amounts into one line per Run, item and
+// currency.
+type computeLines struct {
+	now   time.Time
+	byRun map[string]map[[2]string]*computeLine // run → (item, currency) →
+}
+
+type computeLine struct {
+	amount     *big.Rat
+	from, to   time.Time
+	placements []map[string]any
+	missing    bool
+}
+
+func newComputeLines(now time.Time) *computeLines {
+	return &computeLines{now: now, byRun: map[string]map[[2]string]*computeLine{}}
+}
+
+// add takes the claimed Runs' placements out of one host's result.
+func (b *computeLines) add(evals map[string]*computeEval, in hostCompute, res computeResult, h costHost) {
+	// Each placement's last priced period, per currency: its details show
+	// that period's rate and its share against it.
+	last := make([]map[string]*ratePeriod, len(in.Placements))
+	for _, piece := range res.Pieces {
+		if piece.Rate == nil {
+			continue
+		}
+		for _, i := range piece.Live {
+			if last[i] == nil {
+				last[i] = map[string]*ratePeriod{}
+			}
+			last[i][piece.Rate.Currency] = piece.Rate
+		}
+	}
+	for i, p := range in.Placements {
+		e := evals[p.RunID]
+		if e == nil {
+			continue // another Run's: priced only for its share of the host
+		}
+		pc := res.Placements[i]
+		missing := h.Provider && len(pc.Missing) > 0
+		if missing {
+			for _, m := range pc.Missing {
+				e.Missing = append(e.Missing, fmt.Sprintf("host %s has no rate from %s to %s",
+					in.HostID, m.From.UTC().Format(time.RFC3339), m.To.UTC().Format(time.RFC3339)))
+			}
+		}
+		to := b.now
+		if p.To != nil {
+			to = *p.To
+		}
+		for currency, amount := range pc.Amounts {
+			r := last[i][currency]
+			d := map[string]any{"epoch": p.Epoch, "hostId": in.HostID, "from": p.From, "to": p.To,
+				"cpus": p.CPUs, "memory": p.Memory, "amount": moneyString(amount)}
+			if r != nil {
+				sh, _ := share(p, r).Float64()
+				d["share"], d["ratePerHour"] = sh, moneyString(mustRat(r.PerHour))
+			}
+			if h.Market != "" {
+				d["market"] = h.Market
+			}
+			if h.Zone != "" {
+				d["zone"] = h.Zone
+			}
+			if missing {
+				d["missingRate"] = true
+			}
+			if b.byRun[p.RunID] == nil {
+				b.byRun[p.RunID] = map[[2]string]*computeLine{}
+			}
+			k := [2]string{h.item(), currency}
+			l := b.byRun[p.RunID][k]
+			if l == nil {
+				l = &computeLine{amount: new(big.Rat), from: p.From, to: to}
+				b.byRun[p.RunID][k] = l
+			}
+			l.amount.Add(l.amount, amount)
+			l.from, l.to = minTime(l.from, p.From), maxTime(l.to, to)
+			l.placements = append(l.placements, d)
+			l.missing = l.missing || missing
+		}
+	}
+}
+
+// lines is one Run's lines, by item. An item priced in more than one
+// currency (hosts priced differently) is one line per currency, the
+// currency appended to its item, since a line's key is its item.
+func (b *computeLines) lines(runID string) []costReport {
+	perItem := map[string]int{}
+	for k := range b.byRun[runID] {
+		perItem[k[0]]++
+	}
+	var out []costReport
+	for k, l := range b.byRun[runID] {
+		item := k[0]
+		if perItem[item] > 1 {
+			item += ":" + k[1]
+		}
+		slices.SortFunc(l.placements, func(a, b map[string]any) int {
+			return cmp.Or(a["from"].(time.Time).Compare(b["from"].(time.Time)), cmp.Compare(a["epoch"].(int), b["epoch"].(int)))
+		})
+		details := map[string]any{"placements": l.placements}
+		if l.missing {
+			details["missingRate"] = true
+		}
+		out = append(out, costReport{Family: "compute", Item: item, Amount: moneyString(l.amount), Currency: k[1],
+			From: l.from, To: l.to, Details: details})
+	}
+	slices.SortFunc(out, func(a, b costReport) int { return strings.Compare(a.Item, b.Item) })
+	return out
+}
+
+// writeCompute stores one Run's evaluation, if this luxd still holds its
+// claim: a state change since (which frees the claim) makes it stale, and
+// the Run is evaluated again. On an error, its earlier lines stay.
+func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, e *computeEval, now time.Time) error {
+	var held bool
+	err := tx.QueryRow(ctx, `SELECT true FROM cost_pending WHERE run_id = $1 AND claimed_by = $2 FOR UPDATE`, runID, s.id).Scan(&held)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if e == nil {
+		// Not a Run any more: nothing to evaluate.
+		_, err := tx.Exec(ctx, `DELETE FROM cost_pending WHERE run_id = $1`, runID)
+		return err
+	}
+	final := e.final()
+	status, lastError := "ok", ""
+	switch {
+	case final:
+		status = "final"
+	case e.Err != nil:
+		status, lastError = "incomplete", e.Err.Error()
+	case len(e.Missing) > 0:
+		status, lastError = "incomplete", strings.Join(e.Missing, "; ")
+	}
+	// A terminal Run not final yet is tried again, backing off. A live Run
+	// is queued by every tick anyway; a stopped or lost one stays quiet
+	// until it is resumed.
+	var nextAt *time.Time
+	var attempts int
+	if terminal(e.State) && !final {
+		if err := tx.QueryRow(ctx, `SELECT coalesce((SELECT attempts FROM cost_sources WHERE run_id = $1 AND source = 'compute'), 0) + 1`,
+			runID).Scan(&attempts); err != nil {
+			return err
+		}
+		if e.FinishedAt == nil || now.Sub(*e.FinishedAt) < costGiveUp {
+			t := now.Add(min(s.cfg.Costs.Every<<min(attempts-1, 16), costRetryMax))
+			nextAt = &t
+		}
+	}
+	if e.Err == nil {
+		for i := range e.Lines {
+			e.Lines[i].Final = final
+		}
+		if err := replaceCostLines(ctx, tx, e.TenantID, runID, "compute", e.Lines); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, attempts, next_at, last_error)
+			VALUES ($1, $2, 'compute', $3, CASE WHEN $4 THEN now() END, $5, $6, $7)
+		ON CONFLICT (run_id, source) DO UPDATE SET status = EXCLUDED.status,
+			answered_at = coalesce(EXCLUDED.answered_at, cost_sources.answered_at),
+			attempts = EXCLUDED.attempts, next_at = EXCLUDED.next_at, last_error = EXCLUDED.last_error`,
+		runID, e.TenantID, status, e.Err == nil, attempts, nextAt, lastError); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `DELETE FROM cost_pending WHERE run_id = $1`, runID)
+	return err
+}
+
+// resetCostFinality: a resumed Run is active again. Its final sources go
+// back to ok and its lines to estimates, and no retry is pending (the
+// tick queues it while it is live), in the resume's transaction (a
+// tenant's scope, from the API: these are its own rows).
+func resetCostFinality(ctx context.Context, tx pgx.Tx, runID string) error {
+	if _, err := tx.Exec(ctx, `UPDATE cost_sources SET status = CASE WHEN status = 'final' THEN 'ok' ELSE status END,
+			next_at = NULL, attempts = 0
+		WHERE run_id = $1`, runID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `UPDATE cost_lines SET final = false WHERE run_id = $1 AND final`, runID)
+	return err
+}
+
+func mustRat(s string) *big.Rat {
+	r, ok := new(big.Rat).SetString(s)
+	if !ok {
+		panic("not a decimal: " + s)
+	}
+	return r
+}
+
+func minTime(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}

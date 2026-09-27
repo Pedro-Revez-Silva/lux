@@ -85,6 +85,9 @@ type Config struct {
 	// DiskPaths are the directories whose filesystems the control host's
 	// history tracks. Nil: DefaultDiskPaths; empty: none.
 	DiskPaths []string
+	// Costs: the cost tick and drainer (costqueue.go). Zero durations and
+	// batch: the defaults.
+	Costs CostsConfig
 }
 
 type Server struct {
@@ -117,6 +120,8 @@ type Server struct {
 	bins map[string]map[string]runnerBin
 	// instance names this luxd's control samples: its hostname.
 	instance string
+	// id names this luxd in cost claims (instanceID; tests run two).
+	id string
 	// readPostgres is postgresFigures (replaced in tests). pgFailing and
 	// diskFailing record what failed on the last read, so each failure is
 	// logged once (control.go).
@@ -163,6 +168,9 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 	if cfg.DiskPaths == nil {
 		cfg.DiskPaths = DefaultDiskPaths
 	}
+	cfg.Costs.Every = cmp.Or(cfg.Costs.Every, DefaultCostsEvery)
+	cfg.Costs.DrainEvery = cmp.Or(cfg.Costs.DrainEvery, DefaultCostsDrainEvery)
+	cfg.Costs.Batch = cmp.Or(cfg.Costs.Batch, DefaultCostsBatch)
 	s := &Server{
 		cfg:         cfg,
 		db:          db,
@@ -173,6 +181,7 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 		kick:        make(chan struct{}, 1),
 		diskFailing: map[string]bool{},
 		instance:    hostname(),
+		id:          instanceID,
 	}
 	s.readPostgres = s.postgresFigures
 	if cfg.ConsoleAuth.Mode == "cloudflare-access" {
@@ -228,13 +237,14 @@ func redirectConsole(w http.ResponseWriter, r *http.Request) {
 // Run starts the background loops and serves until ctx ends.
 func (s *Server) Run(ctx context.Context) error {
 	srv := &http.Server{Addr: s.cfg.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	s.wg.Add(6)
+	s.wg.Add(7)
 	go func() { defer s.wg.Done(); s.schedulerLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.provisionerLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.reaperLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.hub.deliveryLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.historyLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.listenLoop(ctx) }()
+	go func() { defer s.wg.Done(); s.costLoop(ctx) }()
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	s.log.Info("luxd listening", "addr", s.cfg.Listen)
