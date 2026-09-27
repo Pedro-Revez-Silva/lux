@@ -391,6 +391,87 @@ func TestCostTickBoundedRetriesWithConcurrentPoll(t *testing.T) {
 	}
 }
 
+func TestCostTickBatchesHistoricalMissingSources(t *testing.T) {
+	s, _, _ := pluginFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if pluginDescribeHandler(w, r) {
+			return
+		}
+		var req struct {
+			Runs []pluginRun `json:"runs"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+			return
+		}
+		out := make([]any, 0, len(req.Runs))
+		for _, run := range req.Runs {
+			out = append(out, map[string]any{"runId": run.RunID, "status": "ok", "final": true, "lines": []any{pluginLine()}})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"protocol": 1, "runs": out})
+	})
+	s.cfg.Costs.Batch = 3
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'failed' WHERE id IN ('r1', 'r2')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_pending (run_id, due_at, reason, claimed_by, claimed_until)
+		VALUES ('r1', now() - interval '1 hour', 'state:failed', 'peer', now() + interval '1 hour'),
+			('r2', now() + interval '1 hour', 'retry', NULL, NULL)`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state)
+		SELECT 'historical-' || n, 't1', '{}',
+			(ARRAY['succeeded', 'failed', 'cancelled', 'stopped', 'lost'])[(n - 1) % 5 + 1]
+		FROM generate_series(1, 20) n`)
+	readQueue := func(id string) (string, string) {
+		t.Helper()
+		var row, version string
+		systemScan(t, s, `SELECT row_to_json(p)::text, xmin::text FROM cost_pending p WHERE run_id = $1`, []any{id}, &row, &version)
+		return row, version
+	}
+	claimed, claimedVersion := readQueue("r1")
+	delayed, delayedVersion := readQueue("r2")
+	for cycle := 0; cycle < 7; cycle++ {
+		if won, err := s.costTick(ctx); err != nil || !won {
+			t.Fatalf("cycle %d tick: won %v, %v", cycle, won, err)
+		}
+		if err := s.pollDueCostSources(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var queued int
+		systemScan(t, s, `SELECT count(*) FROM cost_pending WHERE run_id LIKE 'historical-%'`, nil, &queued)
+		if want := min(3, 20-cycle*3); queued != want {
+			t.Fatalf("cycle %d queued %d historical Runs, want %d", cycle, queued, want)
+		}
+		if row, version := readQueue("r1"); row != claimed || version != claimedVersion {
+			t.Fatalf("cycle %d changed claimed row", cycle)
+		}
+		if row, version := readQueue("r2"); row != delayed || version != delayedVersion {
+			t.Fatalf("cycle %d changed delayed row", cycle)
+		}
+		drain(t, s)
+		var sources, remaining int
+		systemScan(t, s, `SELECT count(*) FROM cost_sources WHERE run_id LIKE 'historical-%' AND source = 'ledger'`, nil, &sources)
+		systemScan(t, s, `SELECT count(*) FROM cost_pending WHERE run_id LIKE 'historical-%'`, nil, &remaining)
+		if want := min(20, (cycle+1)*3); sources != want || remaining != 0 {
+			t.Fatalf("cycle %d: %d sources, %d pending; want %d sources and no pending", cycle, sources, remaining, want)
+		}
+		execSQL(t, s, ctx, `DELETE FROM cost_ticks`)
+	}
+	for _, state := range []string{"succeeded", "failed", "cancelled", "stopped", "lost"} {
+		var n int
+		systemScan(t, s, `SELECT count(*) FROM runs r JOIN cost_sources c ON c.run_id = r.id
+			WHERE r.id LIKE 'historical-%' AND r.state = $1 AND c.source = 'ledger' AND c.status IN ('final', 'ok')`, []any{state}, &n)
+		if n != 4 {
+			t.Errorf("%s: %d backfilled sources, want 4", state, n)
+		}
+	}
+	if won, err := s.costTick(ctx); err != nil || !won {
+		t.Fatalf("post-backfill tick: won %v, %v", won, err)
+	}
+	var queued int
+	systemScan(t, s, `SELECT count(*) FROM cost_pending WHERE run_id LIKE 'historical-%'`, nil, &queued)
+	if queued != 0 {
+		t.Errorf("post-backfill tick queued %d historical Runs", queued)
+	}
+}
+
 func TestCostLoopPollsDueSourcesBetweenTicks(t *testing.T) {
 	s, _ := costFixture(t)
 	s.cfg.Costs.Enabled = true
