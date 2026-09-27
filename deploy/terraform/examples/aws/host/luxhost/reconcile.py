@@ -103,7 +103,7 @@ class Run:
         return {"luxd": "luxd.service" in changed_units, "cloudflared": "cloudflared.service" in changed_units}
 
     def luxd(self, infra: dict, want: desired_mod.Desired, creds: dict, restart: dict) -> str:
-        """luxd.toml, the version switch and the luxd restart. Returns the
+        """luxd.toml and the version switch. Returns the
         installed version ("" if none). A failed switch is kept in
         self.deferred_error so the remaining steps still run."""
         host = self.host
@@ -140,16 +140,11 @@ class Run:
                     self.changed.append("luxd.toml")
                     restart["luxd"] = True
         # A successful deploy has restarted luxd on the new config already.
-        if not deploying or self.deferred_error:
-            if restart["luxd"] and installed and release.is_luxd_active(host):
-                host.run(["systemctl", "restart", "luxd"])
-                self.changed.append("luxd-restarted")
+        self.restart_luxd = (not deploying or self.deferred_error) and restart["luxd"] and bool(installed)
         return installed
 
     def enable(self, installed: str) -> None:
         self.step = "enable"
-        if installed and units.enable_now(self.host, "luxd.service"):
-            self.changed.append("enable:luxd")
         for timer in units.TIMERS:
             if units.enable_now(self.host, timer):
                 self.changed.append(f"enable:{timer}")
@@ -191,6 +186,7 @@ class Run:
         creds = self.postgres(infra)
         restart = self.write_units(infra)
         installed = self.luxd(infra, want, creds, restart)
+        self.installed = installed
         self.enable(installed)
         self.cloudflared(infra, restart)
         if self.deferred_error:
@@ -220,15 +216,31 @@ def main(host: Host | None = None, bootstrap_path: str | None = None,
             reexec(*args)
 
         run = None
+        version = "none"
+        error = None
         try:
             boot = load_bootstrap(bootstrap_path)
             run = Run(host, boot, reexec_unlocked, environ)
             version = run.run()
         except Exception as e:  # noqa: BLE001 - every failure ends in the summary line
-            installed = release.installed_version(host.paths.install_root) or "none"
-            step = run.step if run else "bootstrap"
-            detail = str(e) if isinstance(e, HostError) else repr(e)
-            print(summary("error", installed, run.changed if run else [], f"{step}: {detail}"), flush=True)
-            return 1
-    print(summary("ok", version, run.changed), flush=True)
+            error = (run.step if run else "bootstrap", e)
+    if run and getattr(run, "installed", None):
+        step = "enable"
+        try:
+            if units.enable_now(host, "luxd.service"):
+                run.changed.append("enable:luxd")
+            elif getattr(run, "restart_luxd", False) and release.is_luxd_active(host):
+                step = "luxd-restart"
+                host.run(["systemctl", "restart", "luxd"])
+                run.changed.append("luxd-restarted")
+        except Exception as e:  # noqa: BLE001 - include restart failures in the summary
+            if error is None:
+                error = (step, e)
+    if error:
+        step, e = error
+        installed = release.installed_version(host.paths.install_root) or "none"
+        detail = str(e) if isinstance(e, HostError) else repr(e)
+        print(summary("error", installed, run.changed if run else [], f"{step}: {detail}"), flush=True)
+        return 1
+    print(summary("ok", version, run.changed if run else []), flush=True)
     return 0

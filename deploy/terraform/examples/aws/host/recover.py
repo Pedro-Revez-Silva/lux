@@ -3,7 +3,7 @@ import fcntl
 import os
 import sys
 
-from luxhost.release import pair_lock, recover
+from luxhost.release import _recover_locked, pair_lock, recover
 
 
 def admit(install_root="/usr/local/lux", lock_path="/etc/lux/.reconcile.lock"):
@@ -24,21 +24,29 @@ def start(install_root="/usr/local/lux", config_path="/etc/lux/luxd.toml",
           lock_path="/etc/lux/.reconcile.lock", execute=os.execve):
     contended = admit(install_root, lock_path)
     with pair_lock(install_root):
-        # Admission can precede rollback: recheck while holding the pair lock.
         if contended and not os.path.exists(os.path.join(install_root, ".switch", "ready")):
             sys.exit(1)
-        binary = os.open(os.path.join(install_root, "current", "bin", "luxd"), os.O_RDONLY)
-        try:
-            config = os.open(config_path, os.O_RDONLY)
+        with open(lock_path, "a") as lock:
             try:
-                os.set_inheritable(binary, True)
-                os.set_inheritable(config, True)
+                # Nonblocking: reconcile takes this lock before the pair lock.
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if not os.path.exists(os.path.join(install_root, ".switch", "ready")):
+                    sys.exit(1)
+            else:
+                _recover_locked(install_root)
+            binary = os.open(os.path.join(install_root, "current", "bin", "luxd"), os.O_RDONLY)
+            try:
+                config = os.open(config_path, os.O_RDONLY)
+                try:
+                    os.set_inheritable(binary, True)
+                    os.set_inheritable(config, True)
+                except BaseException:
+                    os.close(config)
+                    raise
             except BaseException:
-                os.close(config)
+                os.close(binary)
                 raise
-        except BaseException:
-            os.close(binary)
-            raise
     binary_path = f"/proc/self/fd/{binary}"
     config_fd_path = f"/proc/self/fd/{config}"
     try:

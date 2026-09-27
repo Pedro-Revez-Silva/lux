@@ -177,6 +177,7 @@ def test_config_change_restarts_a_running_luxd_once_and_only_then(env, capsys):
     assert "luxd.toml" in line and "luxd-restarted" in line
     assert luxd_toml(env)["scale_down_after"] == "30m"
     assert len(restarts(env)) == 1
+    assert "luxd" in env.sh.active
 
     env.sh.calls.clear()
     assert env.run() == 0
@@ -190,6 +191,7 @@ def test_ssm_change_rerenders_the_config(env, capsys):
     assert env.run() == 0
     assert luxd_toml(env)["public_url"] == "https://lux2.example.com"
     assert len(restarts(env)) == 1
+    assert "luxd" in env.sh.active
 
 
 def test_config_change_to_a_stopped_luxd_enables_it_instead_of_restarting(env, capsys):
@@ -611,6 +613,79 @@ def test_admitted_start_cannot_cross_rollback_with_mixed_pair(env, capsys, monke
             assert ("connect to database" in result.stderr.lower()) == valid, result.stderr
 
 
+def test_uncontended_start_recovers_crashed_switch_before_selecting_pair(env, capsys, monkeypatch):
+    old_bin = os.environ.get("LUX_TEST_OLD_LUXD")
+    new_bin = os.environ.get("LUX_TEST_NEW_LUXD")
+    if not old_bin or not new_bin:
+        pytest.skip("set LUX_TEST_OLD_LUXD and LUX_TEST_NEW_LUXD to real old/new binaries")
+    deploy_version(env, capsys, "v1.0.0")
+    shutil.copyfile(old_bin, env.path("usr/local/lux/versions/v1.0.0/bin/luxd"))
+    path = env.path("etc/lux/luxd.toml")
+    old = read(env, "etc/lux/luxd.toml").replace('operators = ["operator@example.com"]\n', '').replace(
+        'default_tenant = "ten_aaaaaaaaaaaaaaaa"\n', ''
+    )
+    with open(path, "w") as f:
+        f.write(old)
+    env.web.releases["v2.0.0"] = make_release("v2.0.0")
+    env.repo.set_desired(desired("v2.0.0"))
+    namespace = runpy.run_path(os.path.join(os.path.dirname(os.path.dirname(__file__)), "recover.py"),
+                               run_name="lux_start_test")
+    start = namespace["start"]
+    admit = namespace["admit"]
+    entered = threading.Event()
+    resume = threading.Event()
+    results = []
+    lock = env.path("etc/lux/.reconcile.lock")
+    original_link = release._atomic_symlink
+
+    def pause(*args):
+        admitted = admit(*args)
+        assert admitted is False
+        entered.set()
+        assert resume.wait(10)
+        return admitted
+
+    def execute(binary, argv, environment):
+        assert os.readlink(binary).endswith("/versions/v1.0.0/bin/luxd")
+        result = subprocess.run([binary, "--config", argv[2], "admin", "create-key"],
+                                pass_fds=(int(binary.rsplit("/", 1)[1]), int(argv[2].rsplit("/", 1)[1])),
+                                capture_output=True, text=True, timeout=10)
+        results.append(result.stderr)
+
+    def worker():
+        try:
+            start(env.host.paths.install_root, path, lock, execute=execute)
+        except BaseException as e:
+            results.append(e)
+
+    def link(target, name):
+        original_link(target, name)
+        if name == env.path("usr/local/lux/current") and target.endswith("v2.0.0"):
+            resume.set()
+            raise KeyboardInterrupt("killed after current changed")
+
+    with monkeypatch.context() as patch:
+        patch.setitem(start.__globals__, "admit", pause)
+        patch.setattr(release, "_atomic_symlink", link)
+        thread = threading.Thread(target=worker)
+        thread.start()
+        try:
+            assert entered.wait(10)
+            with pytest.raises(KeyboardInterrupt):
+                env.run()
+        finally:
+            resume.set()
+            thread.join(10)
+    assert not thread.is_alive()
+    assert len(results) == 1 and "connect to database" in results[0].lower(), results
+    assert installed(env) == "v1.0.0"
+    assert read(env, "etc/lux/luxd.toml") == old
+    assert not os.path.exists(env.path("usr/local/lux/.switch"))
+    result = subprocess.run([new_bin, "--config", path, "admin", "create-key"],
+                            capture_output=True, text=True, timeout=10)
+    assert "connect to database" not in result.stderr.lower()
+
+
 def test_pinned_start_survives_rollback_with_strict_loader(env, capsys, monkeypatch):
     old_bin = os.environ.get("LUX_TEST_OLD_LUXD")
     new_bin = os.environ.get("LUX_TEST_NEW_LUXD")
@@ -653,7 +728,7 @@ def test_pinned_start_survives_rollback_with_strict_loader(env, capsys, monkeypa
 
             with monkeypatch.context() as patch:
                 patch.setitem(start.__globals__, "admit", lambda *args: True)
-                start(env.host.paths.install_root, path, execute=execute)
+                start(env.host.paths.install_root, path, env.path("etc/lux/.reconcile.lock"), execute=execute)
         return original_restart(host)
 
     with monkeypatch.context() as patch:

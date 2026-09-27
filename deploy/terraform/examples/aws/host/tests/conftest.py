@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tarfile
@@ -129,15 +130,18 @@ class FakeSh:
             self.enabled.update(units)
             if "--now" in argv:
                 for u in units:
-                    self._start(u)
+                    if u not in self.active and not self._start(u):
+                        return completed(argv, 1, stderr=f"{u} start failed")
             return completed(argv)
         if verb == "disable":
             self.enabled.difference_update(units)
             self.active.difference_update(units)
             return completed(argv)
         if verb in ("restart", "start"):
-            self._start(units[0])
-            return completed(argv)
+            if verb == "restart":
+                self.active.discard(units[0])
+            return completed(argv, 0 if self._start(units[0]) else 1,
+                             stderr="" if units[0] in self.active else f"{units[0]} start failed")
         if verb == "stop":
             self.active.difference_update(units)
             return completed(argv)
@@ -148,13 +152,30 @@ class FakeSh:
     def _start(self, unit):
         if unit != "luxd":
             self.active.add(unit)
-            return
+            return True
+        root = os.path.join(self.root, "usr/local/lux")
+        config = os.path.join(self.root, "etc/lux/luxd.toml")
+        lock = os.path.join(self.root, "etc/lux/.reconcile.lock")
+        helper = runpy.run_path(os.path.join(HOST_DIR, "recover.py"), run_name="unit_helper")
+        try:
+            helper["admit"](root, lock)
+            helper["start"](root, config, lock_path=lock,
+                            execute=lambda binary, argv, environ: self._check_pair(binary, argv))
+        except (SystemExit, OSError):
+            self.active.discard("luxd")
+            return False
         current = os.path.join(self.root, "usr/local/lux/current")
         version = os.path.basename(os.readlink(current)) if os.path.islink(current) else None
         if version in self.healthy_versions:
             self.active.add("luxd")
         else:
             self.active.discard("luxd")
+        return "luxd" in self.active
+
+    def _check_pair(self, binary, argv):
+        assert os.path.samefile(binary, os.path.join(self.root, "usr/local/lux/current/bin/luxd"))
+        with open(argv[2]) as config:
+            assert config.read()
 
     def _dpkg(self, argv, _input):
         if argv[1:] == ["--print-architecture"]:
