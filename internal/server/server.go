@@ -238,7 +238,7 @@ func redirectConsole(w http.ResponseWriter, r *http.Request) {
 // Run starts the background loops and serves until ctx ends.
 func (s *Server) Run(ctx context.Context) error {
 	srv := &http.Server{Addr: s.cfg.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	s.wg.Add(7)
+	s.wg.Add(8)
 	go func() { defer s.wg.Done(); s.schedulerLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.provisionerLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.reaperLoop(ctx) }()
@@ -246,6 +246,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() { defer s.wg.Done(); s.historyLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.listenLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.costLoop(ctx) }()
+	go func() { defer s.wg.Done(); s.priceLoop(ctx) }()
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	s.log.Info("luxd listening", "addr", s.cfg.Listen)
@@ -259,6 +260,22 @@ func (s *Server) Run(ctx context.Context) error {
 		return nil
 	case err := <-errc:
 		return err
+	}
+}
+
+// priceLoop discovers newly launched hosts independently of cost ticks and drains.
+// Each pass has a deadline so a slow provider cannot hold up later passes.
+func (s *Server) priceLoop(ctx context.Context) {
+	if !s.cfg.Costs.Enabled || !s.cfg.Costs.ComputeEC2 {
+		return
+	}
+	const refreshTimeout = 30 * time.Second
+	every := min(s.cfg.Costs.PricesRefresh, DefaultCostsEvery)
+	for ctx.Err() == nil {
+		refreshCtx, cancel := context.WithTimeout(ctx, refreshTimeout)
+		s.refreshPrices(refreshCtx)
+		cancel()
+		wait(ctx, nil, every)
 	}
 }
 

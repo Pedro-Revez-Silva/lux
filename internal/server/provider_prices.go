@@ -2,9 +2,9 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +24,20 @@ type PriceProvider interface {
 }
 
 const DefaultPricesRefresh = 24 * time.Hour
+
+// Cursors avoid replaying long contiguous history on each tick. Entries for
+// inactive servers and hosts expire, and the map is capped between refreshes.
+var spotGapCursors sync.Map // spotGapKey -> spotGapCursor
+
+type spotGapCursor struct {
+	at   time.Time
+	used time.Time
+}
+
+type spotGapKey struct {
+	server *Server
+	host   string
+}
 
 type pricedHost struct {
 	ID, Provider, Region, Type, Zone, Market string
@@ -105,26 +119,9 @@ func (s *Server) onDemandPrice(ctx context.Context, provider, region, kind strin
 	return rate, err
 }
 
-// priceLaunchedHost primes the on-demand cache at launch, before the runner
-// has advertised capacity. A failed lookup does not hold up provisioning.
-func (s *Server) priceLaunchedHost(ctx context.Context, provider string, template []byte, launched Launched) {
-	if !s.cfg.Costs.Enabled || !s.cfg.Costs.ComputeEC2 || launched.Market != MarketOnDemand || launched.InstanceType == "" {
-		return
-	}
-	var info struct {
-		Region string `json:"region"`
-	}
-	if err := json.Unmarshal(template, &info); err != nil || info.Region == "" {
-		return
-	}
-	if _, err := s.onDemandPrice(ctx, provider, info.Region, launched.InstanceType); err != nil && ctx.Err() == nil {
-		s.log.Warn("costs: price at launch", "provider", provider, "type", launched.InstanceType, "err", err)
-	}
-}
-
-// refreshPrices runs before a cost drain, outside its Run/queue locks. A
-// provider failure leaves gaps and the next tick retries. Spot requests are
-// shared by zone/type; a terminated host is retained while gaps may be filled.
+// refreshPrices runs independently of cost draining and provisioning. A
+// provider failure leaves gaps for the next pass. Spot requests are shared by
+// zone/type; terminated hosts remain eligible while compute is incomplete.
 func (s *Server) refreshPrices(ctx context.Context) {
 	if !s.cfg.Costs.Enabled || !s.cfg.Costs.ComputeEC2 {
 		return
@@ -134,8 +131,23 @@ func (s *Server) refreshPrices(ctx context.Context) {
 		s.log.Warn("costs: list priced hosts", "err", err)
 		return
 	}
+	cursors := 0
+	spotGapCursors.Range(func(k, v any) bool {
+		if time.Since(v.(spotGapCursor).used) > time.Hour || cursors >= 4096 {
+			spotGapCursors.Delete(k)
+		} else {
+			cursors++
+		}
+		return true
+	})
 	type spotKey struct{ provider, zone, kind string }
 	groups := map[spotKey][]pricedHost{}
+	type demandKey struct{ provider, region, kind string }
+	type demandResult struct {
+		rate HourlyRate
+		err  error
+	}
+	demand := map[demandKey]demandResult{}
 	for _, h := range hosts {
 		if h.Type == "" || h.Region == "" {
 			continue
@@ -147,10 +159,16 @@ func (s *Server) refreshPrices(ctx context.Context) {
 			}
 			continue
 		}
-		if h.Market != MarketOnDemand || h.To != nil {
+		if h.Market != MarketOnDemand {
 			continue
 		}
-		rate, err := s.onDemandPrice(ctx, h.Provider, h.Region, h.Type)
+		key := demandKey{h.Provider, h.Region, h.Type}
+		result, ok := demand[key]
+		if !ok {
+			result.rate, result.err = s.onDemandPrice(ctx, h.Provider, h.Region, h.Type)
+			demand[key] = result
+		}
+		rate, err := result.rate, result.err
 		if err == nil {
 			err = s.applyCurrentPrice(ctx, h, rate, h.Provider+"-pricing")
 		}
@@ -158,31 +176,144 @@ func (s *Server) refreshPrices(ctx context.Context) {
 			s.log.Warn("costs: on-demand price", "host", h.ID, "err", err)
 		}
 	}
+	const spotWindow = 24 * time.Hour
+	type spotWindowRequest struct {
+		from, to time.Time
+	}
 	for key, hs := range groups {
 		p := s.cfg.Costs.Prices[key.provider]
 		if p == nil {
 			continue
 		}
-		from, to := hs[0].From, time.Now()
+		now := time.Now()
+		var windows []spotWindowRequest
 		for _, h := range hs {
-			if h.From.Before(from) {
-				from = h.From
+			from := h.From
+			if h.Registered != nil {
+				from = *h.Registered
+			}
+			until := now
+			if h.To != nil && h.To.Before(until) {
+				until = *h.To
+			}
+			if !from.Before(until) {
+				continue
+			}
+			gapFrom, gapTo, err := s.spotGap(ctx, h.ID, from, until)
+			if err != nil {
+				if ctx.Err() == nil {
+					s.log.Warn("costs: spot gap", "host", h.ID, "err", err)
+				}
+				continue
+			}
+			recent := maxTime(from, until.Add(-spotWindow))
+			if h.To == nil {
+				recent = maxTime(from, now.Add(-spotWindow))
+				if recent.Before(until) {
+					windows = append(windows, spotWindowRequest{recent, until})
+				}
+			}
+			if gapFrom.Before(gapTo) && (h.To != nil || gapFrom.Before(recent)) {
+				windows = append(windows, spotWindowRequest{gapFrom, minTime(gapTo, gapFrom.Add(spotWindow))})
 			}
 		}
-		history, err := p.SpotHistory(ctx, key.zone, key.kind, from, to)
-		if err != nil {
-			if ctx.Err() == nil {
-				s.log.Warn("costs: spot history", "zone", key.zone, "type", key.kind, "err", err)
+		slices.SortFunc(windows, func(a, b spotWindowRequest) int { return a.from.Compare(b.from) })
+		merged := windows[:0]
+		for _, w := range windows {
+			if len(merged) > 0 && !w.from.After(merged[len(merged)-1].to) {
+				merged[len(merged)-1].to = maxTime(merged[len(merged)-1].to, w.to)
+			} else {
+				merged = append(merged, w)
 			}
-			continue
 		}
-		slices.SortFunc(history, func(a, b SpotRate) int { return a.At.Compare(b.At) })
-		for _, h := range hs {
-			if err := s.applySpotHistory(ctx, h, history, to); err != nil && ctx.Err() == nil {
-				s.log.Warn("costs: spot periods", "host", h.ID, "err", err)
+		for _, w := range merged {
+			for start := w.from; start.Before(w.to); {
+				end := minTime(w.to, start.Add(spotWindow))
+				history, err := p.SpotHistory(ctx, key.zone, key.kind, start, end)
+				if err != nil {
+					if ctx.Err() == nil {
+						s.log.Warn("costs: spot history", "zone", key.zone, "type", key.kind, "err", err)
+					}
+				} else {
+					slices.SortFunc(history, func(a, b SpotRate) int { return a.At.Compare(b.At) })
+					for _, h := range hs {
+						if err := s.applySpotHistory(ctx, h, history, start, end, now); err != nil && ctx.Err() == nil {
+							s.log.Warn("costs: spot periods", "host", h.ID, "err", err)
+						}
+					}
+				}
+				start = end
 			}
 		}
 	}
+}
+
+// spotGap checks at most 128 adjacent periods via the host/valid_from index.
+// An uncovered interval is retried; contiguous history advances the cursor.
+func (s *Server) spotGap(ctx context.Context, host string, from, until time.Time) (time.Time, time.Time, error) {
+	key := spotGapKey{s, host}
+	cursor := from
+	if saved, ok := spotGapCursors.Load(key); ok {
+		cursor = maxTime(cursor, saved.(spotGapCursor).at)
+	}
+	gapFrom, gapTo := until, until
+	var advance time.Time
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var preceding *time.Time
+		var precedingFrom time.Time
+		err := tx.QueryRow(ctx, `SELECT valid_from, valid_to FROM host_rates
+    WHERE host_id=$1 AND valid_from <= $2 ORDER BY valid_from DESC LIMIT 1`, host, cursor).Scan(&precedingFrom, &preceding)
+		if err != nil && err != pgx.ErrNoRows {
+			return err
+		}
+		if err == nil {
+			if preceding == nil {
+				return nil
+			}
+			cursor = maxTime(cursor, *preceding)
+			advance = precedingFrom
+		}
+		lookup := cursor.Add(-time.Nanosecond)
+		if !advance.IsZero() {
+			lookup = advance
+		}
+		rows, err := tx.Query(ctx, `SELECT valid_from, valid_to FROM host_rates
+    WHERE host_id=$1 AND valid_from > $2 AND valid_from < $3 ORDER BY valid_from LIMIT 128`, host, lookup, until)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		count := 0
+		for rows.Next() {
+			var start time.Time
+			var end *time.Time
+			if err := rows.Scan(&start, &end); err != nil {
+				return err
+			}
+			if cursor.Before(start) {
+				gapFrom, gapTo = cursor, start
+				return nil
+			}
+			if end == nil {
+				advance = start
+				return nil
+			}
+			cursor = maxTime(cursor, *end)
+			advance = start
+			count++
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if count < 128 && cursor.Before(until) {
+			gapFrom, gapTo = cursor, until
+		}
+		return nil
+	})
+	if err == nil && !advance.IsZero() {
+		spotGapCursors.Store(key, spotGapCursor{advance, time.Now()})
+	}
+	return gapFrom, gapTo, err
 }
 
 func (s *Server) applyCurrentPrice(ctx context.Context, h pricedHost, rate HourlyRate, source string) error {
@@ -193,10 +324,10 @@ func (s *Server) applyCurrentPrice(ctx context.Context, h pricedHost, rate Hourl
 		var from time.Time
 		var cpus float64
 		var memory int64
-		var registered *time.Time
+		var registered, ended *time.Time
 		if err := tx.QueryRow(ctx, `SELECT provision_requested_at, registered_at, coalesce((capacity->>'cpus')::float8,0),
-    coalesce((capacity->>'memory')::int8,0) FROM hosts WHERE id=$1 AND terminated_at IS NULL FOR UPDATE`, h.ID).
-			Scan(&from, &registered, &cpus, &memory); err != nil {
+    coalesce((capacity->>'memory')::int8,0), terminated_at FROM hosts WHERE id=$1 FOR UPDATE`, h.ID).
+			Scan(&from, &registered, &cpus, &memory, &ended); err != nil {
 			if err == pgx.ErrNoRows {
 				return nil
 			}
@@ -209,6 +340,11 @@ func (s *Server) applyCurrentPrice(ctx context.Context, h pricedHost, rate Hourl
 		if registered != nil {
 			from = *registered
 		}
+		var fetched time.Time
+		if err := tx.QueryRow(ctx, `SELECT fetched_at FROM price_cache
+    WHERE provider=$1 AND region=$2 AND instance_type=$3 AND os='Linux'`, h.Provider, h.Region, h.Type).Scan(&fetched); err != nil {
+			return err
+		}
 		var oldFrom time.Time
 		var oldRate, oldCurrency string
 		var oldCPUs float64
@@ -219,6 +355,9 @@ func (s *Server) applyCurrentPrice(ctx context.Context, h pricedHost, rate Hourl
 			return err
 		}
 		if err == nil {
+			if ended != nil {
+				return nil
+			}
 			if oldRate == rate.PerHour && oldCurrency == rate.Currency && oldCPUs == cpus && oldMemory == memory {
 				return nil
 			}
@@ -233,16 +372,21 @@ func (s *Server) applyCurrentPrice(ctx context.Context, h pricedHost, rate Hourl
 				return err
 			}
 			from = at
+		} else {
+			from = maxTime(from, fetched)
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO host_rates (host_id,valid_from,per_hour,currency,cap_cpus,cap_memory,source)
-    VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (host_id,valid_from) DO NOTHING`, h.ID, from, rate.PerHour, rate.Currency, cpus, memory, source)
+		if ended != nil && !from.Before(*ended) {
+			return nil
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO host_rates (host_id,valid_from,valid_to,per_hour,currency,cap_cpus,cap_memory,source)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (host_id,valid_from) DO NOTHING`, h.ID, from, ended, rate.PerHour, rate.Currency, cpus, memory, source)
 		return err
 	})
 }
 
 // applySpotHistory changes only the open period, or inserts uncovered gaps.
 // Every closed row's price, capacity and bounds are immutable.
-func (s *Server) applySpotHistory(ctx context.Context, h pricedHost, history []SpotRate, now time.Time) error {
+func (s *Server) applySpotHistory(ctx context.Context, h pricedHost, history []SpotRate, windowFrom, windowTo, now time.Time) error {
 	if len(history) == 0 {
 		return nil
 	}
@@ -268,10 +412,11 @@ func (s *Server) applySpotHistory(ctx context.Context, h pricedHost, history []S
 		if registered != nil {
 			from = *registered
 		}
-		until := now
+		until := minTime(now, windowTo)
 		if ended != nil && ended.Before(until) {
 			until = *ended
 		}
+		from = maxTime(from, windowFrom)
 		if !from.Before(until) {
 			return nil
 		}
@@ -283,7 +428,8 @@ func (s *Server) applySpotHistory(ctx context.Context, h pricedHost, history []S
 			memory int64
 		}
 		rows, err := tx.Query(ctx, `SELECT valid_from,valid_to,trim_scale(per_hour)::text,currency,cap_cpus,cap_memory
-    FROM host_rates WHERE host_id=$1 ORDER BY valid_from`, h.ID)
+    FROM host_rates WHERE host_id=$1 AND valid_from < $3 AND (valid_to IS NULL OR valid_to > $2)
+    ORDER BY valid_from`, h.ID, from, until)
 		if err != nil {
 			return err
 		}
@@ -302,6 +448,7 @@ func (s *Server) applySpotHistory(ctx context.Context, h pricedHost, history []S
 		if err != nil {
 			return err
 		}
+		periodIndex := 0
 		for i, r := range history {
 			start := maxTime(from, r.At)
 			end := until
@@ -317,14 +464,15 @@ func (s *Server) applySpotHistory(ctx context.Context, h pricedHost, history []S
 			for cursor.Before(end) {
 				var covering *period
 				next := end
-				for j := range periods {
-					v := &periods[j]
-					if !v.from.After(cursor) && (v.to == nil || v.to.After(cursor)) {
+				for periodIndex < len(periods) && periods[periodIndex].to != nil && !periods[periodIndex].to.After(cursor) {
+					periodIndex++
+				}
+				if periodIndex < len(periods) {
+					v := &periods[periodIndex]
+					if !v.from.After(cursor) {
 						covering = v
-						break
-					}
-					if v.from.After(cursor) && v.from.Before(next) {
-						next = v.from
+					} else {
+						next = minTime(next, v.from)
 					}
 				}
 				if covering != nil {
@@ -332,7 +480,11 @@ func (s *Server) applySpotHistory(ctx context.Context, h pricedHost, history []S
 					if covering.to != nil {
 						limit = minTime(limit, *covering.to)
 					}
-					if covering.to == nil && (covering.rate != r.HourlyRate || covering.cpus != cpus || covering.memory != memory) && cursor.After(covering.from) {
+					if covering.to == nil && cursor.Equal(covering.from) {
+						cursor = limit
+						continue
+					}
+					if covering.to == nil && (covering.rate != r.HourlyRate || covering.cpus != cpus || covering.memory != memory) {
 						if _, err = tx.Exec(ctx, `UPDATE host_rates SET valid_to=$2 WHERE host_id=$1 AND valid_from=$3 AND valid_to IS NULL`, h.ID, cursor, covering.from); err != nil {
 							return err
 						}
@@ -348,14 +500,13 @@ func (s *Server) applySpotHistory(ctx context.Context, h pricedHost, history []S
 				var stop *time.Time
 				if next.Before(end) {
 					stop = &next
-				} else if end.Before(now) || i+1 < len(history) || ended != nil {
+				} else if (i+1 < len(history) && !history[i+1].At.After(until)) || (ended != nil && !until.Before(*ended)) {
 					stop = &end
 				}
 				if _, err = tx.Exec(ctx, `INSERT INTO host_rates (host_id,valid_from,valid_to,per_hour,currency,cap_cpus,cap_memory,source)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, h.ID, cursor, stop, r.PerHour, r.Currency, cpus, memory, h.Provider+"-spot-history"); err != nil {
 					return err
 				}
-				periods = append(periods, period{cursor, stop, r.HourlyRate, cpus, memory})
 				cursor = next
 			}
 		}
