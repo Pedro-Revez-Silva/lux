@@ -751,7 +751,8 @@ where it differs from the above:
 - The tick's bucket is `costs.every` (not a fixed 120 s), and its
   "settling or backing off" Runs are those whose `compute` source is not
   final and whose `next_at` has passed. The drainer runs the tick itself,
-  every `costs.every`, before draining. The tick locks those Runs first
+  before draining, at the start of each bucket (up to a second after it),
+  and again at its next pass if the tick failed. The tick locks those Runs first
   (`FOR KEY SHARE SKIP LOCKED`, in id order), then inserts their queue
   rows in the same order; a Run another transaction holds is skipped, as
   it is changing state, which queues it.
