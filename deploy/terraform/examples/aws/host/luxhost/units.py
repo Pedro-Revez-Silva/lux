@@ -45,6 +45,7 @@ RequiresMountsFor={pg_mount}
 # luxd.toml, which luxd reads strictly, so a pinned older release that does
 # not know the setting still starts.
 Environment=LUX_HISTORY_DISK_PATHS=/,{pg_mount}
+ExecStartPre=/usr/bin/python3 {host_dir}/recover.py
 ExecStart=/usr/local/bin/luxd serve
 Restart=on-failure
 RestartSec=5s
@@ -107,7 +108,7 @@ def render(host: Host, host_dir: str, infra: dict, region: str) -> dict:
     return {
         "lux-reconcile.timer": RECONCILE_TIMER,
         "lux-reconcile.service": RECONCILE_SERVICE.format(host_dir=host_dir),
-        "luxd.service": LUXD_SERVICE.format(pg_mount=p.pg_mount),
+        "luxd.service": LUXD_SERVICE.format(pg_mount=p.pg_mount, host_dir=host_dir),
         "cloudflared.service": CLOUDFLARED_SERVICE.format(token_file=os.path.join(p.cloudflared_dir, "token")),
         "lux-pg-backup.timer": BACKUP_TIMER,
         "lux-pg-backup.service": BACKUP_SERVICE.format(

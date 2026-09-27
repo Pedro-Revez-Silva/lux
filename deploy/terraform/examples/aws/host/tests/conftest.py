@@ -67,6 +67,17 @@ class FakeSh:
         self.calls.append(argv)
         cmd = os.path.basename(argv[0])
         handler = getattr(self, "_" + cmd.replace("-", "_").replace(".", "_"), None)
+        if cmd == "luxd" and argv[-1] in ("check-config", "create-key"):
+            with open(argv[argv.index("--config") + 1]) as f:
+                candidate = f.read()
+            current = os.path.join(self.root, "usr/local/lux/current")
+            version = os.path.basename(os.readlink(current)) if os.path.islink(current) else ""
+            with open(os.path.join(self.root, "etc/lux/luxd.toml")) as f:
+                active = f.read()
+            supported = version != "v1.0.0" or "operators = " not in candidate or "operators = " in active
+            if argv[-1] == "check-config":
+                return completed(argv, 2, stderr="usage: luxd")
+            return completed(argv, 1, stderr="connect to database" if supported else "unsupported Access config")
         if cmd == "luxd":
             return completed(argv, self.migrate_rc, stderr="" if self.migrate_rc == 0 else "migration 7 failed")
         if handler is None:

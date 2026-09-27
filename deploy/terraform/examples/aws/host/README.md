@@ -40,13 +40,17 @@ tools.
    environment, not `luxd.toml`, so an older pinned release (which refuses
    unknown keys in its file) still starts.
 7. Renders the candidate config, leaving the installed config untouched until
-   a version switch is ready. A pinned version without the new Access keys
-   rejects staged Access settings without rewriting its config or restarting.
+   a version switch is ready. The installed binary validates a changed
+   candidate before a config-only Access transition; unsupported settings
+   leave the live config untouched.
 8. If `lux_version` differs from the installed version: downloads the
-    release, verifies it against `SHA256SUMS`, runs `luxd migrate` with
-    the new binary and candidate config, switches the symlinks and config,
-    restarts luxd and waits ~30s for `/health`; on failure restores the
-    previous config and binaries before restarting the previous luxd.
+   release, verifies it against `SHA256SUMS`, runs `luxd migrate` with
+   the new binary and candidate config, journals the previous config (0600)
+   and links privately (0700), switches the symlinks and config,
+   restarts luxd and waits ~30s for `/health`; on failure restores the
+   previous config and binaries before restarting the previous luxd. A
+   killed switch is restored by luxd's `ExecStartPre` on boot/restart or at
+   the start of the next reconcile, before extraction or service start.
    Otherwise, if the config or luxd's unit changed and luxd is running, it
    restarts luxd.
    With a version installed, every run also enables and starts a stopped
@@ -101,8 +105,9 @@ list must be nonempty and have no duplicates. Both settings are required in
 Access mode and rejected in key mode. A missing or invalid setting fails the
 run before package changes, `luxd.toml` writes, or a binary switch. Migrating
 an existing host requires adding this private table along with enabling
-Access and upgrading `lux_version` to a release supporting these fields.
-Staging the table before the version bump fails reconciliation but keeps the
+Access; an already-compatible installed binary can switch config only,
+otherwise upgrade `lux_version` to a release supporting these fields.
+Staging the table on an incompatible binary fails reconciliation but keeps the
 old config and old binary running; the periodic timer retries after the bump.
 Failed downloads, migrations and health checks likewise keep or restore the
 old config. For key mode, omit `[console.cloudflare_access]` entirely and leave

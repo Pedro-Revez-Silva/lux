@@ -3,7 +3,6 @@ SSM describe. See host/README.md for the steps and how to read the result."""
 import fcntl
 import os
 import sys
-import tomllib
 
 from . import desired as desired_mod
 from . import gitsync, luxdconf, packages, postgres, release, units
@@ -115,10 +114,10 @@ class Run:
         deploying = want.lux_version is not None and want.lux_version != installed
         config_path = os.path.join(host.paths.etc_lux, "luxd.toml")
         previous = read_file(config_path)
-        if installed and not deploying and want.cloudflare_access:
-            access = tomllib.loads(previous or "").get("console", {}).get("cloudflare_access", {})
-            if not all(k in access for k in ("operators", "default_tenant")):
-                raise HostError("Access settings need a lux_version upgrade; keeping installed luxd config")
+        if installed and not deploying and want.cloudflare_access and previous != toml:
+            binary = os.path.join(host.paths.install_root, "current", "bin", "luxd")
+            if not release.check_config(host, binary, toml, config_path):
+                raise HostError("candidate config is not supported by installed luxd; keeping installed config")
 
         if deploying:
             self.step = "version"
@@ -170,6 +169,9 @@ class Run:
             self.changed.append("cloudflared-restarted")
 
     def run(self) -> str:
+        self.step = "switch-recovery"
+        if release.recover(self.host.paths.install_root):
+            self.changed.append("switch-recovered")
         self.step = "ssm"
         infra = load_infra(self.host, self.boot)
         self.sync_checkout(infra)
