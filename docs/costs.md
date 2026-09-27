@@ -744,10 +744,12 @@ where it differs from the above:
 - `setRunState` queues through `lux_cost_enqueue(run, reason)`, a
   `SECURITY DEFINER` function: an API stop or cancel runs in the tenant's
   scope, where the system-only `cost_pending` is out of reach. It queues
-  only a Run that scope can see. The merge also sets `reason` to the latest
-  trigger and **frees any claim**: a drainer's result read before the
-  change is then not written (it writes only under its own claim), and the
-  Run is evaluated again.
+  only a Run that scope can see. `PUBLIC` may not execute it: only
+  `lux_app` (granted with its other privileges when luxd migrates), and
+  `reason` is checked against the known triggers. The merge also sets
+  `reason` to the latest trigger and **frees any claim**: a drainer's
+  result read before the change is then not written (it writes only under
+  its own claim), and the Run is evaluated again.
 - The tick's bucket is `costs.every` (not a fixed 120 s), and its
   "settling or backing off" Runs are those whose `compute` source is not
   final and whose `next_at` has passed. The drainer runs the tick itself,

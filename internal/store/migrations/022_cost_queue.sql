@@ -7,7 +7,8 @@
 CREATE TABLE cost_pending (
   run_id        text PRIMARY KEY REFERENCES runs(id),
   due_at        timestamptz NOT NULL,
-  reason        text NOT NULL,          -- 'tick' | 'state:<state>' | 'settle' | 'retry'
+  reason        text NOT NULL CHECK (reason IN ('tick', 'settle', 'retry', 'state:stopping', 'state:stopped',
+                  'state:lost', 'state:succeeded', 'state:failed', 'state:cancelled', 'state:resuming')),
   claimed_by    text,                   -- the luxd working it
   claimed_until timestamptz             -- past: the claim is free to take again
 );
@@ -30,7 +31,9 @@ CREATE POLICY system_only ON cost_ticks USING (lux_system()) WITH CHECK (lux_sys
 -- caller's scope can see. A trigger arriving while a luxd works the Run
 -- frees its claim: that luxd's result, read before the change, is dropped
 -- (the drainer writes only under its own claim) and the Run is evaluated
--- again.
+-- again. Only lux_app may call it (granted with its other privileges, in
+-- store.ensureAppRole: the role may not exist yet here), and only with a
+-- reason the queue knows (the CHECK above).
 CREATE FUNCTION lux_cost_enqueue(run text, why text) RETURNS void
 LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
   INSERT INTO cost_pending (run_id, due_at, reason)
@@ -38,6 +41,7 @@ LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
   ON CONFLICT (run_id) DO UPDATE SET due_at = least(cost_pending.due_at, EXCLUDED.due_at),
     reason = EXCLUDED.reason, claimed_by = NULL, claimed_until = NULL
 $$;
+REVOKE ALL ON FUNCTION lux_cost_enqueue(text, text) FROM PUBLIC;
 
 -- The tick queues every live Run, and every Run whose source is owed
 -- another attempt (next_at passed): both found by index, not a scan.
