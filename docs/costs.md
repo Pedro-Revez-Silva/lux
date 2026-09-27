@@ -795,8 +795,10 @@ where it differs from the above:
   which frees any claim: a drainer's result, read while the Run was still
   finished, is not written.
 - Spot compute remains estimated for at least 24 hours after both the Run
-  finishes and its latest spot host terminates. During that window terminated
-  hosts remain eligible for spot refresh and incomplete/estimated Runs keep
+  finishes and every spot host it used terminates. A successful refresh of each
+  terminated host's recent history after that threshold is required before the
+  cost becomes final. Until then terminated hosts remain eligible for spot
+  refresh and fully priced estimated Runs keep
   retrying. Bounded history requests close rates at historical window edges
   so unchecked hours remain missing until queried. The refresh revisits only
   the latest 24 hours of a fully covered terminated host: corrections outside

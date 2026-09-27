@@ -476,12 +476,92 @@ func TestProviderPricesSpotDelayedChangeAfterTwoCompleteAnswers(t *testing.T) {
 	if err := settled.write(s); err != nil {
 		t.Fatal(err)
 	}
-	if _, c := getCost(t, s, keys["t1"], "spot-delayed-run"); c.Status != "final" || !c.Final || len(c.Lines) != 1 || c.Lines[0].Amount != "0.3" || !c.Lines[0].Final {
-		t.Fatalf("settled spot cost: %+v", c)
+	if _, c := getCost(t, s, keys["t1"], "spot-delayed-run"); c.Final || c.Lines[0].Amount != "0.3" {
+		t.Fatalf("future threshold without refresh must not settle: %+v", c)
 	}
 	s.refreshPrices(context.Background())
-	if len(p.spotCalls) != 3 {
-		t.Fatalf("finalized host was queried again: %+v", p.spotCalls)
+	if len(p.spotCalls) != 4 {
+		t.Fatalf("estimated host was not queried again: %+v", p.spotCalls)
+	}
+}
+
+func TestProviderPricesSpotLiveHostDoesNotSettle(t *testing.T) {
+	from := time.Now().UTC().Add(-50 * time.Hour).Truncate(time.Microsecond)
+	end := from.Add(time.Hour)
+	p := &fakePriceProvider{spot: [][]SpotRate{
+		{{At: from, HourlyRate: HourlyRate{PerHour: "0.1", Currency: "USD"}}},
+		{{At: from, HourlyRate: HourlyRate{PerHour: "0.1", Currency: "USD"}}},
+		{{At: from, HourlyRate: HourlyRate{PerHour: "0.1", Currency: "USD"}}},
+	}}
+	s, keys := costFixture(t)
+	s.cfg.Costs = CostsConfig{Enabled: true, ComputeEC2: true, Every: time.Minute, Batch: DefaultCostsBatch,
+		Prices: map[string]PriceProvider{"ec2": p}}
+	insertProviderHost(t, s, "t1", "burst", "ec2", "live-spot", MarketSpot, from)
+	placeRun(t, s, "t1", "live-spot-run", StateRunning, "live-spot", placementWindow{From: from, To: &end, CPUs: 4, Memory: 16 * gib})
+	finish(t, s, "t1", "live-spot-run", StateSucceeded)
+	execSQL(t, s, context.Background(), `UPDATE runs SET finished_at = $1 WHERE id = 'live-spot-run'`, end)
+	s.refreshPrices(context.Background())
+	drain(t, s)
+	if _, c := getCost(t, s, keys["t1"], "live-spot-run"); c.Status != "complete" || c.Final || c.Lines[0].Amount != "0.1" || c.Sources[0].NextAt == nil {
+		t.Fatalf("live host after 24h must remain estimated: %+v", c)
+	}
+	execSQL(t, s, context.Background(), `UPDATE runs SET finished_at = now() - interval '8 days' WHERE id = 'live-spot-run'`)
+	execSQL(t, s, context.Background(), `SELECT lux_cost_enqueue('live-spot-run', 'retry')`)
+	drain(t, s)
+	if _, c := getCost(t, s, keys["t1"], "live-spot-run"); c.Final || c.Sources[0].NextAt == nil {
+		t.Fatalf("live host must keep retrying beyond ordinary give-up: %+v", c)
+	}
+	execSQL(t, s, context.Background(), `UPDATE hosts SET terminated_at = now() - interval '25 hours' WHERE id = 'live-spot'`)
+	execSQL(t, s, context.Background(), `SELECT lux_cost_enqueue('live-spot-run', 'retry')`)
+	drain(t, s)
+	if _, c := getCost(t, s, keys["t1"], "live-spot-run"); c.Final {
+		t.Fatalf("termination without post-threshold refresh finalized: %+v", c)
+	}
+	s.refreshPrices(context.Background())
+	if len(p.spotCalls) < 2 {
+		t.Fatalf("terminated estimated host must remain eligible for history: %+v", p.spotCalls)
+	}
+}
+
+func TestProviderPricesSpotDrainBeforeFinalHistoryRefresh(t *testing.T) {
+	from := time.Now().UTC().Add(-25*time.Hour - time.Second).Truncate(time.Microsecond)
+	end := from.Add(time.Hour)
+	change := end.Add(-10 * time.Minute)
+	p := &fakePriceProvider{spot: [][]SpotRate{
+		{{At: from, HourlyRate: HourlyRate{PerHour: "0.1", Currency: "USD"}}},
+		{{At: from, HourlyRate: HourlyRate{PerHour: "0.1", Currency: "USD"}},
+			{At: change, HourlyRate: HourlyRate{PerHour: "0.2", Currency: "USD"}}},
+	}}
+	s, keys := costFixture(t)
+	s.cfg.Costs = CostsConfig{Enabled: true, ComputeEC2: true, Every: time.Minute, Batch: DefaultCostsBatch,
+		Prices: map[string]PriceProvider{"ec2": p}}
+	insertProviderHost(t, s, "t1", "burst", "ec2", "final-spot", MarketSpot, from)
+	execSQL(t, s, context.Background(), `UPDATE hosts SET terminated_at = $1 WHERE id = 'final-spot'`, end)
+	placeRun(t, s, "t1", "final-spot-run", StateRunning, "final-spot", placementWindow{From: from, To: &end, CPUs: 4, Memory: 16 * gib})
+	finish(t, s, "t1", "final-spot-run", StateSucceeded)
+	execSQL(t, s, context.Background(), `UPDATE runs SET finished_at = $1 WHERE id = 'final-spot-run'`, end)
+	drain(t, s)
+	s.refreshPrices(context.Background())
+	execSQL(t, s, context.Background(), `UPDATE spot_history_refresh SET checked_at = $1 WHERE host_id = 'final-spot'`, end.Add(costSpotSettle-time.Second))
+	execSQL(t, s, context.Background(), `SELECT lux_cost_enqueue('final-spot-run', 'retry')`)
+	drain(t, s)
+	if _, c := getCost(t, s, keys["t1"], "final-spot-run"); c.Final || len(c.Lines) != 1 || c.Lines[0].Amount != "0.1" || c.Sources[0].NextAt == nil {
+		t.Fatalf("drain before final refresh must remain estimated: %+v; calls=%+v; rates=%+v", c, p.spotCalls, providerRates(t, s, "final-spot"))
+	}
+	execSQL(t, s, context.Background(), `SELECT lux_cost_enqueue('final-spot-run', 'retry')`)
+	drain(t, s)
+	if _, c := getCost(t, s, keys["t1"], "final-spot-run"); c.Final || c.Lines[0].Amount != "0.1" {
+		t.Fatalf("complete price before recent overlap must remain estimated: %+v", c)
+	}
+	s.refreshPrices(context.Background())
+	execSQL(t, s, context.Background(), `SELECT lux_cost_enqueue('final-spot-run', 'retry')`)
+	drain(t, s)
+	if _, c := getCost(t, s, keys["t1"], "final-spot-run"); !c.Final || c.Lines[0].Amount != "0.116666667" {
+		t.Fatalf("post-threshold refresh must be consumed: %+v", c)
+	}
+	s.refreshPrices(context.Background())
+	if len(p.spotCalls) != 2 {
+		t.Fatalf("finalized host should no longer be queried: %+v", p.spotCalls)
 	}
 }
 

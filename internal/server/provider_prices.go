@@ -187,6 +187,7 @@ func (s *Server) refreshPrices(ctx context.Context) {
 		}
 		now := time.Now()
 		var windows []spotWindowRequest
+		recentWindows := map[string]spotWindowRequest{}
 		for _, h := range hs {
 			from := h.From
 			if h.Registered != nil {
@@ -207,6 +208,9 @@ func (s *Server) refreshPrices(ctx context.Context) {
 				continue
 			}
 			recent := maxTime(from, until.Add(-spotWindow))
+			if h.To != nil && recent.Before(until) {
+				recentWindows[h.ID] = spotWindowRequest{recent, until}
+			}
 			if h.To == nil {
 				recent = maxTime(from, now.Add(-spotWindow))
 				if recent.Before(until) {
@@ -228,6 +232,10 @@ func (s *Server) refreshPrices(ctx context.Context) {
 				merged = append(merged, w)
 			}
 		}
+		covered := map[string]time.Time{}
+		for id, recent := range recentWindows {
+			covered[id] = recent.from
+		}
 		for _, w := range merged {
 			for start := w.from; start.Before(w.to); {
 				end := minTime(w.to, start.Add(spotWindow))
@@ -239,8 +247,24 @@ func (s *Server) refreshPrices(ctx context.Context) {
 				} else {
 					slices.SortFunc(history, func(a, b SpotRate) int { return a.At.Compare(b.At) })
 					for _, h := range hs {
-						if err := s.applySpotHistory(ctx, h, history, start, end, now); err != nil && ctx.Err() == nil {
-							s.log.Warn("costs: spot periods", "host", h.ID, "err", err)
+						if err := s.applySpotHistory(ctx, h, history, start, end, now); err != nil {
+							if ctx.Err() == nil {
+								s.log.Warn("costs: spot periods", "host", h.ID, "err", err)
+							}
+							continue
+						}
+						if recent, ok := recentWindows[h.ID]; ok && !start.After(covered[h.ID]) && end.After(covered[h.ID]) &&
+							len(history) > 0 && !history[0].At.After(covered[h.ID]) {
+							covered[h.ID] = end
+							if !end.Before(recent.to) {
+								if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+									_, err := tx.Exec(ctx, `INSERT INTO spot_history_refresh (host_id, checked_at) VALUES ($1, $2)
+										ON CONFLICT (host_id) DO UPDATE SET checked_at = greatest(spot_history_refresh.checked_at, EXCLUDED.checked_at)`, h.ID, now)
+									return err
+								}); err != nil && ctx.Err() == nil {
+									s.log.Warn("costs: spot refresh checkpoint", "host", h.ID, "err", err)
+								}
+							}
 						}
 					}
 				}
