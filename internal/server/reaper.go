@@ -184,30 +184,47 @@ func (s *Server) reapHosts(ctx context.Context) error {
 func (s *Server) reapTimeouts(ctx context.Context) error {
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT r.id, r.tenant_id, r.current_epoch FROM runs r
+		const dueQuery = `SELECT r.id FROM runs r
 			WHERE r.state IN ('starting', 'running') AND r.first_started_at IS NOT NULL
 			  AND coalesce(r.spec->>'timeout', '') NOT IN ('', '0s')
 			  AND (SELECT coalesce(sum(coalesce(p.ended_at, now()) - p.started_at), interval '0')
 			       FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) > (r.spec->>'timeout')::interval
+			  AND NOT EXISTS (SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch AND p.stop_requested_at IS NOT NULL)`
+		rows, err := tx.Query(ctx, dueQuery+` ORDER BY r.id LIMIT 50`)
+		if err != nil {
+			return err
+		}
+		candidates, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		if err := lockReaperRuns(ctx, tx, candidates); err != nil {
+			return err
+		}
+		if err := lockCostHosts(ctx, tx, candidates); err != nil {
+			return err
+		}
+		rows, err = tx.Query(ctx, `SELECT r.id, r.tenant_id FROM runs r
+			WHERE r.id = ANY($1) AND r.state IN ('starting', 'running') AND r.first_started_at IS NOT NULL
+			  AND coalesce(r.spec->>'timeout', '') NOT IN ('', '0s')
+			  AND (SELECT coalesce(sum(coalesce(p.ended_at, now()) - p.started_at), interval '0')
+			       FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) > (r.spec->>'timeout')::interval
 			  AND NOT EXISTS (SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch AND p.stop_requested_at IS NOT NULL)
-			LIMIT 50`)
+			ORDER BY r.id`, candidates)
 		if err != nil {
 			return err
 		}
 		type rr struct {
 			id, tenant string
-			epoch      int
 		}
-		var due []rr
-		for rows.Next() {
+		due, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (rr, error) {
 			var r rr
-			if err := rows.Scan(&r.id, &r.tenant, &r.epoch); err != nil {
-				rows.Close()
-				return err
-			}
-			due = append(due, r)
+			err := row.Scan(&r.id, &r.tenant)
+			return r, err
+		})
+		if err != nil {
+			return err
 		}
-		rows.Close()
 		for _, r := range due {
 			h, err := s.requestStop(ctx, tx, r.tenant, r.id, "timeout")
 			if err != nil {
