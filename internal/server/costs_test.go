@@ -378,6 +378,7 @@ func TestRunCostStatus(t *testing.T) {
 	if _, c := getCost(t, s, keys["t1"], "r1"); c.Status != "pending" || len(c.Totals) != 0 || c.Lines == nil {
 		t.Errorf("no lines: %+v", c)
 	}
+	s.cfg.Costs.Plugins = []CostPluginConfig{{Name: "gw"}}
 	answered, next := t0.Add(time.Hour), t0.Add(2*time.Hour)
 	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, next_at) VALUES
 		('r1', 't1', 'compute', 'final', $1, NULL), ('r1', 't1', 'gw', 'ok', $1, $2)`, answered, next)
@@ -403,6 +404,30 @@ func TestRunCostStatus(t *testing.T) {
 	execSQL(t, s, ctx, `UPDATE cost_sources SET status = 'final' WHERE source = 'gw'`)
 	if _, c := getCost(t, s, keys["t1"], "r1"); c.Status != "final" || !c.Final {
 		t.Errorf("all final: %+v", c)
+	}
+}
+
+func TestRemovedPluginHistoryDoesNotBlockCurrentFinality(t *testing.T) {
+	s, keys := costFixture(t)
+	s.cfg.Costs.Plugins = []CostPluginConfig{{Name: "current"}}
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'failed' WHERE id = 'r1'`)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, next_at) VALUES
+		('r1', 't1', 'compute', 'final', NULL),
+		('r1', 't1', 'old', 'incomplete', now() - interval '1 hour'),
+		('r1', 't1', 'current', 'final', NULL)`)
+	report(t, s, "t1", "r1", "old", line("ai", "historical", "2", "USD", false))
+	code, c := getCost(t, s, keys["t1"], "r1")
+	if code != http.StatusOK || !c.Final || c.Status != "final" || len(c.Sources) != 3 || c.Sources[2].Status != "incomplete" ||
+		len(c.Lines) != 1 || c.Lines[0].Source != "old" || totals(c.Totals) != "/USD=2(f0,e2) " {
+		t.Fatalf("removed plugin history: %d %+v", code, c)
+	}
+	if code, _ := getCost(t, s, keys["t2"], "r1"); code != http.StatusNotFound {
+		t.Errorf("foreign tenant read historical costs: %d", code)
+	}
+	s.cfg.Costs.Plugins = []CostPluginConfig{{Name: "current"}, {Name: "new"}}
+	if _, c := getCost(t, s, keys["t1"], "r1"); c.Final || c.Status != "incomplete" {
+		t.Errorf("missing configured source did not block finality: %+v", c)
 	}
 }
 

@@ -326,6 +326,61 @@ func TestPluginFailedChunkKeepsHealthFailing(t *testing.T) {
 	}
 }
 
+func TestPluginWriteFailureReleasesOnlyFailedChunk(t *testing.T) {
+	broken := true
+	s, keys, _ := pluginFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if pluginDescribeHandler(w, r) {
+			return
+		}
+		var req struct {
+			Runs []pluginRun `json:"runs"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		line := pluginLine()
+		if broken && req.Runs[0].RunID == "r1" {
+			line["details"] = map[string]any{"invalid": "\x00"}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"protocol": 1, "runs": []any{map[string]any{"runId": req.Runs[0].RunID, "status": "ok", "lines": []any{line}}}})
+	})
+	ctx := context.Background()
+	finish(t, s, "t1", "r1", StateStopped)
+	finish(t, s, "t2", "r2", StateLost)
+	n, err := s.drainCosts(ctx)
+	if n != 2 || err == nil {
+		t.Fatalf("failed write: drained %d, err %v", n, err)
+	}
+	if got := pending(t, s, "r1"); got != "retry -" {
+		t.Errorf("failed chunk claim: %q", got)
+	}
+	if got := pending(t, s, "r2"); got != "" {
+		t.Errorf("successful sibling still queued: %q", got)
+	}
+	s.plugins[0].mu.RLock()
+	failing := !s.plugins[0].failing.IsZero()
+	s.plugins[0].mu.RUnlock()
+	if !failing {
+		t.Error("plugin write failure did not mark health failing")
+	}
+	if _, c := getCost(t, s, keys["t1"], "r1"); c.Status != "incomplete" || len(c.Lines) != 0 {
+		t.Errorf("failed chunk committed answer: %+v", c)
+	}
+	if code, c := getCost(t, s, keys["t2"], "r2"); code != http.StatusOK || len(c.Lines) != 1 {
+		t.Errorf("successful sibling: %d %+v", code, c)
+	}
+	if code, _ := getCost(t, s, keys["t2"], "r1"); code != http.StatusNotFound {
+		t.Errorf("foreign tenant saw failed run: %d", code)
+	}
+	broken = false
+	execSQL(t, s, ctx, `UPDATE cost_pending SET due_at = now() - interval '1 second' WHERE run_id = 'r1'`)
+	drain(t, s)
+	if _, c := getCost(t, s, keys["t1"], "r1"); c.Status != "complete" || len(c.Lines) != 1 {
+		t.Errorf("retry did not recover: %+v", c)
+	}
+	if got := pending(t, s, "r1"); got != "" {
+		t.Errorf("recovered claim still pending: %q", got)
+	}
+}
+
 func TestStoppedSettlementRestartsOnTerminalTransition(t *testing.T) {
 	s, keys, _ := pluginFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		if pluginDescribeHandler(w, r) {
