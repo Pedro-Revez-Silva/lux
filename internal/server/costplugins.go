@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/marcioapm/lux/internal/ids"
+	"github.com/marcioapm/lux/internal/store"
 )
 
 const pluginBodyLimit = 16 << 20
@@ -193,7 +195,9 @@ func (s *Server) initCostPlugins() {
 			if cfg.MaxBatch <= 0 {
 				cfg.MaxBatch = 200
 			}
-			s.plugins = append(s.plugins, &costPlugin{cfg: cfg, client: &http.Client{Timeout: cfg.Timeout, Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext}}})
+			s.plugins = append(s.plugins, &costPlugin{cfg: cfg, client: &http.Client{Timeout: cfg.Timeout, CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			}, Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext}}})
 		}
 	})
 }
@@ -331,14 +335,14 @@ func loadPluginDue(ctx context.Context, tx pgx.Tx, runs []string, now time.Time)
 	return due, rows.Err()
 }
 
-func (s *Server) reportCostPlugins(ctx context.Context, runs map[string]pluginRun, due map[string]map[string]bool) map[string]map[string]pluginAnswer {
-	out := map[string]map[string]pluginAnswer{}
+func (s *Server) reportCostPlugins(ctx context.Context, runs map[string]pluginRun, due map[string]map[string]bool, evals map[string]*computeEval, now time.Time) error {
 	if len(runs) == 0 {
-		return out
+		return nil
 	}
 	s.initCostPlugins()
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	var first error
 	for _, p := range s.plugins {
 		wg.Add(1)
 		go func() {
@@ -357,14 +361,15 @@ func (s *Server) reportCostPlugins(ctx context.Context, runs map[string]pluginRu
 				}
 			}
 			slices.Sort(ids)
-			answers := map[string]pluginAnswer{}
 			if len(ids) == 0 {
-				mu.Lock()
-				out[p.cfg.Name] = answers
-				mu.Unlock()
 				return
 			}
+			var failed error
 			for chunk := range slices.Chunk(ids, limit) {
+				if ctx.Err() != nil {
+					return
+				}
+				answers := map[string]pluginAnswer{}
 				batch := make([]pluginRun, 0, len(chunk))
 				for _, id := range chunk {
 					batch = append(batch, runs[id])
@@ -383,7 +388,9 @@ func (s *Server) reportCostPlugins(ctx context.Context, runs map[string]pluginRu
 					}
 				}
 				if err != nil {
-					p.health(s, err)
+					if failed == nil {
+						failed = err
+					}
 					var he pluginHTTPError
 					_ = errors.As(err, &he)
 					if he.status >= 400 && he.status < 500 && he.status != 429 {
@@ -392,56 +399,84 @@ func (s *Server) reportCostPlugins(ctx context.Context, runs map[string]pluginRu
 					for _, id := range chunk {
 						answers[id] = pluginAnswer{err: err, retry: he.retry, fault: he.status >= 400 && he.status < 500 && he.status != 429}
 					}
-					continue
-				}
-				p.health(s, nil)
-				seen := map[string]bool{}
-				for _, a := range response.Runs {
-					if !slices.Contains(chunk, a.RunID) {
-						s.log.Warn("cost plugin returned foreign run", "plugin", p.cfg.Name, "run", a.RunID)
-						continue
-					}
-					if seen[a.RunID] {
-						answers[a.RunID] = pluginAnswer{err: errors.New("duplicate run response")}
-						continue
-					}
-					seen[a.RunID] = true
-					items := map[string]bool{}
-					if a.Status == "ok" {
-						for _, l := range a.Lines {
-							if items[l.Item] || !costAmount.MatchString(l.Amount) || l.Family == "" || l.Currency == "" || l.From.IsZero() || l.To.IsZero() || l.To.Before(l.From) {
-								a.err = errors.New("invalid or duplicate cost line")
-								break
+				} else {
+					seen := map[string]bool{}
+					for _, a := range response.Runs {
+						if !slices.Contains(chunk, a.RunID) {
+							s.log.Warn("cost plugin returned foreign run", "plugin", p.cfg.Name, "run", a.RunID)
+							continue
+						}
+						if seen[a.RunID] {
+							answers[a.RunID] = pluginAnswer{err: errors.New("duplicate run response")}
+							continue
+						}
+						seen[a.RunID] = true
+						items := map[string]bool{}
+						if a.Status == "ok" {
+							for _, l := range a.Lines {
+								if items[l.Item] || !costAmount.MatchString(l.Amount) || l.Family == "" || l.Currency == "" || l.From.IsZero() || l.To.IsZero() || l.To.Before(l.From) {
+									a.err = errors.New("invalid or duplicate cost line")
+									break
+								}
+								items[l.Item] = true
 							}
-							items[l.Item] = true
+						} else if a.Status == "error" {
+							a.err = errors.New(a.Error)
+							if a.Error == "" {
+								a.err = errors.New("plugin run error")
+							}
+							a.retry, _ = time.ParseDuration(a.RetryAfter)
+						} else {
+							a.err = errors.New("invalid run status")
 						}
-					} else if a.Status == "error" {
-						a.err = errors.New(a.Error)
-						if a.Error == "" {
-							a.err = errors.New("plugin run error")
+						if old, duplicate := answers[a.RunID]; duplicate && old.err != nil && old.err.Error() == "duplicate run response" {
+							continue
 						}
-						a.retry, _ = time.ParseDuration(a.RetryAfter)
-					} else {
-						a.err = errors.New("invalid run status")
+						answers[a.RunID] = a
 					}
-					if old, duplicate := answers[a.RunID]; duplicate && old.err != nil && old.err.Error() == "duplicate run response" {
-						continue
+					for _, id := range chunk {
+						if !seen[id] {
+							answers[id] = pluginAnswer{err: errors.New("missing run response")}
+						}
 					}
-					answers[a.RunID] = a
 				}
-				for _, id := range chunk {
-					if !seen[id] {
-						answers[id] = pluginAnswer{err: errors.New("missing run response")}
+				for _, a := range answers {
+					if a.err != nil && failed == nil {
+						failed = a.err
 					}
+				}
+				writeErr := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+					if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR KEY SHARE`, chunk); err != nil {
+						return err
+					}
+					rows, err := tx.Query(ctx, `SELECT run_id FROM cost_pending WHERE run_id = ANY($1) AND claimed_by = $2 ORDER BY run_id FOR UPDATE`, chunk, s.id)
+					if err != nil {
+						return err
+					}
+					held, err := pgx.CollectRows(rows, pgx.RowTo[string])
+					if err != nil {
+						return err
+					}
+					for _, id := range held {
+						if err := s.writePluginCost(ctx, tx, p.cfg, id, evals[id], answers[id], now); err != nil {
+							return err
+						}
+					}
+					return nil
+				})
+				if writeErr != nil {
+					mu.Lock()
+					first = cmp.Or(first, writeErr)
+					mu.Unlock()
 				}
 			}
-			mu.Lock()
-			out[p.cfg.Name] = answers
-			mu.Unlock()
+			if ctx.Err() == nil {
+				p.health(s, failed)
+			}
 		}()
 	}
 	wg.Wait()
-	return out
+	return first
 }
 
 func idsNewCost() string { return ids.New("cq") }

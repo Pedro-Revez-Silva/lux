@@ -1,11 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,6 +112,116 @@ func TestRunCostTotals(t *testing.T) {
 	}
 	if c.Status != "complete" || c.Final || c.Basis != "list" {
 		t.Errorf("status %q final %v basis %q", c.Status, c.Final, c.Basis)
+	}
+}
+
+func TestRunCostFamilyMetadata(t *testing.T) {
+	s, keys := costFixture(t)
+	var logs bytes.Buffer
+	s.log = slog.New(slog.NewTextHandler(&logs, nil))
+	s.cfg.Costs.Plugins = []CostPluginConfig{{Name: "first"}, {Name: "second"}}
+	s.initCostPlugins()
+	type metadata struct {
+		DisplayName string `json:"displayName"`
+		Color       string `json:"color"`
+	}
+	setFamilies := func(index int, values map[string]metadata) {
+		t.Helper()
+		p := s.plugins[index]
+		p.mu.Lock()
+		p.desc.Families = make(map[string]struct {
+			DisplayName string `json:"displayName"`
+			Color       string `json:"color"`
+		})
+		for family, value := range values {
+			p.desc.Families[family] = value
+		}
+		p.usable = true
+		p.mu.Unlock()
+	}
+	setFamilies(0, map[string]metadata{
+		"ai": {"AI models", "violet"}, "compute": {"Not compute", "red"},
+	})
+	setFamilies(1, map[string]metadata{
+		"ai": {"Other AI", "amber"}, "video": {"Video", "amber"},
+	})
+	report(t, s, "t1", "r1", "compute", line("compute", "host", "1", "USD", false))
+	report(t, s, "t1", "r1", "first", line("ai", "model", "2", "USD", false), line("unknown", "other", "3", "USD", false))
+	report(t, s, "t1", "r1", "second", line("video", "clip", "4", "USD", false))
+	check := func() {
+		t.Helper()
+		code, c := getCost(t, s, keys["t1"], "r1")
+		if code != http.StatusOK || len(c.ByFamily) != 4 {
+			t.Fatalf("cost response: %d %+v", code, c)
+		}
+		for _, total := range c.ByFamily {
+			switch total.Family {
+			case "ai":
+				if total.DisplayName != "AI models" || total.Color != "violet" {
+					t.Errorf("ai: %+v", total)
+				}
+			case "compute":
+				if total.DisplayName != "Compute" || total.Color != "" {
+					t.Errorf("compute: %+v", total)
+				}
+			case "unknown":
+				if total.DisplayName != "" || total.Color != "" {
+					t.Errorf("unknown: %+v", total)
+				}
+			case "video":
+				if total.DisplayName != "Video" || total.Color != "amber" {
+					t.Errorf("video: %+v", total)
+				}
+			default:
+				t.Errorf("unexpected family: %+v", total)
+			}
+		}
+		if len(c.Totals) != 1 || c.Totals[0].DisplayName != "" || c.Totals[0].Color != "" {
+			t.Errorf("currency totals have family metadata: %+v", c.Totals)
+		}
+	}
+	check()
+	check()
+	if n := strings.Count(logs.String(), "cost family metadata conflict"); n != 1 {
+		t.Errorf("conflict logged %d times, want once: %s", n, logs.String())
+	}
+	// A temporarily unusable first plugin lets the next configured one supply metadata.
+	s.plugins[0].mu.Lock()
+	s.plugins[0].usable = false
+	s.plugins[0].mu.Unlock()
+	_, c := getCost(t, s, keys["t1"], "r1")
+	if c.ByFamily[0].DisplayName != "Other AI" || c.ByFamily[0].Color != "amber" {
+		t.Errorf("fallback metadata: %+v", c.ByFamily[0])
+	}
+}
+
+func TestCostFamilyMetadataPrecedenceAndLogging(t *testing.T) {
+	var logs bytes.Buffer
+	s := &Server{log: slog.New(slog.NewTextHandler(&logs, nil)), cfg: Config{Costs: CostsConfig{Plugins: []CostPluginConfig{{Name: "metadata-first"}, {Name: "metadata-second"}}}}}
+	s.initCostPlugins()
+	for i, d := range []struct{ name, color string }{{"AI", "violet"}, {"Different", "amber"}} {
+		p := s.plugins[i]
+		p.desc.Families = map[string]struct {
+			DisplayName string `json:"displayName"`
+			Color       string `json:"color"`
+		}{"ai": {d.name, d.color}}
+		p.usable = true
+	}
+	for range 2 {
+		totals := []CostTotal{{Family: "ai"}, {Family: "compute"}, {Family: "other"}}
+		s.decorateCostFamilies(totals)
+		if totals[0].DisplayName != "AI" || totals[0].Color != "violet" || totals[1].DisplayName != "Compute" || totals[2].DisplayName != "" {
+			t.Errorf("family metadata: %+v", totals)
+		}
+	}
+	if n := strings.Count(logs.String(), "cost family metadata conflict"); n != 1 {
+		t.Errorf("conflict logged %d times, want once: %s", n, logs.String())
+	}
+	s.plugins[0].usable = false
+	totals := []CostTotal{{Family: "ai"}}
+	s.decorateCostFamilies(totals)
+	if totals[0].DisplayName != "Different" || totals[0].Color != "amber" {
+		t.Errorf("unusable first plugin: %+v", totals)
 	}
 }
 

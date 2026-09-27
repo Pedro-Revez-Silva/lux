@@ -175,7 +175,13 @@ components:
         amount:
           description: final + estimate.
           type: string
+        color:
+          description: In byFamily when a plugin supplies a color hint.
+          type: string
         currency:
+          type: string
+        displayName:
+          description: In byFamily when the family is described by a plugin or is compute.
           type: string
         estimate:
           description: The part from lines that may still change.

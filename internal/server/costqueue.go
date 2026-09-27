@@ -97,6 +97,9 @@ func (s *Server) costLoop(ctx context.Context) {
 		if !time.Now().Before(nextTick) {
 			nextTick = s.tryCostTick(ctx, nextTick)
 		}
+		if err := s.pollDueCostSources(ctx); err != nil && ctx.Err() == nil {
+			s.log.Warn("costs: poll due sources", "err", err)
+		}
 		n, err := s.drainCosts(ctx)
 		if err != nil && ctx.Err() == nil {
 			s.log.Warn("costs: drain", "err", err)
@@ -137,11 +140,14 @@ func nextCostTick(now time.Time, every time.Duration) time.Time {
 	return epoch.Add(now.Sub(epoch).Truncate(every) + every + min(costTickSlack, every/10))
 }
 
-// costTick queues every active Run, if this luxd is the first to claim the
-// current bucket of costs.every (one cost_ticks row per bucket): the live
-// ones, and those whose compute is owed another attempt. It reports whether
-// it ran the tick.
+// costTick queues live Runs, due configured sources and terminal Runs missing
+// a configured plugin source, once per costs.every bucket. It reports whether
+// this luxd won the bucket.
 func (s *Server) costTick(ctx context.Context) (bool, error) {
+	plugins := make([]string, 0, len(s.cfg.Costs.Plugins))
+	for _, p := range s.cfg.Costs.Plugins {
+		plugins = append(plugins, p.Name)
+	}
 	var won bool
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `INSERT INTO cost_ticks (tick_at)
@@ -161,17 +167,42 @@ func (s *Server) costTick(ctx context.Context) (bool, error) {
 				SELECT id FROM runs WHERE id IN (
 					SELECT id FROM runs WHERE state IN ('scheduled', 'starting', 'running', 'stopping')
 					UNION
-					SELECT run_id FROM cost_sources WHERE status <> 'final' AND next_at <= now())
+					SELECT run_id FROM cost_sources WHERE status <> 'final' AND next_at <= now()
+						AND (source = 'compute' OR source = ANY($1))
+					UNION
+					SELECT r.id FROM runs r CROSS JOIN unnest($1::text[]) AS plugin(source)
+						WHERE r.state IN ('succeeded', 'failed', 'cancelled')
+						AND NOT EXISTS (SELECT 1 FROM cost_sources c WHERE c.run_id = r.id AND c.source = plugin.source))
 				ORDER BY id FOR KEY SHARE SKIP LOCKED)
 			INSERT INTO cost_pending (run_id, due_at, reason)
 				SELECT id, now(), 'tick' FROM due ORDER BY id
-			ON CONFLICT (run_id) DO UPDATE SET due_at = least(cost_pending.due_at, EXCLUDED.due_at)`); err != nil {
+			ON CONFLICT (run_id) DO UPDATE SET due_at = least(cost_pending.due_at, EXCLUDED.due_at)`, plugins); err != nil {
 			return err
 		}
 		_, err = tx.Exec(ctx, `DELETE FROM cost_ticks WHERE tick_at < now() - interval '1 day'`)
 		return err
 	})
 	return won && err == nil, err
+}
+
+// pollDueCostSources queues backoffs and settlement attempts between ticks.
+// Removed plugins have no configured name, so their source rows stay quiet.
+func (s *Server) pollDueCostSources(ctx context.Context) error {
+	plugins := make([]string, 0, len(s.cfg.Costs.Plugins))
+	for _, p := range s.cfg.Costs.Plugins {
+		plugins = append(plugins, p.Name)
+	}
+	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `WITH due AS (
+			SELECT id FROM runs WHERE id IN (
+				SELECT run_id FROM cost_sources WHERE status <> 'final' AND next_at <= now()
+					AND (source = 'compute' OR source = ANY($1)))
+			ORDER BY id FOR KEY SHARE SKIP LOCKED)
+			INSERT INTO cost_pending (run_id, due_at, reason)
+				SELECT id, now(), 'retry' FROM due ORDER BY id
+			ON CONFLICT (run_id) DO UPDATE SET due_at = least(cost_pending.due_at, EXCLUDED.due_at)`, plugins)
+		return err
+	})
 }
 
 // claimCosts claims up to costs.batch due Runs for this luxd, in a
@@ -202,6 +233,9 @@ func (s *Server) drainCosts(ctx context.Context) (int, error) {
 	if err != nil || len(runs) == 0 {
 		return 0, err
 	}
+	// Leave room before the lease expires for writes and for another drainer.
+	ctx, cancel := context.WithTimeout(ctx, costClaim/2)
+	defer cancel()
 	slices.Sort(runs) // each chunk locks its Runs in id order
 	var evals map[string]*computeEval
 	var pluginRuns map[string]pluginRun
@@ -220,22 +254,70 @@ func (s *Server) drainCosts(ctx context.Context) (int, error) {
 	})
 	if err != nil {
 		// Nothing was read: every claimed Run is tried again later.
-		s.releaseCosts(ctx, runs)
+		s.releaseCosts(context.WithoutCancel(ctx), runs)
 		return len(runs), err
 	}
-	pluginResults := s.reportCostPlugins(ctx, pluginRuns, pluginDue)
-	// A chunk that fails is tried again later; the others go on.
+	// Compute is committed before any external request. Plugin chunks write
+	// independently, so one slow source cannot hold up another source.
 	var first error
+	valid := map[string]bool{}
 	for chunk := range slices.Chunk(runs, costChunk) {
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			return s.writeCosts(ctx, tx, chunk, evals, now, pluginResults)
+			return s.writeComputeChunk(ctx, tx, chunk, evals, now)
 		})
 		if err != nil {
-			s.releaseCosts(ctx, chunk)
+			s.releaseCosts(context.WithoutCancel(ctx), chunk)
+			first = cmp.Or(first, err)
+		} else {
+			for _, id := range chunk {
+				valid[id] = true
+			}
+		}
+	}
+	for id := range pluginRuns {
+		if !valid[id] {
+			delete(pluginRuns, id)
+		}
+	}
+	first = cmp.Or(first, s.reportCostPlugins(ctx, pluginRuns, pluginDue, evals, now))
+	if ctx.Err() != nil {
+		s.releaseCosts(context.WithoutCancel(ctx), runs)
+		return len(runs), cmp.Or(first, ctx.Err())
+	}
+	for chunk := range slices.Chunk(runs, costChunk) {
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR KEY SHARE`, chunk); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `DELETE FROM cost_pending WHERE run_id = ANY($1) AND claimed_by = $2`, chunk, s.id)
+			return err
+		})
+		if err != nil {
+			s.releaseCosts(context.WithoutCancel(ctx), chunk)
 			first = cmp.Or(first, err)
 		}
 	}
 	return len(runs), first
+}
+
+func (s *Server) writeComputeChunk(ctx context.Context, tx pgx.Tx, runs []string, evals map[string]*computeEval, now time.Time) error {
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR KEY SHARE`, runs); err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `SELECT run_id FROM cost_pending WHERE run_id = ANY($1) AND claimed_by = $2 ORDER BY run_id FOR UPDATE`, runs, s.id)
+	if err != nil {
+		return err
+	}
+	held, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	for _, id := range held {
+		if err := s.writeCompute(ctx, tx, id, evals[id], now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // releaseCosts gives up this luxd's claims on runs after a failure, and

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -30,11 +31,13 @@ type CostLine struct {
 // CostTotal is a sum of lines in one currency: amounts in different
 // currencies are never added together.
 type CostTotal struct {
-	Family   string `json:"family,omitempty" doc:"In byFamily only."`
-	Currency string `json:"currency"`
-	Amount   string `json:"amount" doc:"final + estimate."`
-	Final    string `json:"final" doc:"The part from final lines."`
-	Estimate string `json:"estimate" doc:"The part from lines that may still change."`
+	Family      string `json:"family,omitempty" doc:"In byFamily only."`
+	DisplayName string `json:"displayName,omitempty" doc:"In byFamily when the family is described by a plugin or is compute."`
+	Color       string `json:"color,omitempty" doc:"In byFamily when a plugin supplies a color hint."`
+	Currency    string `json:"currency"`
+	Amount      string `json:"amount" doc:"final + estimate."`
+	Final       string `json:"final" doc:"The part from final lines."`
+	Estimate    string `json:"estimate" doc:"The part from lines that may still change."`
 }
 
 // CostSource is how far one source has answered for the Run.
@@ -114,9 +117,64 @@ func (s *Server) runCost(ctx context.Context, in *RunPath) (*runCostOutput, erro
 	if err != nil {
 		return nil, err
 	}
+	s.decorateCostFamilies(c.ByFamily)
+	for _, plugin := range s.cfg.Costs.Plugins {
+		found := false
+		for _, source := range c.Sources {
+			if source.Source == plugin.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			c.Sources = append(c.Sources, CostSource{Source: plugin.Name, Status: "incomplete"})
+		}
+	}
 	c.Status = costStatus(c.Sources, len(c.Lines) > 0)
 	c.Final = c.Status == "final"
 	return &runCostOutput{c}, nil
+}
+
+// Conflicts are logged once per family and pair of configured plugins in this process.
+var loggedCostFamilyConflicts sync.Map
+
+func (s *Server) decorateCostFamilies(totals []CostTotal) {
+	if len(totals) == 0 {
+		return
+	}
+	s.initCostPlugins()
+	type familyMeta struct {
+		name, color, plugin string
+	}
+	families := map[string]familyMeta{}
+	for _, p := range s.plugins {
+		p.mu.RLock()
+		if p.usable {
+			for family, d := range p.desc.Families {
+				if family == "compute" {
+					continue
+				}
+				if first, ok := families[family]; ok {
+					if first.name != d.DisplayName || first.color != d.Color {
+						key := [3]string{family, first.plugin, p.cfg.Name}
+						if _, loaded := loggedCostFamilyConflicts.LoadOrStore(key, struct{}{}); !loaded {
+							s.log.Warn("cost family metadata conflict", "family", family, "first", first.plugin, "plugin", p.cfg.Name)
+						}
+					}
+					continue
+				}
+				families[family] = familyMeta{d.DisplayName, d.Color, p.cfg.Name}
+			}
+		}
+		p.mu.RUnlock()
+	}
+	for i := range totals {
+		if totals[i].Family == "compute" {
+			totals[i].DisplayName = "Compute"
+		} else if d, ok := families[totals[i].Family]; ok {
+			totals[i].DisplayName, totals[i].Color = d.name, d.color
+		}
+	}
 }
 
 // costStatus: incomplete if any source is; final once every source is;

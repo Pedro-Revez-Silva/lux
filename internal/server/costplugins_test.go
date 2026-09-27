@@ -78,11 +78,15 @@ func TestPluginReportsAndIsolation(t *testing.T) {
 
 func TestPluginErrorsKeepLinesAndRetry(t *testing.T) {
 	mode := "ok"
+	var modeMu sync.Mutex
 	s, keys, _ := pluginFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		if pluginDescribeHandler(w, r) {
 			return
 		}
-		switch mode {
+		modeMu.Lock()
+		current := mode
+		modeMu.Unlock()
+		switch current {
 		case "down":
 			w.Header().Set("Retry-After", "4")
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -95,10 +99,10 @@ func TestPluginErrorsKeepLinesAndRetry(t *testing.T) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		out := []any{}
-		if mode != "missing" {
+		if current != "missing" {
 			for _, run := range req.Runs {
 				lines := []any{pluginLine()}
-				if mode == "duplicate" {
+				if current == "duplicate" {
 					lines = append(lines, pluginLine())
 				}
 				out = append(out, map[string]any{"runId": run.RunID, "status": "ok", "lines": lines})
@@ -114,7 +118,9 @@ func TestPluginErrorsKeepLinesAndRetry(t *testing.T) {
 	}
 	fire()
 	for _, state := range []string{"down", "slow", "duplicate", "missing"} {
+		modeMu.Lock()
 		mode = state
+		modeMu.Unlock()
 		fire()
 		_, c := getCost(t, s, keys["t1"], "r1")
 		if c.Status != "incomplete" || totals(c.Totals) != "/USD=1.25(f0,e1.25) " {
@@ -126,7 +132,9 @@ func TestPluginErrorsKeepLinesAndRetry(t *testing.T) {
 			t.Errorf("%s: no retry", state)
 		}
 	}
+	modeMu.Lock()
 	mode = "ok"
+	modeMu.Unlock()
 	execSQL(t, s, context.Background(), `UPDATE cost_sources SET next_at = now() - interval '1 second' WHERE run_id = 'r1' AND source = 'ledger'`)
 	fire()
 	if _, c := getCost(t, s, keys["t1"], "r1"); c.Status != "complete" {
@@ -216,5 +224,131 @@ func TestPluginSettlementAndFinalSourceSkippedOnTick(t *testing.T) {
 	drain(t, s)
 	if requests != 2 {
 		t.Fatalf("final source queried on tick: %d requests", requests)
+	}
+}
+
+func TestPluginRejectsRedirectWithoutLeakingTokenOrRuns(t *testing.T) {
+	var received int
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received++
+	}))
+	defer foreign.Close()
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", foreign.URL+r.URL.Path)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer local.Close()
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		s := &Server{cfg: Config{Costs: CostsConfig{Plugins: []CostPluginConfig{{Name: "ledger", URL: local.URL, TokenEnv: "LUX_TEST_COST_TOKEN"}}}}}
+		t.Setenv("LUX_TEST_COST_TOKEN", "secret")
+		s.initCostPlugins()
+		var result map[string]any
+		if err := s.plugins[0].request(context.Background(), method, "/v1/costs", map[string]any{"tenantId": "private"}, &result); err == nil {
+			t.Fatalf("%s redirect accepted", method)
+		}
+	}
+	if received != 0 {
+		t.Fatalf("redirect target received %d requests", received)
+	}
+}
+
+func TestPluginSlowChunkDoesNotBlockComputeOrOtherPlugin(t *testing.T) {
+	blocked := make(chan struct{})
+	started := make(chan struct{})
+	s, keys, _ := pluginFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if pluginDescribeHandler(w, r) {
+			return
+		}
+		close(started)
+		<-blocked
+		_ = json.NewEncoder(w).Encode(map[string]any{"protocol": 1, "runs": []any{}})
+	})
+	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/describe" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"protocol": []int{1}, "name": "fast"})
+			return
+		}
+		var req struct {
+			Runs []pluginRun `json:"runs"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewEncoder(w).Encode(map[string]any{"protocol": 1, "runs": []any{map[string]any{"runId": req.Runs[0].RunID, "status": "ok", "lines": []any{pluginLine()}}}})
+	}))
+	defer fast.Close()
+	s.cfg.Costs.Plugins = append(s.cfg.Costs.Plugins, CostPluginConfig{Name: "fast", URL: fast.URL, Timeout: time.Second, MaxBatch: 1})
+	s.plugins = append(s.plugins, &costPlugin{cfg: s.cfg.Costs.Plugins[1], client: fast.Client(), usable: true})
+	execSQL(t, s, context.Background(), `INSERT INTO cost_pending (run_id, due_at, reason) VALUES ('r1', now(), 'tick')`)
+	done := make(chan error, 1)
+	go func() { _, err := s.drainCosts(context.Background()); done <- err }()
+	<-started
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		_, c := getCost(t, s, keys["t1"], "r1")
+		if len(c.Sources) >= 2 && c.Sources[0].Source == "compute" && c.Sources[1].Source == "fast" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_, c := getCost(t, s, keys["t1"], "r1")
+	if len(c.Sources) < 2 || c.Sources[0].Source != "compute" || c.Sources[1].Source != "fast" {
+		t.Errorf("compute and fast source blocked by slow plugin: %+v", c.Sources)
+	}
+	close(blocked)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPluginFailedChunkKeepsHealthFailing(t *testing.T) {
+	var requests int
+	s, _, _ := pluginFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if pluginDescribeHandler(w, r) {
+			return
+		}
+		requests++
+		if requests == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		var req struct {
+			Runs []pluginRun `json:"runs"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewEncoder(w).Encode(map[string]any{"protocol": 1, "runs": []any{map[string]any{"runId": req.Runs[0].RunID, "status": "ok"}}})
+	})
+	execSQL(t, s, context.Background(), `INSERT INTO cost_pending (run_id, due_at, reason) VALUES ('r1', now(), 'tick'), ('r2', now(), 'tick')`)
+	drain(t, s)
+	s.plugins[0].mu.RLock()
+	failing := !s.plugins[0].failing.IsZero()
+	s.plugins[0].mu.RUnlock()
+	if !failing {
+		t.Fatal("later successful chunk cleared health")
+	}
+}
+
+func TestStoppedSettlementRestartsOnTerminalTransition(t *testing.T) {
+	s, keys, _ := pluginFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if pluginDescribeHandler(w, r) {
+			return
+		}
+		var req struct {
+			Runs []pluginRun `json:"runs"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewEncoder(w).Encode(map[string]any{"protocol": 1, "runs": []any{map[string]any{"runId": req.Runs[0].RunID, "status": "ok", "final": false, "lines": []any{pluginLine()}}}})
+	})
+	finish(t, s, "t1", "r1", StateStopped)
+	drain(t, s)
+	execSQL(t, s, context.Background(), `UPDATE cost_sources SET settles_left = 0, next_at = NULL WHERE run_id = 'r1' AND source = 'ledger'`)
+	finish(t, s, "t1", "r1", StateCancelled)
+	drain(t, s)
+	_, c := getCost(t, s, keys["t1"], "r1")
+	if c.Final || c.Status != "complete" || len(c.Lines) != 1 || c.Lines[0].Final {
+		t.Fatalf("terminal answer reused stopped settlement: %+v", c)
+	}
+	var left *int
+	systemScan(t, s, `SELECT settles_left FROM cost_sources WHERE run_id = 'r1' AND source = 'ledger'`, nil, &left)
+	if left == nil || *left != 1 {
+		t.Fatalf("terminal settlement left: %v", left)
 	}
 }
