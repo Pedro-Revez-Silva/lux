@@ -62,6 +62,11 @@ type CostsConfig struct {
 	DrainEvery time.Duration
 	// Batch is how many Runs one drain claims.
 	Batch int
+	// ComputeEC2 enables provider price lookups; PricesRefresh controls the
+	// on-demand cache lifetime. Prices is keyed by provider, not by host.
+	ComputeEC2    bool
+	PricesRefresh time.Duration
+	Prices        map[string]PriceProvider
 }
 
 // costLoop ticks and drains, when costs are enabled. The drainer wakes at
@@ -76,6 +81,7 @@ func (s *Server) costLoop(ctx context.Context) {
 	for ctx.Err() == nil {
 		woken := s.wakeups.next("")
 		if !time.Now().Before(nextTick) {
+			s.refreshPrices(ctx)
 			nextTick = s.tryCostTick(ctx, nextTick)
 		}
 		n, err := s.drainCosts(ctx)

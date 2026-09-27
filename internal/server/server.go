@@ -171,6 +171,7 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 	cfg.Costs.Every = cmp.Or(cfg.Costs.Every, DefaultCostsEvery)
 	cfg.Costs.DrainEvery = cmp.Or(cfg.Costs.DrainEvery, DefaultCostsDrainEvery)
 	cfg.Costs.Batch = cmp.Or(cfg.Costs.Batch, DefaultCostsBatch)
+	cfg.Costs.PricesRefresh = cmp.Or(cfg.Costs.PricesRefresh, DefaultPricesRefresh)
 	s := &Server{
 		cfg:         cfg,
 		db:          db,
