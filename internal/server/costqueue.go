@@ -778,8 +778,12 @@ func resolvePlacementRate(ctx context.Context, tx pgx.Tx, hostID string, start t
 					AND h.provision_requested_at IS NOT NULL
 					AND coalesce(h.instance_type, h.launch_template->>'instanceType', '') = t.kind
 					AND coalesce(h.market, '') = t.market
-					AND ((t.market = 'spot' AND (h.id = t.id OR (t.zone <> '' AND h.zone = t.zone)) AND r.source LIKE '%-spot-history')
-						OR (t.market = 'on-demand' AND (h.id = t.id OR (t.region <> '' AND h.launch_template->>'region' = t.region)) AND r.source LIKE '%-pricing')))
+					AND ((t.market = 'spot' AND (h.id = t.id OR (t.zone <> '' AND h.zone = t.zone))
+						AND ((p.provider IS NOT NULL AND r.source = p.provider || '-spot-history')
+							OR (p.provider IS NULL AND r.source LIKE '%-spot-history')))
+						OR (t.market = 'on-demand' AND (h.id = t.id OR (t.region <> '' AND h.launch_template->>'region' = t.region))
+							AND ((p.provider IS NOT NULL AND r.source = p.provider || '-pricing')
+								OR (p.provider IS NULL AND r.source LIKE '%-pricing')))))
 			UNION ALL
 			SELECT pc.fetched_at, NULL::timestamptz, pc.per_hour, pc.currency, 'price-cache',
 				coalesce(c.cap_cpus, t.cpus), coalesce(c.cap_memory, t.memory), false, false
