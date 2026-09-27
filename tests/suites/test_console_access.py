@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 import requests
 
-from conftest import generic
-from env import ALPINE_IMAGE
+from conftest import Runners, generic
+from env import ALPINE_IMAGE, wait_until
 from fake_access import FakeAccess
 
 
@@ -46,6 +46,18 @@ def test_an_access_user_is_an_operator(env, access, tenant_factory):
     assert [e["data"]["by"] for e in t.events(run_id, "cancel.requested")] == ["ada@example.com"]
 
 
+def test_operator_allowlist_ignores_email_case(env, access, tenant_factory):
+    other = tenant_factory()
+    run_id = other.submit(generic(ALPINE_IMAGE, "true", placement={"requires": {"nowhere": "yes"}}))
+    hdr = {"Cf-Access-Jwt-Assertion": access.token("ADA@EXAMPLE.COM")}
+    me = _get(env, "/v1/whoami", headers=hdr)
+    assert me.status_code == 200 and me.json()["operator"] is True, me.text
+    assert me.json()["email"] == "ADA@EXAMPLE.COM"
+    runs = _get(env, "/v1/runs", headers=hdr, params={"tenant": other.tenant_id, "limit": 1000})
+    assert runs.status_code == 200 and run_id in {r["id"] for r in runs.json()["runs"]}, runs.text
+    other.run("cancel", run_id)
+
+
 def test_access_tenant_is_isolated(env, access, tenant_factory):
     other = tenant_factory()
     run_id = other.submit(generic(ALPINE_IMAGE, "true", placement={"requires": {"nowhere": "yes"}}))
@@ -73,6 +85,103 @@ def test_access_tenant_is_isolated(env, access, tenant_factory):
     assert events.status_code == 200, events.text
     assert [e["data"]["by"] for e in events.json()["events"] if e["type"] == "cancel.requested"] == ["ordinary@example.com"]
     other.run("cancel", run_id)
+
+
+def test_access_status_and_history_are_tenant_scoped(env, access, tenant_factory):
+    other = tenant_factory()
+    hdr = {"Cf-Access-Jwt-Assertion": access.token("ordinary@example.com")}
+    operator = {"Cf-Access-Jwt-Assertion": access.token("ada@example.com")}
+    spec = generic(ALPINE_IMAGE, "true", placement={"requires": {"nowhere": "yes"}})
+    mine = requests.post(f"{env.luxd_url}/v1/runs", headers=hdr, json=spec, timeout=10)
+    assert mine.status_code in (200, 201, 202), mine.text
+    own_id = mine.json()["id"]
+    other_ids = [other.submit(spec) for _ in range(2)]
+    try:
+        for path in ("/v1/status", f"/v1/status?tenant={other.tenant_id}"):
+            r = _get(env, path, headers=hdr)
+            assert r.status_code == 200 and r.json()["queued"] == 1, r.text
+        foreign = _get(env, "/v1/status", headers=operator, params={"tenant": other.tenant_id})
+        assert foreign.status_code == 200 and foreign.json()["queued"] == 2, foreign.text
+
+        def sampled(headers, tenant=None):
+            r = _get(env, "/v1/history", headers=headers,
+                     params={"since": "5m", "res": 0, **({"tenant": tenant} if tenant else {})})
+            assert r.status_code == 200, r.text
+            return r.json()["samples"]
+
+        wait_until(lambda: any(s.get("queued") == 2 for s in sampled(operator, other.tenant_id)),
+                   30, 1, "foreign tenant never had two queued Runs in history")
+        own_samples = sampled(hdr)
+        narrowed_samples = sampled(hdr, other.tenant_id)
+        assert own_samples and any(s.get("queued") == 1 for s in own_samples), own_samples
+        assert narrowed_samples and any(s.get("queued") == 1 for s in narrowed_samples), narrowed_samples
+        assert all(s.get("queued", 0) < 2 for s in own_samples + narrowed_samples)
+    finally:
+        requests.post(f"{env.luxd_url}/v1/runs/{own_id}/cancel", headers=hdr, timeout=10)
+        for run_id in other_ids:
+            other.run("cancel", run_id)
+
+
+def test_access_hosts_and_pools_are_tenant_scoped(env, access, tenant_factory, hosts):
+    other = tenant_factory()
+    hdr = {"Cf-Access-Jwt-Assertion": access.token("ordinary@example.com")}
+    operator = {"Cf-Access-Jwt-Assertion": access.token("ada@example.com")}
+    own_name, foreign_name = "access-own-pool", f"access-foreign-{other.tenant_id[-6:]}"
+    own_host, foreign_host = "access-own-host", "access-foreign-host"
+    own = Runners(env, other)
+    foreign = Runners(env, other)
+    tenants = _get(env, "/v1/tenants", headers=operator)
+    assert tenants.status_code == 200, tenants.text
+    default_id = next(t["id"] for t in tenants.json()["tenants"] if t["name"] == "access-default")
+    own_token = env.luxd_admin("create-host-token", "--tenant", default_id)["token"]
+    other_pool = {"name": foreign_name, "provider": "static", "minHosts": 0, "maxHosts": 0, "warmHosts": 0}
+    created = requests.post(f"{env.luxd_url}/v1/pools", headers={"Authorization": f"Bearer {other.api_key}"},
+                            json=other_pool, timeout=10)
+    assert created.status_code == 200, created.text
+    try:
+        own.start(hosts[0], token=own_token, name=own_host, wait=False)
+        wait_until(lambda: any(h["name"] == own_host and h["state"] == "ready"
+                               for h in _get(env, "/v1/hosts", headers=hdr).json()["hosts"]),
+                   30, 0.3, "Access tenant host never became ready")
+        foreign.start(hosts[1], name=foreign_host)
+        foreign_id = next(h["id"] for h in other.json("hosts", "ls") if h["name"] == foreign_host)
+        for path in ("/v1/hosts", f"/v1/hosts?tenant={other.tenant_id}"):
+            r = _get(env, path, headers=hdr)
+            assert r.status_code == 200, r.text
+            names = {h["name"] for h in r.json()["hosts"]}
+            assert own_host in names and foreign_host not in names, r.text
+        for suffix in ("", f"?tenant={other.tenant_id}"):
+            assert _get(env, f"/v1/hosts/{foreign_id}{suffix}", headers=hdr).status_code == 404
+            assert _get(env, f"/v1/hosts/{foreign_id}/history{suffix}", headers=hdr).status_code == 404
+        visible = _get(env, f"/v1/hosts/{foreign_id}", headers=operator)
+        assert visible.status_code == 200 and visible.json()["name"] == foreign_host, visible.text
+        own_visible = _get(env, f"/v1/hosts/{own_host}/history", headers=hdr)
+        assert own_visible.status_code == 200, own_visible.text
+
+        pool = {"name": own_name, "provider": "static", "minHosts": 0, "maxHosts": 0, "warmHosts": 0}
+        created = requests.post(f"{env.luxd_url}/v1/pools", headers=hdr, json=pool, timeout=10)
+        assert created.status_code == 200, created.text
+        pool["maxHosts"] = 2
+        updated = requests.post(f"{env.luxd_url}/v1/pools", headers=hdr, json=pool, timeout=10)
+        assert updated.status_code == 200, updated.text
+        for path in ("/v1/pools", f"/v1/pools?tenant={other.tenant_id}"):
+            r = _get(env, path, headers=hdr)
+            assert r.status_code == 200, r.text
+            pools = {p["name"]: p for p in r.json()["pools"]}
+            assert pools[own_name]["maxHosts"] == 2 and foreign_name not in pools, r.text
+        forbidden = requests.delete(f"{env.luxd_url}/v1/pools/{foreign_name}", headers=hdr,
+                                    params={"tenant": other.tenant_id}, timeout=10)
+        assert forbidden.status_code == 404, forbidden.text
+        assert any(p["name"] == foreign_name for p in other.json("pools", "ls"))
+        deleted = requests.delete(f"{env.luxd_url}/v1/pools/{own_name}", headers=hdr, timeout=10)
+        assert deleted.status_code == 204, deleted.text
+        assert own_name not in {p["name"] for p in _get(env, "/v1/pools", headers=hdr).json()["pools"]}
+    finally:
+        own.stop_all()
+        foreign.stop_all()
+        requests.delete(f"{env.luxd_url}/v1/pools/{own_name}", headers=hdr, timeout=10)
+        requests.delete(f"{env.luxd_url}/v1/pools/{foreign_name}",
+                        headers={"Authorization": f"Bearer {other.api_key}"}, timeout=10)
 
 
 def test_missing_default_tenant_denies_nonoperators(env, access):
