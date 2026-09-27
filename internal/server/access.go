@@ -35,13 +35,13 @@ type cfAccess struct {
 	verifier *oidc.IDTokenVerifier
 	client   *http.Client
 
-	mu    sync.Mutex
-	names map[string]cachedIdentity
+	mu         sync.Mutex
+	identities map[string]cachedIdentity
 }
 
 type cachedIdentity struct {
 	identity
-	at time.Time
+	until time.Time
 }
 
 // identity is what Access's identity endpoint says of a user.
@@ -62,10 +62,10 @@ func newCFAccess(team, aud string) *cfAccess {
 	team = strings.TrimRight(team, "/")
 	keys := oidc.NewRemoteKeySet(context.Background(), team+"/cdn-cgi/access/certs")
 	return &cfAccess{
-		team:     team,
-		verifier: oidc.NewVerifier(team, keys, &oidc.Config{ClientID: aud}),
-		client:   &http.Client{Timeout: 5 * time.Second},
-		names:    map[string]cachedIdentity{},
+		team:       team,
+		verifier:   oidc.NewVerifier(team, keys, &oidc.Config{ClientID: aud}),
+		client:     &http.Client{Timeout: 5 * time.Second},
+		identities: map[string]cachedIdentity{},
 	}
 }
 
@@ -103,7 +103,7 @@ func (a *cfAccess) user(ctx context.Context, token string) (email string, id ide
 	if err := t.Claims(&claims); err != nil || !ValidAccessOperatorEmail(claims.Email) {
 		return "", identity{}, errf(http.StatusUnauthorized, "unauthorized", "the Cloudflare Access token names no valid user")
 	}
-	return claims.Email, a.identity(ctx, claims.Email, token), nil
+	return claims.Email, a.lookupIdentity(ctx, claims.Email, token), nil
 }
 
 // ValidAccessOperatorEmail accepts a single plain ASCII mailbox.
@@ -124,38 +124,44 @@ func isASCII(s string) bool {
 	return true
 }
 
-// identity is the user's name and picture from Access's identity endpoint
-// (the token's claims carry only the email), cached for an hour; the name
-// is the email if unknown.
-func (a *cfAccess) identity(ctx context.Context, email, token string) identity {
+// lookupIdentity is the user's name and picture from Access's identity
+// endpoint (the token's claims carry only the email), cached for an hour;
+// the name is the email if unknown. A failed lookup is cached for a minute
+// only, so a blip does not hide the name for long.
+func (a *cfAccess) lookupIdentity(ctx context.Context, email, token string) identity {
 	a.mu.Lock()
-	c, ok := a.names[email]
+	c, ok := a.identities[email]
 	a.mu.Unlock()
-	if ok && time.Since(c.at) < time.Hour {
+	if ok && time.Now().Before(c.until) {
 		return c.identity
 	}
-	id := identity{Name: email}
+	id, ttl := identity{Name: email}, time.Minute
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.team+"/cdn-cgi/access/get-identity", nil)
 	if err == nil {
 		req.AddCookie(&http.Cookie{Name: "CF_Authorization", Value: token})
 		if resp, err := a.client.Do(req); err == nil {
+			// Picture is any JSON: a provider that sends something other
+			// than a string must not cost the name.
 			var body struct {
 				Name       string `json:"name"`
 				OIDCFields struct {
-					Picture string `json:"picture"`
+					Picture any `json:"picture"`
 				} `json:"oidc_fields"`
 			}
 			if resp.StatusCode == http.StatusOK && json.NewDecoder(resp.Body).Decode(&body) == nil {
 				if body.Name != "" {
 					id.Name = body.Name
 				}
-				id.Picture = httpsURL(body.OIDCFields.Picture)
+				if pic, ok := body.OIDCFields.Picture.(string); ok {
+					id.Picture = httpsURL(pic)
+				}
+				ttl = time.Hour
 			}
 			resp.Body.Close()
 		}
 	}
 	a.mu.Lock()
-	a.names[email] = cachedIdentity{id, time.Now()}
+	a.identities[email] = cachedIdentity{id, time.Now().Add(ttl)}
 	a.mu.Unlock()
 	return id
 }
