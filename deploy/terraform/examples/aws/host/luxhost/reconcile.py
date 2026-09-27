@@ -103,7 +103,7 @@ class Run:
         return {"luxd": "luxd.service" in changed_units, "cloudflared": "cloudflared.service" in changed_units}
 
     def luxd(self, infra: dict, want: desired_mod.Desired, creds: dict, restart: dict) -> str:
-        """luxd.toml, the version switch and the luxd restart. Returns the
+        """luxd.toml and the version switch. Returns the
         installed version ("" if none). A failed switch is kept in
         self.deferred_error so the remaining steps still run."""
         host = self.host
@@ -112,34 +112,39 @@ class Run:
         toml = luxdconf.render(infra, self.boot.region, want, creds, ip, host.paths.runner_bin_dir)
         installed = release.installed_version(host.paths.install_root)
         deploying = want.lux_version is not None and want.lux_version != installed
-        if write_if_changed(os.path.join(host.paths.etc_lux, "luxd.toml"), toml, 0o600):
-            self.changed.append("luxd.toml")
-            restart["luxd"] = True
+        config_path = os.path.join(host.paths.etc_lux, "luxd.toml")
+        previous = read_file(config_path)
+        if installed and not deploying and want.cloudflare_access and previous != toml:
+            binary = os.path.join(host.paths.install_root, "current", "bin", "luxd")
+            if not release.check_config(host, binary, toml, config_path):
+                raise HostError("candidate config is not supported by installed luxd; keeping installed config")
 
         if deploying:
             self.step = "version"
             try:
                 release.deploy(
                     host, want.lux_version, want.release_base_url, creds["migrate_dsn"],
-                    f"http://127.0.0.1:{infra['luxd_port']}/health",
+                    f"http://127.0.0.1:{infra['luxd_port']}/health", config_path, toml,
                 )
+                if previous != toml:
+                    self.changed.append("luxd.toml")
                 self.changed.append(f"version:{want.lux_version}")
                 installed = want.lux_version
             except HostError as e:
                 # The previous version is still in place: keep the tunnel
                 # and timers reconciled, and fail the run at the end.
                 self.deferred_error = HostError(f"version: {e}")
+        else:
+            with release.pair_lock(host.paths.install_root):
+                if write_if_changed(config_path, toml, 0o600):
+                    self.changed.append("luxd.toml")
+                    restart["luxd"] = True
         # A successful deploy has restarted luxd on the new config already.
-        if not deploying or self.deferred_error:
-            if restart["luxd"] and installed and release.is_luxd_active(host):
-                host.run(["systemctl", "restart", "luxd"])
-                self.changed.append("luxd-restarted")
+        self.restart_luxd = (not deploying or self.deferred_error) and restart["luxd"] and bool(installed)
         return installed
 
-    def enable(self, installed: str) -> None:
+    def enable(self) -> None:
         self.step = "enable"
-        if installed and units.enable_now(self.host, "luxd.service"):
-            self.changed.append("enable:luxd")
         for timer in units.TIMERS:
             if units.enable_now(self.host, timer):
                 self.changed.append(f"enable:{timer}")
@@ -161,16 +166,28 @@ class Run:
             self.changed.append("cloudflared-restarted")
 
     def run(self) -> str:
+        self.step = "switch-recovery"
+        if release.recover(self.host.paths.install_root):
+            self.changed.append("switch-recovered")
         self.step = "ssm"
         infra = load_infra(self.host, self.boot)
         self.sync_checkout(infra)
         want = self.load_desired()
+        self.step = "console-access"
+        if infra["cf_access_team"] and infra["cf_access_aud"]:
+            if not want.cloudflare_access:
+                raise HostError("console.cloudflare_access needs operators and default_tenant in private lux-host.toml")
+        elif want.cloudflare_access:
+            raise HostError("console.cloudflare_access needs a Cloudflare Access team and AUD in SSM")
+        elif infra["cf_access_team"] or infra["cf_access_aud"]:
+            raise HostError("Cloudflare Access needs both team and AUD in SSM")
         self.remove_legacy()
         self.packages()
         creds = self.postgres(infra)
         restart = self.write_units(infra)
         installed = self.luxd(infra, want, creds, restart)
-        self.enable(installed)
+        self.installed = installed
+        self.enable()
         self.cloudflared(infra, restart)
         if self.deferred_error:
             self.step = "version"
@@ -199,15 +216,31 @@ def main(host: Host | None = None, bootstrap_path: str | None = None,
             reexec(*args)
 
         run = None
+        version = "none"
+        error = None
         try:
             boot = load_bootstrap(bootstrap_path)
             run = Run(host, boot, reexec_unlocked, environ)
             version = run.run()
         except Exception as e:  # noqa: BLE001 - every failure ends in the summary line
-            installed = release.installed_version(host.paths.install_root) or "none"
-            step = run.step if run else "bootstrap"
-            detail = str(e) if isinstance(e, HostError) else repr(e)
-            print(summary("error", installed, run.changed if run else [], f"{step}: {detail}"), flush=True)
-            return 1
-    print(summary("ok", version, run.changed), flush=True)
+            error = (run.step if run else "bootstrap", e)
+    if run and getattr(run, "installed", None):
+        step = "enable"
+        try:
+            if units.enable_now(host, "luxd.service"):
+                run.changed.append("enable:luxd")
+            elif getattr(run, "restart_luxd", False) and release.is_luxd_active(host):
+                step = "luxd-restart"
+                host.run(["systemctl", "restart", "luxd"])
+                run.changed.append("luxd-restarted")
+        except Exception as e:  # noqa: BLE001 - include restart failures in the summary
+            if error is None:
+                error = (step, e)
+    if error:
+        step, e = error
+        installed = release.installed_version(host.paths.install_root) or "none"
+        detail = str(e) if isinstance(e, HostError) else repr(e)
+        print(summary("error", installed, run.changed if run else [], f"{step}: {detail}"), flush=True)
+        return 1
+    print(summary("ok", version, run.changed if run else []), flush=True)
     return 0

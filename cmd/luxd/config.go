@@ -108,8 +108,10 @@ type config struct {
 		// Auth: "key" (paste an API key) or "cloudflare-access".
 		Auth             string `toml:"auth" env:"LUX_CONSOLE_AUTH"`
 		CloudflareAccess struct {
-			Team string `toml:"team" env:"LUX_CF_ACCESS_TEAM"`
-			AUD  string `toml:"aud" env:"LUX_CF_ACCESS_AUD"`
+			Team          string   `toml:"team" env:"LUX_CF_ACCESS_TEAM"`
+			AUD           string   `toml:"aud" env:"LUX_CF_ACCESS_AUD"`
+			Operators     []string `toml:"operators" env:"LUX_CF_ACCESS_OPERATORS"`
+			DefaultTenant string   `toml:"default_tenant" env:"LUX_CF_ACCESS_DEFAULT_TENANT"`
 		} `toml:"cloudflare_access"`
 	} `toml:"console"`
 }
@@ -440,8 +442,23 @@ func (c config) check() error {
 	switch c.Console.Auth {
 	case "key":
 	case "cloudflare-access":
-		if c.Console.CloudflareAccess.Team == "" || c.Console.CloudflareAccess.AUD == "" {
+		cf := c.Console.CloudflareAccess
+		if cf.Team == "" || cf.AUD == "" {
 			problems = append(problems, "console.auth cloudflare-access needs console.cloudflare_access.team and .aud (LUX_CF_ACCESS_TEAM, LUX_CF_ACCESS_AUD)")
+		}
+		if cf.DefaultTenant == "" || cf.DefaultTenant != strings.TrimSpace(cf.DefaultTenant) {
+			problems = append(problems, "console.cloudflare_access.default_tenant (LUX_CF_ACCESS_DEFAULT_TENANT) must name a tenant")
+		}
+		if len(cf.Operators) == 0 {
+			problems = append(problems, "console.cloudflare_access.operators (LUX_CF_ACCESS_OPERATORS) needs at least one email")
+		}
+		seen := map[string]bool{}
+		for _, email := range cf.Operators {
+			if !server.ValidAccessOperatorEmail(email) || seen[strings.ToLower(email)] {
+				problems = append(problems, "console.cloudflare_access.operators (LUX_CF_ACCESS_OPERATORS) must contain distinct plain email addresses")
+				break
+			}
+			seen[strings.ToLower(email)] = true
 		}
 	default:
 		problems = append(problems, fmt.Sprintf("console.auth (LUX_CONSOLE_AUTH) %q: want key or cloudflare-access", c.Console.Auth))

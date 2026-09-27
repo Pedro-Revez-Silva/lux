@@ -15,6 +15,8 @@ def primary_ip() -> str:
 
 
 def _value(v) -> str:
+    if isinstance(v, list):
+        return "[" + ", ".join(_value(item) for item in v) + "]"
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, (int, float)):
@@ -41,7 +43,7 @@ def render(infra: dict, region: str, desired: Desired, creds: dict, ip: str, run
         "s3": {"bucket": infra["blob_bucket"], "region": region},
         **desired.luxd_tables,
         "console": {"auth": "cloudflare-access" if team else "key"},
-        "console.cloudflare_access": {"team": team, "aud": infra["cf_access_aud"]},
+        "console.cloudflare_access": {"team": team, "aud": infra["cf_access_aud"], **desired.cloudflare_access},
     }
     lines = ["# Written by lux-reconcile from SSM and lux-host.toml; edits here are overwritten."]
     lines += [f"{k} = {_value(v)}" for k, v in top.items()]

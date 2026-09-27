@@ -53,7 +53,9 @@ def test_switch_points_every_link_at_the_new_version(layout):
 
 def test_restore_after_switch_returns_every_link_to_v1(layout):
     current_link, links, old_dir, new_dir = layout
-    previous = release.switch_symlinks(new_dir, current_link, links)
+    previous = {path: os.readlink(path) if os.path.islink(path) else None
+                for path in (current_link, *links)}
+    release.switch_symlinks(new_dir, current_link, links)
     release.restore_symlinks(previous, current_link, links)
     assert os.path.realpath(current_link) == old_dir
     for link_path in links:
@@ -118,9 +120,9 @@ def test_verify_sha256_refuses_a_mismatch_and_an_unlisted_tarball(tmp_path):
 
 def test_run_migrate_reports_success_and_failure():
     seen = []
-    assert release.run_migrate(fake_host(0, seen=seen), "/v2/bin/luxd", "postgres://x")[0]
-    assert seen[0][0] == ["/v2/bin/luxd", "migrate"] and seen[0][1]["LUX_DATABASE_URL"] == "postgres://x"
-    ok, stderr = release.run_migrate(fake_host(1, stderr="boom"), "/v2/bin/luxd", "postgres://x")
+    assert release.run_migrate(fake_host(0, seen=seen), "/v2/bin/luxd", "postgres://x", "/staged/luxd.toml")[0]
+    assert seen[0][0] == ["/v2/bin/luxd", "--config", "/staged/luxd.toml", "migrate"] and seen[0][1]["LUX_DATABASE_URL"] == "postgres://x"
+    ok, stderr = release.run_migrate(fake_host(1, stderr="boom"), "/v2/bin/luxd", "postgres://x", "/staged/luxd.toml")
     assert not ok and stderr == "boom"
 
 

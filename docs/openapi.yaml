@@ -1655,6 +1655,8 @@ components:
           type: string
         operator:
           type: boolean
+        picture:
+          type: string
         scopes:
           items:
             type: string

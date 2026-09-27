@@ -25,9 +25,9 @@ type Principal struct {
 	KeyID    string
 	Scopes   []string
 	Operator bool
-	// Email and Name: a person's, when authenticated as one (console
-	// auth) rather than by an API key.
-	Email, Name string
+	// Email, Name and Picture (a photo's URL, if any): a person's, when
+	// authenticated as one (console auth) rather than by an API key.
+	Email, Name, Picture string
 }
 
 // Actor names who a request is from in events: the person, or the key.
@@ -193,13 +193,20 @@ func (s *Server) narrow(ctx context.Context, p Principal, ref string) (Principal
 	if !p.Operator || ref == "" {
 		return p, nil
 	}
+	id, err := s.resolveTenant(ctx, ref)
+	p.TenantID = id
+	return p, err
+}
+
+func (s *Server) resolveTenant(ctx context.Context, ref string) (string, error) {
+	var id string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT id FROM tenants WHERE id = $1 OR name = $1 ORDER BY id = $1 DESC LIMIT 1`, ref).Scan(&p.TenantID)
+		return tx.QueryRow(ctx, `SELECT id FROM tenants WHERE id = $1 OR name = $1 ORDER BY id = $1 DESC LIMIT 1`, ref).Scan(&id)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return p, errf(http.StatusNotFound, "not_found", "no tenant %s", ref)
+		return "", errf(http.StatusNotFound, "not_found", "no tenant %s", ref)
 	}
-	return p, err
+	return id, err
 }
 
 // scope is the RLS scope of a read: the principal's tenant, or every

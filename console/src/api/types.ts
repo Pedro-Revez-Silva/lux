@@ -217,6 +217,8 @@ export interface WhoAmI {
   /** A person signed in through luxd's console auth (no key). */
   email?: string;
   name?: string;
+  /** Their photo's URL, from the identity provider (https). */
+  picture?: string;
   scopes: string[];
   /** key: the console needs an API key; cloudflare-access: Access signs people in. */
   consoleAuth: "key" | "cloudflare-access";
