@@ -9,7 +9,7 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-func TestFinalCostHoursUpgradeSeedsFinalSources(t *testing.T) {
+func TestFinalCostHoursUpgradeDefersSeeding(t *testing.T) {
 	owner, _ := emptyDB(t)
 	ctx := context.Background()
 	if _, err := store.MigrateTo(ctx, owner, "lux_app", "026_cost_host_refresh"); err != nil {
@@ -36,27 +36,8 @@ func TestFinalCostHoursUpgradeSeedsFinalSources(t *testing.T) {
 	if _, err := store.Migrate(ctx, owner, "lux_app"); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := conn.Query(ctx, `SELECT run_id, source, next_hour FROM cost_final_hour_backfill ORDER BY source`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	var sources []string
-	for rows.Next() {
-		var run, source string
-		var at time.Time
-		if err := rows.Scan(&run, &source, &at); err != nil {
-			t.Fatal(err)
-		}
-		if run != "r1" || !at.Equal(from) {
-			t.Errorf("cursor %s/%s at %s, want r1 at %s", run, source, at, from)
-		}
-		sources = append(sources, source)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if len(sources) != 2 || sources[0] != "compute" || sources[1] != "ledger" {
-		t.Errorf("seeded sources: %v", sources)
+	var count int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM cost_final_hour_backfill`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("upgrade synchronously seeded %d cursors: %v", count, err)
 	}
 }

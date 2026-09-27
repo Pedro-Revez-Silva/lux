@@ -128,7 +128,8 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 			WHERE (c.retry_at IS NULL OR c.retry_at <= $2)
 				AND greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1) <= date_trunc('hour', $2::timestamptz)
 				AND (h.terminated_at IS NULL OR h.terminated_at > greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1))
-			ORDER BY 2, h.id LIMIT $3`, oldest, now, s.cfg.Costs.Batch)
+			ORDER BY CASE WHEN greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1) = date_trunc('hour', $2::timestamptz) THEN 0 ELSE 1 END,
+				2, h.id LIMIT $3`, oldest, now, max(1, s.cfg.Costs.Batch-1))
 		if err != nil {
 			return err
 		}
@@ -147,6 +148,31 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 	})
 	if err != nil {
 		return err
+	}
+	if len(jobs) < s.cfg.Costs.Batch {
+		ids := make([]string, 0, len(jobs))
+		for _, job := range jobs {
+			ids = append(ids, job.id)
+		}
+		var job struct {
+			id   string
+			hour time.Time
+		}
+		err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT h.id, greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1)
+				FROM hosts h LEFT JOIN cost_host_refresh c ON c.host_id = h.id
+				WHERE (c.retry_at IS NULL OR c.retry_at <= $2)
+					AND greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1) <= date_trunc('hour', $2::timestamptz)
+					AND (h.terminated_at IS NULL OR h.terminated_at > greatest(coalesce(c.next_hour, date_trunc('hour', coalesce(h.provision_requested_at, h.registered_at, h.created_at))), $1))
+					AND h.id <> ALL($3::text[])
+				ORDER BY 2, h.id LIMIT 1`, oldest, now, ids).Scan(&job.id, &job.hour)
+		})
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if err == nil {
+			jobs = append(jobs, job)
+		}
 	}
 	for _, job := range jobs {
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {

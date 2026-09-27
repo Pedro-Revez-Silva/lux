@@ -306,6 +306,130 @@ func TestFinalCostHoursBackfillDropsEmptyAndNoLongerFinalSources(t *testing.T) {
 	}
 }
 
+func TestFinalCostHoursBackfillWaitsForFutureHour(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 2
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	due := time.Now().UTC().Truncate(time.Hour)
+	future := due.Add(time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES ('r1', 't1', 'ledger', 'final')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final)
+		VALUES ('t1', 'r1', 'ledger', 'future', 'ai', 6, 'USD', $1, $2, true)`, due, future.Add(time.Hour))
+	execSQL(t, s, ctx, `INSERT INTO cost_final_hour_backfill (run_id, source, next_hour) VALUES ('r1', 'ledger', $1)`, due)
+	for pass := 0; pass < 2; pass++ {
+		if err := peer(s, fmt.Sprintf("future-pass-%d", pass)).backfillFinalCostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var count int
+		var amount string
+		systemScan(t, s, `SELECT count(*), trim_scale(sum(amount))::text FROM cost_hourly
+			WHERE run_id = 'r1' AND source = 'ledger' AND hour = $1`, []any{due}, &count, &amount)
+		if count != 1 || amount != "3" {
+			t.Fatalf("pass %d: due hour has %d rows totaling %s, want one row totaling 3", pass, count, amount)
+		}
+		systemScan(t, s, `SELECT count(*) FROM cost_hourly WHERE run_id = 'r1' AND source = 'ledger' AND hour = $1`, []any{future}, &count)
+		if count != 0 {
+			t.Fatalf("pass %d: projected %d future-hour rows before the hour was due", pass, count)
+		}
+		var next time.Time
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT next_hour FROM cost_final_hour_backfill WHERE run_id = 'r1' AND source = 'ledger'`).Scan(&next)
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			t.Fatalf("pass %d: future-hour cursor discarded before the hour was due", pass)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !next.Equal(future) {
+			t.Fatalf("pass %d: cursor %s, want future hour %s retained", pass, next, future)
+		}
+	}
+	if err := peer(s, "after-hour").backfillFinalCostHoursAt(ctx, future.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	var projected string
+	systemScan(t, s, `SELECT trim_scale(sum(amount))::text FROM cost_hourly
+		WHERE run_id = 'r1' AND source = 'ledger' AND hour = $1`, []any{future}, &projected)
+	if projected != "3" {
+		t.Errorf("future hour after arrival: %s, want 3", projected)
+	}
+}
+
+func TestFinalCostHoursDiscoveryRetainedPages(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 1
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	old := time.Now().UTC().Truncate(time.Hour).Add(-72 * time.Hour)
+	recent := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES
+		('r1', 't1', 'old', 'final'), ('r1', 't1', 'ledger', 'final'), ('r2', 't2', 'ledger', 'final')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final) VALUES
+		('t1', 'r1', 'old', 'a', 'ai', 1, 'USD', $1, $2, true),
+		('t1', 'r1', 'ledger', 'a', 'ai', 1, 'USD', $3, $4, true),
+		('t2', 'r2', 'ledger', 'a', 'ai', 1, 'USD', $4, $5, true)`, old, old.Add(time.Hour), recent, recent.Add(time.Hour), recent.Add(2*time.Hour))
+	for pass := 1; pass <= 3; pass++ {
+		if err := peer(s, fmt.Sprintf("discovery-%d", pass)).discoverFinalCostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var count int
+		systemScan(t, s, `SELECT count(*) FROM cost_final_hour_backfill`, nil, &count)
+		want := 1
+		if pass == 3 {
+			want = 2
+		}
+		if count != want {
+			t.Fatalf("pass %d seeded %d retained sources, want %d", pass, count, want)
+		}
+	}
+	if err := s.discoverFinalCostHours(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var completed bool
+	systemScan(t, s, `SELECT completed FROM cost_final_hour_discovery WHERE id`, nil, &completed)
+	if !completed {
+		t.Fatal("discovery did not persist completion")
+	}
+	var oldCount int
+	systemScan(t, s, `SELECT count(*) FROM cost_final_hour_backfill WHERE source = 'old'`, nil, &oldCount)
+	if oldCount != 0 {
+		t.Fatal("discovery seeded an expired line")
+	}
+}
+
+func TestFinalCostHoursBackfillBoundedCursorWork(t *testing.T) {
+	s, _ := costFixture(t)
+	ctx := context.Background()
+	s.cfg.Costs.Batch = 2
+	s.cfg.Costs.Hourly = 48 * time.Hour
+	start := time.Now().UTC().Truncate(time.Hour).Add(-4 * time.Hour)
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES
+		('r1', 't1', 'ledger', 'final'), ('r2', 't2', 'ledger', 'final')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, item, family, amount, currency, period_from, period_to, final) VALUES
+		('t1', 'r1', 'ledger', 'a', 'ai', 4, 'USD', $1, $2, true),
+		('t2', 'r2', 'ledger', 'a', 'ai', 4, 'USD', $1, $2, true)`, start, start.Add(4*time.Hour))
+	execSQL(t, s, ctx, `INSERT INTO cost_final_hour_backfill (run_id, source, next_hour) VALUES
+		('r1', 'ledger', $1), ('r2', 'ledger', $1)`, start)
+	for pass := 1; pass <= 4; pass++ {
+		if err := s.backfillFinalCostHours(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var count int
+		var total string
+		systemScan(t, s, `SELECT count(*), trim_scale(sum(amount))::text FROM cost_hourly WHERE source = 'ledger'`, nil, &count, &total)
+		if count != pass*2 || total != fmt.Sprint(pass*2) {
+			t.Fatalf("pass %d: %d rows totaling %s, want %d", pass, count, total, pass*2)
+		}
+		var progressed int
+		systemScan(t, s, `SELECT sum(extract(epoch FROM next_hour - $1) / 3600)::int FROM cost_final_hour_backfill WHERE source = 'ledger'`, []any{start}, &progressed)
+		if progressed != pass*2 {
+			t.Errorf("pass %d: advanced %d source-hours, want %d", pass, progressed, pass*2)
+		}
+	}
+}
+
 func TestCostTickDiscoversHistoricalPluginSources(t *testing.T) {
 	s, keys, _ := pluginFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		if pluginDescribeHandler(w, r) {
