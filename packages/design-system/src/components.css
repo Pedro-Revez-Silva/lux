@@ -1424,6 +1424,63 @@ a.idchip-text:hover {
   flex: none;
   padding-top: 2px;
 }
+/* Breadcrumbs above the title, for a page under an object. */
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.crumbs a {
+  color: var(--fg-muted);
+}
+.crumbs a:hover {
+  color: var(--accent-text);
+  text-decoration: none;
+}
+.crumbs .idchip {
+  font-size: 0.96em;
+}
+.crumbs-sep {
+  display: inline-flex;
+  color: var(--fg-faint);
+}
+.crumbs-here {
+  color: var(--fg-secondary);
+}
+/* A hairline between groups of header actions. */
+.btn-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 var(--sp-2);
+}
+/* Buttons sharing one border: a stepper, a segmented control. */
+.btn-group {
+  display: inline-flex;
+  align-items: center;
+  height: var(--control-h);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+.btn-group .btn {
+  border: 0;
+  border-radius: 0;
+  height: 100%;
+}
+.btn-group-val {
+  min-width: 36px;
+  text-align: center;
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
 @media (max-width: 767px) {
   .page-head-actions {
     width: 100%;
@@ -1727,9 +1784,6 @@ a.idchip-text:hover {
   height: 32px;
   font-size: var(--text-xs);
   color: var(--fg-muted);
-}
-.server-log-err {
-  color: var(--danger-fg);
 }
 .server-note {
   padding: var(--sp-4) var(--pad-card);

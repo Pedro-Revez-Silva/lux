@@ -1,8 +1,8 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Button, IconButton } from "./Button.tsx";
 import { ServerStateMark } from "./Badge.tsx";
-import { LogView, type LogLine } from "./LogView.tsx";
 import { EmptyState } from "./EmptyState.tsx";
+import { useCopy } from "./IdChip.tsx";
 import { formatClock, formatElapsed } from "./format.ts";
 import { IconCheck, IconChevronDown, IconChevronUp, IconCopy, IconExternal, IconPlay, IconRefresh, IconStop, IconTrash } from "./icons.tsx";
 import type { ServerState } from "./states.ts";
@@ -26,12 +26,6 @@ export interface ServerInfo {
   url?: string | null;
 }
 
-export interface ServerLogState {
-  lines: LogLine[];
-  loading?: boolean;
-  error?: string | null;
-}
-
 export interface ServerRowProps {
   server: ServerInfo;
   /** The Run is running: start, stop and restart are possible. */
@@ -43,19 +37,14 @@ export interface ServerRowProps {
   onStop?: (s: ServerInfo) => void;
   onRestart?: (s: ServerInfo) => void;
   onRemove?: (s: ServerInfo) => void;
-  /** The log pane, once opened; the row asks for it with onOpenLog. */
-  log?: ServerLogState;
-  onOpenLog?: (s: ServerInfo, open: boolean) => void;
+  /** The log pane under the row, once opened (the row owns the toggle; the caller owns the fetch). */
+  renderLog?: (s: ServerInfo) => ReactNode;
   /** Start with the log open. */
   defaultOpen?: boolean;
-  /** Extra actions at the end of the row. */
-  extra?: ReactNode;
 }
 
-const LOG_H = 240;
-
 /** "ready for 12m", "starting · 9s", "stopped at 14:32 · migrated", "exited 14:29", "not started". */
-export function serverSinceText(s: ServerInfo, now: number): string {
+function sinceText(s: ServerInfo, now: number): string {
   const clock = (at: string) => formatClock(at).slice(0, 5);
   switch (s.state) {
     case "ready":
@@ -77,29 +66,15 @@ export function serverSinceText(s: ServerInfo, now: number): string {
 }
 
 /** One server: name and port, state with how long, its URL to copy or open, and what can be done to it. */
-export function ServerRow({ server: s, runRunning, now = Date.now(), busy, onStart, onStop, onRestart, onRemove, log, onOpenLog, defaultOpen = false, extra }: ServerRowProps) {
+export function ServerRow({ server: s, runRunning, now = Date.now(), busy, onStart, onStop, onRestart, onRemove, renderLog, defaultOpen = false }: ServerRowProps) {
   const [open, setOpen] = useState(defaultOpen);
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    if (!copied) return;
-    const t = setTimeout(() => setCopied(false), 1200);
-    return () => clearTimeout(t);
-  }, [copied]);
+  const { copied, copy } = useCopy(s.url ?? "");
   const live = s.state === "ready";
   const up = s.state === "ready" || s.state === "starting" || s.state === "unreachable";
   const canStart = runRunning && !up && !!s.command?.length;
-  const toggleLog = () => {
-    const next = !open;
-    setOpen(next);
-    onOpenLog?.(s, next);
-  };
-  const copyUrl = () => {
-    if (!s.url) return;
-    void navigator.clipboard?.writeText(s.url).then(() => setCopied(true));
-  };
   const host = s.url?.replace(/^https?:\/\//, "");
   return (
-    <li className={["server-row", open ? "is-open" : ""].join(" ").trim()} data-state={s.state}>
+    <li className={["server-row", open ? "is-open" : ""].join(" ").trim()}>
       <div className="server-main">
         <div className="server-name">
           <span className="server-name-text mono">{s.name}</span>
@@ -108,7 +83,7 @@ export function ServerRow({ server: s, runRunning, now = Date.now(), busy, onSta
         <div className="server-mid">
           <div className="server-state">
             <ServerStateMark state={s.state} exitCode={s.exitCode} />
-            <span className="server-since">{serverSinceText(s, now)}</span>
+            <span className="server-since">{sinceText(s, now)}</span>
             {s.state === "exited" && s.error && (
               <span className="server-err" title={s.error}>
                 {s.error}
@@ -120,7 +95,7 @@ export function ServerRow({ server: s, runRunning, now = Date.now(), busy, onSta
               <a href={s.url} target="_blank" rel="noreferrer" className="mono" title={s.url}>
                 {host}
               </a>
-              <IconButton size="sm" label={copied ? "Copied" : "Copy URL"} onClick={copyUrl}>
+              <IconButton size="sm" label={copied ? "Copied" : "Copy URL"} onClick={copy}>
                 {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
               </IconButton>
               {live && (
@@ -134,8 +109,8 @@ export function ServerRow({ server: s, runRunning, now = Date.now(), busy, onSta
           )}
         </div>
         <div className="server-actions">
-          {onOpenLog && (
-            <Button size="sm" variant="ghost" onClick={toggleLog} aria-expanded={open}>
+          {renderLog && (
+            <Button size="sm" variant="ghost" onClick={() => setOpen(!open)} aria-expanded={open}>
               Logs {open ? <IconChevronUp size={12} /> : <IconChevronDown size={12} />}
             </Button>
           )}
@@ -164,45 +139,40 @@ export function ServerRow({ server: s, runRunning, now = Date.now(), busy, onSta
               <IconTrash size={13} />
             </IconButton>
           )}
-          {extra}
         </div>
       </div>
-      {open && (
+      {open && renderLog && (
         <div className="server-log">
           <div className="server-log-head">
             <span className="mono">server:{s.name}</span>
-            {log?.error && <span className="server-log-err">{log.error}</span>}
           </div>
-          <LogView lines={log?.lines ?? []} height={LOG_H} timestamps emptyText={log?.loading ? "Loading…" : "No output yet."} />
+          {renderLog(s)}
         </div>
       )}
     </li>
   );
 }
 
-export interface ServerListProps extends Omit<ServerRowProps, "server" | "log" | "defaultOpen" | "busy"> {
+export interface ServerListProps extends Omit<ServerRowProps, "server" | "defaultOpen" | "busy"> {
   servers: ServerInfo[];
   /** Names with an action in flight. */
   busy?: string[];
-  /** Log panes by server name. */
-  logs?: Record<string, ServerLogState>;
   /** Names whose log starts open. */
   open?: string[];
+  /** Shown instead of the list when there are no servers. */
   empty?: ReactNode;
   /** A line under the list. */
   note?: ReactNode;
 }
 
 /** The Run's servers, one row each, in the order given. */
-export function ServerList({ servers, busy, logs, open, empty, note, ...row }: ServerListProps) {
-  if (servers.length === 0) {
-    return typeof empty === "string" || empty == null ? <EmptyState compact title={empty ?? "No servers"} /> : <>{empty}</>;
-  }
+export function ServerList({ servers, busy, open, empty, note, ...row }: ServerListProps) {
+  if (servers.length === 0) return <>{empty ?? <EmptyState compact title="No servers" />}</>;
   return (
     <div className="server-list-wrap">
       <ul className="server-list">
         {servers.map((s) => (
-          <ServerRow key={s.name} server={s} busy={busy?.includes(s.name)} log={logs?.[s.name]} defaultOpen={open?.includes(s.name)} {...row} />
+          <ServerRow key={s.name} server={s} busy={busy?.includes(s.name)} defaultOpen={open?.includes(s.name)} {...row} />
         ))}
       </ul>
       {note && <p className="server-note">{note}</p>}

@@ -6,7 +6,7 @@
 // Access the cookie rides along; with a key, a single-use ticket
 // (POST /tickets) goes in the query.
 import { getKey } from "./auth.ts";
-import { apiFetch } from "./client.ts";
+import { apiFetch, apiUrl } from "./client.ts";
 import { api } from "./endpoints.ts";
 
 /** What lux shell runs: bash as a login shell, sh when there is none. */
@@ -36,13 +36,12 @@ export interface ExecSession {
   close: () => void;
 }
 
+/** proto.StreamData, the fields a terminal uses. */
 interface StreamData {
   data?: string;
   rows?: number;
   cols?: number;
-  ch?: string;
   exitCode?: number;
-  eof?: boolean;
   error?: string;
 }
 
@@ -64,18 +63,19 @@ function fromBase64(s: string): Uint8Array {
 /**
  * Open a shell in a running Run. Checks first, without upgrading, that the
  * stream can be opened (the same URL answers the error it would get: not
- * running, no host, not allowed; a 401 signs out), mints a ticket when the
- * session is a key, then dials.
+ * running, no host, not allowed; a 401 signs out); with a key session a
+ * ticket is minted meanwhile. Then dials.
  */
 export async function openExec(runId: string, opts: ExecOptions): Promise<ExecSession> {
   const path = `/runs/${encodeURIComponent(runId)}/exec`;
+  // Independent of the check, so the two round trips overlap; a ticket
+  // minted for a check that fails is single-use and expires in a minute.
+  const ticket = getKey() ? api.ticket(runId, "exec", opts.signal) : null;
+  ticket?.catch(() => {});
   await apiFetch(path, { signal: opts.signal });
-  const url = new URL(`/v1${path}`, window.location.origin);
+  const url = new URL(apiUrl(path), window.location.origin);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  if (getKey()) {
-    const t = await api.ticket(runId, "exec", opts.signal);
-    url.searchParams.set("ticket", t.ticket);
-  }
+  if (ticket) url.searchParams.set("ticket", (await ticket).ticket);
   opts.signal.throwIfAborted();
 
   const ws = new WebSocket(url);

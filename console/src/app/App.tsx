@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { IdChip, ToastProvider, type Tenant as PickerTenant } from "@lux/design-system";
 import { IconExternal, IconTerminal } from "@lux/design-system/icons";
-import { accessSeen, api, errorText, getSession, isApiError, setRole, signInAs, useQuery, useSession } from "../api/index.ts";
-import { matchPath, navigate, usePath, useSearchParams } from "./router.tsx";
+import { api, errorText, getSession, isApiError, setRole, signInAs, useQuery, useSession } from "../api/index.ts";
+import { matchPath, usePath, useSearchParams } from "./router.tsx";
 import { ScopeProvider, useScope } from "./scope.tsx";
 import { useLiveUpdates } from "./live.ts";
 import { Shell } from "./Shell.tsx";
@@ -19,26 +19,50 @@ import { Tenants } from "./pages/Tenants.tsx";
 import { NotFound } from "./pages/NotFound.tsx";
 import { ErrorBlock } from "./pages/common.tsx";
 
+/** What the sign-in screen says about the page it continues to. */
+type SignInNote = Pick<SignInProps, "next" | "reason">;
+
 interface Route {
   pattern: string;
   title: string;
   render: (params: Record<string, string>) => React.ReactNode;
-  /** A class on the content area. */
-  content?: string;
   /** Rendered without the shell (its own full-window layout). */
   bare?: boolean;
+  /** A deep link people arrive at signed out: how the sign-in screen frames it. */
+  signIn?: (params: Record<string, string>, search: URLSearchParams) => SignInNote;
 }
 
 const ROUTES: Route[] = [
   { pattern: "/", title: "Overview", render: () => <Overview /> },
   { pattern: "/runs", title: "Runs", render: () => <Runs /> },
   { pattern: "/runs/:id", title: "Run", render: (p) => <RunPage id={p.id!} /> },
-  { pattern: "/runs/:id/terminal", title: "Runs", render: (p) => <TerminalPage id={p.id!} />, content: "is-terminal" },
+  {
+    pattern: "/runs/:id/terminal",
+    title: "Runs",
+    render: (p) => <TerminalPage id={p.id!} />,
+    signIn: (p) => ({
+      next: { icon: <IconTerminal size={15} />, text: <>Then you will continue to the terminal for <IdChip value={p.id!} /></> },
+      reason: "Your session has expired or this tab has no key yet. A terminal needs a key with the run scope for this run's tenant.",
+    }),
+  },
   { pattern: "/hosts", title: "Hosts", render: () => <Hosts /> },
   { pattern: "/hosts/:id", title: "Host", render: (p) => <HostPage id={p.id!} /> },
   { pattern: "/pools", title: "Pools", render: () => <Pools /> },
   { pattern: "/tenants", title: "Tenants", render: () => <Tenants /> },
-  { pattern: "/preview-auth", title: "Preview", render: () => <PreviewAuth />, bare: true },
+  {
+    pattern: "/preview-auth",
+    title: "Preview",
+    render: () => <PreviewAuth />,
+    bare: true,
+    signIn: (_p, search) => {
+      const t = parsePreviewTarget(search.get("to"));
+      if ("error" in t) return {};
+      return {
+        next: { icon: <IconExternal size={15} />, text: <>Then you will continue to the preview of <span className="mono">{t.server}</span> on <IdChip value={t.runId} /></> },
+        reason: "A preview needs a key that can read its run.",
+      };
+    },
+  },
 ];
 
 /**
@@ -56,7 +80,7 @@ function useRole(): { error: string | null; retrying: boolean; retry: () => void
     const probe = async () => {
       try {
         const me = await api.whoami(ctrl.signal);
-        setRole(me.operator ? "operator" : "tenant");
+        setRole(me.operator ? "operator" : "tenant", me.consoleAuth);
         setFailure(null);
       } catch (e) {
         if (ctrl.signal.aborted) return;
@@ -113,7 +137,7 @@ function Router() {
     if (r.pattern === "/tenants" && session.role === "tenant") break;
     if (r.bare) return <>{r.render(m.params)}</>;
     return (
-      <Shell tenants={picker} operator={operator} title={r.title} contentClassName={r.content}>
+      <Shell tenants={picker} operator={operator} title={r.title}>
         {r.render(m.params)}
       </Shell>
     );
@@ -137,32 +161,21 @@ export function App() {
 }
 
 /**
- * The sign-in screen, saying where it continues to: the page the person
- * was headed to (`?next=`, a path on this console, kept across the sign-in),
- * a terminal, or a preview. A path outside the console is ignored.
+ * The sign-in screen, saying where it continues to. The URL is kept across
+ * the sign-in, so a deep link (a terminal, a preview) lands on its page
+ * once there is a session; routes that expect to be arrived at signed out
+ * say what for.
  */
 function SignInFor() {
   const path = usePath();
   const params = useSearchParams();
-  // A deep link (a terminal, a preview) signs in on the page itself: the
-  // URL is kept, and the router renders it once there is a session.
-  const here = path !== "/" ? path + window.location.search : null;
-  const next = params.get("next");
-  useEffect(() => {
-    // Landed on /?next=/runs/x/terminal (from a sign-out on a page): go there once signed in.
-    if (path === "/" && next?.startsWith("/") && !next.startsWith("//")) navigate(next, { replace: true });
-  }, [path, next]);
-  const props: SignInProps = { access: accessSeen() };
-  const term = matchPath("/runs/:id/terminal", path);
-  const preview = path === "/preview-auth" ? parsePreviewTarget(params.get("to")) : null;
-  if (term) {
-    props.next = { icon: <IconTerminal size={15} />, text: <>Then you will continue to the terminal for <IdChip value={term.params.id!} /></> };
-    props.reason = "Your session has expired or this tab has no key yet. A terminal needs a key with the run scope for this run's tenant.";
-  } else if (preview && !("error" in preview)) {
-    props.next = { icon: <IconExternal size={15} />, text: <>Then you will continue to the preview of <span className="mono">{preview.server}</span> on <IdChip value={preview.runId} /></> };
-    props.reason = "A preview needs a key that can read its run.";
-  } else if (here) {
-    props.next = { text: <>Then you will continue to <span className="mono">{path}</span></> };
+  const session = useSession();
+  const props: SignInProps = { access: session.consoleAuth === "cloudflare-access" };
+  for (const r of ROUTES) {
+    const m = matchPath(r.pattern, path);
+    if (!m) continue;
+    Object.assign(props, r.signIn?.(m.params, params) ?? (path !== "/" ? { next: { text: <>Then you will continue to <span className="mono">{path}</span></> } } : {}));
+    break;
   }
   return <SignIn {...props} />;
 }

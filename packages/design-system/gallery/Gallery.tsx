@@ -50,7 +50,6 @@ import {
   type Column,
   type ConnectionStatus,
   type ServerInfo,
-  type ServerLogState,
   type TerminalHandle,
   type TimeRange,
 } from "../src/index.ts";
@@ -684,11 +683,9 @@ function Logs() {
 /* A fake shell behind the Terminal: the script plays on open and Reconnect;
    typing echoes locally, Enter answers with a prompt. Enough to see the
    frame, the palette in both themes, the font stepper and the overlays. */
-type TermState = "connecting" | "connected" | "exited" | "disconnected";
-
 function TerminalDemo() {
   const term = useRef<TerminalHandle>(null);
-  const [state, setState] = useState<TermState>("connecting");
+  const [state, setState] = useState<ConnectionStatus>("connecting");
   const [fontSize, setFontSize] = useState(13);
   const [size, setSize] = useState({ cols: 80, rows: 24 });
   const [round, setRound] = useState(0);
@@ -779,17 +776,15 @@ function TerminalDemo() {
     <Section id="terminal" title="Terminal, ConnectionBadge, TerminalOverlay" note="xterm.js in the LogView's frame, Solarized inside (terminalThemes: exact dark and light, following the console theme). Transport-agnostic: the page writes bytes through the handle and gets keystrokes and resizes back; WebGL rendering with a DOM fallback. Type into it; Ctrl-D ends the fake shell; Ctrl+Shift+C copies the selection.">
       <div className="sg-row">
         <ConnectionBadge status={state} exitCode={state === "exited" ? 0 : undefined} />
-        <span className="row" style={{ gap: 4 }}>
-          <IconButton size="sm" label="Smaller text" onClick={() => setFontSize((f) => Math.max(10, f - 1))}>
-            <IconMinus size={14} />
+        <div className="btn-group" role="group" aria-label="Font size">
+          <IconButton label="Smaller text" onClick={() => setFontSize((f) => Math.max(10, f - 1))}>
+            <IconMinus size={15} />
           </IconButton>
-          <span className="muted num" style={{ minWidth: 40, textAlign: "center", fontSize: "var(--text-xs)" }}>
-            {fontSize} px
-          </span>
-          <IconButton size="sm" label="Larger text" onClick={() => setFontSize((f) => Math.min(20, f + 1))}>
-            <IconPlus size={14} />
+          <span className="btn-group-val">{fontSize} px</span>
+          <IconButton label="Larger text" onClick={() => setFontSize((f) => Math.min(20, f + 1))}>
+            <IconPlus size={15} />
           </IconButton>
-        </span>
+        </div>
         <Button size="sm" onClick={() => setRound((r) => r + 1)}>
           Reconnect
         </Button>
@@ -839,7 +834,6 @@ function TerminalDemo() {
 function Servers() {
   const [servers, setServers] = useState<ServerInfo[]>(fakeServers);
   const [busy, setBusy] = useState<string | null>(null);
-  const [logs, setLogs] = useState<Record<string, ServerLogState>>({});
   const toast = useToast();
   const act = (label: string, s: ServerInfo, next: Partial<ServerInfo>) => {
     setBusy(s.name);
@@ -849,11 +843,7 @@ function Servers() {
       toast({ title: `${label} ${s.name}`, tone: "success" });
     }, 600);
   };
-  const openLog = (s: ServerInfo, open: boolean) => {
-    if (!open) return;
-    setLogs((l) => ({ ...l, [s.name]: { lines: [], loading: true } }));
-    setTimeout(() => setLogs((l) => ({ ...l, [s.name]: { lines: fakeServerLogs[s.name] ?? [] } })), 400);
-  };
+  const renderLog = (s: ServerInfo) => <LogView lines={fakeServerLogs[s.name] ?? []} height={240} timestamps />;
   const handlers = {
     now: NOW,
     onStart: (s: ServerInfo) => act("Started", s, { state: "starting", since: new Date(NOW).toISOString() }),
@@ -863,20 +853,20 @@ function Servers() {
       setServers((xs) => xs.filter((x) => x.name !== s.name));
       toast({ title: `Removed ${s.name}`, tone: "warn" });
     },
-    onOpenLog: openLog,
+    renderLog,
   };
   return (
     <Section id="servers" title="ServerList, ServerRow" note="A run's servers: name and port lead, state (ServerStateMark) with how long, the preview URL to copy or open (dimmed while it does not answer), and what can be done: start, stop, restart, remove, and an expandable log (LogView) fetched when opened. A server without a command was started by hand: lux only watches its port.">
       <Card title="Servers" subtitle="live: try the actions and open a log" flush actions={<Button size="sm" icon={<IconPlus size={13} />}>Add server</Button>}>
-        <ServerList servers={servers} logs={logs} busy={busy ? [busy] : undefined} runRunning {...handlers} note={<>Servers stop when the run stops or moves host; they do not restart on their own. Output streams into the run's output as <span className="mono">server:&lt;name&gt;</span>.</>} />
+        <ServerList servers={servers} busy={busy ? [busy] : undefined} runRunning {...handlers} note={<>Servers stop when the run stops or moves host; they do not restart on their own. Output streams into the run's output as <span className="mono">server:&lt;name&gt;</span>.</>} />
       </Card>
       <div className="grid grid-2">
         <Card title="Exited" subtitle="the log is open on the failed server" flush>
-          <ServerList servers={fakeServersExited} logs={{ api: { lines: fakeServerLogs.api ?? [] } }} open={["api"]} runRunning now={NOW} onStart={() => {}} onStop={() => {}} onRestart={() => {}} onOpenLog={() => {}} />
+          <ServerList servers={fakeServersExited} open={["api"]} runRunning now={NOW} onStart={() => {}} onStop={() => {}} onRestart={() => {}} renderLog={renderLog} />
         </Card>
         <div className="stack">
           <Card title="After a migration" subtitle="every server stopped by the move; the run is not running yet" flush>
-            <ServerList servers={fakeServersMigrated} runRunning={false} now={NOW} onStart={() => {}} onStop={() => {}} onOpenLog={() => {}} />
+            <ServerList servers={fakeServersMigrated} runRunning={false} now={NOW} onStart={() => {}} onStop={() => {}} renderLog={renderLog} />
           </Card>
           <Card title="Started by hand, no previews configured" flush>
             <ServerList servers={[fakeServerManual]} runRunning now={NOW} onStop={() => {}} onRemove={() => {}} />

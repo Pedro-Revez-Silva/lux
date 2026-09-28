@@ -27,8 +27,6 @@ export interface ShellProps {
   operator: boolean;
   /** Section name shown in the top bar (the page itself carries its header). */
   title?: ReactNode;
-  /** A class on the content area (e.g. a page that does not scroll and lays itself out in the height left). */
-  contentClassName?: string;
   children: ReactNode;
 }
 
@@ -77,7 +75,7 @@ const wideMedia = mediaStore("(min-width: 1280px)");
  * an off-canvas drawer behind a menu button on small ones), a top bar whose
  * scope controls fold into one menu on phones, and the scrolling content.
  */
-export function Shell({ tenants, operator, title, contentClassName, children }: ShellProps) {
+export function Shell({ tenants, operator, title, children }: ShellProps) {
   const session = useSession();
   const path = usePath();
   const scope = useScope();
@@ -271,7 +269,7 @@ export function Shell({ tenants, operator, title, contentClassName, children }: 
             </div>
           </div>
         </header>
-        <main className={["content", contentClassName ?? ""].join(" ").trim()}>{children}</main>
+        <main className="content">{children}</main>
       </div>
     </div>
   );

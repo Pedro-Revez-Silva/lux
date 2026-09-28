@@ -20,8 +20,6 @@ export interface TerminalHandle {
   /** Wipe the screen and scrollback (a new shell). */
   reset: () => void;
   focus: () => void;
-  /** Refit to the frame now (after a layout change the observer cannot see). */
-  fit: () => void;
   /** The current grid, for the open message. */
   size: () => TerminalSize;
 }
@@ -35,11 +33,8 @@ export interface TerminalProps {
   /** Called once the terminal is open and fitted, with its grid. */
   onReady?: (size: TerminalSize) => void;
   fontSize?: number;
-  /** Solarized dark or light; defaults to following the console theme. */
-  theme?: "light" | "dark";
   /** No input, dimmed screen, still cursor: the shell is gone. */
   disabled?: boolean;
-  scrollback?: number;
   /** A card over the dimmed screen (TerminalOverlay). */
   overlay?: ReactNode;
   /** The status strip under the screen. */
@@ -48,7 +43,7 @@ export interface TerminalProps {
   "aria-label"?: string;
 }
 
-const DEFAULT_FONT_SIZE = 13;
+export const DEFAULT_FONT_SIZE = 13;
 
 /**
  * An xterm.js terminal in the console's frame (LogView's inset, hairline
@@ -57,12 +52,11 @@ const DEFAULT_FONT_SIZE = 13;
  * the handle and gets keystrokes and resizes back. WebGL rendering when the
  * browser has it, xterm's DOM renderer otherwise.
  */
-export function Terminal({ ref, onData, onResize, onReady, fontSize = DEFAULT_FONT_SIZE, theme, disabled = false, scrollback = 5000, overlay, bar, className, "aria-label": ariaLabel = "Terminal" }: TerminalProps) {
+export function Terminal({ ref, onData, onResize, onReady, fontSize = DEFAULT_FONT_SIZE, disabled = false, overlay, bar, className, "aria-label": ariaLabel = "Terminal" }: TerminalProps) {
   const host = useRef<HTMLDivElement>(null);
   const term = useRef<XTerm | null>(null);
   const fitter = useRef<FitAddon | null>(null);
-  const resolvedTheme = useTheme().resolved;
-  const scheme = theme ?? resolvedTheme;
+  const scheme = useTheme().resolved;
   // Callbacks change every render; the terminal is built once.
   const cbs = useRef({ onData, onResize, onReady });
   cbs.current = { onData, onResize, onReady };
@@ -78,7 +72,7 @@ export function Terminal({ ref, onData, onResize, onReady, fontSize = DEFAULT_FO
       fontFamily: cssVar("--font-mono") || "monospace",
       fontSize,
       lineHeight: 1.3,
-      scrollback,
+      scrollback: 5000,
       theme: terminalThemes[scheme],
       // xterm 6 renders mixed-width glyphs itself; Solarized is contrast enough.
       minimumContrastRatio: 1,
@@ -122,7 +116,7 @@ export function Terminal({ ref, onData, onResize, onReady, fontSize = DEFAULT_FO
       term.current = null;
       fitter.current = null;
     };
-    // Built once: font size, theme and scrollback are applied as options below.
+    // Built once: font size, theme and input are applied as options below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -153,14 +147,13 @@ export function Terminal({ ref, onData, onResize, onReady, fontSize = DEFAULT_FO
       write: (data) => term.current?.write(data),
       reset: () => term.current?.reset(),
       focus: () => term.current?.focus(),
-      fit: () => fitter.current?.fit(),
       size: () => ({ cols: term.current?.cols ?? 80, rows: term.current?.rows ?? 24 }),
     }),
     [],
   );
 
   return (
-    <div className={["term", disabled ? "is-dimmed" : "", className ?? ""].join(" ").trim()} data-theme={scheme} aria-label={ariaLabel}>
+    <div className={["term", disabled ? "is-dimmed" : "", className ?? ""].join(" ").trim()} aria-label={ariaLabel}>
       <div ref={host} className="term-screen" />
       {overlay && <div className="term-overlay">{overlay}</div>}
       {bar && <div className="term-bar">{bar}</div>}

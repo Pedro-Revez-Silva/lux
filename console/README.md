@@ -62,9 +62,9 @@ page and operator-only actions (Migrate, target-host choice on Resume) are
 hidden. Other 403s render as "Your key cannot do this: …".
 
 A deep link (`/runs/{id}/terminal`, `/preview-auth?to=…`) opened without a
-session shows the sign-in on the page itself, saying where it continues;
-the URL is kept, so signing in lands there. `/?next=<path>` continues to
-`path` once signed in.
+session shows the sign-in on the page itself, saying where it continues
+(the route table in `App.tsx` gives each such page its wording); the URL is
+kept, so signing in lands there.
 
 ## API module (`src/api/`)
 
@@ -87,7 +87,7 @@ Run-scoped calls (`/runs/{id}/…`, `/hosts/{id}/…`, `/artifacts/…`) do not 
 | --- | --- | --- |
 | `/` | Overview: stat tiles, charts over the selected range, live activity feed | `/status` (5s), `/history?since=` (30s), `/events` SSE |
 | `/runs` | Runs table with state presets and chips, resumable/host/label filters, "Load more" (`before=`) | `/runs` (5s) |
-| `/runs/:id` | Header + actions (Terminal, Stop, Cancel, Resume, Migrate), tabs (`?tab=`): Output (SSE), Servers (list, Add server, start/stop/restart/remove, a log per server), Timeline (per-epoch waterfall), Resources (charts, epoch marks), Events, Snapshots & artifacts, Spec | `/runs/{id}` (3s while active), `/runs/{id}/output`, `/runs/{id}/servers` (+ `/servers/{name}/log`), `/history`, `/events`, `/snapshots`, `/artifacts` |
+| `/runs/:id` | Header + actions (Terminal, Stop, Cancel, Resume, Migrate), tabs (`?tab=`): Output (SSE), Servers (the run's `servers`; Add server, start/stop/restart/remove, a log per server), Timeline (per-epoch waterfall), Resources (charts, epoch marks), Events, Snapshots & artifacts, Spec | `/runs/{id}` (3s while active), `/runs/{id}/output`, `/runs/{id}/servers/{name}/log`, `/history`, `/events`, `/snapshots`, `/artifacts` |
 | `/runs/:id/terminal` | A shell in the run's container: xterm.js over the exec WebSocket, font size (persisted), Reconnect, Open in new tab; exited / lost overlays; an empty state while the run is not running | `/runs/{id}` (5s), `GET /runs/{id}/exec` (WebSocket; `POST /runs/{id}/tickets` first with a key) |
 | `/hosts` | Hosts table (pool/state filters, include terminated) with allocation bars | `/hosts` (5s), `/pools` |
 | `/hosts/:id` | Details, Drain, lifecycle timeline, live placements, usage charts, recent runs | `/hosts/{id}` (5s), `/hosts/{id}/history`, `/runs?host=` |

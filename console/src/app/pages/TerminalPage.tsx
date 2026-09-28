@@ -1,21 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Badge, Button, Card, ConnectionBadge, EmptyState, formatDuration, IconButton, IdChip, StatePill, Terminal, TerminalOverlay, useTheme, type ConnectionStatus, type TerminalHandle, type TerminalSize } from "@lux/design-system";
-import { IconChevronLeft, IconChevronRight, IconExternal, IconMinus, IconMoon, IconPlus, IconRefresh, IconSun, IconTerminal, IconWarning } from "@lux/design-system/icons";
-import { api, errorText, isRunActive, openExec, SHELL_COMMAND, useQuery, useSession, type ExecSession, type Run } from "../../api/index.ts";
+import { Badge, Button, Card, ConnectionBadge, CrumbSep, DEFAULT_FONT_SIZE, EmptyState, formatDuration, IconButton, IdChip, LinkButton, PageHeader, StatePill, Terminal, TerminalOverlay, useTheme, type ConnectionStatus, type TerminalHandle, type TerminalSize } from "@lux/design-system";
+import { IconChevronLeft, IconExternal, IconMinus, IconMoon, IconPlus, IconRefresh, IconSun, IconTerminal, IconWarning } from "@lux/design-system/icons";
+import { errorText, EXEC_RUN_STATES, openExec, SHELL_COMMAND, TERMINAL_RUN_STATES, useSession, type ExecSession, type Run } from "../../api/index.ts";
 import { href, Link, scoped, useSearch } from "../router.tsx";
-import { ErrorBlock, HostLink, PageSkeleton, runPath } from "./common.tsx";
+import { ButtonLink, ErrorBlock, HostLink, PageSkeleton, RunLink, runPath, useRun } from "./common.tsx";
 
 const FONT_KEY = "lux.terminal.font";
 const FONT_MIN = 10;
 const FONT_MAX = 20;
-const FONT_DEFAULT = 13;
 
 function readFont(): number {
   try {
     const n = Number(localStorage.getItem(FONT_KEY));
     if (Number.isInteger(n) && n >= FONT_MIN && n <= FONT_MAX) return n;
   } catch {}
-  return FONT_DEFAULT;
+  return DEFAULT_FONT_SIZE;
 }
 
 /** The shell as the connection sees it: status, and why it ended. */
@@ -41,18 +40,9 @@ export function TerminalPage({ id }: { id: string }) {
   const session = useSession();
   const { resolved, toggle } = useTheme();
   const search = useSearch();
-  const [active, setActive] = useState(true);
-  const q = useQuery(
-    `run:${id}`,
-    async (s) => {
-      const r = await api.run(id, s);
-      setActive(isRunActive(r.state));
-      return r;
-    },
-    { interval: active ? 5000 : 15_000, live: active ? 30_000 : 60_000 },
-  );
+  const q = useRun(id, { active: 5000, settled: 15_000, liveActive: 30_000, liveSettled: 60_000 });
   const run = q.data;
-  const running = run?.state === "running";
+  const running = run != null && EXEC_RUN_STATES.has(run.state);
 
   const term = useRef<TerminalHandle>(null);
   const exec = useRef<ExecSession | null>(null);
@@ -139,89 +129,80 @@ export function TerminalPage({ id }: { id: string }) {
   }
   if (!run) return <PageSkeleton />;
 
-  const crumbs = (
-    <nav className="crumbs" aria-label="Breadcrumb">
-      <Link to="/runs">Runs</Link>
-      <span className="crumbs-sep">
-        <IconChevronRight size={12} />
-      </span>
-      <IdChip value={run.id} href={href(scoped(runPath(run.id), search))} />
-      <span className="crumbs-sep">
-        <IconChevronRight size={12} />
-      </span>
-      <span className="crumbs-here">Terminal</span>
-    </nav>
-  );
-  const meta = (
-    <div className="page-desc">
-      {running && (
-        <>
-          <span>
-            <span className="mono">bash -l</span> as <span className="mono">{run.spec.workload.user || "the workload's user"}</span>
-          </span>
-          {run.spec.workload.workdir && (
-            <span>
-              in <span className="mono">{run.spec.workload.workdir}</span>
-            </span>
-          )}
-        </>
-      )}
-      {run.hostId && (
-        <span>
-          on <HostLink id={run.hostId} name={run.host} /> <IdChip value={run.hostId} />
-        </span>
-      )}
-      <span>epoch {run.epoch}</span>
-      {!running && run.stateReason && <span>{run.stateReason}</span>}
-    </div>
-  );
-
   return (
-    <div className="page term-page">
-      <header className="page-head term-head">
-        <div className="page-head-main">
-          {crumbs}
-          <div className="page-head-title">
-            <h1 className="page-title">Terminal</h1>
+    <div className="page page-fill">
+      <PageHeader
+        className="term-head"
+        crumbs={
+          <>
+            <Link to="/runs">Runs</Link>
+            <CrumbSep />
+            <RunLink id={run.id} />
+            <CrumbSep />
+            <span className="crumbs-here">Terminal</span>
+          </>
+        }
+        title="Terminal"
+        badges={
+          <>
             <StatePill kind="run" state={run.state} activity={run.activity} />
             {run.name && <Badge outline>{run.name}</Badge>}
             {running && <ConnectionBadge status={shell.status} exitCode={shell.exitCode} />}
-          </div>
-          {meta}
-        </div>
-        {running ? (
-          <div className="page-head-actions term-actions">
-            <div className="font-step" role="group" aria-label="Font size">
-              <IconButton label="Smaller text" onClick={() => setFont(fontSize - 1)} disabled={fontSize <= FONT_MIN}>
-                <IconMinus size={15} />
-              </IconButton>
-              <span className="font-step-val">{fontSize} px</span>
-              <IconButton label="Larger text" onClick={() => setFont(fontSize + 1)} disabled={fontSize >= FONT_MAX}>
-                <IconPlus size={15} />
-              </IconButton>
-            </div>
-            <IconButton label={resolved === "dark" ? "Switch to light theme" : "Switch to dark theme"} title="Switch theme (the terminal follows: Solarized dark / light)" onClick={toggle}>
-              {resolved === "dark" ? <IconSun size={16} /> : <IconMoon size={16} />}
-            </IconButton>
-            <span className="btn-sep" aria-hidden="true" />
-            <Button icon={<IconRefresh size={15} />} onClick={reconnect} disabled={shell.status === "connecting"} title="Ends this shell and opens a new one">
-              Reconnect
-            </Button>
-            <Button icon={<IconExternal size={15} />} onClick={() => window.open(href(scoped(terminalPath(run.id), search)), "_blank", "noopener")} title={`Opens ${terminalPath(run.id)} in a new tab: a separate shell`}>
-              Open in new tab
-            </Button>
-          </div>
-        ) : (
-          <div className="page-head-actions">
-            <Link to={runPath(run.id)} className="btn btn-default btn-md">
-              <span className="btn-icon">
-                <IconChevronLeft size={15} />
+          </>
+        }
+        description={
+          <>
+            {running && (
+              <>
+                <span>
+                  <span className="mono">bash -l</span> as <span className="mono">{run.spec.workload.user || "the workload's user"}</span>
+                </span>
+                {run.spec.workload.workdir && (
+                  <span>
+                    in <span className="mono">{run.spec.workload.workdir}</span>
+                  </span>
+                )}
+              </>
+            )}
+            {run.hostId && (
+              <span>
+                on <HostLink id={run.hostId} name={run.host} /> <IdChip value={run.hostId} />
               </span>
-              <span className="btn-label">Back to run</span>
-            </Link>
-          </div>
-        )}
-      </header>
+            )}
+            <span>epoch {run.epoch}</span>
+            {!running && run.stateReason && <span>{run.stateReason}</span>}
+          </>
+        }
+        actions={
+          running ? (
+            <div className="row term-actions">
+              <div className="btn-group" role="group" aria-label="Font size">
+                <IconButton label="Smaller text" onClick={() => setFont(fontSize - 1)} disabled={fontSize <= FONT_MIN}>
+                  <IconMinus size={15} />
+                </IconButton>
+                <span className="btn-group-val">{fontSize} px</span>
+                <IconButton label="Larger text" onClick={() => setFont(fontSize + 1)} disabled={fontSize >= FONT_MAX}>
+                  <IconPlus size={15} />
+                </IconButton>
+              </div>
+              <IconButton label={resolved === "dark" ? "Switch to light theme" : "Switch to dark theme"} title="Switch theme (the terminal follows: Solarized dark / light)" onClick={toggle}>
+                {resolved === "dark" ? <IconSun size={16} /> : <IconMoon size={16} />}
+              </IconButton>
+              <span className="btn-sep" aria-hidden="true" />
+              <Button icon={<IconRefresh size={15} />} onClick={reconnect} disabled={shell.status === "connecting"} title="Ends this shell and opens a new one">
+                Reconnect
+              </Button>
+              <LinkButton href={href(scoped(terminalPath(run.id), search))} target="_blank" rel="noopener" icon={<IconExternal size={15} />} title={`Opens ${terminalPath(run.id)} in a new tab: a separate shell`}>
+                Open in new tab
+              </LinkButton>
+            </div>
+          ) : (
+            <ButtonLink to={runPath(run.id)} icon={<IconChevronLeft size={15} />}>
+              Back to run
+            </ButtonLink>
+          )
+        }
+      />
 
       {running ? (
         <Terminal
@@ -261,9 +242,9 @@ export function TerminalPage({ id }: { id: string }) {
 function ShellOverlay({ run, shell, onReconnect }: { run: Run; shell: Shell; onReconnect: () => void }) {
   const lasted = shell.openedAt && shell.endedAt ? formatDuration((shell.endedAt - shell.openedAt) / 1000) : null;
   const back = (
-    <Link to={runPath(run.id)} className="btn btn-ghost btn-md">
-      <span className="btn-label">Back to run</span>
-    </Link>
+    <ButtonLink to={runPath(run.id)} variant="ghost">
+      Back to run
+    </ButtonLink>
   );
   if (shell.status === "exited") {
     return (
@@ -315,20 +296,22 @@ function ShellOverlay({ run, shell, onReconnect }: { run: Run; shell: Shell; onR
 function NotRunning({ run }: { run: Run }) {
   const last = run.placements?.at(-1);
   const state = run.state;
+  const ended = TERMINAL_RUN_STATES.has(state);
+  const parked = state === "stopped" || state === "lost";
   const title =
     state === "stopped"
       ? "This run is stopped — there is no container to open a shell in."
       : state === "lost"
         ? "This run is lost — its host stopped answering."
-        : state === "succeeded" || state === "failed" || state === "cancelled"
+        : ended
           ? `This run is ${state} — there is no container to open a shell in.`
           : `This run is ${state} — its container is not up yet.`;
   const desc =
     state === "stopped" && last?.stopReason === "migrate"
       ? `Stopped by migration: its placement on ${last.hostName || last.host} was snapshotted and the run is parked until a ready host takes it. Once it is running again, this page opens a shell.`
-      : state === "stopped" || state === "lost"
+      : parked
         ? `${run.stateReason ? run.stateReason + ". " : ""}Resume it from the run page; once it is running again, this page opens a shell.`
-        : state === "succeeded" || state === "failed" || state === "cancelled"
+        : ended
           ? run.stateReason || "The run has ended for good."
           : "This page opens a shell as soon as the run is running.";
   return (
@@ -340,12 +323,10 @@ function NotRunning({ run }: { run: Run }) {
           description={desc}
           action={
             <span className="row" style={{ justifyContent: "center" }}>
-              <Link to={runPath(run.id)} className="btn btn-primary btn-md">
-                <span className="btn-label">Back to run</span>
-              </Link>
-              <Link to={`${runPath(run.id)}?tab=timeline`} className="btn btn-default btn-md">
-                <span className="btn-label">Timeline</span>
-              </Link>
+              <ButtonLink to={runPath(run.id)} variant="primary">
+                Back to run
+              </ButtonLink>
+              <ButtonLink to={`${runPath(run.id)}?tab=timeline`}>Timeline</ButtonLink>
             </span>
           }
         />

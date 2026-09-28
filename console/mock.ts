@@ -212,23 +212,19 @@ const server = Bun.serve<ShellSock>({
         step();
         return;
       }
-      if (m.eof) {
+      const exit = () => {
+        write("exit\r\n");
         ws.send(JSON.stringify({ exitCode: 0 }));
         ws.close(1000);
-        return;
-      }
+      };
+      if (m.eof) return exit();
       if (!m.data) return; // a resize
       for (const ch of utf8(m.data)) {
         if (ch === "\r") {
           const line = ws.data.line.trim();
           ws.data.line = "";
           write("\r\n");
-          if (line === "exit" || line === "\x04") {
-            write("exit\r\n");
-            ws.send(JSON.stringify({ exitCode: 0 }));
-            ws.close(1000);
-            return;
-          }
+          if (line === "exit") return exit();
           if (line === "lose") {
             ws.terminate();
             return;
@@ -242,10 +238,7 @@ const server = Bun.serve<ShellSock>({
             write("\b \b");
           }
         } else if (ch === "\x04") {
-          write("exit\r\n");
-          ws.send(JSON.stringify({ exitCode: 0 }));
-          ws.close(1000);
-          return;
+          return exit();
         } else if (ch === "\x03") {
           ws.data.line = "";
           write("^C\r\n" + PROMPT);

@@ -28,7 +28,7 @@ function currentSearch(): string {
 }
 
 /** Go to a path (with an optional query). */
-export function navigate(to: string, opts: { replace?: boolean } = {}) {
+function navigate(to: string, opts: { replace?: boolean } = {}) {
   const url = href(to);
   if (opts.replace) history.replaceState(null, "", url);
   else history.pushState(null, "", url);

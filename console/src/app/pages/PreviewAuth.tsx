@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Button, Card, EmptyState, Logo, Spinner } from "@lux/design-system";
+import { Button, EmptyState, LinkButton, Spinner } from "@lux/design-system";
 import { IconExternal, IconWarning } from "@lux/design-system/icons";
 import { api, errorText, isApiError } from "../../api/index.ts";
 import { useSearchParams } from "../router.tsx";
+import { AuthScreen } from "../SignIn.tsx";
 
 /** A run id's suffix: 16 lowercase alphanumerics (luxd mints a-z2-7; it validates the ticket against the host's run). */
 const SUFFIX_RE = /^[a-z0-9]{16}$/;
@@ -30,11 +31,11 @@ export function parsePreviewTarget(to: string | null): PreviewTarget | { error: 
     return { error: `Not a URL: ${to}` };
   }
   if (url.protocol !== "https:") return { error: "Previews are served over https only." };
-  const label = url.hostname.split(".")[0] ?? "";
+  const [label = "", ...domain] = url.hostname.split(".");
   const dash = label.lastIndexOf("-");
   const server = label.slice(0, dash);
   const suffix = label.slice(dash + 1);
-  if (dash <= 0 || !SUFFIX_RE.test(suffix) || !url.hostname.slice(label.length).startsWith(".")) return { error: `${url.hostname} is not a preview host (<server>-<run>.<domain>).` };
+  if (dash <= 0 || !SUFFIX_RE.test(suffix) || domain.length === 0) return { error: `${url.hostname} is not a preview host (<server>-<run>.<domain>).` };
   return { url, server, runId: `run_${suffix}` };
 }
 
@@ -80,63 +81,48 @@ export function PreviewAuth() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params, attempt]);
 
-  const brand = (
-    <div className="brand signin-brand" style={{ justifyContent: "center", marginBottom: 8 }}>
-      <Logo size={26} className="brand-mark" />
-      <span className="brand-name">Lux</span>
-    </div>
-  );
   if ("error" in target) {
     return (
-      <div className="preview-auth">
-        <Card>
-          {brand}
-          <EmptyState icon={<IconWarning size={24} />} title="Cannot open this preview" description={target.error} />
-        </Card>
-      </div>
+      <AuthScreen>
+        <EmptyState icon={<IconWarning size={24} />} title="Cannot open this preview" description={target.error} />
+      </AuthScreen>
     );
   }
   return (
-    <div className="preview-auth">
-      <Card>
-        {brand}
-        {error ? (
-          <EmptyState
-            icon={<IconWarning size={24} />}
-            title={`Cannot open the preview of ${target.server}`}
-            description={
-              <>
-                {error} The preview belongs to <span className="mono">{target.runId}</span>.
-              </>
-            }
-            action={
-              <Button size="sm" onClick={() => setAttempt((n) => n + 1)}>
-                Try again
-              </Button>
-            }
-          />
-        ) : (
-          <EmptyState
-            icon={<Spinner size={20} />}
-            title={`Opening the preview of ${target.server}…`}
-            description={
-              <>
-                Signing you in to <span className="mono">{target.url.host}</span> for <span className="mono">{target.runId}</span>.
-              </>
-            }
-            action={
-              next ? (
-                <a className="btn btn-default btn-sm" href={next}>
-                  <span className="btn-icon">
-                    <IconExternal size={13} />
-                  </span>
-                  <span className="btn-label">Continue</span>
-                </a>
-              ) : undefined
-            }
-          />
-        )}
-      </Card>
-    </div>
+    <AuthScreen>
+      {error ? (
+        <EmptyState
+          icon={<IconWarning size={24} />}
+          title={`Cannot open the preview of ${target.server}`}
+          description={
+            <>
+              {error} The preview belongs to <span className="mono">{target.runId}</span>.
+            </>
+          }
+          action={
+            <Button size="sm" onClick={() => setAttempt((n) => n + 1)}>
+              Try again
+            </Button>
+          }
+        />
+      ) : (
+        <EmptyState
+          icon={<Spinner size={20} />}
+          title={`Opening the preview of ${target.server}…`}
+          description={
+            <>
+              Signing you in to <span className="mono">{target.url.host}</span> for <span className="mono">{target.runId}</span>.
+            </>
+          }
+          action={
+            next ? (
+              <LinkButton size="sm" href={next} icon={<IconExternal size={13} />}>
+                Continue
+              </LinkButton>
+            ) : undefined
+          }
+        />
+      )}
+    </AuthScreen>
   );
 }

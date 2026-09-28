@@ -1,9 +1,8 @@
-import { useState } from "react";
 import { Badge, formatBytes, formatDuration, formatRelative, formatTimestamp, IdChip, KeyValue, PageHeader, StatePill, Tabs } from "@lux/design-system";
-import { api, isRunActive, useNow, useQuery, type Run } from "../../api/index.ts";
+import { isRunActive, useNow, type Run } from "../../api/index.ts";
 import { setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip, HostLink, labelsText, PageSkeleton } from "./common.tsx";
+import { DASH, ErrorBlock, ErrorStrip, HostLink, labelsText, PageSkeleton, useRun } from "./common.tsx";
 import { RunActions } from "./RunActions.tsx";
 import { RunOutput } from "./RunOutput.tsx";
 import { RunResources } from "./RunResources.tsx";
@@ -22,16 +21,7 @@ export function RunPage({ id }: { id: string }) {
   const t = params.get("tab");
   const tab: Tab = TABS.includes(t as Tab) ? (t as Tab) : "output";
   const setTab = (next: Tab) => setSearchParams({ tab: next === "output" ? null : next });
-  const [active, setActive] = useState(true);
-  const q = useQuery(
-    `run:${id}`,
-    async (s) => {
-      const r = await api.run(id, s);
-      setActive(isRunActive(r.state));
-      return r;
-    },
-    { interval: active ? 3000 : 15_000, live: active ? 15_000 : 60_000 },
-  );
+  const q = useRun(id, { active: 3000, settled: 15_000, liveActive: 15_000, liveSettled: 60_000 });
   const run = q.data;
 
   if (q.error && !run) {
@@ -46,7 +36,7 @@ export function RunPage({ id }: { id: string }) {
   const onChanged = (r: Run) => {
     // Action responses carry no placements or usage; keep what we have and refetch.
     q.setData({ ...run, ...r, placements: run.placements, usage: run.usage, resume: undefined });
-    setActive(true);
+    q.setActive();
     void q.refetch();
   };
   const live = isRunActive(run.state);
@@ -109,7 +99,7 @@ export function RunPage({ id }: { id: string }) {
         ]}
       />
       {tab === "output" && <RunOutput run={run} />}
-      {tab === "servers" && <RunServers run={run} />}
+      {tab === "servers" && <RunServers run={run} refetch={q.refetch} fetching={q.fetching} error={q.error} />}
       {tab === "timeline" && <RunTimeline run={run} now={now} />}
       {tab === "resources" && <RunResources run={run} />}
       {tab === "events" && <RunEvents run={run} live={live} />}

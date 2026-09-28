@@ -461,6 +461,8 @@ export const TERMINAL_RUN_STATES = new Set(["succeeded", "failed", "cancelled"])
 export const INPUT_RUN_STATES = new Set(["starting", "running"]);
 /** What POST /resume accepts. */
 export const RESUMABLE_RUN_STATES = new Set(["stopped", "lost", "failed"]);
+/** What the exec stream (a terminal) and a server's start/stop/restart need. */
+export const EXEC_RUN_STATES = new Set(["running"]);
 
 /** Still changing: worth polling. */
 export function isRunActive(state: string): boolean {

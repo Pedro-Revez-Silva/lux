@@ -30,9 +30,7 @@ export const api = {
   /** A single-use ticket (60s) that lets a browser open the exec WebSocket or a preview without a header. */
   ticket: (id: string, kind: StreamTicket["kind"], signal?: Sig) => request<StreamTicket>(`/runs/${enc(id)}/tickets`, { method: "POST", body: { kind }, signal }),
 
-  servers: (id: string, signal?: Sig) => request<{ servers: Server[] }>(`/runs/${enc(id)}/servers`, { signal }).then((r) => r.servers),
   addServer: (id: string, body: ServerInput) => request<Server>(`/runs/${enc(id)}/servers`, { method: "POST", body }),
-  updateServer: (id: string, name: string, body: Omit<ServerInput, "name">) => request<Server>(`/runs/${enc(id)}/servers/${enc(name)}`, { method: "PUT", body }),
   startServer: (id: string, name: string) => request<Server>(`/runs/${enc(id)}/servers/${enc(name)}/start`, { method: "POST" }),
   stopServer: (id: string, name: string) => request<Server>(`/runs/${enc(id)}/servers/${enc(name)}/stop`, { method: "POST" }),
   restartServer: (id: string, name: string) => request<Server>(`/runs/${enc(id)}/servers/${enc(name)}/restart`, { method: "POST" }),

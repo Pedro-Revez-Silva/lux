@@ -21,10 +21,12 @@ export function Badge({ tone = "neutral", outline, mono, className, children, ..
 }
 
 export interface StatePillProps {
-  kind: "run" | "host";
+  kind: "run" | "host" | "server";
   state: string;
   /** A run's activity: "busy" or "idle" refine a running run's label (others are ignored). */
   activity?: string | null;
+  /** A server's exit code: "Exited · code 1". */
+  exitCode?: number | null;
   /** Show only the dot (for dense table cells); label goes to title. */
   compact?: boolean;
   className?: string;
@@ -40,12 +42,15 @@ export function LiveDot({ hue = "teal", label = "live" }: { hue?: StateHue; labe
   );
 }
 
-/** Colored dot + label for a run or host state. Never color-only. */
-export function StatePill({ kind, state, activity, compact, className }: StatePillProps) {
-  const style = kind === "run" ? runStateStyle(state) : hostStateStyle(state);
+const STYLES = { run: runStateStyle, host: hostStateStyle, server: serverStateStyle };
+
+/** Colored dot + label for a run, host or server state (states.ts). Never color-only. */
+export function StatePill({ kind, state, activity, exitCode, compact, className }: StatePillProps) {
+  const style = STYLES[kind](state);
   const hue: StateHue = style.hue;
   const act = kind === "run" && state === "running" && (activity === "busy" || activity === "idle") ? activity : null;
-  const label = act ? `${style.label} · ${act}` : style.label;
+  const detail = act ?? (kind === "server" && state === "exited" && exitCode != null ? `code ${exitCode}` : null);
+  const label = detail ? `${style.label} · ${detail}` : style.label;
   const live = style.live && act !== "idle";
   const cls = ["pill", `pill-${hue}`, live ? "pill-live" : "", compact ? "pill-compact" : "", className ?? ""].join(" ").trim();
   return (
@@ -56,24 +61,7 @@ export function StatePill({ kind, state, activity, compact, className }: StatePi
   );
 }
 
-export interface ServerStateMarkProps {
-  state: string;
-  /** Shown after the label for an exited server: "Exited · code 1". */
-  exitCode?: number | null;
-  /** Only the dot; the label goes to the title and screen readers. */
-  compact?: boolean;
-  className?: string;
-}
-
-/** Colored dot + label for a Run's server (ServerState in states.ts): the same hue families as the run and host pills. */
-export function ServerStateMark({ state, exitCode, compact, className }: ServerStateMarkProps) {
-  const style = serverStateStyle(state);
-  const label = state === "exited" && exitCode != null ? `${style.label} · code ${exitCode}` : style.label;
-  const cls = ["pill", `pill-${style.hue}`, style.live ? "pill-live" : "", compact ? "pill-compact" : "", className ?? ""].join(" ").trim();
-  return (
-    <span className={cls} title={label} data-state={state}>
-      <span className="pill-dot" aria-hidden="true" />
-      <span className={compact ? "sr-only" : "pill-label"}>{label}</span>
-    </span>
-  );
+/** StatePill for a Run's server. */
+export function ServerStateMark(props: Omit<StatePillProps, "kind" | "activity">) {
+  return <StatePill kind="server" {...props} />;
 }
