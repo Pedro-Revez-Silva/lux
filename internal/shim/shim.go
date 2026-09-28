@@ -11,6 +11,7 @@ package shim
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
@@ -74,6 +76,9 @@ type Shim struct {
 	term *terminal
 	// streams: exec'd processes, by pid, whose exits the reaper reports.
 	streams map[int]chan syscall.WaitStatus
+	// groups: process groups (by their leader's pid) the reaper kills as
+	// their leader exits, before reaping it (servers' groups).
+	groups map[int]bool
 	// srv: the Run's servers' processes (servers.go).
 	srv servers
 }
@@ -103,6 +108,7 @@ func Main() int {
 		startCh:   make(chan proto.ShimMsg, 1),
 		delivered: map[string]bool{},
 		streams:   map[int]chan syscall.WaitStatus{},
+		groups:    map[int]bool{},
 		exitCh:    make(chan syscall.WaitStatus, 1),
 		initCh:    make(chan syscall.WaitStatus, 1),
 		srv:       servers{procs: map[string]*serverProc{}, started: map[string]int64{}, stopping: map[string]*serverProc{}},
@@ -272,22 +278,33 @@ func (s *Shim) isStopping() bool {
 }
 
 // reap collects every child: the workload and init script, whose status
-// is handed on, and orphans, which are just reaped.
+// is handed on, and orphans, which are just reaped. Each exited child is
+// looked at before it is reaped (waitid WNOWAIT): a group that dies with
+// its leader (a server's) is killed while the leader, a zombie, still
+// holds its pid, so the kill cannot reach another group that reused it.
 func (s *Shim) reap() {
 	sigchld := make(chan os.Signal, 16)
 	signal.Notify(sigchld, syscall.SIGCHLD)
 	for range sigchld {
 		for {
-			var ws syscall.WaitStatus
-			pid, err := syscall.Wait4(-1, &ws, syscall.WNOHANG, nil)
-			if pid <= 0 || err != nil {
+			pid := exitedChild()
+			if pid <= 0 {
 				break
 			}
+			var ws syscall.WaitStatus
 			s.mu.Lock()
+			if s.groups[pid] {
+				_ = syscall.Kill(-pid, syscall.SIGKILL)
+				delete(s.groups, pid)
+			}
+			got, err := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
 			work, init := s.workPid, s.initPid
 			stream := s.streams[pid]
 			delete(s.streams, pid)
 			s.mu.Unlock()
+			if got != pid || err != nil {
+				break
+			}
 			switch pid {
 			case work:
 				s.exitCh <- ws
@@ -299,6 +316,31 @@ func (s *Shim) reap() {
 				}
 			}
 		}
+	}
+}
+
+// exitedChild is a child that has exited and is not reaped yet (0 if
+// none), left unreaped.
+func exitedChild() int {
+	var info unix.Siginfo
+	if err := unix.Waitid(unix.P_ALL, 0, &info, unix.WEXITED|unix.WNOHANG|unix.WNOWAIT, nil); err != nil {
+		return 0
+	}
+	// si_pid: the first field of the union after si_signo, si_errno and
+	// si_code, which is pointer-aligned.
+	align := unsafe.Alignof(uintptr(0))
+	off := (3*unsafe.Sizeof(int32(0)) + align - 1) &^ (align - 1)
+	b := unsafe.Slice((*byte)(unsafe.Pointer(&info)), unsafe.Sizeof(info))
+	return int(int32(binary.NativeEndian.Uint32(b[off:])))
+}
+
+// killGroup signals a server's process group, only while its leader is
+// not reaped: after, its pgid may be another's.
+func (s *Shim) killGroup(pgid int, sig syscall.Signal) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.groups[pgid] {
+		_ = syscall.Kill(-pgid, sig)
 	}
 }
 

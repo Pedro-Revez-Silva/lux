@@ -85,7 +85,7 @@ func (s *Shim) reconcileServers() {
 	}
 	for name, p := range s.srv.procs {
 		if w, ok := want[name]; !ok || w.Gen != p.gen {
-			stopServerProc(p)
+			s.stopServerProc(p)
 			delete(s.srv.procs, name)
 			s.srv.stopping[name] = p
 			go func() {
@@ -113,15 +113,18 @@ func (s *Shim) reconcileServers() {
 	}
 }
 
-// stopServerProc stops a server's process group: TERM, then KILL.
-func stopServerProc(p *serverProc) {
-	_ = syscall.Kill(-p.pgid, syscall.SIGTERM)
+// stopServerProc stops a server's process group: TERM, then KILL if it
+// has not gone in 5s. Only while its leader is not reaped (killGroup):
+// after, the reaper has killed the group already, and its pgid may be
+// another's.
+func (s *Shim) stopServerProc(p *serverProc) {
+	s.killGroup(p.pgid, syscall.SIGTERM)
 	go func() {
 		select {
 		case <-p.done:
 		case <-time.After(5 * time.Second):
+			s.killGroup(p.pgid, syscall.SIGKILL)
 		}
-		_ = syscall.Kill(-p.pgid, syscall.SIGKILL)
 	}()
 }
 
@@ -158,7 +161,15 @@ func (s *Shim) startServer(sv proto.ServerSpec) *serverProc {
 		exitEvent(127, "pipes: "+fmt.Sprint(e1, e2))
 		return nil
 	}
-	exited, err := s.startTracked(cmd.Start, &cmd.Process)
+	exited, err := s.startTracked(func() error {
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		// Its group dies with it, killed by the reaper before the leader
+		// is reaped (after, the pgid may be another's).
+		s.groups[cmd.Process.Pid] = true
+		return nil
+	}, &cmd.Process)
 	if err != nil {
 		exitEvent(127, err.Error())
 		return nil
@@ -176,8 +187,6 @@ func (s *Shim) startServer(sv proto.ServerSpec) *serverProc {
 	})
 	go func() {
 		ws := <-exited
-		// Whatever it left behind in its group goes with it.
-		_ = syscall.Kill(-p.pgid, syscall.SIGKILL)
 		drain()
 		close(p.done)
 		s.srv.mu.Lock()

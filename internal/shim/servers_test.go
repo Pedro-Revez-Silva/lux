@@ -3,6 +3,7 @@ package shim
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -66,7 +67,7 @@ func TestServerProcesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &Shim{out: o, red: NewRedactor(nil), user: &userInfo{home: dir}, env: []string{"PATH=" + os.Getenv("PATH")},
-		streams: map[int]chan syscall.WaitStatus{}, srv: servers{procs: map[string]*serverProc{}, started: map[string]int64{}, stopping: map[string]*serverProc{}}}
+		streams: map[int]chan syscall.WaitStatus{}, groups: map[int]bool{}, srv: servers{procs: map[string]*serverProc{}, started: map[string]int64{}, stopping: map[string]*serverProc{}}}
 	s.cfg.Workdir = dir
 	go s.reap()
 
@@ -119,6 +120,31 @@ func TestServerProcesses(t *testing.T) {
 	case <-loop.done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("loop was not stopped")
+	}
+
+	// A server's group goes with its leader, killed by the reaper before
+	// the leader is reaped; after, the shim no longer signals that pgid (it
+	// may be another's by then), even when a stop's KILL comes due. (In
+	// this test, not its own: one process has one reaper.)
+	pidFile := filepath.Join(dir, "child")
+	s.setServers([]proto.ServerSpec{{Name: "web", Gen: 1, Command: []string{"sh", "-c", "sleep 60 & echo $! > " + pidFile + "; sleep 0.3"}}})
+	var web *serverProc
+	waitFor(t, func() bool { s.srv.mu.Lock(); defer s.srv.mu.Unlock(); web = s.srv.procs["web"]; return web != nil }, "web never started")
+	select {
+	case <-web.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the leader's exit was not seen")
+	}
+	child, err := strconv.Atoi(strings.TrimSpace(readFile(t, pidFile)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return syscall.Kill(child, 0) != nil }, "the group outlived its leader")
+	s.mu.Lock()
+	tracked := s.groups[web.pgid]
+	s.mu.Unlock()
+	if tracked {
+		t.Fatal("a reaped leader's group is still signalled")
 	}
 	o.Close()
 }
