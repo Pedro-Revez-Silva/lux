@@ -227,7 +227,7 @@ func (p *previews) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.challenge(w, r)
 		return
 	}
-	t, err := p.route(r.Context(), w, r, name, runID, user)
+	t, err := p.route(r.Context(), w, name, runID)
 	if err != nil || t == nil {
 		return
 	}
@@ -368,7 +368,7 @@ func (p *previews) state(ctx context.Context, runID, name string) (previewState,
 // route decides what a request gets: a target to proxy to, or (nil) a
 // status page it has already written. A starting server, or a Run on its
 // way to running, is waited for up to hold_for.
-func (p *previews) route(ctx context.Context, w http.ResponseWriter, r *http.Request, name, runID string, u previewUser) (*streamTarget, error) {
+func (p *previews) route(ctx context.Context, w http.ResponseWriter, name, runID string) (*streamTarget, error) {
 	deadline := time.Now().Add(p.s.cfg.Preview.HoldFor)
 	for {
 		woken := p.s.wakeups.next(runID)

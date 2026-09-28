@@ -301,22 +301,16 @@ func (c *hubConn) Read(p []byte) (int, error) {
 		d, changed := c.deadline, c.dchange
 		c.dmu.Unlock()
 		var timer <-chan time.Time
-		var t *time.Timer
 		if !d.IsZero() {
 			if time.Until(d) <= 0 {
 				return 0, errDeadline
 			}
-			t = time.NewTimer(time.Until(d))
+			t := time.NewTimer(time.Until(d))
+			defer t.Stop()
 			timer = t.C
-		}
-		stop := func() {
-			if t != nil {
-				t.Stop()
-			}
 		}
 		select {
 		case <-c.closed:
-			stop()
 			return 0, net.ErrClosed
 		case <-c.st.gone:
 			c.err = errors.New("the Run's host disconnected")
@@ -324,7 +318,6 @@ func (c *hubConn) Read(p []byte) (int, error) {
 			return 0, errDeadline
 		case <-changed:
 		case f, ok := <-c.st.ch:
-			stop()
 			switch {
 			case !ok:
 				c.err = errors.New("the stream fell behind and was dropped")

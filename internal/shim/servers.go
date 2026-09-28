@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -128,7 +129,7 @@ func stopServerProc(p *serverProc) {
 // held. A command that cannot start is recorded as exited at once.
 func (s *Shim) startServer(sv proto.ServerSpec) *serverProc {
 	s.mu.Lock()
-	env := s.env
+	env := slices.Clone(s.env)
 	s.mu.Unlock()
 	for k, v := range sv.Env {
 		env = append(env, k+"="+v)
