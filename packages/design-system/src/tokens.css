@@ -87,6 +87,14 @@
   --log-stderr-fg: #8f2b2b;
   --log-line-hover: rgba(22, 24, 29, 0.04);
 
+  /* Terminal: the frame around a Solarized screen (the screen's own colours
+     are terminalThemes.ts; these are what the CSS around it needs). */
+  --term-bg: #fdf6e3;
+  --term-fg: #657b83;
+  --term-cursor: #586e75;
+  --term-dim: #93a1a1;
+  --term-scrollbar: #93a1a1;
+
   /* Type */
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
@@ -287,6 +295,12 @@
     --log-stderr-fg: #f0a0a0;
     --log-line-hover: rgba(255, 255, 255, 0.04);
 
+    --term-bg: #002b36;
+    --term-fg: #839496;
+    --term-cursor: #93a1a1;
+    --term-dim: #586e75;
+    --term-scrollbar: #586e75;
+
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
     --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.06);
     --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.08);
@@ -357,6 +371,12 @@
   --log-stderr-bg: rgba(230, 103, 103, 0.10);
   --log-stderr-fg: #f0a0a0;
   --log-line-hover: rgba(255, 255, 255, 0.04);
+
+  --term-bg: #002b36;
+  --term-fg: #839496;
+  --term-cursor: #93a1a1;
+  --term-dim: #586e75;
+  --term-scrollbar: #586e75;
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.06);

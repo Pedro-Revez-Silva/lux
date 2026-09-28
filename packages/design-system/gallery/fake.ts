@@ -1,5 +1,5 @@
 // Deterministic fake data for the style guide. Seeded so reloads look the same.
-import type { HostState, LogLine, RunState, Tenant, TimelineStage } from "../src/index.ts";
+import type { HostState, LogLine, RunState, ServerInfo, Tenant, TimelineStage } from "../src/index.ts";
 
 function rng(seed: number) {
   let s = seed >>> 0;
@@ -182,3 +182,80 @@ export function fakeLogs(n = 50_000): LogLine[] {
   }
   return out;
 }
+
+/* ---------- Servers ---------- */
+
+const PREVIEW = "k3jq7x2mfa9vbn4z.lux.example.dev";
+const iso = (ms: number) => new Date(ms).toISOString();
+
+/** A run's three servers: one ready, one starting, one never started. */
+export const fakeServers: ServerInfo[] = [
+  { name: "web", port: 3000, command: ["sh", "-c", "npm run dev -- --host 0.0.0.0 --port 3000"], state: "ready", since: iso(NOW - 12 * 60_000), readySince: iso(NOW - 12 * 60_000), url: `https://web-${PREVIEW}` },
+  { name: "api", port: 8080, command: ["sh", "-c", "go run ./cmd/api --port 8080 --dev"], state: "starting", since: iso(NOW - 9_000), url: `https://api-${PREVIEW}` },
+  { name: "storybook", port: 6006, command: ["sh", "-c", "npm run storybook -- --ci --port 6006"], state: "stopped", url: `https://storybook-${PREVIEW}` },
+];
+
+/** The same run after the api server died: the port was taken. */
+export const fakeServersExited: ServerInfo[] = [
+  fakeServers[0]!,
+  { ...fakeServers[1]!, state: "exited", exitCode: 1, error: "listen tcp :8080: bind: address already in use", since: iso(NOW - 14 * 60_000) },
+  fakeServers[2]!,
+];
+
+/** After a migration: every server stopped by the move. */
+export const fakeServersMigrated: ServerInfo[] = fakeServers.map((s, i) => ({ ...s, state: "stopped", stopReason: i < 2 ? "migrated" : undefined, since: i < 2 ? iso(NOW - 31 * 60_000) : undefined, readySince: undefined }));
+
+/** A server with no command and no preview domain: something started by hand. */
+export const fakeServerManual: ServerInfo = { name: "docs", port: 4000, command: null, state: "unreachable", since: iso(NOW - 40_000), url: null };
+
+const at = (offset: number) => NOW - 15 * 60_000 + offset * 1000;
+export const fakeServerLogs: Record<string, LogLine[]> = {
+  web: [
+    { ts: at(0), stream: "system", text: "[lux] starting web in apps/web: npm run dev -- --host 0.0.0.0 --port 3000" },
+    { ts: at(0.4), stream: "stdout", text: "> web@2.14.0 dev" },
+    { ts: at(0.4), stream: "stdout", text: "> vite --host 0.0.0.0 --port 3000" },
+    { ts: at(1.3), stream: "stdout", text: "  VITE v6.0.7  ready in 812 ms" },
+    { ts: at(1.3), stream: "stdout", text: "  ➜  Local:   http://localhost:3000/" },
+    { ts: at(1.3), stream: "stdout", text: "  ➜  Network: http://10.42.7.19:3000/" },
+    { ts: at(1.4), stream: "system", text: "[lux] web is ready: tcp :3000 answered after 1.4s" },
+    { ts: at(180), stream: "stdout", text: "14:31:07 [vite] hmr update /src/checkout/PaymentStep.tsx" },
+  ],
+  api: [
+    { ts: at(60), stream: "system", text: "[lux] starting api in services/api: go run ./cmd/api --port 8080 --dev" },
+    { ts: at(60.5), stream: "stdout", text: "go: downloading github.com/jackc/pgx/v5 v5.7.2" },
+    { ts: at(60.9), stream: "stdout", text: "go: downloading github.com/go-chi/chi/v5 v5.2.0" },
+    { ts: at(61.2), stream: "stdout", text: "2026/09/28 14:29:41 INFO api starting port=8080 env=dev" },
+    { ts: at(61.2), stream: "stdout", text: "2026/09/28 14:29:41 INFO migrations up to date version=0412" },
+    { ts: at(61.3), stream: "stderr", text: "2026/09/28 14:29:42 ERROR listen tcp :8080: bind: address already in use" },
+    { ts: at(61.3), stream: "stderr", text: "exit status 1" },
+    { ts: at(61.4), stream: "system", text: "[lux] api exited with code 1 after 1.3s" },
+  ],
+};
+
+/** A short shell session, with ANSI colour, for the terminal demo. */
+export const fakeShellScript: string[] = [
+  "\x1b[1;32magent@run-k3jq7x2m\x1b[0m:\x1b[1;34m/workspace\x1b[0m$ whoami\r\n",
+  "agent\r\n",
+  "\x1b[1;32magent@run-k3jq7x2m\x1b[0m:\x1b[1;34m/workspace\x1b[0m$ ls -la\r\n",
+  "total 72\r\n",
+  "drwxr-xr-x  9 agent agent  4096 Sep 28 10:41 \x1b[1;34m.\x1b[0m\r\n",
+  "drwxr-xr-x  1 root  root   4096 Sep 28 10:12 \x1b[1;34m..\x1b[0m\r\n",
+  "-rw-r--r--  1 agent agent   312 Sep 28 10:12 .env\r\n",
+  "drwxr-xr-x  8 agent agent  4096 Sep 28 10:44 \x1b[1;34m.git\x1b[0m\r\n",
+  "-rw-r--r--  1 agent agent  1873 Sep 28 10:12 README.md\r\n",
+  "drwxr-xr-x 14 agent agent  4096 Sep 28 10:39 \x1b[1;34mnode_modules\x1b[0m\r\n",
+  "-rw-r--r--  1 agent agent  1204 Sep 28 10:12 package.json\r\n",
+  "-rwxr-xr-x  1 agent agent   512 Sep 28 10:12 \x1b[1;32mrun.sh\x1b[0m\r\n",
+  "drwxr-xr-x  5 agent agent  4096 Sep 28 10:43 \x1b[1;34msrc\x1b[0m\r\n",
+  "\x1b[1;32magent@run-k3jq7x2m\x1b[0m:\x1b[1;34m/workspace\x1b[0m$ git status\r\n",
+  "On branch \x1b[1mfeat/terminal-page\x1b[0m\r\n",
+  "Changes not staged for commit:\r\n",
+  "\t\x1b[31mmodified:   src/app/router.tsx\x1b[0m\r\n",
+  "\t\x1b[31mmodified:   src/app/pages/RunPage.tsx\x1b[0m\r\n",
+  "\r\n",
+  "\x1b[1;32magent@run-k3jq7x2m\x1b[0m:\x1b[1;34m/workspace\x1b[0m$ curl -sI localhost:3000 | head -3\r\n",
+  "\x1b[1mHTTP/1.1 200 OK\x1b[0m\r\n",
+  "Content-Type: text/html\r\n",
+  "Cache-Control: no-cache\r\n",
+  "\x1b[1;32magent@run-k3jq7x2m\x1b[0m:\x1b[1;34m/workspace\x1b[0m$ ",
+];

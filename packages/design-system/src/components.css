@@ -1432,3 +1432,323 @@ a.idchip-text:hover {
     flex: 1 1 auto;
   }
 }
+
+/* ---------- ConnectionBadge ----------
+   A badge with a dot (green connected, amber connecting, red lost, neutral
+   after the shell exits). */
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.conn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.85;
+}
+.conn .conn-spinner {
+  border-width: 1.5px !important;
+}
+
+/* ---------- Terminal ----------
+   The LogView's framing (inset, hairline, radius, a status bar under it);
+   the screen inside is Solarized (terminalThemes.ts, --term-* tokens) and
+   follows the console theme. The frame fills what it is given: the page
+   sets the height. */
+.term {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  background: var(--term-bg);
+  overflow: hidden;
+}
+.term:focus-within {
+  box-shadow: var(--focus-ring);
+}
+.term-screen {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  padding: var(--sp-5) var(--sp-6);
+  background: var(--term-bg);
+  transition: opacity var(--dur-normal) var(--ease);
+}
+.term-screen .xterm {
+  height: 100%;
+}
+.term-screen .xterm .xterm-viewport {
+  scrollbar-width: thin;
+  scrollbar-color: var(--term-scrollbar) transparent;
+}
+.term-screen .xterm .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+}
+.term-screen .xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--term-scrollbar);
+  border-radius: 5px;
+  border: 3px solid var(--term-bg);
+}
+.term.is-dimmed .term-screen {
+  opacity: 0.38;
+}
+.term-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-6);
+  height: 30px;
+  padding: 0 var(--sp-5);
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-surface);
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  flex: none;
+  min-width: 0;
+}
+.term-bar-group {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  white-space: nowrap;
+  flex: none;
+}
+.term-bar-group.is-audit {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.term-bar .sep {
+  color: var(--fg-faint);
+}
+.term-bar kbd {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  color: var(--fg-secondary);
+  line-height: 1.35;
+}
+.term-bar .num {
+  color: var(--fg-secondary);
+}
+/* Overlay card over a dimmed screen: exit, connection lost. */
+.term-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-7);
+  pointer-events: none;
+}
+.term:has(.term-bar) .term-overlay {
+  bottom: 30px;
+}
+.term-overlay .card {
+  pointer-events: auto;
+  width: 420px;
+  max-width: 100%;
+  background: var(--bg-raised);
+  border-color: var(--border);
+  box-shadow: var(--shadow-lg);
+}
+.term-overlay-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding: var(--sp-7);
+}
+.term-overlay .overlay-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+.term-overlay .overlay-icon {
+  display: inline-flex;
+  color: var(--fg-muted);
+}
+.term-overlay .overlay-icon.is-warn {
+  color: var(--warn-dot);
+}
+.term-overlay .overlay-desc {
+  color: var(--fg-secondary);
+  font-size: var(--text-md);
+}
+.term-overlay .overlay-actions {
+  display: flex;
+  gap: var(--sp-4);
+  margin-top: var(--sp-3);
+}
+.term-overlay .overlay-meta {
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+
+/* ---------- ServerList ----------
+   One row per server: name and port lead, the state and URL in the
+   middle, actions on the right; an expandable log under a row. Rows are
+   separated by the soft hairline, like table rows. */
+.server-list-wrap {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.server-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.server-row + .server-row {
+  border-top: 1px solid var(--border-soft);
+}
+.server-main {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--sp-5) var(--sp-6);
+  padding: var(--sp-5) var(--pad-card);
+  min-width: 0;
+}
+.server-row.is-open .server-main {
+  background: var(--bg-subtle);
+}
+.server-name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding-top: 2px;
+}
+.server-name-text {
+  color: var(--fg);
+  font-weight: var(--weight-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.server-port {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+.server-mid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.server-state {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.server-since {
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.server-err {
+  font-size: var(--text-sm);
+  color: var(--danger-fg);
+  font-family: var(--font-mono);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.server-url {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+.server-url a {
+  color: var(--accent-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.server-url.is-off a {
+  color: var(--fg-muted);
+}
+.server-url.is-off a:hover {
+  color: var(--accent-text);
+}
+.server-url .btn {
+  color: var(--fg-muted);
+}
+.server-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  flex: none;
+}
+.server-actions .btn {
+  color: var(--fg-secondary);
+}
+.server-actions .btn-default {
+  color: var(--fg);
+}
+.server-log {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border-soft);
+  background: var(--bg-subtle);
+  padding: 0 var(--pad-card) var(--sp-5);
+}
+.server-log .logview {
+  border-radius: var(--radius-md);
+}
+.server-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  height: 32px;
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+.server-log-err {
+  color: var(--danger-fg);
+}
+.server-note {
+  padding: var(--sp-4) var(--pad-card);
+  border-top: 1px solid var(--border-soft);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+@container content (max-width: 760px) {
+  .server-main {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--sp-3);
+  }
+  .server-name {
+    flex-direction: row;
+    align-items: baseline;
+    gap: var(--sp-3);
+  }
+  .server-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+}

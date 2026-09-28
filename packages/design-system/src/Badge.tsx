@@ -1,5 +1,5 @@
 import type { HTMLAttributes, ReactNode } from "react";
-import { hostStateStyle, runStateStyle, type StateHue } from "./states.ts";
+import { hostStateStyle, runStateStyle, serverStateStyle, type StateHue } from "./states.ts";
 
 export type BadgeTone = "neutral" | "accent" | "success" | "warn" | "danger" | "info";
 
@@ -48,6 +48,28 @@ export function StatePill({ kind, state, activity, compact, className }: StatePi
   const label = act ? `${style.label} · ${act}` : style.label;
   const live = style.live && act !== "idle";
   const cls = ["pill", `pill-${hue}`, live ? "pill-live" : "", compact ? "pill-compact" : "", className ?? ""].join(" ").trim();
+  return (
+    <span className={cls} title={label} data-state={state}>
+      <span className="pill-dot" aria-hidden="true" />
+      <span className={compact ? "sr-only" : "pill-label"}>{label}</span>
+    </span>
+  );
+}
+
+export interface ServerStateMarkProps {
+  state: string;
+  /** Shown after the label for an exited server: "Exited · code 1". */
+  exitCode?: number | null;
+  /** Only the dot; the label goes to the title and screen readers. */
+  compact?: boolean;
+  className?: string;
+}
+
+/** Colored dot + label for a Run's server (ServerState in states.ts): the same hue families as the run and host pills. */
+export function ServerStateMark({ state, exitCode, compact, className }: ServerStateMarkProps) {
+  const style = serverStateStyle(state);
+  const label = state === "exited" && exitCode != null ? `${style.label} · code ${exitCode}` : style.label;
+  const cls = ["pill", `pill-${style.hue}`, style.live ? "pill-live" : "", compact ? "pill-compact" : "", className ?? ""].join(" ").trim();
   return (
     <span className={cls} title={label} data-state={state}>
       <span className="pill-dot" aria-hidden="true" />
