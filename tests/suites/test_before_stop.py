@@ -114,6 +114,21 @@ def test_the_hook_does_not_lengthen_the_grace(lux, runners, hosts):
     assert "/.lux/artifacts/x" in artifact_paths(lux, run_id)
 
 
+def test_a_workload_that_ends_during_the_hook_does_not_cut_it_short(lux, runners, hosts):
+    """The workload exits on its own while the hook runs: the container
+    stays until the hook is done, so what it writes is still collected."""
+    runners.start(hosts[0])
+    spec = generic(ALPINE_IMAGE, "sh", "-c", "echo $$ > /workspace/pid; " + WORK, volumes=WORKSPACE)
+    # The hook ends the workload itself, then keeps working for a while.
+    spec["workload"]["beforeStop"] = {"command": ["sh", "-c", "kill -KILL $(cat /workspace/pid); sleep 3; echo late > $LUX_ARTIFACTS/late; echo hook-finished"], "timeout": "10s"}
+    run_id = lux.submit(spec)
+    started(lux, run_id)
+    lux.run("stop", run_id, "--wait")
+    assert "/.lux/artifacts/late" in artifact_paths(lux, run_id)
+    # The hook ran to its end: what it printed last is the Run's output.
+    assert "hook-finished" in lux.logs(run_id)
+
+
 def test_a_timeout_past_the_grace_is_refused(lux):
     spec = hooked()
     spec["workload"]["grace"] = "5s"

@@ -318,8 +318,9 @@ stop** — a `lux stop`, a cancel, the Run's `timeout`, a drain, a
 preemption — the shim runs the command in the container first, while the
 workload is still whole, and only then signals the workload. It runs as
 the workload's user, with its environment and working directory; its
-output is the Run's, bracketed by `lux.beforeStop` events (`start`, then
-`done` with the exit code and whether it timed out). Anything it writes
+output is the Run's (and the shim's own record brackets it with
+`lux.beforeStop` events: `start`, then `done` with the exit code and
+whether it timed out). Anything it writes
 into `$LUX_ARTIFACTS` is collected with the placement's artifacts.
 
 It is bounded: after `timeout` (default 10s) its process group is killed
