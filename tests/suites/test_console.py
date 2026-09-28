@@ -258,7 +258,7 @@ def _cost_cell(cost: dict) -> str:
     return ("~" if may_change else "") + _dollars(total["amount"])
 
 
-def test_runs_list_cost_column_matches_the_run_page(page, env, lux, runners, hosts):
+def test_runs_list_cost_column_matches_the_run_page(page, env, lux, operator, runners, hosts):
     _priced_host(lux, runners, hosts[0], price="36")
     name = f"listed-cost-{lux.tenant_id[-6:]}"
     run_id = _costed_run(lux, "listed-cost", name=name)
@@ -307,6 +307,25 @@ def test_runs_list_cost_column_matches_the_run_page(page, env, lux, runners, hos
     page.get_by_role("tab", name="Resources & cost").click()
     expect(page.locator("section.card.run-cost .money-list-lg")).to_have_text(shown, timeout=15_000)
     assert not page.errors, page.errors
+
+    # Beside the Cost column the State pill reads whole (a reason may still
+    # ellipsize): at 1200px the table is under its 1100px breakpoint; at 1400px
+    # it is just over it, where every column left State under 100px. For a
+    # tenant, and for an operator, who also has a Tenant column.
+    for key in (lux.api_key, operator.api_key):
+        page.sign_in(key, "/runs")
+        for width in (1200, 1300, 1400, 1500):
+            page.set_viewport_size({"width": width, "height": 900})
+            page.goto(env.luxd_url + "/runs")
+            row = page.get_by_role("row").filter(has=page.get_by_role("link", name=name, exact=True))
+            expect(row.locator(".pill")).to_have_text("Succeeded", timeout=15_000)
+            state = row.locator("td", has=page.locator(".pill"))
+            overflow = state.evaluate("""td => [td, ...td.querySelectorAll('*')]
+                .filter(e => !e.closest('.state-reason') && getComputedStyle(e).display !== 'inline')
+                .filter(e => e.scrollWidth > e.clientWidth)
+                .map(e => `${e.tagName}.${e.className} ${e.scrollWidth}>${e.clientWidth}`)""")
+            assert not overflow, (width, overflow)
+    assert not page.errors, page.errors
     lux.run("cancel", pending)
 
 
@@ -339,6 +358,10 @@ def test_overview_charts_cost_by_family(page, env, lux, runners, hosts, cost_plu
         expect(legend.get_by_text("Compute", exact=True)).to_have_count(1)
         expect(legend.get_by_text("AI models", exact=True)).to_have_count(1)
         expect(legend.get_by_text("ai", exact=True)).to_have_count(0)
+        # Each family has its own colour: Compute's swatch is not AI models'.
+        swatch = lambda label: legend.get_by_role("button", name=label, exact=True).locator(".tschart-key").evaluate("e => getComputedStyle(e).backgroundColor")
+        compute, ai = swatch("Compute"), swatch("AI models")
+        assert compute != ai and "0, 0, 0, 0" not in compute + ai, (theme, compute, ai)
         # Top Runs leads with the Run's name, its id beside it; a tenant gets no tenant table and no Unallocated tile.
         top = page.locator("section.card", has=page.get_by_role("heading", name="Top Runs", exact=True))
         row = top.get_by_role("row").filter(has=page.get_by_role("link", name=name, exact=True))

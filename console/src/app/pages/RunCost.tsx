@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Card, ColorKey, compareMoney, CostStatusBadge, EmptyState, familyColor, familyDisplay, formatDuration, formatMoney, formatTimestamp, KeyValue, ListPriceNote, Money, MoneyList, Table, Tooltip, type Column } from "@lux/design-system";
+import { Card, ColorKey, compareMoney, CostStatusBadge, EmptyState, familyColor, familyDisplay, formatDuration, formatTimestamp, KeyValue, ListPriceNote, Money, MoneyList, Table, Tooltip, type Column } from "@lux/design-system";
 import { api, isRunActive, useQuery, type CostLine, type CostTotal, type Run, type RunCost as RunCostData } from "../../api/index.ts";
 import { ErrorBlock, ErrorStrip, RelativeTime } from "./common.tsx";
 
@@ -68,11 +68,14 @@ function Family({ family, families }: { family: string; families: ReturnType<typ
 
 /** A family's amount, with the part that may still change when it is only part of it. */
 function FamilyAmount({ total }: { total: CostTotal }) {
-  const amount = formatMoney(total.amount, total.currency);
-  if (compareMoney(total.estimate, "0") === 0 || compareMoney(total.final, "0") === 0) return <>{amount}</>;
+  const amount = <Money amount={total.amount} currency={total.currency} />;
+  if (compareMoney(total.estimate, "0") === 0 || compareMoney(total.final, "0") === 0) return amount;
   return (
     <>
-      {amount} <span className="muted">· {formatMoney(total.estimate, total.currency)} estimate</span>
+      {amount}{" "}
+      <span className="muted">
+        · <Money amount={total.estimate} currency={total.currency} /> estimate
+      </span>
     </>
   );
 }

@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Card, EmptyState, familyColor, formatMoney, formatTimestamp, KeyValue, ListPriceNote, TimeSeriesChart, Tooltip, type KeyValueItem } from "@lux/design-system";
+import { Card, EmptyState, familyColor, formatMoney, formatTimestamp, KeyValue, ListPriceNote, TimeSeriesChart, Tooltip, type KeyValueItem, type Series } from "@lux/design-system";
 import { api, useQuery, type HostCost as HostCostData, type HostCostRate } from "../../api/index.ts";
 import { ErrorStrip } from "./common.tsx";
 
@@ -13,7 +13,9 @@ export function HostCost({ id, range, operator }: { id: string; range: string; o
   const since = range === "1h" ? "6h" : range;
   const q = useQuery(`host-cost:${id}:${since}`, (s) => api.hostCost(id, since, s), { interval: 30_000 });
   const c = q.data;
-  const charts = useMemo(() => (c ? byCurrency(c) : []), [c]);
+  // Stable per response: the host page re-renders on its 10s clock, and a
+  // fresh series or ys array would rebuild each chart.
+  const charts = useMemo(() => (c ? byCurrency(c) : []).map((ch) => chartProps(ch, operator)), [c, operator]);
   const sub = operator ? `allocated to Runs vs unallocated, per hour, over ${since}` : `allocated to your Runs, per hour, over ${since}`;
   return (
     <>
@@ -26,15 +28,7 @@ export function HostCost({ id, range, operator }: { id: string; range: string; o
         ) : (
           charts.map((ch, i) => (
             <Card key={ch.currency} title={charts.length > 1 ? `Cost · ${ch.currency}` : "Cost"} subtitle={sub} actions={i === 0 ? <ListPriceNote /> : undefined}>
-              <TimeSeriesChart
-                x={ch.x}
-                ys={operator ? [ch.allocated, ch.unallocated] : [ch.allocated]}
-                series={operator ? [{ label: "Allocated", color: familyColor("compute") }, { label: "Unallocated", color: "var(--st-neutral-dot)" }] : [{ label: "Allocated", color: familyColor("compute"), area: true }]}
-                unit="money"
-                currency={ch.currency}
-                stacked={operator}
-                legend
-              />
+              <TimeSeriesChart x={ch.x} ys={ch.ys} series={ch.series} unit="money" currency={ch.currency} stacked={operator} legend />
             </Card>
           ))
         )}
@@ -53,6 +47,14 @@ interface CurrencySeries {
   x: number[];
   allocated: (number | null)[];
   unallocated: (number | null)[];
+}
+
+const OPERATOR_SERIES: Series[] = [{ label: "Allocated", color: familyColor("compute") }, { label: "Unallocated", color: "var(--st-neutral-dot)" }];
+const TENANT_SERIES: Series[] = [{ label: "Allocated", color: familyColor("compute"), area: true }];
+
+/** A currency's chart: allocated and unallocated stacked for operators, allocated alone otherwise. */
+function chartProps(ch: CurrencySeries, operator: boolean) {
+  return { currency: ch.currency, x: ch.x, ys: operator ? [ch.allocated, ch.unallocated] : [ch.allocated], series: operator ? OPERATOR_SERIES : TENANT_SERIES };
 }
 
 /** One aligned hourly series per currency; an hour without a row is missing (null), not zero. */
