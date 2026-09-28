@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Card, EmptyState, familyColor, formatMoney, formatTimestamp, KeyValue, ListPriceNote, TimeSeriesChart, Tooltip, type KeyValueItem, type Series } from "@lux/design-system";
+import { Card, EmptyState, familyColor, formatTimestamp, KeyValue, ListPriceNote, Money, TimeSeriesChart, Tooltip, type KeyValueItem, type Series } from "@lux/design-system";
 import { api, useQuery, type HostCost as HostCostData, type HostCostRate } from "../../api/index.ts";
 import { ErrorStrip } from "./common.tsx";
 
@@ -88,18 +88,12 @@ function RateSource({ source }: { source: string }) {
   );
 }
 
-/** Every digit of a rate: "$0.384", not "$0.38". */
-function rateDecimals(perHour: string): number {
-  const frac = perHour.split(".")[1]?.replace(/0+$/, "") ?? "";
-  return Math.min(9, Math.max(2, frac.length));
-}
-
 function rateItem(r: HostCostRate): KeyValueItem {
   return {
     key: `${formatTimestamp(r.from, { seconds: false })} – ${r.to ? formatTimestamp(r.to, { seconds: false }) : "now"}`,
     value: (
       <>
-        <span className="mono">{formatMoney(r.perHour, r.currency, { decimals: rateDecimals(r.perHour) })}/h</span> <span className="secondary">·</span> <RateSource source={r.source} />
+        <span className="mono"><Money amount={r.perHour} currency={r.currency} />/h</span> <span className="secondary">·</span> <RateSource source={r.source} />
       </>
     ),
   };

@@ -382,7 +382,8 @@ def test_operator_overview_has_unallocated_and_top_tenants(page, env, operator):
 
 
 def test_host_page_shows_cost_to_its_owner_and_rates_to_operators(page, env, lux, operator, runners, hosts):
-    host_id = _priced_host(lux, runners, hosts[0])
+    # More than 4 decimals: shown rounded, the exact rate one hover away.
+    host_id = _priced_host(lux, runners, hosts[0], price="0.041666667")
     page.sign_in(lux.api_key, f"/hosts/{host_id}")
     expect(page.get_by_text(re.compile(r"^allocated to your Runs, per hour"))).to_have_count(1, timeout=15_000)
     # Rate periods and unallocated are the operators'.
@@ -393,7 +394,10 @@ def test_host_page_shows_cost_to_its_owner_and_rates_to_operators(page, env, lux
 
     def check(theme):
         rates = page.locator("section.card", has=page.get_by_role("heading", name="Rate periods", exact=True))
-        expect(rates.get_by_text("$0.40/h", exact=True)).to_have_count(1, timeout=15_000)
+        expect(rates.get_by_text("$0.0417/h", exact=True)).to_have_count(1, timeout=15_000)
+        rates.locator(".money-rounded").hover()
+        expect(page.get_by_role("tooltip")).to_have_text("Exactly $0.041666667")
+        page.mouse.move(0, 0)
         # The source once: "static", not "static price (static)".
         expect(rates.get_by_text("static", exact=True)).to_have_count(1)
         expect(rates.get_by_text(re.compile(r"static price|\(static\)"))).to_have_count(0)
