@@ -222,9 +222,11 @@ aud = ""                         # LUX_PREVIEW_CF_ACCESS_AUD (team: console.clou
   server as not answering. Run previews through the luxd your runners
   connect to.
 - **Throughput:** proxied bytes travel as base64 JSON frames over the
-  runner's WebSocket, without flow control: a response that a slow client
-  reads far behind the server (many megabytes queued) is cut off. Fine for
-  dev servers and demos; not a CDN.
+  runner's WebSocket. A tunnel is flow controlled: the runner sends at
+  most 4 MiB ahead of what luxd has passed on, so a slow client slows the
+  server's writes rather than losing the response (a runner from before
+  flow control relays without it, and a far-behind response is cut off,
+  until it updates itself). Fine for dev servers and demos; not a CDN.
 
 The preview listener is what the Run's authors' code is served from: see
 [security](security.md#previews).

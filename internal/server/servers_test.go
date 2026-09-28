@@ -548,7 +548,8 @@ func TestTickets(t *testing.T) {
 }
 
 // fakeRunner stands in for host h1's runner: it opens tunnels to the
-// given address, relaying stream frames as a runner does.
+// given address, relaying stream frames as a runner does, flow control
+// included (it sends output only with credit).
 func fakeRunner(t *testing.T, s *Server, target string) {
 	t.Helper()
 	c := &runnerConn{hostID: "h1", send: make(chan proto.Frame, 256), notify: make(chan struct{}, 1), done: make(chan struct{})}
@@ -562,6 +563,7 @@ func fakeRunner(t *testing.T, s *Server, target string) {
 		close(c.done)
 	})
 	conns := map[string]net.Conn{}
+	credits := map[string]chan int{}
 	go func() {
 		for {
 			select {
@@ -570,16 +572,30 @@ func fakeRunner(t *testing.T, s *Server, target string) {
 			case f := <-c.send:
 				switch f.Type {
 				case proto.MsgStreamOpen:
+					var o proto.StreamOpen
+					_ = json.Unmarshal(f.Data, &o)
 					conn, err := net.Dial("tcp", target)
 					if err != nil {
 						s.hub.route(f.Stream, proto.Frame{Type: proto.MsgStreamClose, Stream: f.Stream, Data: proto.Marshal(proto.StreamData{Error: err.Error()})})
 						continue
 					}
 					conns[f.Stream] = conn
+					credit := make(chan int, 64)
+					credits[f.Stream] = credit
 					id := f.Stream
 					go func() {
+						window := o.Window
 						buf := make([]byte, 4096)
 						for {
+							for o.Window > 0 && window == 0 {
+								select {
+								case n := <-credit:
+									window += n
+								case <-c.done:
+									return
+								}
+							}
+							window--
 							n, err := conn.Read(buf)
 							if n > 0 {
 								s.hub.route(id, proto.Frame{Type: proto.MsgStreamData, Stream: id, Data: proto.Marshal(proto.StreamData{Data: append([]byte{}, buf[:n]...)})})
@@ -593,6 +609,12 @@ func fakeRunner(t *testing.T, s *Server, target string) {
 				case proto.MsgStreamData:
 					var d proto.StreamData
 					_ = json.Unmarshal(f.Data, &d)
+					if d.Credit > 0 {
+						if ch := credits[f.Stream]; ch != nil {
+							ch <- d.Credit
+						}
+						continue
+					}
 					if conn := conns[f.Stream]; conn != nil {
 						if d.EOF {
 							conn.(*net.TCPConn).CloseWrite()
@@ -839,5 +861,65 @@ func TestPreviewWebSocket(t *testing.T) {
 		if err != nil || string(b) != "echo: "+msg {
 			t.Fatalf("%s: %q %v", msg, b, err)
 		}
+	}
+}
+
+// A large response to a client that reads slowly arrives whole: the tunnel
+// is flow controlled, so the runner waits for the reader rather than
+// overflowing the hub's buffer (which drops the stream).
+func TestPreviewSlowReader(t *testing.T) {
+	s := testServer(t)
+	s.cfg.PublicURL = "https://luxd.example.com"
+	s.cfg.Preview = PreviewConfig{Domain: "lux.example.com", Auth: "ticket", HoldFor: time.Second}
+	ctx := context.Background()
+	serversFixture(t, s, ctx)
+	s.preview = newPreviews(s)
+	if err := s.preview.init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	execSQL(t, s, ctx, `INSERT INTO run_servers (tenant_id, run_id, name, port, state) VALUES ('t1', $1, 'web', 3000, 'ready')`, r1)
+	body := make([]byte, 24<<20)
+	for i := range body {
+		body[i] = byte(i * 7 / 5)
+	}
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer app.Close()
+	fakeRunner(t, s, strings.TrimPrefix(app.URL, "http://"))
+	cookie := s.preview.sign(previewUser{RunID: r1, TenantID: "t1", User: "ci", Exp: time.Now().Add(time.Hour).Unix()})
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Host = "web-aaaaaaaaaaaaaaaa.lux.example.com"
+		s.preview.ServeHTTP(w, r)
+	}))
+	defer front.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, front.URL+"/big", nil)
+	req.Header.Set("Cookie", previewCookie+"="+cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	// Slow: nothing read for a while (the sockets' buffers fill), then a
+	// little at a time.
+	time.Sleep(time.Second)
+	var got []byte
+	buf := make([]byte, 256<<10)
+	for {
+		n, err := resp.Body.Read(buf)
+		got = append(got, buf[:n]...)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("after %d bytes: %v", len(got), err)
+		}
+		if len(got) < 4<<20 {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if len(got) != len(body) || string(got) != string(body) {
+		t.Fatalf("got %d bytes of %d", len(got), len(body))
 	}
 }

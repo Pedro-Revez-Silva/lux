@@ -1838,6 +1838,10 @@ components:
         cols:
           format: int64
           type: integer
+        credit:
+          description: luxd to runner only (tunnel flow control); a client that sends it ends its stream.
+          format: int64
+          type: integer
         data:
           contentEncoding: base64
           type: string
@@ -1876,6 +1880,10 @@ components:
           type: string
         tty:
           type: boolean
+        window:
+          description: luxd to runner only (tunnel flow control); ignored from clients.
+          format: int64
+          type: integer
       type: object
     Tenant:
       additionalProperties: false

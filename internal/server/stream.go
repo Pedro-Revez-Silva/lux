@@ -157,17 +157,45 @@ type hubStream struct {
 	gone   <-chan struct{}
 	unsub  func()
 	once   sync.Once
+	// window: flow control (a tunnel's); taken counts the output frames
+	// read since the last grant. Only the stream's reader touches taken.
+	window int
+	taken  int
 }
 
-// openStream opens a stream of open.Kind to t.
+// tunnelWindow is how many output frames (up to 32 KiB each: 4 MiB) a
+// tunnel's runner may send ahead of its reader here. Well under the hub's
+// 256-frame subscription buffer, with room for the EOF and close after.
+const tunnelWindow = 128
+
+// openStream opens a stream of open.Kind to t. A tunnel is flow
+// controlled: its runner sends output only as fast as it is read here
+// (see took).
 func (s *Server) openStream(runID string, t streamTarget, open proto.StreamOpen) (*hubStream, error) {
 	h := &hubStream{s: s, hostID: t.hostID, runID: runID, epoch: t.epoch, id: ids.New("st"), gone: s.hub.Gone(t.hostID)}
+	if open.Kind == "tunnel" {
+		open.Window, h.window = tunnelWindow, tunnelWindow
+	}
 	h.ch, h.unsub = s.hub.Subscribe(h.id)
 	if err := h.send(proto.MsgStreamOpen, proto.Marshal(open)); err != nil {
 		h.unsub()
 		return nil, err
 	}
 	return h, nil
+}
+
+// took notes that the reader has taken an output frame off the stream,
+// and grants the runner more once it has taken half the window. A runner
+// from before flow control reads the grant as empty input.
+func (h *hubStream) took() {
+	if h.window == 0 {
+		return
+	}
+	h.taken++
+	if h.taken >= h.window/2 {
+		_ = h.send(proto.MsgStreamData, proto.Marshal(proto.StreamData{Credit: h.taken}))
+		h.taken = 0
+	}
 }
 
 func (h *hubStream) send(typ string, data []byte) error {
@@ -191,7 +219,7 @@ func (s *Server) relayStream(ctx context.Context, ws *websocket.Conn, runID, kin
 			closeWith(ctx, ws, []byte(`{"error":"exec needs a command"}`))
 			return
 		}
-		open.Kind, open.Port = kind, 0
+		open.Kind, open.Port, open.Window = kind, 0, 0
 	}
 	st, err := s.openStream(runID, t, open)
 	if err != nil {
@@ -209,7 +237,7 @@ func (s *Server) relayStream(ctx context.Context, ws *websocket.Conn, runID, kin
 				return
 			}
 			var d proto.StreamData
-			if json.Unmarshal(b, &d) != nil || d.ExitCode != nil || d.Error != "" {
+			if json.Unmarshal(b, &d) != nil || d.ExitCode != nil || d.Error != "" || d.Credit != 0 {
 				return
 			}
 			if err := st.send(proto.MsgStreamData, b); err != nil {
@@ -240,6 +268,7 @@ func (s *Server) relayStream(ctx context.Context, ws *websocket.Conn, runID, kin
 			if err != nil {
 				return
 			}
+			st.took()
 		}
 	}
 }
@@ -300,49 +329,71 @@ func (c *hubConn) Read(p []byte) (int, error) {
 		c.dmu.Lock()
 		d, changed := c.deadline, c.dchange
 		c.dmu.Unlock()
-		var timer <-chan time.Time
+		var timer *time.Timer
+		var expired <-chan time.Time
 		if !d.IsZero() {
 			if time.Until(d) <= 0 {
 				return 0, errDeadline
 			}
-			t := time.NewTimer(time.Until(d))
-			defer t.Stop()
-			timer = t.C
+			timer = time.NewTimer(time.Until(d))
+			expired = timer.C
 		}
-		select {
-		case <-c.closed:
-			return 0, net.ErrClosed
-		case <-c.st.gone:
-			c.err = errors.New("the Run's host disconnected")
-		case <-timer:
-			return 0, errDeadline
-		case <-changed:
-		case f, ok := <-c.st.ch:
-			switch {
-			case !ok:
-				c.err = errors.New("the stream fell behind and was dropped")
-			case f.Type == proto.MsgStreamClose:
-				var d proto.StreamData
-				if json.Unmarshal(f.Data, &d) == nil && d.Error != "" {
-					c.err = errors.New(d.Error)
-				} else {
-					c.eof = true
-				}
-			default:
-				var d proto.StreamData
-				if json.Unmarshal(f.Data, &d) != nil {
-					continue
-				}
-				if d.EOF {
-					c.eof = true
-				}
-				c.buf = d.Data
+		f, ok, err := c.next(changed, expired)
+		if timer != nil {
+			timer.Stop()
+		}
+		if err != nil {
+			return 0, err
+		}
+		if !ok {
+			continue
+		}
+		switch {
+		case f.Type == proto.MsgStreamClose:
+			var d proto.StreamData
+			if json.Unmarshal(f.Data, &d) == nil && d.Error != "" {
+				c.err = errors.New(d.Error)
+			} else {
+				c.eof = true
 			}
+		default:
+			c.st.took()
+			var d proto.StreamData
+			if json.Unmarshal(f.Data, &d) != nil {
+				continue
+			}
+			if d.EOF {
+				c.eof = true
+			}
+			c.buf = d.Data
 		}
 	}
 	n := copy(p, c.buf)
 	c.buf = c.buf[n:]
 	return n, nil
+}
+
+// next waits for the stream's next frame (ok), a deadline change (not
+// ok, no error), or an end: the deadline, Close, the host or the stream
+// going away (recorded in c.err for the reads after).
+func (c *hubConn) next(changed <-chan struct{}, expired <-chan time.Time) (proto.Frame, bool, error) {
+	select {
+	case <-c.closed:
+		return proto.Frame{}, false, net.ErrClosed
+	case <-c.st.gone:
+		c.err = errors.New("the Run's host disconnected")
+		return proto.Frame{}, false, c.err
+	case <-expired:
+		return proto.Frame{}, false, errDeadline
+	case <-changed:
+		return proto.Frame{}, false, nil
+	case f, ok := <-c.st.ch:
+		if !ok {
+			c.err = errors.New("the stream fell behind and was dropped")
+			return proto.Frame{}, false, c.err
+		}
+		return f, true, nil
+	}
 }
 
 func (c *hubConn) Write(p []byte) (int, error) {

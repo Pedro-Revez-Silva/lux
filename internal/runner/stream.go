@@ -21,7 +21,9 @@ import (
 // runner answers with stream.data (output) and one stream.close (with the
 // exit code, or an error). Exec and attach go to the shim, one socket
 // connection per stream, carrying StreamData lines; a tunnel is a TCP
-// connection to a declared port on the Run's container.
+// connection to a declared port on the Run's container. A tunnel opened
+// with a Window sends at most that many output frames ahead of luxd's
+// grants (StreamData.Credit), which luxd gives as its reader takes them.
 //
 // Each stream has its own goroutine writing its input in order. Input
 // waits in a bounded buffer; a stream whose target stops reading loses
@@ -32,6 +34,57 @@ type stream struct {
 	// cancel ends the stream: with a cause when the runner ends it (sent
 	// to luxd as the reason), with nil when luxd or the connection did.
 	cancel context.CancelCauseFunc
+	// credit: output frames luxd will take (StreamOpen.Window), nil
+	// without flow control.
+	credit *credit
+}
+
+// credit is a tunnel's flow control: output waits for luxd's grants, so
+// a slow reader on luxd's side slows the container's writes instead of
+// losing the stream.
+type credit struct {
+	mu     sync.Mutex
+	n      int
+	grants chan struct{} // signalled on a grant
+}
+
+func newCredit(window int) *credit {
+	if window <= 0 {
+		return nil
+	}
+	return &credit{n: window, grants: make(chan struct{}, 1)}
+}
+
+func (c *credit) grant(n int) {
+	c.mu.Lock()
+	c.n += n
+	c.mu.Unlock()
+	select {
+	case c.grants <- struct{}{}:
+	default:
+	}
+}
+
+// take waits for one frame's credit, until ctx ends. Without flow control
+// (nil) it never waits.
+func (c *credit) take(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	for {
+		c.mu.Lock()
+		if c.n > 0 {
+			c.n--
+			c.mu.Unlock()
+			return nil
+		}
+		c.mu.Unlock()
+		select {
+		case <-c.grants:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 // streamInputBuffer is how many input frames a stream holds while its
@@ -82,6 +135,9 @@ func (r *Runner) handleStreamFrame(ctx context.Context, f proto.Frame) {
 		// connection are read in order.
 		sctx, cancel := context.WithCancelCause(ctx)
 		st := &stream{input: make(chan proto.StreamData, streamInputBuffer), cancel: cancel}
+		if o.Kind == "tunnel" {
+			st.credit = newCredit(o.Window)
+		}
 		r.streams.put(f.Stream, st)
 		go r.runStream(sctx, f.RunID, f.Epoch, f.Stream, o, st)
 	case proto.MsgStreamData:
@@ -91,6 +147,12 @@ func (r *Runner) handleStreamFrame(ctx context.Context, f proto.Frame) {
 		}
 		var d proto.StreamData
 		if json.Unmarshal(f.Data, &d) != nil {
+			return
+		}
+		if d.Credit > 0 {
+			if st.credit != nil {
+				st.credit.grant(d.Credit)
+			}
 			return
 		}
 		select {
@@ -177,10 +239,14 @@ func (r *Runner) runStream(ctx context.Context, runID string, epoch int, id stri
 		}
 	}()
 
-	// Output.
+	// Output. A tunnel reads only with credit: a slow reader on luxd's
+	// side leaves the bytes in the socket, and the container's writes wait.
 	if o.Kind == "tunnel" {
 		buf := make([]byte, 32<<10)
 		for {
+			if st.credit.take(ctx) != nil {
+				return
+			}
 			n, err := conn.Read(buf)
 			if n > 0 {
 				send(proto.MsgStreamData, proto.Marshal(proto.StreamData{Data: buf[:n]}))

@@ -400,6 +400,11 @@ type StreamOpen struct {
 	Port     int      `json:"port,omitempty"`
 	Rows     int      `json:"rows,omitempty"`
 	Cols     int      `json:"cols,omitempty"`
+	// Window is flow control for the stream's output: the runner sends at
+	// most this many output StreamData frames ahead of luxd, which grants
+	// more (StreamData.Credit) as its reader takes them. 0 (a luxd from
+	// before): no flow control.
+	Window int `json:"window,omitempty" doc:"luxd to runner only (tunnel flow control); ignored from clients."`
 }
 
 // StreamData is one message of an interactive stream, on every link:
@@ -417,6 +422,9 @@ type StreamData struct {
 	EOF      bool `json:"eof,omitempty"`
 	// Error, on close: why the stream could not be opened, or ended.
 	Error string `json:"error,omitempty"`
+	// Credit, luxd → runner only: this many more output frames may be sent
+	// (StreamOpen.Window). A runner from before takes it as empty input.
+	Credit int `json:"credit,omitempty" doc:"luxd to runner only (tunnel flow control); a client that sends it ends its stream."`
 }
 
 // Push asks the runner to push each repository's current commit to the
