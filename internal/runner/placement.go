@@ -61,6 +61,10 @@ type placement struct {
 	netTx        int64
 	cgroup       string
 	ip           string // the container's address, once looked up
+	// exited: per server, the gen the shim reported exited.
+	exited map[string]int64
+	// srvSet: the servers luxd last sent (servers.go).
+	srvSet *proto.Servers
 }
 
 func newPlacement(r *Runner, a proto.Assign) *placement {
@@ -193,7 +197,11 @@ func (p *placement) run(ctx context.Context) {
 	sp := a.Spec
 
 	prev, _ := readRunState(p.dir)
-	p.state = &runState{RunID: p.runID, TenantID: p.tenantID, Epoch: p.epoch, Phase: "assigned", Times: map[string]int64{}}
+	st := &runState{RunID: p.runID, TenantID: p.tenantID, Epoch: p.epoch, Phase: "assigned", Times: map[string]int64{}}
+	p.mu.Lock()
+	p.state = st
+	p.state.Servers = p.srvSet
+	p.mu.Unlock()
 	stored, _, _ := sp.SplitSecrets()
 	p.state.Spec = &stored
 	if prev != nil {
@@ -306,6 +314,9 @@ func (p *placement) supervise(ctx context.Context) {
 	exited := make(chan struct{})
 	tailDone := make(chan struct{})
 	go func() { defer close(tailDone); p.tailEvents(ctx, exited) }()
+	checkCtx, stopChecks := context.WithCancel(ctx)
+	defer stopChecks()
+	go p.checkServers(checkCtx)
 
 	code, err := p.r.pm.Wait(ctx, containerName(p.runID))
 	if err != nil {
@@ -782,7 +793,13 @@ func (p *placement) startShim(ctx context.Context, a *proto.Assign) error {
 	if err := p.dialShim(ctx); err != nil {
 		return err
 	}
-	return p.sendShim(proto.ShimMsg{Type: proto.ShimStart, Secrets: a.Secrets, Input: a.Input})
+	if err := p.sendShim(proto.ShimMsg{Type: proto.ShimStart, Secrets: a.Secrets, Input: a.Input}); err != nil {
+		return err
+	}
+	// The servers luxd sent before the shim was there (the shim starts
+	// them once init is done).
+	p.sendServers()
+	return nil
 }
 
 // ---- control ------------------------------------------------------------
@@ -865,6 +882,10 @@ func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 		}
 	}
 	_ = tailRecords(ctx, path, 0, true, done, func(rec proto.Record) error {
+		if rec.Ch == "server" {
+			p.onServerRecord(ctx, rec)
+			return nil
+		}
 		if rec.Ch != "event" {
 			return nil
 		}

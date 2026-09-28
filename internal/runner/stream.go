@@ -242,12 +242,13 @@ func (p *placement) shimStream(ctx context.Context, o proto.StreamOpen) (net.Con
 	return c, nil
 }
 
-// dialPort connects to a port the Run's spec declares, on its container.
-// Only declared ports: a tunnel is not a way into anything else.
+// dialPort connects to a port the Run's spec declares, or one of its
+// servers', on its container. Only those: a tunnel is not a way into
+// anything else.
 func (p *placement) dialPort(ctx context.Context, port int) (net.Conn, error) {
 	declared := p.assign != nil && slices.ContainsFunc(p.assign.Spec.Network.Ports, func(dp spec.Port) bool { return dp.Port == port })
-	if !declared {
-		return nil, fmt.Errorf("port %d is not declared in the Run's spec", port)
+	if !declared && !p.serverPortAllowed(port) {
+		return nil, fmt.Errorf("port %d is neither declared in the Run's spec nor a server's", port)
 	}
 	ip, err := p.containerIP(ctx)
 	if err != nil {

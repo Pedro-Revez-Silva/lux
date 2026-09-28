@@ -74,6 +74,8 @@ type Shim struct {
 	term *terminal
 	// streams: exec'd processes, by pid, whose exits the reaper reports.
 	streams map[int]chan syscall.WaitStatus
+	// srv: the Run's servers' processes (servers.go).
+	srv servers
 }
 
 // Main is the shim's entry point. It returns the process exit code.
@@ -103,6 +105,7 @@ func Main() int {
 		streams:   map[int]chan syscall.WaitStatus{},
 		exitCh:    make(chan syscall.WaitStatus, 1),
 		initCh:    make(chan syscall.WaitStatus, 1),
+		srv:       servers{procs: map[string]*serverProc{}, started: map[string]int64{}},
 	}
 	return s.run()
 }
@@ -181,6 +184,9 @@ func (s *Shim) run() int {
 	if s.isStopping() {
 		return s.finish(proto.ExitInfo{ExitCode: 0, Reason: "stopped", Message: "stopped during init"})
 	}
+	// The Run's servers start once init has set things up, beside the
+	// workload.
+	s.serversReady()
 
 	s.adapter = ad
 	argv, err := ad.Command(s.cfg)
@@ -357,6 +363,8 @@ func (s *Shim) handleConn(c net.Conn) {
 			}
 		case proto.ShimStop:
 			s.stop(m.Reason, time.Duration(m.GraceSec*float64(time.Second)))
+		case proto.ShimServers:
+			s.setServers(m.Servers)
 		case proto.ShimStream:
 			// The connection is the stream's from now on.
 			if m.Stream != nil {
