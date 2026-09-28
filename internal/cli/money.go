@@ -10,7 +10,8 @@ import (
 // noValue stands for an amount lux does not have; never "0".
 const noValue = "—"
 
-// moneyDecimals is how many fractional digits amounts are shown with.
+// moneyDecimals is how many fractional digits amounts are shown with; the
+// console's formatMoney (packages/design-system/src/format.ts) rounds the same.
 const moneyDecimals = 4
 
 // money formats an API amount (a decimal string) with its currency code:

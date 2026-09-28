@@ -15,6 +15,7 @@ import {
   familySlot,
   FamilyKey,
   formatMoney,
+  formatMoneyExact,
   formatBytes,
   formatCores,
   formatCount,
@@ -29,6 +30,7 @@ import {
   ListPriceNote,
   LiveDot,
   LogView,
+  Money,
   MoneyList,
   Logo,
   PageHeader,
@@ -401,10 +403,10 @@ function Costs() {
     { key: "item", header: "Item", cell: (l) => l.item, lead: true, sortValue: (l) => l.item },
     { key: "source", header: "Source", cell: (l) => <span className="secondary">{l.source}</span>, width: 130, optional: true },
     { key: "state", header: "Status", cell: (l) => (l.final ? <span className="muted">final</span> : <span className="muted">estimate</span>), width: 90 },
-    { key: "amount", header: "Amount", cell: (l) => formatMoney(l.amount, l.currency), sortValue: (l) => Number(l.amount), align: "right", mono: true, width: 120 },
+    { key: "amount", header: "Amount", cell: (l) => <Money amount={l.amount} currency={l.currency} />, sortValue: (l) => Number(l.amount), align: "right", mono: true, width: 120 },
   ];
   return (
-    <Section id="costs" title="Cost: money, status, families" note="Amounts are exact decimal strings, formatted without floats (formatMoney), one figure per currency and never added across currencies. A status badge says how settled a figure is; its tooltip names what is missing. Family colours come from a plugin's hint, mapped to the nearest chart slot; compute is always slot 1. Every page with money says “list price” once, explained in a tooltip. Pending is an empty state, never $0.00.">
+    <Section id="costs" title="Cost: money, status, families" note="Amounts are exact decimal strings, formatted without floats (formatMoney: at most 4 decimals, <$0.0001 for a tiny non-zero amount, the exact value in a tooltip), one figure per currency and never added across currencies. A status badge says how settled a figure is; its tooltip names what is missing. Family colours come from a plugin's hint, mapped to the nearest chart slot; compute is always slot 1. Every page with money says “list price” once, explained in a tooltip. Pending is an empty state, never $0.00.">
       <div className="sg-row">
         {COST_STATUS_LIST.map((s) => (
           <CostStatusBadge key={s} status={s} waitingOn={s === "incomplete" ? ["model-gateway"] : undefined} />
@@ -855,7 +857,10 @@ function Formatting() {
     ['formatMoney("0.0012", "USD")', formatMoney("0.0012", "USD")],
     ['formatMoney("12345.5", "EUR")', formatMoney("12345.5", "EUR")],
     ['formatMoney("3.2", "XTS")', formatMoney("3.2", "XTS")],
-    ['formatMoney("0.000000001", "USD")', formatMoney("0.000000001", "USD")],
+    ['formatMoney("1.28431", "USD")', formatMoney("1.28431", "USD")],
+    ['formatMoney("0.000074", "USD")', formatMoney("0.000074", "USD")],
+    ['formatMoney("0.00004", "USD")', formatMoney("0.00004", "USD")],
+    ['formatMoneyExact("0.000074", "USD")', formatMoneyExact("0.000074", "USD")],
     ["formatMoney(null)", formatMoney(null)],
   ];
   return (

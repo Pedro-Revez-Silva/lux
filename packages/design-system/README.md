@@ -10,6 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
+bun run test           # bun test: formatMoney's rounding rule (src/format.test.ts)
 ```
 
 ## Using it
@@ -82,7 +83,8 @@ gallery/            the gallery app (index.html, Gallery.tsx, fake data)
   `sumMoney`, `compareMoney` work on scaled integers, never floats), one
   figure per currency, never added across currencies. Every page that shows
   money labels it "list price" once, explained in a Tooltip
-  (`ListPriceNote`).
+  (`ListPriceNote`). Amounts show at most 4 decimals; the exact value is one
+  hover away (`Money`), and in the API.
 
 ## Density
 
@@ -196,7 +198,9 @@ Cost additions (`src/Cost.tsx`, `format.ts`, `states.ts`; gallery section
 
 | Export | What |
 | --- | --- |
-| `formatMoney(amount, currency, {decimals?})` | exact decimal string → `$1.43`, `$0.0012`, `€12,345.50`, `3.20 XTS`; 2 decimals from a cent up, up to 6 significant below; a nonzero amount too small to show reads `<$0.000001`; missing or unparseable → `–` |
+| `formatMoney(amount, currency, {decimals?})` | exact decimal string → `$1.2843`, `$0.15`, `€12,345.50`, `3.20 XTS`: rounded half to even to 4 decimals (`MONEY_DECIMALS`), trailing zeros trimmed down to cents; a non-zero amount that rounds to zero reads `<$0.0001` (`>-$0.0001` below zero); missing or unparseable → `–`. The same rule as the CLI (`internal/cli/money.go`), which writes the code after the number (`1.2843 USD`) and trims to the integer |
+| `formatMoneyExact(amount, currency)`, `moneyIsRounded(amount)` | every digit of an amount (`$0.000074`), and whether `formatMoney` rounded it |
+| `Money({amount, currency})` | one amount as `formatMoney` shows it; when rounded, the exact value in a Tooltip ("Exactly $0.000074") |
 | `sumMoney(amounts)`, `compareMoney(a, b)` | exact sum and order of decimal strings of one currency |
 | `formatUnit(v, "money", currency)` | the chart/tile unit for money (axes and tooltips) |
 | `CostStatusBadge({status, waitingOn?})` | the status as a Badge with its meaning in a Tooltip |

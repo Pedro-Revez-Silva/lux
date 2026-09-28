@@ -1079,6 +1079,8 @@ cost is visible exactly when the Run is. It is not stored on `runs`.
 Amounts are shown rounded half-even to 4 decimals (`math/big`, never a
 float), trailing zeros trimmed, with the currency code; a non-zero amount
 under that is shown as `<0.0001`, and a missing one as `—`, never `0`.
+The console rounds the same way (`formatMoney`), with the currency's
+symbol (`$0.0421`, `<$0.0001`) and cents kept (`$0.15`).
 Each command says "list price" once. `-o json` prints luxd's response
 unchanged, with exact amounts. The range and series of `lux costs` are
 shown in UTC, like its buckets.
@@ -1120,7 +1122,8 @@ is fixed to slot 1).
   - Not built: plugin health (last answer, failing since). No endpoint
     exposes plugin state.
 - Every page with money says "list price" once, explained in a Tooltip.
-  Amounts are never added across currencies.
+  Amounts are never added across currencies. An amount rounded for display
+  shows its exact value in a Tooltip (`Money`).
 
 ## 10. Config
 

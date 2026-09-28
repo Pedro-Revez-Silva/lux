@@ -1,5 +1,5 @@
 import { useMemo, type ReactNode } from "react";
-import { Card, compareMoney, EmptyState, familyDisplay, formatMoney, ListPriceNote, MoneyList, SectionHeader, StatTile, sumMoney, Table, TimeSeriesChart, type Column } from "@lux/design-system";
+import { Card, compareMoney, EmptyState, familyDisplay, ListPriceNote, Money, MoneyList, SectionHeader, StatTile, sumMoney, Table, TimeSeriesChart, type Column } from "@lux/design-system";
 import { api, type CostSummary, type CostSummaryRow, type MoneyTotal } from "../../api/index.ts";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { ErrorStrip, RunLink, RunNameLink, runPath } from "./common.tsx";
@@ -92,7 +92,7 @@ function TopTable({ rows, name, id, onClick, loading, empty }: { rows: TopRow[];
     { key: "name", header: "Name", cell: (r) => name(r.key), lead: true },
     // Not optional: the card is narrower than Table's breakpoint, and the id is what a name supports.
     ...(id ? [{ key: "id", header: "Id", cell: (r: TopRow) => id(r.key), mono: true, width: 190 }] : []),
-    { key: "amount", header: "Cost", cell: (r) => formatMoney(r.amount, r.currency), align: "right", mono: true, width: 110 },
+    { key: "amount", header: "Cost", cell: (r) => <Money amount={r.amount} currency={r.currency} />, align: "right", mono: true, width: 110 },
   ];
   return <Table columns={cols} rows={rows} rowKey={(r) => `${r.currency}:${r.key}`} loading={loading} loadingRows={3} onRowClick={onClick ? (r) => onClick(r.key) : undefined} empty={empty} dense />;
 }

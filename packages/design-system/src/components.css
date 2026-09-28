@@ -1182,6 +1182,14 @@ a.idchip-text:hover {
   color: var(--fg);
   line-height: var(--leading-tight);
 }
+.money-rounded {
+  cursor: help;
+}
+.money-rounded:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
 .list-price {
   display: inline-flex;
   align-items: center;

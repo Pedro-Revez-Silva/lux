@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Card, ColorKey, compareMoney, CostStatusBadge, EmptyState, familyColor, familyDisplay, formatDuration, formatMoney, formatTimestamp, KeyValue, ListPriceNote, MoneyList, Table, Tooltip, type Column } from "@lux/design-system";
+import { Card, ColorKey, compareMoney, CostStatusBadge, EmptyState, familyColor, familyDisplay, formatDuration, formatMoney, formatTimestamp, KeyValue, ListPriceNote, Money, MoneyList, Table, Tooltip, type Column } from "@lux/design-system";
 import { api, isRunActive, useQuery, type CostLine, type CostTotal, type Run, type RunCost as RunCostData } from "../../api/index.ts";
 import { ErrorBlock, ErrorStrip, RelativeTime } from "./common.tsx";
 
@@ -37,7 +37,7 @@ function CostBody({ cost }: { cost: RunCostData }) {
       { key: "source", header: "Source", cell: (l) => <span className="secondary">{l.source}</span>, sortValue: (l) => l.source, width: 140, optional: true },
       { key: "window", header: "Window", cell: (l) => <Window line={l} />, sortValue: (l) => Date.parse(l.from), width: 110, align: "right", optional: true },
       { key: "final", header: "Status", cell: (l) => <span className="muted">{l.final ? "final" : missingRate(l) ? "no price yet" : "estimate"}</span>, sortValue: (l) => (l.final ? 1 : 0), width: 110 },
-      { key: "amount", header: "Amount", cell: (l) => formatMoney(l.amount, l.currency), sortValue: (l) => l.amount, align: "right", mono: true, width: 120 },
+      { key: "amount", header: "Amount", cell: (l) => <Money amount={l.amount} currency={l.currency} />, sortValue: (l) => l.amount, align: "right", mono: true, width: 120 },
     ],
     [families],
   );

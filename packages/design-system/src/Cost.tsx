@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Badge } from "./Badge.tsx";
-import { formatMoney } from "./format.ts";
+import { formatMoney, formatMoneyExact, moneyIsRounded } from "./format.ts";
 import { IconInfo } from "./icons.tsx";
 import { costStatusStyle, familyColor } from "./states.ts";
 import { Tooltip } from "./Tooltip.tsx";
@@ -69,6 +69,19 @@ export interface MoneyAmount {
   amount: string;
 }
 
+/** An amount as formatMoney rounds it; when rounding changed it, the exact value is in a Tooltip. */
+export function Money({ amount, currency }: MoneyAmount) {
+  const shown = formatMoney(amount, currency);
+  if (!moneyIsRounded(amount)) return <span className="money">{shown}</span>;
+  return (
+    <Tooltip content={`Exactly ${formatMoneyExact(amount, currency)}`}>
+      <span className="money money-rounded" tabIndex={0}>
+        {shown}
+      </span>
+    </Tooltip>
+  );
+}
+
 /** One figure per currency, never added across currencies; an en dash when there are none. */
 export function MoneyList({ amounts, large, className }: { amounts: MoneyAmount[] | null | undefined; large?: boolean; className?: string }) {
   const cls = ["money-list", large ? "money-list-lg" : "", className ?? ""];
@@ -76,9 +89,7 @@ export function MoneyList({ amounts, large, className }: { amounts: MoneyAmount[
   return (
     <span className={[...cls, "num"].join(" ").trim()}>
       {amounts.map((a) => (
-        <span key={a.currency} className="money">
-          {formatMoney(a.amount, a.currency)}
-        </span>
+        <Money key={a.currency} amount={a.amount} currency={a.currency} />
       ))}
     </span>
   );

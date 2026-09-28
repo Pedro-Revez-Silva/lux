@@ -179,12 +179,15 @@ export function compareMoney(a: string | null | undefined, b: string | null | un
   return x < y ? -1 : x > y ? 1 : 0;
 }
 
-/** Decimals shown: 2 from 0.01 up; below that, enough for two significant digits, at most 6. */
-function moneyDecimals(abs: bigint): number {
-  const cent = 10n ** BigInt(MONEY_SCALE - 2);
-  if (abs === 0n || abs >= cent) return 2;
-  const digits = abs.toString().length; // significant digits of the 1e-9 count
-  return Math.min(6, MONEY_SCALE - digits + 2);
+/** Most fractional digits formatMoney shows; the CLI (internal/cli/money.go) rounds to the same. */
+export const MONEY_DECIMALS = 4;
+
+/** Rounds a count of 1e-9 units half to even to `decimals`, as a count of 10^-decimals units. */
+function roundHalfEven(abs: bigint, decimals: number): bigint {
+  const unit = 10n ** BigInt(MONEY_SCALE - decimals);
+  const q = abs / unit;
+  const twice = (abs % unit) * 2n;
+  return twice > unit || (twice === unit && q % 2n === 1n) ? q + 1n : q;
 }
 
 const symbols = new Map<string, { symbol: string; before: boolean } | null>();
@@ -206,11 +209,14 @@ function currencySymbol(currency: string): { symbol: string; before: boolean } |
 }
 
 /**
- * A money amount from its exact decimal string: "1.4342", "USD" → "$1.43";
- * "0.0012" → "$0.0012"; "12345.5", "EUR" → "€12,345.50"; unknown codes go
- * after the number ("3.20 XTS"). Rounded half away from zero on the decimal
- * digits, never through a float. A number is accepted for chart axes only.
- * Missing or unparseable → en dash.
+ * A money amount from its exact decimal string, never through a float:
+ * rounded half to even to MONEY_DECIMALS (4), trailing zeros trimmed down to
+ * cents. "1.28431", "USD" → "$1.2843"; "0.15" → "$0.15"; "12345.5", "EUR" →
+ * "€12,345.50"; unknown codes go after the number ("3.20 XTS"). A non-zero
+ * amount that rounds to zero is a bound, "<$0.0001" (">-$0.0001" below
+ * zero), never zero. `decimals` fixes the digits shown instead (no bound
+ * past 9). A number is accepted for chart axes only. Missing or
+ * unparseable → en dash. formatMoneyExact gives every digit, for a tooltip.
  */
 export function formatMoney(amount: string | number | null | undefined, currency?: string | null, opts: { decimals?: number } = {}): string {
   if (amount == null) return MISSING;
@@ -219,22 +225,40 @@ export function formatMoney(amount: string | number | null | undefined, currency
   if (v == null) return MISSING;
   const neg = v < 0n;
   const abs = neg ? -v : v;
-  const decimals = Math.max(0, Math.min(MONEY_SCALE, opts.decimals ?? moneyDecimals(abs)));
-  const unit = 10n ** BigInt(MONEY_SCALE - decimals);
-  const rounded = (abs + unit / 2n) / unit;
-  // A nonzero amount that rounds away reads as "<$0.000001", never as zero.
-  if (rounded === 0n && abs > 0n) return (neg ? "-" : "") + "<" + formatMoney(moneyString(unit), currency, { decimals });
+  const decimals = Math.max(0, Math.min(MONEY_SCALE, opts.decimals ?? MONEY_DECIMALS));
+  const rounded = roundHalfEven(abs, decimals);
+  if (rounded === 0n && abs > 0n) {
+    const bound = withCurrency("0." + "1".padStart(decimals, "0"), currency);
+    return neg ? ">-" + bound : "<" + bound;
+  }
   const s = rounded.toString().padStart(decimals + 1, "0");
   const int = s.slice(0, s.length - decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   let frac = s.slice(s.length - decimals);
   // Past the cents, only significant digits: "0.001", not "0.0010".
-  if (opts.decimals == null && frac.length > 2) frac = frac.replace(/0+$/, "").padEnd(2, "0");
+  if (opts.decimals == null) frac = frac.replace(/0+$/, "").padEnd(2, "0");
   const number = frac ? `${int}.${frac}` : int;
-  const sign = neg && rounded > 0n ? "-" : "";
-  if (!currency) return sign + number;
+  return (neg && rounded > 0n ? "-" : "") + withCurrency(number, currency);
+}
+
+/** Every digit of an amount (at least cents), for where the rounded figure needs its exact value: "0.000074" → "$0.000074". */
+export function formatMoneyExact(amount: string | null | undefined, currency?: string | null): string {
+  const v = amount == null ? null : parseMoney(amount);
+  if (v == null) return MISSING;
+  const frac = moneyString(v < 0n ? -v : v).split(".")[1] ?? "";
+  return formatMoney(amount, currency, { decimals: Math.max(2, frac.length) });
+}
+
+/** Whether formatMoney shows `amount` rounded, so its exact value differs from the figure. */
+export function moneyIsRounded(amount: string | null | undefined): boolean {
+  const v = amount == null ? null : parseMoney(amount);
+  return v != null && (v < 0n ? -v : v) % 10n ** BigInt(MONEY_SCALE - MONEY_DECIMALS) !== 0n;
+}
+
+function withCurrency(number: string, currency?: string | null): string {
+  if (!currency) return number;
   const sym = currencySymbol(currency);
-  if (!sym) return `${sign}${number} ${currency}`;
-  return sym.before ? `${sign}${sym.symbol}${number}` : `${sign}${number} ${sym.symbol}`;
+  if (!sym) return `${number} ${currency}`;
+  return sym.before ? `${sym.symbol}${number}` : `${number} ${sym.symbol}`;
 }
 
 export type Unit = "bytes" | "cores" | "count" | "duration" | "percent" | "rate" | "money";
