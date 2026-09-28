@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -110,6 +111,24 @@ func TestCostSummaryRunNames(t *testing.T) {
 	got = CostSummaryBody{}
 	if code := getJSON(t, s, keys["op"], costPath("&group=run"), &got); code != http.StatusOK || !slices.Equal(got.Runs, []CostRunInfo{{ID: "r1", Name: "nightly"}, {ID: "r2"}}) {
 		t.Errorf("operator: %d %+v", code, got.Runs)
+	}
+	// An operator narrowed to one tenant sees that tenant's Runs alone: totals, series and names.
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["op"], costPath("&tenant=t1&group=run&interval=hour"), &got); code != http.StatusOK {
+		t.Fatalf("narrowed operator status %d", code)
+	}
+	if !slices.Equal(got.Runs, []CostRunInfo{{ID: "r1", Name: "nightly"}}) {
+		t.Errorf("narrowed operator runs: %+v", got.Runs)
+	}
+	totals := map[string]string{}
+	for _, row := range got.Totals {
+		totals[row.Group["run"]+" "+row.Currency] = row.Amount
+	}
+	if !maps.Equal(totals, map[string]string{"r1 USD": "2", "r1 EUR": "2.5"}) {
+		t.Errorf("narrowed operator totals: %+v", got.Totals)
+	}
+	if len(got.Series) != 3 || slices.ContainsFunc(got.Series, func(r CostSummaryRow) bool { return r.Group["run"] != "r1" }) {
+		t.Errorf("narrowed operator series: %+v", got.Series)
 	}
 }
 
