@@ -1,12 +1,20 @@
 // Package hoststat reads the machine's own CPU, memory and disk use from
-// /proc and statfs: what runners report of their hosts, and luxd of its own.
+// /proc and statfs, and the calling process's: what runners report of their
+// hosts and themselves, and luxd of its own.
 package hoststat
 
 import (
 	"os"
+	"runtime"
+	"runtime/metrics"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
+
+	"github.com/marcioapm/lux/internal/proto"
 )
 
 // CPU is the CPU time used since boot, over all cores, and how many cores
@@ -64,21 +72,23 @@ func ReadMemory() (Memory, error) {
 }
 
 func parseMeminfo(s string) Memory {
-	var total, avail int64
+	kb := parseKB(s, "MemTotal:", "MemAvailable:")
+	return Memory{Used: kb["MemTotal:"] - kb["MemAvailable:"], Total: kb["MemTotal:"]}
+}
+
+// parseKB reads "Key: N kB" lines (/proc/meminfo, /proc/self/status), in
+// bytes, for the keys asked for.
+func parseKB(s string, keys ...string) map[string]int64 {
+	out := make(map[string]int64, len(keys))
 	for _, l := range strings.Split(s, "\n") {
 		f := strings.Fields(l)
-		if len(f) < 2 {
+		if len(f) < 2 || !slices.Contains(keys, f[0]) {
 			continue
 		}
 		n, _ := strconv.ParseInt(f[1], 10, 64)
-		switch f[0] {
-		case "MemTotal:":
-			total = n * 1024
-		case "MemAvailable:":
-			avail = n * 1024
-		}
+		out[f[0]] = n * 1024
 	}
-	return Memory{Used: total - avail, Total: total}
+	return out
 }
 
 // Disk is the filesystem holding a directory, in bytes. Free is what an
@@ -101,3 +111,56 @@ func ReadDisk(dir string) (Disk, error) {
 		Total: int64(st.Blocks) * bs,
 	}, nil
 }
+
+var started = time.Now()
+
+// ProcessSampler reads the calling process's own use (what luxd reports of
+// itself, and a runner of itself, not of the podman and conmon processes
+// it starts) for one sampler: luxd's system tick, the runner's heartbeat.
+// It owns the peak RSS window: each Read resets the kernel's high-water
+// mark at once and keeps the peak read pending, so nothing between reads
+// is missed; a reading that was not stored leaves its peak to the next
+// one, until Stored. A process has one.
+type ProcessSampler struct {
+	mu      sync.Mutex
+	pending int64 // highest peak read since the last Stored
+}
+
+// Read reads getrusage, /proc/self/status and the Go runtime. The peak is
+// left out when the kernel's mark cannot be reset (a non-dumpable process,
+// some sandboxes): it would be the lifetime peak.
+func (s *ProcessSampler) Read() (*proto.ProcessUsage, error) {
+	var ru syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &ru); err != nil {
+		return nil, err
+	}
+	b, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return nil, err
+	}
+	// 5 resets the high-water mark to the RSS now (proc(5), clear_refs).
+	reset := os.WriteFile("/proc/self/clear_refs", []byte("5"), 0) == nil
+	kb := parseKB(string(b), "VmRSS:", "VmHWM:")
+	m := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
+	metrics.Read(m)
+	p := &proto.ProcessUsage{Started: started, CPUSeconds: seconds(ru.Utime) + seconds(ru.Stime), RSSBytes: kb["VmRSS:"],
+		HeapBytes: int64(m[0].Value.Uint64()), Goroutines: int64(runtime.NumGoroutine())}
+	if reset {
+		s.mu.Lock()
+		s.pending = max(s.pending, kb["VmHWM:"])
+		peak := s.pending
+		s.mu.Unlock()
+		p.PeakRSSBytes = &peak
+	}
+	return p, nil
+}
+
+// Stored says the last Read's reading was stored: the next peak starts
+// from what the process holds then.
+func (s *ProcessSampler) Stored() {
+	s.mu.Lock()
+	s.pending = 0
+	s.mu.Unlock()
+}
+
+func seconds(t syscall.Timeval) float64 { return float64(t.Sec) + float64(t.Usec)/1e6 }

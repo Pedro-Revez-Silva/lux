@@ -88,24 +88,43 @@ kept as samples, in these tables, at three resolutions (`res`: 0 raw, 60,
 
 | Table | Written | What |
 | --- | --- | --- |
-| `host_samples` | each heartbeat | the host's CPU seconds (counter), memory and disk in use; its live placements and the CPU and memory they asked for |
+| `host_samples` | each heartbeat | the host's CPU seconds (counter), memory and disk in use; its live placements and the CPU and memory they asked for; the runner process's own use (below) |
 | `placement_samples` | each heartbeat, per live placement | CPU seconds (counter), memory and pids now, disk, network counters |
 | `system_samples` | every `LUX_SAMPLE_EVERY` | for the system (tenant `''`) and each tenant with anything live: Runs by state, busy, idle, queued, started and finished since the last sample, time to start p50/p95, hosts by state, capacity, allocated |
-| `control_samples`, `control_disk_samples` | with the whole system's sample, at its instant | the control host, the machine luxd runs on: CPU seconds (counter) and cores, memory used and total; its Postgres database's size and connections (read with SQL, so a remote database works too); and for each of `LUX_HISTORY_DISK_PATHS` its filesystem's used, free (writable without root) and total bytes |
+| `control_samples`, `control_disk_samples` | with the whole system's sample, at its instant | the control host, the machine luxd runs on: CPU seconds (counter) and cores, memory used and total; its Postgres database's size and connections (read with SQL, so a remote database works too); for each of `LUX_HISTORY_DISK_PATHS` its filesystem's used, free (writable without root) and total bytes; and the luxd process's own use (below) |
 
-Control samples carry the sampling luxd's hostname (`instance`). With
-several luxd instances on one database, each records its own machine, rolls
-up separately, and `/v1/history` serves the instance with the latest sample
-in the range (`control.instance`); its CPU rate is computed only between
-that instance's own samples, and a counter that drops (a reboot) gives no
-rate for that point.
+lux's own processes, luxd on its control samples and each host's runner on
+its host samples, are recorded as `proc_started` (when the process
+started), `proc_cpu_seconds` (user and system seconds since then),
+`proc_rss`, `proc_peak_rss` (the highest RSS since the previous stored
+sample: the kernel's high-water mark, reset at each reading with the peak
+kept until a sample is stored, so a spike between samples still shows, and
+one in a sample that was lost carries to the next; absent where the process
+cannot reset it, e.g. a non-dumpable one, rather than a lifetime peak), `proc_heap` (Go heap objects, live or not yet swept) and
+`goroutines`. The runner's are the runner process only, not the podman
+and conmon processes it starts; a runner that predates them sends none.
+A restart starts the CPU counter again, so a CPU rate is only taken between
+two samples of the same start, and a minute or hour bucket keeps its last
+reading's counter and start (not the maximum, which may be the previous
+process's); RSS, heap and goroutines are averaged, the peak is the
+bucket's maximum. The API has the runner's as `runner` on a host's
+samples, with the CPU as cores.
+
+Control samples are keyed by the luxd process that took them (`instance`:
+a `luxd_...` id new at each start, so no two processes share one, on one
+machine or several), with its machine's `hostname` beside it (rows from
+before process ids have the hostname as both). `/v1/history` serves them
+as `control`, by what each figure is of: `machines`, a series per
+hostname (its CPU rate spans luxd restarts; a counter that drops, a
+reboot, gives no rate for that point); `postgres`, one series; and
+`luxd`, a series per luxd process, so a restart is a new series.
 
 Every minute, luxd rolls complete buckets up into the next resolution
 (levels averaged, counters and peaks their maximum, starts and finishes
 summed, states the bucket's last) and deletes what is older than that
 resolution's retention (`LUX_HISTORY_RAW`, `_MINUTES`, `_HOURS`). The API
 (`/v1/history`, `/v1/hosts/{id}/history`, `/v1/runs/{id}/history`) serves
-counters as rates. `/v1/history` carries the control host (`control` on
-each sample) only for an operator key reading the whole system: never for
+counters as rates. `/v1/history` carries the control host (`control`)
+only for an operator key reading the whole system: never for
 a tenant key, nor for an operator's `?tenant=`. See
 [Operators](operators.md#history).

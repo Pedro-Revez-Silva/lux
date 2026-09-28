@@ -265,6 +265,8 @@ export interface Sample {
   placements?: number;
   allocCpus?: number;
   allocMemory?: number;
+  /** Hosts: the runner process itself (absent before the runner reported it). */
+  runner?: ProcessSample;
   pids?: number;
   netRxRate?: number;
   netTxRate?: number;
@@ -282,21 +284,58 @@ export interface Sample {
   capacityMemory?: number;
   allocatedCpus?: number;
   allocatedMemory?: number;
-  /** Only for an operator reading the whole system. */
-  control?: ControlSample;
 }
 
-/** The machine luxd runs on, and its Postgres. */
-export interface ControlSample {
-  /** Hostname of the luxd instance that recorded it. */
-  instance: string;
+/** The control host by what each figure is of: a luxd restart starts a new luxd series; a machine's and Postgres's go on. */
+export interface Control {
+  /** A series per machine luxd ran on, oldest first. */
+  machines: MachineSeries[];
+  /** lux's Postgres database: one series. */
+  postgres: PostgresPoint[];
+  /** A series per luxd process (a restart is a new one), oldest first. */
+  luxd: LuxdSeries[];
+}
+
+export interface MachineSeries {
+  hostname: string;
+  samples: MachinePoint[];
+}
+
+export interface MachinePoint {
+  at: string;
   cpuCores?: number;
   cpus?: number;
   memoryBytes?: number;
   memoryTotal?: number;
-  databaseBytes?: number;
-  databaseConnections?: number;
   disks?: DiskSample[];
+}
+
+export interface PostgresPoint {
+  at: string;
+  bytes?: number;
+  connections?: number;
+}
+
+export interface LuxdSeries {
+  /** The process's id, new at each start (rows from before process ids: its hostname). */
+  instance: string;
+  /** The machine it runs on. */
+  hostname: string;
+  samples: (ProcessSample & { at: string })[];
+}
+
+/** One of lux's own processes: luxd, or a host's runner (not the podman and conmon processes it starts). */
+export interface ProcessSample {
+  /** When the process started: a change is a restart. */
+  started: string;
+  /** Cores, a rate over the previous point of the same process. */
+  cpuCores?: number;
+  rssBytes?: number;
+  /** The highest RSS since the previous sample (a rollup: in its interval). */
+  peakRssBytes?: number;
+  /** Go heap objects, live or not yet swept. */
+  heapBytes?: number;
+  goroutines?: number;
 }
 
 export interface DiskSample {
@@ -313,6 +352,8 @@ export interface History {
   /** Seconds per sample; 0 is raw. */
   resolution: number;
   samples: Sample[];
+  /** Only for an operator reading the whole system. */
+  control?: Control;
 }
 
 export interface ResumeRequest {

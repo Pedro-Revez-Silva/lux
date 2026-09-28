@@ -29,6 +29,7 @@ import (
 
 	"github.com/marcioapm/lux/internal/egress"
 	"github.com/marcioapm/lux/internal/gitws"
+	"github.com/marcioapm/lux/internal/hoststat"
 	"github.com/marcioapm/lux/internal/podman"
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/version"
@@ -71,8 +72,10 @@ type Config struct {
 }
 
 type Runner struct {
-	cfg   Config
-	log   *slog.Logger
+	cfg Config
+	log *slog.Logger
+	// proc reads the runner's own process for its heartbeats.
+	proc  hoststat.ProcessSampler
 	pm    *podman.Podman
 	conn  *conn
 	api   *api
@@ -462,13 +465,19 @@ func (r *Runner) heartbeatLoop(ctx context.Context) {
 		if hu, err := podman.ReadHostUsage(r.cfg.DataDir); err == nil {
 			hb.Usage = &proto.HostUsage{CPUSeconds: hu.CPUSeconds, MemoryBytes: hu.MemoryBytes, DiskBytes: hu.DiskBytes}
 		}
+		if p, err := r.proc.Read(); err == nil {
+			hb.Runner = p
+		}
 		for _, p := range r.livePlacements() {
 			if st := p.liveState(); st != "" {
 				hb.Leases = append(hb.Leases, proto.LivePlacement{RunID: p.runID, Epoch: p.epoch, State: st, Usage: p.usage()})
 			}
 		}
 		hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		_ = r.conn.Report(hctx, proto.Frame{Type: proto.MsgHeartbeat, Data: proto.Marshal(hb)})
+		// Acked: its peak RSS reached luxd. Else it carries to the next.
+		if r.conn.Report(hctx, proto.Frame{Type: proto.MsgHeartbeat, Data: proto.Marshal(hb)}) == nil {
+			r.proc.Stored()
+		}
 		cancel()
 	}
 }
