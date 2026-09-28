@@ -400,7 +400,7 @@ function Costs() {
     { key: "family", header: "Family", cell: (l) => <FamilyKey family={l.family} displayName={FAMILIES.find((f) => f.family === l.family)?.displayName} color={FAMILIES.find((f) => f.family === l.family)?.color} />, width: 130 },
     { key: "item", header: "Item", cell: (l) => l.item, lead: true, sortValue: (l) => l.item },
     { key: "source", header: "Source", cell: (l) => <span className="secondary">{l.source}</span>, width: 130, optional: true },
-    { key: "state", header: "", cell: (l) => (l.final ? <span className="muted">final</span> : <span className="muted">estimate</span>), width: 90 },
+    { key: "state", header: "Status", cell: (l) => (l.final ? <span className="muted">final</span> : <span className="muted">estimate</span>), width: 90 },
     { key: "amount", header: "Amount", cell: (l) => formatMoney(l.amount, l.currency), sortValue: (l) => Number(l.amount), align: "right", mono: true, width: 120 },
   ];
   return (
@@ -446,6 +446,9 @@ function Costs() {
         </Card>
         <Card title="Host cost" subtitle="allocated to Runs vs unallocated, hourly">
           <TimeSeriesChart x={c.x} ys={[c.allocated, c.unallocated]} series={[{ label: "Allocated", color: familyColor("compute") }, { label: "Unallocated", color: "var(--st-neutral-dot)" }]} unit="money" currency="USD" stacked />
+        </Card>
+        <Card title="Host cost, one hour costed" subtitle="sparse: the y axis still reaches the stacked top ($0.0375)">
+          <TimeSeriesChart x={c.x} ys={[c.x.map((_, i) => (i === c.x.length - 1 ? 0.0015 : null)), c.x.map((_, i) => (i === c.x.length - 1 ? 0.036 : null))]} series={[{ label: "Allocated", color: familyColor("compute") }, { label: "Unallocated", color: "var(--st-neutral-dot)" }]} unit="money" currency="USD" stacked />
         </Card>
       </div>
       <p className="sg-note">
@@ -818,6 +821,10 @@ function Feedback() {
         <Spinner size={20} />
         <Skeleton width={120} />
         <Skeleton width={60} height={20} round />
+      </div>
+      <div className="sg-row sg-row-end" data-demo="tooltip-edge">
+        <span className="muted">At the viewport&apos;s edge a tooltip shifts inside it, and flips side when its side has no room:</span>
+        <ListPriceNote />
       </div>
       <Card>
         <EmptyState title="No hosts in pool gpu-a10" description="Hosts appear here once the provider reports them running. Check the pool's scaling settings." action={<Button variant="primary" size="sm">Add host</Button>} />

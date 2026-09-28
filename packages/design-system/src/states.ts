@@ -188,3 +188,25 @@ export function familyColors(families: readonly { family: string; color?: string
   }
   return out;
 }
+
+export interface FamilyInfo {
+  family: string;
+  /** The plugin describe's displayName; compute is "Compute". */
+  displayName?: string | null;
+  /** The plugin describe's colour hint. */
+  color?: string | null;
+}
+
+/**
+ * Label and colour of each family shown together: displayName (the family
+ * key when there is none) and familyColors() of the hints. Every view of
+ * cost families resolves them here, so one family reads the same everywhere.
+ */
+export function familyDisplay(families: readonly FamilyInfo[]): Map<string, { label: string; color: string }> {
+  const colors = familyColors(families);
+  const out = new Map<string, { label: string; color: string }>();
+  for (const f of families) {
+    if (!out.has(f.family)) out.set(f.family, { label: f.displayName || (f.family === "compute" ? "Compute" : f.family), color: colors.get(f.family)! });
+  }
+  return out;
+}

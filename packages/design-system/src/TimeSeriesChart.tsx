@@ -128,6 +128,10 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
     const label = cssVar("--chart-label");
     const cursorColor = cssVar("--chart-cursor");
     const font = `11px ${cssVar("--font-sans")}`;
+    // Zero-based without a fixed max: the top gridline is a whole step at or
+    // above the largest (stacked) value, so no point sits above it.
+    const nice = zeroBase && yMax == null;
+    let step = 0;
 
     const opts: uPlot.Options = {
       width: el.clientWidth || 300,
@@ -139,7 +143,17 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
         drag: { x: false, y: false, setScale: false },
       },
       legend: { show: false },
-      scales: { x: { time: true }, y: { range: (_u, min, max) => [zeroBase ? 0 : min, yMax ?? (max === 0 ? 1 : max * 1.05)] } },
+      scales: {
+        x: { time: true },
+        y: {
+          range: (_u, min, max) => {
+            if (!nice) return [zeroBase ? 0 : min, yMax ?? (max === 0 ? 1 : max * 1.05)];
+            const s = niceScale(max, Math.max(2, Math.floor(height / 50)));
+            step = s.step;
+            return [0, s.max];
+          },
+        },
+      },
       axes: [
         {
           stroke: label,
@@ -157,6 +171,7 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
           size: 56,
           values: (_u, vals) => vals.map((v) => fmt(v)),
           space: 32,
+          splits: nice ? (_u, _i, _min, max) => Array.from({ length: Math.round(max / step) + 1 }, (_, k) => k * step) : undefined,
         },
       ],
       series: [
@@ -168,7 +183,8 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
           dash: s.dashed ? [4, 4] : undefined,
           fill: stacked ? hexWithAlpha(colors[i]!, STACK_ALPHA) : s.area ? hexWithAlpha(colors[i]!, 0.1) : undefined,
           paths: s.step ? uPlot.paths.stepped!({ align: 1 }) : undefined,
-          points: { show: false },
+          // A value with no neighbour draws no line: mark it with a dot.
+          points: { show: false, filter: isolatedPoints, size: 6, width: 0, fill: colors[i] },
           spanGaps: false,
           show: !hidden.has(i),
         })),
@@ -305,4 +321,28 @@ function stackTotal(ys: (number | null | undefined)[][], hidden: Set<number>, id
     if (!hidden.has(i) && v != null) total = (total ?? 0) + v;
   });
   return total;
+}
+
+/**
+ * A 0-based y scale for `max` in about `ticks` steps: the step is 1, 2, 2.5
+ * or 5 × 10^n, and the scale's max the first multiple of it >= max.
+ */
+function niceScale(max: number | null | undefined, ticks: number): { max: number; step: number } {
+  if (max == null || !(max > 0)) return { max: 1, step: 0.25 };
+  const raw = max / ticks;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw * (1 - 1e-9))!;
+  // Float noise (0.1 + 0.2) must not add a step: compare with a tolerance.
+  const n = Math.max(1, Math.ceil(max / step - 1e-9));
+  return { max: Number((n * step).toPrecision(12)), step };
+}
+
+/** Indices of values with no value on either side: a line or band cannot show them. */
+function isolatedPoints(u: uPlot, seriesIdx: number): number[] | null {
+  const ys = u.data[seriesIdx]!;
+  const out: number[] = [];
+  for (let i = 0; i < ys.length; i++) {
+    if (ys[i] != null && ys[i - 1] == null && ys[i + 1] == null) out.push(i);
+  }
+  return out.length ? out : null;
 }

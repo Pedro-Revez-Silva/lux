@@ -205,5 +205,21 @@ Cost additions (`src/Cost.tsx`, `format.ts`, `states.ts`; gallery section
 | `ColorKey({color})`, `FamilyKey({family, displayName, color, swatch?})` | a square swatch before its label (colour never without one) |
 | `MoneyList({amounts, large?})` | one figure per currency, side by side; `–` when empty |
 | `familySlot`, `familyColor`, `familyColors` | cost family → `--chart-N` (above) |
+| `familyDisplay(families)` | each family's `{label, color}` from its describe `displayName` and `color` hint (the key when unnamed; `Compute` for compute): every view of cost families (Run card, Overview chart) resolves both here, so a family reads the same everywhere |
 | `TimeSeriesChart` `stacked` | series stacked bottom-first as filled bands (28% fill, 2px edges); the tooltip adds a Total; hiding a series from the legend restacks the rest; a missing value adds nothing and shows `–` |
 | `TimeSeriesChart` `currency` | the currency of `unit="money"` |
+
+Behaviour shared by every chart and tooltip:
+
+- **Y axis**: zero-based without a fixed `yMax`, the scale's top is the first
+  multiple of a 1/2/2.5/5 × 10ⁿ step at or above the largest value (the
+  stacked total when `stacked`), and gridlines sit on those steps. No point
+  is ever above the top gridline, sparse data included (gallery: "Host cost,
+  one hour costed").
+- **Chart tooltip**: sized to its content (`width: max-content`); series
+  labels never wrap.
+- **Tooltip placement**: `side` is a preference. When the tooltip opens it is
+  measured before paint: it flips to the opposite side when its side leaves
+  the viewport, and shifts along that side (`--tip-shift`) to stay 8px inside
+  it. A "list price" note at a card's right edge stays readable (gallery:
+  Feedback, the right-aligned row).

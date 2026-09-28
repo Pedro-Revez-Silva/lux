@@ -130,6 +130,9 @@ html:root #root {
   flex-wrap: wrap;
   gap: var(--sp-4);
 }
+.sg-row-end {
+  justify-content: flex-end;
+}
 
 .sg-swatches {
   display: flex;

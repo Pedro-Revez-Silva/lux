@@ -285,25 +285,26 @@
   pointer-events: none;
   box-shadow: var(--shadow-md);
 }
+/* --tip-shift: set by Tooltip to keep the tip inside the viewport. */
 .tip-top {
   bottom: calc(100% + 6px);
   left: 50%;
-  transform: translateX(-50%);
+  transform: translateX(calc(-50% + var(--tip-shift, 0px)));
 }
 .tip-bottom {
   top: calc(100% + 6px);
   left: 50%;
-  transform: translateX(-50%);
+  transform: translateX(calc(-50% + var(--tip-shift, 0px)));
 }
 .tip-left {
   right: calc(100% + 6px);
   top: 50%;
-  transform: translateY(-50%);
+  transform: translateY(calc(-50% + var(--tip-shift, 0px)));
 }
 .tip-right {
   left: calc(100% + 6px);
   top: 50%;
-  transform: translateY(-50%);
+  transform: translateY(calc(-50% + var(--tip-shift, 0px)));
 }
 
 /* ---------- Card ----------
@@ -1083,6 +1084,8 @@ a.idchip-text:hover {
   box-shadow: var(--shadow-md);
   font-size: var(--text-sm);
   min-width: 140px;
+  /* Sized to its rows, not to the room left of the plot's right edge. */
+  width: max-content;
 }
 .tschart-tip.is-left {
   transform: translateX(calc(-100% - 16px));
@@ -1106,6 +1109,7 @@ a.idchip-text:hover {
 .tschart-tip-label {
   color: var(--fg-secondary);
   white-space: nowrap;
+  flex: none;
 }
 /* Line key: a 12x2 stroke in the series color (inline background). */
 .tschart-key {
