@@ -117,6 +117,16 @@ components:
             - array
             - "null"
       type: object
+    CostFamilyInfo:
+      additionalProperties: false
+      properties:
+        color:
+          type: string
+        displayName:
+          type: string
+        family:
+          type: string
+      type: object
     CostLine:
       additionalProperties: false
       properties:
@@ -158,6 +168,14 @@ components:
           format: date-time
           type: string
       type: object
+    CostRunInfo:
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+      type: object
     CostSource:
       additionalProperties: false
       properties:
@@ -181,12 +199,26 @@ components:
       properties:
         basis:
           type: string
+        families:
+          description: "Grouped by family: each family in totals, with the displayName and color byFamily has on a Run's cost."
+          items:
+            $ref: "#/components/schemas/CostFamilyInfo"
+          type:
+            - array
+            - "null"
         from:
           format: date-time
           type: string
         hosts:
           items:
             $ref: "#/components/schemas/HostAllocation"
+          type:
+            - array
+            - "null"
+        runs:
+          description: "Grouped by run: each Run in totals with its name."
+          items:
+            $ref: "#/components/schemas/CostRunInfo"
           type:
             - array
             - "null"

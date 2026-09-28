@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -71,6 +72,44 @@ func TestCostSummaryScopeAndGroups(t *testing.T) {
 	got = CostSummaryBody{}
 	if code := getJSON(t, s, keys["op"], costPath("&group=host&family=compute"), &got); code != http.StatusOK || len(got.Hosts) != 3 || got.Hosts[0].Allocated != "2" {
 		t.Errorf("host breakdown: %d %+v", code, got)
+	}
+}
+
+// Grouped by family, the summary names each family as a Run's byFamily does.
+func TestCostSummaryFamilyMetadata(t *testing.T) {
+	s, keys := costReadFixture(t)
+	s.cfg.Costs.Plugins = []CostPluginConfig{{Name: "plugin"}}
+	s.initCostPlugins()
+	s.plugins[0].desc.Families = map[string]struct {
+		DisplayName string `json:"displayName"`
+		Color       string `json:"color"`
+	}{"ai": {"AI models", "violet"}}
+	s.plugins[0].usable = true
+	var got CostSummaryBody
+	if code := getJSON(t, s, keys["t1"], costPath("&group=family&interval=hour"), &got); code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	want := []CostFamilyInfo{{Family: "ai", DisplayName: "AI models", Color: "violet"}, {Family: "compute", DisplayName: "Compute"}}
+	if !slices.Equal(got.Families, want) {
+		t.Errorf("families: %+v", got.Families)
+	}
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["t1"], costPath("&group=pool"), &got); code != http.StatusOK || got.Families != nil || got.Runs != nil {
+		t.Errorf("families without a family group: %d %+v", code, got.Families)
+	}
+}
+
+// Grouped by run, the summary names each Run in its totals, and only those the key sees.
+func TestCostSummaryRunNames(t *testing.T) {
+	s, keys := costReadFixture(t)
+	execSQL(t, s, context.Background(), `UPDATE runs SET name = 'nightly' WHERE id = 'r1'`)
+	var got CostSummaryBody
+	if code := getJSON(t, s, keys["t1"], costPath("&group=run"), &got); code != http.StatusOK || !slices.Equal(got.Runs, []CostRunInfo{{ID: "r1", Name: "nightly"}}) {
+		t.Errorf("tenant: %d %+v", code, got.Runs)
+	}
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["op"], costPath("&group=run"), &got); code != http.StatusOK || !slices.Equal(got.Runs, []CostRunInfo{{ID: "r1", Name: "nightly"}, {ID: "r2"}}) {
+		t.Errorf("operator: %d %+v", code, got.Runs)
 	}
 }
 
