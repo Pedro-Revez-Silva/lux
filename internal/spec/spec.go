@@ -393,9 +393,10 @@ func (s *RunSpec) Normalize(d Defaults) error {
 			fail("workload.beforeStop.timeout must not be negative")
 		}
 		if b.Timeout.Duration == 0 {
-			b.Timeout.Duration = DefaultBeforeStopTimeout
-		}
-		if b.Timeout.Duration > w.Grace.Duration {
+			// The default fits whatever grace there is; only a timeout
+			// someone set can be too long.
+			b.Timeout.Duration = min(DefaultBeforeStopTimeout, w.Grace.Duration)
+		} else if b.Timeout.Duration > w.Grace.Duration {
 			fail("workload.beforeStop.timeout (%s) must not exceed workload.grace (%s): the hook runs inside the stop's grace", b.Timeout.Duration, w.Grace.Duration)
 		}
 	}

@@ -54,6 +54,9 @@ type Shim struct {
 	// hookBy is when a beforeStop must be over: set as the stop begins,
 	// only ever moved in by a later shorter stop, and watched by the hook.
 	// hookMoved wakes it when that happens; hookDone closes when it ends.
+	// ending: the workload is gone and run() is finishing; a stop now
+	// starts no beforeStop, which nothing would wait for.
+	ending    bool
 	hookBy    time.Time
 	hookMoved chan struct{}
 	hookDone  chan struct{}
@@ -220,6 +223,7 @@ func (s *Shim) run() int {
 	// its own deadline.
 	s.mu.Lock()
 	hook := s.hookDone
+	s.ending = true
 	s.mu.Unlock()
 	if hook != nil {
 		<-hook
@@ -418,6 +422,9 @@ func (s *Shim) stop(reason string, shorter time.Duration) {
 	s.stopping = true
 	s.stopWhy = reason
 	env := s.env
+	if s.ending {
+		env = nil
+	}
 	s.mu.Unlock()
 	s.out.Event(proto.EvStop, map[string]any{"reason": reason})
 
@@ -501,8 +508,15 @@ func (s *Shim) beforeStop(env []string) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); copyTo(stdout, func(b []byte) { s.out.Write("stdout", b) }) }()
-	go func() { defer wg.Done(); copyTo(stderr, func(b []byte) { s.out.Write("stderr", b) }) }()
+	// Its own line buffers: the workload is still writing beside it.
+	go func() {
+		defer wg.Done()
+		copyTo(stdout, func(b []byte) { s.out.WriteAs("beforeStop:stdout", "stdout", b) })
+	}()
+	go func() {
+		defer wg.Done()
+		copyTo(stderr, func(b []byte) { s.out.WriteAs("beforeStop:stderr", "stderr", b) })
+	}()
 	timedOut := false
 	var ws syscall.WaitStatus
 wait:
