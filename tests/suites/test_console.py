@@ -287,8 +287,19 @@ def test_runs_list_cost_column_matches_the_run_page(page, env, lux, runners, hos
         # The status in words and the exact amount, on hover.
         cell.hover()
         tip = page.get_by_role("tooltip")
-        expect(tip).to_contain_text(re.compile(r"^(Final|Estimate|Incomplete):"))
+        expect(tip).to_contain_text(re.compile(r"^(Final|Estimate|Incomplete) · "))
         expect(tip).to_contain_text(_dollars(total["amount"], exact=True))
+        # Not clipped: every ancestor that clips its overflow contains the whole tooltip.
+        clipped = tip.evaluate("""t => {
+            const r = t.getBoundingClientRect();
+            for (let e = t.parentElement; e; e = e.parentElement) {
+                if (getComputedStyle(e).overflow === 'visible') continue;
+                const c = e.getBoundingClientRect();
+                if (r.left < c.left || r.right > c.right || r.top < c.top || r.bottom > c.bottom) return e.tagName + '.' + e.className;
+            }
+            return null;
+        }""")
+        assert clipped is None, clipped
     _both_themes(page, env, "/runs", check)
 
     # The Run page shows the same figure.

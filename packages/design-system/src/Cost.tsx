@@ -104,8 +104,9 @@ export interface CostFigureTotal extends MoneyAmount {
  * A cost in one table cell, as `lux ls` shows it: the total for one
  * currency, "multi" for several, an en dash while pending. A leading "~"
  * marks a total that may still change (an estimate part, or a source that
- * has not answered); the Tooltip says which status, in words, with the
- * exact amounts. No colour: a cell has no room for the label colour needs.
+ * has not answered); the Tooltip says the status in words, with the exact
+ * amounts. No colour: a cell has no room for the label colour needs.
+ * The page says "list price" once (ListPriceNote), not each cell.
  */
 export function CostFigure({ status, totals }: { status: string; totals: CostFigureTotal[] | null | undefined }) {
   if (!totals || totals.length === 0 || status === "pending") return <span className="muted" data-cost-figure="pending">–</span>;
@@ -113,26 +114,19 @@ export function CostFigure({ status, totals }: { status: string; totals: CostFig
   const approx = status === "incomplete" || totals.some((t) => compareMoney(t.estimate, "0") !== 0);
   const text = totals.length > 1 ? "multi" : (approx ? "~" : "") + formatMoney(totals[0]!.amount, totals[0]!.currency);
   return (
-    <Tooltip
-      side="left"
-      content={
-        <span className="cost-figure-tip">
-          <span>
-            {st.label}: {st.description}
-          </span>
-          {totals.map((t) => (
-            <span key={t.currency} className="num">
-              {formatMoneyExact(t.amount, t.currency)}
-              {compareMoney(t.estimate, "0") !== 0 && compareMoney(t.estimate, t.amount) !== 0 ? ` (${formatMoneyExact(t.estimate, t.currency)} estimate)` : ""}
-            </span>
-          ))}
-          <span>{LIST_PRICE_TEXT}</span>
-        </span>
-      }
-    >
+    <Tooltip side="left" content={figureTip(st.label, approx, totals)}>
       <span className="cost-figure" tabIndex={0} data-cost-figure={status}>
         {text}
       </span>
     </Tooltip>
   );
+}
+
+// One line: taller than a row, the tip would be clipped by the table's scroll box on its last row.
+function figureTip(label: string, approx: boolean, totals: CostFigureTotal[]): string {
+  const amounts = totals.map((t) => {
+    const part = compareMoney(t.estimate, "0") !== 0 && compareMoney(t.estimate, t.amount) !== 0 ? ` (${formatMoneyExact(t.estimate, t.currency)} estimate)` : "";
+    return formatMoneyExact(t.amount, t.currency) + part;
+  });
+  return [label, ...amounts, ...(approx ? ["may still change"] : [])].join(" · ");
 }

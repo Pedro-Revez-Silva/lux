@@ -205,7 +205,7 @@ Cost additions (`src/Cost.tsx`, `format.ts`, `states.ts`; gallery section
 | `formatMoney(amount, currency, {decimals?})` | exact decimal string → `$1.2843`, `$0.15`, `€12,345.50`, `3.20 XTS`: rounded half to even to 4 decimals (`MONEY_DECIMALS`), trailing zeros trimmed down to cents; a non-zero amount that rounds to zero reads `<$0.0001` (`>-$0.0001` below zero); missing or unparseable → `–`. The same rule as the CLI (`internal/cli/money.go`), which writes the code after the number (`1.2843 USD`) and trims to the integer |
 | `formatMoneyExact(amount, currency)`, `moneyIsRounded(amount)` | every digit of an amount (`$0.000074`), and whether `formatMoney` rounded it |
 | `Money({amount, currency})` | one amount as `formatMoney` shows it; when rounded, the exact value in a Tooltip ("Exactly $0.000074") |
-| `CostFigure({status, totals})` | a cost in a table cell, the same as `lux ls`'s COST: the total for one currency, `multi` for several, `–` while pending; `~` before a total that may still change (an estimate part, or `incomplete`); the Tooltip says the status in words, the exact amounts and "list price" |
+| `CostFigure({status, totals})` | a cost in a table cell, the same as `lux ls`'s COST: the total for one currency, `multi` for several, `–` while pending; `~` before a total that may still change (an estimate part, or `incomplete`); the Tooltip says the status in words and the exact amounts; a table cell holding one shows its Tooltip unclipped |
 | `sumMoney(amounts)`, `compareMoney(a, b)` | exact sum and order of decimal strings of one currency |
 | `formatUnit(v, "money", currency)` | the chart/tile unit for money (axes and tooltips) |
 | `CostStatusBadge({status, waitingOn?})` | the status as a Badge with its meaning in a Tooltip |
