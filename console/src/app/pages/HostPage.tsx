@@ -4,6 +4,7 @@ import { api, errorText, useNow, useQuery, type Host, type HostPlacement, type H
 import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, RelativeTime, RunLink, RunNameLink, runColumns, runPath, useSeries } from "./common.tsx";
+import { ProcessCards, runnerProcesses } from "./ProcessCards.tsx";
 
 export function HostPage({ id }: { id: string }) {
   const scope = useScope();
@@ -23,6 +24,7 @@ export function HostPage({ id }: { id: string }) {
   const mem = useSeries(samples, [(s) => s.memoryBytes, cap?.memory, (s) => s.allocMemory]);
   const disk = useSeries(samples, [(s) => s.diskBytes, cap?.disk]);
   const placements = useSeries(samples, [(s) => s.placements, cap?.runs]);
+  const runners = useMemo(() => runnerProcesses(samples), [samples]);
 
   const drain = async (forceEvict: boolean) => {
     setDraining(true);
@@ -129,6 +131,7 @@ export function HostPage({ id }: { id: string }) {
         <Card title="Placements" subtitle="live placements vs run capacity">
           <TimeSeriesChart x={placements.x} ys={placements.ys} series={[{ label: "Placements", color: 3, step: true, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="count" />
         </Card>
+        <ProcessCards title="Runner" what="the lux-runner process, not podman or its containers" processes={runners} />
       </div>
 
       <Card flush title="Recent runs on this host" subtitle="any epoch, newest first, up to 50" actions={<Link to={hostRunsPath(id)}>All runs on this host</Link>}>

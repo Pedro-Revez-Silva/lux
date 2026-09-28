@@ -39,18 +39,15 @@ func (s *Server) resolutions() []resolution {
 	return []resolution{{0, s.cfg.HistoryRaw}, {60, s.cfg.HistoryMinutes}, {3600, s.cfg.HistoryHours}}
 }
 
-// sampleHost records a host's heartbeat: its usage and what its live
-// placements hold.
-func sampleHost(ctx context.Context, tx pgx.Tx, hostID string, u *proto.HostUsage) error {
+// sampleHost records a host's heartbeat: its usage, its runner's, and what
+// its live placements hold.
+func sampleHost(ctx context.Context, tx pgx.Tx, hostID string, u *proto.HostUsage, r *proto.ProcessUsage) error {
 	var cpu *float64
 	var mem, disk *int64
 	if u != nil {
 		cpu, mem, disk = &u.CPUSeconds, &u.MemoryBytes, &u.DiskBytes
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO host_samples (host_id, res, at, cpu_seconds, mem_bytes, disk_bytes, placements, alloc_cpus, alloc_mem)
-		SELECT $1, 0, now(), $2, $3, $4, count(*), coalesce(sum((pl.resources->>'cpus')::float8), 0), coalesce(sum((pl.resources->>'memory')::int8), 0)
-		FROM placements pl WHERE pl.host_id = $1 AND pl.state IN `+livePlacementStates+`
-		ON CONFLICT DO NOTHING`, hostID, cpu, mem, disk)
+	_, err := tx.Exec(ctx, insertHostSample, append([]any{hostID, cpu, mem, disk}, procValues(r)...)...)
 	return err
 }
 
@@ -91,7 +88,8 @@ func (s *Server) historyLoop(ctx context.Context) {
 // rows share the whole system's `at`.
 func (s *Server) sampleSystem(ctx context.Context) error {
 	host := s.readControlHost(ctx)
-	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+	var stored bool
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var from time.Time
 		if err := tx.QueryRow(ctx, `SELECT coalesce(max(window_end), now() - interval '1 minute' - $1::interval)
 			FROM system_samples WHERE res = 0 AND tenant_id = ''`, interval(s.cfg.SampleEvery)).Scan(&from); err != nil {
@@ -155,8 +153,15 @@ func (s *Server) sampleSystem(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		return sampleControl(ctx, tx, s.instance, host)
+		stored, err = s.sampleControl(ctx, tx, host)
+		return err
 	})
+	// Committed with its row: the peak RSS it carries is recorded. Else
+	// that peak stays pending for the next sample.
+	if err == nil && stored {
+		s.proc.Stored()
+	}
+	return err
 }
 
 // rollupHistory folds each resolution's complete buckets into the next,
@@ -187,7 +192,9 @@ func (s *Server) rollupHistory(ctx context.Context) error {
 // and past the newest bucket already rolled up. A bucket is complete a
 // minute after it ends: a sample is stamped when its transaction starts,
 // and may commit a little later. Levels are averaged, peaks and counters
-// take the maximum (counters only grow), flows are summed.
+// take the maximum (counters only grow), flows are summed. A process's
+// counter is the exception: it starts again when the process does, so a
+// bucket keeps its last reading, and that reading's start (procRow.columns).
 const (
 	rollupBucket = `to_timestamp(floor(extract(epoch FROM at) / $2::int) * $2::int)`
 	rollupSince  = `at >= coalesce((SELECT max(d.at) + make_interval(secs => $2::int) FROM %s d WHERE d.res = $2::int AND %s), '-infinity')
@@ -195,9 +202,9 @@ const (
 )
 
 var (
-	rollupHosts = `INSERT INTO host_samples (host_id, res, at, cpu_seconds, mem_bytes, disk_bytes, placements, alloc_cpus, alloc_mem)
+	rollupHosts = `INSERT INTO host_samples (host_id, res, at, cpu_seconds, mem_bytes, disk_bytes, placements, alloc_cpus, alloc_mem, ` + procCols + `)
 		SELECT host_id, $2::int, ` + rollupBucket + `, max(cpu_seconds), avg(mem_bytes)::bigint, avg(disk_bytes)::bigint,
-			round(avg(placements))::int, avg(alloc_cpus), avg(alloc_mem)::bigint
+			round(avg(placements))::int, avg(alloc_cpus), avg(alloc_mem)::bigint, ` + rollupProc + `
 		FROM host_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "host_samples", "d.host_id = s.host_id") + `
 		GROUP BY host_id, 3 ON CONFLICT DO NOTHING`
 	rollupPlacements = `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, cpu_seconds, mem_bytes, disk_bytes, pids, net_rx, net_tx)
@@ -213,14 +220,15 @@ var (
 			(array_agg(hosts ORDER BY at DESC))[1], avg(cap_cpus), avg(cap_mem)::bigint, avg(alloc_cpus), avg(alloc_mem)::bigint
 		FROM system_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "system_samples", "d.tenant_id = s.tenant_id") + `
 		GROUP BY tenant_id, 3 ON CONFLICT DO NOTHING`
-	// The control host, per luxd instance: CPU a counter, memory and connections levels,
-	// totals (cores, memory, disk) their maximum; the database size and
-	// disk use the bucket's mean.
-	rollupControl = `INSERT INTO control_samples (instance, res, at, cpu_seconds, cpus, mem_bytes, mem_total, db_bytes, db_connections)
-		SELECT instance, $2::int, ` + rollupBucket + `, max(cpu_seconds), max(cpus), avg(mem_bytes)::bigint, max(mem_total),
-			avg(db_bytes)::bigint, round(avg(db_connections))::int
+	// The control host, per luxd process (on its machine): CPU a counter,
+	// memory and connections levels, totals (cores, memory, disk) their
+	// maximum; the database size and disk use the bucket's mean; luxd's
+	// process as the hosts' runner.
+	rollupControl = `INSERT INTO control_samples (instance, hostname, res, at, cpu_seconds, cpus, mem_bytes, mem_total, db_bytes, db_connections, ` + procCols + `)
+		SELECT instance, hostname, $2::int, ` + rollupBucket + `, max(cpu_seconds), max(cpus), avg(mem_bytes)::bigint, max(mem_total),
+			avg(db_bytes)::bigint, round(avg(db_connections))::int, ` + rollupProc + `
 		FROM control_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "control_samples", "d.instance = s.instance") + `
-		GROUP BY instance, 3 ON CONFLICT DO NOTHING`
+		GROUP BY instance, hostname, 4 ON CONFLICT DO NOTHING`
 	rollupControlDisks = `INSERT INTO control_disk_samples (instance, path, res, at, used_bytes, free_bytes, total_bytes)
 		SELECT instance, path, $2::int, ` + rollupBucket + `, avg(used_bytes)::bigint, avg(free_bytes)::bigint, max(total_bytes)
 		FROM control_disk_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "control_disk_samples", "d.instance = s.instance AND d.path = s.path") + `
@@ -240,6 +248,8 @@ type Sample struct {
 	Placements *int     `json:"placements,omitempty"`
 	AllocCPUs  *float64 `json:"allocCpus,omitempty"`
 	AllocMem   *int64   `json:"allocMemory,omitempty"`
+	// Hosts: the runner process (absent before the runner reported it).
+	Runner *ProcessSample `json:"runner,omitempty" doc:"The runner process itself (not the podman and conmon processes it starts)."`
 	// Placements.
 	Pids      *int     `json:"pids,omitempty"`
 	NetRxRate *float64 `json:"netRxRate,omitempty"`
@@ -259,8 +269,123 @@ type Sample struct {
 	CapMem    *int64         `json:"capacityMemory,omitempty"`
 	SysAllocC *float64       `json:"allocatedCpus,omitempty"`
 	SysAllocM *int64         `json:"allocatedMemory,omitempty"`
-	// The control host: only for an operator reading the whole system.
-	Control *ControlSample `json:"control,omitempty" doc:"luxd's own machine and its Postgres. Only an operator key reading the whole system (no tenant) gets it."`
+}
+
+// ProcessSample is one of lux's own processes: a host's runner, or luxd.
+type ProcessSample struct {
+	Started      time.Time `json:"started" doc:"When the process started: a change is a restart."`
+	CPUCores     *float64  `json:"cpuCores,omitempty" doc:"CPU in use, in cores: a rate over the previous point of the same process."`
+	RSSBytes     *int64    `json:"rssBytes,omitempty"`
+	PeakRSSBytes *int64    `json:"peakRssBytes,omitempty" doc:"The highest RSS since the previous sample (a rollup: in its interval)."`
+	HeapBytes    *int64    `json:"heapBytes,omitempty" doc:"Go heap objects, live or not yet swept."`
+	Goroutines   *int64    `json:"goroutines,omitempty"`
+}
+
+// procRow is a row's process columns. Its columns are the one list of
+// them: names, rollups, insert values and scan destinations all come from
+// it, so none can fall out of step with another.
+type procRow struct {
+	started         *time.Time
+	cpu             *float64
+	rss, peak, heap *int64
+	goroutines      *int64
+}
+
+// procColumn is one process column: its name, how a rollup bucket folds
+// it, and the procRow field it is read into and written from.
+type procColumn struct {
+	name, rollup string
+	field        any
+}
+
+// lastReading is a bucket's last reading of a process column: the counter
+// and its start go together, and a restart starts the counter again.
+func lastReading(col string) string {
+	return `(array_agg(` + col + ` ORDER BY at DESC) FILTER (WHERE proc_started IS NOT NULL))[1]`
+}
+
+func (p *procRow) columns() []procColumn {
+	return []procColumn{
+		{"proc_started", lastReading("proc_started"), &p.started},
+		{"proc_cpu_seconds", lastReading("proc_cpu_seconds"), &p.cpu},
+		{"proc_rss", "avg(proc_rss)::bigint", &p.rss},
+		{"proc_peak_rss", "max(proc_peak_rss)", &p.peak},
+		{"proc_heap", "avg(proc_heap)::bigint", &p.heap},
+		{"goroutines", "round(avg(goroutines))::bigint", &p.goroutines},
+	}
+}
+
+// dest are the row's scan destinations, in columns order. They are also a
+// row's insert values: pgx writes a nil pointer as NULL.
+func (p *procRow) dest() []any {
+	var d []any
+	for _, c := range p.columns() {
+		d = append(d, c.field)
+	}
+	return d
+}
+
+// procColumnSQL is procCols, rollupProc and a placeholder list, from
+// procRow.columns.
+func procColumnSQL(f func(i int, c procColumn) string) string {
+	var out []string
+	for i, c := range (&procRow{}).columns() {
+		out = append(out, f(i, c))
+	}
+	return strings.Join(out, ", ")
+}
+
+var (
+	procCols   = procColumnSQL(func(_ int, c procColumn) string { return c.name })
+	rollupProc = procColumnSQL(func(_ int, c procColumn) string { return c.rollup })
+	// The raw sample inserts, with the process columns' placeholders.
+	insertHostSample = `INSERT INTO host_samples (host_id, res, at, cpu_seconds, mem_bytes, disk_bytes, placements, alloc_cpus, alloc_mem, ` + procCols + `)
+		SELECT $1, 0, now(), $2, $3, $4, count(*), coalesce(sum((pl.resources->>'cpus')::float8), 0), coalesce(sum((pl.resources->>'memory')::int8), 0),
+			` + procParams(5) + `
+		FROM placements pl WHERE pl.host_id = $1 AND pl.state IN ` + livePlacementStates + `
+		ON CONFLICT DO NOTHING`
+	insertControlSample = `INSERT INTO control_samples (instance, hostname, res, at, cpu_seconds, cpus, mem_bytes, mem_total, db_bytes, db_connections, ` + procCols + `)
+		VALUES ($1, $2, 0, now(), $3, $4, $5, $6, $7, $8, ` + procParams(9) + `)
+		ON CONFLICT DO NOTHING`
+)
+
+// procParams are the placeholders for a row's process columns, from $n.
+func procParams(n int) string {
+	return procColumnSQL(func(i int, _ procColumn) string { return fmt.Sprintf("$%d", n+i) })
+}
+
+// procValues are a reading's column values, in columns order; all NULL
+// without one.
+func procValues(u *proto.ProcessUsage) []any {
+	var p procRow
+	if u != nil {
+		p = procRow{&u.Started, &u.CPUSeconds, &u.RSSBytes, u.PeakRSSBytes, &u.HeapBytes, &u.Goroutines}
+	}
+	return p.dest()
+}
+
+// sample is the row's process, its CPU a rate against the previous row of
+// the same start; nil when the row has none (and the rate skips it).
+func (p *procRow) sample(r *procRate, at time.Time) *ProcessSample {
+	if p.started == nil {
+		return nil
+	}
+	return &ProcessSample{Started: *p.started, CPUCores: r.next(*p.started, at, p.cpu), RSSBytes: p.rss, PeakRSSBytes: p.peak,
+		HeapBytes: p.heap, Goroutines: p.goroutines}
+}
+
+// procRate is a rate over a process's counter, which a restart starts
+// again: a new start begins a new series.
+type procRate struct {
+	started time.Time
+	rate
+}
+
+func (p *procRate) next(started, at time.Time, v *float64) *float64 {
+	if !started.Equal(p.started) {
+		p.started, p.rate = started, rate{}
+	}
+	return p.rate.next(at, v)
 }
 
 // History is a series over [From, To] at Resolution seconds (0: raw).
@@ -269,6 +394,8 @@ type History struct {
 	To         time.Time `json:"to"`
 	Resolution int       `json:"resolution"`
 	Samples    []Sample  `json:"samples"`
+	// The control host: only for an operator reading the whole system.
+	Control *Control `json:"control,omitempty" doc:"The machines luxd runs on, its Postgres, and each luxd process. Only an operator key reading the whole system (no tenant) gets it."`
 }
 
 // pickResolution is the finest resolution still kept for all of [from, to]
@@ -401,20 +528,22 @@ func (s *Server) hostHistory(ctx context.Context, in *hostHistoryInput) (*histor
 				return errf(http.StatusForbidden, "forbidden", "a platform host's history is the operators'")
 			}
 		}
-		rows, err := tx.Query(ctx, `SELECT at, cpu_seconds, mem_bytes, disk_bytes, placements, alloc_cpus, alloc_mem
+		rows, err := tx.Query(ctx, `SELECT at, cpu_seconds, mem_bytes, disk_bytes, placements, alloc_cpus, alloc_mem, `+procCols+`
 			FROM host_samples WHERE host_id = $1 AND res = $2 AND at BETWEEN $3 AND $4 ORDER BY at`, id, res, from, to)
 		if err != nil {
 			return err
 		}
 		var cpu rate
+		var runnerCPU procRate
 		var at time.Time
 		var cpuS *float64
 		var mem, disk, allocM *int64
 		var n *int
 		var allocC *float64
-		_, err = pgx.ForEachRow(rows, []any{&at, &cpuS, &mem, &disk, &n, &allocC, &allocM}, func() error {
+		var proc procRow
+		_, err = pgx.ForEachRow(rows, append([]any{&at, &cpuS, &mem, &disk, &n, &allocC, &allocM}, proc.dest()...), func() error {
 			h.Samples = append(h.Samples, Sample{At: at, CPUCores: cpu.next(at, cpuS), MemoryBytes: mem, DiskBytes: disk,
-				Placements: n, AllocCPUs: allocC, AllocMem: allocM})
+				Placements: n, AllocCPUs: allocC, AllocMem: allocM, Runner: proc.sample(&runnerCPU, at)})
 			return nil
 		})
 		return err
@@ -498,7 +627,8 @@ func (s *Server) systemHistory(ctx context.Context, in *HistoryQuery) (*historyO
 		if err != nil || !controlVisible(p) {
 			return err
 		}
-		return addControl(ctx, tx, h.Samples, res, from, to)
+		h.Control, err = readControl(ctx, tx, res, from, to)
+		return err
 	})
 	if err != nil {
 		return nil, err

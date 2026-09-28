@@ -96,11 +96,13 @@ export function formatClock(when: Date | number | string | null | undefined): st
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-/** CPU cores (or millicores when < 1). 0.25 → "250m", 2.5 → "2.5 cores". */
+/** CPU cores (or millicores when < 1, with a decimal under 10m). 0.25 → "250m", 0.0012 → "1.2m", 2.5 → "2.5 cores". */
 export function formatCores(cores: number | null | undefined): string {
   if (cores == null || !Number.isFinite(cores)) return MISSING;
   if (cores === 0) return "0";
-  if (Math.abs(cores) < 1) return `${Math.round(cores * 1000)}m`;
+  const milli = cores * 1000;
+  if (Math.abs(milli) < 10) return `${trimZeros(milli.toFixed(1))}m`;
+  if (Math.abs(cores) < 1) return `${Math.round(milli)}m`;
   return `${trimZeros(cores.toFixed(2))} ${Math.abs(cores) === 1 ? "core" : "cores"}`;
 }
 

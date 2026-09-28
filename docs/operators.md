@@ -91,7 +91,9 @@ luxd keeps samples of:
 
 - every host, on each heartbeat: CPU in use, memory in use, disk used on
   the runner's data filesystem, and its live placements and what they asked
-  for;
+  for; and the runner process's own CPU, memory (RSS, its peak since the
+  last heartbeat, Go heap) and goroutines, with when it started, so a
+  restart shows;
 - every live placement, on each heartbeat: CPU, memory and pids now, disk,
   and network counters;
 - the system, every `LUX_SAMPLE_EVERY`, once in total and once per tenant:
@@ -100,10 +102,12 @@ luxd keeps samples of:
 - the control host, the machine luxd itself runs on, with the system: CPU
   and memory used against what it has, each tracked filesystem's used and
   free space (`history.disk_paths`, `LUX_HISTORY_DISK_PATHS`; default `/`;
-  a path that cannot be read is skipped and logged), and its Postgres
-  database's size and connections. Only operators viewing all tenants see
-  it. With several luxd instances on one database, the charts show the
-  instance that sampled most recently, named by hostname in the section.
+  a path that cannot be read is skipped and logged), its Postgres
+  database's size and connections, and the luxd process's own use (as a
+  runner's, above). Only operators viewing all tenants see
+  it. The charts draw a line per machine (by hostname) and one for
+  Postgres, and a line per luxd process, named by its machine and the tail
+  of its id: several luxd instances, or a restart, are separate lines.
 
 Raw samples are rolled up into minutes and hours; each resolution is kept
 for its own period (see [Operations](operations.md)). A read picks the
@@ -120,12 +124,14 @@ filter at the top; a tenant key, that tenant.
 - **Overview**: status now, history charts over the chosen range, and a live
   feed of every Run's events. An operator viewing all tenants also gets a
   **Control host** row: luxd's machine (CPU, memory, one disk card per
-  tracked path) and its Postgres (size, connections).
+  tracked path), its Postgres (size, connections), and luxd itself (CPU,
+  memory, goroutines), a line per luxd process. A host page charts its
+  runner the same way, a line per runner process.
 - **Runs**: filterable, with a Run page per Run: output (live), placement
   timeline, resource charts, events, snapshots and artifacts, and the
   actions above.
-- **Hosts**: capacity and allocation, and a host page with its history,
-  lifecycle and the Runs on it.
+- **Hosts**: capacity and allocation, and a host page with its history
+  (the runner process's too), lifecycle and the Runs on it.
 - **Pools** and **Tenants**.
 
 The console is static files built with Bun and embedded in luxd (see
