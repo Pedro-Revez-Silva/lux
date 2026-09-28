@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Badge, Button, Card, ConnectionBadge, CrumbSep, DEFAULT_FONT_SIZE, EmptyState, formatDuration, IconButton, IdChip, LinkButton, PageHeader, StatePill, Terminal, TerminalOverlay, useTheme, type ConnectionStatus, type TerminalHandle, type TerminalSize } from "@lux/design-system";
 import { IconChevronLeft, IconExternal, IconMinus, IconMoon, IconPlus, IconRefresh, IconSun, IconTerminal, IconWarning } from "@lux/design-system/icons";
-import { errorText, EXEC_RUN_STATES, openExec, SHELL_COMMAND, TERMINAL_RUN_STATES, useSession, type ExecSession, type Run } from "../../api/index.ts";
+import { errorText, EXEC_RUN_STATES, isApiError, openExec, SHELL_COMMAND, TERMINAL_RUN_STATES, useSession, type ExecSession, type Run } from "../../api/index.ts";
 import { href, Link, scoped, useSearch } from "../router.tsx";
 import { ButtonLink, ErrorBlock, HostLink, PageSkeleton, RunLink, runPath, useRun } from "./common.tsx";
 
@@ -24,6 +24,8 @@ interface Shell {
   /** The socket's close code (1006: no close frame, the host or luxd went away). */
   closeCode?: number;
   error?: string;
+  /** The shell could not be opened at all (the pre-check refused: not allowed, not running); Reconnect will not help. */
+  refused?: boolean;
   openedAt?: number;
   endedAt?: number;
 }
@@ -66,15 +68,13 @@ export function TerminalPage({ id }: { id: string }) {
     const t = term.current;
     if (!t) return;
     const ctrl = new AbortController();
-    const dim = t.size();
     t.reset();
     t.write(`\x1b[2mOpening a shell on ${run?.host ?? "the run's host"} (bash -l, falling back to sh)…\x1b[0m\r\n`);
     setShell({ status: "connecting" });
     let opened = 0;
     openExec(id, {
       command: SHELL_COMMAND,
-      rows: dim.rows,
-      cols: dim.cols,
+      size: () => t.size(),
       signal: ctrl.signal,
       onOpen: () => {
         opened = Date.now();
@@ -94,7 +94,8 @@ export function TerminalPage({ id }: { id: string }) {
       })
       .catch((e: unknown) => {
         if (ctrl.signal.aborted) return;
-        setShell({ status: "disconnected", error: errorText(e), endedAt: Date.now() });
+        // The pre-check refused (not allowed, not running): not a lost host.
+        setShell({ status: "disconnected", error: errorText(e), refused: isApiError(e), endedAt: Date.now() });
       });
     return () => {
       ctrl.abort();
@@ -102,9 +103,13 @@ export function TerminalPage({ id }: { id: string }) {
     };
   }, [id, ready, running, round]);
 
-  // The Run stopped under the shell: the socket closes on its own, but say why.
-  useEffect(() => {
-    if (run && !running) setShell((s) => (s.status === "connected" || s.status === "connecting" ? { ...s, status: "disconnected", error: `the run is ${run.state}`, endedAt: Date.now() } : s));
+  // The Run stopped under the shell: the socket closes on its own, but say
+  // why. Running again: back to connecting before the Terminal paints, so
+  // the last shell's overlay does not show over the new screen.
+  useLayoutEffect(() => {
+    if (!run) return;
+    if (!running) setShell((s) => (s.status === "connected" || s.status === "connecting" ? { ...s, status: "disconnected", error: `the run is ${run.state}`, endedAt: Date.now() } : s));
+    else setShell((s) => (s.status === "disconnected" && !s.closeCode && !s.refused ? { status: "connecting" } : s));
   }, [run, running]);
 
   const onData = useCallback((d: string) => exec.current?.send(d), []);
@@ -273,6 +278,24 @@ function ShellOverlay({ run, shell, onReconnect }: { run: Run; shell: Shell; onR
     );
   }
   const meta = [shell.closeCode != null ? `Socket closed (${shell.closeCode})` : null, shell.error].filter(Boolean).join(" · ");
+  if (shell.refused) {
+    return (
+      <TerminalOverlay
+        warn
+        icon={<IconWarning size={18} />}
+        title="No shell could be opened"
+        description={shell.error ?? "luxd refused the stream."}
+        actions={
+          <>
+            <Button variant="primary" icon={<IconRefresh size={15} />} onClick={onReconnect}>
+              Try again
+            </Button>
+            {back}
+          </>
+        }
+      />
+    );
+  }
   return (
     <TerminalOverlay
       warn

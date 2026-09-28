@@ -95,6 +95,9 @@ export function Terminal({ ref, onData, onResize, onReady, fontSize = DEFAULT_FO
     // browser handles Ctrl+Shift+V as a paste into xterm's textarea.
     t.attachCustomKeyEventHandler((ev) => {
       if (ev.type === "keydown" && ev.ctrlKey && ev.shiftKey && (ev.key === "C" || ev.key === "c")) {
+        // Ours, not the browser's (DevTools) nor xterm's.
+        ev.preventDefault();
+        ev.stopPropagation();
         const s = t.getSelection();
         if (s) void navigator.clipboard?.writeText(s);
         return false;

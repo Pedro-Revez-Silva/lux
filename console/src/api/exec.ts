@@ -14,8 +14,8 @@ export const SHELL_COMMAND = ["/bin/sh", "-c", "exec bash -l 2>/dev/null || exec
 
 export interface ExecOptions {
   command: string[];
-  rows: number;
-  cols: number;
+  /** The grid at the moment the socket opens (a resize during the round trips is not lost). */
+  size: () => { rows: number; cols: number };
   signal: AbortSignal;
   /** The socket is open and the shell requested. */
   onOpen: () => void;
@@ -84,7 +84,7 @@ export async function openExec(runId: string, opts: ExecOptions): Promise<ExecSe
     if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m));
   };
   ws.onopen = () => {
-    ws.send(JSON.stringify({ command: opts.command, tty: true, rows: opts.rows, cols: opts.cols }));
+    ws.send(JSON.stringify({ command: opts.command, tty: true, ...opts.size() }));
     opts.onOpen();
   };
   ws.onmessage = (ev) => {
