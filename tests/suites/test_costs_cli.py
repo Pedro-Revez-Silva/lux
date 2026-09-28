@@ -9,6 +9,7 @@ hourly row. No cost tick (every 2m) is waited for."""
 from __future__ import annotations
 
 import re
+from decimal import ROUND_HALF_EVEN, Decimal
 
 from conftest import generic
 from env import ALPINE_IMAGE, wait_until
@@ -82,3 +83,34 @@ def test_cost_cli(lux, tenant_factory, operator, runners, hosts):
     out = operator.run("costs", "--since", "1h", "--by", "host").stdout
     assert re.search(r"^unallocated \(hosts' cost charged to no Run\): .*[\d.<]+ USD", out, re.M), out
     assert re.search(r"^HOST\s+ALLOCATED\s+UNALLOCATED$", out, re.M), out
+
+    # The priced host's row shows luxd's amounts as `lux costs` rounds them.
+    # Its hours refresh on their own schedule, so the text is compared with
+    # a response that did not change around it.
+    host_id = lux.json("hosts", "get", host.name)["id"]
+
+    def host_row():
+        return next((h for h in operator.json("costs", "--since", "1h", "--by", "host")["hosts"]
+                     if h["hostId"] == host_id and h["currency"] == "USD"), None)
+
+    def shown_host():
+        before = host_row()
+        text = operator.run("costs", "--since", "1h", "--by", "host").stdout
+        after = host_row()
+        return (after, text) if before and before == after else None
+    row, out = wait_until(shown_host, 30, 1, f"host {host_id} never had a stable allocation row")
+    allocated, unallocated = money(row["allocated"]), money(row["unallocated"])
+    assert (allocated, unallocated) != ("0", "0"), row
+    want = rf"^{re.escape(host_id)}\s+{re.escape(allocated)} USD\s+{re.escape(unallocated)} USD$"
+    assert re.search(want, out, re.M), (row, out)
+
+
+def money(amount: str) -> str:
+    """The CLI's display rounding: half-even to 4 decimals, trailing zeros
+    trimmed, a non-zero amount below that shown as a bound."""
+    d = Decimal(amount)
+    q = d.quantize(Decimal("0.0001"), rounding=ROUND_HALF_EVEN)
+    if q == 0 and d != 0:
+        return "<0.0001" if d > 0 else ">-0.0001"
+    s = format(q, "f")
+    return s.rstrip("0").rstrip(".") if "." in s else s

@@ -224,6 +224,7 @@ func fixtureSummary() server.CostSummaryBody {
 			{At: &day2, Group: map[string]string{"family": "compute"}, Currency: "USD", Amount: "0.050000001"},
 		},
 		Unallocated: []server.CostSummaryRow{{Currency: "USD", Amount: "0.75"}},
+		Hosts:       []server.HostAllocation{{HostID: "host_a", Currency: "USD", Allocated: "1.23456", Unallocated: "0.25"}},
 	}
 }
 
@@ -247,6 +248,15 @@ func TestCostsCommand(t *testing.T) {
 	lineWith(t, out, "Sep", "26", "compute", "0.1", "USD")
 	lineWith(t, out, "Sep", "27", "compute", "0.05", "USD")
 	lineWith(t, out, "unallocated", "0.75", "USD")
+
+	out, err = runCLI(t, f, "costs", "--by", "host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineWith(t, out, "HOST", "ALLOCATED", "UNALLOCATED")
+	h := fixtureSummary().Hosts[0]
+	row := append([]string{h.HostID}, strings.Fields(money(h.Allocated, h.Currency))...)
+	lineWith(t, out, append(row, strings.Fields(money(h.Unallocated, h.Currency))...)...)
 
 	_, err = runCLI(t, f, "costs", "--from", "2026-09-01T00:00:00Z", "--to", "2026-09-02T00:00:00Z",
 		"--by", "tenant", "--by", "label:team", "--family", "ai", "--tenant", "acme")

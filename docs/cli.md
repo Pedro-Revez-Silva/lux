@@ -147,7 +147,11 @@ response. A value lux does not have is `—`, never `0`.
 - `lux costs --by` takes `tenant` (operators), `pool`, `host`, `family`,
   `run` or `label:KEY`, up to twice. `--interval hour|day` adds a series.
   Ranges are whole UTC hours, at most 90 days. With an operator key and no
-  `--tenant`, the hosts' unallocated cost is shown too.
+  `--tenant`, the hosts' unallocated cost is shown too, and `--by host`
+  adds each host's ALLOCATED and UNALLOCATED. A host's allocated plus
+  unallocated is its billed cost for those hours and need not equal the sum
+  of its Runs' lines: host hours refresh on their own schedule and include
+  idle time.
 - `lux ls` has a COST column: the Run's total when it has one currency,
   `multi` when it has several, `—` while nothing has been reported. A
   leading `~` (`~0.0421 USD`) marks a total that may still change.
