@@ -27,7 +27,7 @@ lux run -f spec.yaml [--follow | --wait] [--name N] [-l k=v] [--idempotency-key 
 lux run --image alpine -- echo hello           # a quick generic Run
 lux ls [--state running,stopped] [-l team=x] [--resumable] [--host H] [--limit N]
 lux get <run>                                  # state, placements, usage
-lux logs <run> [-f] [--since <cursor>] [--events] [--stderr=false]
+lux logs <run> [-f] [--since <cursor>] [--events] [--stderr=false] [--server NAME | --servers]
 lux events <run>                               # lifecycle events
 lux wait <run> [--state s1,s2] [--timeout 5m]  # default: until it ends; exits with its code
 ```
@@ -40,6 +40,9 @@ variable of the same name.
 `lux logs -o json` prints one JSON record per line:
 `{"cursor","epoch","seq","t","ch","data"|"event"}`. Pass a record's
 `cursor` to `--since` to continue from it, across placements and hosts.
+The Run's servers' output is left out: `--server web` prints one
+server's, `--servers` adds all of theirs, each line prefixed with its
+server's name (records with `ch: "server"`, `server` and `stream`).
 
 ## Steering
 
@@ -142,6 +145,7 @@ connection.
 
 ```bash
 lux exec <run> [-t | -T] -- command...
+lux shell <run>
 lux attach <run>
 lux port-forward <run> <port-name> <local-port> [--address 127.0.0.1]
 ```
@@ -155,6 +159,28 @@ lux port-forward <run> <port-name> <local-port> [--address 127.0.0.1]
   `workload.tty: true`: its output from now on, and your typing. Ctrl-]
   detaches; the workload keeps running. What the workload prints on its
   terminal is also the Run's output, as always.
+- **shell** opens a login shell on a terminal: `bash -l` where the image
+  has bash, `sh -l` otherwise (`lux exec -t <run> -- /bin/sh -c 'exec bash
+  -l 2>/dev/null || exec sh -l'`).
 - **port-forward** listens locally and tunnels each connection to a port
-  the Run declares in `network.ports`, by name. Undeclared ports cannot be
-  reached.
+  the Run declares in `network.ports`, or to one of its servers, by name.
+  No other port can be reached.
+
+## Servers
+
+A Run's named ports, optionally with commands lux runs in its container
+(see [concepts](concepts.md#servers)).
+
+```bash
+lux server add <run> <name> <port> [--workdir DIR] [--env K=V]... [--no-start] [-- command...]
+lux server ls <run> [name]                     # state, since, preview URL, command
+lux server start|stop|restart <run> <name>
+lux server rm <run> <name>                     # stops it first
+lux server logs <run> <name> [--tail N] [-f]   # its recent lines, across placements; -f follows
+lux server wait <run> <name> [--state ready] [--timeout 2m]
+```
+
+`add` starts a server with a command at once (the Run must be running)
+unless `--no-start`; one without a command is only its port. `lux get`
+lists the Run's servers too. Every command takes `-o json` (the API's
+Server object, or a list of them).

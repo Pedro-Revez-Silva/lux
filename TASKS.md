@@ -55,3 +55,4 @@ After v1:
 | AWS deployment: `runner_url`, luxd self-serving runner binaries with sha256 verification, outdated-host draining, no-custom-AMI EC2 boot (Ignition/Fedora CoreOS default, cloud-init script, or plain env; `GET /runner/bootstrap.sh` for static hosts), `make dist` release tarballs and `release.yml` — Terraform in `deploy/terraform/` | ✅ done |
 | Per-pool `--scale-down-after`; `--warm-while-active` (scale to zero when idle) | ✅ done |
 | Timeouts: none unless set; count running time only (parked Runs keep theirs) | ✅ done |
+| Servers: named ports of a Run with commands lux runs (`workload.servers`, `lux server`, API), stopped with their placement; preview listener (`[preview]`: Access or ticket cookie, reverse proxy over tunnel streams, status pages); stream tickets and the Origin check for browser streams; `lux shell`; Terraform preview domain | ✅ done |

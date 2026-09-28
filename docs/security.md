@@ -33,6 +33,18 @@ are in the linked pages.
   email) are refused. The Access cookie authenticates reads, and writes
   only when the browser marks them same-origin (`Sec-Fetch-Site`), so another
   site cannot act with it ([Operators](operators.md#signing-in)).
+- **Streams from a browser** (exec, attach, ports) authenticate with the
+  Access cookie or a **stream ticket**: `POST /v1/runs/{id}/tickets`, made
+  with the caller's own key, good once for 60 seconds, for one Run and one
+  kind (exec or preview), stored hashed, and dead with the key that made
+  it. Every stream upgrade from a page is refused (403 `bad_origin`)
+  unless its `Origin` is luxd's `public_url`, the request's own host, or
+  one in `console.allowed_origins`, so another site cannot open a shell
+  with a visitor's cookie. Clients that send no `Origin` (the CLI) are not
+  affected.
+- **A terminal is the Run's secrets.** A shell in a Run sees the
+  workload's environment, `env` secrets included: whoever may open one
+  (`run` scope on the Run's tenant) may read them.
 
 ## Workloads
 
@@ -57,11 +69,42 @@ are in the linked pages.
   never enter the container at all: the runner clones and pushes. Git
   mirrors on a host are per tenant: one tenant never clones from another's.
 
+## Previews
+
+A Run's servers can be reached at `https://<server>-<run suffix>.<preview
+domain>` ([Operators](operators.md#previews)). What protects that:
+
+- **Always authenticated.** Cloudflare Access with the preview
+  application's own AUD, where luxd also verifies the token and checks
+  the user may read the Run (an operator, or its tenant under the Access
+  mapping); or, in ticket mode, a `__Host-` cookie (host-only, `Secure`,
+  `HttpOnly`, `SameSite=Lax`, 12 hours) that luxd signs (HMAC-SHA256 with
+  a key it keeps in its database) and gives out only for a preview ticket
+  of that very Run. A cookie made from an API key stops working when the
+  key is revoked.
+- **A listener of its own** (`preview.listen`) that only proxies: it never
+  serves `/v1`, `/runner` or the console, so preview content never shares
+  an origin with them.
+- **Header hygiene.** Toward the container, luxd removes
+  `Cf-Access-Jwt-Assertion`, any `Authorization: Bearer lux…`, and the
+  `CF_Authorization` and `__Host-lux_preview` cookies; it sets
+  `X-Forwarded-Host`, `X-Forwarded-Proto: https` and `X-Lux-User` (the
+  person's email or the key's name). From the container, every
+  `Set-Cookie` loses its `Domain`, so a preview can set cookies for its
+  own host only.
+- **What is left:** preview hosts are subdomains of the preview domain, so
+  they are same-site with anything else under its registrable domain, and
+  browsers send them cookies other apps set with `Domain=` that parent.
+  Serve previews from a domain of their own, or make sure the apps beside
+  them use host-only cookies. Preview content is the Run's code: treat a
+  preview like any page its author wrote.
+
 ## Deployment
 
 - **Reach luxd privately**: its API and console carry every tenant's data.
   Put it behind a tunnel, a VPN or Cloudflare Access; lux has no public
-  URLs of its own (port forwarding goes through the CLI).
+  URLs of its own (port forwarding goes through the CLI), except previews,
+  when configured, which are always authenticated (above).
 - **Secrets in configuration** (the database password, the S3 secret key)
   are best set in the environment. A configuration file holding them
   should be readable by luxd only (`chmod 600`); luxd warns when others can
