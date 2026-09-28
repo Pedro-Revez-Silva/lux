@@ -487,7 +487,17 @@ func TestTickets(t *testing.T) {
 	if d, ok := whoami()["previewDomain"]; !ok || d != nil {
 		t.Fatalf("previewDomain, previews off: %v %v", d, ok)
 	}
-	s.cfg.Preview.Domain = "lux.example.com"
+	// Previews through Cloudflare Access: no tickets, no domain to sign in to.
+	s.cfg.Preview.Domain, s.cfg.Preview.Auth = "lux.example.com", "cloudflare-access"
+	s.preview = newPreviews(s)
+	if d := whoami()["previewDomain"]; d != nil {
+		t.Fatalf("previewDomain, Access previews: %v", d)
+	}
+	if w := apiCall(t, s, readKey, http.MethodPost, "/v1/runs/"+r1+"/tickets", map[string]any{"kind": "preview"}); w.Code != http.StatusConflict {
+		t.Fatalf("preview ticket, Access previews: %d %s", w.Code, w.Body)
+	}
+	s.cfg.Preview.Auth = "ticket"
+	s.preview = newPreviews(s)
 	if d := whoami()["previewDomain"]; d != "lux.example.com" {
 		t.Fatalf("previewDomain: %v", d)
 	}

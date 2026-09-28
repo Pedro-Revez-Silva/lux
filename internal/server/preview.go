@@ -74,6 +74,12 @@ type keyCheck struct {
 	until time.Time
 }
 
+// previewTickets: previews are on, and people sign in to them with a
+// ticket from the console (not through Cloudflare Access).
+func (s *Server) previewTickets() bool {
+	return s.preview != nil && s.preview.mode == "ticket"
+}
+
 func newPreviews(s *Server) *previews {
 	p := &previews{s: s, mode: s.cfg.Preview.Auth, pending: map[serverRef]time.Time{}, written: map[serverRef]time.Time{},
 		keysLive: map[string]keyCheck{}}

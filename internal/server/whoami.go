@@ -26,7 +26,7 @@ type Whoami struct {
 	Scopes      []string `json:"scopes"`
 	// PreviewDomain: the console signs people in to
 	// https://<server>-<run>.<PreviewDomain> only.
-	PreviewDomain *string `json:"previewDomain" nullable:"true" doc:"The preview listener's domain (preview URLs are https://<server>-<run suffix>.<domain>); null when previews are off."`
+	PreviewDomain *string `json:"previewDomain" nullable:"true" doc:"The preview listener's domain (preview URLs are https://<server>-<run suffix>.<domain>); null when previews are off, or signed in to through Cloudflare Access rather than a ticket."`
 }
 
 type whoamiOutput struct {
@@ -39,7 +39,8 @@ func (s *Server) whoami(ctx context.Context, _ *struct{}) (*whoamiOutput, error)
 	p := principal(ctx)
 	w := Whoami{Operator: p.Operator, KeyID: p.KeyID, Email: p.Email, Name: p.Name, Picture: p.Picture, Scopes: slices.Clone(p.Scopes),
 		ConsoleAuth: cmp.Or(s.cfg.ConsoleAuth.Mode, "key")}
-	if d := s.cfg.Preview.Domain; d != "" {
+	if s.previewTickets() {
+		d := s.cfg.Preview.Domain
 		w.PreviewDomain = &d
 	}
 	if !p.Operator {

@@ -203,13 +203,14 @@ aud = ""                         # LUX_PREVIEW_CF_ACCESS_AUD (team: console.clou
 - **Auth, `ticket`** (the default in key mode): a browser without a
   preview cookie that asks for a page is sent to
   `{public_url}/preview-auth?to=<the URL>`. The console there (signed in)
-  checks that the URL is https and its host is exactly
+  checks that the URL is https on the standard port and its host is exactly
   `<server>-<run>.<domain>` of this luxd's preview domain (from
   `GET /v1/whoami`'s `previewDomain`), mints a preview ticket and sends
   the browser to `https://<host>/.lux/auth?ticket=…&to=<path>`, where luxd
   sets the cookie and redirects to the path. Other requests without a
-  cookie get 401. Without `preview.domain`, luxd mints no preview tickets
-  (409 `previews_off`).
+  cookie get 401. Without `preview.domain`, or when previews sign in
+  through Cloudflare Access, luxd mints no preview tickets (409
+  `previews_off`) and whoami's `previewDomain` is null.
 - **Routing:** a ready server of a running Run is proxied, over a tunnel
   stream to its current placement: HTTP, WebSockets and server-sent
   events. A request to a starting server, or to a Run on its way to

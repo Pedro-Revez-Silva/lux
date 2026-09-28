@@ -192,8 +192,9 @@ func (h *hubStream) took() {
 		return
 	}
 	h.taken++
-	if h.taken >= h.window/2 {
-		_ = h.send(proto.MsgStreamData, proto.Marshal(proto.StreamData{Credit: h.taken}))
+	// A grant that could not be sent stays owed: the next frame taken
+	// tries again, so a busy host never loses its window for good.
+	if h.taken >= h.window/2 && h.send(proto.MsgStreamData, proto.Marshal(proto.StreamData{Credit: h.taken})) == nil {
 		h.taken = 0
 	}
 }

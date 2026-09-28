@@ -60,8 +60,8 @@ func (s *Server) mintTicket(ctx context.Context, in *mintTicketInput) (*ticketOu
 	if kind != TicketExec && kind != TicketPreview {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_request", "kind: want exec or preview")
 	}
-	if kind == TicketPreview && s.cfg.Preview.Domain == "" {
-		return nil, errf(http.StatusConflict, "previews_off", "this luxd serves no previews (preview.domain is not set)")
+	if kind == TicketPreview && !s.previewTickets() {
+		return nil, errf(http.StatusConflict, "previews_off", "this luxd signs no one in to previews with tickets (preview.domain is not set, or previews use Cloudflare Access)")
 	}
 	// A preview is a read; a stream acts on the Run.
 	if kind == TicketExec && !p.Can("run") {

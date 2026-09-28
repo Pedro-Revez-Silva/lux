@@ -23,6 +23,7 @@ describe("parsePreviewTarget", () => {
     [`https://a.web-${SUFFIX}.lux.example.com/`, "a deeper host"],
     [`https://web-${SUFFIX}.example.com/`, "the parent domain"],
     [`http://web-${SUFFIX}.lux.example.com/`, "http"],
+    [`https://web-${SUFFIX}.lux.example.com:8443/`, "another port"],
     [`https://web.lux.example.com/`, "no run"],
     ["/relative", "not a URL"],
   ])("refuses %s (%s)", (to) => {

@@ -2011,7 +2011,7 @@ components:
         picture:
           type: string
         previewDomain:
-          description: The preview listener's domain (preview URLs are https://<server>-<run suffix>.<domain>); null when previews are off.
+          description: The preview listener's domain (preview URLs are https://<server>-<run suffix>.<domain>); null when previews are off, or signed in to through Cloudflare Access rather than a ticket.
           type:
             - string
             - "null"

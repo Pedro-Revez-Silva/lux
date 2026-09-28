@@ -48,6 +48,7 @@ export function parsePreviewTarget(to: string | null, previewDomain: string | nu
   const domain = previewDomain.toLowerCase().replace(/\.$/, "");
   const host = t.url.hostname.replace(/\.$/, "");
   const label = host.split(".")[0] ?? "";
+  if (t.url.port !== "") return { error: `${t.url.host}: a preview is served on the standard https port only.` };
   if (host !== `${label}.${domain}`) return { error: `${t.url.hostname} is not one of this lux's previews (*.${domain}).` };
   return t;
 }
