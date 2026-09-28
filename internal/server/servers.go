@@ -263,16 +263,30 @@ func watched(epoch string) string {
 	return `NOT (coalesce(stop_reason, '') = 'stopped' AND stopped_epoch IS NOT DISTINCT FROM ` + epoch + `)`
 }
 
-// syncServers is syncServersTx in its own system transaction, notifying
-// the host after.
-func (s *Server) syncServers(ctx context.Context, runID string) error {
+// changeServers runs fn, a change to a Run's servers, and sends the Run's
+// live placement its new set in the same transaction, so a change is never
+// committed without it; the host is notified after the commit. The
+// transaction is system-scoped (host messages are not a tenant's), so the
+// Run is first checked to be tenantID's: fn sees every tenant's rows, and
+// must touch only runID's.
+func (s *Server) changeServers(ctx context.Context, tenantID, runID string, fn func(pgx.Tx) error) error {
 	var hostID string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var mine bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs WHERE id = $1 AND tenant_id = $2)`, runID, tenantID).Scan(&mine); err != nil {
+			return err
+		}
+		if !mine {
+			return errNotFound
+		}
+		if err := fn(tx); err != nil {
+			return err
+		}
 		var err error
 		hostID, err = syncServersTx(ctx, tx, runID)
 		return err
 	})
-	if hostID != "" {
+	if err == nil && hostID != "" {
 		s.hub.Notify(hostID)
 	}
 	return err
@@ -396,7 +410,8 @@ func (s *Server) addServer(ctx context.Context, in *addServerInput) (*serverOutp
 		start = *b.Start
 	}
 	var out RunServer
-	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+	// Started or not, its port is one a tunnel may now reach.
+	err := s.changeServers(ctx, p.TenantID, in.ID, func(tx pgx.Tx) error {
 		state, epoch, sp, err := serverRun(ctx, tx, in.ID)
 		if err != nil {
 			return err
@@ -430,10 +445,6 @@ func (s *Server) addServer(ctx context.Context, in *addServerInput) (*serverOutp
 	if err != nil {
 		return nil, err
 	}
-	// Started or not, its port is one a tunnel may now reach.
-	if err := s.syncServers(ctx, in.ID); err != nil {
-		return nil, err
-	}
 	return &serverOutput{http.StatusCreated, out}, nil
 }
 
@@ -458,7 +469,8 @@ func (s *Server) putServer(ctx context.Context, in *putServerInput) (*serverOutp
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_server", "start is for POST: use POST .../start or .../restart")
 	}
 	var out RunServer
-	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+	// Its port may be one a tunnel may now reach.
+	err := s.changeServers(ctx, p.TenantID, in.ID, func(tx pgx.Tx) error {
 		_, _, sp, err := serverRun(ctx, tx, in.ID)
 		if err != nil {
 			return err
@@ -480,10 +492,6 @@ func (s *Server) putServer(ctx context.Context, in *putServerInput) (*serverOutp
 	if err != nil {
 		return nil, err
 	}
-	// Its port may be one a tunnel may now reach.
-	if err := s.syncServers(ctx, in.ID); err != nil {
-		return nil, err
-	}
 	return &serverOutput{http.StatusOK, out}, nil
 }
 
@@ -492,7 +500,7 @@ func (s *Server) serverAction(action string) func(context.Context, *ServerPath) 
 	return func(ctx context.Context, in *ServerPath) (*serverOutput, error) {
 		p := principal(ctx)
 		var out RunServer
-		err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		err := s.changeServers(ctx, p.TenantID, in.ID, func(tx pgx.Tx) error {
 			state, epoch, _, err := serverRun(ctx, tx, in.ID)
 			if err != nil {
 				return err
@@ -529,9 +537,6 @@ func (s *Server) serverAction(action string) func(context.Context, *ServerPath) 
 		if err != nil {
 			return nil, err
 		}
-		if err := s.syncServers(ctx, in.ID); err != nil {
-			return nil, err
-		}
 		return &serverOutput{http.StatusOK, out}, nil
 	}
 }
@@ -548,7 +553,8 @@ type noContent struct {
 
 func (s *Server) removeServer(ctx context.Context, in *ServerPath) (*noContent, error) {
 	p := principal(ctx)
-	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+	// Its process, if any, stops with the next set.
+	err := s.changeServers(ctx, p.TenantID, in.ID, func(tx pgx.Tx) error {
 		if _, _, _, err := serverRun(ctx, tx, in.ID); err != nil {
 			return err
 		}
@@ -562,10 +568,6 @@ func (s *Server) removeServer(ctx context.Context, in *ServerPath) (*noContent, 
 		return addEvent(ctx, tx, p.TenantID, in.ID, 0, "server.removed", map[string]any{"name": in.Name, "by": p.Actor()})
 	})
 	if err != nil {
-		return nil, err
-	}
-	// Its process, if any, stops with the next set.
-	if err := s.syncServers(ctx, in.ID); err != nil {
 		return nil, err
 	}
 	return &noContent{http.StatusNoContent}, nil

@@ -335,11 +335,32 @@ func TestServerLifecycle(t *testing.T) {
 	if got := getServer(t, s, key, "db"); got.State != ServerStopped {
 		t.Fatalf("a stopped one was watched: %+v", got)
 	}
-	// Another tenant sees nothing.
+	// Another tenant sees nothing, and changes nothing (the change runs in
+	// a system scope, with the Run's tenant checked first).
 	key2 := ids.Secret("luxk")
 	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('k2', 't2', 'x', $1, ARRAY['run'])`, ids.Hash(key2))
-	if w := apiCall(t, s, key2, http.MethodPost, "/v1/runs/"+r1+"/servers/web/stop", nil); w.Code != http.StatusNotFound {
-		t.Fatalf("other tenant: %d %s", w.Code, w.Body)
+	before := len(pendingServers(t, s, ctx))
+	for _, c := range []struct {
+		method, path string
+		body         any
+	}{
+		{http.MethodPost, "/servers/web/stop", nil},
+		{http.MethodPost, "/servers/web/restart", nil},
+		{http.MethodPost, "/servers", map[string]any{"name": "evil", "port": 9}},
+		{http.MethodPut, "/servers/web", map[string]any{"port": 9}},
+		{http.MethodDelete, "/servers/web", nil},
+	} {
+		if w := apiCall(t, s, key2, c.method, "/v1/runs/"+r1+c.path, c.body); w.Code != http.StatusNotFound {
+			t.Fatalf("other tenant, %s %s: %d %s", c.method, c.path, w.Code, w.Body)
+		}
+	}
+	if got := getServer(t, s, key, "web"); got.Port != 3000 || len(pendingServers(t, s, ctx)) != before {
+		t.Fatalf("another tenant changed something: %+v", got)
+	}
+	// A change that fails sends no set.
+	if w := apiCall(t, s, key, http.MethodPut, "/v1/runs/"+r1+"/servers/nope", map[string]any{"port": 9}); w.Code != http.StatusNotFound ||
+		len(pendingServers(t, s, ctx)) != before {
+		t.Fatalf("failed change: %d %s", w.Code, w.Body)
 	}
 
 	// The placement ends with a migration: every server stops with it.
