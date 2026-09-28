@@ -405,6 +405,44 @@
 .signin-note {
   font-size: var(--text-sm);
 }
+.signin-card .empty-desc {
+  overflow-wrap: anywhere;
+}
+/* Where sign-in continues to (a terminal, a preview), and Access beside the key. */
+.signin-next {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+  background: var(--bg-inset);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+.signin-next-icon {
+  display: inline-flex;
+  color: var(--fg-muted);
+  flex: none;
+}
+.signin-next .idchip {
+  color: var(--fg-secondary);
+}
+.signin-or {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  color: var(--fg-faint);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.signin-or::before,
+.signin-or::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-soft);
+}
 /* Phone width: Shell.tsx's query must match. */
 @media (max-width: 767px) {
   .signin-card {
@@ -784,4 +822,61 @@
 }
 .secret-row .input {
   flex: 1 1 160px;
+}
+
+/* A page that fills the content area instead of scrolling it (the
+   terminal): the area stops scrolling and the page lays itself out in
+   the height left. */
+.content:has(> .page-fill) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-top: var(--sp-6);
+  padding-bottom: var(--sp-6);
+}
+.page-fill {
+  flex: 1;
+  min-height: 0;
+  gap: var(--sp-6);
+  max-width: none;
+}
+/* The terminal page's compact header: one title row, one line of facts. */
+.term-head {
+  padding-bottom: 0;
+  align-items: center;
+}
+.term-head .page-head-main {
+  gap: var(--sp-2);
+}
+.term-head .page-title {
+  font-size: var(--text-xl);
+}
+.term-head .page-desc .mono {
+  color: var(--fg-secondary);
+}
+.term-actions {
+  gap: var(--sp-3);
+}
+/* Run not running: an empty state in the terminal's place. */
+.term-none {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding-bottom: var(--sp-9);
+}
+.term-none .card {
+  width: 560px;
+  max-width: 100%;
+}
+.term-none .empty-desc {
+  max-width: 440px;
+}
+@media (max-width: 767px) {
+  .content:has(> .page-fill) {
+    overflow: visible;
+  }
+  .page-fill .term {
+    min-height: 60vh;
+  }
 }

@@ -52,8 +52,20 @@ const HOST_STATES: Record<HostState, StateStyle> = {
   terminated: { hue: "neutral", label: "Terminated" },
 };
 
+/** States of a Run's server (a named port, optionally with a command lux starts). */
+export type ServerState = "stopped" | "starting" | "ready" | "unreachable" | "exited";
+
+const SERVER_STATES: Record<ServerState, StateStyle> = {
+  stopped: { hue: "neutral", label: "Stopped" },
+  starting: { hue: "blue", label: "Starting", live: true },
+  ready: { hue: "green", label: "Ready" },
+  unreachable: { hue: "amber", label: "Unreachable", live: true },
+  exited: { hue: "red", label: "Exited" },
+};
+
 export const RUN_STATE_LIST = Object.keys(RUN_STATES) as RunState[];
 export const HOST_STATE_LIST = Object.keys(HOST_STATES) as HostState[];
+export const SERVER_STATE_LIST = Object.keys(SERVER_STATES) as ServerState[];
 
 const UNKNOWN: StateStyle = { hue: "neutral", label: "Unknown" };
 
@@ -63,4 +75,8 @@ export function runStateStyle(state: string): StateStyle {
 
 export function hostStateStyle(state: string): StateStyle {
   return HOST_STATES[state as HostState] ?? { ...UNKNOWN, label: state };
+}
+
+export function serverStateStyle(state: string): StateStyle {
+  return SERVER_STATES[state as ServerState] ?? { ...UNKNOWN, label: state };
 }
