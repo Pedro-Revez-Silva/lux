@@ -4,6 +4,7 @@ import { api, errorText, useNow, useQuery, type Host, type HostPlacement, type H
 import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, RelativeTime, RunLink, RunNameLink, runColumns, runPath, useSeries } from "./common.tsx";
+import { HostCost } from "./HostCost.tsx";
 import { ProcessCards, runnerProcesses } from "./ProcessCards.tsx";
 
 export function HostPage({ id }: { id: string }) {
@@ -133,6 +134,9 @@ export function HostPage({ id }: { id: string }) {
         </Card>
         <ProcessCards title="Runner" what="the lux-runner process, not podman or its containers" processes={runners} />
       </div>
+
+      {/* The host history rule: operators, and a tenant for its own host (a tenant sees no other non-platform host). */}
+      {(scope.operator || !h.platform) && <HostCost id={h.id} range={scope.range} operator={scope.operator} />}
 
       <Card flush title="Recent runs on this host" subtitle="any epoch, newest first, up to 50" actions={<Link to={hostRunsPath(id)}>All runs on this host</Link>}>
         <ErrorStrip error={recent.error} />

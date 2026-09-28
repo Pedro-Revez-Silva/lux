@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { formatClock, formatTimestamp, formatUnit, type Unit } from "./format.ts";
+import { niceScale, niceSplits } from "./scale.ts";
 import { cssVar, useDensity, useTheme } from "./theme.ts";
 
 export interface Series {
@@ -33,6 +34,14 @@ export interface TimeSeriesChartProps {
   legend?: boolean;
   /** Vertical markers (epoch seconds) with a short label, e.g. epoch boundaries. */
   marks?: ChartMark[];
+  /**
+   * Stack the series (first at the bottom) as filled bands: parts of one
+   * whole, such as cost by family. A missing value adds nothing to the stack
+   * and shows as missing in the tooltip, which also lists the total.
+   */
+  stacked?: boolean;
+  /** ISO 4217 code for unit "money". */
+  currency?: string;
   className?: string;
 }
 
@@ -42,6 +51,8 @@ export interface ChartMark {
 }
 
 const MAX_SERIES = 8;
+/** Fill of a stacked band: stronger than a line's 10% wash, so neighbouring bands read apart. */
+const STACK_ALPHA = 0.28;
 
 /** The --chart-h token as a number, tracking density and viewport changes. */
 function useChartHeight(): number {
@@ -56,14 +67,18 @@ function useChartHeight(): number {
   return h;
 }
 
+/** A concrete colour for the canvas, which cannot resolve var(--token). */
 function seriesColor(s: Series, i: number): string {
-  if (typeof s.color === "string") return s.color;
+  if (typeof s.color === "string") {
+    const v = /^var\((--[\w-]+)\)$/.exec(s.color.trim());
+    return v ? cssVar(v[1]!) || s.color : s.color;
+  }
   const slot = Math.min(MAX_SERIES, s.color ?? i + 1);
   return cssVar(`--chart-${slot}`);
 }
 
 function hexWithAlpha(color: string, alpha: number): string {
-  const m = /^#([0-9a-f]{6})$/i.exec(color);
+  const m = /^#([0-9a-f]{6})$/i.exec(color.trim());
   if (!m) return color;
   const n = parseInt(m[1]!, 16);
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
@@ -76,7 +91,21 @@ interface Hover {
 }
 
 /** uPlot line chart: crosshair + one tooltip for every series, unit-aware axes, theme-aware, resizes. */
-export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroBase = true, yMax, legend, marks, className }: TimeSeriesChartProps) {
+/** Running sums of the visible series, bottom first; hidden ones keep their raw values (they are not drawn). */
+function stackData(ys: (number | null | undefined)[][], hidden: Set<number>, n: number): (number | null)[][] {
+  const acc: (number | null)[] = new Array(n).fill(null);
+  return ys.map((y, si) => {
+    if (hidden.has(si)) return y.map((v) => v ?? null);
+    return acc.map((a, i) => {
+      const v = y[i];
+      const next = v == null ? a : (a ?? 0) + v;
+      acc[i] = next;
+      return next;
+    });
+  });
+}
+
+export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heightProp, zeroBase = true, yMax, legend, marks, stacked, currency, className }: TimeSeriesChartProps) {
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
   const { resolved } = useTheme();
@@ -87,9 +116,13 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
   const marksRef = useRef(marks);
   marksRef.current = marks;
 
+  // Keyed by content: a caller's fresh but equal array must not rebuild the
+  // plot; new data alone goes through setData below.
+  const seriesKey = JSON.stringify(seriesProp);
+  const series = useMemo(() => seriesProp, [seriesKey]);
   const colors = useMemo(() => series.map((s, i) => seriesColor(s, i)), [series, resolved]);
-  const data = useMemo(() => [x, ...ys] as uPlot.AlignedData, [x, ys]);
-  const span = x.length > 1 ? x[x.length - 1]! - x[0]! : 0;
+  const data = useMemo(() => [x, ...(stacked ? stackData(ys, hidden, x.length) : ys)] as uPlot.AlignedData, [x, ys, stacked, hidden]);
+  const fmt = (v: number | null | undefined) => formatUnit(v, unit, currency);
 
   useLayoutEffect(() => {
     const el = host.current;
@@ -99,6 +132,11 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
     const label = cssVar("--chart-label");
     const cursorColor = cssVar("--chart-cursor");
     const font = `11px ${cssVar("--font-sans")}`;
+    // Zero-based without a fixed max: the top gridline is a whole step at or
+    // above the largest (stacked) value, and below zero (a refund) the bottom
+    // one a whole step at or below the smallest, so no point sits outside.
+    const nice = zeroBase && yMax == null;
+    let step = 0;
 
     const opts: uPlot.Options = {
       width: el.clientWidth || 300,
@@ -110,14 +148,29 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
         drag: { x: false, y: false, setScale: false },
       },
       legend: { show: false },
-      scales: { x: { time: true }, y: { range: (_u, min, max) => [zeroBase ? 0 : min, yMax ?? (max === 0 ? 1 : max * 1.05)] } },
+      scales: {
+        x: { time: true },
+        y: {
+          range: (_u, min, max) => {
+            if (!nice) return [zeroBase ? 0 : min, yMax ?? (max === 0 ? 1 : max * 1.05)];
+            const s = niceScale(min, max, Math.max(2, Math.floor(height / 50)));
+            step = s.step;
+            return [s.min, s.max];
+          },
+        },
+      },
       axes: [
         {
           stroke: label,
           font,
           grid: { show: false },
           ticks: { show: true, stroke: axis, width: 1, size: 4 },
-          values: (_u, vals) => vals.map((v) => (span <= 86400 ? formatClock(v * 1000).slice(0, 5) : formatTimestamp(v * 1000, { seconds: false }).slice(5, 11))),
+          values: (u, vals) => {
+            // From the plotted data, which setData replaces without a rebuild.
+            const xs = u.data[0];
+            const span = xs.length > 1 ? xs[xs.length - 1]! - xs[0]! : 0;
+            return vals.map((v) => (span <= 86400 ? formatClock(v * 1000).slice(0, 5) : formatTimestamp(v * 1000, { seconds: false }).slice(5, 11)));
+          },
           space: 64,
         },
         {
@@ -126,8 +179,9 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
           grid: { stroke: grid, width: 1 },
           ticks: { show: false },
           size: 56,
-          values: (_u, vals) => vals.map((v) => formatUnit(v, unit)),
+          values: (_u, vals) => vals.map((v) => fmt(v)),
           space: 32,
+          splits: nice ? (_u, _i, min, max) => niceSplits(min, max, step) : undefined,
         },
       ],
       series: [
@@ -137,13 +191,16 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
           stroke: colors[i],
           width: 2,
           dash: s.dashed ? [4, 4] : undefined,
-          fill: s.area ? hexWithAlpha(colors[i]!, 0.1) : undefined,
+          fill: stacked ? hexWithAlpha(colors[i]!, STACK_ALPHA) : s.area ? hexWithAlpha(colors[i]!, 0.1) : undefined,
           paths: s.step ? uPlot.paths.stepped!({ align: 1 }) : undefined,
-          points: { show: false },
+          // A value with no neighbour draws no line: mark it with a dot.
+          points: { show: false, filter: isolatedPoints, size: 6, width: 0, fill: colors[i] },
           spanGaps: false,
           show: !hidden.has(i),
         })),
       ],
+      // Each visible band's fill is clipped to the one below it.
+      bands: stacked ? stackBands(series.length, hidden) : undefined,
       hooks: {
         draw: [
           (u) => {
@@ -196,7 +253,7 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
       plot.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolved, height, unit, zeroBase, yMax, series, colors, hidden, x.length < 2]);
+  }, [resolved, height, unit, currency, zeroBase, yMax, series, colors, hidden, stacked, x.length < 2]);
 
   useEffect(() => {
     plot.current?.setData(data);
@@ -233,10 +290,17 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
             hidden.has(i) ? null : (
               <div className="tschart-tip-row" key={s.label}>
                 <span className="tschart-key" style={{ background: colors[i] }} />
-                <span className="tschart-tip-value num">{formatUnit(ys[i]?.[hover.idx] ?? null, unit)}</span>
+                <span className="tschart-tip-value num">{fmt(ys[i]?.[hover.idx] ?? null)}</span>
                 <span className="tschart-tip-label">{s.label}</span>
               </div>
             ),
+          )}
+          {stacked && (
+            <div className="tschart-tip-row tschart-tip-total">
+              <span className="tschart-key" />
+              <span className="tschart-tip-value num">{fmt(stackTotal(ys, hidden, hover.idx))}</span>
+              <span className="tschart-tip-label">Total</span>
+            </div>
           )}
         </div>
       )}
@@ -252,4 +316,29 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
       )}
     </div>
   );
+}
+
+function stackBands(n: number, hidden: Set<number>): uPlot.Band[] {
+  const visible = Array.from({ length: n }, (_, i) => i).filter((i) => !hidden.has(i));
+  return visible.slice(1).map((upper, k) => ({ series: [upper + 1, visible[k]! + 1] as [number, number] }));
+}
+
+/** The sum at one x of the visible series; null when none has a value there. */
+function stackTotal(ys: (number | null | undefined)[][], hidden: Set<number>, idx: number): number | null {
+  let total: number | null = null;
+  ys.forEach((y, i) => {
+    const v = y[idx];
+    if (!hidden.has(i) && v != null) total = (total ?? 0) + v;
+  });
+  return total;
+}
+
+/** Indices of values with no value on either side: a line or band cannot show them. */
+function isolatedPoints(u: uPlot, seriesIdx: number): number[] | null {
+  const ys = u.data[seriesIdx]!;
+  const out: number[] = [];
+  for (let i = 0; i < ys.length; i++) {
+    if (ys[i] != null && ys[i - 1] == null && ys[i + 1] == null) out.push(i);
+  }
+  return out.length ? out : null;
 }

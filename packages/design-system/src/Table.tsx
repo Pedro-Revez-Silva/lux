@@ -5,6 +5,27 @@ import { IconChevronDown, IconChevronUp } from "./icons.tsx";
 
 /** Container width (px) under which optional columns are dropped. */
 const NARROW = 1100;
+/** The least width (px) a column without one gets before optional columns drop. */
+const FLEX_MIN = 140;
+
+/**
+ * Whether optional columns drop at a container `width`: under NARROW, or
+ * when with them the fixed and percentage widths would leave a column that
+ * has no width under FLEX_MIN.
+ */
+export function dropsOptional(columns: readonly Pick<Column<unknown>, "width" | "optional">[], width: number): boolean {
+  if (width <= 0) return false;
+  if (width < NARROW) return true;
+  if (!columns.some((c) => c.optional)) return false;
+  let fixed = 0;
+  let flex = 0;
+  for (const c of columns) {
+    if (typeof c.width === "number") fixed += c.width;
+    else if (typeof c.width === "string" && c.width.endsWith("%")) fixed += (parseFloat(c.width) / 100) * width;
+    else flex++;
+  }
+  return flex > 0 && (width - fixed) / flex < FLEX_MIN;
+}
 
 export interface Column<Row> {
   key: string;
@@ -24,7 +45,7 @@ export interface Column<Row> {
   wrap?: boolean;
   /** The row's name: rendered in the foreground colour, medium weight. */
   lead?: boolean;
-  /** Dropped when the table's container is narrow (under 1100px). */
+  /** Dropped when the table's container is under 1100px, or too narrow to give each column without a width 140px with it. */
   optional?: boolean;
 }
 
@@ -74,7 +95,7 @@ export function Table<Row>(props: TableProps<Row>) {
   const setSort = props.onSortChange ?? setInternalSort;
   const wrap = useRef<HTMLDivElement>(null);
   const [scrolled, setScrolled] = useState(false);
-  const [narrow, setNarrow] = useState(false);
+  const [wrapWidth, setWrapWidth] = useState(0);
 
   useEffect(() => {
     const el = wrap.current;
@@ -88,13 +109,14 @@ export function Table<Row>(props: TableProps<Row>) {
   useLayoutEffect(() => {
     const el = wrap.current;
     if (!el) return;
-    const measure = () => setNarrow(el.clientWidth > 0 && el.clientWidth < NARROW);
+    const measure = () => setWrapWidth(el.clientWidth);
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
 
+  const narrow = dropsOptional(props.columns, wrapWidth);
   const columns = useMemo(() => (narrow ? props.columns.filter((c) => !c.optional) : props.columns), [props.columns, narrow]);
 
   const sorted = useMemo(() => {
@@ -124,7 +146,7 @@ export function Table<Row>(props: TableProps<Row>) {
   const floor = useMemo(() => {
     if (minWidth != null) return minWidth;
     let w = 0;
-    for (const c of columns) w += typeof c.width === "number" ? c.width : c.width ? 120 : 140;
+    for (const c of columns) w += typeof c.width === "number" ? c.width : c.width ? 120 : FLEX_MIN;
     return w;
   }, [columns, minWidth]);
 

@@ -20,8 +20,10 @@ func TestMoney(t *testing.T) {
 		{"10.5", "USD", "10.5 USD"},
 		{"0", "USD", "0 USD"},
 		{"0.00005", "USD", "<0.0001 USD"}, // half-even: 0.0000|5 rounds to 0, but it is not nothing
-		{"0.00015", "USD", "0.0002 USD"},  // half to even: up
-		{"0.00025", "USD", "0.0002 USD"},  // half to even: down
+		{"0.000074", "USD", "0.0001 USD"},
+		{"0.00004", "USD", "<0.0001 USD"},
+		{"0.00015", "USD", "0.0002 USD"}, // half to even: up
+		{"0.00025", "USD", "0.0002 USD"}, // half to even: down
 		{"0.000250001", "USD", "0.0003 USD"},
 		{"1.99995", "USD", "2 USD"},
 		{"999999999999999.999999999", "USD", "1000000000000000 USD"},

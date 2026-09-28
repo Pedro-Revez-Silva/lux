@@ -1,8 +1,8 @@
 # Run costs (design)
 
-Status: **compute, prices, plugins, hourly views and the CLI are built**,
-with the per-placement estimate rules described below. Console work
-remains planned. These are list-price estimates, not invoice-accurate charges.
+Status: **compute, prices, plugins, hourly views, the CLI and the console
+are built**, with the per-placement estimate rules described below. These
+are list-price estimates, not invoice-accurate charges.
 
 This doc covers what each Run costs: the hosts it ran on (built in) and
 anything outside lux that it used, such as model tokens, video or image
@@ -1033,6 +1033,12 @@ For an operator without `tenant`, the response also has
 `unallocated: [{currency, amount}]` and, grouped by `host`, each host's
 allocated vs unallocated. Tenants never get these fields.
 
+Grouped by `family`, the response has `families: [{family, displayName,
+color}]`, resolved as a Run's `byFamily` is (the first usable plugin's
+describe; `Compute` for compute), so a family reads the same everywhere.
+Grouped by `run`, it has `runs: [{id, name}]` for the Runs in `totals`,
+read in the same snapshot, so a list of top Runs needs no call per Run.
+
 ### `GET /v1/hosts/{id}/cost`
 
 This returns a host's allocated and unallocated cost per hour over a range,
@@ -1073,36 +1079,54 @@ cost is visible exactly when the Run is. It is not stored on `runs`.
 Amounts are shown rounded half-even to 4 decimals (`math/big`, never a
 float), trailing zeros trimmed, with the currency code; a non-zero amount
 under that is shown as `<0.0001`, and a missing one as `—`, never `0`.
+The console rounds the same way (`formatMoney`), with the currency's
+symbol (`$0.0421`, `<$0.0001`) and cents kept (`$0.15`).
 Each command says "list price" once. `-o json` prints luxd's response
 unchanged, with exact amounts. The range and series of `lux costs` are
 shown in UTC, like its buckets.
 
 ## 9. Console
 
-All of these use existing design-system components (`Card`, `KeyValue`,
-`Table`, `Badge`, `StatTile`, `TimeSeriesChart`, `TimeRangePicker`,
-`Tooltip`, `EmptyState`). Family colours come from the describe hint,
-mapped to theme tokens.
+**Built** (step 10). Every piece is a design-system component
+(`packages/design-system`, gallery section "costs"): `Card`, `KeyValue`,
+`Table`, `Badge`/`CostStatusBadge`, `StatTile`, a stacked
+`TimeSeriesChart`, `Tooltip`, `EmptyState`, `MoneyList`, `ListPriceNote`,
+and `familyDisplay` for each family's label and colour (describe
+`displayName`, and its `color` hint mapped to a `--chart-N` token; compute
+is fixed to slot 1).
 
-- **Run page, Cost card** (next to `RunResources`):
+- **Run page, Cost card** (the "Resources & cost" tab, above
+  `RunResources`), from `GET /v1/runs/{id}/cost`, polled every 15s while
+  the Run is active and every minute after:
   - the total per currency, with a Badge for `estimate`, `final` or
-    `incomplete` (the tooltip names the sources);
-  - one row per family;
-  - a Table of lines by item;
-  - reserved vs used for compute: CPU and memory efficiency.
-- **Runs list:** a Cost column showing the total, or `—` while nothing has
-  been reported.
-- **Host page**: allocated vs unallocated over time, as a stacked
-  `TimeSeriesChart` from `/v1/hosts/{id}/cost`, plus the rate periods
-  (on-demand or spot, with the price) in a `KeyValue`. Only for those who
-  can see the host's history.
-- **Overview**:
-  - cost over time, stacked by family, over the page's range;
-  - Tables of top tenants (operators) and top values of a chosen label;
-  - for an operator viewing all tenants, an **Unallocated** tile and a
-    plugin health row (last answer, failing since).
-- Every money figure is labelled "list price" once per page, in a
-  Tooltip.
+    `incomplete` (the tooltip names the sources not yet answered);
+  - one row per family, with its estimate part when only part is final;
+  - a Table of lines (family, item, source, window, status, amount);
+  - pending: an empty state, "No cost reported yet", never `$0.00`.
+  - Not built: reserved vs used efficiency (the API has no such field).
+- **Runs list:** a Cost column from `cost` on `GET /v1/runs`, as `lux ls`
+  shows it (`CostFigure`): the total for one currency, `multi` for several,
+  `—` while pending, and a leading `~` when the total may still change (an
+  estimate part, or `incomplete`). Its Tooltip names the status and gives
+  the exact amounts.
+- **Host page**: allocated vs unallocated per hour, stacked, from
+  `/v1/hosts/{id}/cost` (a tenant sees its allocated part only), and, for
+  operators, the rate periods in a `KeyValue` (price per hour, and the
+  source once: `static`, `on-demand` or `spot`). Shown to those who can see
+  the host's history.
+- **Overview**, over the page's range (1h reads 6h: costs are hourly):
+  - cost per hour (per day at 30d), stacked by family, one chart per
+    currency, labelled and coloured as on the Run page;
+  - top tenants (operators across tenants) and top Runs, each ranked per
+    currency; a Run is shown by name with its id beside it (the summary's
+    `runs`);
+  - a Cost tile and, for an operator viewing all tenants, an
+    **Unallocated** tile.
+  - Not built: plugin health (last answer, failing since). No endpoint
+    exposes plugin state.
+- Every page with money says "list price" once, explained in a Tooltip.
+  Amounts are never added across currencies. An amount rounded for display
+  shows its exact value in a Tooltip (`Money`).
 
 ## 10. Config
 
@@ -1245,7 +1269,10 @@ Each step can be reviewed and shipped on its own.
    estimates; previously finalized sources are not backfilled from lines.
 9. **CLI (built)**: `lux cost`, `lux costs`, and a COST column in
    `lux ls`, with `cost` on `GET /v1/runs`.
-10. **Console**: the Run page Cost card, then the Runs list column, the
-    host page, and the Overview.
+10. **Console (built)**: the Run page Cost card, the host page and the
+    Overview (section 9), and the Runs list column from `cost` on
+    `GET /v1/runs`. `GET /v1/costs` gains `families` and `runs` when
+    grouped by them. Tested in `tests/suites/test_console.py` against a real
+    luxd, with a static host price and a fake cost plugin.
 11. **Docs**: turn this design into `docs/costs.md` as it was actually
     built, and link it from the README.

@@ -3,6 +3,7 @@ export * from "./Button.tsx";
 export * from "./Badge.tsx";
 export * from "./Card.tsx";
 export * from "./ConfirmDialog.tsx";
+export * from "./Cost.tsx";
 export * from "./Dialog.tsx";
 export * from "./EmptyState.tsx";
 export * from "./IdChip.tsx";
