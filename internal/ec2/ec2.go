@@ -38,6 +38,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -130,11 +131,16 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 	} else {
 		lt.LaunchTemplateName = aws.String(t.LaunchTemplate)
 	}
-	var instTags []types.Tag
-	for _, m := range []map[string]string{t.Tags, tags} {
-		for k, v := range m {
-			instTags = append(instTags, types.Tag{Key: aws.String(k), Value: aws.String(v)})
-		}
+	// EC2 refuses a key given twice, and lux lists a pool's instances by
+	// its own tags, so those win over a template's same key.
+	merged := maps.Clone(t.Tags)
+	if merged == nil {
+		merged = map[string]string{}
+	}
+	maps.Copy(merged, tags)
+	instTags := make([]types.Tag, 0, len(merged))
+	for _, k := range slices.Sorted(maps.Keys(merged)) {
+		instTags = append(instTags, types.Tag{Key: aws.String(k), Value: aws.String(merged[k])})
 	}
 	in := &awsec2.RunInstancesInput{
 		MinCount:       aws.Int32(1),
