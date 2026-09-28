@@ -101,10 +101,22 @@ lux artifacts <run> [--download DIR]
 lux hosts ls [--all] [--pool P] [--state S]
 lux hosts get <host>            # lifecycle, capacity, allocation, live Runs
 lux hosts drain <host> [--force-evict]   # admin: no new Runs; without --force-evict its live Runs finish where they are
+lux hosts price <host> --hourly-price 0.40 --currency USD   # admin: a static host's flat price, from now on
+lux hosts price <host> --clear           # admin: no price, so its Runs get no compute cost from now on
 lux pools ls
 lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON]
+lux pools set <name> --provider static --hourly-price 0.40 --currency USD   # default price of hosts registering into it
 lux pools rm <name> [--force-evict]      # admin: cordons its hosts, terminated once idle; --force-evict stops their live Runs too
 ```
+
+A static pool's `--hourly-price` is copied to each host when it first
+registers. Changing it later does not reprice the pool's existing hosts:
+use `lux hosts price` for those. `lux pools set` replaces the whole pool,
+the default price included, like every other field: a `pools set` without
+`--hourly-price` leaves the pool with no default price. Each price or
+capacity change starts a new rate period, and earlier periods are never
+changed ([Run costs](costs.md), section 2). `ec2` pools take no price: the
+provider prices their hosts.
 
 ## Status and history
 

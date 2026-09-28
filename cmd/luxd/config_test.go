@@ -34,6 +34,9 @@ bucket = "from-file"
 memory = "4Gi"
 [history]
 raw = "24h"
+[costs]
+every = "5m"
+batch = 50
 [console]
 auth = "cloudflare-access"
 [console.cloudflare_access]
@@ -44,6 +47,7 @@ default_tenant = "absmartly"
 `)
 	t.Setenv("LUX_S3_BUCKET", "from-env")
 	t.Setenv("LUX_DEFAULT_CPUS", "1.5")
+	t.Setenv("LUX_COSTS", "false")
 	c, err := loadConfig(path)
 	if err != nil {
 		t.Fatal(err)
@@ -57,6 +61,8 @@ default_tenant = "absmartly"
 		t.Errorf("defaults: %+v", c.Defaults)
 	case c.History.Raw.Duration != 24*time.Hour || c.History.Hours.Duration == 0:
 		t.Errorf("history: %+v", c.History)
+	case c.Costs.Enabled || c.Costs.Every.Duration != 5*time.Minute || c.Costs.Batch != 50 || c.Costs.DrainEvery.Duration != 2*time.Second:
+		t.Errorf("costs: %+v", c.Costs)
 	case c.Console.Auth != "cloudflare-access" || c.Console.CloudflareAccess.Team != "acme" ||
 		!slices.Equal(c.Console.CloudflareAccess.Operators, []string{"ada@example.com"}) || c.Console.CloudflareAccess.DefaultTenant != "absmartly":
 		t.Errorf("console: %+v", c.Console)
@@ -74,9 +80,12 @@ default_tenant = "absmartly"
 		{"[console]\nauth = \"cloudflare-access\"\n[console.cloudflare_access]\nteam = \"acme\"\naud = \"aud\"\ndefault_tenant = \"absmartly\"", "", "operators"},
 		{"[console]\nauth = \"cloudflare-access\"\n[console.cloudflare_access]\nteam = \"acme\"\naud = \"aud\"\ndefault_tenant = \"absmartly\"\noperators = [\"ada@example.com\", \"ADA@example.com\"]", "", "operators"},
 		{"[console]\nauth = \"magic\"", "", "want key or cloudflare-access"},
+		{"[costs]\nbatch = 0", "", "costs.batch"},
+		{"", "LUX_COSTS_EVERY=0s", "costs.every"},
 	} {
 		os.Unsetenv("LUX_LEASE")
 		os.Unsetenv("LUX_DEFAULT_CPUS")
+		os.Unsetenv("LUX_COSTS_EVERY")
 		write(bad.file)
 		if bad.env != "" {
 			k, v, _ := strings.Cut(bad.env, "=")
@@ -256,5 +265,96 @@ func TestDiskPaths(t *testing.T) {
 	t.Setenv("LUX_HISTORY_DISK_PATHS", "var/lib")
 	if _, err := load(""); err == nil || !strings.Contains(err.Error(), "history.disk_paths") {
 		t.Fatalf("relative path: %v", err)
+	}
+}
+
+func TestCostPluginConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "luxd.toml")
+	load := func(file string) (config, error) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(file), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return loadConfig(path)
+	}
+	c, err := load(`[[costs.plugin]]
+name = "ledger"
+url = "http://10.0.0.5:8080"
+token_env = "LEDGER_TOKEN"
+timeout = "5s"
+max_batch = 10
+settle = ["15m", "2h"]
+`)
+	if err != nil || len(c.Costs.Plugin) != 1 || c.Costs.Plugin[0].Timeout.Duration != 5*time.Second || *c.Costs.Plugin[0].MaxBatch != 10 || len(c.Costs.Plugin[0].Settle) != 2 {
+		t.Fatalf("file plugin: %+v %v", c.Costs.Plugin, err)
+	}
+	t.Setenv("LUX_COSTS_PLUGINS", `[{"name":"env-ledger","url":"https://ledger.example","max_batch":20,"settle":["1h"]}]`)
+	t.Setenv("LUX_COSTS_SETTLE", `["20m","3h"]`)
+	c, err = load(`[[costs.plugin]]
+name = "file-ledger"
+url = "https://file.example"
+`)
+	if err != nil || len(c.Costs.Plugin) != 1 || c.Costs.Plugin[0].Name != "env-ledger" || *c.Costs.Plugin[0].MaxBatch != 20 || len(c.Costs.Settle) != 2 || c.Costs.Settle[0].Duration != 20*time.Minute {
+		t.Fatalf("env override: %+v %v", c.Costs, err)
+	}
+	t.Setenv("LUX_COSTS_PLUGINS", "")
+	t.Setenv("LUX_COSTS_SETTLE", "")
+	for _, tc := range []struct{ file, want string }{
+		{`[[costs.plugin]]
+name = "compute"
+url = "https://x.example"`, "name"},
+		{`[[costs.plugin]]
+name = "x"
+url = "http://public.example"`, "url"},
+		{`[[costs.plugin]]
+name = "x"
+url = "https://user:password@x.example"`, "url"},
+		{`[[costs.plugin]]
+name = "x"
+url = "https://x.example"
+token_file = "/tmp/token"
+token_env = "TOKEN"`, "token_file"},
+		{`[[costs.plugin]]
+name = "x"
+url = "https://x.example"
+token_file = "relative.token"`, "token_file"},
+		{`[[costs.plugin]]
+name = "x"
+url = "https://x.example"
+token_env = "bad-name"`, "token_env"},
+		{`[[costs.plugin]]
+name = "x"
+url = "https://x.example"
+[[costs.plugin]]
+name = "x"
+url = "https://other.example"`, "name"},
+		{`[[costs.plugin]]
+name = "x"
+url = "https://x.example"
+timeout = "0s"`, "timeout"},
+		{`[[costs.plugin]]
+name = "x"
+url = "https://x.example"
+max_batch = 0`, "max_batch"},
+		{`[costs]
+settle = ["1h", "10m"]`, "settle"},
+		{`[costs]
+describe_every = "0s"`, "describe_every"},
+		{`[costs]
+backoff = "20m"`, "backoff_max"},
+		{`[[costs.plugin]]
+name = "x"
+url = "https://x.example"
+surprise = 1`, "surprise"},
+	} {
+		if _, err := load(tc.file); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%q: got %v, want %q", tc.file, err, tc.want)
+		}
+	}
+	for _, value := range []string{`not json`, `[{"name":"x","url":"https://x.example","extra":1}]`, `null`, `[{"name":"x","url":"https://x.example","timeout":"bad"}]`} {
+		t.Setenv("LUX_COSTS_PLUGINS", value)
+		if _, err := load(""); err == nil || !strings.Contains(err.Error(), "LUX_COSTS_PLUGINS") {
+			t.Errorf("env %q: %v", value, err)
+		}
 	}
 }

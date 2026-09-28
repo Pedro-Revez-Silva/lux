@@ -85,6 +85,9 @@ type Config struct {
 	// DiskPaths are the directories whose filesystems the control host's
 	// history tracks. Nil: DefaultDiskPaths; empty: none.
 	DiskPaths []string
+	// Costs: the cost tick and drainer (costqueue.go). Zero durations and
+	// batch: the defaults.
+	Costs CostsConfig
 }
 
 type Server struct {
@@ -119,6 +122,8 @@ type Server struct {
 	bins map[string]map[string]runnerBin
 	// instance names this luxd's control samples: its hostname.
 	instance string
+	// id names this luxd in cost claims (instanceID; tests run two).
+	id string
 	// readPostgres is postgresFigures (replaced in tests). pgFailing and
 	// diskFailing record what failed on the last read, so each failure is
 	// logged once (control.go).
@@ -127,6 +132,8 @@ type Server struct {
 	diskMu       sync.Mutex
 	diskFailing  map[string]bool
 	wg           sync.WaitGroup
+	pluginsOnce  sync.Once
+	plugins      []*costPlugin
 }
 
 func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Server {
@@ -165,6 +172,18 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 	if cfg.DiskPaths == nil {
 		cfg.DiskPaths = DefaultDiskPaths
 	}
+	cfg.Costs.Every = cmp.Or(cfg.Costs.Every, DefaultCostsEvery)
+	cfg.Costs.Hourly = cmp.Or(cfg.Costs.Hourly, 400*24*time.Hour)
+	cfg.Costs.DrainEvery = cmp.Or(cfg.Costs.DrainEvery, DefaultCostsDrainEvery)
+	cfg.Costs.Batch = cmp.Or(cfg.Costs.Batch, DefaultCostsBatch)
+	cfg.Costs.PricesRefresh = cmp.Or(cfg.Costs.PricesRefresh, DefaultPricesRefresh)
+	cfg.Costs.Backoff = cmp.Or(cfg.Costs.Backoff, 10*time.Second)
+	cfg.Costs.BackoffMax = cmp.Or(cfg.Costs.BackoffMax, 10*time.Minute)
+	cfg.Costs.SettleGiveUp = cmp.Or(cfg.Costs.SettleGiveUp, 7*24*time.Hour)
+	cfg.Costs.DescribeEvery = cmp.Or(cfg.Costs.DescribeEvery, time.Hour)
+	if cfg.Costs.Settle == nil {
+		cfg.Costs.Settle = []time.Duration{10 * time.Minute, time.Hour}
+	}
 	s := &Server{
 		cfg:         cfg,
 		db:          db,
@@ -175,6 +194,7 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 		kick:        make(chan struct{}, 1),
 		diskFailing: map[string]bool{},
 		instance:    hostname(),
+		id:          instanceID,
 	}
 	s.readPostgres = s.postgresFigures
 	if cfg.ConsoleAuth.Mode == "cloudflare-access" {
@@ -233,13 +253,15 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	srv := &http.Server{Addr: s.cfg.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	s.wg.Add(6)
+	s.wg.Add(8)
 	go func() { defer s.wg.Done(); s.schedulerLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.provisionerLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.reaperLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.hub.deliveryLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.historyLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.listenLoop(ctx) }()
+	go func() { defer s.wg.Done(); s.costLoop(ctx) }()
+	go func() { defer s.wg.Done(); s.priceLoop(ctx) }()
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	s.log.Info("luxd listening", "addr", s.cfg.Listen)
@@ -253,6 +275,22 @@ func (s *Server) Run(ctx context.Context) error {
 		return nil
 	case err := <-errc:
 		return err
+	}
+}
+
+// priceLoop discovers newly launched hosts independently of cost ticks and drains.
+// Each pass has a deadline so a slow provider cannot hold up later passes.
+func (s *Server) priceLoop(ctx context.Context) {
+	if !s.cfg.Costs.Enabled || !s.cfg.Costs.ComputeEC2 {
+		return
+	}
+	const refreshTimeout = 30 * time.Second
+	every := min(s.cfg.Costs.PricesRefresh, DefaultCostsEvery)
+	for ctx.Err() == nil {
+		refreshCtx, cancel := context.WithTimeout(ctx, refreshTimeout)
+		s.refreshPrices(refreshCtx)
+		cancel()
+		wait(ctx, nil, every)
 	}
 }
 

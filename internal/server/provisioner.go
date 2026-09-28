@@ -17,14 +17,30 @@ import (
 // Provider provisions hosts for pools whose provider it is (ec2).
 type Provider interface {
 	// Launch starts one host, tagged with tags, and returns its provider
-	// id. env is what its runner starts with (URL, host token, name).
-	Launch(ctx context.Context, template json.RawMessage, tags, env map[string]string) (string, error)
+	// id and what the provider says it is. env is what its runner starts
+	// with (URL, host token, name).
+	Launch(ctx context.Context, template json.RawMessage, tags, env map[string]string) (Launched, error)
 	// Terminate ends a host. One that no longer exists is done.
 	Terminate(ctx context.Context, template json.RawMessage, providerID string) error
 	// Instances lists the provider's hosts carrying all the given tags,
 	// by provider id.
 	Instances(ctx context.Context, template json.RawMessage, tags map[string]string) (map[string]Instance, error)
 }
+
+// Launched is a host as the provider started it. InstanceType is the
+// provider's answer, not the template's (a launch template may choose it);
+// empty fields are unknown and stored as NULL.
+type Launched struct {
+	ProviderID   string
+	InstanceType string
+	Zone         string
+	Market       string // MarketOnDemand or MarketSpot
+}
+
+const (
+	MarketOnDemand = "on-demand"
+	MarketSpot     = "spot"
+)
 
 // Instance is a provider's view of one host.
 type Instance struct {
@@ -459,16 +475,22 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow) error {
 	env := map[string]string{"LUX_URL": s.cfg.RunnerURL, "LUX_HOST_TOKEN": token, "LUX_HOST_NAME": name}
 	tags := s.poolTags(pl)
 	tags["Name"], tags[tagHost] = name, hostID
-	pid, err := prov.Launch(ctx, pl.Template, tags, env)
+	l, err := prov.Launch(ctx, pl.Template, tags, env)
 	if err != nil {
 		s.markTerminated(ctx, hostID, "launch failed: "+truncate(err.Error(), 200))
 		return fmt.Errorf("launch in %s: %w", pl.Name, err)
 	}
-	s.log.Info("host launched", "pool", pl.Name, "host", name, "providerId", pid)
-	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE hosts SET provider_id = $2 WHERE id = $1`, hostID, pid)
+	s.log.Info("host launched", "pool", pl.Name, "host", name, "providerId", l.ProviderID,
+		"instanceType", l.InstanceType, "zone", l.Zone, "market", l.Market)
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE hosts SET provider_id = $2,
+				instance_type = nullif($3, ''), zone = nullif($4, ''), market = nullif($5, '')
+			WHERE id = $1`, hostID, l.ProviderID, l.InstanceType, l.Zone, l.Market)
 		return err
-	})
+	}); err != nil {
+		return err
+	}
+	return nil
 }
 
 // checkHostQuota: one rule for a tenant's hosts, whether a runner

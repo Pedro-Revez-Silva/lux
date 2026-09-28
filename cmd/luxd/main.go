@@ -30,6 +30,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/marcioapm/lux/internal/blob"
+	"github.com/marcioapm/lux/internal/ec2"
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/server"
 	"github.com/marcioapm/lux/internal/spec"
@@ -100,6 +101,7 @@ admin commands:
   create-host-token [--tenant T] [--pool P] [--label k=v ...]
   create-pool --name N --provider static|ec2 [--tenant T] [--shared]
               [--min N] [--max N] [--warm N] [--template JSON]
+              [--hourly-price D --currency C]   (static pools: hosts' default price)
   set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BYTES] [--retention-days N]`)
 	os.Exit(2)
 }
@@ -149,6 +151,24 @@ func serve(ctx context.Context, c config) error {
 	if err := blobs.Check(ctx); err != nil {
 		return fmt.Errorf("blob store: %w", err)
 	}
+	plugins := make([]server.CostPluginConfig, 0, len(c.Costs.Plugin))
+	for _, p := range c.Costs.Plugin {
+		plugin := server.CostPluginConfig{Name: p.Name, URL: p.URL, TokenFile: p.TokenFile, TokenEnv: p.TokenEnv, Insecure: p.Insecure}
+		if p.Timeout != nil {
+			plugin.Timeout = p.Timeout.Duration
+		}
+		if p.MaxBatch != nil {
+			plugin.MaxBatch = *p.MaxBatch
+		}
+		for _, d := range p.Settle {
+			plugin.Settle = append(plugin.Settle, d.Duration)
+		}
+		plugins = append(plugins, plugin)
+	}
+	settle := make([]time.Duration, 0, len(c.Costs.Settle))
+	for _, d := range c.Costs.Settle {
+		settle = append(settle, d.Duration)
+	}
 	srv := server.New(server.Config{
 		Listen:               c.Listen,
 		PublicURL:            c.PublicURL,
@@ -168,7 +188,25 @@ func serve(ctx context.Context, c config) error {
 		HistoryMinutes:       c.History.Minutes.Duration,
 		HistoryHours:         c.History.Hours.Duration,
 		DiskPaths:            c.History.DiskPaths,
-		Providers:            providers(c),
+		Costs: server.CostsConfig{
+			Enabled:       c.Costs.Enabled,
+			Every:         c.Costs.Every.Duration,
+			DrainEvery:    c.Costs.DrainEvery.Duration,
+			Batch:         c.Costs.Batch,
+			Plugins:       plugins,
+			Settle:        settle,
+			SettleGiveUp:  c.Costs.SettleGiveUp.Duration,
+			Backoff:       c.Costs.Backoff.Duration,
+			BackoffMax:    c.Costs.BackoffMax.Duration,
+			DescribeEvery: c.Costs.DescribeEvery.Duration,
+			Hourly:        c.Costs.Hourly.Duration,
+			ComputeEC2:    c.Costs.Compute.EC2,
+			PricesRefresh: c.Costs.Compute.PricesRefresh.Duration,
+			Prices: map[string]server.PriceProvider{
+				"ec2": ec2.NewPrices(c.Costs.Compute.PricingRegion, c.Costs.Compute.PricingEndpoint, c.EC2.Endpoint),
+			},
+		},
+		Providers: providers(c),
 		ConsoleAuth: server.ConsoleAuth{
 			Mode:            c.Console.Auth,
 			CFTeam:          c.Console.CloudflareAccess.Team,
@@ -304,6 +342,8 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		scaleDown := fs.Duration("scale-down-after", 0, "how long a host stays idle before it is released (default: scale_down_after)")
 		warmActive := fs.Bool("warm-while-active", false, "keep --warm hosts only while the pool is in use")
 		template := fs.String("template", "{}", "provider template (JSON)")
+		price := fs.String("hourly-price", "", "static pools: default hourly price of hosts registering into it (a decimal; with --currency); replaces the pool's, like every flag here")
+		currency := fs.String("currency", "", "the currency of --hourly-price (ISO 4217, e.g. USD)")
 		fs.Parse(args[1:])
 		var tmpl map[string]any
 		if err := json.Unmarshal([]byte(*template), &tmpl); err != nil {
@@ -312,16 +352,20 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		if *shared && *tenant != "" {
 			return errors.New("only platform pools (no --tenant) can be shared")
 		}
+		if err := server.ValidPoolPrice(*provider, *price, *currency); err != nil {
+			return err
+		}
 		id := ids.New(ids.Pool)
 		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
-					scale_down_after_s, warm_while_active)
-				VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11)
+					scale_down_after_s, warm_while_active, hourly_price, price_currency)
+				VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11, nullif($12, '')::numeric, nullif($13, ''))
 				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts, shared = EXCLUDED.shared,
 					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
+					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
 					retired = false`,
-				id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive)
+				id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive, *price, *currency)
 			return err
 		})
 		if err != nil {

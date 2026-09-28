@@ -19,6 +19,16 @@ import (
 // (tests/run_tests.py starts one on that port.) They are skipped otherwise.
 func testDB(t *testing.T) (owner, app string) {
 	t.Helper()
+	owner, app = emptyDB(t)
+	if _, err := store.Migrate(context.Background(), owner, "lux_app"); err != nil {
+		t.Fatal(err)
+	}
+	return owner, app
+}
+
+// emptyDB is a new database with no migrations applied.
+func emptyDB(t *testing.T) (owner, app string) {
+	t.Helper()
 	admin := os.Getenv("LUX_TEST_PG")
 	if admin == "" {
 		t.Skip("LUX_TEST_PG not set")
@@ -40,9 +50,6 @@ func testDB(t *testing.T) (owner, app string) {
 	cfg := conn.Config()
 	owner = fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", cfg.User, cfg.Password, cfg.Host, cfg.Port, name)
 	app = fmt.Sprintf("postgres://lux_app:lux_app@%s:%d/%s?sslmode=disable", cfg.Host, cfg.Port, name)
-	if _, err := store.Migrate(ctx, owner, "lux_app"); err != nil {
-		t.Fatal(err)
-	}
 	return owner, app
 }
 
@@ -118,5 +125,78 @@ func TestMigrateIdempotent(t *testing.T) {
 	applied, err := store.Migrate(context.Background(), owner, "lux_app")
 	if err != nil || len(applied) != 0 {
 		t.Fatalf("second migrate applied %v (%v)", applied, err)
+	}
+}
+
+// The hourly schema needs only per-host refresh state, including the
+// single-slot priority turn; final-source reconciliation is not installed.
+func TestHourlyMigration(t *testing.T) {
+	owner, _ := testDB(t)
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	for name, want := range map[string]bool{
+		"cost_host_refresh": true, "cost_host_turn": true,
+		"cost_final_hour_backfill": false, "cost_final_hour_discovery": false,
+	} {
+		var exists bool
+		if err := conn.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, name).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists != want {
+			t.Errorf("table %s exists: %v, want %v", name, exists, want)
+		}
+	}
+	var generation bool
+	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		WHERE table_name = 'cost_sources' AND column_name = 'hourly_generation')`).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+	if generation {
+		t.Error("legacy hourly generation column installed")
+	}
+}
+
+// lux_cost_enqueue runs as its owner (it queues from a tenant's scope):
+// only lux_app may call it, not every role, and only with a reason the
+// queue knows.
+func TestCostEnqueueGrant(t *testing.T) {
+	owner, appDSN := testDB(t)
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	for role, want := range map[string]bool{"public": false, "lux_app": true} {
+		var got bool
+		if err := conn.QueryRow(ctx, `SELECT has_function_privilege($1, 'lux_cost_enqueue(text, text)', 'EXECUTE')`, role).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("%s may call lux_cost_enqueue: %v, want %v", role, got, want)
+		}
+	}
+
+	app, err := pgx.Connect(ctx, appDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close(ctx)
+	if _, err := app.Exec(ctx, `SELECT set_config('lux.system', 'on', false)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1');
+		INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r1', 't1', '{}', 'stopped')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.Exec(ctx, `SELECT lux_cost_enqueue('r1', 'state:stopped')`); err != nil {
+		t.Errorf("lux_app queueing: %v", err)
+	}
+	if _, err := app.Exec(ctx, `SELECT lux_cost_enqueue('r1', 'anything')`); err == nil {
+		t.Error("queued with an unknown reason")
 	}
 }
