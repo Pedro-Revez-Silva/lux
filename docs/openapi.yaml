@@ -117,6 +117,16 @@ components:
             - array
             - "null"
       type: object
+    CostFamilyInfo:
+      additionalProperties: false
+      properties:
+        color:
+          type: string
+        displayName:
+          type: string
+        family:
+          type: string
+      type: object
     CostLine:
       additionalProperties: false
       properties:
@@ -158,6 +168,14 @@ components:
           format: date-time
           type: string
       type: object
+    CostRunInfo:
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+      type: object
     CostSource:
       additionalProperties: false
       properties:
@@ -181,12 +199,26 @@ components:
       properties:
         basis:
           type: string
+        families:
+          description: "Grouped by family: each family in totals, with the displayName and color byFamily has on a Run's cost."
+          items:
+            $ref: "#/components/schemas/CostFamilyInfo"
+          type:
+            - array
+            - "null"
         from:
           format: date-time
           type: string
         hosts:
           items:
             $ref: "#/components/schemas/HostAllocation"
+          type:
+            - array
+            - "null"
+        runs:
+          description: "Grouped by run: each Run in totals with its name."
+          items:
+            $ref: "#/components/schemas/CostRunInfo"
           type:
             - array
             - "null"
@@ -1191,6 +1223,9 @@ components:
       properties:
         activity:
           type: string
+        cost:
+          $ref: "#/components/schemas/RunCostBrief"
+          description: "In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."
         createdAt:
           format: date-time
           type: string
@@ -1299,6 +1334,25 @@ components:
             - final
           type: string
         totals:
+          items:
+            $ref: "#/components/schemas/CostTotal"
+          type:
+            - array
+            - "null"
+      type: object
+    RunCostBrief:
+      additionalProperties: false
+      properties:
+        status:
+          description: As in GET /v1/runs/{id}/cost.
+          enum:
+            - pending
+            - complete
+            - incomplete
+            - final
+          type: string
+        totals:
+          description: Per currency, ordered by currency; empty while pending.
           items:
             $ref: "#/components/schemas/CostTotal"
           type:
@@ -3212,7 +3266,7 @@ paths:
   /v1/runs:
     get:
       description: |-
-        Newest first.
+        Newest first. Each Run carries `cost`: its totals per currency (final and estimate parts) and its cost status, as `GET /v1/runs/{id}/cost` has them.
 
         Needs the `read` scope.
       operationId: listRuns

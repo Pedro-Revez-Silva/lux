@@ -4,9 +4,19 @@ import {
   Button,
   Card,
   Code,
+  COST_STATUS_LIST,
+  ColorKey,
+  compareMoney,
   ConfirmDialog,
   ConnectionBadge,
+  CostFigure,
+  CostStatusBadge,
   EmptyState,
+  familyColor,
+  familySlot,
+  FamilyKey,
+  formatMoney,
+  formatMoneyExact,
   formatBytes,
   formatCores,
   formatCount,
@@ -18,8 +28,11 @@ import {
   IconButton,
   IdChip,
   KeyValue,
+  ListPriceNote,
   LiveDot,
   LogView,
+  Money,
+  MoneyList,
   Logo,
   PageHeader,
   RUN_STATE_LIST,
@@ -33,6 +46,7 @@ import {
   solarized,
   Sparkline,
   Spinner,
+  sumMoney,
   StatePill,
   StatTile,
   TenantPicker,
@@ -54,7 +68,7 @@ import {
   type TimeRange,
 } from "../src/index.ts";
 import { IconDots, IconInfo, IconMinus, IconMoon, IconPlus, IconRefresh, IconRows, IconRowsLoose, IconSun, IconTerminal, IconWarning } from "../src/icons.tsx";
-import { fakeHosts, fakeLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeShellScript, fakeTenants, NOW, type FakeHost, type FakeRun } from "./fake.ts";
+import { fakeCostLines, fakeCostSeries, fakeHosts, fakeLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeShellScript, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
 
 function Section({ id, title, children, note }: { id: string; title: string; note?: ReactNode; children: ReactNode }) {
   return (
@@ -68,7 +82,7 @@ function Section({ id, title, children, note }: { id: string; title: string; not
   );
 }
 
-const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "tabs", "selects", "charts", "timeline", "logs", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
+const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "tabs", "selects", "charts", "costs", "timeline", "logs", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
 
 /** The gallery: a slim bar (brand, theme and density) over the sections. */
 export function Gallery() {
@@ -124,6 +138,7 @@ function Sections() {
         <TabsDemo />
         <Selects />
         <Charts />
+        <Costs />
         <TimelineDemo />
         <Logs />
         <TerminalDemo />
@@ -372,6 +387,121 @@ function Layout() {
         />
         <SectionHeader title="Section header" note="a quiet label between groups of cards" />
       </Card>
+    </Section>
+  );
+}
+
+/* ---------- costs ---------- */
+
+const FAMILIES: { family: string; displayName: string; color?: string }[] = [
+  { family: "compute", displayName: "Compute" },
+  { family: "ai", displayName: "AI models", color: "violet" },
+  { family: "video", displayName: "Video", color: "amber" },
+  { family: "storage", displayName: "Storage", color: "#2bb5a0" },
+  { family: "egress", displayName: "Egress" },
+];
+
+/** The AI series with one hour refunded: a -$6 credit, more than that hour's compute. */
+const refundHour = (ai: (number | null)[]) => ai.map((v, i) => (i === 18 ? -6 : v));
+
+interface RunCostRow {
+  name: string;
+  status: string;
+  totals: { currency: string; amount: string; estimate: string }[];
+}
+
+const RUN_COSTS: RunCostRow[] = [
+  { name: "final, one currency", status: "final", totals: [{ currency: "USD", amount: "0.184215", estimate: "0" }] },
+  { name: "part estimate", status: "complete", totals: [{ currency: "USD", amount: "1.4343", estimate: "1.28431" }] },
+  { name: "a source not answered", status: "incomplete", totals: [{ currency: "USD", amount: "0.041", estimate: "0" }] },
+  { name: "tiny", status: "final", totals: [{ currency: "USD", amount: "0.000074", estimate: "0" }] },
+  { name: "two currencies", status: "complete", totals: [{ currency: "EUR", amount: "2.1", estimate: "2.1" }, { currency: "USD", amount: "0.5", estimate: "0" }] },
+  { name: "pending", status: "pending", totals: [] },
+];
+
+const RUN_COST_COLS: Column<RunCostRow>[] = [
+  { key: "name", header: "Run", cell: (r) => r.name, lead: true },
+  { key: "status", header: "Status", cell: (r) => <span className="muted">{r.status}</span>, width: 110 },
+  { key: "cost", header: "Cost", cell: (r) => <CostFigure status={r.status} totals={r.totals} />, align: "right", mono: true, width: 120 },
+];
+
+function Costs() {
+  const c = useMemo(() => fakeCostSeries(), []);
+  const refund = useMemo(() => [c.compute, refundHour(c.ai)], [c]);
+  const byCurrency = useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const l of fakeCostLines) m.set(l.currency, [...(m.get(l.currency) ?? []), l.amount]);
+    return [...m].map(([currency, amounts]) => ({ currency, amount: sumMoney(amounts) ?? "0" }));
+  }, []);
+  const cols: Column<FakeCostLine>[] = [
+    { key: "family", header: "Family", cell: (l) => <FamilyKey family={l.family} displayName={FAMILIES.find((f) => f.family === l.family)?.displayName} color={FAMILIES.find((f) => f.family === l.family)?.color} />, width: 130 },
+    { key: "item", header: "Item", cell: (l) => l.item, lead: true, sortValue: (l) => l.item },
+    { key: "source", header: "Source", cell: (l) => <span className="secondary">{l.source}</span>, width: 130, optional: true },
+    { key: "state", header: "Status", cell: (l) => (l.final ? <span className="muted">final</span> : <span className="muted">estimate</span>), width: 90 },
+    { key: "amount", header: "Amount", cell: (l) => <Money amount={l.amount} currency={l.currency} />, sortValue: (l) => Number(l.amount), align: "right", mono: true, width: 120 },
+  ];
+  return (
+    <Section id="costs" title="Cost: money, status, families" note="Amounts are exact decimal strings, formatted without floats (formatMoney: at most 4 decimals, <$0.0001 for a tiny non-zero amount, the exact value in a tooltip), one figure per currency and never added across currencies. A status badge says how settled a figure is; its tooltip names what is missing. Family colours come from a plugin's hint, mapped to the nearest chart slot; compute is always slot 1. Every page with money says “list price” once, explained in a tooltip. Pending is an empty state, never $0.00.">
+      <div className="sg-row">
+        {COST_STATUS_LIST.map((s) => (
+          <CostStatusBadge key={s} status={s} waitingOn={s === "incomplete" ? ["model-gateway"] : undefined} />
+        ))}
+        <ListPriceNote />
+      </div>
+      <div className="sg-row">
+        {FAMILIES.map((f) => (
+          <span key={f.family} title={`hint ${f.color ?? "none"} → ${familyColor(f.family, f.color)}`}>
+            <FamilyKey {...f} />
+          </span>
+        ))}
+        <ColorKey color="var(--st-neutral-dot)">Unallocated</ColorKey>
+      </div>
+      <div className="grid grid-2">
+        <Card title="Cost" subtitle="a Run's total per currency, by family, and its lines" actions={<ListPriceNote />}>
+          <div className="stack">
+            <div className="sg-row">
+              <MoneyList amounts={byCurrency} large />
+              <CostStatusBadge status="incomplete" waitingOn={["model-gateway"]} />
+            </div>
+            <KeyValue
+              items={[
+                { key: <FamilyKey family="compute" displayName="Compute" />, value: formatMoney(sumMoney(["0.149912", "0.038104"]), "USD"), mono: true },
+                { key: <FamilyKey family="ai" displayName="AI models" color="violet" />, value: formatMoney("1.284712", "USD"), mono: true },
+                { key: <FamilyKey family="video" displayName="Video" color="amber" />, value: formatMoney("2.10", "EUR"), mono: true },
+              ]}
+            />
+            <Table columns={cols} rows={[...fakeCostLines].sort((a, b) => compareMoney(b.amount, a.amount))} rowKey={(l) => `${l.source}:${l.item}`} dense />
+          </div>
+        </Card>
+        <Card title="Cost in a list" subtitle="CostFigure: the same as lux ls's COST column">
+          <Table
+            columns={RUN_COST_COLS}
+            rows={RUN_COSTS}
+            rowKey={(r) => r.name}
+            dense
+          />
+        </Card>
+        <Card title="Cost" subtitle="pending: nothing reported yet">
+          <EmptyState compact title="No cost reported yet" description="The first figures arrive within a couple of minutes of the Run starting. Until then there is no figure, not a zero." />
+        </Card>
+      </div>
+      <div className="grid grid-charts">
+        <Card title="Cost by family" subtitle="stacked, hourly · USD" actions={<ListPriceNote />}>
+          <TimeSeriesChart x={c.x} ys={[c.compute, c.ai, c.video]} series={[{ label: "Compute", color: familyColor("compute") }, { label: "AI models", color: familyColor("ai", "violet") }, { label: "Video", color: familyColor("video", "amber") }]} unit="money" currency="USD" stacked />
+        </Card>
+        <Card title="Host cost" subtitle="allocated to Runs vs unallocated, hourly">
+          <TimeSeriesChart x={c.x} ys={[c.allocated, c.unallocated]} series={[{ label: "Allocated", color: familyColor("compute") }, { label: "Unallocated", color: "var(--st-neutral-dot)" }]} unit="money" currency="USD" stacked />
+        </Card>
+        <Card title="Host cost, one hour costed" subtitle="sparse: the y axis still reaches the stacked top ($0.0375)">
+          <TimeSeriesChart x={c.x} ys={[c.x.map((_, i) => (i === c.x.length - 1 ? 0.0015 : null)), c.x.map((_, i) => (i === c.x.length - 1 ? 0.036 : null))]} series={[{ label: "Allocated", color: familyColor("compute") }, { label: "Unallocated", color: "var(--st-neutral-dot)" }]} unit="money" currency="USD" stacked />
+        </Card>
+        <Card title="Cost by family, a refund hour" subtitle="an AI models credit of -$6 in one hour: the y axis goes below zero, with gridlines">
+          <TimeSeriesChart x={c.x} ys={refund} series={[{ label: "Compute", color: familyColor("compute") }, { label: "AI models", color: familyColor("ai", "violet") }]} unit="money" currency="USD" stacked />
+        </Card>
+      </div>
+      <p className="sg-note">
+        familySlot: {FAMILIES.map((f) => `${f.family}${f.color ? ` (${f.color})` : ""} → ${familySlot(f.family, f.color)}`).join(" · ")}. Named hints map to a slot (blue hints avoid slot 1, which is compute&apos;s), <Code>#rrggbb</Code> to the nearest hue, no hint to a slot from the family&apos;s name. A family's slot never depends on its companions: egress and video share slot 4 above, an accepted collision.
+      </p>
     </Section>
   );
 }
@@ -956,6 +1086,10 @@ function Feedback() {
         <Skeleton width={120} />
         <Skeleton width={60} height={20} round />
       </div>
+      <div className="sg-row sg-row-end" data-demo="tooltip-edge">
+        <span className="muted">At the viewport&apos;s edge a tooltip shifts inside it, and flips side when its side has no room:</span>
+        <ListPriceNote />
+      </div>
       <Card>
         <EmptyState title="No hosts in pool gpu-a10" description="Hosts appear here once the provider reports them running. Check the pool's scaling settings." action={<Button variant="primary" size="sm">Add host</Button>} />
       </Card>
@@ -981,6 +1115,15 @@ function Formatting() {
     ["formatCount(12900, compact)", formatCount(12900, { compact: true })],
     ["formatCount(1284)", formatCount(1284)],
     ["formatBytes(null)", formatBytes(null)],
+    ['formatMoney("1.4342", "USD")', formatMoney("1.4342", "USD")],
+    ['formatMoney("0.0012", "USD")', formatMoney("0.0012", "USD")],
+    ['formatMoney("12345.5", "EUR")', formatMoney("12345.5", "EUR")],
+    ['formatMoney("3.2", "XTS")', formatMoney("3.2", "XTS")],
+    ['formatMoney("1.28431", "USD")', formatMoney("1.28431", "USD")],
+    ['formatMoney("0.000074", "USD")', formatMoney("0.000074", "USD")],
+    ['formatMoney("0.00004", "USD")', formatMoney("0.00004", "USD")],
+    ['formatMoneyExact("0.000074", "USD")', formatMoneyExact("0.000074", "USD")],
+    ["formatMoney(null)", formatMoney(null)],
   ];
   return (
     <Section id="format" title="Formatting helpers" note="src/ds/format.ts. Missing values render as an en dash, never as 0.">

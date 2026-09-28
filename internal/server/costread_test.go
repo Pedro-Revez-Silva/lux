@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -42,7 +44,7 @@ func costPath(q string) string {
 
 func TestCostSummaryScopeAndGroups(t *testing.T) {
 	s, keys := costReadFixture(t)
-	var got costSummaryBody
+	var got CostSummaryBody
 	if code := getJSON(t, s, keys["t1"], costPath("&group=pool&group=family&interval=hour"), &got); code != http.StatusOK {
 		t.Fatalf("tenant status: %d", code)
 	}
@@ -64,19 +66,75 @@ func TestCostSummaryScopeAndGroups(t *testing.T) {
 		got.Unallocated[1].Amount != "3.25" {
 		t.Errorf("operator summary: %+v", got)
 	}
-	got = costSummaryBody{}
+	got = CostSummaryBody{}
 	if code := getJSON(t, s, keys["op"], costPath("&tenant=t1&group=host"), &got); code != http.StatusOK || len(got.Totals) != 2 || got.Unallocated != nil || got.Hosts != nil {
 		t.Errorf("narrowed summary: %d %+v", code, got)
 	}
-	got = costSummaryBody{}
+	got = CostSummaryBody{}
 	if code := getJSON(t, s, keys["op"], costPath("&group=host&family=compute"), &got); code != http.StatusOK || len(got.Hosts) != 3 || got.Hosts[0].Allocated != "2" {
 		t.Errorf("host breakdown: %d %+v", code, got)
 	}
 }
 
+// Grouped by family, the summary names each family as a Run's byFamily does.
+func TestCostSummaryFamilyMetadata(t *testing.T) {
+	s, keys := costReadFixture(t)
+	s.cfg.Costs.Plugins = []CostPluginConfig{{Name: "plugin"}}
+	s.initCostPlugins()
+	s.plugins[0].desc.Families = map[string]struct {
+		DisplayName string `json:"displayName"`
+		Color       string `json:"color"`
+	}{"ai": {"AI models", "violet"}}
+	s.plugins[0].usable = true
+	var got CostSummaryBody
+	if code := getJSON(t, s, keys["t1"], costPath("&group=family&interval=hour"), &got); code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	want := []CostFamilyInfo{{Family: "ai", DisplayName: "AI models", Color: "violet"}, {Family: "compute", DisplayName: "Compute"}}
+	if !slices.Equal(got.Families, want) {
+		t.Errorf("families: %+v", got.Families)
+	}
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["t1"], costPath("&group=pool"), &got); code != http.StatusOK || got.Families != nil || got.Runs != nil {
+		t.Errorf("families without a family group: %d %+v", code, got.Families)
+	}
+}
+
+// Grouped by run, the summary names each Run in its totals, and only those the key sees.
+func TestCostSummaryRunNames(t *testing.T) {
+	s, keys := costReadFixture(t)
+	execSQL(t, s, context.Background(), `UPDATE runs SET name = 'nightly' WHERE id = 'r1'`)
+	var got CostSummaryBody
+	if code := getJSON(t, s, keys["t1"], costPath("&group=run"), &got); code != http.StatusOK || !slices.Equal(got.Runs, []CostRunInfo{{ID: "r1", Name: "nightly"}}) {
+		t.Errorf("tenant: %d %+v", code, got.Runs)
+	}
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["op"], costPath("&group=run"), &got); code != http.StatusOK || !slices.Equal(got.Runs, []CostRunInfo{{ID: "r1", Name: "nightly"}, {ID: "r2"}}) {
+		t.Errorf("operator: %d %+v", code, got.Runs)
+	}
+	// An operator narrowed to one tenant sees that tenant's Runs alone: totals, series and names.
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["op"], costPath("&tenant=t1&group=run&interval=hour"), &got); code != http.StatusOK {
+		t.Fatalf("narrowed operator status %d", code)
+	}
+	if !slices.Equal(got.Runs, []CostRunInfo{{ID: "r1", Name: "nightly"}}) {
+		t.Errorf("narrowed operator runs: %+v", got.Runs)
+	}
+	totals := map[string]string{}
+	for _, row := range got.Totals {
+		totals[row.Group["run"]+" "+row.Currency] = row.Amount
+	}
+	if !maps.Equal(totals, map[string]string{"r1 USD": "2", "r1 EUR": "2.5"}) {
+		t.Errorf("narrowed operator totals: %+v", got.Totals)
+	}
+	if len(got.Series) != 3 || slices.ContainsFunc(got.Series, func(r CostSummaryRow) bool { return r.Group["run"] != "r1" }) {
+		t.Errorf("narrowed operator series: %+v", got.Series)
+	}
+}
+
 func TestCostSummaryRangeAndValidation(t *testing.T) {
 	s, keys := costReadFixture(t)
-	var got costSummaryBody
+	var got CostSummaryBody
 	path := "/v1/costs?from=" + url.QueryEscape(t0.Add(time.Hour).Format(time.RFC3339)) + "&to=" + url.QueryEscape(t0.Add(2*time.Hour).Format(time.RFC3339))
 	if code := getJSON(t, s, keys["t1"], path+"&interval=day", &got); code != http.StatusOK || len(got.Totals) != 1 || got.Totals[0].Amount != "0.75" || len(got.Series) != 1 || got.Series[0].At == nil || !got.Series[0].At.Equal(t0.Truncate(24*time.Hour)) {
 		t.Errorf("range: %d %+v", code, got)
@@ -106,7 +164,7 @@ func TestCostReadEffectiveBounds(t *testing.T) {
 		{"from=" + url.QueryEscape(t0.Add(30*time.Minute).Format(time.RFC3339)) + "&to=" + url.QueryEscape(t0.Add(75*time.Minute).Format(time.RFC3339)), t0, t0.Add(2 * time.Hour), "2"},
 		{"from=" + url.QueryEscape(t0.Add(30*time.Minute).Format(time.RFC3339)) + "&to=" + url.QueryEscape(t0.Add(time.Hour).Format(time.RFC3339)), t0, t0.Add(time.Hour), "1.25"},
 	} {
-		var summary costSummaryBody
+		var summary CostSummaryBody
 		if code := getJSON(t, s, keys["t1"], "/v1/costs?"+tc.query+"&family=compute", &summary); code != 200 || !summary.From.Equal(tc.from) || !summary.To.Equal(tc.to) || len(summary.Totals) != 1 || summary.Totals[0].Amount != tc.amount {
 			t.Errorf("summary %s: %d %+v", tc.query, code, summary)
 		}
@@ -166,7 +224,7 @@ func TestCostSummaryConcurrentReplacement(t *testing.T) {
 	}()
 	defer func() { close(stop); wg.Wait() }()
 	for range 40 {
-		var got costSummaryBody
+		var got CostSummaryBody
 		if code := getJSON(t, s, keys["op"], costPath("&group=host&family=compute&interval=hour"), &got); code != 200 {
 			t.Fatalf("summary status: %d", code)
 		}
@@ -184,7 +242,7 @@ func TestCostSummaryConcurrentReplacement(t *testing.T) {
 				series = row.Amount
 			}
 		}
-		var host hostAllocation
+		var host HostAllocation
 		for _, row := range got.Hosts {
 			if row.HostID == "h1" {
 				host = row

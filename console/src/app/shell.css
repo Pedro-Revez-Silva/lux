@@ -770,6 +770,15 @@
 }
 
 /* Run page. */
+.cost-total {
+  gap: var(--sp-5);
+}
+.cost-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-6);
+  font-size: var(--text-xs);
+}
 .run-facts {
   padding: var(--sp-2) var(--pad-card);
   background: var(--bg-surface);

@@ -122,6 +122,8 @@ export interface Run {
   resume?: Resumability;
   /** The Run's servers (named ports, optionally with a command lux starts). */
   servers?: Server[];
+  /** In GET /v1/runs only (not GET /v1/runs/{id}); absent means unknown, not zero. */
+  cost?: RunCostBrief;
 }
 
 export type ServerState = "stopped" | "starting" | "ready" | "unreachable" | "exited";
@@ -181,6 +183,150 @@ export interface StreamTicket {
   kind: "exec" | "preview";
   runId: string;
   expiresAt: string;
+}
+
+/** RunCostBrief in internal/server/costs.go: GET /v1/runs/{id}/cost's status and totals. */
+export interface RunCostBrief {
+  status: CostStatus;
+  /** Per currency, ordered by currency, each with its final and estimate parts; empty while pending. */
+  totals: CostTotal[];
+}
+
+export interface MoneyTotal {
+  currency: string;
+  /** A decimal string; never converted between currencies. */
+  amount: string;
+}
+
+/** pending: nothing reported yet; complete: all answered, some estimates; incomplete: a source is missing; final: settled. */
+export type CostStatus = "pending" | "complete" | "incomplete" | "final";
+
+/** CostLine in internal/server/costs.go. */
+export interface CostLine {
+  runId: string;
+  /** compute, or a cost plugin's configured name. */
+  source: string;
+  family: string;
+  /** Empty when the source gives none. */
+  item: string;
+  amount: string;
+  currency: string;
+  from: string;
+  to: string;
+  /** false: an estimate that may still change. */
+  final: boolean;
+  details: Record<string, unknown> | null;
+  reportedAt: string;
+}
+
+/** CostTotal: per currency in totals, per family and currency in byFamily. */
+export interface CostTotal {
+  family?: string;
+  displayName?: string;
+  /** A plugin's colour hint; mapped to a chart token, never used raw. */
+  color?: string;
+  currency: string;
+  /** final + estimate. */
+  amount: string;
+  final: string;
+  estimate: string;
+}
+
+export interface CostSource {
+  source: string;
+  status: "ok" | "incomplete" | "final";
+  answeredAt?: string;
+  nextAt?: string;
+}
+
+/** GET /v1/runs/{id}/cost. */
+export interface RunCost {
+  runId: string;
+  status: CostStatus;
+  final: boolean;
+  /** list: list prices, before discounts, credits and tax. */
+  basis: string;
+  totals: CostTotal[];
+  byFamily: CostTotal[];
+  lines: CostLine[];
+  sources: CostSource[];
+}
+
+export interface CostSummaryRow {
+  /** With interval: the bucket's start. */
+  at?: string;
+  /** With group: the group's value per group key ("(none)" when absent). */
+  group?: Record<string, string>;
+  currency: string;
+  amount: string;
+}
+
+export interface HostAllocation {
+  hostId: string;
+  currency: string;
+  allocated: string;
+  unallocated: string;
+}
+
+/** GET /v1/costs. */
+export interface CostSummary {
+  from: string;
+  to: string;
+  basis: string;
+  totals: CostSummaryRow[];
+  series?: CostSummaryRow[];
+  /** Operators without a tenant scope only. */
+  unallocated?: CostSummaryRow[];
+  /** Operators without a tenant scope, grouped by host. */
+  hosts?: HostAllocation[];
+  /** Grouped by family: each family's displayName and colour hint, as in a Run's byFamily. */
+  families?: CostFamily[];
+  /** Grouped by run: each Run's name (empty when it has none). */
+  runs?: { id: string; name?: string }[];
+}
+
+export interface CostFamily {
+  family: string;
+  displayName?: string;
+  color?: string;
+}
+
+export interface CostSummaryParams {
+  /** Up to two: tenant (operators), pool, host, family, run, label:key. */
+  group?: string[];
+  family?: string;
+  interval?: "hour" | "day";
+  since?: string;
+  from?: string;
+  to?: string;
+}
+
+export interface HostCostHour {
+  hour: string;
+  currency: string;
+  allocated: string;
+  /** Operators only. */
+  unallocated?: string;
+}
+
+export interface HostCostRate {
+  from: string;
+  to?: string;
+  perHour: string;
+  currency: string;
+  /** static, or the provider's price source (e.g. ec2-pricing, ec2-spot-history). */
+  source: string;
+}
+
+/** GET /v1/hosts/{id}/cost. */
+export interface HostCost {
+  hostId: string;
+  from: string;
+  to: string;
+  basis: string;
+  hours: HostCostHour[];
+  /** Operators only. */
+  rates?: HostCostRate[];
 }
 
 export interface Event {
