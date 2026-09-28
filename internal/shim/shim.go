@@ -105,7 +105,7 @@ func Main() int {
 		streams:   map[int]chan syscall.WaitStatus{},
 		exitCh:    make(chan syscall.WaitStatus, 1),
 		initCh:    make(chan syscall.WaitStatus, 1),
-		srv:       servers{procs: map[string]*serverProc{}, started: map[string]int64{}},
+		srv:       servers{procs: map[string]*serverProc{}, started: map[string]int64{}, stopping: map[string]*serverProc{}},
 	}
 	return s.run()
 }

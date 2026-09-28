@@ -60,6 +60,10 @@ func (s *Server) mintTicket(ctx context.Context, in *mintTicketInput) (*ticketOu
 	if kind != TicketExec && kind != TicketPreview {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_request", "kind: want exec or preview")
 	}
+	// A preview is a read; a stream acts on the Run.
+	if kind == TicketExec && !p.Can("run") {
+		return nil, errf(http.StatusForbidden, "forbidden", "an exec ticket needs the %q scope", "run")
+	}
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error { return requireRun(ctx, tx, in.ID) })
 	if err != nil {
 		return nil, err

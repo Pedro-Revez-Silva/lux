@@ -181,10 +181,11 @@ func (s *Server) routes(api huma.API) {
 		Summary: "Mint a stream ticket",
 		Description: "A single-use credential, good for 60 seconds, for what a browser cannot send an Authorization header with. " +
 			"kind exec: `?ticket=` on this Run's exec, attach and ports streams, which then act as the caller. " +
-			"kind preview: the sign-in of this Run's preview URLs (`https://<host>/.lux/auth?ticket=...&to=/path`).",
+			"kind preview: the sign-in of this Run's preview URLs (`https://<host>/.lux/auth?ticket=...&to=/path`). " +
+			"An exec ticket needs the `run` scope; a preview one, `read`.",
 		DefaultStatus: http.StatusCreated,
 		Errors:        []int{http.StatusNotFound, http.StatusUnprocessableEntity},
-	}, "run", s.mintTicket)
+	}, "read", s.mintTicket)
 
 	// Servers.
 	register(s, api, huma.Operation{

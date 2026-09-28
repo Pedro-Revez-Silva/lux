@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -41,9 +40,6 @@ type runState struct {
 	Spec *spec.RunSpec `json:"spec,omitempty"`
 	// LastExitAt, unix ms, for host-local TTL.
 	LastExitAt int64 `json:"lastExitAt,omitempty"`
-	// Servers: the set luxd last sent (MsgServers), for a restarted
-	// runner to go on checking them.
-	Servers *proto.Servers `json:"servers,omitempty"`
 }
 
 type volumeRef struct {

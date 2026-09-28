@@ -42,7 +42,15 @@ type servers struct {
 	// started: every name/gen the shim has started, so an exited one is
 	// not started again for the same gen.
 	started map[string]int64
+	// stopping: processes told to stop and not gone yet. A server's next
+	// start waits for its last process (a restart would otherwise find
+	// the port still held), up to stopWait.
+	stopping map[string]*serverProc
 }
+
+// stopWait bounds how long a server's next start waits for its last
+// process to go (it is killed after 5s).
+const stopWait = 6 * time.Second
 
 // setServers takes the runner's set and reconciles to it once the shim
 // is ready.
@@ -78,10 +86,23 @@ func (s *Shim) reconcileServers() {
 		if w, ok := want[name]; !ok || w.Gen != p.gen {
 			stopServerProc(p)
 			delete(s.srv.procs, name)
+			s.srv.stopping[name] = p
+			go func() {
+				select {
+				case <-p.done:
+				case <-time.After(stopWait):
+				}
+				s.srv.mu.Lock()
+				if s.srv.stopping[name] == p {
+					delete(s.srv.stopping, name)
+				}
+				s.srv.mu.Unlock()
+				s.reconcileServers()
+			}()
 		}
 	}
 	for name, w := range want {
-		if s.srv.procs[name] != nil || s.srv.started[name] == w.Gen {
+		if s.srv.procs[name] != nil || s.srv.stopping[name] != nil || s.srv.started[name] == w.Gen {
 			continue
 		}
 		s.srv.started[name] = w.Gen

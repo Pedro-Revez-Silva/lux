@@ -66,7 +66,7 @@ func TestServerProcesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &Shim{out: o, red: NewRedactor(nil), user: &userInfo{home: dir}, env: []string{"PATH=" + os.Getenv("PATH")},
-		streams: map[int]chan syscall.WaitStatus{}, srv: servers{procs: map[string]*serverProc{}, started: map[string]int64{}}}
+		streams: map[int]chan syscall.WaitStatus{}, srv: servers{procs: map[string]*serverProc{}, started: map[string]int64{}, stopping: map[string]*serverProc{}}}
 	s.cfg.Workdir = dir
 	go s.reap()
 
@@ -98,6 +98,21 @@ func TestServerProcesses(t *testing.T) {
 	if !same || failsAgain || strings.Count(readFile(t, filepath.Join(dir, "out.jsonl")), `"phase":"start"`) != 2 {
 		t.Fatalf("restarted on the same set: same %v, fails %v", same, failsAgain)
 	}
+	// A new gen: the old process goes first, then the new one starts.
+	s.setServers([]proto.ServerSpec{{Name: "loop", Gen: 2, Command: []string{"sh", "-c", "exec sleep 60"}}})
+	select {
+	case <-loop.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the old gen was not stopped")
+	}
+	waitFor(t, func() bool {
+		s.srv.mu.Lock()
+		defer s.srv.mu.Unlock()
+		return s.srv.procs["loop"] != nil && s.srv.procs["loop"].gen == 2
+	}, "the new gen never started")
+	s.srv.mu.Lock()
+	loop = s.srv.procs["loop"]
+	s.srv.mu.Unlock()
 	// Out of the set: stopped.
 	s.setServers(nil)
 	select {

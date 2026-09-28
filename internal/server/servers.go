@@ -125,13 +125,15 @@ func setServerState(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoc
 	rows, err := tx.Query(ctx, `UPDATE run_servers rs SET
 			state = $2,
 			since = now(),
-			gen = gen + 1,
+			gen = nextval('run_servers_gen'),
 			exit_code = NULL, error = NULL, ready_since = NULL,
 			active = CASE WHEN $2 = 'starting' THEN jsonb_build_object('port', port, 'command', command, 'workdir', workdir, 'env', env) END,
 			epoch = CASE WHEN $2 = 'starting' THEN nullif($3, 0) ELSE epoch END,
 			stop_reason = CASE WHEN $2 = 'stopped' THEN $4 END,
-			-- The placement it was running in; one already stopped keeps its.
-			stopped_epoch = CASE WHEN $2 = 'stopped' AND rs.state <> 'stopped' THEN coalesce(rs.epoch, nullif($3, 0)) ELSE stopped_epoch END
+			-- The placement it stopped in: one already stopped keeps its,
+			-- unless now stopped by request (its watching ends in this one).
+			stopped_epoch = CASE WHEN $2 = 'stopped' AND (rs.state <> 'stopped' OR $4 = 'stopped')
+				THEN coalesce(nullif($3, 0), rs.epoch) ELSE stopped_epoch END
 		WHERE rs.run_id = $1 AND (`+where+`)
 		RETURNING name`, append([]any{runID, state, epoch, stopReason}, args...)...)
 	if err != nil {
@@ -214,7 +216,7 @@ func desiredServers(ctx context.Context, tx pgx.Tx, runID string, epoch int, rev
 	if err := tx.QueryRow(ctx, `SELECT coalesce(spec->'workload'->>'workdir', '') FROM runs WHERE id = $1`, runID).Scan(&workdir); err != nil {
 		return msg, err
 	}
-	rows, err := tx.Query(ctx, `SELECT name, port, command IS NULL, state, `+watchedSQL+`, gen, active
+	rows, err := tx.Query(ctx, `SELECT name, port, command IS NULL, state, `+watched("$2")+`, gen, active
 		FROM run_servers WHERE run_id = $1 ORDER BY name`, runID, epoch)
 	if err != nil {
 		return msg, err
@@ -254,10 +256,12 @@ func desiredServers(ctx context.Context, tx pgx.Tx, runID string, epoch int, rev
 	return msg, rows.Err()
 }
 
-// watchedSQL, on run_servers with the placement's epoch as $2: a stopped
-// server without a command is watched unless it was stopped by request in
-// this placement.
-const watchedSQL = `NOT (coalesce(stop_reason, '') = 'stopped' AND stopped_epoch IS NOT DISTINCT FROM $2)`
+// watched, for SQL on run_servers with the placement's epoch as the
+// parameter epoch: a stopped server without a command is watched unless it
+// was stopped by request in this placement.
+func watched(epoch string) string {
+	return `NOT (coalesce(stop_reason, '') = 'stopped' AND stopped_epoch IS NOT DISTINCT FROM ` + epoch + `)`
+}
 
 // syncServers is syncServersTx in its own system transaction, notifying
 // the host after.
@@ -304,8 +308,7 @@ func applyServerState(ctx context.Context, tx pgx.Tx, tenantID, runID string, ep
 				WHEN active IS NULL THEN jsonb_build_object('port', port) ELSE active END
 		WHERE run_id = $1 AND name = $2 AND gen = $3 AND state <> $4
 		  AND (state IN ('starting', 'ready', 'unreachable')
-		       OR ($4 = 'ready' AND command IS NULL AND state = 'stopped'
-		           AND NOT (coalesce(stop_reason, '') = 'stopped' AND stopped_epoch IS NOT DISTINCT FROM $5)))`,
+		       OR ($4 = 'ready' AND command IS NULL AND state = 'stopped' AND `+watched("$5")+`))`,
 		runID, name, int64(gen), state, epoch, code, msg)
 	if err != nil || tag.RowsAffected() == 0 {
 		return err

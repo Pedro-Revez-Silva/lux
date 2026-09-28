@@ -200,7 +200,6 @@ func (p *placement) run(ctx context.Context) {
 	st := &runState{RunID: p.runID, TenantID: p.tenantID, Epoch: p.epoch, Phase: "assigned", Times: map[string]int64{}}
 	p.mu.Lock()
 	p.state = st
-	p.state.Servers = p.srvSet
 	p.mu.Unlock()
 	stored, _, _ := sp.SplitSecrets()
 	p.state.Spec = &stored

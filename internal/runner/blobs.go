@@ -356,7 +356,7 @@ func (r *Runner) readopt(ctx context.Context) {
 		}
 		p := &placement{
 			r: r, runID: st.RunID, tenantID: st.TenantID, epoch: st.Epoch, dir: r.runDir(st.RunID),
-			state: st, done: make(chan struct{}), stopWhy: st.StopReason, srvSet: st.Servers,
+			state: st, done: make(chan struct{}), stopWhy: st.StopReason, srvSet: loadServers(r.runDir(st.RunID), st.Epoch),
 		}
 		// No assignment after a restart: the spec it had, without secrets.
 		if st.Spec != nil {

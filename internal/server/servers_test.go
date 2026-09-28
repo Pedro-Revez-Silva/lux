@@ -301,6 +301,17 @@ func TestServerLifecycle(t *testing.T) {
 	if got := getServer(t, s, key, "web"); got.State != ServerStarting || got.ExitCode != nil {
 		t.Fatalf("restarted: %+v", got)
 	}
+	// A port-only server that never became ready, stopped: no longer
+	// watched in this placement either.
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/servers", map[string]any{"name": "idle", "port": 6000}); w.Code != http.StatusCreated {
+		t.Fatalf("add idle: %d %s", w.Code, w.Body)
+	}
+	apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/servers/idle/stop", nil)
+	serverReport(t, s, ctx, 1, map[string]any{"name": "idle", "gen": serverGen(t, s, ctx, "idle"), "state": "ready"})
+	if got := getServer(t, s, key, "idle"); got.State != ServerStopped || *got.StoppedEpoch != 1 {
+		t.Fatalf("idle was watched after its stop: %+v", got)
+	}
+	apiCall(t, s, key, http.MethodDelete, "/v1/runs/"+r1+"/servers/idle", nil)
 	// Nothing to start without a command.
 	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/servers/db/start", nil); w.Code != http.StatusConflict ||
 		!strings.Contains(w.Body.String(), "no_command") {
@@ -352,7 +363,17 @@ func TestServerLifecycle(t *testing.T) {
 		!strings.Contains(w.Body.String(), "not_running") {
 		t.Fatalf("start while stopped: %d %s", w.Code, w.Body)
 	}
-	// Remove.
+	// Remove, and add again under the name: a new gen, never an old one.
+	oldGen := serverGen(t, s, ctx, "db")
+	if w := apiCall(t, s, key, http.MethodDelete, "/v1/runs/"+r1+"/servers/db", nil); w.Code != http.StatusNoContent {
+		t.Fatalf("remove: %d %s", w.Code, w.Body)
+	}
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/servers", map[string]any{"name": "db", "port": 5432}); w.Code != http.StatusCreated {
+		t.Fatalf("add again: %d %s", w.Code, w.Body)
+	}
+	if g := serverGen(t, s, ctx, "db"); g <= oldGen {
+		t.Fatalf("gen %d reused (was %d)", g, oldGen)
+	}
 	if w := apiCall(t, s, key, http.MethodDelete, "/v1/runs/"+r1+"/servers/db", nil); w.Code != http.StatusNoContent {
 		t.Fatalf("remove: %d %s", w.Code, w.Body)
 	}
@@ -419,6 +440,15 @@ func TestTickets(t *testing.T) {
 		var tk Ticket
 		_ = json.Unmarshal(w.Body.Bytes(), &tk)
 		return tk
+	}
+	// A read key may mint preview tickets, not exec ones.
+	readKey := ids.Secret("luxk")
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('kr', 't1', 'viewer', $1, ARRAY['read'])`, ids.Hash(readKey))
+	if w := apiCall(t, s, readKey, http.MethodPost, "/v1/runs/"+r1+"/tickets", map[string]any{"kind": "exec"}); w.Code != http.StatusForbidden {
+		t.Fatalf("read key, exec ticket: %d %s", w.Code, w.Body)
+	}
+	if w := apiCall(t, s, readKey, http.MethodPost, "/v1/runs/"+r1+"/tickets", map[string]any{"kind": "preview"}); w.Code != http.StatusCreated {
+		t.Fatalf("read key, preview ticket: %d %s", w.Code, w.Body)
 	}
 	tk := mint(TicketExec)
 	if !strings.HasPrefix(tk.Ticket, "tkt_") || tk.RunID != r1 || time.Until(tk.ExpiresAt) > time.Minute+time.Second {

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -12,7 +14,7 @@ import (
 )
 
 // A placement's servers (luxd's MsgServers): the set luxd wants now, kept
-// (newest rev wins) in the placement's state so a restarted runner has it,
+// (newest rev wins) in a file beside its state so a restarted runner has it,
 // handed to the shim (which runs the commands), and health-checked here:
 // every serverCheckEvery the runner dials each server's port on the
 // container, and reports ready when it accepts, unreachable when a ready
@@ -30,8 +32,6 @@ type serverHealth struct {
 }
 
 // setServers takes luxd's set, if newer than the one it has.
-// It may come before the placement has its state (right after the
-// assign): run() records it then.
 func (p *placement) setServers(ctx context.Context, sv proto.Servers) {
 	p.mu.Lock()
 	if p.srvSet != nil && p.srvSet.Rev >= sv.Rev {
@@ -39,12 +39,31 @@ func (p *placement) setServers(ctx context.Context, sv proto.Servers) {
 		return
 	}
 	p.srvSet = &sv
-	if p.state != nil {
-		p.state.Servers = &sv
-		_ = writeRunState(p.dir, p.state)
-	}
 	p.mu.Unlock()
+	// A file of its own: state.json is written by the placement's own
+	// goroutine; sets come in order on the Run's control queue.
+	if b, err := json.Marshal(sv); err == nil {
+		if err := os.MkdirAll(p.dir, 0o700); err == nil {
+			_ = writeFileAtomic(filepath.Join(p.dir, serversFile(p.epoch)), b, 0o600)
+		}
+	}
 	p.sendServers()
+}
+
+// serversFile holds a placement's servers set, for a restarted runner.
+func serversFile(epoch int) string { return fmt.Sprintf("servers-%d.json", epoch) }
+
+// loadServers reads a placement's servers set back (nil: none).
+func loadServers(dir string, epoch int) *proto.Servers {
+	b, err := os.ReadFile(filepath.Join(dir, serversFile(epoch)))
+	if err != nil {
+		return nil
+	}
+	var sv proto.Servers
+	if json.Unmarshal(b, &sv) != nil {
+		return nil
+	}
+	return &sv
 }
 
 // servers is the set luxd wants now (nil: none yet).

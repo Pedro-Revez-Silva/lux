@@ -9,7 +9,7 @@ func TestServers(t *testing.T) {
 	base := func(servers ...Server) RunSpec {
 		return RunSpec{Image: Image{Ref: "alpine"}, Workload: Workload{Command: []string{"sleep", "infinity"}, Workdir: "/work", Servers: servers,
 			Services: []Service{{Name: "api", URL: "https://api.example.com", Loopback: true}}},
-			Network: Network{Egress: []EgressRule{{Host: "api.example.com"}}}}
+			Network: Network{Egress: []EgressRule{{Host: "api.example.com"}}, Ports: []Port{{Port: 9000, Name: "admin"}}}}
 	}
 	ok := base(
 		Server{Name: "web", Port: 3000, Command: []string{"npm", "run", "dev"}, Workdir: "apps/web", Env: map[string]string{"VITE_X": "1"}},
@@ -39,6 +39,7 @@ func TestServers(t *testing.T) {
 		{[]Server{{Name: "web", Port: 1, Env: map[string]string{"LUX_X": "1"}}}, "reserved"},
 		{[]Server{{Name: "web", Port: 1, Env: map[string]string{"A-B": "1"}}}, "invalid name"},
 		{[]Server{{Name: "web", Port: 1}, {Name: "web", Port: 2}}, "duplicate name"},
+		{[]Server{{Name: "admin", Port: 1}}, "network.ports name"},
 	} {
 		sp := base(c.sv...)
 		err := sp.Normalize(BuiltinDefaults)

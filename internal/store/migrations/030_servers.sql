@@ -4,8 +4,12 @@
 -- in its container. A record outlives placements; its process does not.
 -- The columns name, port, command, workdir and env are what the server is
 -- now (PUT changes them); active is what it was started with (null while
--- stopped), so an edit applies at its next start. gen counts its starts:
--- the runner reports states per gen, and a report for another gen is stale.
+-- stopped), so an edit applies at its next start. gen names its current
+-- start (or stop): the runner reports states per gen, and a report for
+-- another gen is stale. Gens come from one sequence, so a server removed
+-- and added again under its name never reuses one.
+
+CREATE SEQUENCE run_servers_gen;
 
 CREATE TABLE run_servers (
   tenant_id       text NOT NULL REFERENCES tenants(id),
@@ -19,7 +23,7 @@ CREATE TABLE run_servers (
   state           text NOT NULL DEFAULT 'stopped'
                   CHECK (state IN ('stopped', 'starting', 'ready', 'unreachable', 'exited')),
   active          jsonb,                        -- {port, command, workdir, env} as started
-  gen             bigint NOT NULL DEFAULT 0,
+  gen             bigint NOT NULL DEFAULT nextval('run_servers_gen'),
   exit_code       int,
   error           text,
   since           timestamptz NOT NULL DEFAULT now(),

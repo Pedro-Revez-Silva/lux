@@ -216,7 +216,12 @@ aud = ""                         # LUX_PREVIEW_CF_ACCESS_AUD (team: console.clou
   starting.
 - **One luxd:** the proxy reaches a Run's host through that host's
   connection, which is to one luxd; the listener of another luxd shows the
-  server as not answering.
+  server as not answering. Run previews through the luxd your runners
+  connect to.
+- **Throughput:** proxied bytes travel as base64 JSON frames over the
+  runner's WebSocket, without flow control: a response that a slow client
+  reads far behind the server (many megabytes queued) is cut off. Fine for
+  dev servers and demos; not a CDN.
 
 The preview listener is what the Run's authors' code is served from: see
 [security](security.md#previews).

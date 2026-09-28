@@ -102,6 +102,9 @@ func (s *RunSpec) ValidateServer(at string, sv Server) []string {
 	if !ValidServerName(sv.Name) {
 		errs = append(errs, fmt.Sprintf("%s: invalid name %q (1-30 of a-z, 0-9 and -, starting with a letter, not ending in -)", at, sv.Name))
 	}
+	if slices.ContainsFunc(s.Network.Ports, func(p Port) bool { return p.Name == sv.Name }) {
+		errs = append(errs, fmt.Sprintf("%s: %q is a network.ports name: a port-forward by name would be ambiguous", at, sv.Name))
+	}
 	if sv.Port < 1 || sv.Port > 65535 {
 		errs = append(errs, fmt.Sprintf("%s.port: need 1-65535", at))
 	} else if j := sv.Port - ServiceBasePort; j >= 0 && j < len(s.Workload.Services) && s.Workload.Services[j].Loopback {

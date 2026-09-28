@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -305,25 +306,22 @@ func (p *previews) signIn(w http.ResponseWriter, r *http.Request, runID string) 
 		p.page(w, http.StatusUnauthorized, pageSignIn, nil)
 		return
 	}
+	if !pr.Can("read") {
+		p.page(w, http.StatusUnauthorized, pageSignIn, nil)
+		return
+	}
 	u := previewUser{RunID: runID, TenantID: pr.TenantID, Operator: pr.Operator, KeyID: pr.KeyID, User: pr.Email,
 		Exp: time.Now().Add(previewCookieTTL).Unix()}
 	if u.User == "" && pr.KeyID != "" {
 		_ = p.s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
 			return tx.QueryRow(r.Context(), `SELECT name FROM api_keys WHERE id = $1`, pr.KeyID).Scan(&u.User)
 		})
-		u.User = cmpOr(u.User, pr.KeyID)
+		u.User = cmp.Or(u.User, pr.KeyID)
 	}
 	http.SetCookie(w, &http.Cookie{Name: previewCookie, Value: p.sign(u), Path: "/", MaxAge: int(previewCookieTTL.Seconds()),
 		Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	w.Header().Set("Cache-Control", "no-store")
 	http.Redirect(w, r, to, http.StatusFound)
-}
-
-func cmpOr(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }
 
 // localPath: a path on this host, never another (//evil, /\evil).

@@ -5143,9 +5143,9 @@ paths:
   /v1/runs/{id}/tickets:
     post:
       description: |-
-        A single-use credential, good for 60 seconds, for what a browser cannot send an Authorization header with. kind exec: `?ticket=` on this Run's exec, attach and ports streams, which then act as the caller. kind preview: the sign-in of this Run's preview URLs (`https://<host>/.lux/auth?ticket=...&to=/path`).
+        A single-use credential, good for 60 seconds, for what a browser cannot send an Authorization header with. kind exec: `?ticket=` on this Run's exec, attach and ports streams, which then act as the caller. kind preview: the sign-in of this Run's preview URLs (`https://<host>/.lux/auth?ticket=...&to=/path`). An exec ticket needs the `run` scope; a preview one, `read`.
 
-        Needs the `run` scope.
+        Needs the `read` scope.
       operationId: mintTicket
       parameters:
         - description: The Run's id.
