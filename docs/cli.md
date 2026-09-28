@@ -25,7 +25,7 @@ was reached; `1` anything else.
 ```bash
 lux run -f spec.yaml [--follow | --wait] [--name N] [-l k=v] [--idempotency-key K] [--secrets-from .env]
 lux run --image alpine -- echo hello           # a quick generic Run
-lux ls [--state running,stopped] [-l team=x] [--resumable] [--host H] [--limit N]
+lux ls [--state running,stopped] [-l team=x] [--resumable] [--host H] [--limit N]   # with a COST column
 lux get <run>                                  # state, placements, usage
 lux logs <run> [-f] [--since <cursor>] [--events] [--stderr=false]
 lux events <run>                               # lifecycle events
@@ -127,6 +127,30 @@ lux history <run>               # a Run's resource use, across placements
 lux history --host <host>
 lux events --all                # every Run's events as they happen
 ```
+
+## Costs
+
+```bash
+lux cost <run>                  # totals per currency (final/estimate), families, lines, sources
+lux costs [--since 7d] [--by family] [--by label:team] [--family ai] [--interval day]
+lux costs --from 2026-09-01T00:00:00Z --to 2026-09-08T00:00:00Z --by tenant   # operators
+```
+
+Amounts are list prices ([Run costs](costs.md)), per currency: amounts in
+different currencies are never added. They are shown rounded half-even to
+4 decimals with trailing zeros trimmed; `-o json` prints luxd's exact
+response. A value lux does not have is `—`, never `0`.
+
+- `lux cost` prints the status: `pending` (nothing reported yet),
+  `incomplete` (naming the sources that have not answered), `complete`, or
+  `final`.
+- `lux costs --by` takes `tenant` (operators), `pool`, `host`, `family`,
+  `run` or `label:KEY`, up to twice. `--interval hour|day` adds a series.
+  Ranges are whole UTC hours, at most 90 days. With an operator key and no
+  `--tenant`, the hosts' unallocated cost is shown too.
+- `lux ls` has a COST column: the Run's total when it has one currency,
+  `multi` when it has several, `—` while nothing has been reported. A
+  leading `~` (`~0.0421 USD`) marks a total that may still change.
 
 ## Operators
 
