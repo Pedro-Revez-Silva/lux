@@ -1838,12 +1838,9 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 }
 
 // checkTemplateTags refuses an EC2 template's tags that are not a string
-// map, or that set a lux:* key: lux tags every instance itself (lux:pool,
+// map (null included), or that set a lux:* key: lux tags every instance itself (lux:pool,
 // lux:host, …) and finds a pool's instances by those tags.
 func checkTemplateTags(raw any) error {
-	if raw == nil {
-		return nil
-	}
 	tags, isMap := raw.(map[string]any)
 	if !isMap {
 		return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.tags must be an object of strings, got %T", raw)
@@ -1875,8 +1872,10 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "only platform pools can be shared (luxd admin create-pool --shared)")
 	}
 	if pl.Provider == "ec2" {
-		if err := checkTemplateTags(pl.Template["tags"]); err != nil {
-			return nil, err
+		if raw, present := pl.Template["tags"]; present {
+			if err := checkTemplateTags(raw); err != nil {
+				return nil, err
+			}
 		}
 		if raw, present := pl.Template["userData"]; present {
 			ud, isString := raw.(string)

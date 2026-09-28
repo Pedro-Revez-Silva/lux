@@ -48,6 +48,9 @@ def test_template_tags_are_kept_and_lux_tags_are_reserved(lux, ec2):
     [inst] = ec2.running()
     assert inst["tags"]["team"] == "platform", inst["tags"]
     assert inst["tags"]["lux:pool"].endswith("/burst"), inst["tags"]
+    # The pool as listed saves back unchanged (no stored lux:* tag).
+    [stored] = [p for p in lux.json("pools", "ls") if p["name"] == "burst"]
+    assert stored["template"]["tags"] == {"team": "platform"}, stored["template"]
 
 
 def test_max_hosts_is_respected(lux, ec2):

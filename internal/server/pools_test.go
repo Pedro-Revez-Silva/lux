@@ -66,6 +66,7 @@ func TestPutPoolRejectsReservedTemplateTags(t *testing.T) {
 		map[string]any{"LUX:Host": "h"},
 		map[string]any{"team": 1},
 		"lux:pool=arm64",
+		nil, // an explicit "tags": null; an absent key is fine
 	} {
 		pool := &poolBody{Body: Pool{Name: "burst", Provider: "ec2", Template: map[string]any{"tags": tags}}}
 		_, err := s.putPool(ctx, pool)
