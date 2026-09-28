@@ -43,6 +43,24 @@ components:
             - array
             - "null"
       type: object
+    BeforeStop:
+      additionalProperties: false
+      properties:
+        command:
+          description: argv; run with the workload's PATH
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        timeout:
+          description: default 10s; at most the workload's grace
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
+      type: object
     Build:
       additionalProperties: false
       properties:
@@ -1792,6 +1810,9 @@ components:
       properties:
         adapter:
           type: string
+        beforeStop:
+          $ref: "#/components/schemas/BeforeStop"
+          description: "A command run in the container on every stop, before the workload is signalled: a stop asked for, a cancel, a timeout, a drain. Its output is the Run's; what it writes into $LUX_ARTIFACTS is collected. It cannot run when the container dies or its host is lost."
         command:
           items:
             type: string

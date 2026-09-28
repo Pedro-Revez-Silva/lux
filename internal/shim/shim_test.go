@@ -501,3 +501,25 @@ func BenchmarkOutputLines(b *testing.B) {
 		}
 	}
 }
+
+// Two writers on one channel — the beforeStop hook beside a workload still
+// writing — each keep their own partial line: nothing is spliced into
+// another's record.
+func TestOutputSecondWriterKeepsItsOwnLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	o, _ := OpenOutput(path, NewRedactor(nil))
+	o.Write("stdout", []byte("progress 4"))
+	o.WriteAs("beforeStop:stdout", "stdout", []byte("hook-ran\n"))
+	o.Write("stdout", []byte("0%\n"))
+	o.Close()
+	var lines []string
+	for _, r := range readRecords(t, path) {
+		if r.Ch != "stdout" {
+			t.Fatalf("a record on %q, not stdout", r.Ch)
+		}
+		lines = append(lines, r.Data)
+	}
+	if strings.Join(lines, "|") != "hook-ran\n|progress 40%\n" {
+		t.Fatalf("got %q", lines)
+	}
+}

@@ -118,34 +118,14 @@ func (s *Shim) execStream(sc *bufio.Scanner, out *streamConn, open proto.StreamO
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}()
 
-	var wg sync.WaitGroup
-	for _, o := range outputs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			copyTo(o.r, func(b []byte) { _ = out.send(proto.StreamData{Channel: o.ch, Data: b}) })
-		}()
+	readers := make([]io.Reader, len(outputs))
+	for i, o := range outputs {
+		readers[i] = o.r
 	}
+	drain := copyOutputs(readers, func(i int, b []byte) { _ = out.send(proto.StreamData{Channel: outputs[i].ch, Data: b}) })
 	ws := <-exited
-	// What the process wrote before exiting is still being read. A PTY
-	// may be held open by its background children: do not wait forever.
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-	}
-	if ptmx != nil {
-		_ = ptmx.Close()
-	}
-	// The reaper collected the process, so cmd.Wait (which would close
-	// the pipes' parent ends) is never called: close them here.
+	drain()
 	_ = stdin.Close()
-	for _, o := range outputs {
-		if c, ok := o.r.(io.Closer); ok {
-			_ = c.Close()
-		}
-	}
 	code := exitCode(ws)
 	_ = out.send(proto.StreamData{ExitCode: &code})
 }
@@ -252,6 +232,33 @@ func winsize(rows, cols int) *pty.Winsize {
 		rows, cols = 24, 80
 	}
 	return &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)}
+}
+
+// copyOutputs copies each reader to sink (by its index) as it is written,
+// and returns drain: called once the process has exited, it waits for what
+// it wrote to be read — no longer than 2s, since a background child can
+// hold a pipe open — then closes the readers. The reaper collects the
+// process, so cmd.Wait (which would close the pipes' parent ends) is never
+// called.
+func copyOutputs(readers []io.Reader, sink func(i int, b []byte)) (drain func()) {
+	var wg sync.WaitGroup
+	for i, r := range readers {
+		wg.Add(1)
+		go func() { defer wg.Done(); copyTo(r, func(b []byte) { sink(i, b) }) }()
+	}
+	return func() {
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+		for _, r := range readers {
+			if c, ok := r.(io.Closer); ok {
+				_ = c.Close()
+			}
+		}
+	}
 }
 
 // startTracked starts a process with the reaper told to hand its exit to
