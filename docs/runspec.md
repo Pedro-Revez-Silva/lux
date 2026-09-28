@@ -323,9 +323,11 @@ output is the Run's, bracketed by `lux.beforeStop` events (`start`, then
 into `$LUX_ARTIFACTS` is collected with the placement's artifacts.
 
 It is bounded: after `timeout` (default 10s) its process group is killed
-and the stop goes on. `timeout` may not exceed `grace`, since it runs inside
-the stop's grace; a preemption that shortens the grace gives it at most
-half of what is left. A container that dies, or a host that is lost, runs
+and the stop goes on; so is anything it left running when it ends. It runs
+inside the stop's grace — its time comes out of the grace, never adds to
+it — so `timeout` may not exceed `grace`. A preemption that shortens the
+grace gives it at most half of what is left, including one that arrives
+while it is already running. A container that dies, or a host that is lost, runs
 nothing, so the last state a caller has is whatever the Run wrote before.
 The hook runs once per placement, only after the workload has started.
 

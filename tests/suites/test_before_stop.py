@@ -85,6 +85,35 @@ def test_an_overrunning_hook_is_cut_off_and_the_stop_goes_on(lux, runners, hosts
     assert "/.lux/artifacts/began" in artifact_paths(lux, run_id)
 
 
+def test_a_hook_that_leaves_a_child_running_does_not_hold_the_stop(lux, runners, hosts):
+    """A hook that exits but leaves a background child holding its output
+    must not keep the stop waiting: the child goes with the hook."""
+    runners.start(hosts[0])
+    spec = generic(ALPINE_IMAGE, "sh", "-c", WORK, volumes=WORKSPACE)
+    spec["workload"]["beforeStop"] = {"command": ["sh", "-c", "sleep 600 & echo left > $LUX_ARTIFACTS/left"], "timeout": "10s"}
+    run_id = lux.submit(spec)
+    started(lux, run_id)
+    t0 = time.monotonic()
+    lux.run("stop", run_id, "--wait")
+    assert time.monotonic() - t0 < 25, "the stop waited on the hook's background child"
+    assert "/.lux/artifacts/left" in artifact_paths(lux, run_id)
+
+
+def test_the_hook_does_not_lengthen_the_grace(lux, runners, hosts):
+    """The hook's time comes out of the grace: a workload that ignores its
+    stop is killed at grace after the stop, however long the hook took."""
+    runners.start(hosts[0])
+    spec = generic(ALPINE_IMAGE, "sh", "-c", "trap '' TERM INT; " + WORK, volumes=WORKSPACE)
+    spec["workload"]["grace"] = "8s"
+    spec["workload"]["beforeStop"] = {"command": ["sh", "-c", "sleep 5; echo x > $LUX_ARTIFACTS/x"], "timeout": "8s"}
+    run_id = lux.submit(spec)
+    started(lux, run_id)
+    t0 = time.monotonic()
+    lux.run("stop", run_id, "--wait")
+    assert time.monotonic() - t0 < 20, "the hook's time was added to the grace"
+    assert "/.lux/artifacts/x" in artifact_paths(lux, run_id)
+
+
 def test_a_timeout_past_the_grace_is_refused(lux):
     spec = hooked()
     spec["workload"]["grace"] = "5s"

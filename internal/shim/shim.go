@@ -51,12 +51,15 @@ type Shim struct {
 	delivered map[string]bool
 	stopping  bool
 	stopWhy   string
-	proc      *adapter.Process
-	workPid   int
-	exitCh    chan syscall.WaitStatus
-	initPid   int
-	initCh    chan syscall.WaitStatus
-	pending   []proto.Input
+	// hookCut, while a beforeStop runs, moves its deadline in: a later,
+	// shorter stop (the host is going) applies to it too.
+	hookCut func(time.Duration)
+	proc    *adapter.Process
+	workPid int
+	exitCh  chan syscall.WaitStatus
+	initPid int
+	initCh  chan syscall.WaitStatus
+	pending []proto.Input
 	// env is the workload's environment, for exec.
 	env []string
 	// term is the workload's terminal, when it has one (workload.tty).
@@ -379,11 +382,18 @@ func (s *Shim) stop(reason string, shorter time.Duration) {
 	s.mu.Lock()
 	ad, proc, initPid := s.adapter, s.proc, s.initPid
 	if s.stopping {
+		hook := s.hookCut
 		s.mu.Unlock()
 		// Stopping already: a shorter grace (the host is going) still
-		// applies. The earlier timer firing later is harmless.
-		if shorter > 0 && proc != nil {
-			time.AfterFunc(shorter, func() { _ = syscall.Kill(-proc.Cmd.Process.Pid, syscall.SIGKILL) })
+		// applies — to a beforeStop still running, and to the workload.
+		// The earlier timer firing later is harmless.
+		if shorter > 0 {
+			if hook != nil {
+				hook(shorter / 2)
+			}
+			if proc != nil {
+				time.AfterFunc(shorter, func() { _ = syscall.Kill(-proc.Cmd.Process.Pid, syscall.SIGKILL) })
+			}
 		}
 		return
 	}
@@ -392,53 +402,65 @@ func (s *Shim) stop(reason string, shorter time.Duration) {
 	env := s.env
 	s.mu.Unlock()
 	s.out.Event(proto.EvStop, map[string]any{"reason": reason})
+
+	grace := time.Duration(s.cfg.GraceSec * float64(time.Second))
+	if grace <= 0 {
+		grace = 30 * time.Second
+	}
+	// The runner sends the grace it has; only one shorter than the spec's
+	// means the host is going.
+	cut := shorter > 0 && shorter < grace
+	if shorter > 0 {
+		grace = min(grace, shorter)
+	}
+	// The whole stop, beforeStop included, is over by this deadline: the
+	// hook's time comes out of the grace, never adds to it.
+	deadline := time.Now().Add(grace)
+
+	finish := func() {
+		if initPid > 0 {
+			_ = syscall.Kill(-initPid, syscall.SIGTERM)
+		}
+		if ad != nil && proc != nil {
+			if err := ad.Stop(); err != nil {
+				s.out.Event(proto.EvWarning, map[string]any{"message": "graceful stop: " + err.Error()})
+			}
+			time.AfterFunc(max(time.Until(deadline), time.Second), func() {
+				_ = syscall.Kill(-proc.Cmd.Process.Pid, syscall.SIGKILL)
+			})
+		}
+		// Not started yet: unblock the wait for start.
+		select {
+		case s.startCh <- proto.ShimMsg{Type: proto.ShimStart}:
+		default:
+		}
+	}
+
 	// What the workload leaves behind, while it is still whole: before
-	// anything is signalled, and inside the grace so a stop is never held
-	// up by it. Only once the workload has started (there is nothing to
-	// leave before), and not for init, which has no workload yet.
-	if len(s.cfg.BeforeStop) > 0 && env != nil && proc != nil {
-		limit := time.Duration(s.cfg.BeforeStopTimeout * float64(time.Second))
-		if shorter > 0 {
-			limit = min(limit, shorter/2)
-		}
-		start := time.Now()
+	// anything is signalled. Only once the workload has started (there is
+	// nothing to leave before). It runs off the runner's connection, so a
+	// preemption arriving meanwhile is read at once and can cut it short.
+	if len(s.cfg.BeforeStop) == 0 || env == nil || proc == nil {
+		finish()
+		return
+	}
+	limit := time.Duration(s.cfg.BeforeStopTimeout * float64(time.Second))
+	if limit <= 0 {
+		limit = 10 * time.Second
+	}
+	if cut {
+		limit = min(limit, grace/2)
+	}
+	go func() {
 		s.beforeStop(env, limit)
-		if shorter > 0 {
-			shorter = max(shorter-time.Since(start), time.Second)
-		}
-	}
-	if initPid > 0 {
-		_ = syscall.Kill(-initPid, syscall.SIGTERM)
-	}
-	if ad != nil && proc != nil {
-		if err := ad.Stop(); err != nil {
-			s.out.Event(proto.EvWarning, map[string]any{"message": "graceful stop: " + err.Error()})
-		}
-		grace := time.Duration(s.cfg.GraceSec * float64(time.Second))
-		if grace <= 0 {
-			grace = 30 * time.Second
-		}
-		if shorter > 0 {
-			grace = min(grace, shorter)
-		}
-		time.AfterFunc(grace, func() {
-			_ = syscall.Kill(-proc.Cmd.Process.Pid, syscall.SIGKILL)
-		})
-	}
-	// Not started yet: unblock the wait for start.
-	select {
-	case s.startCh <- proto.ShimMsg{Type: proto.ShimStart}:
-	default:
-	}
+		finish()
+	}()
 }
 
 // beforeStop runs the spec's beforeStop command once, as the workload user
 // with its environment, its output the Run's, and gives up after limit:
 // the command's whole process group is killed then, and the stop goes on.
 func (s *Shim) beforeStop(env []string, limit time.Duration) {
-	if limit <= 0 {
-		limit = 10 * time.Second
-	}
 	s.out.Event(proto.EvBeforeStop, map[string]any{"phase": "start"})
 	cmd := s.command(s.cfg.BeforeStop, env)
 	stdout, _ := cmd.StdoutPipe()
@@ -448,6 +470,24 @@ func (s *Shim) beforeStop(env []string, limit time.Duration) {
 		s.out.Event(proto.EvBeforeStop, map[string]any{"phase": "done", "exitCode": -1, "error": err.Error()})
 		return
 	}
+	pgid := cmd.Process.Pid
+	// A later, shorter stop (the host is going) moves the deadline in.
+	deadline := time.NewTimer(limit)
+	defer deadline.Stop()
+	var cutMu sync.Mutex
+	s.mu.Lock()
+	s.hookCut = func(d time.Duration) {
+		cutMu.Lock()
+		defer cutMu.Unlock()
+		deadline.Reset(max(d, 0))
+	}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.hookCut = nil
+		s.mu.Unlock()
+	}()
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() { defer wg.Done(); copyTo(stdout, func(b []byte) { s.out.Write("stdout", b) }) }()
@@ -456,12 +496,26 @@ func (s *Shim) beforeStop(env []string, limit time.Duration) {
 	var ws syscall.WaitStatus
 	select {
 	case ws = <-exited:
-	case <-time.After(limit):
+	case <-deadline.C:
 		timedOut = true
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		ws = <-exited
 	}
-	wg.Wait()
+	// Whatever the hook left running (a background child, a daemon) goes
+	// with it: the stop must not wait on it, nor leave it to hold the pipes.
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	// What it wrote before exiting is still being read; a child in its own
+	// session can hold the pipes open, so do not wait forever (as exec).
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+	}
+	// The reaper collected the process, so cmd.Wait (which closes the
+	// pipes' parent ends) is never called: close them here.
+	_ = stdout.Close()
+	_ = stderr.Close()
 	s.out.Event(proto.EvBeforeStop, map[string]any{"phase": "done", "exitCode": exitCode(ws), "timedOut": timedOut})
 }
 
