@@ -80,3 +80,8 @@ export function hostStateStyle(state: string): StateStyle {
 export function serverStateStyle(state: string): StateStyle {
   return SERVER_STATES[state as ServerState] ?? { ...UNKNOWN, label: state };
 }
+
+/** A server whose process (or port) is up, or on its way up: stop and restart apply, start does not. */
+export function isServerUp(state: string): boolean {
+  return state === "starting" || state === "ready" || state === "unreachable";
+}

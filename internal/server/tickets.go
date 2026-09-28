@@ -116,19 +116,23 @@ func (s *Server) redeemTicket(ctx context.Context, raw, runID, kind string) (Pri
 		if err != nil || sp.KeyID == "" {
 			return err
 		}
-		var live bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM api_keys WHERE id = $1 AND revoked_at IS NULL)`, sp.KeyID).Scan(&live); err != nil {
-			return err
+		live, err := keyLiveTx(ctx, tx, sp.KeyID)
+		if err == nil && !live {
+			err = pgx.ErrNoRows
 		}
-		if !live {
-			return pgx.ErrNoRows
-		}
-		return nil
+		return err
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, errBadTicket
 	}
 	return sp.principal(), err
+}
+
+// keyLiveTx: the API key keyID exists and is not revoked.
+func keyLiveTx(ctx context.Context, tx pgx.Tx, keyID string) (bool, error) {
+	var live bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM api_keys WHERE id = $1 AND revoked_at IS NULL)`, keyID).Scan(&live)
+	return live, err
 }
 
 // ticketReaper deletes tickets well past their expiry.

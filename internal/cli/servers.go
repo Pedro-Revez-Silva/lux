@@ -4,15 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/coder/websocket/wsjson"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
 	"github.com/marcioapm/lux/internal/client"
 	"github.com/marcioapm/lux/internal/proto"
@@ -31,20 +28,7 @@ workload user, with its environment, on a terminal. The same as
 lux exec -t <run> -- /bin/sh -c 'exec bash -l 2>/dev/null || exec sh -l'.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := ctxOf(cmd)
-			ws, err := a.c.Dial(ctx, "/v1/runs/"+args[0]+"/exec")
-			if err != nil {
-				return err
-			}
-			defer ws.CloseNow()
-			open := proto.StreamOpen{Command: shellCommand, TTY: true}
-			if a.stdinTerminal() {
-				open.Cols, open.Rows, _ = term.GetSize(int(os.Stdout.Fd()))
-			}
-			if err := wsjson.Write(ctx, ws, open); err != nil {
-				return err
-			}
-			return a.interact(ctx, ws, a.stdinTerminal())
+			return a.exec(ctxOf(cmd), args[0], proto.StreamOpen{Command: shellCommand, TTY: true}, a.stdinTerminal())
 		},
 	}
 }
@@ -155,6 +139,27 @@ func (a *app) listServers(ctx context.Context, run string) ([]server.RunServer, 
 	return out.Servers, err
 }
 
+// getServer is one of a Run's servers, by name.
+func (a *app) getServer(ctx context.Context, run, name string) (server.RunServer, error) {
+	servers, err := a.listServers(ctx, run)
+	if err != nil {
+		return server.RunServer{}, err
+	}
+	i := slices.IndexFunc(servers, func(sv server.RunServer) bool { return sv.Name == name })
+	if i < 0 {
+		return server.RunServer{}, noServer(name)
+	}
+	return servers[i], nil
+}
+
+// serverURL is a server's preview URL, or "" without one.
+func serverURL(sv server.RunServer) string {
+	if sv.URL == nil {
+		return ""
+	}
+	return *sv.URL
+}
+
 func (a *app) serverLsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "ls <run> [name]",
@@ -162,20 +167,22 @@ func (a *app) serverLsCmd() *cobra.Command {
 		Short:   "List a Run's servers (or show one)",
 		Args:    cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				sv, err := a.getServer(ctxOf(cmd), args[0], args[1])
+				if err != nil {
+					return err
+				}
+				if a.output == "json" {
+					return a.json(sv)
+				}
+				a.serverTable([]server.RunServer{sv})
+				return nil
+			}
 			servers, err := a.listServers(ctxOf(cmd), args[0])
 			if err != nil {
 				return err
 			}
-			if len(args) == 2 {
-				i := slices.IndexFunc(servers, func(sv server.RunServer) bool { return sv.Name == args[1] })
-				if i < 0 {
-					return noServer(args[1])
-				}
-				if a.output == "json" {
-					return a.json(servers[i])
-				}
-				servers = servers[i : i+1]
-			} else if a.output == "json" {
+			if a.output == "json" {
 				return a.json(servers)
 			}
 			a.serverTable(servers)
@@ -194,11 +201,7 @@ func (a *app) serverTable(servers []server.RunServer) {
 				command = command[:39] + "…"
 			}
 		}
-		u := "-"
-		if sv.URL != nil {
-			u = *sv.URL
-		}
-		rows = append(rows, []string{sv.Name, strconv.Itoa(sv.Port), serverState(sv), ago(&sv.Since), u, command})
+		rows = append(rows, []string{sv.Name, strconv.Itoa(sv.Port), serverState(sv), ago(&sv.Since), orDash(serverURL(sv)), command})
 	}
 	a.table("NAME\tPORT\tSTATE\tSINCE\tURL\tCOMMAND", rows)
 }
@@ -287,20 +290,16 @@ func (a *app) serverWaitCmd() *cobra.Command {
 			ctx, cancel := context.WithTimeout(ctxOf(cmd), timeout)
 			defer cancel()
 			for {
-				servers, err := a.listServers(ctx, args[0])
+				sv, err := a.getServer(ctx, args[0], args[1])
 				if err != nil {
 					return err
 				}
-				i := slices.IndexFunc(servers, func(sv server.RunServer) bool { return sv.Name == args[1] })
-				if i < 0 {
-					return noServer(args[1])
-				}
-				if slices.Contains(want, servers[i].State) {
-					return a.printServer(servers[i])
+				if slices.Contains(want, sv.State) {
+					return a.printServer(sv)
 				}
 				select {
 				case <-ctx.Done():
-					return fmt.Errorf("server %s is %s, not %s, after %s", args[1], serverState(servers[i]), states, timeout)
+					return fmt.Errorf("server %s is %s, not %s, after %s", args[1], serverState(sv), states, timeout)
 				case <-time.After(500 * time.Millisecond):
 				}
 			}

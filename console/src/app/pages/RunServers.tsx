@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Button, Card, ConfirmDialog, Dialog, EmptyState, LogView, ServerList, useToast, type LogLine, type ServerInfo } from "@lux/design-system";
+import { Button, Card, ConfirmDialog, Dialog, EmptyState, isServerUp, LogView, ServerList, useToast, type LogLine, type ServerInfo } from "@lux/design-system";
 import { IconPlus, IconRefresh } from "@lux/design-system/icons";
 import { api, errorText, EXEC_RUN_STATES, invalidate, isApiError, TERMINAL_RUN_STATES, useNow, useQuery, type Run, type Server, type ServerInput } from "../../api/index.ts";
 import { ErrorStrip } from "./common.tsx";
@@ -107,7 +107,7 @@ export function RunServers({ run, refetch, fetching, error }: { run: Run; refetc
  * when nothing changed.
  */
 function ServerLog({ runId, server: s }: { runId: string; server: ServerInfo }) {
-  const up = s.state === "starting" || s.state === "ready" || s.state === "unreachable";
+  const up = isServerUp(s.state);
   const last = useRef<LogLine[] | null>(null);
   const q = useQuery(
     `run-server-log:${runId}:${s.name}`,

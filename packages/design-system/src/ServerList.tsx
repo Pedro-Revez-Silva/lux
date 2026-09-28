@@ -5,7 +5,7 @@ import { EmptyState } from "./EmptyState.tsx";
 import { useCopy } from "./IdChip.tsx";
 import { formatClock, formatElapsed } from "./format.ts";
 import { IconCheck, IconChevronDown, IconChevronUp, IconCopy, IconExternal, IconPlay, IconRefresh, IconStop, IconTrash } from "./icons.tsx";
-import type { ServerState } from "./states.ts";
+import { isServerUp, type ServerState } from "./states.ts";
 
 /** A Run's server as the API reports it: the fields the row shows. */
 export interface ServerInfo {
@@ -70,7 +70,7 @@ export function ServerRow({ server: s, runRunning, now = Date.now(), busy, onSta
   const [open, setOpen] = useState(defaultOpen);
   const { copied, copy } = useCopy(s.url ?? "");
   const live = s.state === "ready";
-  const up = s.state === "ready" || s.state === "starting" || s.state === "unreachable";
+  const up = isServerUp(s.state);
   const canStart = runRunning && !up && !!s.command?.length;
   const host = s.url?.replace(/^https?:\/\//, "");
   return (

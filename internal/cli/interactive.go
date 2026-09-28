@@ -28,21 +28,8 @@ command's. A terminal is allocated when stdin is one (-t forces it, -T turns
 it off).`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := ctxOf(cmd)
 			useTTY := (tty || a.stdinTerminal()) && !noTTY
-			ws, err := a.c.Dial(ctx, "/v1/runs/"+args[0]+"/exec")
-			if err != nil {
-				return err
-			}
-			defer ws.CloseNow()
-			open := proto.StreamOpen{Command: args[1:], TTY: useTTY}
-			if useTTY {
-				open.Cols, open.Rows, _ = term.GetSize(int(os.Stdout.Fd()))
-			}
-			if err := wsjson.Write(ctx, ws, open); err != nil {
-				return err
-			}
-			return a.interact(ctx, ws, useTTY)
+			return a.exec(ctxOf(cmd), args[0], proto.StreamOpen{Command: args[1:], TTY: useTTY}, useTTY)
 		},
 	}
 	cmd.Flags().BoolVarP(&tty, "tty", "t", false, "allocate a terminal")
@@ -68,6 +55,23 @@ workload keeps running).`,
 			return a.interact(ctx, ws, a.stdinTerminal())
 		},
 	}
+}
+
+// exec runs open's command in a Run and interacts with it (raw: stdin as
+// a raw terminal, whose size the command's terminal starts with).
+func (a *app) exec(ctx context.Context, run string, open proto.StreamOpen, raw bool) error {
+	ws, err := a.c.Dial(ctx, "/v1/runs/"+run+"/exec")
+	if err != nil {
+		return err
+	}
+	defer ws.CloseNow()
+	if raw {
+		open.Cols, open.Rows, _ = term.GetSize(int(os.Stdout.Fd()))
+	}
+	if err := wsjson.Write(ctx, ws, open); err != nil {
+		return err
+	}
+	return a.interact(ctx, ws, raw)
 }
 
 // stdinTerminal: whether the CLI's stdin is a terminal (raw mode, sizes).

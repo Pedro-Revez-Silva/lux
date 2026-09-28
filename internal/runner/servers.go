@@ -86,16 +86,9 @@ func (p *placement) sendServers() {
 			run = append(run, s)
 		}
 	}
-	if err := p.sendShim(proto.ShimMsg{Type: proto.ShimServers, Servers: nonNilServers(run)}); err != nil && p.liveState() == "running" {
+	if err := p.sendShim(proto.ShimMsg{Type: proto.ShimServers, Servers: run}); err != nil && p.liveState() == "running" {
 		p.logf("servers: shim not reachable", "err", err)
 	}
-}
-
-func nonNilServers(s []proto.ServerSpec) []proto.ServerSpec {
-	if s == nil {
-		return []proto.ServerSpec{}
-	}
-	return s
 }
 
 // serverPortAllowed: a tunnel may reach any of the Run's servers' ports.

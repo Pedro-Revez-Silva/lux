@@ -210,7 +210,9 @@ func (p *previews) keyLive(ctx context.Context, keyID string) bool {
 	}
 	var live bool
 	err := p.s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM api_keys WHERE id = $1 AND revoked_at IS NULL)`, keyID).Scan(&live)
+		var err error
+		live, err = keyLiveTx(ctx, tx, keyID)
+		return err
 	})
 	if err != nil {
 		return false
@@ -313,11 +315,7 @@ func (p *previews) signIn(w http.ResponseWriter, r *http.Request, runID string) 
 		return
 	}
 	pr, err := p.s.redeemTicket(r.Context(), r.URL.Query().Get("ticket"), runID, TicketPreview)
-	if err != nil {
-		p.page(w, http.StatusUnauthorized, pageSignIn, nil)
-		return
-	}
-	if !pr.Can("read") {
+	if err != nil || !pr.Can("read") {
 		p.page(w, http.StatusUnauthorized, pageSignIn, nil)
 		return
 	}

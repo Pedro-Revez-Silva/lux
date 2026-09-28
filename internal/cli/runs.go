@@ -303,11 +303,7 @@ func (a *app) getCmd() *cobra.Command {
 			if len(run.Servers) > 0 {
 				fmt.Fprintln(w, "servers:")
 				for _, sv := range run.Servers {
-					u := ""
-					if sv.URL != nil {
-						u = *sv.URL
-					}
-					fmt.Fprintf(w, "  %-12s %-6d %-24s %s\n", sv.Name, sv.Port, serverState(sv), u)
+					fmt.Fprintf(w, "  %-12s %-6d %-24s %s\n", sv.Name, sv.Port, serverState(sv), serverURL(sv))
 				}
 			}
 			if u := run.Usage; u != nil && u.Placements > 0 {

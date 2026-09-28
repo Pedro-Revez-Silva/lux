@@ -349,13 +349,16 @@ func boundary(typ string, data any) bool {
 // event records an event, redacted as marshalled: values are matched in
 // their JSON-escaped forms too (see Redactor.Set). Must be called with mu
 // held.
-func (o *Output) event(typ string, data any) {
+func (o *Output) event(typ string, data any) { o.eventAs(proto.Record{Ch: "event"}, typ, data) }
+
+// eventAs is event on the record r (its Ch, and Server if any).
+func (o *Output) eventAs(r proto.Record, typ string, data any) {
 	raw, err := json.Marshal(data)
 	if err != nil {
 		raw = []byte(`{}`)
 	}
 	ev, _ := json.Marshal(map[string]json.RawMessage{"type": mustJSON(typ), "data": raw})
-	o.record(proto.Record{Ch: "event"}, nil, json.RawMessage(o.red.Redact(string(ev))))
+	o.record(r, nil, json.RawMessage(o.red.Redact(string(ev))))
 }
 
 // ServerEvent records a server process's lifecycle (EvServer) as a
@@ -371,12 +374,7 @@ func (o *Output) ServerEvent(name string, data any) {
 			o.release(b, true)
 		}
 	}
-	raw, err := json.Marshal(data)
-	if err != nil {
-		raw = []byte(`{}`)
-	}
-	ev, _ := json.Marshal(map[string]json.RawMessage{"type": mustJSON(proto.EvServer), "data": raw})
-	o.record(proto.Record{Ch: "server", Server: name}, nil, json.RawMessage(o.red.Redact(string(ev))))
+	o.eventAs(proto.Record{Ch: "server", Server: name}, proto.EvServer, data)
 	o.w.Flush()
 }
 

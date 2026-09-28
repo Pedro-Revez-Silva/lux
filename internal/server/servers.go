@@ -36,6 +36,12 @@ const (
 	ServerExited      = "exited"
 )
 
+// serverUp: a server in a state its process (or port) is up in, or on
+// its way up.
+func serverUp(state string) bool {
+	return state == ServerStarting || state == ServerReady || state == ServerUnreachable
+}
+
 // RunServer is a Run's server, as the API shows it.
 type RunServer struct {
 	Name          string            `json:"name"`
@@ -54,17 +60,15 @@ type RunServer struct {
 	Epoch         *int              `json:"epoch" nullable:"true" doc:"The placement epoch its current state is of."`
 	URL           *string           `json:"url" nullable:"true" doc:"Its preview URL; null when previews are not configured."`
 	LastRequestAt *time.Time        `json:"lastRequestAt,omitempty" doc:"When its preview URL was last requested (updated at most every 30s)."`
-	// gen: which start its state is of (internal).
-	gen int64
 }
 
 const serverColumns = `name, port, command, workdir, env, from_spec, state, exit_code, error, since, ready_since,
-	stop_reason, stopped_epoch, epoch, last_request_at, gen`
+	stop_reason, stopped_epoch, epoch, last_request_at`
 
 func (s *Server) scanServer(row pgx.Row, runID string) (RunServer, error) {
 	var sv RunServer
 	err := row.Scan(&sv.Name, &sv.Port, &sv.Command, &sv.Workdir, &sv.Env, &sv.FromSpec, &sv.State, &sv.ExitCode, &sv.Error,
-		&sv.Since, &sv.ReadySince, &sv.StopReason, &sv.StoppedEpoch, &sv.Epoch, &sv.LastRequestAt, &sv.gen)
+		&sv.Since, &sv.ReadySince, &sv.StopReason, &sv.StoppedEpoch, &sv.Epoch, &sv.LastRequestAt)
 	if sv.Env == nil {
 		sv.Env = map[string]string{}
 	}
@@ -92,7 +96,7 @@ func (s *Server) listServersTx(ctx context.Context, tx pgx.Tx, runID string) ([]
 func (s *Server) getServerTx(ctx context.Context, tx pgx.Tx, runID, name string) (RunServer, error) {
 	sv, err := s.scanServer(tx.QueryRow(ctx, `SELECT `+serverColumns+` FROM run_servers WHERE run_id = $1 AND name = $2`, runID, name), runID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return sv, errf(http.StatusNotFound, "not_found", "the Run has no server %q", name)
+		return sv, errNoServer(name)
 	}
 	return sv, err
 }
@@ -120,8 +124,8 @@ func nilIfEmpty(cmd []string) []string {
 // for each that changed. where selects them on run_servers (as rs, $1 is
 // the Run's id; further args from $5), and the update sets what the state
 // means: starting (a new start: gen, active config and epoch), stopped
-// (stopReason, stoppedEpoch). Returns how many changed.
-func setServerState(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, state, stopReason, where string, args ...any) (int, error) {
+// (stopReason, stoppedEpoch).
+func setServerState(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, state, stopReason, where string, args ...any) error {
 	rows, err := tx.Query(ctx, `UPDATE run_servers rs SET
 			state = $2,
 			since = now(),
@@ -137,26 +141,25 @@ func setServerState(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoc
 		WHERE rs.run_id = $1 AND (`+where+`)
 		RETURNING name`, append([]any{runID, state, epoch, stopReason}, args...)...)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
-		return 0, err
+		return err
 	}
 	for _, n := range names {
 		if err := addEvent(ctx, tx, tenantID, runID, epoch, "server.state", map[string]any{"name": n, "state": state, "epoch": epoch}); err != nil {
-			return 0, err
+			return err
 		}
 	}
-	return len(names), nil
+	return nil
 }
 
 // stopServersAtEnd marks every server of a placement that ended stopped:
 // its processes went with it. why is the stop reason (run stopped,
 // migrated, host lost).
 func stopServersAtEnd(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, why string) error {
-	_, err := setServerState(ctx, tx, tenantID, runID, epoch, ServerStopped, why, `rs.state <> 'stopped'`)
-	return err
+	return setServerState(ctx, tx, tenantID, runID, epoch, ServerStopped, why, `rs.state <> 'stopped'`)
 }
 
 // endReason is the stopReason servers get when their placement ended with
@@ -172,7 +175,7 @@ func endReason(placementStop string) string {
 // sends the placement its servers.
 // A Run without servers is sent nothing.
 func (s *Server) startSpecServers(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int) error {
-	if _, err := setServerState(ctx, tx, tenantID, runID, epoch, ServerStarting, "", `rs.from_spec`); err != nil {
+	if err := setServerState(ctx, tx, tenantID, runID, epoch, ServerStarting, "", `rs.from_spec`); err != nil {
 		return err
 	}
 	var any bool
@@ -242,7 +245,7 @@ func desiredServers(ctx context.Context, tx pgx.Tx, runID string, epoch int, rev
 			msg.Servers = append(msg.Servers, proto.ServerSpec{Name: name, Port: port, Gen: gen})
 			continue
 		}
-		if active == nil || (state != ServerStarting && state != ServerReady && state != ServerUnreachable) {
+		if active == nil || !serverUp(state) {
 			continue
 		}
 		if active.Port != port {
@@ -435,7 +438,7 @@ func (s *Server) addServer(ctx context.Context, in *addServerInput) (*serverOutp
 			return err
 		}
 		if start {
-			if _, err := setServerState(ctx, tx, p.TenantID, in.ID, epoch, ServerStarting, "", `rs.name = $5`, sv.Name); err != nil {
+			if err := setServerState(ctx, tx, p.TenantID, in.ID, epoch, ServerStarting, "", `rs.name = $5`, sv.Name); err != nil {
 				return err
 			}
 		}
@@ -484,7 +487,7 @@ func (s *Server) putServer(ctx context.Context, in *putServerInput) (*serverOutp
 			return err
 		}
 		if tag.RowsAffected() == 0 {
-			return errf(http.StatusNotFound, "not_found", "the Run has no server %q", in.Name)
+			return errNoServer(in.Name)
 		}
 		out, err = s.getServerTx(ctx, tx, in.ID, in.Name)
 		return err
@@ -512,7 +515,7 @@ func (s *Server) serverAction(action string) func(context.Context, *ServerPath) 
 			if action == "stop" {
 				// Stopped by request, it is no longer watched either.
 				if sv.State != ServerStopped || sv.StopReason == nil || *sv.StopReason != "stopped" {
-					if _, err := setServerState(ctx, tx, p.TenantID, in.ID, epoch, ServerStopped, "stopped", `rs.name = $5`, in.Name); err != nil {
+					if err := setServerState(ctx, tx, p.TenantID, in.ID, epoch, ServerStopped, "stopped", `rs.name = $5`, in.Name); err != nil {
 						return err
 					}
 				}
@@ -523,10 +526,9 @@ func (s *Server) serverAction(action string) func(context.Context, *ServerPath) 
 				if state != StateRunning {
 					return errf(http.StatusConflict, "not_running", "run is %s: a server starts only in a running Run", state)
 				}
-				running := sv.State == ServerStarting || sv.State == ServerReady || sv.State == ServerUnreachable
 				// start is idempotent while it runs; restart restarts.
-				if action == "restart" || !running {
-					if _, err := setServerState(ctx, tx, p.TenantID, in.ID, epoch, ServerStarting, "", `rs.name = $5`, in.Name); err != nil {
+				if action == "restart" || !serverUp(sv.State) {
+					if err := setServerState(ctx, tx, p.TenantID, in.ID, epoch, ServerStarting, "", `rs.name = $5`, in.Name); err != nil {
 						return err
 					}
 				}
@@ -539,6 +541,11 @@ func (s *Server) serverAction(action string) func(context.Context, *ServerPath) 
 		}
 		return &serverOutput{http.StatusOK, out}, nil
 	}
+}
+
+// errNoServer is the not_found of a server the Run does not have.
+func errNoServer(name string) error {
+	return errf(http.StatusNotFound, "not_found", "the Run has no server %q", name)
 }
 
 // errNoCommand: lux runs nothing for a server without a command; its port
@@ -563,7 +570,7 @@ func (s *Server) removeServer(ctx context.Context, in *ServerPath) (*noContent, 
 			return err
 		}
 		if tag.RowsAffected() == 0 {
-			return errf(http.StatusNotFound, "not_found", "the Run has no server %q", in.Name)
+			return errNoServer(in.Name)
 		}
 		return addEvent(ctx, tx, p.TenantID, in.ID, 0, "server.removed", map[string]any{"name": in.Name, "by": p.Actor()})
 	})
