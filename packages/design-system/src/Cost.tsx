@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Badge } from "./Badge.tsx";
-import { formatMoney, formatMoneyExact, moneyIsRounded } from "./format.ts";
+import { compareMoney, formatMoney, formatMoneyExact, moneyIsRounded } from "./format.ts";
 import { IconInfo } from "./icons.tsx";
 import { costStatusStyle, familyColor } from "./states.ts";
 import { Tooltip } from "./Tooltip.tsx";
@@ -92,5 +92,47 @@ export function MoneyList({ amounts, large, className }: { amounts: MoneyAmount[
         <Money key={a.currency} amount={a.amount} currency={a.currency} />
       ))}
     </span>
+  );
+}
+
+export interface CostFigureTotal extends MoneyAmount {
+  /** The part from lines that may still change. */
+  estimate: string;
+}
+
+/**
+ * A cost in one table cell, as `lux ls` shows it: the total for one
+ * currency, "multi" for several, an en dash while pending. A leading "~"
+ * marks a total that may still change (an estimate part, or a source that
+ * has not answered); the Tooltip says which status, in words, with the
+ * exact amounts. No colour: a cell has no room for the label colour needs.
+ */
+export function CostFigure({ status, totals }: { status: string; totals: CostFigureTotal[] | null | undefined }) {
+  if (!totals || totals.length === 0 || status === "pending") return <span className="muted" data-cost-figure="pending">–</span>;
+  const st = costStatusStyle(status);
+  const approx = status === "incomplete" || totals.some((t) => compareMoney(t.estimate, "0") !== 0);
+  const text = totals.length > 1 ? "multi" : (approx ? "~" : "") + formatMoney(totals[0]!.amount, totals[0]!.currency);
+  return (
+    <Tooltip
+      side="left"
+      content={
+        <span className="cost-figure-tip">
+          <span>
+            {st.label}: {st.description}
+          </span>
+          {totals.map((t) => (
+            <span key={t.currency} className="num">
+              {formatMoneyExact(t.amount, t.currency)}
+              {compareMoney(t.estimate, "0") !== 0 && compareMoney(t.estimate, t.amount) !== 0 ? ` (${formatMoneyExact(t.estimate, t.currency)} estimate)` : ""}
+            </span>
+          ))}
+          <span>{LIST_PRICE_TEXT}</span>
+        </span>
+      }
+    >
+      <span className="cost-figure" tabIndex={0} data-cost-figure={status}>
+        {text}
+      </span>
+    </Tooltip>
   );
 }

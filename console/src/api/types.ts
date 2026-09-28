@@ -111,14 +111,15 @@ export interface Run {
   placements?: Placement[];
   usage?: RunUsage;
   resume?: Resumability;
-  /** From GET /v1/runs only, once luxd has it (docs/costs.md §8, Runs list): absent means unknown, not zero. */
-  cost?: RunCostSummary;
+  /** In GET /v1/runs only (not GET /v1/runs/{id}); absent means unknown, not zero. */
+  cost?: RunCostBrief;
 }
 
-/** A Run's cost in a list: its totals per currency and status. */
-export interface RunCostSummary {
-  totals: MoneyTotal[];
+/** RunCostBrief in internal/server/costs.go: GET /v1/runs/{id}/cost's status and totals. */
+export interface RunCostBrief {
   status: CostStatus;
+  /** Per currency, ordered by currency, each with its final and estimate parts; empty while pending. */
+  totals: CostTotal[];
 }
 
 export interface MoneyTotal {

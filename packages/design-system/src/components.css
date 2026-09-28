@@ -1182,13 +1182,21 @@ a.idchip-text:hover {
   color: var(--fg);
   line-height: var(--leading-tight);
 }
-.money-rounded {
+.money-rounded,
+.cost-figure {
   cursor: help;
 }
-.money-rounded:focus-visible {
+.money-rounded:focus-visible,
+.cost-figure:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
   border-radius: var(--radius-sm);
+}
+.cost-figure-tip {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  text-align: left;
 }
 .list-price {
   display: inline-flex;

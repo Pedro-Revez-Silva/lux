@@ -1104,8 +1104,11 @@ is fixed to slot 1).
   - a Table of lines (family, item, source, window, status, amount);
   - pending: an empty state, "No cost reported yet", never `$0.00`.
   - Not built: reserved vs used efficiency (the API has no such field).
-- **Runs list:** a Cost column, written against the planned
-  `cost: {totals, status}` on `GET /v1/runs`; `—` until luxd sends it.
+- **Runs list:** a Cost column from `cost` on `GET /v1/runs`, as `lux ls`
+  shows it (`CostFigure`): the total for one currency, `multi` for several,
+  `—` while pending, and a leading `~` when the total may still change (an
+  estimate part, or `incomplete`). Its Tooltip names the status and gives
+  the exact amounts.
 - **Host page**: allocated vs unallocated per hour, stacked, from
   `/v1/hosts/{id}/cost` (a tenant sees its allocated part only), and, for
   operators, the rate periods in a `KeyValue` (price per hour, and the
@@ -1267,8 +1270,8 @@ Each step can be reviewed and shipped on its own.
 9. **CLI (built)**: `lux cost`, `lux costs`, and a COST column in
    `lux ls`, with `cost` on `GET /v1/runs`.
 10. **Console (built)**: the Run page Cost card, the host page and the
-    Overview (section 9), and the Runs list column against the planned
-    `GET /v1/runs` field. `GET /v1/costs` gains `families` and `runs` when
+    Overview (section 9), and the Runs list column from `cost` on
+    `GET /v1/runs`. `GET /v1/costs` gains `families` and `runs` when
     grouped by them. Tested in `tests/suites/test_console.py` against a real
     luxd, with a static host price and a fake cost plugin.
 11. **Docs**: turn this design into `docs/costs.md` as it was actually

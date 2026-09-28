@@ -8,6 +8,7 @@ import {
   ColorKey,
   compareMoney,
   ConfirmDialog,
+  CostFigure,
   CostStatusBadge,
   EmptyState,
   familyColor,
@@ -391,6 +392,27 @@ const FAMILIES: { family: string; displayName: string; color?: string }[] = [
 
 const FAMILY_COLORS = familyColors(FAMILIES);
 
+interface RunCostRow {
+  name: string;
+  status: string;
+  totals: { currency: string; amount: string; estimate: string }[];
+}
+
+const RUN_COSTS: RunCostRow[] = [
+  { name: "final, one currency", status: "final", totals: [{ currency: "USD", amount: "0.184215", estimate: "0" }] },
+  { name: "part estimate", status: "complete", totals: [{ currency: "USD", amount: "1.4343", estimate: "1.28431" }] },
+  { name: "a source not answered", status: "incomplete", totals: [{ currency: "USD", amount: "0.041", estimate: "0" }] },
+  { name: "tiny", status: "final", totals: [{ currency: "USD", amount: "0.000074", estimate: "0" }] },
+  { name: "two currencies", status: "complete", totals: [{ currency: "EUR", amount: "2.1", estimate: "2.1" }, { currency: "USD", amount: "0.5", estimate: "0" }] },
+  { name: "pending", status: "pending", totals: [] },
+];
+
+const RUN_COST_COLS: Column<RunCostRow>[] = [
+  { key: "name", header: "Run", cell: (r) => r.name, lead: true },
+  { key: "status", header: "Status", cell: (r) => <span className="muted">{r.status}</span>, width: 110 },
+  { key: "cost", header: "Cost", cell: (r) => <CostFigure status={r.status} totals={r.totals} />, align: "right", mono: true, width: 120 },
+];
+
 function Costs() {
   const c = useMemo(() => fakeCostSeries(), []);
   const byCurrency = useMemo(() => {
@@ -437,6 +459,14 @@ function Costs() {
             />
             <Table columns={cols} rows={[...fakeCostLines].sort((a, b) => compareMoney(b.amount, a.amount))} rowKey={(l) => `${l.source}:${l.item}`} dense />
           </div>
+        </Card>
+        <Card title="Cost in a list" subtitle="CostFigure: the same as lux ls's COST column">
+          <Table
+            columns={RUN_COST_COLS}
+            rows={RUN_COSTS}
+            rowKey={(r) => r.name}
+            dense
+          />
         </Card>
         <Card title="Cost" subtitle="pending: nothing reported yet">
           <EmptyState compact title="No cost reported yet" description="The first figures arrive within a couple of minutes of the Run starting. Until then there is no figure, not a zero." />

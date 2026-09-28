@@ -1,7 +1,7 @@
 // Small pieces shared by pages: error/loading blocks, links, the runs table
 // columns, chart series builders and lookups.
 import { useMemo, type ReactNode } from "react";
-import { Button, costStatusStyle, EmptyState, formatMoney, formatPercent, formatRelative, formatTimestamp, formatUnit, IdChip, KeyValue, Skeleton, SkeletonLines, StatePill, Tooltip, type ChartMark, type Column, type Unit } from "@lux/design-system";
+import { Button, CostFigure, EmptyState, formatPercent, formatRelative, formatTimestamp, formatUnit, IdChip, KeyValue, Skeleton, SkeletonLines, StatePill, Tooltip, type ChartMark, type Column, type Unit } from "@lux/design-system";
 import { useNow, type Run, type Sample } from "../../api/index.ts";
 import { Link, linkTo, useSearch } from "../router.tsx";
 
@@ -126,21 +126,9 @@ export function runColumns({ tenant, host = true, adapter = true, cost = false }
   return c;
 }
 
-/**
- * A Run's cost in a list: its total, one figure per currency (never added
- * across currencies). An en dash when luxd sends no cost (not yet
- * reported, or a luxd without the field), never a zero.
- */
+/** A Run's cost in a list, as `lux ls` shows it (CostFigure); an en dash when luxd sends none. */
 function RunCostCell({ run }: { run: Run }) {
-  const c = run.cost;
-  if (!c || c.status === "pending" || c.totals.length === 0) return DASH;
-  const st = costStatusStyle(c.status);
-  const text = c.totals.map((t) => formatMoney(t.amount, t.currency)).join(" · ");
-  return (
-    <Tooltip content={`${st.label}: ${st.description} List price.`} side="left">
-      <span>{text}</span>
-    </Tooltip>
-  );
+  return <CostFigure status={run.cost?.status ?? "pending"} totals={run.cost?.totals} />;
 }
 
 /** Sort by the first currency's total; rows without one sort together. */
