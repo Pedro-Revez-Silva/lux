@@ -369,8 +369,8 @@ func TestBeforeStopTimeoutAgainstGrace(t *testing.T) {
 	if err := s.Normalize(BuiltinDefaults); err != nil {
 		t.Fatalf("a default timeout under a short grace: %v", err)
 	}
-	if got := s.Workload.BeforeStop.Timeout.Duration; got != 5*time.Second {
-		t.Fatalf("default timeout %s, want the grace (5s)", got)
+	if got := s.Workload.BeforeStop.Timeout.Duration; got != 2500*time.Millisecond {
+		t.Fatalf("default timeout %s, want half the grace (2.5s): the workload keeps the rest", got)
 	}
 	s = spec("", "")
 	_ = s.Normalize(BuiltinDefaults)
@@ -380,5 +380,9 @@ func TestBeforeStopTimeoutAgainstGrace(t *testing.T) {
 	s = spec("5s", "20s")
 	if err := s.Normalize(BuiltinDefaults); err == nil || !strings.Contains(err.Error(), "beforeStop.timeout") {
 		t.Fatalf("a timeout past the grace: %v", err)
+	}
+	s = spec("-5s", "")
+	if err := s.Normalize(BuiltinDefaults); err == nil || !strings.Contains(err.Error(), "workload.grace") {
+		t.Fatalf("a negative grace: %v", err)
 	}
 }

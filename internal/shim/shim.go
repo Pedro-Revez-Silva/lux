@@ -66,6 +66,10 @@ type Shim struct {
 	pending   []proto.Input
 	// env is the workload's environment, for exec.
 	env []string
+	// ending: the workload has exited and the shim is finishing; no
+	// beforeStop may start from here. Kept apart from env, which stays
+	// the workload's environment until the shim is done.
+	ending bool
 	// term is the workload's terminal, when it has one (workload.tty).
 	term *terminal
 	// streams: exec'd processes, by pid, whose exits the reaper reports.
@@ -221,7 +225,7 @@ func (s *Shim) run() int {
 	// its own deadline.
 	s.mu.Lock()
 	hook := s.hookDone
-	s.env = nil
+	s.ending = true
 	s.mu.Unlock()
 	if hook != nil {
 		<-hook
@@ -424,9 +428,9 @@ func (s *Shim) stop(reason string, shorter time.Duration) {
 	s.stopping = true
 	s.stopWhy = reason
 	// Registered with the stop, under the same lock, so run() waits for
-	// it. A workload that already exited has cleared env and has no hook.
+	// it. A workload that already exited is ending and has no hook.
 	env := s.env
-	hook := len(s.cfg.BeforeStop) > 0 && env != nil && proc != nil
+	hook := len(s.cfg.BeforeStop) > 0 && env != nil && !s.ending && proc != nil
 	var done chan struct{}
 	if hook {
 		limit := secs(s.cfg.BeforeStopTimeoutSec)

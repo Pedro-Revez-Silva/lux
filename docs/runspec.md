@@ -21,7 +21,7 @@ workload:
   grace: 30s                    # graceful stop before SIGKILL
   beforeStop:                   # run in the container on every stop, first
     command: [sh, -c, "git -C /workspace/repos/api diff > $LUX_ARTIFACTS/final.patch"]
-    timeout: 10s                # default 10s; at most `grace`
+    timeout: 10s                # default 10s or half of `grace`; at most `grace`
   resume: { command: [...] }    # generic only: what to run on resume
   mcpServers:                   # remote MCP servers the agent is given
     - name: tracker
@@ -323,12 +323,14 @@ output is the Run's (and the shim's own record brackets it with
 whether it timed out). Anything it writes
 into `$LUX_ARTIFACTS` is collected with the placement's artifacts.
 
-It is bounded: after `timeout` (default 10s) its process group is killed
+It is bounded: after `timeout` (default 10s, or half the grace if that is
+shorter, so the workload keeps the rest) its process group is killed
 and the stop goes on; so is anything it left running when it ends. It runs
 inside the stop's grace — its time comes out of the grace, never adds to
 it — so `timeout` may not exceed `grace`. A preemption that shortens the
 grace gives it at most half of what is left, including one that arrives
-while it is already running. A container that dies, or a host that is lost, runs
+while it is already running. A workload that exits on its own meanwhile
+leaves the container up until the hook is done. A container that dies, or a host that is lost, runs
 nothing, so the last state a caller has is whatever the Run wrote before.
 The hook runs once per placement, only after the workload has started.
 

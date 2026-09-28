@@ -382,6 +382,9 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	if w.TTY && w.Adapter != "generic" {
 		fail("workload.tty is only for generic workloads: agent adapters own their stdio")
 	}
+	if w.Grace.Duration < 0 {
+		fail("workload.grace must not be negative")
+	}
 	if w.Grace.Duration == 0 {
 		w.Grace.Duration = DefaultGrace
 	}
@@ -393,9 +396,10 @@ func (s *RunSpec) Normalize(d Defaults) error {
 			fail("workload.beforeStop.timeout must not be negative")
 		}
 		if b.Timeout.Duration == 0 {
-			// The default fits whatever grace there is; only a timeout
+			// The default fits whatever grace there is and leaves the
+			// workload half of it, as a preemption does; only a timeout
 			// someone set can be too long.
-			b.Timeout.Duration = min(DefaultBeforeStopTimeout, w.Grace.Duration)
+			b.Timeout.Duration = min(DefaultBeforeStopTimeout, w.Grace.Duration/2)
 		} else if b.Timeout.Duration > w.Grace.Duration {
 			fail("workload.beforeStop.timeout (%s) must not exceed workload.grace (%s): the hook runs inside the stop's grace", b.Timeout.Duration, w.Grace.Duration)
 		}
