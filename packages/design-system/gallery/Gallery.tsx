@@ -392,6 +392,9 @@ const FAMILIES: { family: string; displayName: string; color?: string }[] = [
 
 const FAMILY_COLORS = familyColors(FAMILIES);
 
+/** The AI series with one hour refunded: a -$6 credit, more than that hour's compute. */
+const refundHour = (ai: (number | null)[]) => ai.map((v, i) => (i === 18 ? -6 : v));
+
 interface RunCostRow {
   name: string;
   status: string;
@@ -415,6 +418,7 @@ const RUN_COST_COLS: Column<RunCostRow>[] = [
 
 function Costs() {
   const c = useMemo(() => fakeCostSeries(), []);
+  const refund = useMemo(() => [c.compute, refundHour(c.ai)], [c]);
   const byCurrency = useMemo(() => {
     const m = new Map<string, string[]>();
     for (const l of fakeCostLines) m.set(l.currency, [...(m.get(l.currency) ?? []), l.amount]);
@@ -482,9 +486,12 @@ function Costs() {
         <Card title="Host cost, one hour costed" subtitle="sparse: the y axis still reaches the stacked top ($0.0375)">
           <TimeSeriesChart x={c.x} ys={[c.x.map((_, i) => (i === c.x.length - 1 ? 0.0015 : null)), c.x.map((_, i) => (i === c.x.length - 1 ? 0.036 : null))]} series={[{ label: "Allocated", color: familyColor("compute") }, { label: "Unallocated", color: "var(--st-neutral-dot)" }]} unit="money" currency="USD" stacked />
         </Card>
+        <Card title="Cost by family, a refund hour" subtitle="an AI models credit of -$6 in one hour: the y axis goes below zero, with gridlines">
+          <TimeSeriesChart x={c.x} ys={refund} series={[{ label: "Compute", color: familyColor("compute") }, { label: "AI models", color: familyColor("ai", "violet") }]} unit="money" currency="USD" stacked />
+        </Card>
       </div>
       <p className="sg-note">
-        familySlot: {FAMILIES.map((f) => `${f.family}${f.color ? ` (${f.color})` : ""} → ${familySlot(f.family, f.color)}`).join(" · ")}. Named hints map to a slot (blue hints avoid slot 1, which is compute&apos;s), <Code>#rrggbb</Code> to the nearest hue, no hint to a slot from the family&apos;s name. Shown together, familyColors moves an unhinted family off a slot already taken (egress above).
+        familySlot: {FAMILIES.map((f) => `${f.family}${f.color ? ` (${f.color})` : ""} → ${familySlot(f.family, f.color)}`).join(" · ")}. Named hints map to a slot (blue hints avoid slot 1, which is compute&apos;s), <Code>#rrggbb</Code> to the nearest hue, no hint to a slot from the family&apos;s name. A family's slot never depends on its companions: egress and video share slot 4 above, an accepted collision.
       </p>
     </Section>
   );

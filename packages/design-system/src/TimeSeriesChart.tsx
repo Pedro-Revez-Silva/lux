@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { formatClock, formatTimestamp, formatUnit, type Unit } from "./format.ts";
+import { niceScale, niceSplits } from "./scale.ts";
 import { cssVar, useDensity, useTheme } from "./theme.ts";
 
 export interface Series {
@@ -104,7 +105,7 @@ function stackData(ys: (number | null | undefined)[][], hidden: Set<number>, n: 
   });
 }
 
-export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroBase = true, yMax, legend, marks, stacked, currency, className }: TimeSeriesChartProps) {
+export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heightProp, zeroBase = true, yMax, legend, marks, stacked, currency, className }: TimeSeriesChartProps) {
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
   const { resolved } = useTheme();
@@ -115,10 +116,13 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
   const marksRef = useRef(marks);
   marksRef.current = marks;
 
+  // Keyed by content: a caller's fresh but equal array must not rebuild the
+  // plot; new data alone goes through setData below.
+  const seriesKey = JSON.stringify(seriesProp);
+  const series = useMemo(() => seriesProp, [seriesKey]);
   const colors = useMemo(() => series.map((s, i) => seriesColor(s, i)), [series, resolved]);
   const data = useMemo(() => [x, ...(stacked ? stackData(ys, hidden, x.length) : ys)] as uPlot.AlignedData, [x, ys, stacked, hidden]);
   const fmt = (v: number | null | undefined) => formatUnit(v, unit, currency);
-  const span = x.length > 1 ? x[x.length - 1]! - x[0]! : 0;
 
   useLayoutEffect(() => {
     const el = host.current;
@@ -129,7 +133,8 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
     const cursorColor = cssVar("--chart-cursor");
     const font = `11px ${cssVar("--font-sans")}`;
     // Zero-based without a fixed max: the top gridline is a whole step at or
-    // above the largest (stacked) value, so no point sits above it.
+    // above the largest (stacked) value, and below zero (a refund) the bottom
+    // one a whole step at or below the smallest, so no point sits outside.
     const nice = zeroBase && yMax == null;
     let step = 0;
 
@@ -148,9 +153,9 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
         y: {
           range: (_u, min, max) => {
             if (!nice) return [zeroBase ? 0 : min, yMax ?? (max === 0 ? 1 : max * 1.05)];
-            const s = niceScale(max, Math.max(2, Math.floor(height / 50)));
+            const s = niceScale(min, max, Math.max(2, Math.floor(height / 50)));
             step = s.step;
-            return [0, s.max];
+            return [s.min, s.max];
           },
         },
       },
@@ -160,7 +165,12 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
           font,
           grid: { show: false },
           ticks: { show: true, stroke: axis, width: 1, size: 4 },
-          values: (_u, vals) => vals.map((v) => (span <= 86400 ? formatClock(v * 1000).slice(0, 5) : formatTimestamp(v * 1000, { seconds: false }).slice(5, 11))),
+          values: (u, vals) => {
+            // From the plotted data, which setData replaces without a rebuild.
+            const xs = u.data[0];
+            const span = xs.length > 1 ? xs[xs.length - 1]! - xs[0]! : 0;
+            return vals.map((v) => (span <= 86400 ? formatClock(v * 1000).slice(0, 5) : formatTimestamp(v * 1000, { seconds: false }).slice(5, 11)));
+          },
           space: 64,
         },
         {
@@ -171,7 +181,7 @@ export function TimeSeriesChart({ x, ys, series, unit, height: heightProp, zeroB
           size: 56,
           values: (_u, vals) => vals.map((v) => fmt(v)),
           space: 32,
-          splits: nice ? (_u, _i, _min, max) => Array.from({ length: Math.round(max / step) + 1 }, (_, k) => k * step) : undefined,
+          splits: nice ? (_u, _i, min, max) => niceSplits(min, max, step) : undefined,
         },
       ],
       series: [
@@ -321,20 +331,6 @@ function stackTotal(ys: (number | null | undefined)[][], hidden: Set<number>, id
     if (!hidden.has(i) && v != null) total = (total ?? 0) + v;
   });
   return total;
-}
-
-/**
- * A 0-based y scale for `max` in about `ticks` steps: the step is 1, 2, 2.5
- * or 5 × 10^n, and the scale's max the first multiple of it >= max.
- */
-function niceScale(max: number | null | undefined, ticks: number): { max: number; step: number } {
-  if (max == null || !(max > 0)) return { max: 1, step: 0.25 };
-  const raw = max / ticks;
-  const mag = 10 ** Math.floor(Math.log10(raw));
-  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw * (1 - 1e-9))!;
-  // Float noise (0.1 + 0.2) must not add a step: compare with a tolerance.
-  const n = Math.max(1, Math.ceil(max / step - 1e-9));
-  return { max: Number((n * step).toPrecision(12)), step };
 }
 
 /** Indices of values with no value on either side: a line or band cannot show them. */

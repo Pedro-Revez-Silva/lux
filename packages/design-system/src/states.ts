@@ -163,29 +163,14 @@ export function familyColor(family: string, hint?: string | null): string {
 }
 
 /**
- * Colours for the families shown together (a chart, a breakdown): compute
- * and hinted families keep their slot; an unhinted family whose name-derived
- * slot is taken moves to the next free one, so two families on one chart
- * never share a colour while 8 slots last. Keyed by family.
+ * Colours of the families shown together (a chart, a breakdown), keyed by
+ * family: each one's familyColor, so a family has one colour in every view
+ * whatever its companions. Two unhinted families whose names pick the same
+ * slot share it; a companion never moves either.
  */
 export function familyColors(families: readonly { family: string; color?: string | null }[]): Map<string, string> {
   const out = new Map<string, string>();
-  const used = new Set<number>();
-  const fixed = families.filter((f) => f.family === "compute" || f.color);
-  const free = families.filter((f) => !(f.family === "compute" || f.color));
-  for (const f of fixed) {
-    if (out.has(f.family)) continue;
-    const s = familySlot(f.family, f.color);
-    used.add(s);
-    out.set(f.family, `var(--chart-${s})`);
-  }
-  for (const f of free) {
-    if (out.has(f.family)) continue;
-    let s = familySlot(f.family);
-    for (let k = 0; k < 7 && used.has(s); k++) s = 2 + ((s - 1) % 7);
-    used.add(s);
-    out.set(f.family, `var(--chart-${s})`);
-  }
+  for (const f of families) if (!out.has(f.family)) out.set(f.family, familyColor(f.family, f.color));
   return out;
 }
 
@@ -199,7 +184,7 @@ export interface FamilyInfo {
 
 /**
  * Label and colour of each family shown together: displayName (the family
- * key when there is none) and familyColors() of the hints. Every view of
+ * key when there is none) and familyColor() of its hint. Every view of
  * cost families resolves them here, so one family reads the same everywhere.
  */
 export function familyDisplay(families: readonly FamilyInfo[]): Map<string, { label: string; color: string }> {

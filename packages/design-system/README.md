@@ -182,9 +182,11 @@ family maps to a categorical `--chart-N` slot, never a raw colour.
 slot: a name (`violet` → 7, `amber` → 4, `orange` → 2, `teal` → 3, `pink`
 → 5, `green` → 6, `red` → 8; blue names go to 7, as slot 1 is compute's)
 or `#rrggbb` by nearest hue. Without a hint the family's name picks one of
-slots 2–8, so it keeps its colour everywhere. When several families are
-shown together, `familyColors` keeps compute and hinted families in place
-and moves an unhinted family off a slot already taken.
+slots 2–8 (a hash of the name). A family's slot depends on its key and
+hint alone, never on the families shown beside it, so it has one colour in
+every view; `familyColors` maps each family shown together to that colour.
+Two families that land on one slot share it: a collision is accepted, a
+colour that changes between views is not.
 
 ## Components
 
@@ -224,7 +226,12 @@ Behaviour shared by every chart and tooltip:
   multiple of a 1/2/2.5/5 × 10ⁿ step at or above the largest value (the
   stacked total when `stacked`), and gridlines sit on those steps. No point
   is ever above the top gridline, sparse data included (gallery: "Host cost,
-  one hour costed").
+  one hour costed"). When a value (a refund, a negative stacked sum) is below
+  zero the scale's bottom is the last step at or below the smallest value,
+  with gridlines down to it (gallery: "Cost by family, a refund hour");
+  non-negative data keeps zero as the bottom (`niceScale` in `src/scale.ts`).
+  A series prop that is a fresh but equal array does not rebuild the plot;
+  new `x`/`ys` alone are applied with uPlot's `setData`.
 - **Chart tooltip**: sized to its content (`width: max-content`); series
   labels never wrap.
 - **Tooltip placement**: `side` is a preference. When the tooltip opens it is
