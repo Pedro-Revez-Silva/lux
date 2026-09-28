@@ -685,7 +685,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, image 
 	}
 	if b := sp.Workload.BeforeStop; b != nil {
 		cfg.BeforeStop = b.Command
-		cfg.BeforeStopTimeout = b.Timeout.Seconds()
+		cfg.BeforeStopTimeoutSec = b.Timeout.Seconds()
 	}
 	if a.Resume != nil {
 		cfg.Resume = true

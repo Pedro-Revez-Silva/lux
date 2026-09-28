@@ -49,8 +49,8 @@ type ShimConfig struct {
 	GraceSec float64           `json:"graceSec"`
 	// BeforeStop, when set, runs in the container on every stop before the
 	// workload is signalled (spec.Workload.BeforeStop).
-	BeforeStop        []string `json:"beforeStop,omitempty"`
-	BeforeStopTimeout float64  `json:"beforeStopTimeoutSec,omitempty"`
+	BeforeStop           []string `json:"beforeStop,omitempty"`
+	BeforeStopTimeoutSec float64  `json:"beforeStopTimeoutSec,omitempty"`
 	// Resume is set when this is not the Run's first placement.
 	Resume        bool     `json:"resume,omitempty"`
 	ResumeCommand []string `json:"resumeCommand,omitempty"`

@@ -42,9 +42,9 @@ type Output struct {
 
 type chanBuf struct {
 	id string
-	// ch is the channel its records go out on; id alone when empty. A
-	// second writer on a channel (the beforeStop hook beside the workload)
-	// holds its own partial line, so the two never splice into one record.
+	// ch is the channel its records go out on. A second writer on a
+	// channel (the beforeStop hook beside the workload) has its own id, so
+	// its partial line is held apart and the two never splice.
 	ch   string
 	data []byte
 	// Streamed text (Stream): released as a typ event, built by wrap from
@@ -107,9 +107,7 @@ func (o *Output) WriteAs(id, ch string, p []byte) {
 		return
 	}
 	b := o.buf(id)
-	if b.ch == "" && id != ch {
-		b.ch = ch
-	}
+	b.ch = ch
 	if len(p) > 0 {
 		o.lastByte[id] = p[len(p)-1]
 	}
@@ -275,11 +273,7 @@ func (o *Output) emit(b *chanBuf, end int) {
 	if b.wrap != nil {
 		o.event(b.typ, b.wrap(string(b.data[:end])))
 	} else {
-		ch := b.id
-		if b.ch != "" {
-			ch = b.ch
-		}
-		o.record(ch, b.data[:end], nil)
+		o.record(b.ch, b.data[:end], nil)
 	}
 	b.data = append(b.data[:0], b.data[end:]...)
 	b.since = time.Now()
