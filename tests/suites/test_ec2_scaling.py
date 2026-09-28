@@ -31,6 +31,25 @@ def test_a_waiting_run_gets_a_host_launched(lux, ec2):
     wait_until(lambda: not ec2_hosts(lux, states=("ready", "draining")), 30, 0.3, "the host is still listed")
 
 
+def test_template_tags_are_kept_and_lux_tags_are_reserved(lux, ec2):
+    """A template's own tags reach the instance; a lux:* key is refused when
+    the pool is set. (Production 2026-09-28: a Terraform-generated template
+    carried lux:pool, so every RunInstances named it twice and EC2 refused
+    it.)"""
+    fake_only(ec2)
+    bad = {**ec2.template, "tags": {"lux:pool": "burst"}}
+    r = lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps(bad), check=False)
+    assert r.returncode != 0 and "lux:* tags are set by lux" in r.stderr, r.stderr
+    pool_args = ["pools", "set", "burst", "--provider", "ec2", "--max", "1",
+                 "--template", json.dumps({**ec2.template, "tags": {"team": "platform"}})]
+    lux.run(*pool_args)
+    run_id = lux.submit(generic(ALPINE_IMAGE, "echo", "tagged", placement={"pool": "burst"}))
+    lux.wait_state(run_id, "succeeded", timeout=120)
+    [inst] = ec2.running()
+    assert inst["tags"]["team"] == "platform", inst["tags"]
+    assert inst["tags"]["lux:pool"].endswith("/burst"), inst["tags"]
+
+
 def test_max_hosts_is_respected(lux, ec2):
     fake_only(ec2)
     pool(lux, ec2, max=1)
