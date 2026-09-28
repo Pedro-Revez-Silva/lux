@@ -130,7 +130,8 @@ func setServerState(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoc
 			active = CASE WHEN $2 = 'starting' THEN jsonb_build_object('port', port, 'command', command, 'workdir', workdir, 'env', env) END,
 			epoch = CASE WHEN $2 = 'starting' THEN nullif($3, 0) ELSE epoch END,
 			stop_reason = CASE WHEN $2 = 'stopped' THEN $4 END,
-			stopped_epoch = CASE WHEN $2 = 'stopped' THEN coalesce(nullif($3, 0), stopped_epoch) ELSE stopped_epoch END
+			-- The placement it was running in; one already stopped keeps its.
+			stopped_epoch = CASE WHEN $2 = 'stopped' AND rs.state <> 'stopped' THEN coalesce(rs.epoch, nullif($3, 0)) ELSE stopped_epoch END
 		WHERE rs.run_id = $1 AND (`+where+`)
 		RETURNING name`, append([]any{runID, state, epoch, stopReason}, args...)...)
 	if err != nil {
@@ -196,31 +197,33 @@ func syncServersTx(ctx context.Context, tx pgx.Tx, runID string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	msg, err := desiredServers(ctx, tx, runID, rev)
+	msg, err := desiredServers(ctx, tx, runID, epoch, rev)
 	if err != nil {
 		return "", err
 	}
 	return hostID, enqueue(ctx, tx, hostID, runID, epoch, proto.MsgServers, msg)
 }
 
-// desiredServers is what a placement should run: every server started (and
-// not since stopped or exited), as it was started, and the ports of all.
-func desiredServers(ctx context.Context, tx pgx.Tx, runID string, rev int64) (proto.Servers, error) {
+// desiredServers is what placement epoch should run: every server started
+// (and not since stopped or exited), as it was started; every server
+// without a command, to watch, unless stopped by request in this
+// placement; and the ports of all.
+func desiredServers(ctx context.Context, tx pgx.Tx, runID string, epoch int, rev int64) (proto.Servers, error) {
 	msg := proto.Servers{Rev: rev, Servers: []proto.ServerSpec{}}
 	var workdir string
 	if err := tx.QueryRow(ctx, `SELECT coalesce(spec->'workload'->>'workdir', '') FROM runs WHERE id = $1`, runID).Scan(&workdir); err != nil {
 		return msg, err
 	}
-	rows, err := tx.Query(ctx, `SELECT name, port, command IS NULL, state, coalesce(stop_reason, ''), gen, active
-		FROM run_servers WHERE run_id = $1 ORDER BY name`, runID)
+	rows, err := tx.Query(ctx, `SELECT name, port, command IS NULL, state, `+watchedSQL+`, gen, active
+		FROM run_servers WHERE run_id = $1 ORDER BY name`, runID, epoch)
 	if err != nil {
 		return msg, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var name, state, stopReason string
+		var name, state string
 		var port int
-		var portOnly bool
+		var portOnly, watched bool
 		var gen int64
 		var active *struct {
 			Port    int               `json:"port"`
@@ -228,13 +231,12 @@ func desiredServers(ctx context.Context, tx pgx.Tx, runID string, rev int64) (pr
 			Workdir string            `json:"workdir"`
 			Env     map[string]string `json:"env"`
 		}
-		if err := rows.Scan(&name, &port, &portOnly, &state, &stopReason, &gen, &active); err != nil {
+		if err := rows.Scan(&name, &port, &portOnly, &state, &watched, &gen, &active); err != nil {
 			return msg, err
 		}
 		msg.Ports = append(msg.Ports, port)
-		if portOnly && state == ServerStopped && stopReason != "stopped" {
-			// Watched while the Run runs, unless stopped by request: its
-			// port opening (someone started it by hand) makes it ready.
+		if portOnly && state == ServerStopped && watched {
+			// Its port opening (someone started it by hand) makes it ready.
 			msg.Servers = append(msg.Servers, proto.ServerSpec{Name: name, Port: port, Gen: gen})
 			continue
 		}
@@ -251,6 +253,11 @@ func desiredServers(ctx context.Context, tx pgx.Tx, runID string, rev int64) (pr
 	msg.Ports = slices.Compact(msg.Ports)
 	return msg, rows.Err()
 }
+
+// watchedSQL, on run_servers with the placement's epoch as $2: a stopped
+// server without a command is watched unless it was stopped by request in
+// this placement.
+const watchedSQL = `NOT (coalesce(stop_reason, '') = 'stopped' AND stopped_epoch IS NOT DISTINCT FROM $2)`
 
 // syncServers is syncServersTx in its own system transaction, notifying
 // the host after.
@@ -288,8 +295,8 @@ func applyServerState(ctx context.Context, tx pgx.Tx, tenantID, runID string, ep
 		e = truncate(e, 1000)
 		msg = &e
 	}
-	// A watched port-only server that was stopped by its placement's end
-	// (or never started) becomes ready when its port opens.
+	// A watched server without a command becomes ready when its port
+	// opens, whatever it was.
 	tag, err := tx.Exec(ctx, `UPDATE run_servers SET state = $4, since = now(), epoch = $5,
 			ready_since = CASE WHEN $4 = 'ready' THEN now() END,
 			exit_code = $6, error = $7, stop_reason = NULL,
@@ -297,7 +304,8 @@ func applyServerState(ctx context.Context, tx pgx.Tx, tenantID, runID string, ep
 				WHEN active IS NULL THEN jsonb_build_object('port', port) ELSE active END
 		WHERE run_id = $1 AND name = $2 AND gen = $3 AND state <> $4
 		  AND (state IN ('starting', 'ready', 'unreachable')
-		       OR ($4 = 'ready' AND command IS NULL AND state = 'stopped' AND stop_reason IS DISTINCT FROM 'stopped'))`,
+		       OR ($4 = 'ready' AND command IS NULL AND state = 'stopped'
+		           AND NOT (coalesce(stop_reason, '') = 'stopped' AND stopped_epoch IS NOT DISTINCT FROM $5)))`,
 		runID, name, int64(gen), state, epoch, code, msg)
 	if err != nil || tag.RowsAffected() == 0 {
 		return err
@@ -379,6 +387,9 @@ func (s *Server) addServer(ctx context.Context, in *addServerInput) (*serverOutp
 	sv := spec.Server{Name: b.Name, Port: b.Port, Command: b.Command, Workdir: b.Workdir, Env: b.Env}
 	start := len(b.Command) > 0
 	if b.Start != nil {
+		if *b.Start && len(b.Command) == 0 {
+			return nil, errNoCommand(b.Name)
+		}
 		start = *b.Start
 	}
 	var out RunServer
@@ -495,15 +506,18 @@ func (s *Server) serverAction(action string) func(context.Context, *ServerPath) 
 					}
 				}
 			} else {
+				if len(sv.Command) == 0 {
+					return errNoCommand(in.Name)
+				}
 				if state != StateRunning {
 					return errf(http.StatusConflict, "not_running", "run is %s: a server starts only in a running Run", state)
 				}
-				if action == "start" && len(sv.Command) == 0 && sv.State != ServerStopped {
-					// Watched already: nothing to start.
-				} else if action == "start" && len(sv.Command) > 0 && (sv.State == ServerStarting || sv.State == ServerReady || sv.State == ServerUnreachable) {
-					// Running already: start is idempotent (restart restarts).
-				} else if _, err := setServerState(ctx, tx, p.TenantID, in.ID, epoch, ServerStarting, "", `rs.name = $5`, in.Name); err != nil {
-					return err
+				running := sv.State == ServerStarting || sv.State == ServerReady || sv.State == ServerUnreachable
+				// start is idempotent while it runs; restart restarts.
+				if action == "restart" || !running {
+					if _, err := setServerState(ctx, tx, p.TenantID, in.ID, epoch, ServerStarting, "", `rs.name = $5`, in.Name); err != nil {
+						return err
+					}
 				}
 			}
 			out, err = s.getServerTx(ctx, tx, in.ID, in.Name)
@@ -517,6 +531,12 @@ func (s *Server) serverAction(action string) func(context.Context, *ServerPath) 
 		}
 		return &serverOutput{http.StatusOK, out}, nil
 	}
+}
+
+// errNoCommand: lux runs nothing for a server without a command; its port
+// is watched whenever the Run runs.
+func errNoCommand(name string) error {
+	return errf(http.StatusConflict, "no_command", "server %q has no command: lux starts nothing for it, and watches its port while the Run runs", name)
 }
 
 type noContent struct {

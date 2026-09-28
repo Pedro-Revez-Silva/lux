@@ -4540,7 +4540,7 @@ paths:
         - servers
     post:
       description: |-
-        A named port of the Run, with an optional command lux runs in its container. It starts now if start (default: when it has a command), which needs the Run running. Any state but finished may add one.
+        A named port of the Run, with an optional command lux runs in its container. It starts now if start (default: when it has a command), which needs the Run running. Any state but finished may add one. One without a command is watched: ready whenever its port accepts connections while the Run runs.
 
         Needs the `run` scope.
       operationId: addServer
@@ -4822,7 +4822,7 @@ paths:
   /v1/runs/{id}/servers/{name}/restart:
     post:
       description: |-
-        Stops its command and runs it again, as it is defined now. 409 not_running unless the Run is running.
+        Stops its command and runs it again, as it is defined now. 409 not_running unless the Run is running; 409 no_command without a command.
 
         Needs the `run` scope.
       operationId: restartServer
@@ -4892,7 +4892,7 @@ paths:
   /v1/runs/{id}/servers/{name}/start:
     post:
       description: |-
-        Runs its command (a server without one: watches its port). Idempotent while it runs. 409 not_running unless the Run is running.
+        Runs its command. Idempotent while it runs. 409 not_running unless the Run is running; 409 no_command for a server without one (its port is watched whenever the Run runs).
 
         Needs the `run` scope.
       operationId: startServer
@@ -4962,7 +4962,7 @@ paths:
   /v1/runs/{id}/servers/{name}/stop:
     post:
       description: |-
-        Stops its command (a server without one: stops watching its port). Idempotent.
+        Stops its command; a server without one is no longer watched, until the Run's next placement. Idempotent.
 
         Needs the `run` scope.
       operationId: stopServer

@@ -360,7 +360,9 @@ class TestEnvironment:
             # Run's secrets are given up in seconds, not a production 30s.
             "LUX_LEASE": "10s",
             **({"LUX_PREVIEW_DOMAIN": PREVIEW_DOMAIN, "LUX_PREVIEW_LISTEN": f"{self.gateway}:{self.preview_port}",
-                "LUX_PREVIEW_HOLD_FOR": "15s"} if self.preview_port else {}),
+                # Ticket sign-in, whatever the console's auth (a suite
+                # that turns Access on for the console leaves previews be).
+                "LUX_PREVIEW_AUTH": "ticket", "LUX_PREVIEW_HOLD_FOR": "15s"} if self.preview_port else {}),
         }
 
     # -- setup --------------------------------------------------------------

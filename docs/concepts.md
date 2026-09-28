@@ -147,10 +147,11 @@ lux server stop|start|restart|rm <run> web
   ends is `exited`, with its exit code and the last line it wrote to
   stderr (`error`). The runner checks each port every 3 seconds, from the
   host, on the container's address.
-- **Without a command**, only the port is exposed; start and stop just
-  begin and end watching it. While the Run runs, such a server whose port
-  opens is `ready` whatever it was, unless someone stopped it: whoever
-  started the process by hand made it so.
+- **Without a command**, only the port is exposed, and lux watches it
+  whenever the Run runs: once it accepts connections the server is
+  `ready`, whatever it was (whoever started the process by hand made it
+  so). There is nothing to start (409 `no_command`); stopping one stops
+  the watching until the Run's next placement.
 - **`stopReason`** says why one is `stopped`: `stopped` (asked for),
   `run stopped`, `migrated` or `host lost` (its placement ended), with
   `stoppedEpoch`, the placement it stopped in.

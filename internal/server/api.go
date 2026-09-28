@@ -195,7 +195,8 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "addServer", Method: http.MethodPost, Path: "/v1/runs/{id}/servers", Tags: []string{"servers"},
 		Summary: "Add a server to a Run",
 		Description: "A named port of the Run, with an optional command lux runs in its container. " +
-			"It starts now if start (default: when it has a command), which needs the Run running. Any state but finished may add one.",
+			"It starts now if start (default: when it has a command), which needs the Run running. Any state but finished may add one. " +
+			"One without a command is watched: ready whenever its port accepts connections while the Run runs.",
 		DefaultStatus: http.StatusCreated,
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "run", s.addServer)
@@ -205,9 +206,9 @@ func (s *Server) routes(api huma.API) {
 		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "run", s.putServer)
 	for _, a := range []struct{ action, summary, doc string }{
-		{"start", "Start a server", "Runs its command (a server without one: watches its port). Idempotent while it runs. 409 not_running unless the Run is running."},
-		{"stop", "Stop a server", "Stops its command (a server without one: stops watching its port). Idempotent."},
-		{"restart", "Restart a server", "Stops its command and runs it again, as it is defined now. 409 not_running unless the Run is running."},
+		{"start", "Start a server", "Runs its command. Idempotent while it runs. 409 not_running unless the Run is running; 409 no_command for a server without one (its port is watched whenever the Run runs)."},
+		{"stop", "Stop a server", "Stops its command; a server without one is no longer watched, until the Run's next placement. Idempotent."},
+		{"restart", "Restart a server", "Stops its command and runs it again, as it is defined now. 409 not_running unless the Run is running; 409 no_command without a command."},
 	} {
 		register(s, api, huma.Operation{
 			OperationID: a.action + "Server", Method: http.MethodPost, Path: "/v1/runs/{id}/servers/{name}/" + a.action, Tags: []string{"servers"},

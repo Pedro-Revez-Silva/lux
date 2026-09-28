@@ -108,12 +108,15 @@ def test_start_stop_and_a_port_started_by_hand(lux, runners, hosts, fake_image):
     wait_until(lambda: http_forward_fails(lux, run_id, "web"), 20, 1, "the server kept serving after stop")
     lux.run("server", "start", run_id, "web")
     wait_server(lux, run_id, "web", "ready")
-    # A port with no command: ready when something listens there.
+    # A port with no command: ready when something listens there; there
+    # is nothing for lux to start.
     sv = add(lux, run_id, "manual", 7000)
     assert sv["state"] == "stopped" and sv["command"] is None and sv["stopReason"] is None, sv
-    lux.run("server", "start", run_id, "manual")
+    with pytest.raises(CLIError) as e:
+        lux.run("server", "start", run_id, "manual")
+    assert e.value.code == 4 and "no command" in e.value.stderr
     time.sleep(4)
-    assert server(lux, run_id, "manual")["state"] == "starting"
+    assert server(lux, run_id, "manual")["state"] == "stopped"
     p = lux.popen("exec", run_id, "-T", "--", "lux-fake", "serve", "7000", "by-hand")
     try:
         wait_server(lux, run_id, "manual", "ready")
@@ -126,11 +129,12 @@ def test_start_stop_and_a_port_started_by_hand(lux, runners, hosts, fake_image):
         lux.run("server", "ls", run_id, "web")
     assert e.value.code == 3
     # Starting needs a running Run; adding does not.
+    lux.run("server", "add", run_id, "later", "8081", "--no-start", "--", *serve(8081))
     lux.run("stop", run_id, "--wait", timeout=120)
     with pytest.raises(CLIError) as e:
-        lux.run("server", "start", run_id, "manual")
+        lux.run("server", "start", run_id, "later")
     assert e.value.code == 4 and "a server starts only in a running Run" in e.value.stderr
-    lux.run("server", "add", run_id, "later", "8081", "--no-start", "--", *serve(8081))
+    lux.run("server", "add", run_id, "later2", "8082", "--no-start", "--", *serve(8082))
     lux.run("cancel", run_id)
 
 

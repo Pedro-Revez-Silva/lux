@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/marcioapm/lux/internal/ids"
@@ -212,6 +213,18 @@ func getServer(t *testing.T, s *Server, key, name string) RunServer {
 	return RunServer{}
 }
 
+func serverGen(t *testing.T, s *Server, ctx context.Context, name string) int64 {
+	t.Helper()
+	var gen int64
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT gen FROM run_servers WHERE run_id = $1 AND name = $2`, r1, name).Scan(&gen)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return gen
+}
+
 func serverReport(t *testing.T, s *Server, ctx context.Context, epoch int, data map[string]any) {
 	t.Helper()
 	f := s.handleReport(ctx, "h1", proto.Frame{Type: proto.MsgRunEvent, ID: 1, RunID: r1, Epoch: epoch,
@@ -270,7 +283,7 @@ func TestServerLifecycle(t *testing.T) {
 		t.Fatalf("ready: %+v", got)
 	}
 	// A port-only server whose port opens is ready.
-	serverReport(t, s, ctx, 1, map[string]any{"name": "db", "gen": last.Servers[0].Gen, "state": "ready"})
+	serverReport(t, s, ctx, 1, map[string]any{"name": "db", "gen": serverGen(t, s, ctx, "db"), "state": "ready"})
 	if got := getServer(t, s, key, "db"); got.State != ServerReady {
 		t.Fatalf("db: %+v", got)
 	}
@@ -288,7 +301,12 @@ func TestServerLifecycle(t *testing.T) {
 	if got := getServer(t, s, key, "web"); got.State != ServerStarting || got.ExitCode != nil {
 		t.Fatalf("restarted: %+v", got)
 	}
-	// Stop by request.
+	// Nothing to start without a command.
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/servers/db/start", nil); w.Code != http.StatusConflict ||
+		!strings.Contains(w.Body.String(), "no_command") {
+		t.Fatalf("start without a command: %d %s", w.Code, w.Body)
+	}
+	// Stop by request: no longer watched in this placement.
 	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/servers/db/stop", nil); w.Code != http.StatusOK {
 		t.Fatalf("stop: %d %s", w.Code, w.Body)
 	}
@@ -298,6 +316,10 @@ func TestServerLifecycle(t *testing.T) {
 	last = pendingServers(t, s, ctx)[len(pendingServers(t, s, ctx))-1]
 	if len(last.Servers) != 1 || last.Servers[0].Name != "web" {
 		t.Fatalf("set after stop: %+v", last)
+	}
+	serverReport(t, s, ctx, 1, map[string]any{"name": "db", "gen": serverGen(t, s, ctx, "db"), "state": "ready"})
+	if got := getServer(t, s, key, "db"); got.State != ServerStopped {
+		t.Fatalf("a stopped one was watched: %+v", got)
 	}
 	// Another tenant sees nothing.
 	key2 := ids.Secret("luxk")
@@ -675,5 +697,61 @@ func TestPreviewProxy(t *testing.T) {
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped'`)
 	if w := do(http.MethodGet, "/", signed); !strings.Contains(w.Body.String(), "not running") {
 		t.Fatalf("run stopped: %d %s", w.Code, w.Body)
+	}
+}
+
+// A WebSocket (a dev server's hot reload) goes through the preview proxy
+// and its tunnel both ways.
+func TestPreviewWebSocket(t *testing.T) {
+	s := testServer(t)
+	s.cfg.PublicURL = "https://luxd.example.com"
+	s.cfg.Preview = PreviewConfig{Domain: "lux.example.com", Auth: "ticket", HoldFor: time.Second}
+	ctx := context.Background()
+	serversFixture(t, s, ctx)
+	s.preview = newPreviews(s)
+	if err := s.preview.init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	execSQL(t, s, ctx, `INSERT INTO run_servers (tenant_id, run_id, name, port, state) VALUES ('t1', $1, 'web', 3000, 'ready')`, r1)
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer c.CloseNow()
+		for {
+			typ, b, err := c.Read(r.Context())
+			if err != nil {
+				return
+			}
+			if err := c.Write(r.Context(), typ, append([]byte("echo: "), b...)); err != nil {
+				return
+			}
+		}
+	}))
+	defer app.Close()
+	fakeRunner(t, s, strings.TrimPrefix(app.URL, "http://"))
+	cookie := s.preview.sign(previewUser{RunID: r1, TenantID: "t1", User: "ci", Exp: time.Now().Add(time.Hour).Unix()})
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Host = "web-aaaaaaaaaaaaaaaa.lux.example.com"
+		s.preview.ServeHTTP(w, r)
+	}))
+	defer front.Close()
+	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(wctx, "ws"+strings.TrimPrefix(front.URL, "http")+"/hmr", &websocket.DialOptions{
+		HTTPHeader: http.Header{"Cookie": {previewCookie + "=" + cookie}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	for _, msg := range []string{"one", "two"} {
+		if err := c.Write(wctx, websocket.MessageText, []byte(msg)); err != nil {
+			t.Fatal(err)
+		}
+		_, b, err := c.Read(wctx)
+		if err != nil || string(b) != "echo: "+msg {
+			t.Fatalf("%s: %q %v", msg, b, err)
+		}
 	}
 }
