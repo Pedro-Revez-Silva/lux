@@ -683,6 +683,10 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, image 
 	if sp.Init != nil {
 		cfg.Init = sp.Init.Script
 	}
+	if b := sp.Workload.BeforeStop; b != nil {
+		cfg.BeforeStop = b.Command
+		cfg.BeforeStopTimeoutSec = b.Timeout.Seconds()
+	}
 	if a.Resume != nil {
 		cfg.Resume = true
 		cfg.SessionID = a.Resume.SessionID

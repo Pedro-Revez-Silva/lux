@@ -352,3 +352,37 @@ func TestServiceBackedMCPRules(t *testing.T) {
 		}
 	}
 }
+
+// beforeStop's default timeout fits the grace; only one someone set can be
+// too long for it.
+func TestBeforeStopTimeoutAgainstGrace(t *testing.T) {
+	spec := func(grace, timeout string) RunSpec {
+		s := RunSpec{Image: Image{Ref: "alpine"}, Workload: Workload{Adapter: "generic", Command: []string{"true"},
+			BeforeStop: &BeforeStop{Command: []string{"true"}}}}
+		s.Workload.Grace.Duration, _ = time.ParseDuration(grace)
+		if timeout != "" {
+			s.Workload.BeforeStop.Timeout.Duration, _ = time.ParseDuration(timeout)
+		}
+		return s
+	}
+	s := spec("5s", "")
+	if err := s.Normalize(BuiltinDefaults); err != nil {
+		t.Fatalf("a default timeout under a short grace: %v", err)
+	}
+	if got := s.Workload.BeforeStop.Timeout.Duration; got != 2500*time.Millisecond {
+		t.Fatalf("default timeout %s, want half the grace (2.5s): the workload keeps the rest", got)
+	}
+	s = spec("", "")
+	_ = s.Normalize(BuiltinDefaults)
+	if got := s.Workload.BeforeStop.Timeout.Duration; got != DefaultBeforeStopTimeout {
+		t.Fatalf("default timeout %s, want %s", got, DefaultBeforeStopTimeout)
+	}
+	s = spec("5s", "20s")
+	if err := s.Normalize(BuiltinDefaults); err == nil || !strings.Contains(err.Error(), "beforeStop.timeout") {
+		t.Fatalf("a timeout past the grace: %v", err)
+	}
+	s = spec("-5s", "")
+	if err := s.Normalize(BuiltinDefaults); err == nil || !strings.Contains(err.Error(), "workload.grace") {
+		t.Fatalf("a negative grace: %v", err)
+	}
+}

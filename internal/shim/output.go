@@ -41,7 +41,11 @@ type Output struct {
 }
 
 type chanBuf struct {
-	id   string
+	id string
+	// ch is the channel its records go out on. A second writer on a
+	// channel (the beforeStop hook beside the workload) has its own id, so
+	// its partial line is held apart and the two never splice.
+	ch   string
 	data []byte
 	// Streamed text (Stream): released as a typ event, built by wrap from
 	// the text.
@@ -92,15 +96,20 @@ func (o *Output) Seq() int64 {
 }
 
 // Write buffers bytes for a stream channel (stdout | stderr).
-func (o *Output) Write(ch string, p []byte) {
+func (o *Output) Write(ch string, p []byte) { o.WriteAs(ch, ch, p) }
+
+// WriteAs buffers bytes on channel ch under its own buffer id, so a second
+// writer's partial line is held apart from the first's.
+func (o *Output) WriteAs(id, ch string, p []byte) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.closed {
 		return
 	}
-	b := o.buf(ch)
+	b := o.buf(id)
+	b.ch = ch
 	if len(p) > 0 {
-		o.lastByte[ch] = p[len(p)-1]
+		o.lastByte[id] = p[len(p)-1]
 	}
 	o.add(b, p)
 	// Flush complete lines now, keeping a partial last line.
@@ -264,7 +273,7 @@ func (o *Output) emit(b *chanBuf, end int) {
 	if b.wrap != nil {
 		o.event(b.typ, b.wrap(string(b.data[:end])))
 	} else {
-		o.record(b.id, b.data[:end], nil)
+		o.record(b.ch, b.data[:end], nil)
 	}
 	b.data = append(b.data[:0], b.data[end:]...)
 	b.since = time.Now()

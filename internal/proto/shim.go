@@ -47,6 +47,10 @@ type ShimConfig struct {
 	Env      map[string]string `json:"env,omitempty"`
 	Init     string            `json:"init,omitempty"`
 	GraceSec float64           `json:"graceSec"`
+	// BeforeStop, when set, runs in the container on every stop before the
+	// workload is signalled (spec.Workload.BeforeStop).
+	BeforeStop           []string `json:"beforeStop,omitempty"`
+	BeforeStopTimeoutSec float64  `json:"beforeStopTimeoutSec,omitempty"`
 	// Resume is set when this is not the Run's first placement.
 	Resume        bool     `json:"resume,omitempty"`
 	ResumeCommand []string `json:"resumeCommand,omitempty"`
@@ -141,14 +145,15 @@ const (
 // Event types the shim writes as ch=event records. The runner forwards the
 // lux.* ones to luxd as adapter events; all are visible in the output.
 const (
-	EvSession  = "lux.session"  // {"sessionId"}
-	EvActivity = "lux.activity" // {"activity": "idle" | "busy"}
-	EvInputAck = "lux.input"    // {"requestId", "text"?, "truncated"?, "error"?}; the first prompt's id is "prompt"
-	EvInit     = "lux.init"     // {"phase": "start" | "done", "exitCode"?}
-	EvWorkload = "lux.workload" // {"phase": "start", "pid"}
-	EvStop     = "lux.stop"     // {"reason"}
-	EvWarning  = "lux.warning"  // {"message"}
-	EvArtifact = "lux.artifact" // {"path"}
+	EvSession    = "lux.session"    // {"sessionId"}
+	EvActivity   = "lux.activity"   // {"activity": "idle" | "busy"}
+	EvInputAck   = "lux.input"      // {"requestId", "text"?, "truncated"?, "error"?}; the first prompt's id is "prompt"
+	EvInit       = "lux.init"       // {"phase": "start" | "done", "exitCode"?}
+	EvWorkload   = "lux.workload"   // {"phase": "start", "pid"}
+	EvStop       = "lux.stop"       // {"reason"}
+	EvBeforeStop = "lux.beforeStop" // {"phase": "start"|"done", "exitCode", "timedOut"}
+	EvWarning    = "lux.warning"    // {"message"}
+	EvArtifact   = "lux.artifact"   // {"path"}
 )
 
 // ExitInfo is the shim's account of how the workload ended.
