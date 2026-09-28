@@ -1,7 +1,7 @@
 import { useMemo } from "react";
-import { Card, TimeSeriesChart, type ChartMark } from "@lux/design-system";
+import { Card, TimeSeriesChart } from "@lux/design-system";
 import { api, useQuery, type Run } from "../../api/index.ts";
-import { ErrorBlock, useSeries } from "./common.tsx";
+import { changeMarks, ErrorBlock, useSeries } from "./common.tsx";
 
 export function RunResources({ run }: { run: Run }) {
   // Cover the Run's whole life (plus slack), so a young Run gets raw samples
@@ -20,17 +20,7 @@ export function RunResources({ run }: { run: Run }) {
   const pids = useSeries(samples, [(s) => s.pids]);
   const net = useSeries(samples, [(s) => s.netRxRate, (s) => s.netTxRate]);
 
-  const marks = useMemo<ChartMark[]>(() => {
-    const out: ChartMark[] = [];
-    let last: number | undefined;
-    for (const s of samples ?? []) {
-      if (s.epoch != null && s.epoch !== last) {
-        if (last != null) out.push({ x: Math.floor(Date.parse(s.at) / 1000), label: `epoch ${s.epoch}` });
-        last = s.epoch;
-      }
-    }
-    return out;
-  }, [samples]);
+  const marks = useMemo(() => changeMarks(samples, (s) => s.epoch, (s) => `epoch ${s.epoch}`), [samples]);
 
   if (q.error && !q.data) return <ErrorBlock error={q.error} onRetry={q.refetch} />;
   const limit = { label: "Requested", color: "var(--fg-faint)", dashed: true } as const;

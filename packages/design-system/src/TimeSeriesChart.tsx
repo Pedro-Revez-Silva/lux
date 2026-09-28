@@ -19,8 +19,8 @@ export interface Series {
 export interface TimeSeriesChartProps {
   /** Epoch seconds, ascending. */
   x: number[];
-  /** One array per series, aligned to x. */
-  ys: (number | null)[][];
+  /** One array per series, aligned to x. null is a gap in the line; undefined is no point there (the line joins over it: several series on one x axis). */
+  ys: (number | null | undefined)[][];
   series: Series[];
   unit: Unit;
   /** Plot height in px; defaults to the --chart-h token (grows with the screen, shrinks when compact). */

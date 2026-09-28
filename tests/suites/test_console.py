@@ -112,6 +112,24 @@ def test_pages_update_live_from_events(page, operator, tenant_factory):
     a.run("cancel", run_id)
 
 
+def test_host_page_charts_its_runner_process(page, operator, lux, runners, hosts):
+    runners.start(hosts[0])
+    # By the runners' tenant: other tests register their own host-a under
+    # theirs, which stay listed (ready, then lost) after they stop.
+    host_id = wait_until(lambda: next((h["id"] for h in lux.json("hosts", "ls")
+                                       if h["name"] == hosts[0].name and h["state"] == "ready"), None),
+                         30, 1, "the host never registered")
+    # A heartbeat has carried the runner's process before the page loads
+    # (the page reads history every 30s).
+    wait_until(lambda: any("runner" in s for s in operator.json("history", "--host", host_id, "--since", "5m")["samples"]),
+               60, 1, "no runner sample")
+    page.sign_in(operator.api_key, f"/hosts/{host_id}?range=1h")
+    for card in ("Runner CPU", "Runner memory", "Runner goroutines"):
+        expect(page.get_by_role("heading", name=card, exact=True)).to_have_count(1, timeout=15_000)
+    expect(page.get_by_text(re.compile(r"^the lux-runner process, not podman or its containers · (\d+ processes, a line each.* · the newest )?started "))).to_have_count(1, timeout=15_000)
+    assert not page.errors, page.errors
+
+
 def test_control_host_row_is_the_operators_whole_system_view(page, env, operator, tenant_factory):
     a = tenant_factory()
     # An hour's range reads raw samples; the default day's reads minute
@@ -122,11 +140,16 @@ def test_control_host_row_is_the_operators_whole_system_view(page, env, operator
     expect(page.get_by_role("heading", name="Postgres size", exact=True)).to_have_count(1, timeout=5_000)
     # The subtitle carries the latest sampled size once history has loaded.
     expect(page.get_by_text(re.compile(r"^lux's database · \d"))).to_have_count(1, timeout=5_000)
+    # luxd's own process (a line per process, if a test restarted luxd), with when it started.
+    for card in ("luxd CPU", "luxd memory", "luxd goroutines"):
+        expect(page.get_by_role("heading", name=card, exact=True)).to_have_count(1, timeout=5_000)
+    expect(page.get_by_text(re.compile(r"^the luxd process · (\d+ processes, a line each.* · the newest )?started "))).to_have_count(1, timeout=5_000)
     # Narrowed to a tenant, the row is gone.
     page.goto(env.luxd_url + f"/?tenant={a.tenant_id}")
     page.get_by_text(re.compile(rf"^tenant {re.escape(a.tenant_id)} · charts over")).wait_for(timeout=15_000)
     expect(page.get_by_role("heading", name="Control host", exact=True)).to_have_count(0)
     expect(page.get_by_role("heading", name="Postgres size", exact=True)).to_have_count(0)
+    expect(page.get_by_role("heading", name="luxd CPU", exact=True)).to_have_count(0)
     assert not page.errors, page.errors
 
 

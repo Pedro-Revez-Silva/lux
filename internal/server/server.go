@@ -14,6 +14,7 @@ import (
 
 	"github.com/marcioapm/lux/console"
 	"github.com/marcioapm/lux/internal/blob"
+	"github.com/marcioapm/lux/internal/hoststat"
 	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 )
@@ -120,10 +121,11 @@ type Server struct {
 	// file swap can never make luxd serve bytes that don't match the
 	// sha256 it advertises.
 	bins map[string]map[string]runnerBin
-	// instance names this luxd's control samples: its hostname.
-	instance string
-	// id names this luxd in cost claims (instanceID; tests run two).
-	id string
+	// id names this luxd process (instanceID; tests run two): in cost
+	// claims, and as the key of its control samples, so no two processes
+	// (on one machine or several) share them. hostname is its machine,
+	// shown with them.
+	id, hostname string
 	// readPostgres is postgresFigures (replaced in tests). pgFailing and
 	// diskFailing record what failed on the last read, so each failure is
 	// logged once (control.go).
@@ -131,9 +133,11 @@ type Server struct {
 	pgFailing    atomic.Bool
 	diskMu       sync.Mutex
 	diskFailing  map[string]bool
-	wg           sync.WaitGroup
-	pluginsOnce  sync.Once
-	plugins      []*costPlugin
+	// proc reads luxd's own process for its control samples.
+	proc        hoststat.ProcessSampler
+	wg          sync.WaitGroup
+	pluginsOnce sync.Once
+	plugins     []*costPlugin
 }
 
 func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Server {
@@ -193,8 +197,8 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 		wakeups:     newWakeups(),
 		kick:        make(chan struct{}, 1),
 		diskFailing: map[string]bool{},
-		instance:    hostname(),
 		id:          instanceID,
+		hostname:    hostname(),
 	}
 	s.readPostgres = s.postgresFigures
 	if cfg.ConsoleAuth.Mode == "cloudflare-access" {

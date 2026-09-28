@@ -74,41 +74,30 @@ components:
           format: int64
           type: integer
       type: object
-    ControlSample:
+    Control:
       additionalProperties: false
       properties:
-        cpuCores:
-          description: "CPU in use, in cores: a rate over the previous point."
-          format: double
-          type: number
-        cpus:
-          description: Cores on the machine.
-          format: int64
-          type: integer
-        databaseBytes:
-          description: Size of lux's Postgres database.
-          format: int64
-          type: integer
-        databaseConnections:
-          description: Backends connected to lux's Postgres database.
-          format: int64
-          type: integer
-        disks:
-          description: Each tracked directory's filesystem (history.disk_paths).
+        luxd:
+          description: A series per luxd process (a restart is a new one), oldest first.
           items:
-            $ref: "#/components/schemas/DiskSample"
+            $ref: "#/components/schemas/LuxdSeries"
           type:
             - array
             - "null"
-        instance:
-          description: The luxd instance's hostname that recorded it.
-          type: string
-        memoryBytes:
-          format: int64
-          type: integer
-        memoryTotal:
-          format: int64
-          type: integer
+        machines:
+          description: A series per machine luxd ran on (by hostname), oldest first.
+          items:
+            $ref: "#/components/schemas/MachineSeries"
+          type:
+            - array
+            - "null"
+        postgres:
+          description: "lux's Postgres database: one series, whichever luxd sampled it."
+          items:
+            $ref: "#/components/schemas/PostgresPoint"
+          type:
+            - array
+            - "null"
       type: object
     CostLine:
       additionalProperties: false
@@ -362,6 +351,9 @@ components:
     History:
       additionalProperties: false
       properties:
+        control:
+          $ref: "#/components/schemas/Control"
+          description: The machines luxd runs on, its Postgres, and each luxd process. Only an operator key reading the whole system (no tenant) gets it.
         from:
           format: date-time
           type: string
@@ -642,6 +634,51 @@ components:
             - array
             - "null"
       type: object
+    LuxdSample:
+      additionalProperties: false
+      properties:
+        at:
+          format: date-time
+          type: string
+        cpuCores:
+          description: "CPU in use, in cores: a rate over the previous point of the same process."
+          format: double
+          type: number
+        goroutines:
+          format: int64
+          type: integer
+        heapBytes:
+          description: Go heap objects, live or not yet swept.
+          format: int64
+          type: integer
+        peakRssBytes:
+          description: "The highest RSS since the previous sample (a rollup: in its interval)."
+          format: int64
+          type: integer
+        rssBytes:
+          format: int64
+          type: integer
+        started:
+          description: "When the process started: a change is a restart."
+          format: date-time
+          type: string
+      type: object
+    LuxdSeries:
+      additionalProperties: false
+      properties:
+        hostname:
+          description: The machine it runs on.
+          type: string
+        instance:
+          description: "The luxd process's id, new at each start (rows from before process ids: its hostname)."
+          type: string
+        samples:
+          items:
+            $ref: "#/components/schemas/LuxdSample"
+          type:
+            - array
+            - "null"
+      type: object
     MCPHeader:
       additionalProperties: false
       properties:
@@ -674,6 +711,46 @@ components:
         url:
           description: "The server's streamable HTTP endpoint: http or https, without credentials. Or service instead."
           type: string
+      type: object
+    MachinePoint:
+      additionalProperties: false
+      properties:
+        at:
+          format: date-time
+          type: string
+        cpuCores:
+          description: "CPU in use, in cores: a rate over the machine's previous point."
+          format: double
+          type: number
+        cpus:
+          description: Cores on the machine.
+          format: int64
+          type: integer
+        disks:
+          description: Each tracked directory's filesystem (history.disk_paths).
+          items:
+            $ref: "#/components/schemas/DiskSample"
+          type:
+            - array
+            - "null"
+        memoryBytes:
+          format: int64
+          type: integer
+        memoryTotal:
+          format: int64
+          type: integer
+      type: object
+    MachineSeries:
+      additionalProperties: false
+      properties:
+        hostname:
+          type: string
+        samples:
+          items:
+            $ref: "#/components/schemas/MachinePoint"
+          type:
+            - array
+            - "null"
       type: object
     Manifest:
       additionalProperties: false
@@ -867,6 +944,47 @@ components:
         port:
           format: int64
           type: integer
+      type: object
+    PostgresPoint:
+      additionalProperties: false
+      properties:
+        at:
+          format: date-time
+          type: string
+        bytes:
+          description: Size of lux's database.
+          format: int64
+          type: integer
+        connections:
+          description: Backends connected to it.
+          format: int64
+          type: integer
+      type: object
+    ProcessSample:
+      additionalProperties: false
+      properties:
+        cpuCores:
+          description: "CPU in use, in cores: a rate over the previous point of the same process."
+          format: double
+          type: number
+        goroutines:
+          format: int64
+          type: integer
+        heapBytes:
+          description: Go heap objects, live or not yet swept.
+          format: int64
+          type: integer
+        peakRssBytes:
+          description: "The highest RSS since the previous sample (a rollup: in its interval)."
+          format: int64
+          type: integer
+        rssBytes:
+          format: int64
+          type: integer
+        started:
+          description: "When the process started: a change is a restart."
+          format: date-time
+          type: string
       type: object
     Push:
       additionalProperties: false
@@ -1333,9 +1451,6 @@ components:
         capacityMemory:
           format: int64
           type: integer
-        control:
-          $ref: "#/components/schemas/ControlSample"
-          description: luxd's own machine and its Postgres. Only an operator key reading the whole system (no tenant) gets it.
         cpuCores:
           format: double
           type: number
@@ -1374,6 +1489,9 @@ components:
         queued:
           format: int64
           type: integer
+        runner:
+          $ref: "#/components/schemas/ProcessSample"
+          description: The runner process itself (not the podman and conmon processes it starts).
         runs:
           additionalProperties:
             format: int64

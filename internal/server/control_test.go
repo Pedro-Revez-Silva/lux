@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -24,12 +25,17 @@ import (
 
 func controlHistoryRequest(t *testing.T, s *Server, key, query string) History {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/v1/history?"+query, nil)
+	return historyRequest(t, s, key, "/v1/history?"+query)
+}
+
+func historyRequest(t *testing.T, s *Server, key, target string) History {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, target, nil)
 	req.Header.Set("Authorization", "Bearer "+key)
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
-		t.Fatalf("%s: %d %s", query, w.Code, w.Body)
+		t.Fatalf("%s: %d %s", target, w.Code, w.Body)
 	}
 	var h History
 	if err := json.Unmarshal(w.Body.Bytes(), &h); err != nil {
@@ -237,7 +243,7 @@ func TestControlRetention(t *testing.T) {
 	}
 	for inst, x := range seed {
 		for _, age := range []time.Duration{x.expired, x.live} {
-			execSQL(t, s, ctx, `INSERT INTO control_samples (instance, res, at, cpu_seconds) VALUES ($1, $2, $3, 1)`, inst, x.res, now.Add(-age))
+			execSQL(t, s, ctx, `INSERT INTO control_samples (instance, hostname, res, at, cpu_seconds) VALUES ($1, $1, $2, $3, 1)`, inst, x.res, now.Add(-age))
 			execSQL(t, s, ctx, `INSERT INTO control_disk_samples (instance, path, res, at, used_bytes, free_bytes, total_bytes)
 				VALUES ($1, '/', $2, $3, 1, 1, 2)`, inst, x.res, now.Add(-age))
 		}
@@ -282,8 +288,8 @@ func TestRollupControl(t *testing.T) {
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		for inst, base := range map[string]float64{"a": 0, "b": 100000} {
 			for i, at := range []time.Duration{0, 30 * time.Second, time.Minute, 90 * time.Second} {
-				if _, err := tx.Exec(ctx, `INSERT INTO control_samples (instance, res, at, cpu_seconds, cpus, mem_bytes, mem_total, db_bytes, db_connections)
-					VALUES ($1, 0, $2, $3, 4, $4, 1000, $5, $6)`, inst, hour.Add(at), base+float64(i*10), int64(100*(i+1)), int64(10*(i+1)), i+1); err != nil {
+				if _, err := tx.Exec(ctx, `INSERT INTO control_samples (instance, hostname, res, at, cpu_seconds, cpus, mem_bytes, mem_total, db_bytes, db_connections)
+					VALUES ($1, $1, 0, $2, $3, 4, $4, 1000, $5, $6)`, inst, hour.Add(at), base+float64(i*10), int64(100*(i+1)), int64(10*(i+1)), i+1); err != nil {
 					return err
 				}
 				// /data's total grows, so its maximum differs from its mean.
@@ -375,11 +381,11 @@ func TestRollupControl(t *testing.T) {
 	}
 }
 
-// Two luxd instances on one database, at very different CPU counter
-// baselines, sample alternately; the second reboots (its counter drops).
-// /v1/history serves the instance with the latest sample in the range, and
-// its CPU rate only between its own consecutive samples: never a rate
-// across instances, none (not a negative or huge one) across the reboot.
+// Two machines on one database, at very different CPU counter baselines,
+// sample alternately. On machine a, luxd restarts (a1, then a2); machine b
+// reboots (its counter drops). /v1/history serves a series per machine,
+// its CPU rate across luxd restarts but never across machines, none (not a
+// negative or huge one) across the reboot; and a series per luxd process.
 func TestControlCPURatePerInstance(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
@@ -387,71 +393,61 @@ func TestControlCPURatePerInstance(t *testing.T) {
 	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('ko', NULL, 'o', $1, ARRAY['operator'])`, ids.Hash(opKey))
 	base := time.Now().UTC().Truncate(time.Second).Add(-10 * time.Minute)
 	type pt struct {
-		inst string
-		off  time.Duration
-		cpu  float64
+		inst, host string
+		off        time.Duration
+		cpu        float64
 	}
 	pts := []pt{
-		{"a", 0, 1000}, {"b", 10 * time.Second, 100000},
-		{"a", 20 * time.Second, 1040}, {"b", 30 * time.Second, 100100},
-		{"a", 40 * time.Second, 1080}, {"b", 50 * time.Second, 50}, // b rebooted
-		{"b", 70 * time.Second, 150},
+		{"luxd_a1", "a", 0, 1000}, {"luxd_b", "b", 10 * time.Second, 100000},
+		{"luxd_a1", "a", 20 * time.Second, 1040}, {"luxd_b", "b", 30 * time.Second, 100100},
+		{"luxd_a2", "a", 40 * time.Second, 1080}, {"luxd_b", "b", 50 * time.Second, 50}, // b rebooted
+		{"luxd_b", "b", 70 * time.Second, 150},
 	}
 	for _, p := range pts {
 		execSQL(t, s, ctx, `INSERT INTO system_samples (tenant_id, res, at) VALUES ('', 0, $1)`, base.Add(p.off))
-		execSQL(t, s, ctx, `INSERT INTO control_samples (instance, res, at, cpu_seconds, cpus) VALUES ($1, 0, $2, $3, 8)`, p.inst, base.Add(p.off), p.cpu)
+		execSQL(t, s, ctx, `INSERT INTO control_samples (instance, hostname, res, at, cpu_seconds, cpus, proc_started, proc_cpu_seconds)
+			VALUES ($1, $2, 0, $3, $4, 8, $5, 1)`, p.inst, p.host, base.Add(p.off), p.cpu, base.Add(-time.Hour))
 	}
-	get := func(to time.Duration) History {
-		t.Helper()
-		q := url.Values{"res": {"0"}, "from": {base.Add(-time.Second).Format(time.RFC3339Nano)}, "to": {base.Add(to).Format(time.RFC3339Nano)}}
-		return controlHistoryRequest(t, s, opKey, q.Encode())
-	}
-	check := func(h History, inst string, want map[time.Duration]*float64) {
-		t.Helper()
-		var got, wantOffs []time.Duration
-		for _, sm := range h.Samples {
-			if sm.Control != nil {
-				got = append(got, sm.At.Sub(base))
-			}
-		}
-		for off := range want {
-			wantOffs = append(wantOffs, off)
-		}
-		slices.Sort(got)
-		slices.Sort(wantOffs)
-		if !slices.Equal(got, wantOffs) {
-			t.Fatalf("samples with %s's control at %v, want %v", inst, got, wantOffs)
-		}
-		for _, sm := range h.Samples {
-			off := sm.At.Sub(base)
-			w, ours := want[off]
-			if !ours {
-				if sm.Control != nil {
-					t.Errorf("+%v: another instance's sample served: %+v", off, sm.Control)
-				}
-				continue
-			}
-			c := sm.Control
-			if c == nil || c.Instance != inst {
-				t.Fatalf("+%v: want %s's control sample, got %+v", off, inst, c)
-			}
-			if (w == nil) != (c.CPUCores == nil) || w != nil && math.Abs(*w-*c.CPUCores) > 1e-9 {
-				t.Errorf("+%v: cpuCores %v, want %v", off, deref(c.CPUCores), deref(w))
-			}
-		}
-	}
+	q := url.Values{"res": {"0"}, "from": {base.Add(-time.Second).Format(time.RFC3339Nano)}, "to": {base.Add(80 * time.Second).Format(time.RFC3339Nano)}}
+	c := controlHistoryRequest(t, s, opKey, q.Encode()).Control
 	two, five := 2.0, 5.0
-	// b's latest sample is the newest: b is served, a is not.
-	check(get(80*time.Second), "b", map[time.Duration]*float64{
-		10 * time.Second: nil, 30 * time.Second: &five, 50 * time.Second: nil, 70 * time.Second: &five,
-	})
-	// Up to +45s a has the newest sample.
-	check(get(45*time.Second), "a", map[time.Duration]*float64{0: nil, 20 * time.Second: &two, 40 * time.Second: &two})
+	type point struct {
+		off   time.Duration
+		cores *float64
+	}
+	want := map[string][]point{
+		"a": {{0, nil}, {20 * time.Second, &two}, {40 * time.Second, &two}},
+		"b": {{10 * time.Second, nil}, {30 * time.Second, &five}, {50 * time.Second, nil}, {70 * time.Second, &five}},
+	}
+	if c == nil || len(c.Machines) != 2 || c.Machines[0].Hostname != "a" || c.Machines[1].Hostname != "b" || len(c.Postgres) != len(pts) {
+		t.Fatalf("control: %+v", c)
+	}
+	for _, m := range c.Machines {
+		w := want[m.Hostname]
+		if len(m.Samples) != len(w) {
+			t.Fatalf("%s: %+v", m.Hostname, m)
+		}
+		for i, p := range m.Samples {
+			if !p.At.Equal(base.Add(w[i].off)) {
+				t.Errorf("%s sample %d at +%v, want +%v", m.Hostname, i, p.At.Sub(base), w[i].off)
+			}
+			if (w[i].cores == nil) != (p.CPUCores == nil) || w[i].cores != nil && math.Abs(*w[i].cores-*p.CPUCores) > 1e-9 {
+				t.Errorf("%s +%v: cpuCores %v, want %v", m.Hostname, w[i].off, deref(p.CPUCores), deref(w[i].cores))
+			}
+		}
+	}
+	var luxd []string
+	for _, l := range c.Luxd {
+		luxd = append(luxd, fmt.Sprintf("%s@%s:%d", l.Instance, l.Hostname, len(l.Samples)))
+	}
+	if want := []string{"luxd_a1@a:2", "luxd_b@b:4", "luxd_a2@a:1"}; !slices.Equal(luxd, want) {
+		t.Fatalf("luxd series %v, want %v", luxd, want)
+	}
 }
 
-// Rolled-up control samples reach /v1/history at their resolution,
-// attached to the whole system's rolled-up samples of the same buckets,
-// with CPU rates between consecutive buckets and each path's disk figures.
+// Rolled-up control samples reach /v1/history at their resolution, with
+// CPU rates between consecutive buckets and each path's disk figures. The
+// rows predate per-process ids: the instance stands in for the hostname.
 func TestRolledUpControlHistory(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
@@ -465,7 +461,7 @@ func TestRolledUpControlHistory(t *testing.T) {
 	for i, off := range offs {
 		at := hour.Add(off + 5*time.Second)
 		execSQL(t, s, ctx, `INSERT INTO system_samples (tenant_id, res, at, queued) VALUES ('', 0, $1, 1)`, at)
-		execSQL(t, s, ctx, `INSERT INTO control_samples (instance, res, at, cpu_seconds, cpus) VALUES ('ctl', 0, $1, $2, 8)`, at, cpu[i])
+		execSQL(t, s, ctx, `INSERT INTO control_samples (instance, hostname, res, at, cpu_seconds, cpus) VALUES ('ctl', 'ctl', 0, $1, $2, 8)`, at, cpu[i])
 		n := int64(i + 1)
 		execSQL(t, s, ctx, `INSERT INTO control_disk_samples (instance, path, res, at, used_bytes, free_bytes, total_bytes)
 			VALUES ('ctl', '/', 0, $1, $2, $3, 1000), ('ctl', '/data', 0, $1, $4, $5, 9000)`, at, 100*n, 1000-100*n, 5000+10*n, 4000-10*n)
@@ -504,17 +500,13 @@ func TestRolledUpControlHistory(t *testing.T) {
 		}},
 	} {
 		h := get(c.res)
-		if len(h.Samples) != len(c.want) {
-			t.Fatalf("res %s: %d samples, want %d: %+v", c.res, len(h.Samples), len(c.want), h.Samples)
+		if h.Control == nil || len(h.Control.Machines) != 1 || h.Control.Machines[0].Hostname != "ctl" || len(h.Control.Machines[0].Samples) != len(c.want) {
+			t.Fatalf("res %s: control %+v", c.res, h.Control)
 		}
 		for i, w := range c.want {
-			sm := h.Samples[i]
-			if !sm.At.Equal(hour.Add(w.off)) {
-				t.Errorf("res %s sample %d: at %v, want +%v", c.res, i, sm.At, w.off)
-			}
-			ctl := sm.Control
-			if ctl == nil || ctl.Instance != "ctl" || ctl.CPUs == nil || *ctl.CPUs != 8 {
-				t.Fatalf("res %s +%v: control %+v", c.res, w.off, ctl)
+			ctl := h.Control.Machines[0].Samples[i]
+			if !ctl.At.Equal(hour.Add(w.off)) || ctl.CPUs == nil || *ctl.CPUs != 8 {
+				t.Fatalf("res %s sample %d: %+v, want at +%v", c.res, i, ctl, w.off)
 			}
 			if (w.cores == nil) != (ctl.CPUCores == nil) || w.cores != nil && math.Abs(*w.cores-*ctl.CPUCores) > 1e-9 {
 				t.Errorf("res %s +%v: cpuCores %v, want %v", c.res, w.off, deref(ctl.CPUCores), deref(w.cores))
@@ -562,25 +554,25 @@ func TestSystemHistoryControlIsOperatorsOnly(t *testing.T) {
 		if len(h.Samples) != 2 {
 			t.Errorf("%q: want the tenant's 2 samples, got %d", c.query, len(h.Samples))
 		}
-		for i, sm := range h.Samples {
-			if sm.Control != nil {
-				t.Errorf("key %s query %q sample %d: control %+v", map[string]string{tenantKey: "tenant", opKey: "operator"}[c.key], c.query, i, sm.Control)
-			}
+		if h.Control != nil {
+			t.Errorf("key %s query %q: control %+v", map[string]string{tenantKey: "tenant", opKey: "operator"}[c.key], c.query, h.Control)
 		}
 	}
 	h := get(opKey, "")
-	if len(h.Samples) != 2 {
+	c := h.Control
+	if len(h.Samples) != 2 || c == nil || len(c.Machines) != 1 || c.Machines[0].Hostname != s.hostname || len(c.Machines[0].Samples) != 2 ||
+		len(c.Postgres) != 2 || len(c.Luxd) != 1 || c.Luxd[0].Instance != s.id || !strings.HasPrefix(s.id, "luxd_") || len(c.Luxd[0].Samples) != 2 {
 		t.Fatalf("operator: %+v", h)
 	}
-	for i, sm := range h.Samples {
-		c := sm.Control
-		if c == nil || c.CPUs == nil || *c.CPUs <= 0 || c.MemoryTotal == nil || c.DatabaseBytes == nil || c.DatabaseConnections == nil ||
-			len(c.Disks) != 1 || c.Disks[0].Path != "/" || c.Disks[0].TotalBytes <= 0 {
-			t.Fatalf("operator sample %d: %+v", i, c)
+	for i, m := range c.Machines[0].Samples {
+		pg := c.Postgres[i]
+		if !m.At.Equal(h.Samples[i].At) || m.CPUs == nil || *m.CPUs <= 0 || m.MemoryTotal == nil || pg.Bytes == nil || pg.Connections == nil ||
+			len(m.Disks) != 1 || m.Disks[0].Path != "/" || m.Disks[0].TotalBytes <= 0 {
+			t.Fatalf("operator sample %d: %+v %+v", i, m, pg)
 		}
 		// CPU is a rate: none for the first point.
-		if (c.CPUCores == nil) != (i == 0) {
-			t.Errorf("sample %d cpuCores %v", i, c.CPUCores)
+		if (m.CPUCores == nil) != (i == 0) {
+			t.Errorf("sample %d cpuCores %v", i, m.CPUCores)
 		}
 	}
 }

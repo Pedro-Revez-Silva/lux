@@ -747,6 +747,7 @@ function Formatting() {
     ["formatRelative(now + 2h)", formatRelative(NOW + 7_200_000, NOW)],
     ["formatTimestamp(now)", formatTimestamp(NOW)],
     ["formatCores(0.25)", formatCores(0.25)],
+    ["formatCores(0.0012)", formatCores(0.0012)],
     ["formatCores(2.5)", formatCores(2.5)],
     ["formatPercent(0.4213)", formatPercent(0.4213)],
     ["formatCount(12900, compact)", formatCount(12900, { compact: true })],
