@@ -405,6 +405,41 @@
 .signin-note {
   font-size: var(--text-sm);
 }
+/* Where sign-in continues to (a terminal, a preview), and Access beside the key. */
+.signin-next {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+  background: var(--bg-inset);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+.signin-next-icon {
+  display: inline-flex;
+  color: var(--fg-muted);
+  flex: none;
+}
+.signin-next .idchip {
+  color: var(--fg-secondary);
+}
+.signin-or {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  color: var(--fg-faint);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.signin-or::before,
+.signin-or::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-soft);
+}
 /* Phone width: Shell.tsx's query must match. */
 @media (max-width: 767px) {
   .signin-card {
@@ -784,4 +819,132 @@
 }
 .secret-row .input {
   flex: 1 1 160px;
+}
+
+/* Terminal page: the content area does not scroll; the terminal takes the
+   height left after a compact header and scrolls itself. */
+.content.is-terminal {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-top: var(--sp-6);
+  padding-bottom: var(--sp-6);
+}
+.term-page {
+  flex: 1;
+  min-height: 0;
+  gap: var(--sp-6);
+  max-width: none;
+}
+.term-head {
+  padding-bottom: 0;
+  align-items: center;
+}
+.term-head .page-head-main {
+  gap: var(--sp-2);
+}
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.crumbs a {
+  color: var(--fg-muted);
+}
+.crumbs a:hover {
+  color: var(--accent-text);
+  text-decoration: none;
+}
+.crumbs .idchip {
+  font-size: 0.96em;
+}
+.crumbs-sep {
+  display: inline-flex;
+  color: var(--fg-faint);
+}
+.crumbs-here {
+  color: var(--fg-secondary);
+}
+.term-head .page-title {
+  font-size: var(--text-xl);
+}
+.term-head .page-desc .mono {
+  color: var(--fg-secondary);
+}
+.term-actions {
+  gap: var(--sp-3);
+}
+.term-actions .btn-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 var(--sp-2);
+}
+.font-step {
+  display: inline-flex;
+  align-items: center;
+  height: var(--control-h);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+.font-step .btn {
+  border: 0;
+  border-radius: 0;
+  height: 100%;
+}
+.font-step-val {
+  min-width: 36px;
+  text-align: center;
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+/* Run not running: an empty state in the terminal's place. */
+.term-none {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding-bottom: var(--sp-9);
+}
+.term-none .card {
+  width: 560px;
+  max-width: 100%;
+}
+.term-none .empty-desc {
+  max-width: 440px;
+}
+.term-none .empty-desc .mono {
+  color: var(--fg-secondary);
+}
+@media (max-width: 767px) {
+  .content.is-terminal {
+    overflow: visible;
+  }
+  .term-page .term {
+    min-height: 60vh;
+  }
+}
+
+/* Preview auth: one card, centred, saying where you are going. */
+.preview-auth {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: var(--pad-page);
+}
+.preview-auth .card {
+  width: 480px;
+  max-width: 100%;
+}
+.preview-auth .empty-desc {
+  max-width: 420px;
+  overflow-wrap: anywhere;
 }

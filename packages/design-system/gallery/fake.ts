@@ -203,7 +203,7 @@ export const fakeServersExited: ServerInfo[] = [
 ];
 
 /** After a migration: every server stopped by the move. */
-export const fakeServersMigrated: ServerInfo[] = fakeServers.map((s, i) => ({ ...s, state: "stopped", stopReason: i < 2 ? "migrated" : undefined, since: i < 2 ? iso(NOW - 31 * 60_000) : undefined, readySince: undefined }));
+export const fakeServersMigrated: ServerInfo[] = fakeServers.map((s, i) => ({ ...s, state: "stopped", stopReason: i < 2 ? "migrated" : undefined, stoppedEpoch: i < 2 ? 3 : null, since: i < 2 ? iso(NOW - 31 * 60_000) : undefined, readySince: undefined }));
 
 /** A server with no command and no preview domain: something started by hand. */
 export const fakeServerManual: ServerInfo = { name: "docs", port: 4000, command: null, state: "unreachable", since: iso(NOW - 40_000), url: null };

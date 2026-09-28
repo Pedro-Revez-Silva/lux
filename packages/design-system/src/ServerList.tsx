@@ -19,7 +19,10 @@ export interface ServerInfo {
   /** When the state last changed. */
   since?: string | null;
   readySince?: string | null;
+  /** Why it is stopped. */
   stopReason?: string | null;
+  /** The placement it stopped in; null if it never started. */
+  stoppedEpoch?: number | null;
   url?: string | null;
 }
 
@@ -51,8 +54,9 @@ export interface ServerRowProps {
 
 const LOG_H = 240;
 
-/** "ready for 12m", "starting · 9s", "stopped at 14:32 · was ready for 41m", "exited 14:29". */
+/** "ready for 12m", "starting · 9s", "stopped at 14:32 · migrated", "exited 14:29", "not started". */
 export function serverSinceText(s: ServerInfo, now: number): string {
+  const clock = (at: string) => formatClock(at).slice(0, 5);
   switch (s.state) {
     case "ready":
       return s.readySince ? `ready for ${formatElapsed(s.readySince, now)}` : "ready";
@@ -61,14 +65,11 @@ export function serverSinceText(s: ServerInfo, now: number): string {
     case "unreachable":
       return s.since ? `unreachable for ${formatElapsed(s.since, now)}` : "unreachable";
     case "exited":
-      return s.since ? `exited ${formatClock(s.since).slice(0, 5)}` : "exited";
+      return s.since ? `exited ${clock(s.since)}` : "exited";
     case "stopped": {
-      if (!s.since && !s.stopReason) return "not started";
-      const parts: string[] = [];
-      if (s.since) parts.push(`stopped ${s.stopReason === "run stopped" || s.stopReason === "migrated" || s.stopReason === "host lost" ? `at ${formatClock(s.since).slice(0, 5)}` : formatClock(s.since).slice(0, 5)}`);
-      else parts.push("stopped");
-      if (s.stopReason && s.stopReason !== "stopped") parts.push(s.stopReason);
-      return parts.join(" · ");
+      if (s.stoppedEpoch == null && !s.stopReason) return "not started";
+      const when = s.since ? `stopped at ${clock(s.since)}` : "stopped";
+      return s.stopReason && s.stopReason !== "stopped" ? `${when} · ${s.stopReason}` : when;
     }
     default:
       return s.state;

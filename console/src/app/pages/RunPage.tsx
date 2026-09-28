@@ -1,20 +1,27 @@
 import { useState } from "react";
 import { Badge, formatBytes, formatDuration, formatRelative, formatTimestamp, IdChip, KeyValue, PageHeader, StatePill, Tabs } from "@lux/design-system";
 import { api, isRunActive, useNow, useQuery, type Run } from "../../api/index.ts";
+import { setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, HostLink, labelsText, PageSkeleton } from "./common.tsx";
 import { RunActions } from "./RunActions.tsx";
 import { RunOutput } from "./RunOutput.tsx";
 import { RunResources } from "./RunResources.tsx";
+import { RunServers } from "./RunServers.tsx";
 import { RunEvents, RunSnapshots, RunSpecView } from "./RunTabs.tsx";
 import { RunTimeline } from "./RunTimeline.tsx";
 
-type Tab = "output" | "timeline" | "resources" | "events" | "snapshots" | "spec";
+const TABS = ["output", "servers", "timeline", "resources", "events", "snapshots", "spec"] as const;
+type Tab = (typeof TABS)[number];
 
 export function RunPage({ id }: { id: string }) {
   const { operator } = useScope();
   const now = useNow(5000);
-  const [tab, setTab] = useState<Tab>("output");
+  // The tab lives in the URL (?tab=), so links can open one.
+  const params = useSearchParams();
+  const t = params.get("tab");
+  const tab: Tab = TABS.includes(t as Tab) ? (t as Tab) : "output";
+  const setTab = (next: Tab) => setSearchParams({ tab: next === "output" ? null : next });
   const [active, setActive] = useState(true);
   const q = useQuery(
     `run:${id}`,
@@ -93,6 +100,7 @@ export function RunPage({ id }: { id: string }) {
         onChange={setTab}
         items={[
           { key: "output", label: "Output" },
+          { key: "servers", label: "Servers", count: run.servers?.length || undefined },
           { key: "timeline", label: "Timeline", count: run.placements?.length },
           { key: "resources", label: "Resources" },
           { key: "events", label: "Events" },
@@ -101,6 +109,7 @@ export function RunPage({ id }: { id: string }) {
         ]}
       />
       {tab === "output" && <RunOutput run={run} />}
+      {tab === "servers" && <RunServers run={run} />}
       {tab === "timeline" && <RunTimeline run={run} now={now} />}
       {tab === "resources" && <RunResources run={run} />}
       {tab === "events" && <RunEvents run={run} live={live} />}

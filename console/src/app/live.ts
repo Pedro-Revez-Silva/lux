@@ -9,7 +9,7 @@ import { useScope } from "./scope.tsx";
 const RUN_LISTS = ["runs:", "host-runs:", "status@"];
 
 /** Query key prefixes of one Run's data. */
-const RUN_DATA = ["run:", "run-events:", "run-snapshots:", "run-artifacts:"];
+const RUN_DATA = ["run:", "run-events:", "run-snapshots:", "run-artifacts:", "run-servers:"];
 
 function refetchFor(e: FeedEvent) {
   invalidate((k) => RUN_LISTS.some((p) => k.startsWith(p)) || RUN_DATA.some((p) => k === p + e.runId));

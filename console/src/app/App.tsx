@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
-import { ToastProvider, type Tenant as PickerTenant } from "@lux/design-system";
-import { api, errorText, getSession, isApiError, setRole, signInAs, useQuery, useSession } from "../api/index.ts";
-import { matchPath, usePath } from "./router.tsx";
+import { IdChip, ToastProvider, type Tenant as PickerTenant } from "@lux/design-system";
+import { IconExternal, IconTerminal } from "@lux/design-system/icons";
+import { accessSeen, api, errorText, getSession, isApiError, setRole, signInAs, useQuery, useSession } from "../api/index.ts";
+import { matchPath, navigate, usePath, useSearchParams } from "./router.tsx";
 import { ScopeProvider, useScope } from "./scope.tsx";
 import { useLiveUpdates } from "./live.ts";
 import { Shell } from "./Shell.tsx";
-import { SignIn } from "./SignIn.tsx";
+import { SignIn, type SignInProps } from "./SignIn.tsx";
 import { Overview } from "./pages/Overview.tsx";
 import { Runs } from "./pages/Runs.tsx";
 import { RunPage } from "./pages/RunPage.tsx";
+import { TerminalPage } from "./pages/TerminalPage.tsx";
+import { parsePreviewTarget, PreviewAuth } from "./pages/PreviewAuth.tsx";
 import { Hosts } from "./pages/Hosts.tsx";
 import { HostPage } from "./pages/HostPage.tsx";
 import { Pools } from "./pages/Pools.tsx";
@@ -20,16 +23,22 @@ interface Route {
   pattern: string;
   title: string;
   render: (params: Record<string, string>) => React.ReactNode;
+  /** A class on the content area. */
+  content?: string;
+  /** Rendered without the shell (its own full-window layout). */
+  bare?: boolean;
 }
 
 const ROUTES: Route[] = [
   { pattern: "/", title: "Overview", render: () => <Overview /> },
   { pattern: "/runs", title: "Runs", render: () => <Runs /> },
   { pattern: "/runs/:id", title: "Run", render: (p) => <RunPage id={p.id!} /> },
+  { pattern: "/runs/:id/terminal", title: "Runs", render: (p) => <TerminalPage id={p.id!} />, content: "is-terminal" },
   { pattern: "/hosts", title: "Hosts", render: () => <Hosts /> },
   { pattern: "/hosts/:id", title: "Host", render: (p) => <HostPage id={p.id!} /> },
   { pattern: "/pools", title: "Pools", render: () => <Pools /> },
   { pattern: "/tenants", title: "Tenants", render: () => <Tenants /> },
+  { pattern: "/preview-auth", title: "Preview", render: () => <PreviewAuth />, bare: true },
 ];
 
 /**
@@ -102,8 +111,9 @@ function Router() {
     const m = matchPath(r.pattern, path);
     if (!m) continue;
     if (r.pattern === "/tenants" && session.role === "tenant") break;
+    if (r.bare) return <>{r.render(m.params)}</>;
     return (
-      <Shell tenants={picker} operator={operator} title={r.title}>
+      <Shell tenants={picker} operator={operator} title={r.title} contentClassName={r.content}>
         {r.render(m.params)}
       </Shell>
     );
@@ -121,9 +131,40 @@ export function App() {
   const signedIn = session.key ?? session.user?.email;
   return (
     <ScopeProvider>
-      <ToastProvider>{signedIn ? <Router key={signedIn} /> : probe === "checking" ? null : <SignIn />}</ToastProvider>
+      <ToastProvider>{signedIn ? <Router key={signedIn} /> : probe === "checking" ? null : <SignInFor />}</ToastProvider>
     </ScopeProvider>
   );
+}
+
+/**
+ * The sign-in screen, saying where it continues to: the page the person
+ * was headed to (`?next=`, a path on this console, kept across the sign-in),
+ * a terminal, or a preview. A path outside the console is ignored.
+ */
+function SignInFor() {
+  const path = usePath();
+  const params = useSearchParams();
+  // A deep link (a terminal, a preview) signs in on the page itself: the
+  // URL is kept, and the router renders it once there is a session.
+  const here = path !== "/" ? path + window.location.search : null;
+  const next = params.get("next");
+  useEffect(() => {
+    // Landed on /?next=/runs/x/terminal (from a sign-out on a page): go there once signed in.
+    if (path === "/" && next?.startsWith("/") && !next.startsWith("//")) navigate(next, { replace: true });
+  }, [path, next]);
+  const props: SignInProps = { access: accessSeen() };
+  const term = matchPath("/runs/:id/terminal", path);
+  const preview = path === "/preview-auth" ? parsePreviewTarget(params.get("to")) : null;
+  if (term) {
+    props.next = { icon: <IconTerminal size={15} />, text: <>Then you will continue to the terminal for <IdChip value={term.params.id!} /></> };
+    props.reason = "Your session has expired or this tab has no key yet. A terminal needs a key with the run scope for this run's tenant.";
+  } else if (preview && !("error" in preview)) {
+    props.next = { icon: <IconExternal size={15} />, text: <>Then you will continue to the preview of <span className="mono">{preview.server}</span> on <IdChip value={preview.runId} /></> };
+    props.reason = "A preview needs a key that can read its run.";
+  } else if (here) {
+    props.next = { text: <>Then you will continue to <span className="mono">{path}</span></> };
+  }
+  return <SignIn {...props} />;
 }
 
 /**

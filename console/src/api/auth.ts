@@ -57,7 +57,15 @@ export function signIn(key: string) {
 /** Signed in by the console auth luxd sits behind (Cloudflare Access). */
 export function signInAs(user: User, role: Role) {
   session = { key: null, role, user };
+  access = true;
   emit();
+}
+
+let access = false;
+
+/** Cloudflare Access signed someone in during this page's life: the sign-in screen offers it beside the key. */
+export function accessSeen(): boolean {
+  return access;
 }
 
 export function signOut() {
