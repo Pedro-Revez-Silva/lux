@@ -1,6 +1,6 @@
 // Typed calls, one per endpoint. Lists are unwrapped from their envelope.
 import { download, request } from "./client.ts";
-import type { Artifact, Event, History, Host, HostListParams, MigrateRequest, Pool, ResumeRequest, Run, RunListParams, Snapshot, Status, Tenant, WhoAmI } from "./types.ts";
+import type { Artifact, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, MigrateRequest, Pool, ResumeRequest, Run, RunCost, RunListParams, Snapshot, Status, Tenant, WhoAmI } from "./types.ts";
 
 type Sig = AbortSignal | undefined;
 /** Tenant scope of a list call: a tenant id or name, or undefined for all the key sees. */
@@ -19,6 +19,9 @@ export const api = {
   snapshots: (id: string, signal?: Sig) => request<{ snapshots: Snapshot[] }>(`/runs/${enc(id)}/snapshots`, { signal }).then((r) => r.snapshots),
   artifacts: (id: string, signal?: Sig) => request<{ artifacts: Artifact[] }>(`/runs/${enc(id)}/artifacts`, { signal }).then((r) => r.artifacts),
   downloadArtifact: (a: Artifact) => download(`/artifacts/${enc(a.id)}`, a.path.split("/").pop() || a.id),
+  runCost: (id: string, signal?: Sig) => request<RunCost>(`/runs/${enc(id)}/cost`, { signal }),
+  costs: (tenant: Scope, p: CostSummaryParams, signal?: Sig) =>
+    request<CostSummary>("/costs", { tenant, query: { group: p.group, family: p.family, interval: p.interval, since: p.since, from: p.from, to: p.to }, signal }),
 
   stopRun: (id: string) => request<Run>(`/runs/${enc(id)}/stop`, { method: "POST" }),
   cancelRun: (id: string) => request<Run>(`/runs/${enc(id)}/cancel`, { method: "POST" }),
@@ -30,6 +33,7 @@ export const api = {
   hosts: (tenant: Scope, p: HostListParams = {}, signal?: Sig) => request<{ hosts: Host[] }>("/hosts", { tenant, query: { all: p.all, pool: p.pool, state: p.state }, signal }).then((r) => r.hosts),
   host: (id: string, signal?: Sig) => request<Host>(`/hosts/${enc(id)}`, { signal }),
   hostHistory: (id: string, since: string, signal?: Sig) => request<History>(`/hosts/${enc(id)}/history`, { query: { since }, signal }),
+  hostCost: (id: string, since: string, signal?: Sig) => request<HostCost>(`/hosts/${enc(id)}/cost`, { query: { since }, signal }),
   drainHost: (id: string, forceEvict = false) => request<{ draining: boolean; host: string }>(`/hosts/${enc(id)}/drain`, { method: "POST", body: { forceEvict } }),
 
   pools: (tenant: Scope, signal?: Sig) => request<{ pools: Pool[] }>("/pools", { tenant, signal }).then((r) => r.pools),

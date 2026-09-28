@@ -1,7 +1,7 @@
 // Small pieces shared by pages: error/loading blocks, links, the runs table
 // columns, chart series builders and lookups.
 import { useMemo, type ReactNode } from "react";
-import { Button, EmptyState, formatPercent, formatRelative, formatTimestamp, formatUnit, IdChip, KeyValue, Skeleton, SkeletonLines, StatePill, Tooltip, type ChartMark, type Column, type Unit } from "@lux/design-system";
+import { Button, costStatusStyle, EmptyState, formatMoney, formatPercent, formatRelative, formatTimestamp, formatUnit, IdChip, KeyValue, Skeleton, SkeletonLines, StatePill, Tooltip, type ChartMark, type Column, type Unit } from "@lux/design-system";
 import { useNow, type Run, type Sample } from "../../api/index.ts";
 import { Link, linkTo, useSearch } from "../router.tsx";
 
@@ -107,7 +107,7 @@ export function RelativeTime({ at }: { at: string | null | undefined }) {
  * Shared columns of a runs table. The name leads; the id is a quiet mono
  * column beside it. Name and state share the flexible width.
  */
-export function runColumns({ tenant, host = true, adapter = true }: { tenant: boolean; host?: boolean; adapter?: boolean }): Column<Run>[] {
+export function runColumns({ tenant, host = true, adapter = true, cost = false }: { tenant: boolean; host?: boolean; adapter?: boolean; cost?: boolean }): Column<Run>[] {
   const c: Column<Run>[] = [
     { key: "name", header: "Run", cell: (r) => <RunNameLink id={r.id} name={r.name} />, sortValue: (r) => r.name || r.id, lead: true, width: "22%" },
     { key: "id", header: "Id", cell: (r) => <RunLink id={r.id} />, sortValue: (r) => r.id, mono: true, width: 200, optional: true },
@@ -118,9 +118,36 @@ export function runColumns({ tenant, host = true, adapter = true }: { tenant: bo
   if (adapter) c.push({ key: "adapter", header: "Adapter", cell: (r) => <span className="secondary">{r.spec.workload.adapter}</span>, sortValue: (r) => r.spec.workload.adapter, width: 110, optional: true });
   c.push(
     { key: "epoch", header: "Epoch", cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 76, optional: true },
+  );
+  if (cost) c.push({ key: "cost", header: "Cost", cell: (r) => <RunCostCell run={r} />, sortValue: (r) => costSortValue(r), align: "right", mono: true, width: 120 });
+  c.push(
     { key: "created", header: "Created", cell: (r) => <RelativeTime at={r.createdAt} />, sortValue: (r) => Date.parse(r.createdAt), align: "right", width: 104 },
   );
   return c;
+}
+
+/**
+ * A Run's cost in a list: its total, one figure per currency (never added
+ * across currencies). An en dash when luxd sends no cost (not yet
+ * reported, or a luxd without the field), never a zero.
+ */
+function RunCostCell({ run }: { run: Run }) {
+  const c = run.cost;
+  if (!c || c.status === "pending" || c.totals.length === 0) return DASH;
+  const st = costStatusStyle(c.status);
+  const text = c.totals.map((t) => formatMoney(t.amount, t.currency)).join(" · ");
+  return (
+    <Tooltip content={`${st.label}: ${st.description} List price.`} side="left">
+      <span>{text}</span>
+    </Tooltip>
+  );
+}
+
+/** Sort by the first currency's total; rows without one sort together. */
+function costSortValue(r: Run): number | null {
+  const t = r.cost?.totals[0];
+  // Ordering only: the displayed figure is formatted from the string.
+  return t ? Number(t.amount) : null;
 }
 
 export interface SeriesData {
