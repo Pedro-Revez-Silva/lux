@@ -42,7 +42,7 @@ func (s *Server) routes(api huma.API) {
 	}, "run", forTenant(s.submitRun))
 	register(s, api, huma.Operation{
 		OperationID: "listRuns", Method: http.MethodGet, Path: "/v1/runs", Tags: []string{"runs"},
-		Summary: "List Runs", Description: "Newest first.",
+		Summary: "List Runs", Description: "Newest first. Each Run carries `cost`: its totals per currency (final and estimate parts) and its cost status, as `GET /v1/runs/{id}/cost` has them.",
 	}, "read", s.listRuns)
 	register(s, api, huma.Operation{
 		OperationID: "getRun", Method: http.MethodGet, Path: "/v1/runs/{id}", Tags: []string{"runs"},
@@ -332,6 +332,7 @@ type Run struct {
 	// Resume: on GET /v1/runs/{id} of a stopped, lost or failed Run, what
 	// a resume would take.
 	Resume *Resumability `json:"resume,omitempty"`
+	Cost   *RunCostBrief `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
 }
 
 // Resumability says whether a Run can be resumed now, and from what.
@@ -633,7 +634,10 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 			}
 			runs = append(runs, run)
 		}
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return s.listRunCosts(ctx, tx, runs)
 	})
 	if err != nil {
 		return nil, err

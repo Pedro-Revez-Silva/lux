@@ -1,8 +1,8 @@
 # Run costs (design)
 
-Status: **compute, prices, plugins and hourly views are built**, with the
-per-placement estimate rules described below. CLI and console work remain
-planned. These are list-price estimates, not invoice-accurate charges.
+Status: **compute, prices, plugins, hourly views and the CLI are built**,
+with the per-placement estimate rules described below. Console work
+remains planned. These are list-price estimates, not invoice-accurate charges.
 
 This doc covers what each Run costs: the hosts it ran on (built in) and
 anything outside lux that it used, such as model tokens, video or image
@@ -1042,15 +1042,40 @@ operators'.
 
 ### Runs list
 
-`GET /v1/runs` gains `cost: {totals, status}` on each Run, read from
-`cost_lines` by an aggregate over the page's Run ids. It is not stored on
-`runs`.
+**Built** (`listRunCosts` in `internal/server/costs.go`). `GET /v1/runs`
+carries `cost: {status, totals}` on each Run: `totals` per currency with
+their `final` and `estimate` parts, and `status` as `GET /v1/runs/{id}/cost`
+derives it (`pending` with no totals when nothing has reported). It is read
+by one aggregate over the page's Run ids from `cost_lines` and one read of
+`cost_sources`, in the list's own transaction and RLS scope, so a Run's
+cost is visible exactly when the Run is. It is not stored on `runs`.
+`GET /v1/runs/{id}` does not carry it.
 
 ### CLI
 
-- `lux cost <run>`: the breakdown.
-- `lux costs [--since 7d] [--by tenant|pool|host|family|label:K]`.
-- `lux ls` gets a COST column, shown for one currency or marked `multi`.
+**Built** (`internal/cli/costs.go`, `money.go`; [CLI](cli.md#costs)):
+
+- `lux cost <run>`: the status (naming the sources not answered when
+  `incomplete`), the total per currency split into final and estimate, one
+  row per family (with `displayName` when there is one), the lines grouped
+  by family (item, source, amount, currency, from–to, final or estimate),
+  and each source's status and `answeredAt`.
+- `lux costs [--since 7d | --from T [--to T]] [--by G]... [--family F]
+  [--interval hour|day]`: `--by` is `tenant` (operators), `pool`, `host`,
+  `family`, `run` or `label:K`, at most twice. An operator without
+  `--tenant` also gets the unallocated total and, by `host`, each host's
+  allocated and unallocated. luxd's 400 and 413 messages are printed as
+  they are.
+- `lux ls` has a COST column: the total for one currency, `multi` for
+  several, and `—` while `pending`. A leading `~` marks a total that may
+  still change: part of it is an estimate, or the status is `incomplete`.
+
+Amounts are shown rounded half-even to 4 decimals (`math/big`, never a
+float), trailing zeros trimmed, with the currency code; a non-zero amount
+under that is shown as `<0.0001`, and a missing one as `—`, never `0`.
+Each command says "list price" once. `-o json` prints luxd's response
+unchanged, with exact amounts. The range and series of `lux costs` are
+shown in UTC, like its buckets.
 
 ## 9. Console
 
@@ -1218,7 +1243,8 @@ Each step can be reviewed and shipped on its own.
 8. **`cost_hourly` and `GET /v1/costs`, `GET /v1/hosts/{id}/cost`
    (built)**: host-hour refresh is separate from frozen Run placement
    estimates; previously finalized sources are not backfilled from lines.
-9. **CLI**: `lux cost`, `lux costs`, and a COST column in `lux ls`.
+9. **CLI (built)**: `lux cost`, `lux costs`, and a COST column in
+   `lux ls`, with `cost` on `GET /v1/runs`.
 10. **Console**: the Run page Cost card, then the Runs list column, the
     host page, and the Overview.
 11. **Docs**: turn this design into `docs/costs.md` as it was actually

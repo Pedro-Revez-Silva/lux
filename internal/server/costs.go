@@ -118,30 +118,94 @@ func (s *Server) runCost(ctx context.Context, in *RunPath) (*runCostOutput, erro
 		return nil, err
 	}
 	s.decorateCostFamilies(c.ByFamily)
+	c.Sources, c.Status = s.runCostStatus(c.Sources, len(c.Lines) > 0)
+	c.Final = c.Status == "final"
+	return &runCostOutput{c}, nil
+}
+
+// runCostStatus adds each configured plugin without a row as incomplete,
+// and derives the status from the configured sources (and compute) only:
+// a removed plugin's rows and lines stay visible but cannot hold up finality.
+func (s *Server) runCostStatus(sources []CostSource, lines bool) ([]CostSource, string) {
 	active := map[string]bool{"compute": true}
 	for _, plugin := range s.cfg.Costs.Plugins {
 		active[plugin.Name] = true
 		found := false
-		for _, source := range c.Sources {
+		for _, source := range sources {
 			if source.Source == plugin.Name {
 				found = true
 				break
 			}
 		}
 		if !found {
-			c.Sources = append(c.Sources, CostSource{Source: plugin.Name, Status: "incomplete"})
+			sources = append(sources, CostSource{Source: plugin.Name, Status: "incomplete"})
 		}
 	}
 	var current []CostSource
-	for _, source := range c.Sources {
+	for _, source := range sources {
 		if active[source.Source] {
 			current = append(current, source)
 		}
 	}
-	// Historical sources and lines remain visible, but cannot hold up current finality.
-	c.Status = costStatus(current, len(c.Lines) > 0)
-	c.Final = c.Status == "final"
-	return &runCostOutput{c}, nil
+	return sources, costStatus(current, lines)
+}
+
+// RunCostBrief is a Run's cost as the Runs list carries it.
+type RunCostBrief struct {
+	Status string      `json:"status" enum:"pending,complete,incomplete,final" doc:"As in GET /v1/runs/{id}/cost."`
+	Totals []CostTotal `json:"totals" doc:"Per currency, ordered by currency; empty while pending."`
+}
+
+// listRunCosts reads the cost of each of runs in the caller's transaction,
+// so RLS gives the list exactly the visibility of the Runs it lists.
+func (s *Server) listRunCosts(ctx context.Context, tx pgx.Tx, runs []*Run) error {
+	if len(runs) == 0 {
+		return nil
+	}
+	ids := make([]string, len(runs))
+	totals := map[string][]CostTotal{}
+	sources := map[string][]CostSource{}
+	for i, r := range runs {
+		ids[i] = r.ID
+	}
+	rows, err := tx.Query(ctx, `SELECT run_id, currency, trim_scale(sum(amount))::text,
+			trim_scale(coalesce(sum(amount) FILTER (WHERE final), 0))::text,
+			trim_scale(coalesce(sum(amount) FILTER (WHERE NOT final), 0))::text
+		FROM cost_lines WHERE run_id = ANY($1)
+		GROUP BY run_id, currency ORDER BY run_id, currency`, ids)
+	if err != nil {
+		return err
+	}
+	var runID string
+	var t CostTotal
+	_, err = pgx.ForEachRow(rows, []any{&runID, &t.Currency, &t.Amount, &t.Final, &t.Estimate}, func() error {
+		totals[runID] = append(totals[runID], t)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	rows, err = tx.Query(ctx, `SELECT run_id, source, status FROM cost_sources WHERE run_id = ANY($1) ORDER BY run_id, source`, ids)
+	if err != nil {
+		return err
+	}
+	var src CostSource
+	_, err = pgx.ForEachRow(rows, []any{&runID, &src.Source, &src.Status}, func() error {
+		sources[runID] = append(sources[runID], src)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, r := range runs {
+		_, status := s.runCostStatus(sources[r.ID], len(totals[r.ID]) > 0)
+		brief := &RunCostBrief{Status: status, Totals: totals[r.ID]}
+		if brief.Totals == nil {
+			brief.Totals = []CostTotal{}
+		}
+		r.Cost = brief
+	}
+	return nil
 }
 
 // Conflicts are logged once per family and pair of configured plugins in this process.

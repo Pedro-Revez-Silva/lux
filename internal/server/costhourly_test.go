@@ -564,7 +564,7 @@ func TestPluginHourlyReplacementAndRLS(t *testing.T) {
 	}
 	check := func(want string) {
 		t.Helper()
-		var c costSummaryBody
+		var c CostSummaryBody
 		if code := getJSON(t, s, keys["t1"], costPath("&interval=hour"), &c); code != 200 {
 			t.Fatalf("status %d", code)
 		}
@@ -662,7 +662,7 @@ func TestComputeHourlyPiecesAndHostIdle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got costSummaryBody
+	var got CostSummaryBody
 	if code := getJSON(t, s, keys["t1"], costPath("&interval=hour"), &got); code != 200 || len(got.Series) != 2 || got.Series[0].Amount != "1" || got.Series[1].Amount != "1" {
 		t.Fatalf("compute hours: %d %+v", code, got)
 	}
@@ -705,7 +705,7 @@ func TestHourlyCostSurvivesResumeAndRetention(t *testing.T) {
 	if expired != 0 {
 		t.Fatalf("replacement reinserted %d expired hours", expired)
 	}
-	var out costSummaryBody
+	var out CostSummaryBody
 	path := "/v1/costs?from=" + old.Add(-time.Hour).Format(time.RFC3339) + "&to=" + recent.Add(time.Hour).Format(time.RFC3339)
 	if code := getJSON(t, s, keys["t1"], path, &out); code != 200 || len(out.Totals) != 1 || out.Totals[0].Amount != "3" {
 		t.Errorf("retained after resume: %d %+v", code, out)

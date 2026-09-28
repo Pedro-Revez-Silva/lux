@@ -1184,6 +1184,9 @@ components:
       properties:
         activity:
           type: string
+        cost:
+          $ref: "#/components/schemas/RunCostBrief"
+          description: "In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."
         createdAt:
           format: date-time
           type: string
@@ -1285,6 +1288,25 @@ components:
             - final
           type: string
         totals:
+          items:
+            $ref: "#/components/schemas/CostTotal"
+          type:
+            - array
+            - "null"
+      type: object
+    RunCostBrief:
+      additionalProperties: false
+      properties:
+        status:
+          description: As in GET /v1/runs/{id}/cost.
+          enum:
+            - pending
+            - complete
+            - incomplete
+            - final
+          type: string
+        totals:
+          description: Per currency, ordered by currency; empty while pending.
           items:
             $ref: "#/components/schemas/CostTotal"
           type:
@@ -2983,7 +3005,7 @@ paths:
   /v1/runs:
     get:
       description: |-
-        Newest first.
+        Newest first. Each Run carries `cost`: its totals per currency (final and estimate parts) and its cost status, as `GET /v1/runs/{id}/cost` has them.
 
         Needs the `read` scope.
       operationId: listRuns
