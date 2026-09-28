@@ -39,6 +39,7 @@ agent, stream-json for Claude Code, and app-server for Codex.
 - [Operators and the console](docs/operators.md): every tenant at once, migrating and resuming Runs, history, the web console.
 - [Telemetry](docs/telemetry.md): what is recorded about Runs, placements and hosts.
 - [Security](docs/security.md)
+- [Run costs](docs/costs.md): design for review, not built yet.
 - [Development](docs/development.md): building, the test harness.
 - [Agent protocol notes](docs/agent-protocols.md): verified facts about the agent CLIs.
 

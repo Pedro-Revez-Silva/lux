@@ -77,6 +77,14 @@ func live(state string) bool {
 }
 
 func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason string, epoch int) error {
+	if terminal(state) {
+		// A terminal Run begins a new settlement epoch after a stopped/lost one.
+		if _, err := tx.Exec(ctx, `UPDATE cost_sources SET settles_left = NULL, next_at = NULL, attempts = 0
+			WHERE run_id = $1 AND source <> 'compute' AND EXISTS
+			(SELECT 1 FROM runs WHERE id = $1 AND state IN ('stopped', 'lost'))`, runID); err != nil {
+			return err
+		}
+	}
 	_, err := tx.Exec(ctx, `UPDATE runs SET state = $2, state_reason = $3, updated_at = now(),
 			finished_at = CASE WHEN $2 IN ('succeeded', 'failed', 'cancelled') THEN now() ELSE finished_at END,
 			activity = CASE WHEN $2 IN ('running') THEN activity ELSE '' END
@@ -84,11 +92,31 @@ func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason 
 	if err != nil {
 		return err
 	}
+	if costStates[state] {
+		if err := enqueueCost(ctx, tx, runID, "state:"+state); err != nil {
+			return err
+		}
+	}
 	data := map[string]any{"state": state}
 	if reason != "" {
 		data["reason"] = reason
 	}
 	return addEvent(ctx, tx, tenantID, runID, epoch, "state", data)
+}
+
+// costStates: a Run entering one of these has its costs evaluated at once
+// (docs/costs.md, section 5), queued with the state change itself.
+var costStates = map[string]bool{
+	StateStopping: true, StateStopped: true, StateLost: true,
+	StateSucceeded: true, StateFailed: true, StateCancelled: true,
+}
+
+// enqueueCost queues a Run's costs as due now, merged with any row it
+// already has, in the caller's transaction (a tenant's scope too:
+// lux_cost_enqueue, migration 022). Nothing is computed here.
+func enqueueCost(ctx context.Context, tx pgx.Tx, runID, reason string) error {
+	_, err := tx.Exec(ctx, `SELECT lux_cost_enqueue($1, $2)`, runID, reason)
+	return err
 }
 
 // applyStatus moves a Run forward from what its runner reports.
@@ -171,6 +199,12 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 // resumable once it has.
 func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, st proto.Status, runState string, cancel bool) error {
 	var stopReason, hostID string
+	if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID); err != nil {
+		return err
+	}
+	if err := lockCostHost(ctx, tx, hostID); err != nil {
+		return err
+	}
 	err := tx.QueryRow(ctx, `UPDATE placements SET state = 'exited', ended_at = now(),
 			exited_at = coalesce(exited_at, now()), exit_code = $3, exit_reason = $4, output_seq = nullif($5, 0),
 			lease_expires_at = NULL
@@ -233,6 +267,13 @@ func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epo
 	var tenantID, runState string
 	var current int
 	if err := tx.QueryRow(ctx, `SELECT tenant_id, state, current_epoch FROM runs WHERE id = $1 FOR UPDATE`, runID).Scan(&tenantID, &runState, &current); err != nil {
+		return err
+	}
+	var hostID string
+	if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID); err != nil {
+		return err
+	}
+	if err := lockCostHost(ctx, tx, hostID); err != nil {
 		return err
 	}
 	tag, err := tx.Exec(ctx, `UPDATE placements SET state = 'lost', ended_at = now(), exit_reason = $3, lease_expires_at = NULL
@@ -301,6 +342,13 @@ func (s *Server) applySnapshotDone(ctx context.Context, tx pgx.Tx, tenantID, hos
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`, sd.Manifest.SnapshotID, tenantID, runID, placementID, epoch, sd.Manifest, hostID); err != nil {
 		return err
 	}
+	// Recorded for any epoch, late ones too: the session ran in that
+	// placement even when it no longer becomes the Run's.
+	if sd.Manifest.SessionID != "" {
+		if err := recordSession(ctx, tx, tenantID, runID, epoch, sd.Manifest.SessionID); err != nil {
+			return err
+		}
+	}
 	// Only the current placement's snapshot becomes the Run's: an old host
 	// reporting late must not roll the Run back.
 	if epoch == current {
@@ -311,6 +359,14 @@ func (s *Server) applySnapshotDone(ctx context.Context, tx pgx.Tx, tenantID, hos
 		}
 	}
 	return addEvent(ctx, tx, tenantID, runID, epoch, "snapshot", map[string]any{"snapshotId": sd.Manifest.SnapshotID, "bytes": total, "volumes": len(sd.Manifest.Volumes)})
+}
+
+// recordSession notes that a Run's placement epoch had session id: one row
+// per (run, epoch, id), its last_seen moved on a repeat.
+func recordSession(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, id string) error {
+	_, err := tx.Exec(ctx, `INSERT INTO run_sessions (tenant_id, run_id, epoch, session_id) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (run_id, epoch, session_id) DO UPDATE SET last_seen = now()`, tenantID, runID, epoch, id)
+	return err
 }
 
 func insertBlob(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, hostID, blobID, kind, name string, size int64, sha string) error {
@@ -326,6 +382,9 @@ func (s *Server) applyAdapterEvent(ctx context.Context, tx pgx.Tx, tenantID, run
 			return err
 		}
 		addEvent(ctx, tx, tenantID, runID, epoch, "session", map[string]any{"sessionId": ev.SessionID})
+		if err := recordSession(ctx, tx, tenantID, runID, epoch, ev.SessionID); err != nil {
+			return err
+		}
 	}
 	if ev.Activity != "" {
 		if _, err := tx.Exec(ctx, `UPDATE runs SET activity = $2 WHERE id = $1 AND state = 'running'`, runID, ev.Activity); err != nil {

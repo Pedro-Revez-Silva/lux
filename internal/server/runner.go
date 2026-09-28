@@ -95,8 +95,14 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 						return err
 					}
 				}
-				if _, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool, token_id, name, state)
-					VALUES ($1, $2, $3, $4, $5, 'ready')`, hostID, tok.TenantID, tok.Pool, tok.ID, h.Name); err != nil {
+				// A static pool's default price, if it has one, is the new
+				// host's own from now on (changing the default later does
+				// not reprice it).
+				if _, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool, token_id, name, state, hourly_price, price_currency)
+					SELECT $1, $2, $3, $4, $5, 'ready', p.hourly_price, p.price_currency
+					FROM (VALUES (1)) v LEFT JOIN pools p
+					  ON coalesce(p.tenant_id, '') = coalesce($2, '') AND p.name = $3 AND NOT p.retired`,
+					hostID, tok.TenantID, tok.Pool, tok.ID, h.Name); err != nil {
 					return err
 				}
 			}
@@ -108,9 +114,9 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		// remove only the "outdated" cause. FOR UPDATE holds the row until
 		// this transaction commits, so a concurrent drainHost or deletePool
 		// cannot add a cause the UPDATE below would then overwrite.
-		var wasDraining bool
+		var wasDraining, registering bool
 		var causes []string
-		if err := tx.QueryRow(ctx, `SELECT draining, drain_causes FROM hosts WHERE id = $1 FOR UPDATE`, hostID).Scan(&wasDraining, &causes); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT draining, drain_causes, registered_at IS NULL FROM hosts WHERE id = $1 FOR NO KEY UPDATE`, hostID).Scan(&wasDraining, &causes, &registering); err != nil {
 			return err
 		}
 		undrainOutdated := wasDraining && slices.Contains(causes, causeOutdated) && s.binariesMatch(h.Arch, h.RunnerSHA256, h.ShimSHA256)
@@ -118,7 +124,8 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 			causes = slices.DeleteFunc(causes, func(c string) bool { return c == causeOutdated })
 		}
 		draining := len(causes) > 0
-		_, err = tx.Exec(ctx, `UPDATE hosts SET
+		var priced bool
+		err = tx.QueryRow(ctx, `UPDATE hosts SET
 				drain_causes = $9,
 				draining = $10,
 				state = CASE WHEN $10 THEN 'draining' ELSE 'ready' END,
@@ -130,9 +137,22 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 				registered_at = coalesce(registered_at, now()),
 				provisioned_at = coalesce(provisioned_at, now()),
 				last_heartbeat = now(), lost_at = NULL
-			WHERE id = $1`,
-			hostID, labels, h.Arch, h.Capacity, versions, caches, nonNil(h.LocalSnapshots), h.ProviderID, nonNil(causes), draining)
+			WHERE id = $1
+			RETURNING hourly_price IS NOT NULL
+				OR EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = $1 AND r.valid_to IS NULL AND r.source = 'static')`,
+			hostID, labels, h.Arch, h.Capacity, versions, caches, nonNil(h.LocalSnapshots), h.ProviderID, nonNil(causes), draining).Scan(&priced)
 		if err != nil {
+			return err
+		}
+		// A priced static host: a changed capacity opens a new rate period
+		// (its first, at registration, from the instant it registered). A
+		// host with no price and no static period has nothing to sync.
+		if priced {
+			if err := syncStaticRate(ctx, tx, hostID, registering); err != nil {
+				return err
+			}
+		}
+		if err := syncProviderCapacity(ctx, tx, hostID, registering); err != nil {
 			return err
 		}
 		if undrainOutdated {
@@ -150,51 +170,146 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 			}
 		}
 		w.HostID = hostID
-
-		// What luxd thinks is live here. Anything the runner has beyond this
-		// is stale (its Run moved on) and it must stop it.
-		rows, err := tx.Query(ctx, `SELECT run_id, epoch, state FROM placements
-			WHERE host_id = $1 AND state IN `+livePlacementStates+``, hostID)
-		if err != nil {
-			return err
-		}
-		live := map[string]proto.LivePlacement{}
-		for rows.Next() {
-			var lp proto.LivePlacement
-			if err := rows.Scan(&lp.RunID, &lp.Epoch, &lp.State); err != nil {
-				return err
-			}
-			w.Live = append(w.Live, lp)
-			live[lp.RunID] = lp
-		}
-		rows.Close()
-
-		// Placements the runner no longer has: it lost them while
-		// disconnected (e.g. the runner restarted and the container was gone).
-		have := map[string]int{}
-		for _, lp := range h.Live {
-			have[lp.RunID] = lp.Epoch
-		}
-		for runID, lp := range live {
-			if e, ok := have[runID]; ok && e == lp.Epoch {
-				continue
-			}
-			// Still assigned but not yet acked: the assign message is pending
-			// and will be (re)delivered; not lost.
-			if lp.State == "assigned" {
-				continue
-			}
-			if err := s.placementLost(ctx, tx, runID, lp.Epoch, "runner restarted without the container"); err != nil {
-				return err
-			}
-		}
 		return nil
 	})
+	if err == nil {
+		// Reconciliation discovers Runs anew after registration commits.
+		err = retryHostPlacements(ctx, func() error {
+			return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				rows, err := tx.Query(ctx, `SELECT DISTINCT run_id FROM placements
+					WHERE host_id = $1 AND state IN `+livePlacementStates+` ORDER BY run_id`, w.HostID)
+				if err != nil {
+					return err
+				}
+				runs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+				if err != nil {
+					return err
+				}
+				if err := lockReaperRuns(ctx, tx, runs); err != nil {
+					return err
+				}
+				rows, err = tx.Query(ctx, `SELECT host_id FROM (
+					SELECT $1::text AS host_id
+					UNION SELECT host_id FROM placements WHERE run_id = ANY($2)
+				) all_hosts ORDER BY host_id`, w.HostID, runs)
+				if err != nil {
+					return err
+				}
+				hosts, err := pgx.CollectRows(rows, pgx.RowTo[string])
+				if err != nil {
+					return err
+				}
+				for _, host := range hosts {
+					if err := lockCostHost(ctx, tx, host); err != nil {
+						return err
+					}
+				}
+				if _, err := tx.Exec(ctx, `SELECT 1 FROM hosts WHERE id = $1 FOR NO KEY UPDATE`, w.HostID); err != nil {
+					return err
+				}
+				return s.reconcileHostPlacements(ctx, tx, w.HostID, h.Live, runs, &w)
+			})
+		})
+	}
 	if err == nil {
 		s.Kick()
 		s.notifyAll(outdatedDrained)
 	}
 	return w, err
+}
+
+var errHostPlacementsChanged = errors.New("host placements changed during reconciliation")
+
+func retryHostPlacements(ctx context.Context, fn func() error) error {
+	for {
+		err := fn()
+		if !errors.Is(err, errHostPlacementsChanged) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+	}
+}
+
+func (s *Server) reconcileHostPlacements(ctx context.Context, tx pgx.Tx, hostID string, reported []proto.LivePlacement, runs []string, w *proto.Welcome) error {
+	// A new assignment after discovery has no Run lock. Retry discovery
+	// without taking a Run lock after a host lock.
+	rows, err := tx.Query(ctx, `SELECT run_id, epoch, state FROM placements
+		WHERE host_id = $1 AND state IN `+livePlacementStates+` ORDER BY run_id`, hostID)
+	if err != nil {
+		return err
+	}
+	live := []proto.LivePlacement{}
+	for rows.Next() {
+		var lp proto.LivePlacement
+		if err := rows.Scan(&lp.RunID, &lp.Epoch, &lp.State); err != nil {
+			rows.Close()
+			return err
+		}
+		live = append(live, lp)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	locked := make(map[string]bool, len(runs))
+	for _, id := range runs {
+		locked[id] = true
+	}
+	for _, lp := range live {
+		if !locked[lp.RunID] {
+			return errHostPlacementsChanged
+		}
+	}
+	w.Live = live
+	have := map[string]int{}
+	for _, lp := range reported {
+		have[lp.RunID] = lp.Epoch
+	}
+	for _, lp := range live {
+		if e, ok := have[lp.RunID]; ok && e == lp.Epoch || lp.State == "assigned" {
+			continue
+		}
+		if err := s.placementLost(ctx, tx, lp.RunID, lp.Epoch, "runner restarted without the container"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// syncProviderCapacity splits only the open provider period. A price fetched
+// after registration cannot price the time before that fetch.
+func syncProviderCapacity(ctx context.Context, tx pgx.Tx, hostID string, registering bool) error {
+	_, err := tx.Exec(ctx, `WITH host AS (
+		SELECT h.id, h.registered_at, h.market, h.instance_type,
+			coalesce((h.capacity->>'cpus')::float8, 0) AS cpus,
+			coalesce((h.capacity->>'memory')::int8, 0) AS memory,
+			p.provider, h.launch_template->>'region' AS region
+		FROM hosts h JOIN pools p ON p.name = h.pool AND p.tenant_id IS NOT DISTINCT FROM h.tenant_id
+		WHERE h.id = $1 AND h.provision_requested_at IS NOT NULL AND h.provider_id IS NOT NULL
+			AND p.provider <> 'static' AND h.terminated_at IS NULL
+	), at AS (SELECT clock_timestamp() AS instant),
+		closed AS (
+			UPDATE host_rates r SET valid_to = (SELECT instant FROM at)
+			FROM host h WHERE r.host_id = h.id AND r.valid_to IS NULL
+				AND r.valid_from < (SELECT instant FROM at)
+				AND (r.cap_cpus <> h.cpus OR r.cap_memory <> h.memory)
+			RETURNING r.host_id, r.per_hour, r.currency, r.source
+		)
+	INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
+	SELECT h.id, (SELECT instant FROM at), c.per_hour, c.currency, h.cpus, h.memory, c.source
+	FROM closed c JOIN host h ON h.id = c.host_id
+	UNION ALL
+	SELECT h.id, h.registered_at, pc.per_hour, pc.currency, h.cpus, h.memory, h.provider || '-pricing'
+	FROM host h JOIN price_cache pc ON pc.provider = h.provider AND pc.region = h.region
+		AND pc.instance_type = h.instance_type AND pc.os = 'Linux'
+	WHERE $2 AND h.market = 'on-demand' AND pc.fetched_at <= h.registered_at
+		AND (h.cpus > 0 OR h.memory > 0)
+		AND NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.valid_to IS NULL)
+		AND NOT EXISTS (SELECT 1 FROM closed)`, hostID, registering)
+	return err
 }
 
 func nonNil[T any](v []T) []T {
@@ -594,14 +709,16 @@ func msToTime(ms int64) *time.Time {
 // on it.
 func (s *Server) hostEvicting(ctx context.Context, hostID string, ev proto.Evicting) error {
 	var hosts []string
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		var err error
-		reason := "evicting: " + truncate(ev.Reason, 100)
-		if !ev.Deadline.IsZero() {
-			reason += " at " + ev.Deadline.UTC().Format(time.RFC3339)
-		}
-		hosts, err = s.drainHosts(ctx, tx, reason, causePreempt, "preempt", "id = $1", hostID)
-		return err
+	err := retryHostPlacements(ctx, func() error {
+		return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			var err error
+			reason := "evicting: " + truncate(ev.Reason, 100)
+			if !ev.Deadline.IsZero() {
+				reason += " at " + ev.Deadline.UTC().Format(time.RFC3339)
+			}
+			hosts, err = s.drainHosts(ctx, tx, reason, causePreempt, "preempt", "id = $1", hostID)
+			return err
+		})
 	})
 	if err != nil {
 		return err

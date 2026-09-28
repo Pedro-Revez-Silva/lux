@@ -110,6 +110,140 @@ components:
           format: int64
           type: integer
       type: object
+    CostLine:
+      additionalProperties: false
+      properties:
+        amount:
+          description: A decimal string, up to 9 fractional digits; may be negative (a refund).
+          examples:
+            - "1.28431"
+          type: string
+        currency:
+          description: As reported (ISO 4217); never converted.
+          examples:
+            - USD
+          type: string
+        details:
+          additionalProperties: {}
+          type: object
+        family:
+          description: "Free-form: compute, ai, video, ..."
+          type: string
+        final:
+          description: "false: an estimate that may still change."
+          type: boolean
+        from:
+          description: Start of the time window the line covers.
+          format: date-time
+          type: string
+        item:
+          description: Empty when the source gives none.
+          type: string
+        reportedAt:
+          format: date-time
+          type: string
+        runId:
+          type: string
+        source:
+          description: compute, or a cost plugin's configured name.
+          type: string
+        to:
+          format: date-time
+          type: string
+      type: object
+    CostSource:
+      additionalProperties: false
+      properties:
+        answeredAt:
+          format: date-time
+          type: string
+        nextAt:
+          format: date-time
+          type: string
+        source:
+          type: string
+        status:
+          enum:
+            - ok
+            - incomplete
+            - final
+          type: string
+      type: object
+    CostSummaryBody:
+      additionalProperties: false
+      properties:
+        basis:
+          type: string
+        from:
+          format: date-time
+          type: string
+        hosts:
+          items:
+            $ref: "#/components/schemas/HostAllocation"
+          type:
+            - array
+            - "null"
+        series:
+          items:
+            $ref: "#/components/schemas/CostSummaryRow"
+          type:
+            - array
+            - "null"
+        to:
+          format: date-time
+          type: string
+        totals:
+          items:
+            $ref: "#/components/schemas/CostSummaryRow"
+          type:
+            - array
+            - "null"
+        unallocated:
+          items:
+            $ref: "#/components/schemas/CostSummaryRow"
+          type:
+            - array
+            - "null"
+      type: object
+    CostSummaryRow:
+      additionalProperties: false
+      properties:
+        amount:
+          type: string
+        at:
+          format: date-time
+          type: string
+        currency:
+          type: string
+        group:
+          additionalProperties:
+            type: string
+          type: object
+      type: object
+    CostTotal:
+      additionalProperties: false
+      properties:
+        amount:
+          description: final + estimate.
+          type: string
+        color:
+          description: In byFamily when a plugin supplies a color hint.
+          type: string
+        currency:
+          type: string
+        displayName:
+          description: In byFamily when the family is described by a plugin or is compute.
+          type: string
+        estimate:
+          description: The part from lines that may still change.
+          type: string
+        family:
+          description: In byFamily only.
+          type: string
+        final:
+          description: The part from final lines.
+          type: string
+      type: object
     DiskSample:
       additionalProperties: false
       properties:
@@ -255,6 +389,9 @@ components:
           type: boolean
         id:
           type: string
+        instanceType:
+          description: The instance type the provider launched; absent for a host that registered itself.
+          type: string
         labels:
           additionalProperties:
             type: string
@@ -265,6 +402,12 @@ components:
         liveRuns:
           format: int64
           type: integer
+        market:
+          description: on-demand or spot, as the provider launched it.
+          enum:
+            - on-demand
+            - spot
+          type: string
         name:
           type: string
         placements:
@@ -296,6 +439,76 @@ components:
         versions:
           additionalProperties: {}
           type: object
+        zone:
+          description: The availability zone the provider launched it in.
+          type: string
+      type: object
+    HostAllocation:
+      additionalProperties: false
+      properties:
+        allocated:
+          type: string
+        currency:
+          type: string
+        hostId:
+          type: string
+        unallocated:
+          type: string
+      type: object
+    HostCost:
+      additionalProperties: false
+      properties:
+        basis:
+          type: string
+        from:
+          format: date-time
+          type: string
+        hostId:
+          type: string
+        hours:
+          items:
+            $ref: "#/components/schemas/HostCostHour"
+          type:
+            - array
+            - "null"
+        rates:
+          items:
+            $ref: "#/components/schemas/HostCostRate"
+          type:
+            - array
+            - "null"
+        to:
+          format: date-time
+          type: string
+      type: object
+    HostCostHour:
+      additionalProperties: false
+      properties:
+        allocated:
+          type: string
+        currency:
+          type: string
+        hour:
+          format: date-time
+          type: string
+        unallocated:
+          type: string
+      type: object
+    HostCostRate:
+      additionalProperties: false
+      properties:
+        currency:
+          type: string
+        from:
+          format: date-time
+          type: string
+        perHour:
+          type: string
+        source:
+          type: string
+        to:
+          format: date-time
+          type: string
       type: object
     HostDrain:
       additionalProperties: false
@@ -335,6 +548,43 @@ components:
           type: string
         tenant:
           type: string
+      type: object
+    HostPrice:
+      additionalProperties: false
+      properties:
+        currency:
+          description: ISO 4217.
+          examples:
+            - USD
+          type: string
+        hourlyPrice:
+          description: Per hour, a decimal string with up to 9 fractional digits.
+          examples:
+            - "0.40"
+          type: string
+      required:
+        - hourlyPrice
+        - currency
+      type: object
+    HostPriceSet:
+      additionalProperties: false
+      properties:
+        currency:
+          description: ISO 4217.
+          examples:
+            - USD
+          type: string
+        host:
+          description: The host's id.
+          type: string
+        hourlyPrice:
+          description: Per hour, a decimal string with up to 9 fractional digits.
+          examples:
+            - "0.40"
+          type: string
+      required:
+        - hourlyPrice
+        - currency
       type: object
     Image:
       additionalProperties: false
@@ -554,6 +804,16 @@ components:
     Pool:
       additionalProperties: false
       properties:
+        currency:
+          description: The currency of hourlyPrice (ISO 4217); both or neither.
+          examples:
+            - USD
+          type: string
+        hourlyPrice:
+          description: "Static pools: the default hourly price of hosts registering into the pool, a decimal string with up to 9 fractional digits. Copied to each host when it first registers; changing it does not reprice existing hosts. Refused for ec2 pools, which the provider prices."
+          examples:
+            - "0.40"
+          type: string
         maxHosts:
           format: int64
           type: integer
@@ -851,6 +1111,49 @@ components:
           type: string
         usage:
           $ref: "#/components/schemas/RunUsage"
+      type: object
+    RunCost:
+      additionalProperties: false
+      properties:
+        basis:
+          description: "list: list prices, before discounts, credits and tax."
+          type: string
+        byFamily:
+          items:
+            $ref: "#/components/schemas/CostTotal"
+          type:
+            - array
+            - "null"
+        final:
+          type: boolean
+        lines:
+          items:
+            $ref: "#/components/schemas/CostLine"
+          type:
+            - array
+            - "null"
+        runId:
+          type: string
+        sources:
+          items:
+            $ref: "#/components/schemas/CostSource"
+          type:
+            - array
+            - "null"
+        status:
+          description: "pending: no source has reported yet (for example, a Run that just started, before the first cost tick). incomplete: some source has not answered or failed (see sources). final: every source is final."
+          enum:
+            - pending
+            - complete
+            - incomplete
+            - final
+          type: string
+        totals:
+          items:
+            $ref: "#/components/schemas/CostTotal"
+          type:
+            - array
+            - "null"
       type: object
     RunPlacement:
       additionalProperties: false
@@ -1526,6 +1829,115 @@ paths:
       summary: Download an artifact
       tags:
         - runs
+  /v1/costs:
+    get:
+      description: Needs the `read` scope.
+      operationId: costSummary
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+          explode: false
+          in: query
+          name: since
+          schema:
+            description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+            examples:
+              - 24h
+            type: string
+        - description: The start (RFC 3339), instead of since.
+          explode: false
+          in: query
+          name: from
+          schema:
+            description: The start (RFC 3339), instead of since.
+            type: string
+        - description: The end (RFC 3339); default now.
+          explode: false
+          in: query
+          name: to
+          schema:
+            description: The end (RFC 3339); default now.
+            type: string
+        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+          explode: false
+          in: query
+          name: res
+          schema:
+            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            type: string
+        - description: "Repeat up to twice: tenant (operators), pool, host, family, run, label:key."
+          explode: true
+          in: query
+          name: group
+          schema:
+            description: "Repeat up to twice: tenant (operators), pool, host, family, run, label:key."
+            items:
+              type: string
+            type:
+              - array
+              - "null"
+        - description: Only this family.
+          explode: false
+          in: query
+          name: family
+          schema:
+            description: Only this family.
+            type: string
+        - description: hour or day; include a time series.
+          explode: false
+          in: query
+          name: interval
+          schema:
+            description: hour or day; include a time series.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CostSummaryBody"
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Summarize costs by currency, time and up to two groups
+      tags:
+        - costs
   /v1/events:
     get:
       description: |-
@@ -1857,6 +2269,104 @@ paths:
       summary: Get a host
       tags:
         - hosts
+  /v1/hosts/{id}/cost:
+    get:
+      description: Needs the `read` scope.
+      operationId: hostCost
+      parameters:
+        - description: The host's id or name (a name of a host that is not terminated).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The host's id or name (a name of a host that is not terminated).
+            type: string
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+          explode: false
+          in: query
+          name: since
+          schema:
+            description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+            examples:
+              - 24h
+            type: string
+        - description: The start (RFC 3339), instead of since.
+          explode: false
+          in: query
+          name: from
+          schema:
+            description: The start (RFC 3339), instead of since.
+            type: string
+        - description: The end (RFC 3339); default now.
+          explode: false
+          in: query
+          name: to
+          schema:
+            description: The end (RFC 3339); default now.
+            type: string
+        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+          explode: false
+          in: query
+          name: res
+          schema:
+            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostCost"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: A host's hourly allocation and rate periods
+      tags:
+        - hosts
+        - costs
   /v1/hosts/{id}/drain:
     post:
       description: |-
@@ -2026,6 +2536,135 @@ paths:
       summary: A host's resource use over time
       tags:
         - history
+  /v1/hosts/{id}/price:
+    delete:
+      description: |-
+        Its current rate period closes now and no new one opens: its Runs get no compute cost from then on. Who may: as for setting it.
+
+        Needs the `admin` scope.
+      operationId: clearHostPrice
+      parameters:
+        - description: The host's id or name (a name of a host that is not terminated).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The host's id or name (a name of a host that is not terminated).
+            type: string
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+      responses:
+        "204":
+          description: No Content
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Clear a static host's hourly price
+      tags:
+        - hosts
+    put:
+      description: |-
+        The flat price its compute cost is worked out at, from now: the host's current rate period closes and a new one opens. Only for a host that registered itself (a provisioned host is priced by its provider). The tenant's own hosts; operators, any host (a platform host's price is theirs to set).
+
+        Needs the `admin` scope.
+      operationId: setHostPrice
+      parameters:
+        - description: The host's id or name (a name of a host that is not terminated).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The host's id or name (a name of a host that is not terminated).
+            type: string
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HostPrice"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostPriceSet"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Set a static host's hourly price
+      tags:
+        - hosts
   /v1/pools:
     get:
       description: |-
@@ -2618,6 +3257,63 @@ paths:
       security:
         - apiKey: []
       summary: Cancel a Run
+      tags:
+        - runs
+  /v1/runs/{id}/cost:
+    get:
+      description: |-
+        Its cost lines (one per source and item), with totals per currency and per family and currency. Amounts in different currencies are never added together. Each total splits into the part from final lines and the part from estimates, which may still change. Amounts are list prices (basis: list).
+
+        Needs the `read` scope.
+      operationId: runCost
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunCost"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: What a Run cost
       tags:
         - runs
   /v1/runs/{id}/events:

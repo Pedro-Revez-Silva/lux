@@ -33,7 +33,23 @@ func (s *Server) reaperLoop(ctx context.Context) {
 func (s *Server) reapLeases(ctx context.Context) error {
 	var n int
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// Discover candidates without locking placements; renewal may win before
+		// the Run lock, so check expiry again after acquiring it.
 		expired, err := livePlacements(ctx, tx, "p.lease_expires_at < now()")
+		if err != nil {
+			return err
+		}
+		runs := make([]string, 0, len(expired))
+		for _, p := range expired {
+			runs = append(runs, p.RunID)
+		}
+		if err := lockReaperRuns(ctx, tx, runs); err != nil {
+			return err
+		}
+		if err := lockCostHosts(ctx, tx, runs); err != nil {
+			return err
+		}
+		expired, err = livePlacements(ctx, tx, "p.lease_expires_at < now() AND p.run_id = ANY($1)", runs)
 		if err != nil {
 			return err
 		}
@@ -45,35 +61,104 @@ func (s *Server) reapLeases(ctx context.Context) error {
 		n = len(expired)
 		return nil
 	})
-	if n > 0 {
+	if err == nil && n > 0 {
 		s.Kick()
 	}
+	return err
+}
+
+func lockReaperRuns(ctx context.Context, tx pgx.Tx, runs []string) error {
+	if len(runs) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = ANY($1) ORDER BY id FOR UPDATE`, runs)
 	return err
 }
 
 // reapHosts: a host without heartbeats is lost, and with it its live
 // placements and the snapshots only it held.
 func (s *Server) reapHosts(ctx context.Context) error {
-	var n int
+	var lost []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `UPDATE hosts SET state = 'lost', lost_at = now(), state_reason = 'missed heartbeats'
+		rows, err := tx.Query(ctx, `SELECT id FROM hosts
 			WHERE state IN ('ready', 'draining') AND last_heartbeat < now() - $1::interval
-			RETURNING id`, interval(s.cfg.LeaseDuration))
+			ORDER BY id`, interval(s.cfg.LeaseDuration))
 		if err != nil {
 			return err
 		}
-		lost, err := pgx.CollectRows(rows, pgx.RowTo[string])
-		if err != nil || len(lost) == 0 {
+		candidates, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil || len(candidates) == 0 {
 			return err
 		}
-		n = len(lost)
-		s.log.Warn("hosts lost", "hosts", lost)
+		rows, err = tx.Query(ctx, `SELECT DISTINCT run_id FROM placements
+			WHERE host_id = ANY($1) AND state IN `+livePlacementStates+` ORDER BY run_id`, candidates)
+		if err != nil {
+			return err
+		}
+		runs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		if err := lockReaperRuns(ctx, tx, runs); err != nil {
+			return err
+		}
+		rows, err = tx.Query(ctx, `SELECT host_id FROM (
+			SELECT unnest($1::text[]) AS host_id
+			UNION SELECT host_id FROM placements WHERE run_id = ANY($2)
+		) all_hosts ORDER BY host_id`, candidates, runs)
+		if err != nil {
+			return err
+		}
+		hosts, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		for _, host := range hosts {
+			if err := lockCostHost(ctx, tx, host); err != nil {
+				return err
+			}
+		}
+		// A placement assigned after discovery has no Run lock here. Leave
+		// these hosts for the next pass rather than lock a Run after a host.
+		rows, err = tx.Query(ctx, `SELECT DISTINCT run_id FROM placements
+			WHERE host_id = ANY($1) AND state IN `+livePlacementStates+` ORDER BY run_id`, candidates)
+		if err != nil {
+			return err
+		}
+		currentRuns, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		locked := make(map[string]bool, len(runs))
+		for _, run := range runs {
+			locked[run] = true
+		}
+		for _, run := range currentRuns {
+			if !locked[run] {
+				return nil
+			}
+		}
+		// Heartbeats may have refreshed a candidate while the locks were
+		// acquired. Only retire hosts still stale under the host advisory lock.
+		for _, host := range candidates {
+			if err := tx.QueryRow(ctx, `UPDATE hosts SET state = 'lost', lost_at = now(), state_reason = 'missed heartbeats'
+				WHERE id = $1 AND state IN ('ready', 'draining')
+				  AND last_heartbeat < now() - $2::interval
+				RETURNING id`, host, interval(s.cfg.LeaseDuration)).Scan(&host); err != nil {
+				if err == pgx.ErrNoRows {
+					continue
+				}
+				return err
+			}
+			lost = append(lost, host)
+		}
+		if len(lost) == 0 {
+			return nil
+		}
 		if err := hostsGone(ctx, tx, lost); err != nil {
 			return err
 		}
-		// Their live placements go with them, whatever their leases say: a
-		// fresh assignment's lease is generous (image pulls are slow), but a
-		// host that stopped heartbeating is not pulling anything.
+		// A fresh assignment's lease can outlast its host's heartbeat.
 		live, err := livePlacements(ctx, tx, "p.host_id = ANY($1)", lost)
 		if err != nil {
 			return err
@@ -85,7 +170,8 @@ func (s *Server) reapHosts(ctx context.Context) error {
 		}
 		return nil
 	})
-	if n > 0 {
+	if err == nil && len(lost) > 0 {
+		s.log.Warn("hosts lost", "hosts", lost)
 		s.Kick()
 	}
 	return err
@@ -98,30 +184,47 @@ func (s *Server) reapHosts(ctx context.Context) error {
 func (s *Server) reapTimeouts(ctx context.Context) error {
 	var hosts []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT r.id, r.tenant_id, r.current_epoch FROM runs r
+		const dueQuery = `SELECT r.id FROM runs r
 			WHERE r.state IN ('starting', 'running') AND r.first_started_at IS NOT NULL
 			  AND coalesce(r.spec->>'timeout', '') NOT IN ('', '0s')
 			  AND (SELECT coalesce(sum(coalesce(p.ended_at, now()) - p.started_at), interval '0')
 			       FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) > (r.spec->>'timeout')::interval
+			  AND NOT EXISTS (SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch AND p.stop_requested_at IS NOT NULL)`
+		rows, err := tx.Query(ctx, dueQuery+` ORDER BY r.id LIMIT 50`)
+		if err != nil {
+			return err
+		}
+		candidates, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		if err := lockReaperRuns(ctx, tx, candidates); err != nil {
+			return err
+		}
+		if err := lockCostHosts(ctx, tx, candidates); err != nil {
+			return err
+		}
+		rows, err = tx.Query(ctx, `SELECT r.id, r.tenant_id FROM runs r
+			WHERE r.id = ANY($1) AND r.state IN ('starting', 'running') AND r.first_started_at IS NOT NULL
+			  AND coalesce(r.spec->>'timeout', '') NOT IN ('', '0s')
+			  AND (SELECT coalesce(sum(coalesce(p.ended_at, now()) - p.started_at), interval '0')
+			       FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) > (r.spec->>'timeout')::interval
 			  AND NOT EXISTS (SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch AND p.stop_requested_at IS NOT NULL)
-			LIMIT 50`)
+			ORDER BY r.id`, candidates)
 		if err != nil {
 			return err
 		}
 		type rr struct {
 			id, tenant string
-			epoch      int
 		}
-		var due []rr
-		for rows.Next() {
+		due, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (rr, error) {
 			var r rr
-			if err := rows.Scan(&r.id, &r.tenant, &r.epoch); err != nil {
-				rows.Close()
-				return err
-			}
-			due = append(due, r)
+			err := row.Scan(&r.id, &r.tenant)
+			return r, err
+		})
+		if err != nil {
+			return err
 		}
-		rows.Close()
 		for _, r := range due {
 			h, err := s.requestStop(ctx, tx, r.tenant, r.id, "timeout")
 			if err != nil {

@@ -84,6 +84,19 @@ its variable; the table below lists them by variable.
 | `LUX_HISTORY_MINUTES` | `720h` | How long minute rollups are kept. |
 | `LUX_HISTORY_HOURS` | `9600h` | How long hour rollups are kept. |
 | `LUX_HISTORY_DISK_PATHS` | `/` | Directories on luxd's own machine whose filesystems (used, free, total) the operators' Overview charts, comma-separated (`history.disk_paths`, a list, in the file). A path that cannot be read is skipped and logged. An empty list (`[]`, or only commas such as `,`) tracks no filesystem. |
+| `LUX_COSTS` | `true` | Run costs ([Costs](costs.md)): `false` stops the cost tick and the queue's drainer on this luxd. State changes still queue their Runs, for whichever luxd drains. |
+| `LUX_COSTS_EVERY` | `2m` | The cost tick: every live Run's costs are evaluated once per interval, by one luxd. |
+| `LUX_COSTS_DRAIN_EVERY` | `2s` | How often each luxd polls the cost queue, besides being woken by Run events. |
+| `LUX_COSTS_BATCH` | `1000` | How many Runs one drain claims. |
+| `LUX_COSTS_SETTLE` | `["10m","1h"]` | Increasing durations after a Run finishes, JSON array in the environment. Plugin-specific `settle` overrides this. |
+| `LUX_COSTS_SETTLE_GIVE_UP` | `168h` | Stop retrying a failed source after seven days. |
+| `LUX_COSTS_BACKOFF`, `LUX_COSTS_BACKOFF_MAX` | `10s`, `10m` | Retry delays for plugin failures. |
+| `LUX_COSTS_DESCRIBE_EVERY` | `1h` | Refresh cost plugin descriptions. |
+| `LUX_COSTS_PLUGINS` | `[]` | JSON array replacing the entire `[[costs.plugin]]` list from the file. |
+| `LUX_COSTS_COMPUTE_EC2` | `true` | Price EC2 hosts using AWS on-demand and spot list prices. |
+| `LUX_COSTS_PRICES_REFRESH` | `24h` | Refresh interval for the on-demand price cache. |
+| `LUX_COSTS_PRICING_REGION` | `us-east-1` | AWS region for the Pricing API, independent of the host's region. |
+| `LUX_PRICING_ENDPOINT` | AWS | Overrides the Pricing API endpoint (tests). |
 | `LUX_DEBUG` | — | Debug logging. |
 | `LUX_CONSOLE_AUTH` | `key` | How the console signs people in: `key` or `cloudflare-access` ([Operators](operators.md#signing-in)). |
 | `LUX_CF_ACCESS_TEAM`, `LUX_CF_ACCESS_AUD` | — | For `cloudflare-access`: the Access team (`acme` or `acme.cloudflareaccess.com`) and the application's AUD tag. |
@@ -92,6 +105,17 @@ its variable; the table below lists them by variable.
 | `LUX_CONFIG` | `/etc/lux/luxd.toml` | The configuration file. |
 
 luxd also serves the operator console at `/` ([Operators](operators.md#the-console)).
+
+Cost plugins are configured under `[[costs.plugin]]` (see
+[the example](luxd.example.toml)). Each needs a unique `name` other than
+`compute` and an HTTP(S) base `url`. A bearer token may be read from
+`token_file` or from the variable named by `token_env`, never inline in the
+configuration. Optional `timeout` defaults to 30s, `max_batch` to 200;
+`settle` overrides the global schedule. Plain HTTP is accepted for loopback
+and private IPs; public HTTP requires `insecure = true`. Prefer HTTPS for
+any plugin outside the private network. `LUX_COSTS_PLUGINS` takes a JSON
+array of objects with the same keys (including duration strings), for example
+`[{"name":"ledger","url":"https://ledger.example","token_env":"LEDGER_TOKEN"}]`.
 
 ### Tenants, keys and quotas
 
@@ -366,9 +390,14 @@ What an instance needs:
   wherever images, git remotes and model APIs live, and an instance
   profile if the runner needs one (it doesn't hold S3 credentials).
 - luxd needs EC2 permissions for `RunInstances` (with the launch template
-  and `CreateTags`), `TerminateInstances` and `DescribeInstances`, from its
-  standard AWS configuration (environment or instance role).
-  `LUX_EC2_ENDPOINT` overrides the endpoint.
+  and `CreateTags`), `TerminateInstances` and `DescribeInstances`, plus
+  `pricing:GetProducts` for on-demand prices and
+  `ec2:DescribeSpotPriceHistory` for spot prices, from its standard AWS
+  configuration (environment or instance role). Both pricing actions are
+  read-only and require `Resource: "*"`; the runner needs neither. The
+  Pricing API uses `LUX_COSTS_PRICING_REGION` regardless of the host's
+  region. `LUX_EC2_ENDPOINT` and `LUX_PRICING_ENDPOINT` override their
+  respective endpoints for tests.
 
 `template.userData` picks the format (default `"ignition"`); a pool set
 with an unrecognized value is refused, not left to fail at boot:

@@ -186,6 +186,9 @@ export interface Host {
   platform: boolean;
   liveRuns: number;
   providerId?: string;
+  instanceType?: string;
+  zone?: string;
+  market?: "on-demand" | "spot";
   lastHeartbeat?: string;
   times: Record<HostTimeKey, string | null>;
   placements?: HostPlacement[];

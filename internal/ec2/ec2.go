@@ -97,20 +97,22 @@ func (p *Provider) client(ctx context.Context, region string) (*awsec2.Client, e
 	return c, nil
 }
 
-// Launch starts one instance and returns its id. tags are set on it
-// (with the template's own); env is the runner's environment, passed as
-// user data (KEY=value lines).
-func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, env map[string]string) (string, error) {
+// Launch starts one instance and returns its id, instance type and
+// availability zone as RunInstances reports them, and its market (from the
+// template's spot). tags are set on it (with the template's own); env is
+// the runner's environment, rendered into user data.
+func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, env map[string]string) (server.Launched, error) {
+	var none server.Launched
 	t, err := parse(template)
 	if err != nil {
-		return "", err
+		return none, err
 	}
 	if t.LaunchTemplate == "" {
-		return "", errors.New("ec2: the pool template needs a launchTemplate")
+		return none, errors.New("ec2: the pool template needs a launchTemplate")
 	}
 	c, err := p.client(ctx, t.Region)
 	if err != nil {
-		return "", err
+		return none, err
 	}
 	// Every instance's runner watches for spot interruptions (on-demand
 	// instances simply never get one).
@@ -120,7 +122,7 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 	}
 	ud, err := renderUserData(t.UserData, env)
 	if err != nil {
-		return "", err
+		return none, err
 	}
 	lt := &types.LaunchTemplateSpecification{Version: aws.String("$Default")}
 	if strings.HasPrefix(t.LaunchTemplate, "lt-") {
@@ -162,12 +164,20 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 	}
 	out, err := c.RunInstances(ctx, in)
 	if err != nil {
-		return "", fmt.Errorf("ec2 RunInstances: %w", err)
+		return none, fmt.Errorf("ec2 RunInstances: %w", err)
 	}
 	if len(out.Instances) != 1 || out.Instances[0].InstanceId == nil {
-		return "", errors.New("ec2 RunInstances: no instance in the reply")
+		return none, errors.New("ec2 RunInstances: no instance in the reply")
 	}
-	return *out.Instances[0].InstanceId, nil
+	i := out.Instances[0]
+	l := server.Launched{ProviderID: *i.InstanceId, InstanceType: string(i.InstanceType), Market: server.MarketOnDemand}
+	if i.Placement != nil {
+		l.Zone = aws.ToString(i.Placement.AvailabilityZone)
+	}
+	if t.Spot {
+		l.Market = server.MarketSpot
+	}
+	return l, nil
 }
 
 // Terminate ends an instance. One that no longer exists is done.
