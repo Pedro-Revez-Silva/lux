@@ -125,7 +125,7 @@ func (s *Shim) run() int {
 	s.out = out
 
 	// PID 1 must reap: orphans reparent to us.
-	go s.reap()
+	go s.reap(nil)
 	sigs := make(chan os.Signal, 4)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
@@ -282,10 +282,19 @@ func (s *Shim) isStopping() bool {
 // looked at before it is reaped (waitid WNOWAIT): a group that dies with
 // its leader (a server's) is killed while the leader, a zombie, still
 // holds its pid, so the kill cannot reach another group that reused it.
-func (s *Shim) reap() {
+//
+// done, when closed, ends it (tests start one per Shim they build; the
+// shim itself reaps until it exits).
+func (s *Shim) reap(done <-chan struct{}) {
 	sigchld := make(chan os.Signal, 16)
 	signal.Notify(sigchld, syscall.SIGCHLD)
-	for range sigchld {
+	defer signal.Stop(sigchld)
+	for {
+		select {
+		case <-done:
+			return
+		case <-sigchld:
+		}
 		for {
 			pid := exitedChild()
 			if pid <= 0 {

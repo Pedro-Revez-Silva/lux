@@ -69,7 +69,9 @@ func TestServerProcesses(t *testing.T) {
 	s := &Shim{out: o, red: NewRedactor(nil), user: &userInfo{home: dir}, env: []string{"PATH=" + os.Getenv("PATH")},
 		streams: map[int]chan syscall.WaitStatus{}, groups: map[int]bool{}, srv: servers{procs: map[string]*serverProc{}, started: map[string]int64{}, stopping: map[string]*serverProc{}}}
 	s.cfg.Workdir = dir
-	go s.reap()
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+	go s.reap(done)
 
 	marker := filepath.Join(dir, "ran")
 	s.setServers([]proto.ServerSpec{
