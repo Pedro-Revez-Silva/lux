@@ -6,6 +6,7 @@ system's Chrome, or Playwright's own Chromium if installed
 from __future__ import annotations
 
 import re
+from decimal import ROUND_HALF_EVEN, Decimal
 
 import pytest
 from playwright.sync_api import expect
@@ -232,6 +233,70 @@ def test_a_pending_run_shows_no_cost_yet_not_zero(page, env, lux):
         expect(card.locator(".money-list-lg")).to_have_count(0)
     _both_themes(page, env, f"/runs/{run_id}", check)
     lux.run("cancel", run_id)
+
+
+def _dollars(amount: str, exact: bool = False) -> str:
+    """formatMoney's figure for USD: half-even to 4 decimals, trimmed down
+    to cents, a bound for a non-zero amount below that. exact: every digit,
+    as formatMoneyExact."""
+    d = Decimal(amount)
+    q = d if exact else d.quantize(Decimal("0.0001"), rounding=ROUND_HALF_EVEN)
+    if q == 0 and d != 0:
+        return "<$0.0001" if d > 0 else ">-$0.0001"
+    whole, _, frac = f"{abs(q):f}".partition(".")
+    return f"{'-' if q < 0 else ''}${int(whole):,}.{frac.rstrip('0').ljust(2, '0')}"
+
+
+def _listed_cost(lux, run_id: str) -> dict:
+    return next(r for r in lux.json("ls") if r["id"] == run_id)["cost"]
+
+
+def _cost_cell(cost: dict) -> str:
+    """The Runs list's Cost cell for a one-currency USD cost, as lux ls has it."""
+    total = cost["totals"][0]
+    may_change = cost["status"] == "incomplete" or Decimal(total["estimate"]) != 0
+    return ("~" if may_change else "") + _dollars(total["amount"])
+
+
+def test_runs_list_cost_column_matches_the_run_page(page, env, lux, runners, hosts):
+    _priced_host(lux, runners, hosts[0], price="36")
+    name = f"listed-cost-{lux.tenant_id[-6:]}"
+    run_id = _costed_run(lux, "listed-cost", name=name)
+    pending_name = f"listed-pending-{lux.tenant_id[-6:]}"
+    pending = _parked(lux, pending_name)
+    listed = _listed_cost(lux, run_id)
+    assert listed["status"] != "pending" and len(listed["totals"]) == 1, listed
+    total = listed["totals"][0]
+    assert total["currency"] == "USD" and Decimal(total["amount"]) > 0, total
+    # The Run has ended: its amount no longer changes (its status may still settle).
+    shown = _dollars(total["amount"])
+    assert not shown.startswith("<"), shown
+    page.sign_in(lux.api_key, "/runs")
+
+    def check(theme):
+        row = page.get_by_role("row").filter(has=page.get_by_role("link", name=name, exact=True))
+        cell = row.locator("[data-cost-figure]")
+        expect(cell).to_have_text(re.compile(rf"^~?{re.escape(shown)}$"), timeout=15_000)
+        # The ~ follows the status and estimate part luxd has for the Run now.
+        wait_until(lambda: cell.inner_text() == _cost_cell(_listed_cost(lux, run_id)), 20, 1,
+                   "the Cost cell's ~ does not match the Run's status")
+        # Pending is a dash, never $0.
+        pending_row = page.get_by_role("row").filter(has=page.get_by_role("link", name=pending_name, exact=True))
+        expect(pending_row.locator("[data-cost-figure]")).to_have_text("–")
+        expect(pending_row.get_by_text(re.compile(r"\$"))).to_have_count(0)
+        # The status in words and the exact amount, on hover.
+        cell.hover()
+        tip = page.get_by_role("tooltip")
+        expect(tip).to_contain_text(re.compile(r"^(Final|Estimate|Incomplete):"))
+        expect(tip).to_contain_text(_dollars(total["amount"], exact=True))
+    _both_themes(page, env, "/runs", check)
+
+    # The Run page shows the same figure.
+    page.goto(env.luxd_url + f"/runs/{run_id}")
+    page.get_by_role("tab", name="Resources & cost").click()
+    expect(page.locator("section.card.run-cost .money-list-lg")).to_have_text(shown, timeout=15_000)
+    assert not page.errors, page.errors
+    lux.run("cancel", pending)
 
 
 @pytest.fixture
