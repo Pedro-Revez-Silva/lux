@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -47,6 +49,19 @@ type CostSummaryBody struct {
 	Series      []CostSummaryRow `json:"series,omitempty"`
 	Unallocated []CostSummaryRow `json:"unallocated,omitempty"`
 	Hosts       []HostAllocation `json:"hosts,omitempty"`
+	Families    []CostFamilyInfo `json:"families,omitempty" doc:"Grouped by family: each family in totals, with the displayName and color byFamily has on a Run's cost."`
+	Runs        []CostRunInfo    `json:"runs,omitempty" doc:"Grouped by run: each Run in totals with its name."`
+}
+
+type CostRunInfo struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
+type CostFamilyInfo struct {
+	Family      string `json:"family"`
+	DisplayName string `json:"displayName,omitempty"`
+	Color       string `json:"color,omitempty"`
 }
 
 type costSummaryOutput struct {
@@ -193,6 +208,11 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 				return err
 			}
 		}
+		if group[0] == "run" || group[1] == "run" {
+			if out.Body.Runs, err = summaryRuns(ctx, tx, out.Body.Totals); err != nil {
+				return err
+			}
+		}
 		if p.Operator && p.TenantID == "" {
 			out.Body.Unallocated = []CostSummaryRow{}
 			rows, err := tx.Query(ctx, `SELECT currency, trim_scale(sum(unallocated))::text FROM cost_hourly
@@ -246,7 +266,40 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 	if err != nil {
 		return nil, err
 	}
+	if group[0] == "family" || group[1] == "family" {
+		out.Body.Families = s.summaryFamilies(out.Body.Totals)
+	}
 	return out, nil
+}
+
+// summaryFamilies names each family in rows once, sorted, as byFamily does.
+func (s *Server) summaryFamilies(rows []CostSummaryRow) []CostFamilyInfo {
+	seen := map[string]bool{}
+	for _, r := range rows {
+		seen[r.Group["family"]] = true
+	}
+	names := slices.Sorted(maps.Keys(seen))
+	meta := s.costFamilyMetadata()
+	out := make([]CostFamilyInfo, 0, len(names))
+	for _, family := range names {
+		name, color := meta.lookup(family)
+		out = append(out, CostFamilyInfo{Family: family, DisplayName: name, Color: color})
+	}
+	return out
+}
+
+// summaryRuns names each Run in rows, in one query in the summary's snapshot.
+func summaryRuns(ctx context.Context, tx pgx.Tx, rows []CostSummaryRow) ([]CostRunInfo, error) {
+	seen := map[string]bool{}
+	for _, r := range rows {
+		seen[r.Group["run"]] = true
+	}
+	ids := slices.Sorted(maps.Keys(seen))
+	names, err := tx.Query(ctx, `SELECT id, name FROM runs WHERE id = ANY($1) ORDER BY id`, ids)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(names, pgx.RowToStructByPos[CostRunInfo])
 }
 
 type hostCostInput struct {

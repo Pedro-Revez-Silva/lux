@@ -182,3 +182,44 @@ export function fakeLogs(n = 50_000): LogLine[] {
   }
   return out;
 }
+
+/** A day of hourly cost by family (list price, USD), and a host's allocated vs unallocated compute. */
+export function fakeCostSeries(hours = 24): { x: number[]; compute: number[]; ai: (number | null)[]; video: number[]; allocated: number[]; unallocated: number[] } {
+  const r = rng(11);
+  const x: number[] = [];
+  const compute: number[] = [];
+  const ai: (number | null)[] = [];
+  const video: number[] = [];
+  const allocated: number[] = [];
+  const unallocated: number[] = [];
+  const t0 = Math.floor(NOW / 1000 / 3600) * 3600 - hours * 3600;
+  for (let i = 0; i < hours; i++) {
+    const daily = Math.sin(((i / hours) * 2 - 0.4) * Math.PI) * 0.5 + 0.5;
+    x.push(t0 + i * 3600);
+    compute.push(1.2 + daily * 2.4 + r() * 0.3);
+    // A gap: the plugin had not answered for that hour.
+    ai.push(i === 15 ? null : 0.4 + daily * 5.1 + r() * 0.8);
+    video.push(daily > 0.6 ? r() * 1.2 : 0);
+    const used = 0.2 + daily * 0.55;
+    allocated.push(0.384 * used);
+    unallocated.push(0.384 * (1 - used));
+  }
+  return { x, compute, ai, video, allocated, unallocated };
+}
+
+export interface FakeCostLine {
+  source: string;
+  family: string;
+  item: string;
+  amount: string;
+  currency: string;
+  final: boolean;
+}
+
+export const fakeCostLines: FakeCostLine[] = [
+  { source: "compute", family: "compute", item: "m6i.xlarge", amount: "0.149912", currency: "USD", final: true },
+  { source: "compute", family: "compute", item: "m6i.xlarge:spot", amount: "0.038104", currency: "USD", final: false },
+  { source: "model-gateway", family: "ai", item: "claude-sonnet-4-5", amount: "1.2843", currency: "USD", final: false },
+  { source: "model-gateway", family: "ai", item: "text-embedding-3-small", amount: "0.000412", currency: "USD", final: false },
+  { source: "render-farm", family: "video", item: "encode-1080p", amount: "2.10", currency: "EUR", final: true },
+];

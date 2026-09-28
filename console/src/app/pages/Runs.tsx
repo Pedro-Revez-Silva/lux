@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Button, Card, PageHeader, RUN_STATE_LIST, runStateStyle, Table } from "@lux/design-system";
+import { Button, Card, ListPriceNote, PageHeader, RUN_STATE_LIST, runStateStyle, Table } from "@lux/design-system";
 import { api, errorText, useQuery, type Run, type RunListParams } from "../../api/index.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
@@ -82,11 +82,19 @@ export function Runs() {
   const clear = () => setSearchParams({ state: null, resumable: null, host: null, label: null });
   const filtered = states.length > 0 || resumable || host !== "" || label !== "";
 
-  const cols = useMemo(() => runColumns({ tenant: scope.showTenant }), [scope.showTenant]);
+  const cols = useMemo(() => runColumns({ tenant: scope.showTenant, cost: true }), [scope.showTenant]);
 
   return (
     <div className="page page-list">
-      <PageHeader title="Runs" description={<span>{runs.length}{full ? "+" : ""} {filtered ? "matching" : ""} runs · newest first{scope.showTenant ? " · all tenants" : ""}</span>} />
+      <PageHeader
+        title="Runs"
+        description={
+          <>
+            <span>{runs.length}{full ? "+" : ""} {filtered ? "matching" : ""} runs · newest first{scope.showTenant ? " · all tenants" : ""}</span>
+            {runs.some((r) => r.cost?.totals.length) && <ListPriceNote>costs are list prices</ListPriceNote>}
+          </>
+        }
+      />
       <div className="filters-bar">
         <div className="filters">
           <div className="chips" role="group" aria-label="States">

@@ -6,12 +6,14 @@ system's Chrome, or Playwright's own Chromium if installed
 from __future__ import annotations
 
 import re
+from decimal import ROUND_HALF_EVEN, Decimal
 
 import pytest
 from playwright.sync_api import expect
 
 from conftest import generic
 from env import ALPINE_IMAGE, wait_until
+from fake_cost_plugin import FakeCostPlugin
 
 pytestmark = pytest.mark.console
 
@@ -161,3 +163,243 @@ def test_a_tenant_key_overview_has_no_control_host(page, tenant_factory):
     expect(page.get_by_role("heading", name="Control host", exact=True)).to_have_count(0)
     expect(page.get_by_role("heading", name="Postgres size", exact=True)).to_have_count(0)
     assert not page.errors, page.errors
+
+
+def _priced_host(lux, runners, host, price: str = "0.40") -> str:
+    """A ready static host of the tenant's, priced before any Run is placed
+    on it, so its Runs' compute lines have a rate from their start."""
+    runners.start(host)
+    host_id = wait_until(lambda: next((h["id"] for h in lux.json("hosts", "ls")
+                                       if h["name"] == host.name and h["state"] == "ready"), None),
+                         30, 1, "the host never registered")
+    lux.run("hosts", "price", host_id, "--hourly-price", price, "--currency", "USD")
+    return host_id
+
+
+def _costed_run(lux, text: str, name: str = "") -> str:
+    """A Run that ends on its own, with its compute line written: the line
+    comes at a state change (or the 2m tick), and the end is one."""
+    extra = {"name": name} if name else {}
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", f"echo {text}; sleep 3", **extra))
+    lux.wait_state(run_id, "succeeded")
+    wait_until(lambda: lux.api(f"/v1/runs/{run_id}/cost").json()["totals"], 60, 1, "no compute line was written")
+    return run_id
+
+
+def _both_themes(page, env, path: str, check):
+    """Run `check` on `path` in the light and then the dark theme."""
+    for theme in ("light", "dark"):
+        page.evaluate(f"localStorage.setItem('lux.theme', {theme!r})")
+        page.goto(env.luxd_url + path)
+        check(theme)
+        assert not page.errors, (theme, page.errors)
+
+
+def test_run_cost_card_shows_the_total_and_list_price(page, env, lux, runners, hosts):
+    _priced_host(lux, runners, hosts[0])
+    run_id = _costed_run(lux, "costed")
+    total = lux.api(f"/v1/runs/{run_id}/cost").json()["totals"][0]
+    assert total["currency"] == "USD" and float(total["amount"]) > 0, total
+    page.sign_in(lux.api_key, f"/runs/{run_id}")
+
+    def check(theme):
+        page.get_by_role("tab", name="Resources & cost").click()
+        card = page.locator("section.card.run-cost")
+        expect(card.get_by_role("heading", name="Cost", exact=True)).to_have_count(1, timeout=15_000)
+        # A dollar total, the status badge, a Compute family row and the item line.
+        expect(card.locator(".money-list-lg")).to_have_text(re.compile(r"^\$\d"), timeout=15_000)
+        expect(card.locator("[data-cost-status]")).to_have_count(1)
+        expect(card.get_by_text("Compute", exact=True).first).to_be_visible()
+        expect(card.get_by_role("cell", name="static", exact=True)).to_have_count(1)
+        # "list price", explained on hover, inside the viewport at the card's right edge.
+        card.locator(".list-price").hover()
+        tip = page.get_by_role("tooltip")
+        expect(tip).to_have_text(re.compile("list prices", re.I))
+        box, width = tip.bounding_box(), page.viewport_size["width"]
+        assert box["x"] >= 0 and box["x"] + box["width"] <= width, (box, width)
+    _both_themes(page, env, f"/runs/{run_id}", check)
+
+
+def test_a_pending_run_shows_no_cost_yet_not_zero(page, env, lux):
+    run_id = _parked(lux, f"pending-cost-{lux.tenant_id[-6:]}")
+    assert lux.api(f"/v1/runs/{run_id}/cost").json()["status"] == "pending"
+    page.sign_in(lux.api_key, f"/runs/{run_id}")
+
+    def check(theme):
+        page.get_by_role("tab", name="Resources & cost").click()
+        card = page.locator("section.card.run-cost")
+        expect(card.get_by_text("No cost reported yet", exact=True)).to_have_count(1, timeout=15_000)
+        expect(card.get_by_text(re.compile(r"\$0(\.0+)?\b"))).to_have_count(0)
+        expect(card.locator(".money-list-lg")).to_have_count(0)
+    _both_themes(page, env, f"/runs/{run_id}", check)
+    lux.run("cancel", run_id)
+
+
+def _dollars(amount: str, exact: bool = False) -> str:
+    """formatMoney's figure for USD: half-even to 4 decimals, trimmed down
+    to cents, a bound for a non-zero amount below that. exact: every digit,
+    as formatMoneyExact."""
+    d = Decimal(amount)
+    q = d if exact else d.quantize(Decimal("0.0001"), rounding=ROUND_HALF_EVEN)
+    if q == 0 and d != 0:
+        return "<$0.0001" if d > 0 else ">-$0.0001"
+    whole, _, frac = f"{abs(q):f}".partition(".")
+    return f"{'-' if q < 0 else ''}${int(whole):,}.{frac.rstrip('0').ljust(2, '0')}"
+
+
+def _listed_cost(lux, run_id: str) -> dict:
+    return next(r for r in lux.json("ls") if r["id"] == run_id)["cost"]
+
+
+def _cost_cell(cost: dict) -> str:
+    """The Runs list's Cost cell for a one-currency USD cost, as lux ls has it."""
+    total = cost["totals"][0]
+    may_change = cost["status"] == "incomplete" or Decimal(total["estimate"]) != 0
+    return ("~" if may_change else "") + _dollars(total["amount"])
+
+
+def test_runs_list_cost_column_matches_the_run_page(page, env, lux, operator, runners, hosts):
+    _priced_host(lux, runners, hosts[0], price="36")
+    name = f"listed-cost-{lux.tenant_id[-6:]}"
+    run_id = _costed_run(lux, "listed-cost", name=name)
+    pending_name = f"listed-pending-{lux.tenant_id[-6:]}"
+    pending = _parked(lux, pending_name)
+    listed = _listed_cost(lux, run_id)
+    assert listed["status"] != "pending" and len(listed["totals"]) == 1, listed
+    total = listed["totals"][0]
+    assert total["currency"] == "USD" and Decimal(total["amount"]) > 0, total
+    # The Run has ended: its amount no longer changes (its status may still settle).
+    shown = _dollars(total["amount"])
+    assert not shown.startswith("<"), shown
+    page.sign_in(lux.api_key, "/runs")
+
+    def check(theme):
+        row = page.get_by_role("row").filter(has=page.get_by_role("link", name=name, exact=True))
+        cell = row.locator("[data-cost-figure]")
+        expect(cell).to_have_text(re.compile(rf"^~?{re.escape(shown)}$"), timeout=15_000)
+        # The ~ follows the status and estimate part luxd has for the Run now.
+        wait_until(lambda: cell.inner_text() == _cost_cell(_listed_cost(lux, run_id)), 20, 1,
+                   "the Cost cell's ~ does not match the Run's status")
+        # Pending is a dash, never $0.
+        pending_row = page.get_by_role("row").filter(has=page.get_by_role("link", name=pending_name, exact=True))
+        expect(pending_row.locator("[data-cost-figure]")).to_have_text("–")
+        expect(pending_row.get_by_text(re.compile(r"\$"))).to_have_count(0)
+        # The status in words and the exact amount, on hover.
+        cell.hover()
+        tip = page.get_by_role("tooltip")
+        expect(tip).to_contain_text(re.compile(r"^(Final|Estimate|Incomplete) · "))
+        expect(tip).to_contain_text(_dollars(total["amount"], exact=True))
+        # Not clipped: every ancestor that clips its overflow contains the whole tooltip.
+        clipped = tip.evaluate("""t => {
+            const r = t.getBoundingClientRect();
+            for (let e = t.parentElement; e; e = e.parentElement) {
+                if (getComputedStyle(e).overflow === 'visible') continue;
+                const c = e.getBoundingClientRect();
+                if (r.left < c.left || r.right > c.right || r.top < c.top || r.bottom > c.bottom) return e.tagName + '.' + e.className;
+            }
+            return null;
+        }""")
+        assert clipped is None, clipped
+    _both_themes(page, env, "/runs", check)
+
+    # The Run page shows the same figure.
+    page.goto(env.luxd_url + f"/runs/{run_id}")
+    page.get_by_role("tab", name="Resources & cost").click()
+    expect(page.locator("section.card.run-cost .money-list-lg")).to_have_text(shown, timeout=15_000)
+    assert not page.errors, page.errors
+
+    # Beside the Cost column the State pill reads whole (a reason may still
+    # ellipsize): at 1200px the table is under its 1100px breakpoint; at 1400px
+    # it is just over it, where every column left State under 100px. For a
+    # tenant, and for an operator, who also has a Tenant column.
+    for key in (lux.api_key, operator.api_key):
+        page.sign_in(key, "/runs")
+        for width in (1200, 1300, 1400, 1500):
+            page.set_viewport_size({"width": width, "height": 900})
+            page.goto(env.luxd_url + "/runs")
+            row = page.get_by_role("row").filter(has=page.get_by_role("link", name=name, exact=True))
+            expect(row.locator(".pill")).to_have_text("Succeeded", timeout=15_000)
+            state = row.locator("td", has=page.locator(".pill"))
+            overflow = state.evaluate("""td => [td, ...td.querySelectorAll('*')]
+                .filter(e => !e.closest('.state-reason') && getComputedStyle(e).display !== 'inline')
+                .filter(e => e.scrollWidth > e.clientWidth)
+                .map(e => `${e.tagName}.${e.className} ${e.scrollWidth}>${e.clientWidth}`)""")
+            assert not overflow, (width, overflow)
+    assert not page.errors, page.errors
+    lux.run("cancel", pending)
+
+
+@pytest.fixture
+def cost_plugin(env):
+    """luxd restarted with a fake cost plugin configured, then back."""
+    plugin = FakeCostPlugin(env.gateway)
+    env.stop_luxd()
+    env.start_luxd(LUX_COSTS_PLUGINS=plugin.config(), LUX_COSTS_EVERY="30s")
+    yield plugin
+    env.stop_luxd()
+    env.start_luxd()
+    plugin.close()
+
+
+def test_overview_charts_cost_by_family(page, env, lux, runners, hosts, cost_plugin):
+    _priced_host(lux, runners, hosts[0])
+    name = f"overview-cost-{lux.tenant_id[-6:]}"
+    run_id = _costed_run(lux, "overview-cost", name=name)
+    # The summary reads cost_hourly, written with each source's lines.
+    wait_until(lambda: {r["group"]["family"] for r in lux.api("/v1/costs?since=24h&group=family&interval=hour").json().get("series", [])} >= {"compute", "ai"},
+               90, 1, "no hourly cost for both families")
+
+    def check(theme):
+        expect(page.get_by_role("heading", name="Cost by family", exact=True)).to_have_count(1, timeout=15_000)
+        chart = page.locator("section.card", has=page.get_by_role("heading", name="Cost by family", exact=True))
+        expect(chart.locator(".tschart-plot canvas")).to_have_count(1, timeout=15_000)
+        # Families read as on the Run page: the describe's displayName, not the key.
+        legend = chart.locator(".tschart-legend")
+        expect(legend.get_by_text("Compute", exact=True)).to_have_count(1)
+        expect(legend.get_by_text("AI models", exact=True)).to_have_count(1)
+        expect(legend.get_by_text("ai", exact=True)).to_have_count(0)
+        # Each family has its own colour: Compute's swatch is not AI models'.
+        swatch = lambda label: legend.get_by_role("button", name=label, exact=True).locator(".tschart-key").evaluate("e => getComputedStyle(e).backgroundColor")
+        compute, ai = swatch("Compute"), swatch("AI models")
+        assert compute != ai and "0, 0, 0, 0" not in compute + ai, (theme, compute, ai)
+        # Top Runs leads with the Run's name, its id beside it; a tenant gets no tenant table and no Unallocated tile.
+        top = page.locator("section.card", has=page.get_by_role("heading", name="Top Runs", exact=True))
+        row = top.get_by_role("row").filter(has=page.get_by_role("link", name=name, exact=True))
+        expect(row).to_have_count(1, timeout=15_000)
+        expect(row.get_by_text(run_id)).to_have_count(1)
+        expect(row.get_by_text(re.compile(r"^\$\d"))).to_have_count(1)
+        expect(page.get_by_role("heading", name="Top tenants", exact=True)).to_have_count(0)
+        expect(page.get_by_text(re.compile(r"^Unallocated"))).to_have_count(0)
+    page.sign_in(lux.api_key, "/")
+    _both_themes(page, env, "/", check)
+
+
+def test_operator_overview_has_unallocated_and_top_tenants(page, env, operator):
+    page.sign_in(operator.api_key, "/")
+    expect(page.get_by_role("heading", name="Top tenants", exact=True)).to_have_count(1, timeout=15_000)
+    expect(page.get_by_text(re.compile(r"^Unallocated \("))).to_have_count(1)
+    assert not page.errors, page.errors
+
+
+def test_host_page_shows_cost_to_its_owner_and_rates_to_operators(page, env, lux, operator, runners, hosts):
+    # More than 4 decimals: shown rounded, the exact rate one hover away.
+    host_id = _priced_host(lux, runners, hosts[0], price="0.041666667")
+    page.sign_in(lux.api_key, f"/hosts/{host_id}")
+    expect(page.get_by_text(re.compile(r"^allocated to your Runs, per hour"))).to_have_count(1, timeout=15_000)
+    # Rate periods and unallocated are the operators'.
+    expect(page.get_by_role("heading", name="Rate periods", exact=True)).to_have_count(0)
+    assert not page.errors, page.errors
+    # Init scripts run in order: the operator's key now wins on every load.
+    page.sign_in(operator.api_key, f"/hosts/{host_id}")
+
+    def check(theme):
+        rates = page.locator("section.card", has=page.get_by_role("heading", name="Rate periods", exact=True))
+        expect(rates.get_by_text("$0.0417/h", exact=True)).to_have_count(1, timeout=15_000)
+        rates.locator(".money-rounded").hover()
+        expect(page.get_by_role("tooltip")).to_have_text("Exactly $0.041666667")
+        page.mouse.move(0, 0)
+        # The source once: "static", not "static price (static)".
+        expect(rates.get_by_text("static", exact=True)).to_have_count(1)
+        expect(rates.get_by_text(re.compile(r"static price|\(static\)"))).to_have_count(0)
+        expect(page.get_by_text(re.compile(r"^allocated to Runs vs unallocated, per hour"))).to_have_count(1)
+    _both_themes(page, env, f"/hosts/{host_id}", check)

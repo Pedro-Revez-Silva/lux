@@ -215,11 +215,31 @@ func (s *Server) decorateCostFamilies(totals []CostTotal) {
 	if len(totals) == 0 {
 		return
 	}
-	s.initCostPlugins()
-	type familyMeta struct {
-		name, color, plugin string
+	families := s.costFamilyMetadata()
+	for i := range totals {
+		totals[i].DisplayName, totals[i].Color = families.lookup(totals[i].Family)
 	}
-	families := map[string]familyMeta{}
+}
+
+type costFamilyMeta struct {
+	name, color, plugin string
+}
+
+type costFamilies map[string]costFamilyMeta
+
+// lookup is a family's display name and colour hint: Compute for compute,
+// the first usable plugin's describe otherwise, empty when none names it.
+func (f costFamilies) lookup(family string) (string, string) {
+	if family == "compute" {
+		return "Compute", ""
+	}
+	d := f[family]
+	return d.name, d.color
+}
+
+func (s *Server) costFamilyMetadata() costFamilies {
+	s.initCostPlugins()
+	families := costFamilies{}
 	for _, p := range s.plugins {
 		p.mu.RLock()
 		if p.usable {
@@ -236,18 +256,12 @@ func (s *Server) decorateCostFamilies(totals []CostTotal) {
 					}
 					continue
 				}
-				families[family] = familyMeta{d.DisplayName, d.Color, p.cfg.Name}
+				families[family] = costFamilyMeta{d.DisplayName, d.Color, p.cfg.Name}
 			}
 		}
 		p.mu.RUnlock()
 	}
-	for i := range totals {
-		if totals[i].Family == "compute" {
-			totals[i].DisplayName = "Compute"
-		} else if d, ok := families[totals[i].Family]; ok {
-			totals[i].DisplayName, totals[i].Color = d.name, d.color
-		}
-	}
+	return families
 }
 
 // costStatus: incomplete if any source is; final once every source is;

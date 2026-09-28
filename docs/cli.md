@@ -138,8 +138,9 @@ lux costs --from 2026-09-01T00:00:00Z --to 2026-09-08T00:00:00Z --by tenant   # 
 
 Amounts are list prices ([Run costs](costs.md)), per currency: amounts in
 different currencies are never added. They are shown rounded half-even to
-4 decimals with trailing zeros trimmed; `-o json` prints luxd's exact
-response. A value lux does not have is `—`, never `0`.
+4 decimals with trailing zeros trimmed, and a non-zero amount below that
+as `<0.0001`; `-o json` prints luxd's exact response. The console rounds
+the same way. A value lux does not have is `—`, never `0`.
 
 - `lux cost` prints the status: `pending` (nothing reported yet),
   `incomplete` (naming the sources that have not answered), `complete`, or

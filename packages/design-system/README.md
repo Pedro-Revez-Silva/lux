@@ -10,6 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
+bun run test           # bun test: money rounding, y scale, family colours, CostFigure, Table columns (src/*.test.ts*)
 ```
 
 ## Using it
@@ -44,8 +45,8 @@ src/
   base.css          reset, global text
   components.css    component styles (one section per component)
   layout.css        page widths, grids, stacks, name links
-  format.ts         bytes, durations, relative time, cores, percentages
-  states.ts         run/host state -> hue family + label
+  format.ts         bytes, durations, relative time, cores, percentages, money
+  states.ts         run/host state -> hue family + label; cost status; cost family -> chart slot
   theme.ts          theme and density: toggles, persistence, cssVar()
   icons.tsx         the icon set
   *.tsx             components
@@ -76,7 +77,18 @@ gallery/            the gallery app (index.html, Gallery.tsx, fake data)
 - Dark mode is its own set of steps, not an inverted light mode. It applies by
   `prefers-color-scheme` unless `<html data-theme="light|dark">` overrides
   (the toggle in the top bar, persisted in `localStorage["lux.theme"]`).
-- Missing values render as an en dash, never as `0`.
+- Missing values render as an en dash, never as `0`. A cost nothing has
+  reported yet is an empty state ("no cost reported yet"), never `$0.00`.
+- Money is exact: amounts stay decimal strings end to end (`formatMoney`,
+  `sumMoney`, `compareMoney` work on scaled integers, never floats), one
+  figure per currency, never added across currencies. Every page that shows
+  money labels it "list price" once, explained in a Tooltip
+  (`ListPriceNote`). Amounts show at most 4 decimals; the exact value is one
+  hover away (`Money`), and in the API.
+- A cost's status is a labelled `CostStatusBadge` where there is room for
+  the label. In a table cell there is not, so a figure that may still change
+  gets a `~` prefix, never a colour, with the status spelled out in its
+  Tooltip (`CostFigure`); `~` is what `lux ls` prints too.
 
 ## Density
 
@@ -116,7 +128,9 @@ Page widths (`src/layout.css`): `.page` (detail), `.page-list` (tables), `.page-
 
 Tables (`Table`): `table-layout: fixed`; columns with a `width` keep it and
 the rest share the remainder. `lead` marks the name column, `optional`
-columns drop out when the table's container is under 1100px, and below the
+columns drop out when the table's container is under 1100px, or when with
+them a column without a width would get under 140px (a State pill beside a
+Cost column at 1100–1300px reads whole; `dropsOptional`). Below the
 table's minimum width (the column widths, or `minWidth`) it scrolls sideways
 with the first column pinned.
 
@@ -132,7 +146,7 @@ All in `src/tokens.css`.
 | Accent | `--accent` `--accent-hover` `--accent-active` `--accent-fg` `--accent-subtle` `--accent-text` `--focus-ring` |
 | Semantic | `--{success,warn,danger,info}-{fg,bg,dot}` |
 | State hues | `--st-{neutral,blue,teal,green,amber,red,violet}-{fg,bg,dot}` |
-| Chart | `--chart-1` … `--chart-8` (fixed order), `--chart-grid` `--chart-axis` `--chart-label` `--chart-cursor`, `--chart-h` |
+| Chart | `--chart-1` … `--chart-8` (fixed order; cost families map onto them, compute is `--chart-1`), `--chart-grid` `--chart-axis` `--chart-label` `--chart-cursor`, `--chart-h`; unallocated cost uses `--st-neutral-dot` |
 | Logs | `--log-stderr-bg` `--log-stderr-fg` `--log-line-hover` |
 | Type | `--font-sans` `--font-mono`, `--text-{xs,sm,md,lg,xl,2xl,3xl}` (density-dependent), `--leading-{tight,normal}`, `--weight-{normal,medium,semibold}` |
 | Spacing | `--sp-1` … `--sp-9` (2, 4, 6, 8, 12, 16, 24, 32, 48px); density-dependent `--gap` `--gap-lg` `--pad-page` `--pad-card` `--pad-cell` |
@@ -153,6 +167,29 @@ State mapping (`src/states.ts`):
 | amber | stopping | draining, terminating |
 | red | lost, failed | lost |
 
+Cost status (`costStatusStyle`, `CostStatusBadge`): the `status` of
+`GET /v1/runs/{id}/cost`, as a Badge whose Tooltip says what it means (and,
+when incomplete, which sources it waits on).
+
+| Status | Badge | Meaning |
+| --- | --- | --- |
+| `pending` | neutral "Pending" | no source has reported yet |
+| `complete` | info "Estimate" | every source answered; some lines may still change |
+| `incomplete` | warn "Incomplete" | a source has not answered or failed |
+| `final` | success "Final" | every source settled |
+
+Cost family colours (`familySlot`, `familyColor`): a
+family maps to a categorical `--chart-N` slot, never a raw colour.
+`compute` is always `--chart-1`. A plugin's describe `color` hint picks the
+slot: a name (`violet` → 7, `amber` → 4, `orange` → 2, `teal` → 3, `pink`
+→ 5, `green` → 6, `red` → 8; blue names go to 7, as slot 1 is compute's)
+or `#rrggbb` by nearest hue. Without a hint the family's name picks one of
+slots 2–8 (a hash of the name). A family's slot depends on its key and
+hint alone, never on the families shown beside it, so it has one colour in
+every view.
+Two families that land on one slot share it: a collision is accepted, a
+colour that changes between views is not.
+
 ## Components
 
 Logo (the star, 16–32px; the detailed mark is `docs/brand/lux.svg`),
@@ -163,3 +200,44 @@ optional vertical `marks`; height from `--chart-h` unless given), Timeline
 SectionHeader, ConfirmDialog, Dialog (a form modal), Toast (`useToast`),
 EmptyState, Spinner, Skeleton. Hooks: `useTheme`, `useDensity`. All exported
 from `src/index.ts` with typed props; icons from `@lux/design-system/icons`.
+
+Cost additions (`src/Cost.tsx`, `format.ts`, `states.ts`; gallery section
+"costs"):
+
+| Export | What |
+| --- | --- |
+| `formatMoney(amount, currency, {decimals?})` | exact decimal string → `$1.2843`, `$0.15`, `€12,345.50`, `3.20 XTS`: rounded half to even to 4 decimals (`MONEY_DECIMALS`), trailing zeros trimmed down to cents; a non-zero amount that rounds to zero reads `<$0.0001` (`>-$0.0001` below zero); missing or unparseable → `–`. The same rule as the CLI (`internal/cli/money.go`), which writes the code after the number (`1.2843 USD`) and trims to the integer |
+| `formatMoneyExact(amount, currency)`, `moneyIsRounded(amount)` | every digit of an amount (`$0.000074`), and whether `formatMoney` rounded it |
+| `Money({amount, currency})` | one amount as `formatMoney` shows it; when rounded, the exact value in a Tooltip ("Exactly $0.000074") |
+| `CostFigure({status, totals})` | a cost in a table cell, the same as `lux ls`'s COST: the total for one currency, `multi` for several, `–` while pending; `~` before a total that may still change (an estimate part, or `incomplete`); the Tooltip says the status in words and the exact amounts; a table cell holding one shows its Tooltip unclipped |
+| `sumMoney(amounts)`, `compareMoney(a, b)` | exact sum and order of decimal strings of one currency |
+| `formatUnit(v, "money", currency)` | the chart/tile unit for money (axes and tooltips) |
+| `CostStatusBadge({status, waitingOn?})` | the status as a Badge with its meaning in a Tooltip |
+| `costStatusStyle`, `COST_STATUS_LIST`, `CostStatus` | the mapping above |
+| `ListPriceNote` | the page's one "list price" label, explained in a Tooltip |
+| `ColorKey({color})`, `FamilyKey({family, displayName, color})` | a square swatch before its label (colour never without one) |
+| `MoneyList({amounts, large?})` | one figure per currency, side by side; `–` when empty |
+| `familySlot`, `familyColor` | cost family → `--chart-N` (above) |
+| `familyDisplay(families)` | each family's `{label, color}` from its describe `displayName` and `color` hint (the key when unnamed; `Compute` for compute): every view of cost families (Run card, Overview chart) resolves both here, so a family reads the same everywhere |
+| `TimeSeriesChart` `stacked` | series stacked bottom-first as filled bands (28% fill, 2px edges); the tooltip adds a Total; hiding a series from the legend restacks the rest; a missing value adds nothing and shows `–` |
+| `TimeSeriesChart` `currency` | the currency of `unit="money"` |
+
+Behaviour shared by every chart and tooltip:
+
+- **Y axis**: zero-based without a fixed `yMax`, the scale's top is the first
+  multiple of a 1/2/2.5/5 × 10ⁿ step at or above the largest value (the
+  stacked total when `stacked`), and gridlines sit on those steps. No point
+  is ever above the top gridline, sparse data included (gallery: "Host cost,
+  one hour costed"). When a value (a refund, a negative stacked sum) is below
+  zero the scale's bottom is the last step at or below the smallest value,
+  with gridlines down to it (gallery: "Cost by family, a refund hour");
+  non-negative data keeps zero as the bottom (`niceScale` in `src/scale.ts`).
+  A series prop that is a fresh but equal array does not rebuild the plot;
+  new `x`/`ys` alone are applied with uPlot's `setData`.
+- **Chart tooltip**: sized to its content (`width: max-content`); series
+  labels never wrap.
+- **Tooltip placement**: `side` is a preference. When the tooltip opens it is
+  measured before paint: it flips to the opposite side when its side leaves
+  the viewport, and shifts along that side (`--tip-shift`) to stay 8px inside
+  it. A "list price" note at a card's right edge stays readable (gallery:
+  Feedback, the right-aligned row).

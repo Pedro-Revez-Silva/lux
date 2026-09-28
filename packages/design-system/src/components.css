@@ -285,25 +285,26 @@
   pointer-events: none;
   box-shadow: var(--shadow-md);
 }
+/* --tip-shift: set by Tooltip to keep the tip inside the viewport. */
 .tip-top {
   bottom: calc(100% + 6px);
   left: 50%;
-  transform: translateX(-50%);
+  transform: translateX(calc(-50% + var(--tip-shift, 0px)));
 }
 .tip-bottom {
   top: calc(100% + 6px);
   left: 50%;
-  transform: translateX(-50%);
+  transform: translateX(calc(-50% + var(--tip-shift, 0px)));
 }
 .tip-left {
   right: calc(100% + 6px);
   top: 50%;
-  transform: translateY(-50%);
+  transform: translateY(calc(-50% + var(--tip-shift, 0px)));
 }
 .tip-right {
   left: calc(100% + 6px);
   top: 50%;
-  transform: translateY(-50%);
+  transform: translateY(calc(-50% + var(--tip-shift, 0px)));
 }
 
 /* ---------- Card ----------
@@ -1083,6 +1084,8 @@ a.idchip-text:hover {
   box-shadow: var(--shadow-md);
   font-size: var(--text-sm);
   min-width: 140px;
+  /* Sized to its rows, not to the room left of the plot's right edge. */
+  width: max-content;
 }
 .tschart-tip.is-left {
   transform: translateX(calc(-100% - 16px));
@@ -1105,6 +1108,8 @@ a.idchip-text:hover {
 }
 .tschart-tip-label {
   color: var(--fg-secondary);
+  white-space: nowrap;
+  flex: none;
 }
 /* Line key: a 12x2 stroke in the series color (inline background). */
 .tschart-key {
@@ -1139,6 +1144,72 @@ a.idchip-text:hover {
 .tschart-legend-item.is-hidden {
   opacity: 0.45;
   text-decoration: line-through;
+}
+
+/* A stacked chart's total row: set off from the parts above it. */
+.tschart-tip-total {
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border-soft);
+}
+
+/* ---------- Cost: ColorKey, MoneyList, ListPriceNote ---------- */
+.color-key {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.color-key-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-sm);
+  flex: none;
+}
+.color-key-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.money-list {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-5);
+}
+.money-list-lg {
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+  color: var(--fg);
+  line-height: var(--leading-tight);
+}
+.money-rounded,
+.cost-figure {
+  cursor: help;
+}
+.money-rounded:focus-visible,
+.cost-figure:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+/* Cells clip (ellipsis); these figures are short, and their Tooltip must show. */
+.table td:has(.cost-figure),
+.table td:has(.money-rounded) {
+  overflow: visible;
+}
+.list-price {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  cursor: help;
+  border-bottom: 1px dotted var(--border-strong);
+}
+.list-price:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
 }
 
 /* ---------- Sparkline ---------- */

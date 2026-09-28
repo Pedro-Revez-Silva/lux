@@ -5,6 +5,7 @@ import { useScope } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, HostLink, labelsText, PageSkeleton } from "./common.tsx";
 import { RunActions } from "./RunActions.tsx";
 import { RunOutput } from "./RunOutput.tsx";
+import { RunCost } from "./RunCost.tsx";
 import { RunResources } from "./RunResources.tsx";
 import { RunEvents, RunSnapshots, RunSpecView } from "./RunTabs.tsx";
 import { RunTimeline } from "./RunTimeline.tsx";
@@ -94,7 +95,7 @@ export function RunPage({ id }: { id: string }) {
         items={[
           { key: "output", label: "Output" },
           { key: "timeline", label: "Timeline", count: run.placements?.length },
-          { key: "resources", label: "Resources" },
+          { key: "resources", label: "Resources & cost" },
           { key: "events", label: "Events" },
           { key: "snapshots", label: "Snapshots & artifacts" },
           { key: "spec", label: "Spec" },
@@ -102,7 +103,12 @@ export function RunPage({ id }: { id: string }) {
       />
       {tab === "output" && <RunOutput run={run} />}
       {tab === "timeline" && <RunTimeline run={run} now={now} />}
-      {tab === "resources" && <RunResources run={run} />}
+      {tab === "resources" && (
+        <div className="stack">
+          <RunCost run={run} />
+          <RunResources run={run} />
+        </div>
+      )}
       {tab === "events" && <RunEvents run={run} live={live} />}
       {tab === "snapshots" && <RunSnapshots run={run} live={live} />}
       {tab === "spec" && <RunSpecView run={run} />}

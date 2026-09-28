@@ -5,6 +5,7 @@ import { useScope, useScopedQuery } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, useSeries } from "./common.tsx";
 import { ActivityFeed } from "./ActivityFeed.tsx";
 import { ControlHost } from "./ControlHost.tsx";
+import { OverviewCost } from "./OverviewCost.tsx";
 
 /** What the Queued tile counts. */
 const QUEUED = ["submitted", "resuming", "provisioning"];
@@ -73,6 +74,7 @@ export function Overview() {
               <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Allocated", color: 7, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="bytes" />
             </Card>
           </div>
+          <OverviewCost />
           {scope.operator && !scope.apiTenant && <ControlHost control={history.data?.control} />}
         </div>
         <ActivityFeed />
