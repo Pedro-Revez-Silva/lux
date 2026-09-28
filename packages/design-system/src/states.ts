@@ -115,9 +115,6 @@ const SLOT_HUES: [number, number][] = [
   [2, 17], [3, 158], [4, 41], [5, 337], [6, 120], [7, 249], [8, 0],
 ];
 
-/** The slot compute always gets: the first, so it never changes colour. */
-export const COMPUTE_SLOT = 1;
-
 function hexHue(hex: string): number | null {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
   if (!m) return null;
@@ -137,7 +134,7 @@ function hexHue(hex: string): number | null {
  * keeps its colour wherever it appears. Raw colour values are never used.
  */
 export function familySlot(family: string, hint?: string | null): number {
-  if (family === "compute") return COMPUTE_SLOT;
+  if (family === "compute") return 1;
   const h = hint?.trim().toLowerCase();
   if (h) {
     const named = HINT_SLOTS[h];
@@ -157,28 +154,13 @@ export function familySlot(family: string, hint?: string | null): number {
   return 2 + (hash % 7);
 }
 
-/** familySlot as a CSS colour: var(--chart-N). */
 export function familyColor(family: string, hint?: string | null): string {
   return `var(--chart-${familySlot(family, hint)})`;
 }
 
-/**
- * Colours of the families shown together (a chart, a breakdown), keyed by
- * family: each one's familyColor, so a family has one colour in every view
- * whatever its companions. Two unhinted families whose names pick the same
- * slot share it; a companion never moves either.
- */
-export function familyColors(families: readonly { family: string; color?: string | null }[]): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const f of families) if (!out.has(f.family)) out.set(f.family, familyColor(f.family, f.color));
-  return out;
-}
-
 export interface FamilyInfo {
   family: string;
-  /** The plugin describe's displayName; compute is "Compute". */
   displayName?: string | null;
-  /** The plugin describe's colour hint. */
   color?: string | null;
 }
 
@@ -188,10 +170,9 @@ export interface FamilyInfo {
  * cost families resolves them here, so one family reads the same everywhere.
  */
 export function familyDisplay(families: readonly FamilyInfo[]): Map<string, { label: string; color: string }> {
-  const colors = familyColors(families);
   const out = new Map<string, { label: string; color: string }>();
   for (const f of families) {
-    if (!out.has(f.family)) out.set(f.family, { label: f.displayName || (f.family === "compute" ? "Compute" : f.family), color: colors.get(f.family)! });
+    if (!out.has(f.family)) out.set(f.family, { label: f.displayName || (f.family === "compute" ? "Compute" : f.family), color: familyColor(f.family, f.color) });
   }
   return out;
 }

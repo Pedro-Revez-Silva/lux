@@ -12,7 +12,6 @@ import {
   CostStatusBadge,
   EmptyState,
   familyColor,
-  familyColors,
   familySlot,
   FamilyKey,
   formatMoney,
@@ -390,8 +389,6 @@ const FAMILIES: { family: string; displayName: string; color?: string }[] = [
   { family: "egress", displayName: "Egress" },
 ];
 
-const FAMILY_COLORS = familyColors(FAMILIES);
-
 /** The AI series with one hour refunded: a -$6 credit, more than that hour's compute. */
 const refundHour = (ai: (number | null)[]) => ai.map((v, i) => (i === 18 ? -6 : v));
 
@@ -441,8 +438,8 @@ function Costs() {
       </div>
       <div className="sg-row">
         {FAMILIES.map((f) => (
-          <span key={f.family} title={`hint ${f.color ?? "none"} → ${FAMILY_COLORS.get(f.family)}`}>
-            <FamilyKey {...f} swatch={FAMILY_COLORS.get(f.family)} />
+          <span key={f.family} title={`hint ${f.color ?? "none"} → ${familyColor(f.family, f.color)}`}>
+            <FamilyKey {...f} />
           </span>
         ))}
         <ColorKey color="var(--st-neutral-dot)">Unallocated</ColorKey>

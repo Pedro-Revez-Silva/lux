@@ -27,7 +27,6 @@ export function CostStatusBadge({ status, waitingOn }: CostStatusBadgeProps) {
 
 export const LIST_PRICE_TEXT = "List prices: before discounts, credits and tax.";
 
-/** The "list price" label every page with money shows once, explained in a Tooltip. */
 export function ListPriceNote({ children = "list price" }: { children?: ReactNode }) {
   return (
     <Tooltip content={LIST_PRICE_TEXT}>
@@ -40,12 +39,10 @@ export function ListPriceNote({ children = "list price" }: { children?: ReactNod
 }
 
 export interface ColorKeyProps {
-  /** A CSS colour, normally var(--chart-N) from familyColor(). */
   color: string;
   children: ReactNode;
 }
 
-/** A square swatch before its label: colour is never shown without one. */
 export function ColorKey({ color, children }: ColorKeyProps) {
   return (
     <span className="color-key">
@@ -55,13 +52,8 @@ export function ColorKey({ color, children }: ColorKeyProps) {
   );
 }
 
-/**
- * A cost family's name with its colour: compute fixed, others from the
- * plugin's hint (`color`). `swatch` overrides it with a colour from
- * familyColors(), when several families are shown together.
- */
-export function FamilyKey({ family, displayName, color, swatch }: { family: string; displayName?: string; color?: string; swatch?: string }) {
-  return <ColorKey color={swatch ?? familyColor(family, color)}>{displayName || family}</ColorKey>;
+export function FamilyKey({ family, displayName, color }: { family: string; displayName?: string; color?: string }) {
+  return <ColorKey color={familyColor(family, color)}>{displayName || family}</ColorKey>;
 }
 
 export interface MoneyAmount {

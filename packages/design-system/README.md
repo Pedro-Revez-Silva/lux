@@ -178,7 +178,7 @@ when incomplete, which sources it waits on).
 | `incomplete` | warn "Incomplete" | a source has not answered or failed |
 | `final` | success "Final" | every source settled |
 
-Cost family colours (`familySlot`, `familyColor`, `familyColors`): a
+Cost family colours (`familySlot`, `familyColor`): a
 family maps to a categorical `--chart-N` slot, never a raw colour.
 `compute` is always `--chart-1`. A plugin's describe `color` hint picks the
 slot: a name (`violet` → 7, `amber` → 4, `orange` → 2, `teal` → 3, `pink`
@@ -186,7 +186,7 @@ slot: a name (`violet` → 7, `amber` → 4, `orange` → 2, `teal` → 3, `pink
 or `#rrggbb` by nearest hue. Without a hint the family's name picks one of
 slots 2–8 (a hash of the name). A family's slot depends on its key and
 hint alone, never on the families shown beside it, so it has one colour in
-every view; `familyColors` maps each family shown together to that colour.
+every view.
 Two families that land on one slot share it: a collision is accepted, a
 colour that changes between views is not.
 
@@ -215,9 +215,9 @@ Cost additions (`src/Cost.tsx`, `format.ts`, `states.ts`; gallery section
 | `CostStatusBadge({status, waitingOn?})` | the status as a Badge with its meaning in a Tooltip |
 | `costStatusStyle`, `COST_STATUS_LIST`, `CostStatus` | the mapping above |
 | `ListPriceNote` | the page's one "list price" label, explained in a Tooltip |
-| `ColorKey({color})`, `FamilyKey({family, displayName, color, swatch?})` | a square swatch before its label (colour never without one) |
+| `ColorKey({color})`, `FamilyKey({family, displayName, color})` | a square swatch before its label (colour never without one) |
 | `MoneyList({amounts, large?})` | one figure per currency, side by side; `–` when empty |
-| `familySlot`, `familyColor`, `familyColors` | cost family → `--chart-N` (above) |
+| `familySlot`, `familyColor` | cost family → `--chart-N` (above) |
 | `familyDisplay(families)` | each family's `{label, color}` from its describe `displayName` and `color` hint (the key when unnamed; `Compute` for compute): every view of cost families (Run card, Overview chart) resolves both here, so a family reads the same everywhere |
 | `TimeSeriesChart` `stacked` | series stacked bottom-first as filled bands (28% fill, 2px edges); the tooltip adds a Total; hiding a series from the legend restacks the rest; a missing value adds nothing and shows `–` |
 | `TimeSeriesChart` `currency` | the currency of `unit="money"` |
