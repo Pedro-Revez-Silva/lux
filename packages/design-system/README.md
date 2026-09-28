@@ -10,7 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
-bun run test           # bun test: formatMoney's rounding rule (src/format.test.ts)
+bun run test           # bun test: money rounding, y scale, family colours, CostFigure, Table columns (src/*.test.ts*)
 ```
 
 ## Using it
