@@ -292,6 +292,8 @@ export interface WhoAmI {
   scopes: string[];
   /** key: the console needs an API key; cloudflare-access: Access signs people in. */
   consoleAuth: "key" | "cloudflare-access";
+  /** Where preview URLs are (https://<server>-<run suffix>.<previewDomain>); null when previews are off. */
+  previewDomain?: string | null;
 }
 
 export interface Tenant {

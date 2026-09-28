@@ -11,7 +11,8 @@ import { Overview } from "./pages/Overview.tsx";
 import { Runs } from "./pages/Runs.tsx";
 import { RunPage } from "./pages/RunPage.tsx";
 import { TerminalPage } from "./pages/TerminalPage.tsx";
-import { parsePreviewTarget, PreviewAuth } from "./pages/PreviewAuth.tsx";
+import { PreviewAuth } from "./pages/PreviewAuth.tsx";
+import { parsePreviewUrl } from "./pages/previewTarget.ts";
 import { Hosts } from "./pages/Hosts.tsx";
 import { HostPage } from "./pages/HostPage.tsx";
 import { Pools } from "./pages/Pools.tsx";
@@ -55,7 +56,7 @@ const ROUTES: Route[] = [
     render: () => <PreviewAuth />,
     bare: true,
     signIn: (_p, search) => {
-      const t = parsePreviewTarget(search.get("to"));
+      const t = parsePreviewUrl(search.get("to"));
       if ("error" in t) return {};
       return {
         next: { icon: <IconExternal size={15} />, text: <>Then you will continue to the preview of <span className="mono">{t.server}</span> on <IdChip value={t.runId} /></> },

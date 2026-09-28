@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -42,9 +43,13 @@ import (
 // else gets a small status page that refreshes itself.
 
 const (
-	previewCookie    = "__Host-lux_preview"
-	previewCookieTTL = 12 * time.Hour
-	previewAuthPath  = "/.lux/auth"
+	previewCookie = "__Host-lux_preview"
+	// previewCookieTTL is a key's cookie's life: luxd re-checks the key
+	// (keyLive) as it goes. A person's (Cloudflare Access, no key) cannot
+	// be re-checked without their Access token, so theirs is short.
+	previewCookieTTL       = 12 * time.Hour
+	previewPersonCookieTTL = time.Hour
+	previewAuthPath        = "/.lux/auth"
 	// activityEvery bounds how often a server's lastRequestAt is written.
 	activityEvery = 30 * time.Second
 )
@@ -310,27 +315,34 @@ func (p *previews) signIn(w http.ResponseWriter, r *http.Request, runID string) 
 		p.page(w, http.StatusUnauthorized, pageSignIn, nil)
 		return
 	}
+	ttl := previewCookieTTL
+	if pr.KeyID == "" {
+		ttl = previewPersonCookieTTL
+	}
 	u := previewUser{RunID: runID, TenantID: pr.TenantID, Operator: pr.Operator, KeyID: pr.KeyID, User: pr.Email,
-		Exp: time.Now().Add(previewCookieTTL).Unix()}
+		Exp: time.Now().Add(ttl).Unix()}
 	if u.User == "" && pr.KeyID != "" {
 		_ = p.s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
 			return tx.QueryRow(r.Context(), `SELECT name FROM api_keys WHERE id = $1`, pr.KeyID).Scan(&u.User)
 		})
 		u.User = cmp.Or(u.User, pr.KeyID)
 	}
-	http.SetCookie(w, &http.Cookie{Name: previewCookie, Value: p.sign(u), Path: "/", MaxAge: int(previewCookieTTL.Seconds()),
+	http.SetCookie(w, &http.Cookie{Name: previewCookie, Value: p.sign(u), Path: "/", MaxAge: int(ttl.Seconds()),
 		Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	w.Header().Set("Cache-Control", "no-store")
 	http.Redirect(w, r, to, http.StatusFound)
 }
 
-// localPath: a path on this host, never another (//evil, /\evil).
+// localPath: a path on this host, never another (//evil, /\evil). No
+// backslash anywhere (browsers read one as a slash, and http.Redirect's
+// cleaning turns /./\evil into /\evil); and, as defence in depth, the
+// cleaned path it redirects to must not start with // either.
 func localPath(to string) bool {
-	if !strings.HasPrefix(to, "/") || strings.HasPrefix(to, "//") || strings.HasPrefix(to, "/\\") || strings.ContainsAny(to, "\r\n") {
+	if !strings.HasPrefix(to, "/") || strings.HasPrefix(to, "//") || strings.ContainsAny(to, "\\\r\n") {
 		return false
 	}
 	u, err := url.Parse(to)
-	return err == nil && u.Scheme == "" && u.Host == ""
+	return err == nil && u.Scheme == "" && u.Host == "" && !strings.HasPrefix(path.Clean(u.Path), "//")
 }
 
 // previewState is what routing a request needs to know.

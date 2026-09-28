@@ -119,6 +119,9 @@ func TestLocalPath(t *testing.T) {
 	for p, want := range map[string]bool{
 		"/": true, "/a/b?c=d#e": true, "": false, "a": false, "//evil.com/": false, "/\\evil.com": false,
 		"https://evil.com/": false, "/a\r\nSet-Cookie: x": false,
+		// http.Redirect cleans the path: /./\evil.com would become /\evil.com;
+		// /.//evil.com becomes /evil.com, on this host.
+		"/./\\evil.com": false, "/a\\b": false, "/.//evil.com": true, "/a/..//evil.com": true, "/%5Cevil.com": true,
 	} {
 		if got := localPath(p); got != want {
 			t.Errorf("localPath(%q) = %v", p, got)
@@ -447,6 +450,26 @@ func TestTickets(t *testing.T) {
 	if w := apiCall(t, s, readKey, http.MethodPost, "/v1/runs/"+r1+"/tickets", map[string]any{"kind": "exec"}); w.Code != http.StatusForbidden {
 		t.Fatalf("read key, exec ticket: %d %s", w.Code, w.Body)
 	}
+	// Without previews, no preview tickets, and whoami says so.
+	if w := apiCall(t, s, readKey, http.MethodPost, "/v1/runs/"+r1+"/tickets", map[string]any{"kind": "preview"}); w.Code != http.StatusConflict {
+		t.Fatalf("preview ticket, previews off: %d %s", w.Code, w.Body)
+	}
+	whoami := func() map[string]any {
+		t.Helper()
+		var me map[string]any
+		w := apiCall(t, s, readKey, http.MethodGet, "/v1/whoami", nil)
+		if err := json.Unmarshal(w.Body.Bytes(), &me); err != nil || w.Code != http.StatusOK {
+			t.Fatalf("whoami: %d %s", w.Code, w.Body)
+		}
+		return me
+	}
+	if d, ok := whoami()["previewDomain"]; !ok || d != nil {
+		t.Fatalf("previewDomain, previews off: %v %v", d, ok)
+	}
+	s.cfg.Preview.Domain = "lux.example.com"
+	if d := whoami()["previewDomain"]; d != "lux.example.com" {
+		t.Fatalf("previewDomain: %v", d)
+	}
 	if w := apiCall(t, s, readKey, http.MethodPost, "/v1/runs/"+r1+"/tickets", map[string]any{"kind": "preview"}); w.Code != http.StatusCreated {
 		t.Fatalf("read key, preview ticket: %d %s", w.Code, w.Body)
 	}
@@ -638,13 +661,25 @@ func TestPreviewProxy(t *testing.T) {
 	if w := do(http.MethodGet, "/.lux/auth?ticket="+mint(TicketPreview)+"&to=//evil.com/", nil); w.Code != http.StatusBadRequest {
 		t.Fatalf("to another host: %d", w.Code)
 	}
+	if w := do(http.MethodGet, "/.lux/auth?ticket="+mint(TicketPreview)+"&to="+url.QueryEscape(`/./\evil.com`), nil); w.Code != http.StatusBadRequest {
+		t.Fatalf("to another host, by a backslash: %d %q", w.Code, w.Header().Get("Location"))
+	}
 	w = do(http.MethodGet, "/.lux/auth?ticket="+mint(TicketPreview)+"&to=/a?b=c", nil)
 	if w.Code != http.StatusFound || w.Header().Get("Location") != "/a?b=c" {
 		t.Fatalf("sign in: %d %v", w.Code, w.Header())
 	}
 	cookie := w.Result().Cookies()[0]
-	if cookie.Name != "__Host-lux_preview" || !cookie.Secure || !cookie.HttpOnly || cookie.Domain != "" || cookie.Path != "/" {
+	if cookie.Name != "__Host-lux_preview" || !cookie.Secure || !cookie.HttpOnly || cookie.Domain != "" || cookie.Path != "/" ||
+		cookie.MaxAge != int(previewCookieTTL.Seconds()) {
 		t.Fatalf("cookie: %+v", cookie)
+	}
+	// A person's (no key, so nothing to re-check): an hour.
+	personTicket := ids.Secret("tkt")
+	execSQL(t, s, ctx, `INSERT INTO stream_tickets (token_hash, tenant_id, run_id, kind, principal, expires_at)
+		VALUES ($1, 't1', $2, 'preview', '{"tenantId":"t1","scopes":["admin"],"email":"ada@example.com"}', now() + interval '1 minute')`, ids.Hash(personTicket), r1)
+	if w := do(http.MethodGet, "/.lux/auth?ticket="+personTicket+"&to=/", nil); w.Code != http.StatusFound ||
+		w.Result().Cookies()[0].MaxAge != int(previewPersonCookieTTL.Seconds()) {
+		t.Fatalf("a person's cookie: %d %+v", w.Code, w.Result().Cookies())
 	}
 	signed := http.Header{"Cookie": {cookie.Name + "=" + cookie.Value + "; mine=1"}}
 

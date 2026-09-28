@@ -2002,6 +2002,11 @@ components:
           type: boolean
         picture:
           type: string
+        previewDomain:
+          description: The preview listener's domain (preview URLs are https://<server>-<run suffix>.<domain>); null when previews are off.
+          type:
+            - string
+            - "null"
         scopes:
           items:
             type: string

@@ -24,6 +24,9 @@ type Whoami struct {
 	// ConsoleAuth is luxd's console auth: key or cloudflare-access.
 	ConsoleAuth string   `json:"consoleAuth"`
 	Scopes      []string `json:"scopes"`
+	// PreviewDomain: the console signs people in to
+	// https://<server>-<run>.<PreviewDomain> only.
+	PreviewDomain *string `json:"previewDomain" nullable:"true" doc:"The preview listener's domain (preview URLs are https://<server>-<run suffix>.<domain>); null when previews are off."`
 }
 
 type whoamiOutput struct {
@@ -36,6 +39,9 @@ func (s *Server) whoami(ctx context.Context, _ *struct{}) (*whoamiOutput, error)
 	p := principal(ctx)
 	w := Whoami{Operator: p.Operator, KeyID: p.KeyID, Email: p.Email, Name: p.Name, Picture: p.Picture, Scopes: slices.Clone(p.Scopes),
 		ConsoleAuth: cmp.Or(s.cfg.ConsoleAuth.Mode, "key")}
+	if d := s.cfg.Preview.Domain; d != "" {
+		w.PreviewDomain = &d
+	}
 	if !p.Operator {
 		w.TenantID = p.TenantID
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {

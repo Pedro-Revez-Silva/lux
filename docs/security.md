@@ -78,10 +78,16 @@ domain>` ([Operators](operators.md#previews)). What protects that:
   application's own AUD, where luxd also verifies the token and checks
   the user may read the Run (an operator, or its tenant under the Access
   mapping); or, in ticket mode, a `__Host-` cookie (host-only, `Secure`,
-  `HttpOnly`, `SameSite=Lax`, 12 hours) that luxd signs (HMAC-SHA256 with
-  a key it keeps in its database) and gives out only for a preview ticket
-  of that very Run. A cookie made from an API key stops working when the
-  key is revoked.
+  `HttpOnly`, `SameSite=Lax`) that luxd signs (HMAC-SHA256 with a key it
+  keeps in its database) and gives out only for a preview ticket of that
+  very Run. A cookie made from an API key lasts 12 hours and stops working
+  (within a minute) when the key is revoked; one made by a person signed
+  in through Cloudflare Access lasts 1 hour, since luxd cannot see the
+  Access policy change without a fresh token. The console hands a preview
+  ticket only to a host under luxd's own preview domain
+  (`<server>-<run>.<preview domain>`, https): a `/preview-auth` link to
+  any other host is refused before a ticket is minted, so it cannot leak
+  one.
 - **A listener of its own** (`preview.listen`) that only proxies: it never
   serves `/v1`, `/runner` or the console, so preview content never shares
   an origin with them.
