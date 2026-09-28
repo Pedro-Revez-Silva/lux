@@ -169,7 +169,12 @@ func (a *app) lsCmd() *cobra.Command {
 		Aliases: []string{"list"},
 		Short:   "List Runs",
 		Long: `List Runs, newest first. With an operator key, every tenant's
-(--tenant narrows it), with a TENANT column.`,
+(--tenant narrows it), with a TENANT column.
+
+COST is the Run's list-price total when it has one currency, "multi" when
+it has several (lux cost <run> shows them), and — while nothing has been
+reported. A leading ~ marks a total that may still change: part of it is
+an estimate, or a cost source has not answered yet.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			q := url.Values{}
 			if state != "" {
@@ -206,13 +211,13 @@ func (a *app) lsCmd() *cobra.Command {
 				if r.Activity == "idle" && r.State == "running" {
 					state += " (waiting for input)"
 				}
-				row := []string{r.ID, orDash(r.Name), state, orDash(r.Host), r.Spec.Workload.Adapter, ago(&r.CreatedAt)}
+				row := []string{r.ID, orDash(r.Name), state, orDash(r.Host), r.Spec.Workload.Adapter, runCostCell(r.Cost), ago(&r.CreatedAt)}
 				if len(tenants) > 1 {
 					row = append([]string{r.Tenant}, row...)
 				}
 				rows = append(rows, row)
 			}
-			header := "ID\tNAME\tSTATE\tHOST\tADAPTER\tCREATED"
+			header := "ID\tNAME\tSTATE\tHOST\tADAPTER\tCOST\tCREATED"
 			if len(tenants) > 1 {
 				header = "TENANT\t" + header
 			}

@@ -55,3 +55,4 @@ After v1:
 | AWS deployment: `runner_url`, luxd self-serving runner binaries with sha256 verification, outdated-host draining, no-custom-AMI EC2 boot (Ignition/Fedora CoreOS default, cloud-init script, or plain env; `GET /runner/bootstrap.sh` for static hosts), `make dist` release tarballs and `release.yml` — Terraform in `deploy/terraform/` | ✅ done |
 | Per-pool `--scale-down-after`; `--warm-while-active` (scale to zero when idle) | ✅ done |
 | Timeouts: none unless set; count running time only (parked Runs keep theirs) | ✅ done |
+| Run costs, CLI (docs/costs.md step 9): `lux cost`, `lux costs`, COST in `lux ls`; `cost` on `GET /v1/runs` | ✅ done |

@@ -25,32 +25,32 @@ func (in *costSummaryInput) Resolve(ctx huma.Context) []error {
 	return nil
 }
 
-type costSummaryRow struct {
+type CostSummaryRow struct {
 	At       *time.Time        `json:"at,omitempty"`
 	Group    map[string]string `json:"group,omitempty"`
 	Currency string            `json:"currency"`
 	Amount   string            `json:"amount"`
 }
 
-type hostAllocation struct {
+type HostAllocation struct {
 	HostID      string `json:"hostId"`
 	Currency    string `json:"currency"`
 	Allocated   string `json:"allocated"`
 	Unallocated string `json:"unallocated"`
 }
 
-type costSummaryBody struct {
+type CostSummaryBody struct {
 	From        time.Time        `json:"from"`
 	To          time.Time        `json:"to"`
 	Basis       string           `json:"basis"`
-	Totals      []costSummaryRow `json:"totals"`
-	Series      []costSummaryRow `json:"series,omitempty"`
-	Unallocated []costSummaryRow `json:"unallocated,omitempty"`
-	Hosts       []hostAllocation `json:"hosts,omitempty"`
+	Totals      []CostSummaryRow `json:"totals"`
+	Series      []CostSummaryRow `json:"series,omitempty"`
+	Unallocated []CostSummaryRow `json:"unallocated,omitempty"`
+	Hosts       []HostAllocation `json:"hosts,omitempty"`
 }
 
 type costSummaryOutput struct {
-	Body costSummaryBody `nameHint:"CostSummary"`
+	Body CostSummaryBody `nameHint:"CostSummary"`
 }
 
 const (
@@ -112,7 +112,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 			return nil, errf(http.StatusBadRequest, "bad_request", "duplicate group %q", g)
 		}
 	}
-	out := &costSummaryOutput{Body: costSummaryBody{From: from, To: to, Basis: "list", Totals: []costSummaryRow{}}}
+	out := &costSummaryOutput{Body: CostSummaryBody{From: from, To: to, Basis: "list", Totals: []CostSummaryRow{}}}
 	// Group selectors and label keys are values, never SQL identifiers.
 	const base = `WITH scoped AS (
 		SELECT c.hour, c.currency, c.amount, c.tenant_id, c.family, c.run_id,
@@ -129,7 +129,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 		FROM scoped
 	) SELECT `
 	rowCount := 0
-	read := func(tx pgx.Tx, interval string) ([]costSummaryRow, error) {
+	read := func(tx pgx.Tx, interval string) ([]CostSummaryRow, error) {
 		bucket := "NULL::timestamptz"
 		switch interval {
 		case "hour":
@@ -137,7 +137,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 		case "day":
 			bucket = "date_trunc('day', hour AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
 		}
-		result := []costSummaryRow{}
+		result := []CostSummaryRow{}
 		rows, err := tx.Query(ctx, base+bucket+`, g1, g2, currency, trim_scale(sum(amount))::text
 				FROM dimensions GROUP BY 1, 2, 3, 4 ORDER BY 1 NULLS FIRST, 2, 3, 4`,
 			from, to, in.Family, group[0], group[1], label[0], label[1])
@@ -146,7 +146,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var row costSummaryRow
+			var row CostSummaryRow
 			var g1, g2 *string
 			if err := rows.Scan(&row.At, &g1, &g2, &row.Currency, &row.Amount); err != nil {
 				return nil, err
@@ -194,7 +194,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 			}
 		}
 		if p.Operator && p.TenantID == "" {
-			out.Body.Unallocated = []costSummaryRow{}
+			out.Body.Unallocated = []CostSummaryRow{}
 			rows, err := tx.Query(ctx, `SELECT currency, trim_scale(sum(unallocated))::text FROM cost_hourly
 				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3)
 				GROUP BY currency ORDER BY currency`, from, to, in.Family)
@@ -202,7 +202,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 				return err
 			}
 			for rows.Next() {
-				var row costSummaryRow
+				var row CostSummaryRow
 				if err := rows.Scan(&row.Currency, &row.Amount); err != nil {
 					rows.Close()
 					return err
@@ -219,7 +219,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 			if err != nil || group[0] != "host" && group[1] != "host" {
 				return err
 			}
-			out.Body.Hosts = []hostAllocation{}
+			out.Body.Hosts = []HostAllocation{}
 			rows, err = tx.Query(ctx, `SELECT host_id, currency, trim_scale(sum(allocated))::text,
 				trim_scale(sum(unallocated))::text FROM cost_hourly
 				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3)
@@ -229,7 +229,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 			}
 			defer rows.Close()
 			for rows.Next() {
-				var row hostAllocation
+				var row HostAllocation
 				if err := rows.Scan(&row.HostID, &row.Currency, &row.Allocated, &row.Unallocated); err != nil {
 					return err
 				}

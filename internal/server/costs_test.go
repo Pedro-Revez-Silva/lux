@@ -437,3 +437,66 @@ func fmtTime(t *time.Time) string {
 	}
 	return t.UTC().Format(time.RFC3339)
 }
+
+func listCosts(t *testing.T, s *Server, key, query string) map[string]*RunCostBrief {
+	t.Helper()
+	var body listRunsBody
+	if code := getJSON(t, s, key, "/v1/runs"+query, &body); code != http.StatusOK {
+		t.Fatalf("list runs: %d", code)
+	}
+	out := map[string]*RunCostBrief{}
+	for _, r := range body.Runs {
+		out[r.ID] = r.Cost
+	}
+	return out
+}
+
+// The Runs list carries each Run's totals per currency and its status,
+// with the same numbers and visibility as GET /v1/runs/{id}/cost.
+func TestListRunsCost(t *testing.T) {
+	s, keys := costFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r3', 't1', '{}', 'running')`)
+	report(t, s, "t1", "r1", "compute", line("compute", "m7i", "0.150000001", "USD", true), line("compute", "spot", "0.05", "USD", false))
+	report(t, s, "t1", "r1", "gw", line("ai", "m", "2.5", "EUR", false))
+	report(t, s, "t2", "r2", "compute", line("compute", "m7i", "7", "USD", false))
+
+	got := listCosts(t, s, keys["t1"], "")
+	if len(got) != 2 || got["r2"] != nil {
+		t.Fatalf("t1 lists %v, want r1 and r3 only", got)
+	}
+	if c := got["r1"]; c == nil || c.Status != "complete" || totals(c.Totals) != "/EUR=2.5(f0,e2.5) /USD=0.200000001(f0.150000001,e0.05) " {
+		t.Errorf("r1: %+v", c)
+	}
+	if c := got["r3"]; c == nil || c.Status != "pending" || c.Totals == nil || len(c.Totals) != 0 {
+		t.Errorf("r3 with no lines: %+v", c)
+	}
+	// The list's status and totals are the per-Run endpoint's.
+	_, full := getCost(t, s, keys["t1"], "r1")
+	if full.Status != got["r1"].Status || totals(full.Totals) != totals(got["r1"].Totals) {
+		t.Errorf("list %+v differs from runCost %s %s", got["r1"], full.Status, totals(full.Totals))
+	}
+
+	if c := listCosts(t, s, keys["t2"], ""); len(c) != 1 || totals(c["r2"].Totals) != "/USD=7(f0,e7) " {
+		t.Errorf("t2: %v", c)
+	}
+	all := listCosts(t, s, keys["op"], "")
+	if len(all) != 3 || totals(all["r2"].Totals) != "/USD=7(f0,e7) " || totals(all["r1"].Totals) != totals(got["r1"].Totals) {
+		t.Errorf("operator: %v", all)
+	}
+	if c := listCosts(t, s, keys["op"], "?tenant=t2"); len(c) != 1 || c["r2"] == nil {
+		t.Errorf("operator narrowed to t2: %v", c)
+	}
+
+	// A configured plugin that has not answered makes it incomplete; a
+	// source row that is incomplete does too.
+	s.cfg.Costs.Plugins = []CostPluginConfig{{Name: "gw"}}
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES ('r1', 't1', 'compute', 'final')`)
+	if c := listCosts(t, s, keys["t1"], ""); c["r1"].Status != "incomplete" || c["r3"].Status != "incomplete" {
+		t.Errorf("unanswered plugin: r1 %+v r3 %+v", c["r1"], c["r3"])
+	}
+	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES ('r1', 't1', 'gw', 'final')`)
+	if c := listCosts(t, s, keys["t1"], ""); c["r1"].Status != "final" {
+		t.Errorf("all final: %+v", c["r1"])
+	}
+}
