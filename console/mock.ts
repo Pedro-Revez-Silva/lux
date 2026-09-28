@@ -121,6 +121,8 @@ async function api(req: Request, srv: Srv): Promise<Response> {
       if (!u.searchParams.has("ticket") && !authed(req)) return json({ error: { code: "unauthorized", message: "no key" } }, 401);
       if (runState !== "running") return json({ error: { code: "not_running", message: `run is ${runState}: interactive access needs it running` } }, 409);
       if (req.headers.get("upgrade") !== "websocket") return json({ status: "ok" });
+      // MOCK_OPEN_DELAY=ms holds the upgrade, to see the page connecting.
+      if (process.env.MOCK_OPEN_DELAY) await Bun.sleep(Number(process.env.MOCK_OPEN_DELAY));
       if (srv.upgrade(req, { data: { line: "", opened: false } })) return undefined as unknown as Response;
       return new Response("upgrade failed", { status: 500 });
     }

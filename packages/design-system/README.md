@@ -134,6 +134,7 @@ All in `src/tokens.css`.
 | State hues | `--st-{neutral,blue,teal,green,amber,red,violet}-{fg,bg,dot}` |
 | Chart | `--chart-1` … `--chart-8` (fixed order), `--chart-grid` `--chart-axis` `--chart-label` `--chart-cursor`, `--chart-h` |
 | Logs | `--log-stderr-bg` `--log-stderr-fg` `--log-line-hover` |
+| Terminal | `--term-bg` `--term-fg` `--term-cursor` `--term-dim` `--term-scrollbar` (the Solarized frame; the screen's palette is `terminalThemes.ts`) |
 | Type | `--font-sans` `--font-mono`, `--text-{xs,sm,md,lg,xl,2xl,3xl}` (density-dependent), `--leading-{tight,normal}`, `--weight-{normal,medium,semibold}` |
 | Spacing | `--sp-1` … `--sp-9` (2, 4, 6, 8, 12, 16, 24, 32, 48px); density-dependent `--gap` `--gap-lg` `--pad-page` `--pad-card` `--pad-cell` |
 | Radius | `--radius-{sm,md,lg,pill}` (3, 5, 8px, pill) |
@@ -143,23 +144,29 @@ All in `src/tokens.css`.
 
 State mapping (`src/states.ts`):
 
-| Hue | Run states | Host states |
-| --- | --- | --- |
-| neutral | submitted, pending, provisioning, stopped, cancelled | provisioning, terminated |
-| blue | scheduled, starting, resuming | registered |
-| teal | running, busy | |
-| violet | idle | |
-| green | succeeded | ready |
-| amber | stopping | draining, terminating |
-| red | lost, failed | lost |
+| Hue | Run states | Host states | Server states |
+| --- | --- | --- | --- |
+| neutral | submitted, pending, provisioning, stopped, cancelled | provisioning, terminated | stopped |
+| blue | scheduled, starting, resuming | registered | starting |
+| teal | running, busy | | |
+| violet | idle | | |
+| green | succeeded | ready | ready |
+| amber | stopping | draining, terminating | unreachable |
+| red | lost, failed | lost | exited |
 
 ## Components
 
 Logo (the star, 16–32px; the detailed mark is `docs/brand/lux.svg`),
-Button, IconButton, Badge, StatePill, StatTile, Sparkline, Card, Table, Tabs,
+Button, IconButton, Badge, StatePill, ServerStateMark, ConnectionBadge,
+StatTile, Sparkline, Card, Table, Tabs,
 Tooltip, Select, TenantPicker, TimeRangePicker, TimeSeriesChart (uPlot, with
 optional vertical `marks`; height from `--chart-h` unless given), Timeline
-(placement waterfall), LogView, KeyValue, IdChip, Code, PageHeader,
+(placement waterfall), LogView, Terminal (xterm.js in the LogView's frame,
+Solarized inside via `terminalThemes`, following the console theme; a
+transport-agnostic handle: `write`, `onData`, `onResize`) with
+TerminalOverlay (the card over a dimmed screen), ServerList / ServerRow (a
+run's servers: state, URL, start/stop/restart/remove, an expandable log),
+KeyValue, IdChip, Code, PageHeader,
 SectionHeader, ConfirmDialog, Dialog (a form modal), Toast (`useToast`),
 EmptyState, Spinner, Skeleton. Hooks: `useTheme`, `useDensity`. All exported
 from `src/index.ts` with typed props; icons from `@lux/design-system/icons`.
