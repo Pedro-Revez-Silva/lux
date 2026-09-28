@@ -1,7 +1,7 @@
 // Small pieces shared by pages: error/loading blocks, links, the runs table
 // columns, chart series builders and lookups.
 import { useMemo, type ReactNode } from "react";
-import { Button, EmptyState, formatPercent, formatRelative, formatTimestamp, formatUnit, IdChip, KeyValue, Skeleton, SkeletonLines, StatePill, Tooltip, type Column, type Unit } from "@lux/design-system";
+import { Button, EmptyState, formatPercent, formatRelative, formatTimestamp, formatUnit, IdChip, KeyValue, Skeleton, SkeletonLines, StatePill, Tooltip, type ChartMark, type Column, type Unit } from "@lux/design-system";
 import { useNow, type Run, type Sample } from "../../api/index.ts";
 import { Link, linkTo, useSearch } from "../router.tsx";
 
@@ -123,9 +123,9 @@ export function runColumns({ tenant, host = true, adapter = true }: { tenant: bo
   return c;
 }
 
-interface SeriesData {
+export interface SeriesData {
   x: number[];
-  ys: (number | null)[][];
+  ys: (number | null | undefined)[][];
 }
 
 /** One series of seriesFrom: a field of each sample, or a number for a constant line (e.g. a capacity). */
@@ -144,11 +144,50 @@ export function seriesFrom(samples: Sample[] | undefined, pick: SeriesPick[]): S
   return { x, ys };
 }
 
+/**
+ * Several processes' (or machines') series on one x axis: ys[group *
+ * fields + field]. A group has no point where it has no sample (undefined:
+ * its line joins across another's instants); a sample without the value is
+ * a gap (null). Each sample's time is parsed once.
+ */
+export function lineSeries<S extends { at: string }>(groups: S[][], pick: ((s: S) => number | null | undefined)[]): SeriesData {
+  const ats = groups.map((g) => g.map((s) => Math.floor(Date.parse(s.at) / 1000)));
+  const x = [...new Set(ats.flat())].filter(Number.isFinite).sort((a, b) => a - b);
+  const index = new Map(x.map((t, i) => [t, i]));
+  const ys = groups.flatMap((g, gi) =>
+    pick.map((p) => {
+      const y: (number | null | undefined)[] = new Array(x.length).fill(undefined);
+      g.forEach((s, si) => {
+        const i = index.get(ats[gi]![si]!);
+        if (i != null) y[i] = p(s) ?? null;
+      });
+      return y;
+    }),
+  );
+  return { x, ys };
+}
+
 /** Memoized seriesFrom: recomputed when the samples or a constant line change. Pick functions must read only the sample. */
 export function useSeries(samples: Sample[] | undefined, pick: SeriesPick[]): SeriesData {
   const consts = pick.map((p) => (typeof p === "function" ? "f" : String(p))).join("|");
   // eslint-disable-next-line react-hooks/exhaustive-deps
   return useMemo(() => seriesFrom(samples, pick), [samples, consts]);
+}
+
+/**
+ * Chart marks where a sample's key changes (a placement epoch, a process
+ * start), at that sample: none for the first value, nor for samples without one.
+ */
+export function changeMarks(samples: Sample[] | undefined, key: (s: Sample) => string | number | undefined, label: (s: Sample) => string): ChartMark[] {
+  const out: ChartMark[] = [];
+  let last: string | number | undefined;
+  for (const s of samples ?? []) {
+    const k = key(s);
+    if (k == null || k === last) continue;
+    if (last != null) out.push({ x: Math.floor(Date.parse(s.at) / 1000), label: label(s) });
+    last = k;
+  }
+  return out;
 }
 
 /** "3.5 / 8 cores" style ratio text. */

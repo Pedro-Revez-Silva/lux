@@ -2,6 +2,7 @@ package hoststat
 
 import (
 	"os"
+	"runtime/debug"
 	"testing"
 )
 
@@ -31,5 +32,60 @@ func TestReadDisk(t *testing.T) {
 	}
 	if _, err := ReadDisk("/nonexistent/" + t.Name()); !os.IsNotExist(err) {
 		t.Fatalf("missing dir: %v", err)
+	}
+}
+
+func TestParseStatus(t *testing.T) {
+	kb := parseKB("Name:\tluxd\nVmHWM:\t    9000 kB\nVmRSS:\t    7000 kB\nThreads:\t12\n", "VmRSS:", "VmHWM:")
+	if kb["VmRSS:"] != 7000*1024 || kb["VmHWM:"] != 9000*1024 || len(kb) != 2 {
+		t.Fatalf("got %v", kb)
+	}
+}
+
+// touch makes RSS spike by 64 MiB and drop again.
+func touch() {
+	buf := make([]byte, 64<<20)
+	for i := 0; i < len(buf); i += 4096 {
+		buf[i] = 1
+	}
+	buf = nil
+	debug.FreeOSMemory()
+}
+
+// Reads in one process: the same start, a CPU counter that does not go
+// back, plausible levels. A spike shows in the next read's peak, and stays
+// in every read until one is Stored (a lost sample's spike carries over);
+// after that it is gone.
+func TestProcessSampler(t *testing.T) {
+	var s ProcessSampler
+	a, err := s.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Stored()
+	touch()
+	b, err := s.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Started.IsZero() || !a.Started.Equal(b.Started) || b.CPUSeconds < a.CPUSeconds {
+		t.Fatalf("%+v then %+v", a, b)
+	}
+	if b.RSSBytes <= 0 || b.HeapBytes <= 0 || b.Goroutines < 2 {
+		t.Fatalf("got %+v", b)
+	}
+	if b.PeakRSSBytes == nil {
+		t.Skip("this kernel or sandbox does not reset the peak")
+	}
+	spike := *b.PeakRSSBytes
+	if spike < b.RSSBytes || spike < a.RSSBytes+48<<20 {
+		t.Fatalf("peak %d, rss before %d, now %d", spike, a.RSSBytes, b.RSSBytes)
+	}
+	if c, _ := s.Read(); *c.PeakRSSBytes < spike {
+		t.Fatalf("not stored, yet the peak fell from %d to %d", spike, *c.PeakRSSBytes)
+	}
+	s.Stored()
+	if c, _ := s.Read(); *c.PeakRSSBytes >= spike {
+		t.Fatalf("stored, yet the peak is still %d", *c.PeakRSSBytes)
 	}
 }

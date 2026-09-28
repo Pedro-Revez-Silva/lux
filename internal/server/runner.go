@@ -508,7 +508,7 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 		// History: the host's sample, and one per live placement (current
 		// levels, cumulative counters).
 		s.sample(ctx, tx, func(tx pgx.Tx) error {
-			if err := sampleHost(ctx, tx, hostID, hb.Usage); err != nil || n == 0 {
+			if err := sampleHost(ctx, tx, hostID, hb.Usage, hb.Runner); err != nil || n == 0 {
 				return err
 			}
 			_, err := tx.Exec(ctx, `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, cpu_seconds, mem_bytes, disk_bytes, pids, net_rx, net_tx)

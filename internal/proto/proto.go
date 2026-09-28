@@ -136,6 +136,19 @@ type HostUsage struct {
 	DiskBytes   int64   `json:"diskBytes"`
 }
 
+// ProcessUsage is the runner process's own, on each heartbeat. CPUSeconds
+// counts from Started, so a restart starts it again. PeakRSSBytes is the
+// highest RSS since the previous heartbeat, absent when the runner cannot
+// reset the kernel's high-water mark.
+type ProcessUsage struct {
+	Started      time.Time `json:"started"`
+	CPUSeconds   float64   `json:"cpuSeconds"`
+	RSSBytes     int64     `json:"rssBytes"`
+	PeakRSSBytes *int64    `json:"peakRssBytes,omitempty"`
+	HeapBytes    int64     `json:"heapBytes"`
+	Goroutines   int64     `json:"goroutines"`
+}
+
 type Welcome struct {
 	HostID       string  `json:"hostId"`
 	LeaseSeconds float64 `json:"leaseSeconds"`
@@ -154,6 +167,9 @@ type Heartbeat struct {
 	GitMirrors []string `json:"gitMirrors"`
 	// Usage: the host's, for history (absent from older runners).
 	Usage *HostUsage `json:"usage,omitempty"`
+	// Runner: the runner process's own use, for history (absent from
+	// older runners).
+	Runner *ProcessUsage `json:"runner,omitempty"`
 	// RunnerSHA256, ShimSHA256: as in Hello, on every heartbeat, so a
 	// binary replaced after the runner started (a bad manual copy) is
 	// still noticed. Absent from runners that predate self-update.
