@@ -44,8 +44,8 @@ src/
   base.css          reset, global text
   components.css    component styles (one section per component)
   layout.css        page widths, grids, stacks, name links
-  format.ts         bytes, durations, relative time, cores, percentages
-  states.ts         run/host state -> hue family + label
+  format.ts         bytes, durations, relative time, cores, percentages, money
+  states.ts         run/host state -> hue family + label; cost status; cost family -> chart slot
   theme.ts          theme and density: toggles, persistence, cssVar()
   icons.tsx         the icon set
   *.tsx             components
@@ -76,7 +76,13 @@ gallery/            the gallery app (index.html, Gallery.tsx, fake data)
 - Dark mode is its own set of steps, not an inverted light mode. It applies by
   `prefers-color-scheme` unless `<html data-theme="light|dark">` overrides
   (the toggle in the top bar, persisted in `localStorage["lux.theme"]`).
-- Missing values render as an en dash, never as `0`.
+- Missing values render as an en dash, never as `0`. A cost nothing has
+  reported yet is an empty state ("no cost reported yet"), never `$0.00`.
+- Money is exact: amounts stay decimal strings end to end (`formatMoney`,
+  `sumMoney`, `compareMoney` work on scaled integers, never floats), one
+  figure per currency, never added across currencies. Every page that shows
+  money labels it "list price" once, explained in a Tooltip
+  (`ListPriceNote`).
 
 ## Density
 
@@ -132,7 +138,7 @@ All in `src/tokens.css`.
 | Accent | `--accent` `--accent-hover` `--accent-active` `--accent-fg` `--accent-subtle` `--accent-text` `--focus-ring` |
 | Semantic | `--{success,warn,danger,info}-{fg,bg,dot}` |
 | State hues | `--st-{neutral,blue,teal,green,amber,red,violet}-{fg,bg,dot}` |
-| Chart | `--chart-1` … `--chart-8` (fixed order), `--chart-grid` `--chart-axis` `--chart-label` `--chart-cursor`, `--chart-h` |
+| Chart | `--chart-1` … `--chart-8` (fixed order; cost families map onto them, compute is `--chart-1`), `--chart-grid` `--chart-axis` `--chart-label` `--chart-cursor`, `--chart-h`; unallocated cost uses `--st-neutral-dot` |
 | Logs | `--log-stderr-bg` `--log-stderr-fg` `--log-line-hover` |
 | Type | `--font-sans` `--font-mono`, `--text-{xs,sm,md,lg,xl,2xl,3xl}` (density-dependent), `--leading-{tight,normal}`, `--weight-{normal,medium,semibold}` |
 | Spacing | `--sp-1` … `--sp-9` (2, 4, 6, 8, 12, 16, 24, 32, 48px); density-dependent `--gap` `--gap-lg` `--pad-page` `--pad-card` `--pad-cell` |
@@ -153,6 +159,27 @@ State mapping (`src/states.ts`):
 | amber | stopping | draining, terminating |
 | red | lost, failed | lost |
 
+Cost status (`costStatusStyle`, `CostStatusBadge`): the `status` of
+`GET /v1/runs/{id}/cost`, as a Badge whose Tooltip says what it means (and,
+when incomplete, which sources it waits on).
+
+| Status | Badge | Meaning |
+| --- | --- | --- |
+| `pending` | neutral "Pending" | no source has reported yet |
+| `complete` | info "Estimate" | every source answered; some lines may still change |
+| `incomplete` | warn "Incomplete" | a source has not answered or failed |
+| `final` | success "Final" | every source settled |
+
+Cost family colours (`familySlot`, `familyColor`, `familyColors`): a
+family maps to a categorical `--chart-N` slot, never a raw colour.
+`compute` is always `--chart-1`. A plugin's describe `color` hint picks the
+slot: a name (`violet` → 7, `amber` → 4, `orange` → 2, `teal` → 3, `pink`
+→ 5, `green` → 6, `red` → 8; blue names go to 7, as slot 1 is compute's)
+or `#rrggbb` by nearest hue. Without a hint the family's name picks one of
+slots 2–8, so it keeps its colour everywhere. When several families are
+shown together, `familyColors` keeps compute and hinted families in place
+and moves an unhinted family off a slot already taken.
+
 ## Components
 
 Logo (the star, 16–32px; the detailed mark is `docs/brand/lux.svg`),
@@ -163,3 +190,20 @@ optional vertical `marks`; height from `--chart-h` unless given), Timeline
 SectionHeader, ConfirmDialog, Dialog (a form modal), Toast (`useToast`),
 EmptyState, Spinner, Skeleton. Hooks: `useTheme`, `useDensity`. All exported
 from `src/index.ts` with typed props; icons from `@lux/design-system/icons`.
+
+Cost additions (`src/Cost.tsx`, `format.ts`, `states.ts`; gallery section
+"costs"):
+
+| Export | What |
+| --- | --- |
+| `formatMoney(amount, currency, {decimals?})` | exact decimal string → `$1.43`, `$0.0012`, `€12,345.50`, `3.20 XTS`; 2 decimals from a cent up, up to 6 significant below; a nonzero amount too small to show reads `<$0.000001`; missing or unparseable → `–` |
+| `sumMoney(amounts)`, `compareMoney(a, b)` | exact sum and order of decimal strings of one currency |
+| `formatUnit(v, "money", currency)` | the chart/tile unit for money (axes and tooltips) |
+| `CostStatusBadge({status, waitingOn?})` | the status as a Badge with its meaning in a Tooltip |
+| `costStatusStyle`, `COST_STATUS_LIST`, `CostStatus` | the mapping above |
+| `ListPriceNote` | the page's one "list price" label, explained in a Tooltip |
+| `ColorKey({color})`, `FamilyKey({family, displayName, color, swatch?})` | a square swatch before its label (colour never without one) |
+| `MoneyList({amounts, large?})` | one figure per currency, side by side; `–` when empty |
+| `familySlot`, `familyColor`, `familyColors` | cost family → `--chart-N` (above) |
+| `TimeSeriesChart` `stacked` | series stacked bottom-first as filled bands (28% fill, 2px edges); the tooltip adds a Total; hiding a series from the legend restacks the rest; a missing value adds nothing and shows `–` |
+| `TimeSeriesChart` `currency` | the currency of `unit="money"` |

@@ -136,11 +136,114 @@ export function formatDelta(n: number | null | undefined, unit: "%" | "" = ""): 
   return `${sign}${v}`;
 }
 
-export type Unit = "bytes" | "cores" | "count" | "duration" | "percent" | "rate";
+/* ---------- money ---------- */
 
-/** Format a value according to a chart/tile unit. */
-export function formatUnit(v: number | null | undefined, unit: Unit): string {
+// Amounts arrive as decimal strings (numeric(24, 9) in luxd) and are handled
+// as scaled BigInts, so no float ever touches a displayed figure.
+const MONEY_SCALE = 9;
+const MONEY_RE = /^([+-])?(\d+)(?:\.(\d+))?$/;
+
+/** A decimal string as an integer count of 1e-9 units; null when it does not parse. Digits past the 9th are truncated. */
+function parseMoney(amount: string): bigint | null {
+  const m = MONEY_RE.exec(amount.trim());
+  if (!m) return null;
+  const frac = (m[3] ?? "").slice(0, MONEY_SCALE).padEnd(MONEY_SCALE, "0");
+  const v = BigInt(m[2]! + frac);
+  return m[1] === "-" ? -v : v;
+}
+
+function moneyString(v: bigint): string {
+  const neg = v < 0n;
+  const digits = (neg ? -v : v).toString().padStart(MONEY_SCALE + 1, "0");
+  const int = digits.slice(0, -MONEY_SCALE);
+  const frac = digits.slice(-MONEY_SCALE).replace(/0+$/, "");
+  return `${neg ? "-" : ""}${int}${frac ? "." + frac : ""}`;
+}
+
+/** Exact sum of decimal strings (same currency only); null if any does not parse. */
+export function sumMoney(amounts: readonly string[]): string | null {
+  let total = 0n;
+  for (const a of amounts) {
+    const v = parseMoney(a);
+    if (v == null) return null;
+    total += v;
+  }
+  return moneyString(total);
+}
+
+/** Exact comparison of two decimal strings, for sorting; unparseable sorts first. */
+export function compareMoney(a: string | null | undefined, b: string | null | undefined): number {
+  const x = a == null ? null : parseMoney(a);
+  const y = b == null ? null : parseMoney(b);
+  if (x == null || y == null) return x == null ? (y == null ? 0 : -1) : 1;
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/** Decimals shown: 2 from 0.01 up; below that, enough for two significant digits, at most 6. */
+function moneyDecimals(abs: bigint): number {
+  const cent = 10n ** BigInt(MONEY_SCALE - 2);
+  if (abs === 0n || abs >= cent) return 2;
+  const digits = abs.toString().length; // significant digits of the 1e-9 count
+  return Math.min(6, MONEY_SCALE - digits + 2);
+}
+
+const symbols = new Map<string, { symbol: string; before: boolean } | null>();
+
+function currencySymbol(currency: string): { symbol: string; before: boolean } | null {
+  if (!symbols.has(currency)) {
+    let found: { symbol: string; before: boolean } | null = null;
+    try {
+      const parts = new Intl.NumberFormat("en", { style: "currency", currency, currencyDisplay: "narrowSymbol" }).formatToParts(1);
+      const i = parts.findIndex((p) => p.type === "currency");
+      const n = parts.findIndex((p) => p.type === "integer");
+      const symbol = parts[i]?.value ?? "";
+      // A symbol that is just the code again reads better after the number.
+      if (i >= 0 && symbol !== currency) found = { symbol, before: i < n };
+    } catch {}
+    symbols.set(currency, found);
+  }
+  return symbols.get(currency)!;
+}
+
+/**
+ * A money amount from its exact decimal string: "1.4342", "USD" → "$1.43";
+ * "0.0012" → "$0.0012"; "12345.5", "EUR" → "€12,345.50"; unknown codes go
+ * after the number ("3.20 XTS"). Rounded half away from zero on the decimal
+ * digits, never through a float. A number is accepted for chart axes only.
+ * Missing or unparseable → en dash.
+ */
+export function formatMoney(amount: string | number | null | undefined, currency?: string | null, opts: { decimals?: number } = {}): string {
+  if (amount == null) return MISSING;
+  if (typeof amount === "number" && !Number.isFinite(amount)) return MISSING;
+  const v = parseMoney(typeof amount === "number" ? amount.toFixed(MONEY_SCALE) : amount);
+  if (v == null) return MISSING;
+  const neg = v < 0n;
+  const abs = neg ? -v : v;
+  const decimals = Math.max(0, Math.min(MONEY_SCALE, opts.decimals ?? moneyDecimals(abs)));
+  const unit = 10n ** BigInt(MONEY_SCALE - decimals);
+  const rounded = (abs + unit / 2n) / unit;
+  // A nonzero amount that rounds away reads as "<$0.000001", never as zero.
+  if (rounded === 0n && abs > 0n) return (neg ? "-" : "") + "<" + formatMoney(moneyString(unit), currency, { decimals });
+  const s = rounded.toString().padStart(decimals + 1, "0");
+  const int = s.slice(0, s.length - decimals).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  let frac = s.slice(s.length - decimals);
+  // Past the cents, only significant digits: "0.001", not "0.0010".
+  if (opts.decimals == null && frac.length > 2) frac = frac.replace(/0+$/, "").padEnd(2, "0");
+  const number = frac ? `${int}.${frac}` : int;
+  const sign = neg && rounded > 0n ? "-" : "";
+  if (!currency) return sign + number;
+  const sym = currencySymbol(currency);
+  if (!sym) return `${sign}${number} ${currency}`;
+  return sym.before ? `${sign}${sym.symbol}${number}` : `${sign}${number} ${sym.symbol}`;
+}
+
+export type Unit = "bytes" | "cores" | "count" | "duration" | "percent" | "rate" | "money";
+
+/** Format a value according to a chart/tile unit. `currency` is for "money". */
+export function formatUnit(v: number | null | undefined, unit: Unit, currency?: string): string {
   switch (unit) {
+    case "money":
+      return formatMoney(v, currency);
     case "bytes":
       return formatBytes(v);
     case "cores":
