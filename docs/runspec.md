@@ -19,6 +19,9 @@ workload:
   workdir: /workspace/repos/api
   user: agent                   # default: the image's USER
   grace: 30s                    # graceful stop before SIGKILL
+  beforeStop:                   # run in the container on every stop, first
+    command: [sh, -c, "git -C /workspace/repos/api diff > $LUX_ARTIFACTS/final.patch"]
+    timeout: 10s                # default 10s; at most `grace`
   resume: { command: [...] }    # generic only: what to run on resume
   mcpServers:                   # remote MCP servers the agent is given
     - name: tracker
@@ -307,6 +310,24 @@ A host started without `--nested` refuses nested Runs.
 It is still in its own user namespace (an unprivileged uid range on the
 host). The containers it starts use the Run's network, so they have its
 egress rules and hard blocks, and nothing more.
+
+## Before stop
+
+`workload.beforeStop` is what a Run leaves behind as it stops. On **every
+stop** — a `lux stop`, a cancel, the Run's `timeout`, a drain, a
+preemption — the shim runs the command in the container first, while the
+workload is still whole, and only then signals the workload. It runs as
+the workload's user, with its environment and working directory; its
+output is the Run's, bracketed by `lux.beforeStop` events (`start`, then
+`done` with the exit code and whether it timed out). Anything it writes
+into `$LUX_ARTIFACTS` is collected with the placement's artifacts.
+
+It is bounded: after `timeout` (default 10s) its process group is killed
+and the stop goes on. `timeout` may not exceed `grace`, since it runs inside
+the stop's grace; a preemption that shortens the grace gives it at most
+half of what is left. A container that dies, or a host that is lost, runs
+nothing, so the last state a caller has is whatever the Run wrote before.
+The hook runs once per placement, only after the workload has started.
 
 ## Artifacts
 

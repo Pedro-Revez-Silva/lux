@@ -389,8 +389,24 @@ func (s *Shim) stop(reason string, shorter time.Duration) {
 	}
 	s.stopping = true
 	s.stopWhy = reason
+	env := s.env
 	s.mu.Unlock()
 	s.out.Event(proto.EvStop, map[string]any{"reason": reason})
+	// What the workload leaves behind, while it is still whole: before
+	// anything is signalled, and inside the grace so a stop is never held
+	// up by it. Only once the workload has started (there is nothing to
+	// leave before), and not for init, which has no workload yet.
+	if len(s.cfg.BeforeStop) > 0 && env != nil && proc != nil {
+		limit := time.Duration(s.cfg.BeforeStopTimeout * float64(time.Second))
+		if shorter > 0 {
+			limit = min(limit, shorter/2)
+		}
+		start := time.Now()
+		s.beforeStop(env, limit)
+		if shorter > 0 {
+			shorter = max(shorter-time.Since(start), time.Second)
+		}
+	}
 	if initPid > 0 {
 		_ = syscall.Kill(-initPid, syscall.SIGTERM)
 	}
@@ -414,6 +430,39 @@ func (s *Shim) stop(reason string, shorter time.Duration) {
 	case s.startCh <- proto.ShimMsg{Type: proto.ShimStart}:
 	default:
 	}
+}
+
+// beforeStop runs the spec's beforeStop command once, as the workload user
+// with its environment, its output the Run's, and gives up after limit:
+// the command's whole process group is killed then, and the stop goes on.
+func (s *Shim) beforeStop(env []string, limit time.Duration) {
+	if limit <= 0 {
+		limit = 10 * time.Second
+	}
+	s.out.Event(proto.EvBeforeStop, map[string]any{"phase": "start"})
+	cmd := s.command(s.cfg.BeforeStop, env)
+	stdout, _ := cmd.StdoutPipe()
+	stderr, _ := cmd.StderrPipe()
+	exited, err := s.startTracked(cmd.Start, &cmd.Process)
+	if err != nil {
+		s.out.Event(proto.EvBeforeStop, map[string]any{"phase": "done", "exitCode": -1, "error": err.Error()})
+		return
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); copyTo(stdout, func(b []byte) { s.out.Write("stdout", b) }) }()
+	go func() { defer wg.Done(); copyTo(stderr, func(b []byte) { s.out.Write("stderr", b) }) }()
+	timedOut := false
+	var ws syscall.WaitStatus
+	select {
+	case ws = <-exited:
+	case <-time.After(limit):
+		timedOut = true
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		ws = <-exited
+	}
+	wg.Wait()
+	s.out.Event(proto.EvBeforeStop, map[string]any{"phase": "done", "exitCode": exitCode(ws), "timedOut": timedOut})
 }
 
 func (s *Shim) environment(secrets map[string]string) []string {

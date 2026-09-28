@@ -71,9 +71,22 @@ type Workload struct {
 	Resume *Resume `json:"resume,omitempty" yaml:"resume,omitempty"`
 	// Grace is how long a graceful stop waits before SIGKILL.
 	Grace      Duration    `json:"grace,omitempty" yaml:"grace,omitempty"`
+	BeforeStop *BeforeStop `json:"beforeStop,omitempty" yaml:"beforeStop,omitempty" doc:"A command run in the container on every stop, before the workload is signalled: a stop asked for, a cancel, a timeout, a drain. Its output is the Run's; what it writes into $LUX_ARTIFACTS is collected. It cannot run when the container dies or its host is lost."`
 	MCPServers []MCPServer `json:"mcpServers,omitempty" yaml:"mcpServers,omitempty" doc:"MCP servers (streamable HTTP) the agent connects to, through its adapter. Each URL's host must be allowed by network.egress (unless unrestricted), and may not be the control plane's."`
 	Services   []Service   `json:"services,omitempty" yaml:"services,omitempty" doc:"HTTP services the workload calls through a local socket (/.lux/services/<name>.sock, named in LUX_SERVICE_<NAME>), which adds their headers: the workload never holds the credentials. Same URL rules as mcpServers."`
 }
+
+// BeforeStop is what the workload leaves behind as it stops: a command run
+// once, as the workload's user with its environment and working directory,
+// before the workload is told to stop. It is bounded by Timeout and never
+// outlasts the stop's grace, so a stop is never held up by it.
+type BeforeStop struct {
+	Command []string `json:"command" yaml:"command" doc:"argv; run with the workload's PATH"`
+	Timeout Duration `json:"timeout,omitempty" yaml:"timeout,omitempty" doc:"default 10s; at most the workload's grace"`
+}
+
+// DefaultBeforeStopTimeout bounds a beforeStop command left without one.
+const DefaultBeforeStopTimeout = 10 * time.Second
 
 // Service is an HTTP service proxied into the container. Header values come
 // only from secrets and stay in lux-shim's memory: the workload never has
@@ -371,6 +384,20 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	}
 	if w.Grace.Duration == 0 {
 		w.Grace.Duration = DefaultGrace
+	}
+	if b := w.BeforeStop; b != nil {
+		if len(b.Command) == 0 {
+			fail("workload.beforeStop.command is required")
+		}
+		if b.Timeout.Duration < 0 {
+			fail("workload.beforeStop.timeout must not be negative")
+		}
+		if b.Timeout.Duration == 0 {
+			b.Timeout.Duration = DefaultBeforeStopTimeout
+		}
+		if b.Timeout.Duration > w.Grace.Duration {
+			fail("workload.beforeStop.timeout (%s) must not exceed workload.grace (%s): the hook runs inside the stop's grace", b.Timeout.Duration, w.Grace.Duration)
+		}
 	}
 
 	for k := range s.Env {
