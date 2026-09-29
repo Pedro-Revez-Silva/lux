@@ -51,6 +51,33 @@ def test_console_is_served_with_client_routing(env):
         assert r.status_code == 301 and r.headers["Location"] == new, (old, r.status_code, r.headers)
 
 
+def _assert_unclipped(tip):
+    """The tooltip is drawn whole: inside the viewport, inside every ancestor
+    that clips its overflow, and on top at its centre and corners."""
+    hidden = tip.evaluate("""t => {
+        const r = t.getBoundingClientRect();
+        const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+        if (r.left < 0 || r.top < 0 || r.right > vw || r.bottom > vh) return 'viewport';
+        for (let e = t.parentElement; e; e = e.parentElement) {
+            if (getComputedStyle(e).overflow === 'visible') continue;
+            const c = e.getBoundingClientRect();
+            if (r.left < c.left || r.right > c.right || r.top < c.top || r.bottom > c.bottom) return e.tagName + '.' + e.className;
+        }
+        // A tooltip ignores the pointer; hit-test it for a moment. Corners
+        // are probed inside its border radius, which hit-testing honours.
+        t.style.pointerEvents = 'auto';
+        try {
+            const i = 4, pts = [[(r.left + r.right) / 2, (r.top + r.bottom) / 2], [r.left + i, r.top + i], [r.right - i, r.top + i], [r.left + i, r.bottom - i], [r.right - i, r.bottom - i]];
+            for (const [x, y] of pts) {
+                const hit = document.elementFromPoint(x, y);
+                if (!hit || !t.contains(hit)) return `covered at ${x},${y} by ${hit && hit.tagName + '.' + hit.className}`;
+            }
+        } finally { t.style.pointerEvents = ''; }
+        return null;
+    }""")
+    assert hidden is None, hidden
+
+
 def _parked(lux, name: str) -> str:
     """A Run that waits for a host that will never come: it stays listed."""
     return lux.submit(generic(ALPINE_IMAGE, "true", name=name, placement={"requires": {"nowhere": "yes"}}))
@@ -99,6 +126,102 @@ def test_run_page_streams_output_and_stops_the_run(page, operator, lux, runners,
     wait_until(lambda: lux.get(run_id)["state"] == "stopped", 60, 0.5, "the console's stop never took effect")
     assert not page.errors, page.errors
     lux.run("cancel", run_id)
+
+
+def test_run_output_tabs_separate_the_workloads_lines_from_luxs(page, env, operator, lux, runners, hosts):
+    runners.start(hosts[0])
+    # A generic workload's steer arrives on stdin: the later line comes once the Output tab is up.
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "echo tabs-err >&2; echo tabs-out; read l; echo \"tabs-$l\"; sleep 300"))
+    lux.wait_output(run_id, "tabs-out")
+    page.sign_in(operator.api_key, f"/runs/{run_id}")
+    log = page.locator(".logview")
+    tabs = page.locator(".tabs-sm")
+
+    def tab(name: str):
+        return tabs.get_by_role("tab", name=re.compile(rf"^{name}\b"))
+
+    def texts(cls: str) -> list[str]:
+        return log.locator(f".logline-{cls} .logline-text").all_inner_texts()
+
+    # All (the default): the workload's lines and Lux's own, interleaved.
+    expect(log.get_by_text("tabs-out", exact=True)).to_have_count(1, timeout=20_000)
+    expect(log.get_by_text("tabs-err", exact=True)).to_have_count(1)
+    expect(log.locator(".logline-system").first).to_contain_text("lux: ", timeout=10_000)
+    expect(tab("All")).to_have_attribute("aria-selected", "true")
+    assert "output=" not in page.url, page.url
+
+    # Each tab counts its lines: All is Output plus Lux.
+    def counts_add_up() -> bool:
+        all_count, output_count, lux_count = (
+            int(tab(name).locator(".tab-count").inner_text()) for name in ("All", "Output", "Lux")
+        )
+        return all_count == output_count + lux_count and output_count == 2 and lux_count >= 1
+    wait_until(counts_add_up, 10, 0.5, "the tab counts do not add up")
+
+    # Output: only stdout and stderr, numbered from 1.
+    tab("Output").click()
+    expect(tab("Output")).to_have_attribute("aria-selected", "true")
+    expect(page).to_have_url(re.compile(r"[?&]output=output\b"))
+    expect(log.locator(".logline-system")).to_have_count(0)
+    assert texts("stdout") == ["tabs-out"] and texts("stderr") == ["tabs-err"], (texts("stdout"), texts("stderr"))
+    expect(log.locator(".logline-no").first).to_have_text("1")
+    expect(log.locator(".logline")).to_have_count(2)
+
+    # A line written after the switch streams into the Output tab as it stands.
+    lux.run("steer", run_id, "later")
+    expect(log.get_by_text("tabs-later", exact=True)).to_have_count(1, timeout=20_000)
+    expect(log.locator(".logline")).to_have_count(3)
+    expect(log.locator(".logline-system")).to_have_count(0)
+
+    # Lux: only Lux's lines.
+    tab("Lux").click()
+    expect(page).to_have_url(re.compile(r"[?&]output=lux\b"))
+    expect(log.locator(".logline-stdout, .logline-stderr")).to_have_count(0)
+    assert texts("system") and all(t.startswith(("lux: ", "[", "---")) for t in texts("system")), texts("system")
+
+    # The choice round-trips through the URL; All drops the parameter.
+    page.goto(env.luxd_url + f"/runs/{run_id}?output=output")
+    expect(tab("Output")).to_have_attribute("aria-selected", "true", timeout=15_000)
+    expect(log.get_by_text("tabs-out", exact=True)).to_have_count(1, timeout=20_000)
+    expect(log.locator(".logline-system")).to_have_count(0)
+    tab("All").click()
+    expect(log.locator(".logline-system").first).to_be_visible()
+    assert "output=" not in page.url, page.url
+    assert not page.errors, page.errors
+    lux.run("cancel", run_id)
+
+
+def test_hosts_live_runs_shows_the_count_and_the_cap_only_near_it(page, lux, runners, hosts):
+    runners.start(hosts[0], "--max-runs", "4")
+    host_id = wait_until(lambda: next((h["id"] for h in lux.json("hosts", "ls")
+                                       if h["name"] == hosts[0].name and h["state"] == "ready"), None),
+                         30, 1, "the host never registered")
+    page.sign_in(lux.api_key, "/hosts")
+    row = page.get_by_role("row").filter(has=page.locator(f'a[href^="/hosts/{host_id}"]'))
+    link = row.locator(f'a[href^="/runs?host={host_id}"]')
+    cell = row.locator("td", has=page.locator(f'a[href^="/runs?host={host_id}"]'))
+    # No Runs: just the count, and the cap on hover.
+    expect(cell).to_have_text(re.compile(r"^\s*0\s*$"), timeout=15_000)
+    expect(cell.locator(".badge-warn")).to_have_count(0)
+    link.hover()
+    tip = page.get_by_role("tooltip")
+    expect(tip).to_have_text("0 live · max 4 runs on this host")
+    _assert_unclipped(tip)
+    page.mouse.move(0, 0)
+    # Half the cap is still just the count; three quarters is "N / M" in the warn tone.
+    # Small reservations: the cap, not CPU or memory, is what fills first.
+    small = {"cpus": 0.1, "memory": 64 * 1024 * 1024}
+    runs = [lux.submit(generic(ALPINE_IMAGE, "sleep", "300", resources=small)) for _ in range(2)]
+    for r in runs:
+        lux.wait_state(r, "running")
+    expect(cell).to_have_text(re.compile(r"^\s*2\s*$"), timeout=15_000)
+    expect(cell.locator(".badge-warn")).to_have_count(0)
+    runs.append(lux.submit(generic(ALPINE_IMAGE, "sleep", "300", resources=small)))
+    lux.wait_state(runs[-1], "running")
+    expect(cell.locator(".badge-warn")).to_have_text("3 / 4", timeout=15_000)
+    assert not page.errors, page.errors
+    for r in runs:
+        lux.run("cancel", r)
 
 
 def test_pages_update_live_from_events(page, operator, tenant_factory):
@@ -322,17 +445,7 @@ def test_runs_list_cost_column_matches_the_run_page(page, env, lux, operator, ru
         tip = page.get_by_role("tooltip")
         expect(tip).to_contain_text(re.compile(r"^(Final|Estimate|Incomplete) · "))
         expect(tip).to_contain_text(_dollars(total["amount"], exact=True))
-        # Not clipped: every ancestor that clips its overflow contains the whole tooltip.
-        clipped = tip.evaluate("""t => {
-            const r = t.getBoundingClientRect();
-            for (let e = t.parentElement; e; e = e.parentElement) {
-                if (getComputedStyle(e).overflow === 'visible') continue;
-                const c = e.getBoundingClientRect();
-                if (r.left < c.left || r.right > c.right || r.top < c.top || r.bottom > c.bottom) return e.tagName + '.' + e.className;
-            }
-            return null;
-        }""")
-        assert clipped is None, clipped
+        _assert_unclipped(tip)
     _both_themes(page, env, "/runs", check)
 
     # The Run page shows the same figure.
