@@ -192,9 +192,11 @@ func (p *placement) serveLiveDiff(ctx context.Context, req proto.DiffRequest, se
 			p.mu.Unlock()
 			return true, nil
 		}
-		// Joined under its lock: it cannot be abandoned in between.
+		// Joined under its lock: it cannot be abandoned in between. A
+		// finished run must leave the slot first: joining it would replay
+		// results from before the checkout changed.
 		l.mu.Lock()
-		joined := !l.abandoned
+		joined := !l.abandoned && !l.done
 		if joined {
 			l.waiters++
 		}

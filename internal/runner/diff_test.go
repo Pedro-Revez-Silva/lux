@@ -395,6 +395,54 @@ func TestLiveDiffRetainsAtMostTheBudget(t *testing.T) {
 	}
 }
 
+// A completed diff still occupies the slot until its producer clears it.
+// An identical request must start a fresh diff rather than replay its results.
+func TestCompletedLiveDiffWaitsForSlotRelease(t *testing.T) {
+	r, dir := diffRunner(t)
+	p := runningPlacement(t, r)
+	writeOut(t, dir, gitdiff.Diff{Stat: proto.DiffStat{Repo: "app", Kind: "clone", Files: 1}, Patch: []byte("fresh")})
+	req := proto.DiffRequest{SubID: "new", Kind: "clone", Repos: []proto.DiffRepo{{Name: "app", Path: "/workspace/repos/app"}}}
+	old := &liveRun{key: liveKey(req), done: true, results: []proto.DiffResult{{Patch: []byte("stale")}},
+		changed: make(chan struct{}), exited: make(chan struct{})}
+	p.mu.Lock()
+	p.live = old
+	p.mu.Unlock()
+	type reply struct {
+		results []proto.DiffResult
+		busy    bool
+		err     error
+	}
+	answers := make(chan reply, 1)
+	go func() {
+		var got []proto.DiffResult
+		busy, err := p.serveLiveDiff(context.Background(), req, func(res proto.DiffResult) error {
+			got = append(got, res)
+			return nil
+		})
+		answers <- reply{got, busy, err}
+	}()
+	select {
+	case got := <-answers:
+		t.Fatalf("replayed completed diff before slot release: %+v", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	p.mu.Lock()
+	p.live = nil
+	p.mu.Unlock()
+	close(old.exited)
+	select {
+	case got := <-answers:
+		if got.busy || got.err != nil || len(got.results) != 1 || string(got.results[0].Patch) != "fresh" || got.results[0].SubID != "new" {
+			t.Errorf("fresh diff: %+v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not start after slot release")
+	}
+	if n := strings.Count(logOf(t, dir), " exec started"); n != 1 {
+		t.Errorf("%d new execs, want 1", n)
+	}
+}
+
 // A request that will be busy is answered without spawning anything:
 // podman inspect included.
 func TestBusyDiffSpawnsNothing(t *testing.T) {
