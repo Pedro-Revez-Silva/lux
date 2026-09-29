@@ -299,7 +299,7 @@ unlabeled, which fails with `203/EXEC`. This is unrelated to
 
 ## EC2 pools
 
-Pool names follow the rule in [the CLI reference](cli.md#pools): 1-32
+Pool names follow the rule in [the CLI reference](cli.md#hosts-and-pools): 1-32
 lowercase letters, digits and `-`. `luxd admin create-pool` and
 `create-host-token --pool` apply it too.
 
