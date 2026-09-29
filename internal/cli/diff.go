@@ -70,12 +70,11 @@ func (a *app) printDiff(d server.RunDiff, stat bool) {
 			continue
 		}
 		if r.OmittedCount > 0 {
-			more := ""
+			omitted := strings.Join(r.Omitted, ", ")
 			if n := r.OmittedCount - len(r.Omitted); n > 0 {
-				more = fmt.Sprintf(" and %d more", n)
+				omitted += fmt.Sprintf(" and %d more", n)
 			}
-			fmt.Fprintf(a.stderr, "lux: repo %s: not in the diff (assume-unchanged or skip-worktree files, or untracked nested repositories): %s%s; the patch does not reproduce the checkout\n",
-				r.Repo, strings.Join(r.Omitted, ", "), more)
+			fmt.Fprintf(a.stderr, "lux: repo %s: not in the diff (assume-unchanged or skip-worktree files, or untracked nested repositories): %s; the patch does not reproduce the checkout\n", r.Repo, omitted)
 		}
 		if r.Files == 0 {
 			continue
