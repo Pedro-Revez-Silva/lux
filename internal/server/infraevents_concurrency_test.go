@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -11,17 +12,17 @@ import (
 )
 
 // heldTx runs write in a transaction of its own and keeps it open until
-// released: wrote is closed once write returned, done carries the
-// transaction's result.
+// released (with what else to do in it before it commits): wrote is closed
+// once write returned, done carries the transaction's result.
 type heldTx struct {
 	pid     chan int
 	wrote   chan struct{}
-	release chan struct{}
+	release chan func(pgx.Tx) error
 	done    chan error
 }
 
 func holdTx(ctx context.Context, s *Server, write func(tx pgx.Tx) error) *heldTx {
-	h := &heldTx{pid: make(chan int, 1), wrote: make(chan struct{}), release: make(chan struct{}), done: make(chan error, 1)}
+	h := &heldTx{pid: make(chan int, 1), wrote: make(chan struct{}), release: make(chan func(pgx.Tx) error, 1), done: make(chan error, 1)}
 	go func() {
 		h.done <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 			var pid int
@@ -34,7 +35,10 @@ func holdTx(ctx context.Context, s *Server, write func(tx pgx.Tx) error) *heldTx
 			}
 			close(h.wrote)
 			select {
-			case <-h.release:
+			case then := <-h.release:
+				if then != nil {
+					return then(tx)
+				}
 				return nil
 			case <-ctx.Done():
 				return ctx.Err()
@@ -82,14 +86,22 @@ func (h *heldTx) settle(t *testing.T, ctx context.Context, s *Server) bool {
 
 func (h *heldTx) finish(t *testing.T, ctx context.Context) {
 	t.Helper()
-	close(h.release)
+	if err := h.finishWith(t, ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// finishWith runs then in the held transaction, commits it, and returns
+// its result.
+func (h *heldTx) finishWith(t *testing.T, ctx context.Context, then func(pgx.Tx) error) error {
+	t.Helper()
+	h.release <- then
 	select {
 	case err := <-h.done:
-		if err != nil {
-			t.Fatal(err)
-		}
+		return err
 	case <-ctx.Done():
 		t.Fatal("transaction never finished: a lock is never released")
+		return nil
 	}
 }
 
@@ -218,5 +230,83 @@ func TestFoldLooksNoFurtherThanItsWindow(t *testing.T) {
 	}
 	if evs := events(t, s, evLaunchFailed); len(evs) != 2 {
 		t.Fatalf("launch_failed events %+v, want two", evs)
+	}
+}
+
+// A pool removed while one of its hosts registers: the removal locks the
+// pool, then drains its hosts; the registration locks its host, then
+// writes its pool's event, whose foreign key locks the pool KEY SHARE. The
+// removal's pool lock must not conflict with that, or each waits for the
+// other (a deadlock Postgres breaks by failing one).
+func TestPoolRemovalAndHostRegistrationDoNotDeadlock(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		t.Run(fmt.Sprintf("forceEvict=%v", force), func(t *testing.T) {
+			s := testServer(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			infraFixture(t, s, ctx)
+			// registerHost's order: the host row, later its pool's event.
+			reg := holdTx(ctx, s, func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, `SELECT 1 FROM hosts WHERE id = 'h1' FOR NO KEY UPDATE`)
+				return err
+			})
+			if !reg.settle(t, ctx, s) {
+				t.Fatal("the registration waited on nothing")
+			}
+			admin := context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+			removed := make(chan error, 1)
+			go func() {
+				_, err := s.deletePool(admin, &deletePoolInput{Name: "burst", ForceEvict: force})
+				removed <- err
+			}()
+			// The removal now holds the pool and waits for the host.
+			waitForRunWaiter(t, s, ctx, "")
+			if err := reg.finishWith(t, ctx, func(tx pgx.Tx) error {
+				return hostPoolEvent(ctx, tx, "h1", evHostRegistered, map[string]any{"host": "h1"})
+			}); err != nil {
+				t.Fatalf("registration: %v", err)
+			}
+			select {
+			case err := <-removed:
+				if err != nil {
+					t.Fatalf("removal: %v", err)
+				}
+			case <-ctx.Done():
+				t.Fatal("the removal never finished")
+			}
+			if evs := events(t, s, evHostRegistered); len(evs) != 1 {
+				t.Fatalf("host_registered events %+v, want one", evs)
+			}
+			if !queryOne[bool](t, s, `SELECT draining FROM hosts WHERE id = 'h1'`) {
+				t.Fatal("the removed pool's host is not draining")
+			}
+		})
+	}
+}
+
+// A pool edit in flight does not hold up its hosts' events: the edit's
+// pool lock leaves the event's foreign-key check alone.
+func TestPoolEditDoesNotBlockItsHostsEvents(t *testing.T) {
+	s := testServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	infraFixture(t, s, ctx)
+	edit := holdTx(ctx, s, func(tx pgx.Tx) error {
+		return ChangePool(ctx, tx, new("t1"), "burst", func() error {
+			_, err := tx.Exec(ctx, `UPDATE pools SET max_hosts = 5 WHERE id = 'pool1'`)
+			return err
+		})
+	})
+	if !edit.settle(t, ctx, s) {
+		t.Fatal("the edit waited on nothing")
+	}
+	reg := holdTx(ctx, s, func(tx pgx.Tx) error {
+		return hostPoolEvent(ctx, tx, "h1", evHostRegistered, map[string]any{"host": "h1"})
+	})
+	wrote := reg.settle(t, ctx, s)
+	edit.finish(t, ctx)
+	reg.finish(t, ctx)
+	if !wrote {
+		t.Fatal("a host's pool event waited for an edit of its pool")
 	}
 }

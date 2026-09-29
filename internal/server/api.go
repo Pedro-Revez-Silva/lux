@@ -1826,21 +1826,8 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 	var hosts []string
 	err := retryHostPlacements(ctx, func() error {
 		return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			if stopReason != "" {
-				var exists bool
-				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pools WHERE tenant_id = $1 AND name = $2 AND NOT retired)`, p.TenantID, name).Scan(&exists); err != nil {
-					return err
-				}
-				if !exists {
-					return errNotFound
-				}
-				var err error
-				hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
-					"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
-				if err != nil {
-					return err
-				}
-			}
+			// The pool row first, then its hosts (drainHosts): the lock
+			// order of infraevents.go.
 			err := ChangePool(ctx, tx, &p.TenantID, name, func() error {
 				tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0
 					WHERE tenant_id = $1 AND name = $2 AND NOT retired`, p.TenantID, name)
@@ -1852,10 +1839,8 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 			if err != nil {
 				return err
 			}
-			if stopReason == "" {
-				hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
-					"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
-			}
+			hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
+				"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
 			return err
 		})
 	})

@@ -278,7 +278,7 @@ func poolSettings(ctx context.Context, tx pgx.Tx, tenantID *string, name string)
 	var wwa, shared, retired bool
 	err := tx.QueryRow(ctx, `SELECT id, provider, template, min_hosts, max_hosts, warm_hosts, coalesce(scale_down_after_s, 0),
 			warm_while_active, shared, retired, coalesce(trim_scale(hourly_price)::text, ''), coalesce(price_currency, '')
-		FROM pools WHERE tenant_id IS NOT DISTINCT FROM $1 AND name = $2 FOR UPDATE`, tenantID, name).
+		FROM pools WHERE tenant_id IS NOT DISTINCT FROM $1 AND name = $2 FOR NO KEY UPDATE`, tenantID, name).
 		Scan(&p.id, &provider, &tmpl, &minH, &maxH, &warm, &sda, &wwa, &shared, &retired, &price, &currency)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
