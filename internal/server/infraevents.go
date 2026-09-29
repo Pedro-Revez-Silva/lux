@@ -32,7 +32,9 @@ import (
 // transaction has written but not yet committed, and two writers could both
 // write a "first" failure.
 //
-// Lock order, for every transaction that writes events:
+// Lock order, for every transaction that writes events, after the owner's
+// default-pool advisory lock (lockDefaultPool) where one is taken:
+// deletePool, and SavePool when it sets a mark, take it before any other.
 //
 //  0. the pool-name advisory lock, keyed by owner and name (ChangePool):
 //     serialises writes to one pool, including its creation, when there
@@ -40,7 +42,8 @@ import (
 //  1. pool rows, FOR NO KEY UPDATE (ChangePool, deletePool) or FOR SHARE
 //     (launch); an event's foreign key takes KEY SHARE on its pool, which
 //     neither conflicts with, so appending to a pool never waits on its
-//     edit;
+//     edit. A mark moved (markPools) locks the previous default's row
+//     after the marked pool's, under the default lock;
 //  2. runs, FOR UPDATE in id order (lockReaperRuns, the scheduler);
 //  3. the cost-host advisory locks, in host id order (lockCostHost);
 //  4. host rows, FOR NO KEY UPDATE, in id order;
@@ -48,8 +51,9 @@ import (
 //
 // Where each writer takes its stream locks, after every other lock:
 //
-//   - ChangePool (putPool, deletePool, luxd admin create-pool): its one
-//     event after change returns; deletePool drains inside change.
+//   - ChangePool (putPool, deletePool, luxd admin create-pool, marks): its
+//     one event after change returns; deletePool drains inside change.
+//     SavePool then records the previous default's unmarking.
 //   - drainHosts (drainHost, deletePool, drainForScaleDown, hostEvicting):
 //     host.drain_requested after its Runs, hosts and placement stops;
 //     hostEvicting's pool.spot_interrupted after that. drainHostsLater
@@ -355,11 +359,11 @@ func poolSettings(ctx context.Context, tx pgx.Tx, tenantID *string, name string)
 	var provider, price, currency string
 	var tmpl map[string]any
 	var minH, maxH, warm, sda int
-	var wwa, shared, retired bool
+	var wwa, shared, retired, isDefault bool
 	err := tx.QueryRow(ctx, `SELECT id, provider, template, min_hosts, max_hosts, warm_hosts, coalesce(scale_down_after_s, 0),
-			warm_while_active, shared, retired, coalesce(trim_scale(hourly_price)::text, ''), coalesce(price_currency, '')
+			warm_while_active, shared, retired, is_default, coalesce(trim_scale(hourly_price)::text, ''), coalesce(price_currency, '')
 		FROM pools WHERE tenant_id IS NOT DISTINCT FROM $1 AND name = $2 FOR NO KEY UPDATE`, tenantID, name).
-		Scan(&p.id, &provider, &tmpl, &minH, &maxH, &warm, &sda, &wwa, &shared, &retired, &price, &currency)
+		Scan(&p.id, &provider, &tmpl, &minH, &maxH, &warm, &sda, &wwa, &shared, &retired, &isDefault, &price, &currency)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -368,7 +372,7 @@ func poolSettings(ctx context.Context, tx pgx.Tx, tenantID *string, name string)
 	}
 	p.fields = map[string]any{"provider": provider, "minHosts": minH, "maxHosts": maxH, "warmHosts": warm,
 		"scaleDownAfterSeconds": sda, "warmWhileActive": wwa, "shared": shared, "retired": retired,
-		"hourlyPrice": price, "currency": currency}
+		"isDefault": isDefault, "hourlyPrice": price, "currency": currency}
 	for k, v := range tmpl {
 		// Through JSON, as the event stores it: 1 and 1.0 compare equal.
 		b, _ := json.Marshal(v)

@@ -1,12 +1,15 @@
 package server
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"net/http"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -329,12 +332,19 @@ func (s *Server) routes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "putPool", Method: http.MethodPost, Path: "/v1/pools", Tags: []string{"pools"},
 		Summary: "Create or update a pool",
-		Errors:  []int{http.StatusUnprocessableEntity},
-	}, "admin", forTenant(s.putPool))
+		Description: "`isDefault: true` makes it the tenant's default pool, where Runs whose spec names no pool go from then on " +
+			"(Runs already submitted keep theirs); the tenant's previous default loses the mark. `false` clears it. " +
+			"A body of exactly `name` and `isDefault` marks an existing pool and changes nothing else; " +
+			"any other field without `provider` is a 422 `invalid_pool`. " +
+			"From an operator key naming no tenant, a marker-only body marks a platform pool as the platform's default, " +
+			"for tenants without one of their own.",
+		Errors: []int{http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity},
+	}, "admin", s.putPool)
 	register(s, api, huma.Operation{
 		OperationID: "deletePool", Method: http.MethodDelete, Path: "/v1/pools/{name}", Tags: []string{"pools"},
 		Summary: "Remove a pool",
 		Description: "Its provisioned hosts are cordoned and terminated once idle; its Runs wait for a pool of that name again. " +
+			"If it was the tenant's default pool, the tenant has none until another is marked. " +
 			"forceEvict also stops its hosts' live Runs so they resume elsewhere.",
 		Errors: []int{http.StatusNotFound},
 	}, "admin", forTenant(s.deletePool))
@@ -555,13 +565,25 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		if idem != "" {
 			idemArg = &idem
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key)
-			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7)`,
-			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg)
+		// Stored in the spec, so every later placement of the Run stays
+		// in this pool whatever the default becomes.
+		// pool_owner too: another owner's pool of the same name is not it.
+		rp, err := resolvePool(ctx, tx, p.TenantID, stored.Placement.Pool)
 		if err != nil {
 			return err
 		}
-		if err := addEvent(ctx, tx, p.TenantID, id, 0, "submitted", map[string]any{"by": p.Actor()}); err != nil {
+		stored.Placement.Pool = rp.Name
+		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_owner)
+			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8)`,
+			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.Owner)
+		if err != nil {
+			return err
+		}
+		ev := map[string]any{"by": p.Actor(), "pool": rp.Name, "poolFrom": rp.From}
+		if o := rp.ownerLabel(); o != "" {
+			ev["poolOwner"] = o
+		}
+		if err := addEvent(ctx, tx, p.TenantID, id, 0, "submitted", ev); err != nil {
 			return err
 		}
 		if err := insertSpecServers(ctx, tx, p.TenantID, id, sp); err != nil {
@@ -1893,12 +1915,50 @@ type Pool struct {
 	ScaleDownAfter  spec.Duration `json:"scaleDownAfter,omitempty" doc:"How long a provisioned host stays idle before it is released, e.g. 600s; empty: luxd's scale_down_after (default 10m)."`
 	WarmWhileActive bool          `json:"warmWhileActive,omitempty" doc:"Keep warmHosts only while the pool is in use (a Run placed or ended within scaleDownAfter, or one waiting); an idle pool scales down to minHosts."`
 	Shared          bool          `json:"shared"`
-	Platform        bool          `json:"platform"`
+	Platform        bool          `json:"platform" readOnly:"true" doc:"A platform pool (no tenant). In a request, true is refused unless the caller acts on the platform's pools (an operator key without a tenant)."`
 	// HourlyPrice and Currency: a static pool's default price, copied to
 	// each host when it first registers. Changing it does not reprice the
 	// pool's existing hosts (PUT /v1/hosts/{id}/price does, one host).
 	HourlyPrice string `json:"hourlyPrice,omitempty" doc:"Static pools: the default hourly price of hosts registering into the pool, a decimal string with up to 9 fractional digits. Copied to each host when it first registers; changing it does not reprice existing hosts. Refused for ec2 pools, which the provider prices." example:"0.40"`
 	Currency    string `json:"currency,omitempty" doc:"The currency of hourlyPrice (ISO 4217); both or neither." example:"USD"`
+	// IsDefault: nil in a request leaves the mark as it is.
+	IsDefault *bool `json:"isDefault,omitempty" doc:"Runs whose spec names no pool go to this pool (the tenant's; a platform default serves tenants without one). At most one per tenant: marking one clears the tenant's previous default. On create or update, omitted leaves the mark as it is. A body without provider changes only the mark of an existing pool: besides name and isDefault its fields must be absent or zero (\"\", 0, false, null, {}); any other value needs provider."`
+}
+
+// poolInput is putPool's body: a Pool (its schema too, newAPI), decoded
+// with unknown fields refused.
+type poolInput Pool
+
+func (pl *poolInput) UnmarshalJSON(b []byte) error {
+	type plain Pool
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	return dec.Decode((*plain)(pl))
+}
+
+// markerOnly: a body with no provider and an isDefault moves only the
+// mark. Its other fields must be zero, as a full Pool with only name and
+// isDefault set serializes (earlier CLIs sent that); the non-zero ones are
+// returned for the refusal. The decoded values are checked, not the keys:
+// the decoder matches keys case-insensitively, and absent and zero decode
+// alike. platform is checked by putPool against the caller.
+func (pl *Pool) markerOnly() (bool, []string) {
+	if pl.Provider != "" || pl.IsDefault == nil {
+		return false, nil
+	}
+	var extra []string
+	v := reflect.ValueOf(*pl)
+	for i, f := range reflect.VisibleFields(v.Type()) {
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name == "name" || name == "isDefault" || name == "platform" {
+			continue
+		}
+		fv := v.Field(i)
+		if !fv.IsZero() && !(fv.Kind() == reflect.Map && fv.Len() == 0) {
+			extra = append(extra, name)
+		}
+	}
+	return true, extra
 }
 
 type listPoolsOutput struct {
@@ -1907,13 +1967,27 @@ type listPoolsOutput struct {
 	} `nameHint:"PoolList"`
 }
 
+// poolColumns: Select poolColumns FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id.
+const poolColumns = `p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
+	coalesce(p.scale_down_after_s, 0), p.warm_while_active,
+	p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, ''), p.is_default`
+
+func scanPool(row pgx.Row) (Pool, error) {
+	var pl Pool
+	var sda int
+	var isDefault bool
+	err := row.Scan(&pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts,
+		&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &isDefault)
+	pl.ScaleDownAfter.Duration = time.Duration(sda) * time.Second
+	pl.IsDefault = &isDefault
+	return pl, err
+}
+
 func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutput, error) {
 	p := principal(ctx)
 	pools := []Pool{}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
-				coalesce(p.scale_down_after_s, 0), p.warm_while_active,
-				p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, '')
+		rows, err := tx.Query(ctx, `SELECT `+poolColumns+`
 			FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id
 			WHERE ($1 = '' OR p.tenant_id = $1 OR p.tenant_id IS NULL) AND NOT p.retired ORDER BY p.name, t.name NULLS FIRST`, p.TenantID)
 		if err != nil {
@@ -1921,13 +1995,10 @@ func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutpu
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var pl Pool
-			var sda int
-			if err := rows.Scan(&pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts,
-				&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency); err != nil {
+			pl, err := scanPool(rows)
+			if err != nil {
 				return err
 			}
-			pl.ScaleDownAfter.Duration = time.Duration(sda) * time.Second
 			pools = append(pools, pl)
 		}
 		return rows.Err()
@@ -1957,11 +2028,15 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 	var hosts []string
 	err := retryHostPlacements(ctx, func() error {
 		return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			// The pool row, then its Runs and hosts (drainHosts), and its
+			// The owner's default lock, then (ChangePool) the pool-name lock
+			// and the pool row, then its Runs and hosts (drainHosts), and its
 			// pool.retired event last, after the drain: the lock order of
 			// infraevents.go puts event streams after every row lock.
+			if err := lockDefaultPool(ctx, tx, p.TenantID); err != nil {
+				return err
+			}
 			return ChangePool(ctx, tx, &p.TenantID, name, func() error {
-				tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0
+				tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0, is_default = false
 					WHERE tenant_id = $1 AND name = $2 AND NOT retired`, p.TenantID, name)
 				if err != nil {
 					return err
@@ -1983,6 +2058,59 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 	}
 	s.notifyAll(hosts)
 	return &struct{}{}, nil
+}
+
+// Where a Run's pool came from, in its submitted event's poolFrom.
+const (
+	poolFromSpec     = "spec"             // the spec named it
+	poolFromTenant   = "tenant-default"   // the tenant's default pool
+	poolFromPlatform = "platform-default" // the platform's default pool (set by lux_default_pool, in SQL)
+	poolFromFallback = "fallback"         // neither is marked: the pool named "default"
+)
+
+// resolvedPool is the pool a Run was submitted to. Owner is runs.pool_owner:
+// "" for a platform pool, the tenant id for the tenant's, nil when no
+// active pool has the name (hosts then match by name alone).
+type resolvedPool struct {
+	Name, From string
+	Owner      *string
+}
+
+// ownerLabel is the owner as the submitted event's poolOwner says it.
+func (rp resolvedPool) ownerLabel() string {
+	switch {
+	case rp.Owner == nil:
+		return ""
+	case *rp.Owner == "":
+		return "platform"
+	default:
+		return "tenant"
+	}
+}
+
+// resolvePool is the pool of a Run whose spec names pool ("" for none), in
+// the submitting tenant's scope: the named one, else the tenant's default,
+// else the platform's, else "default". A default is that pool row; a name
+// is the tenant's pool of that name, else the platform's, as hosts and
+// provisioning have always preferred.
+func resolvePool(ctx context.Context, tx pgx.Tx, tenantID, pool string) (resolvedPool, error) {
+	rp := resolvedPool{Name: pool, From: poolFromSpec}
+	if pool == "" {
+		var name, from *string
+		if err := tx.QueryRow(ctx, `SELECT pool, pool_from FROM lux_default_pool()`).Scan(&name, &from); err != nil {
+			return rp, err
+		}
+		if name != nil {
+			owner := ""
+			if *from == poolFromTenant {
+				owner = tenantID
+			}
+			return resolvedPool{Name: *name, From: *from, Owner: &owner}, nil
+		}
+		rp = resolvedPool{Name: "default", From: poolFromFallback}
+	}
+	err := tx.QueryRow(ctx, `SELECT lux_pool_owner($1)`, rp.Name).Scan(&rp.Owner)
+	return rp, err
 }
 
 // checkTemplateTags refuses an EC2 template's tags that are not a string
@@ -2007,12 +2135,29 @@ func checkTemplateTags(raw any) error {
 // putPool creates or updates one of the tenant's pools.
 type poolBody struct {
 	TenantQuery
-	Body Pool
+	Body poolInput
 }
 
 func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	p := principal(ctx)
-	pl := in.Body
+	pl := Pool(in.Body)
+	// platform is read-only, but a round-tripped Pool carries it: accept
+	// it when it says what the caller's pool is. false and absent decode
+	// alike, so only a platform claim from a tenant's scope is refused.
+	if pl.Platform && p.TenantID != "" {
+		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "platform: true, but this pool is the tenant's; platform pools are an operator's without a tenant")
+	}
+	if marker, extra := pl.markerOnly(); marker && pl.Name != "" && (p.TenantID != "" || p.Operator) {
+		if len(extra) > 0 {
+			return nil, errf(http.StatusUnprocessableEntity, "invalid_pool",
+				"without provider, a body only marks the default: name and isDefault, other fields absent or zero (got also %s); to change the pool's settings, give provider and all of them",
+				strings.Join(extra, ", "))
+		}
+		return s.markDefaultPool(ctx, p.TenantID, pl.Name, *pl.IsDefault)
+	}
+	if p.TenantID == "" {
+		return nil, errf(http.StatusBadRequest, "tenant_required", "an operator key must name a tenant: ?tenant=<id or name>")
+	}
 	if pl.Name == "" || (pl.Provider != "static" && pl.Provider != "ec2") {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "name and provider (static | ec2) are required")
 	}
@@ -2058,8 +2203,9 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	if pl.ScaleDownAfter.Duration < 0 || pl.ScaleDownAfter.Duration > 0 && sda == nil {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "scaleDownAfter must be at least 1s")
 	}
+	var out Pool
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
-		return ChangePool(ctx, tx, &p.TenantID, pl.Name, func() error {
+		err := SavePool(ctx, tx, p.TenantID, pl.Name, pl.IsDefault, func() error {
 			_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
 					scale_down_after_s, warm_while_active, hourly_price, price_currency)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''))
@@ -2067,15 +2213,145 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
 					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
 					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
-					retired = false`,
+					`+PoolRevive,
 				ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
 				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency)
 			return err
 		})
+		if err != nil {
+			return err
+		}
+		out, err = readPool(ctx, tx, p.TenantID, pl.Name)
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	s.Kick()
-	return &poolBody{Body: pl}, nil
+	return &poolBody{Body: poolInput(out)}, nil
+}
+
+// markDefaultPool marks (or clears) one of the tenant's pools as its
+// default, or, tenantID "" (an operator), a platform pool as the
+// platform's, and changes nothing else about it.
+func (s *Server) markDefaultPool(ctx context.Context, tenantID, name string, mark bool) (*poolBody, error) {
+	var out Pool
+	scope := store.Tenant(tenantID)
+	if tenantID == "" {
+		scope = store.System()
+	}
+	err := s.db.Tx(ctx, scope, func(tx pgx.Tx) error {
+		if err := SetDefaultPool(ctx, tx, tenantID, name, mark); err != nil {
+			return err
+		}
+		var err error
+		out, err = readPool(ctx, tx, tenantID, name)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &poolBody{Body: poolInput(out)}, nil
+}
+
+// lockDefaultPool serializes changes to an owner's default mark (tenantID
+// "" for the platform's), taken before any pool row is touched: a second
+// mark then reads the first one's result, and moves the mark rather than
+// failing on pools_one_default.
+func lockDefaultPool(ctx context.Context, tx pgx.Tx, tenantID string) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('default-pool:' || $1, 0))`, tenantID)
+	return err
+}
+
+// PoolRevive ends a pool upsert's DO UPDATE SET: re-creating a retired
+// pool brings it back without the default mark it had.
+const PoolRevive = `is_default = pools.is_default AND NOT pools.retired, retired = false`
+
+// SavePool runs upsert, which creates or replaces the pool name of
+// tenantID's ("" a platform pool), and then sets its default mark unless
+// mark is nil, in ChangePool, so the pool's event records both. A mark
+// taken off another pool is that pool's config_changed event. Lock order:
+// the owner's default lock (only with a mark) before ChangePool's
+// pool-name lock and row, as in deletePool; then the other pool's row,
+// in the marking statement; event streams last.
+func SavePool(ctx context.Context, tx pgx.Tx, tenantID, name string, mark *bool, upsert func() error) error {
+	if mark != nil {
+		if err := lockDefaultPool(ctx, tx, tenantID); err != nil {
+			return err
+		}
+	}
+	var owner *string
+	if tenantID != "" {
+		owner = &tenantID
+	}
+	var unmarked []string
+	err := ChangePool(ctx, tx, owner, name, func() error {
+		if err := upsert(); err != nil || mark == nil {
+			return err
+		}
+		var err error
+		unmarked, err = markPools(ctx, tx, tenantID, name, *mark)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	for _, id := range unmarked {
+		if err := poolEvent(ctx, tx, id, evConfigChanged, map[string]any{"created": false,
+			"changes": map[string]any{"isDefault": map[string]any{"old": true, "new": false}}}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetDefaultPool marks the pool name as its owner's default (tenantID ""
+// for the platform's), or clears it, changing nothing else: SavePool with
+// no upsert.
+func SetDefaultPool(ctx context.Context, tx pgx.Tx, tenantID, name string, mark bool) error {
+	return SavePool(ctx, tx, tenantID, name, &mark, func() error { return nil })
+}
+
+// markPools sets name's mark, clearing the previous one in the same
+// statement (pools_one_default is checked at its end), and returns the ids
+// of the other pools it took a mark off. A retired pool, or none of that
+// name, is a 404. The caller holds the owner's default lock.
+func markPools(ctx context.Context, tx pgx.Tx, tenantID, name string, mark bool) ([]string, error) {
+	const owner = `tenant_id IS NOT DISTINCT FROM nullif($1, '')`
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pools WHERE `+owner+` AND name = $2 AND NOT retired)`,
+		tenantID, name).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, errf(http.StatusNotFound, "not_found", "no pool %q", name)
+	}
+	if !mark {
+		_, err := tx.Exec(ctx, `UPDATE pools SET is_default = false WHERE `+owner+` AND name = $2`, tenantID, name)
+		return nil, err
+	}
+	// A retired pool is never marked, and loses a mark it kept (a removal
+	// that raced a mark before both took the lock), which would otherwise
+	// hold pools_one_default against every later mark.
+	rows, err := tx.Query(ctx, `UPDATE pools SET is_default = (name = $2 AND NOT retired)
+		WHERE `+owner+` AND (name = $2 OR is_default)
+		RETURNING id, name <> $2 AND NOT is_default`, tenantID, name)
+	if err != nil {
+		return nil, err
+	}
+	var unmarked []string
+	var id string
+	var cleared bool
+	_, err = pgx.ForEachRow(rows, []any{&id, &cleared}, func() error {
+		if cleared {
+			unmarked = append(unmarked, id)
+		}
+		return nil
+	})
+	return unmarked, err
+}
+
+func readPool(ctx context.Context, tx pgx.Tx, tenantID, name string) (Pool, error) {
+	return scanPool(tx.QueryRow(ctx, `SELECT `+poolColumns+` FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id
+		WHERE p.tenant_id IS NOT DISTINCT FROM nullif($1, '') AND p.name = $2`, tenantID, name))
 }

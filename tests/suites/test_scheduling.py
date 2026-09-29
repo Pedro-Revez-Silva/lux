@@ -139,3 +139,51 @@ def test_resume_retry_keeps_secrets(lux, runners, hosts):
     runners.start(hosts[0])
     lux.wait_output(run_id, "len=12")
     lux.run("cancel", run_id)
+
+
+def test_a_run_naming_no_pool_goes_to_the_tenants_default(lux, runners, hosts):
+    """The tenant marks a pool not named "default" as its default: a Run
+    naming no pool is placed there, its spec and submitted event say so,
+    and it stays there after the default moves."""
+    runs: list[str] = []
+    try:
+        lux.run("pools", "set", "arm64", "--provider", "static")
+        lux.run("pools", "set", "other", "--provider", "static")
+        runners.start(hosts[0], token=runners.token("--pool", "arm64"))
+        # Nothing marked: the pool named "default", where no host is.
+        before = lux.submit(generic(ALPINE_IMAGE, "true"))
+        runs.append(before)
+        assert lux.get(before)["spec"]["placement"]["pool"] == "default"
+        data = lux.events(before, "submitted")[0]["data"]
+        assert data["poolFrom"] == "fallback" and "poolOwner" not in data, data
+
+        lux.run("pools", "set", "arm64", "--default")
+        assert [p["name"] for p in lux.json("pools", "ls") if p.get("isDefault")] == ["arm64"]
+        # The table: NAME DEFAULT PROVIDER ..., DEFAULT empty but for "*".
+        header, *lines = lux.run("pools", "ls").stdout.splitlines()
+        assert header.split()[:3] == ["NAME", "DEFAULT", "PROVIDER"], header
+        marks = {line.split()[0]: line.split()[1] == "*" for line in lines}
+        # Other suites may leave platform pools the tenant sees: read ours,
+        # and check nothing else is marked.
+        assert {k: marks.get(k) for k in ("arm64", "other")} == {"arm64": True, "other": False}, lines
+        assert [k for k, v in marks.items() if v] == ["arm64"], lines
+
+        run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "echo on-default; sleep 300"))
+        runs.append(run_id)
+        run = lux.wait_state(run_id, "running")
+        assert run["host"] == hosts[0].name and run["spec"]["placement"]["pool"] == "arm64", run
+        data = lux.events(run_id, "submitted")[0]["data"]
+        assert (data["pool"], data["poolFrom"], data["poolOwner"]) == ("arm64", "tenant-default", "tenant"), data
+
+        # Moving the default leaves the submitted Run where it is.
+        lux.run("pools", "set", "other", "--default")
+        assert [p["name"] for p in lux.json("pools", "ls") if p.get("isDefault")] == ["other"]
+        assert lux.get(run_id)["spec"]["placement"]["pool"] == "arm64"
+        moved = lux.submit(generic(ALPINE_IMAGE, "true"))
+        runs.append(moved)
+        assert lux.get(moved)["spec"]["placement"]["pool"] == "other"
+    finally:
+        for r in runs:
+            lux.run("cancel", r, check=False)
+        for pool in ("arm64", "other"):
+            lux.run("pools", "rm", pool, check=False)

@@ -1,8 +1,13 @@
 package cli
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +49,84 @@ func TestParseAddRepo(t *testing.T) {
 		if r, err := parseAddRepo(bad); err == nil {
 			t.Errorf("%q: want an error, got %+v", bad, r)
 		}
+	}
+}
+
+// pools set --default alone sends a marker-only body, exactly name and
+// isDefault, which luxd refuses to read as anything else; with a setting,
+// the whole pool.
+func TestPoolsSetDefaultSendsOnlyTheMark(t *testing.T) {
+	var got []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("body: %v", err)
+		}
+		got = append(got, body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	for _, args := range [][]string{{"pools", "set", "a", "--default"}, {"pools", "set", "a", "--default=false"}, {"pools", "set", "a", "--provider", "static", "--default"}} {
+		a := &app{stdin: strings.NewReader(""), stdout: io.Discard, stderr: io.Discard}
+		root := a.root()
+		root.SetArgs(append([]string{"--url", srv.URL, "--api-key", "k"}, args...))
+		if err := root.Execute(); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	if want := (map[string]any{"name": "a", "isDefault": true}); !reflect.DeepEqual(got[0], want) {
+		t.Errorf("--default sent %v, want %v", got[0], want)
+	}
+	if want := (map[string]any{"name": "a", "isDefault": false}); !reflect.DeepEqual(got[1], want) {
+		t.Errorf("--default=false sent %v, want %v", got[1], want)
+	}
+	if got[2]["provider"] != "static" || got[2]["isDefault"] != true {
+		t.Errorf("a full set sent %v", got[2])
+	}
+}
+
+// pools ls shows an OWNER column to an unscoped operator, and in any
+// listing where the same name belongs to more than one owner.
+func TestPoolsLsOwner(t *testing.T) {
+	operator := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/whoami":
+			_ = json.NewEncoder(w).Encode(map[string]any{"operator": operator})
+		case "/v1/pools":
+			_, _ = w.Write([]byte(`{"pools":[{"name":"burst","provider":"ec2","platform":true,"isDefault":true},
+				{"name":"burst","tenant":"acme","provider":"static","isDefault":false}]}`))
+		default:
+			t.Errorf("unexpected %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	ls := func(extra ...string) []string {
+		t.Helper()
+		var out strings.Builder
+		a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: io.Discard}
+		root := a.root()
+		root.SetArgs(append(append([]string{"--url", srv.URL, "--api-key", "k"}, extra...), "pools", "ls"))
+		if err := root.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Split(strings.TrimSpace(out.String()), "\n")
+	}
+	lines := ls()
+	if got := strings.Fields(lines[0]); !reflect.DeepEqual(got[:3], []string{"NAME", "OWNER", "DEFAULT"}) {
+		t.Fatalf("operator header %v", got)
+	}
+	if a, b := strings.Fields(lines[1]), strings.Fields(lines[2]); a[1] != "platform" || a[2] != "*" || b[1] != "acme" || b[2] != "static" {
+		t.Fatalf("operator rows %q", lines[1:])
+	}
+	if got := strings.Fields(ls("--tenant", "acme")[0]); got[1] != "OWNER" {
+		t.Fatalf("narrowed listing with duplicate names: header %v", got)
+	}
+	operator = false
+	if got := strings.Fields(ls()[0]); got[1] != "OWNER" {
+		t.Fatalf("tenant with duplicate names: header %v", got)
 	}
 }
 

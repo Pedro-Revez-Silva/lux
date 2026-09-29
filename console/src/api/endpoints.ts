@@ -50,6 +50,8 @@ export const api = {
     request<{ events: LifecycleEvent[] }>(`/hosts/${enc(id)}/events`, { tenant, query: { ...page, limit: EVENTS_PAGE }, signal }).then((r) => r.events),
 
   pools: (tenant: Scope, signal?: Sig) => request<{ pools: Pool[] }>("/pools", { tenant, signal }).then((r) => r.pools),
+  /** Marks one of a tenant's pools as its default (tenant: the pool's, for an operator). */
+  makePoolDefault: (tenant: Scope, name: string) => request<Pool>("/pools", { method: "POST", tenant, body: { name, isDefault: true } }),
   /** owner: which pool of that name, where a tenant's and the platform's share it; undefined: the server's default. */
   poolEvents: (name: string, tenant: Scope, owner: PoolOwner | undefined, page: EventRange, signal?: Sig) =>
     request<{ events: LifecycleEvent[] }>(`/pools/${enc(name)}/events`, { tenant, query: { owner, ...page, limit: EVENTS_PAGE }, signal }).then((r) => r.events),

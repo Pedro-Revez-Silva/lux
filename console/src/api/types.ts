@@ -439,6 +439,8 @@ export interface Pool {
   warmWhileActive?: boolean;
   shared: boolean;
   platform: boolean;
+  /** Where Runs naming no pool go: the tenant's default, or (platform pool) the platform's. */
+  isDefault?: boolean;
   hourlyPrice?: string;
   currency?: string;
 }
