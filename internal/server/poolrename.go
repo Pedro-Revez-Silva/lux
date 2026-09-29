@@ -83,7 +83,7 @@ type renamePoolInput struct {
 
 type renamePoolRequest struct {
 	Name    string `json:"name" doc:"The new name." example:"burst-eu"`
-	Confirm string `json:"confirm,omitempty" doc:"The pool's current name. Required while the pool has hosts that are not terminated (409 confirm_required otherwise), so a rename confirmed against counts that have since changed is refused."`
+	Confirm string `json:"confirm,omitempty" doc:"The pool's current name. Required while the pool has hosts that are not terminated (409 confirm_required otherwise). It confirms the pool, not the counts a dry run showed: hosts and Runs that joined since follow the rename too."`
 }
 
 // PoolRenamed is what a rename moved or, with dryRun, would move.
