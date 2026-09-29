@@ -5,7 +5,12 @@ import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, HostLink, hostPath, hostRunsPath, IdLink, RelativeTime, StateCell, UsageBar } from "./common.tsx";
 
-// A tenant's share of a platform host cannot be compared to its cross-tenant cap.
+/**
+ * A host's live Run count. The cap (lux-runner --max-runs) is rarely what
+ * limits a host, so it shows only once the count nears it. On a platform
+ * host a tenant's count is its own share only while the cap counts every
+ * tenant's Runs, so no near-cap warning is drawn from it.
+ */
 function LiveRuns({ host: h, wholeHost }: { host: Host; wholeHost: boolean }) {
   const cap = h.capacity.runs;
   const near = wholeHost && cap > 0 && h.liveRuns >= 0.75 * cap;

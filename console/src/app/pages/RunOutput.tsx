@@ -5,8 +5,10 @@ import { api, errorText, INPUT_RUN_STATES, type Run } from "../../api/index.ts";
 import { setSearchParams, useSearchParams } from "../router.tsx";
 import { useRunOutput } from "./useRunOutput.ts";
 
+/** all: every line; output: the workload's stdout and stderr; lux: Lux's own (system) lines. */
 type OutputView = "all" | "output" | "lux";
 
+/** The lines the view shows, and each view's count, in one pass. */
 function filterOutput(lines: LogLine[], view: OutputView): { lines: LogLine[]; counts: Record<OutputView, number> } {
   const counts = { all: lines.length, output: 0, lux: 0 };
   const visibleLines: LogLine[] = [];
