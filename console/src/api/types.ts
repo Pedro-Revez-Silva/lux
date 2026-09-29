@@ -117,6 +117,10 @@ export interface Run {
   firstScheduledAt?: string;
   firstStartedAt?: string;
   finishedAt?: string;
+  /** Seconds its placements spent running (started to ended; a live one up to the response), summed. */
+  runtimeSeconds: number;
+  /** When the placement still running started; set while one is. */
+  runtimeSince?: string;
   placements?: Placement[];
   usage?: RunUsage;
   resume?: Resumability;

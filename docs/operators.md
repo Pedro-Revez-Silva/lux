@@ -130,9 +130,10 @@ filter at the top; a tenant key, that tenant.
   tracked path), its Postgres (size, connections), and luxd itself (CPU,
   memory, goroutines), a line per luxd process. A host page charts its
   runner the same way, a line per runner process.
-- **Runs**: filterable, with a Run page per Run: output (live), placement
-  timeline, resource charts, events, snapshots and artifacts, and the
-  actions above.
+- **Runs**: filterable, with each Run's runtime (live while it runs) and
+  placements (see [Concepts](concepts.md#placement-and-epoch)), and a Run
+  page per Run: output (live), placement timeline, resource charts,
+  events, snapshots and artifacts, and the actions above.
 - **Hosts**: capacity and allocation, and a host page with its history
   (the runner process's too), lifecycle and the Runs on it.
 - **Pools** and **Tenants**.
