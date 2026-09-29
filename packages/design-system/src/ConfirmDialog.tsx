@@ -15,9 +15,15 @@ export interface ConfirmDialogProps {
   input?: { label: string; placeholder?: string; required?: boolean };
   /** An opt-in checkbox (e.g. force-evict); its state is passed to onConfirm. */
   checkbox?: { label: string; help?: string; checked?: boolean; locked?: boolean };
+  /** While true, the dialog cannot be confirmed (by the button or Enter). */
   loading?: boolean;
   onConfirm: (input?: string, checked?: boolean) => void;
   onCancel: () => void;
+}
+
+/** Whether the dialog refuses to confirm: still loading, the confirmation text not typed, or a required input empty. */
+export function confirmBlocked(p: { loading?: boolean; confirmText?: string; typed: string; inputRequired?: boolean; text: string }): boolean {
+  return !!p.loading || (p.confirmText != null && p.typed !== p.confirmText) || (!!p.inputRequired && p.text.trim() === "");
 }
 
 export function ConfirmDialog(props: ConfirmDialogProps) {
@@ -38,7 +44,7 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
     } else if (!open && d.open) d.close();
   }, [open, checkbox?.checked]);
 
-  const blocked = (confirmText != null && typed !== confirmText) || (input?.required && text.trim() === "");
+  const blocked = confirmBlocked({ loading, confirmText, typed, inputRequired: input?.required, text });
 
   return (
     <dialog
