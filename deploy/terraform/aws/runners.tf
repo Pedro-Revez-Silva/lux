@@ -192,7 +192,6 @@ output "runner_pools_set_commands" {
         subnets        = aws_subnet.public[*].id
         spot           = v.spot
         userData       = v.user_data_format
-        tags           = { "lux:pool" = k }
       })}'",
     ])
   }

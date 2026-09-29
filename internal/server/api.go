@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -1904,6 +1905,25 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 	return &struct{}{}, nil
 }
 
+// checkTemplateTags refuses an EC2 template's tags that are not a string
+// map (null included), or that set a lux:* key: lux tags every instance itself (lux:pool,
+// lux:host, …) and finds a pool's instances by those tags.
+func checkTemplateTags(raw any) error {
+	tags, isMap := raw.(map[string]any)
+	if !isMap {
+		return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.tags must be an object of strings, got %T", raw)
+	}
+	for _, k := range slices.Sorted(maps.Keys(tags)) {
+		if _, isString := tags[k].(string); !isString {
+			return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.tags.%s must be a string, got %T", k, tags[k])
+		}
+		if strings.HasPrefix(strings.ToLower(k), "lux:") {
+			return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.tags.%s: lux:* tags are set by lux", k)
+		}
+	}
+	return nil
+}
+
 // putPool creates or updates one of the tenant's pools.
 type poolBody struct {
 	TenantQuery
@@ -1933,6 +1953,11 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "only platform pools can be shared (luxd admin create-pool --shared)")
 	}
 	if pl.Provider == "ec2" {
+		if raw, present := pl.Template["tags"]; present {
+			if err := checkTemplateTags(raw); err != nil {
+				return nil, err
+			}
+		}
 		if raw, present := pl.Template["userData"]; present {
 			ud, isString := raw.(string)
 			if !isString {
