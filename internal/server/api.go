@@ -1855,7 +1855,10 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 			owner = &p.TenantID
 		}
 		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return CheckPoolName(ctx, tx, owner, pl.Name) }); err != nil {
-			return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "%s", err.Error())
+			if pne := (*PoolNameError)(nil); errors.As(err, &pne) {
+				return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "%s", err.Error())
+			}
+			return nil, err
 		}
 	}
 	if pl.Shared {
