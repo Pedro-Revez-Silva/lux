@@ -552,8 +552,7 @@ func (p *placement) restoreVolume(ctx context.Context, volume string, snap *prot
 }
 
 // importBlob decompresses a volume blob into imp, then checks the blob's
-// compressed size and sha256 against the assignment's (when it carries a
-// sha256).
+// compressed size and sha256 against the assignment's (each when given).
 func importBlob(src io.Reader, snap *proto.VolumeSnapshot, imp func(io.Reader) error) error {
 	h := sha256.New()
 	cw := &countWriter{w: h}
@@ -569,11 +568,11 @@ func importBlob(src io.Reader, snap *proto.VolumeSnapshot, imp func(io.Reader) e
 	if _, err := io.Copy(cw, src); err != nil {
 		return err
 	}
+	if snap.Size != 0 && cw.n != snap.Size {
+		return fmt.Errorf("size mismatch: got %d bytes, want %d", cw.n, snap.Size)
+	}
 	if snap.SHA256 == "" {
 		return nil
-	}
-	if cw.n != snap.Size {
-		return fmt.Errorf("size mismatch: got %d bytes, want %d", cw.n, snap.Size)
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != snap.SHA256 {
 		return fmt.Errorf("checksum mismatch: got %s, want %s", got, snap.SHA256)

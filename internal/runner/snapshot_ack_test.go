@@ -117,7 +117,7 @@ func TestSnapshotAckRefusedIsNotUploaded(t *testing.T) {
 }
 
 // A restored volume blob must have the size and sha256 the assignment
-// carries.
+// carries, each checked when given.
 func TestImportBlobChecksSizeAndSHA256(t *testing.T) {
 	r, _ := ackRunner(t)
 	size, sum, err := r.writeBlob("vol", func(w io.Writer) error { _, err := w.Write([]byte("volume contents")); return err })
@@ -131,6 +131,7 @@ func TestImportBlobChecksSizeAndSHA256(t *testing.T) {
 	}{
 		{"matching", proto.VolumeSnapshot{Size: size, SHA256: sum}, false},
 		{"other size", proto.VolumeSnapshot{Size: size + 1, SHA256: sum}, true},
+		{"other size, no sha256", proto.VolumeSnapshot{Size: size + 1}, true},
 		{"other sha256", proto.VolumeSnapshot{Size: size, SHA256: "0000"}, true},
 		{"unchecked", proto.VolumeSnapshot{}, false},
 	} {
