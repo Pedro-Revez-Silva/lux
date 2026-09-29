@@ -297,6 +297,40 @@ CoreOS enforces SELinux, and its default policy labels `/usr/local/bin`
 unlabeled, which fails with `203/EXEC`. This is unrelated to
 `runner_bin_dir` on luxd's own host, which is unchanged.
 
+## Pools and the default pool
+
+A Run goes to the pool its spec names (`placement.pool`). One that names
+none goes to its tenant's **default pool**, which a tenant (or an operator)
+chooses by marking one of its pools:
+
+```bash
+lux pools set arm64 --default          # the tenant's default from now on
+lux pools set arm64 --default=false    # no default: the platform's, else "default"
+luxd admin create-pool --name shared-x86 --provider static --shared --default   # the platform's default
+```
+
+luxd picks the pool when the Run is submitted, in this order:
+
+1. the tenant's default pool;
+2. else the platform's default pool (a platform pool, `tenant_id` NULL,
+   marked by an operator: `lux pools set <name> --default` without
+   `--tenant`, or `luxd admin create-pool --default`);
+3. else the pool named `default`, which is what every such Run got before
+   default pools existed. A deployment with a pool named `default` keeps
+   working without marking anything.
+
+The pool is written into the Run's spec, so its resumes, retries and
+migrations stay there even when the default changes later. The Run's
+`submitted` event says which pool and why: `{"pool": "arm64", "poolFrom":
+"tenant-default"}` (`platform-default`, `fallback`, or `spec` when the
+spec named it). A Run that names a pool, `default` included, is never
+redirected.
+
+A tenant has at most one default pool, and the platform one (Postgres
+refuses a second). Marking another pool moves the mark in one statement.
+`lux pools rm` clears the mark of the pool it removes; re-creating that
+pool does not bring it back. Upgrading marks no pool.
+
 ## EC2 pools
 
 A pool with `provider: ec2` is sized by luxd:
