@@ -67,6 +67,8 @@ const (
 	evHostReleased     = "pool.host_released"
 	evSpotInterrupted  = "pool.spot_interrupted"
 	evConfigChanged    = "pool.config_changed"
+	evRetired          = "pool.retired"
+	evRestored         = "pool.restored"
 	evPlacement        = "pool.placement"
 	evPoolProviderErr  = "pool.provider_error"
 	evRegistered       = "host.registered"
@@ -232,8 +234,10 @@ func nonNilData(d map[string]any) map[string]any {
 }
 
 // ChangePool runs change, which creates, updates or retires the pool
-// tenantID/name in tx, and records what it changed as pool.config_changed
-// (nothing when nothing did).
+// tenantID/name in tx, and records what it changed (nothing when nothing
+// did). A pool removed is retired, keeping its id and its events; set again
+// it is restored. So its history shows where it went and came back, those
+// changes are pool.retired and pool.restored; any other, pool.config_changed.
 func ChangePool(ctx context.Context, tx pgx.Tx, tenantID *string, name string, change func() error) error {
 	before, err := poolSettings(ctx, tx, tenantID, name)
 	if err != nil {
@@ -264,7 +268,14 @@ func ChangePool(ctx context.Context, tx pgx.Tx, tenantID *string, name string, c
 	if len(changes) == 0 {
 		return nil
 	}
-	return poolEvent(ctx, tx, after.id, evConfigChanged, map[string]any{"created": before == nil, "changes": changes})
+	typ := evConfigChanged
+	if before != nil && before.fields["retired"] != after.fields["retired"] {
+		typ = evRestored
+		if after.fields["retired"] == true {
+			typ = evRetired
+		}
+	}
+	return poolEvent(ctx, tx, after.id, typ, map[string]any{"created": before == nil, "changes": changes})
 }
 
 type poolSnapshot struct {

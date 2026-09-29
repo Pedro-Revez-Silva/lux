@@ -234,7 +234,7 @@ func (s *Server) routes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "listPoolEvents", Method: http.MethodGet, Path: "/v1/pools/{name}/events", Tags: []string{"pools"},
 		Summary: "List a pool's events",
-		Description: "What happened to the pool, newest first: scale-ups and why, launches and their failures, placements on its hosts, hosts released and why, spot interruptions, configuration changes. " +
+		Description: "What happened to the pool, newest first: scale-ups and why, launches and their failures, placements on its hosts, hosts released and why, spot interruptions, configuration changes, removal (retired) and being set again (restored). " +
 			"A failure repeated on every provisioner pass is one event, its `count` and `lastTime` updated in place. " +
 			"A tenant's own pool of that name, else the platform's (`?owner=` picks one); a platform pool's events are the operators' (they name other tenants' Runs), and not shown to an operator narrowed with `?tenant=`.",
 		Errors: []int{http.StatusNotFound, http.StatusForbidden, http.StatusConflict},

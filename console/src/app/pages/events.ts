@@ -90,7 +90,9 @@ export function infraEventSummary(e: LifecycleEvent): string {
     case "pool.placement":
     case "host.placement_assigned":
       return `${s("run")} epoch ${s("epoch")} on ${s("host")}`;
-    case "pool.config_changed": {
+    case "pool.config_changed":
+    case "pool.retired":
+    case "pool.restored": {
       const changes = (d.changes ?? {}) as Record<string, { old?: unknown; new?: unknown }>;
       const parts = Object.keys(changes)
         .sort()

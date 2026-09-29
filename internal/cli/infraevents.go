@@ -111,7 +111,7 @@ func eventLine(e server.LifecycleEvent) string {
 		line = s("host") + " interrupted: " + s("reason")
 	case "pool.placement", "host.placement_assigned":
 		line = fmt.Sprintf("%s epoch %s on %s", s("run"), s("epoch"), s("host"))
-	case "pool.config_changed":
+	case "pool.config_changed", "pool.retired", "pool.restored":
 		changes, _ := d["changes"].(map[string]any)
 		keys := make([]string, 0, len(changes))
 		for k := range changes {

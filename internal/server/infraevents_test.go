@@ -765,3 +765,29 @@ func TestStaticHostFirstRegistrationIsReady(t *testing.T) {
 		t.Fatalf("ready from %v, want new", from)
 	}
 }
+
+// A pool removed and set again keeps its id and its events; the history
+// shows the boundary: pool.retired, then pool.restored.
+func TestPoolRetiredAndRestored(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	infraFixture(t, s, ctx)
+	tenant := context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+	if _, err := s.deletePool(tenant, &deletePoolInput{Name: "burst"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.putPool(tenant, &poolBody{Body: Pool{Name: "burst", Provider: "ec2", MaxHosts: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.putPool(tenant, &poolBody{Body: Pool{Name: "burst", Provider: "ec2", MaxHosts: 3}}); err != nil {
+		t.Fatal(err)
+	}
+	types := queryOne[[]string](t, s, `SELECT array_agg(type ORDER BY id) FROM pool_events WHERE pool_id = 'pool1' AND type NOT LIKE 'pool.host%'`)
+	if !slices.Equal(types, []string{evRetired, evRestored, evConfigChanged}) {
+		t.Fatalf("pool1's events %v, want retired, restored, config_changed", types)
+	}
+	restored := events(t, s, evRestored)[0].Data["changes"].(map[string]any)
+	if fmt.Sprint(restored["retired"]) != fmt.Sprint(map[string]any{"old": true, "new": false}) || restored["maxHosts"] == nil {
+		t.Fatalf("restored changes %v", restored)
+	}
+}

@@ -120,7 +120,9 @@ after losing the provider's reply), `pool.launch_failed` (the provider's error),
 `pool.host_registered`, `pool.placement` (a Run placed on one of its
 hosts), `pool.host_released` (why: `idle` for how long, `pool removed`,
 `outdated`, `manual`, `evicted`, or why it was terminated),
-`pool.spot_interrupted`, `pool.config_changed` (each field, old→new) and
+`pool.spot_interrupted`, `pool.config_changed` (each field, old→new),
+`pool.retired` (removed: `lux pools rm`) and `pool.restored` (set again
+after it was removed; a pool keeps its events across both), and
 `pool.provider_error`. A host's are `host.registered`, `host.ready`,
 `host.placement_assigned`, `host.placement_ended` (with the Run's
 outcome), `host.drain_requested` (its cause), `host.lost`,

@@ -60,6 +60,9 @@ func TestEventLine(t *testing.T) {
 		{server.LifecycleEvent{Type: "pool.config_changed", Count: 1, Data: map[string]any{"created": false, "changes": map[string]any{
 			"maxHosts": map[string]any{"old": 2.0, "new": 4.0}, "template.region": map[string]any{"old": nil, "new": "eu-west-1"}}}},
 			"maxHosts 2→4, template.region -→eu-west-1"},
+		{server.LifecycleEvent{Type: "pool.retired", Count: 1, Data: map[string]any{"created": false, "changes": map[string]any{
+			"retired": map[string]any{"old": false, "new": true}}}},
+			"retired false→true"},
 		{server.LifecycleEvent{Type: "host.placement_ended", Count: 1, Data: map[string]any{"run": "run_1", "epoch": 2.0, "outcome": "lost", "reason": "host lost"}},
 			"run_1 epoch 2: lost (host lost)"},
 	} {
