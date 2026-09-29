@@ -48,8 +48,7 @@ func TestRunPoolFlag(t *testing.T) {
 	}
 
 	file := filepath.Join(t.TempDir(), "spec.yaml")
-	err := os.WriteFile(file, []byte("image: {ref: alpine}\nworkload: {adapter: generic, command: [true]}\nplacement: {pool: gpu, requires: {zone: a}}\n"), 0o600)
-	if err != nil {
+	if err := os.WriteFile(file, []byte("image: {ref: alpine}\nworkload: {adapter: generic, command: [true]}\nplacement: {pool: gpu, requires: {zone: a}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	body = submitted(t, "run", "-f", file, "--pool", "arm64")
