@@ -380,8 +380,8 @@ func TestDiffFallsBackWhenTheContainerHasExited(t *testing.T) {
 	}
 }
 
-// What a snapshot's diff says beyond its stat (filters ignored, an error's
-// code) is stored and answered.
+// What a snapshot's diff says beyond its stat (filters ignored, files git
+// converts, dirty submodules, an error's code) is stored and answered.
 func TestSnapshotDiffKeepsFiltersAndErrorCode(t *testing.T) {
 	s, keys, _ := diffFixture(t)
 	runnerReport(t, s, "r1", 2, proto.MsgSnapshotDone, proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "s1", RunID: "r1", Epoch: 2, Volumes: []proto.VolumeSnapshot{}}})
@@ -389,13 +389,15 @@ func TestSnapshotDiffKeepsFiltersAndErrorCode(t *testing.T) {
 	for _, kind := range []string{proto.DiffBaseClone, proto.DiffBaseHead} {
 		sd.Diffs = append(sd.Diffs,
 			proto.SnapshotDiff{DiffStat: proto.DiffStat{Repo: "app", Kind: kind, Files: 1, FiltersIgnored: true, FilteredPaths: []string{"big.psd"},
+				NormalizedPaths: []string{"crlf.txt"}, DirtySubmodules: []string{"vendor/lib"},
 				FileStats: []proto.DiffFile{{Path: "big.psd", Binary: true}}}},
 			proto.SnapshotDiff{DiffStat: proto.DiffStat{Repo: "lib", Kind: kind, Error: "gone", ErrorCode: proto.DiffBaseUnreachable}})
 	}
 	runnerReport(t, s, "r1", 2, proto.MsgSnapshotDiffs, sd)
 	code, _, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff?stat=true", "")
 	d := decodeDiff(t, body)
-	if code != http.StatusOK || !d.Repos[0].FiltersIgnored || len(d.Repos[0].FilteredPaths) != 1 || d.Repos[1].ErrorCode != "base_unreachable" {
+	if code != http.StatusOK || !d.Repos[0].FiltersIgnored || len(d.Repos[0].FilteredPaths) != 1 || d.Repos[1].ErrorCode != "base_unreachable" ||
+		!slices.Equal(d.Repos[0].NormalizedPaths, []string{"crlf.txt"}) || !slices.Equal(d.Repos[0].DirtySubmodules, []string{"vendor/lib"}) {
 		t.Errorf("%d %s", code, body)
 	}
 }

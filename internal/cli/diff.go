@@ -150,6 +150,14 @@ func (a *app) printDiff(d server.RunDiff, stat, colored bool) error {
 			fmt.Fprintf(a.stderr, "lux: repo %s: files with clean/smudge filters are compared raw (filters are not run): %s\n",
 				r.Repo, strings.Join(r.FilteredPaths, ", "))
 		}
+		if len(r.NormalizedPaths) > 0 {
+			fmt.Fprintf(a.stderr, "lux: repo %s: git converts these files' line endings or encoding; the patch has its stored form: %s\n",
+				r.Repo, strings.Join(r.NormalizedPaths, ", "))
+		}
+		if len(r.DirtySubmodules) > 0 {
+			fmt.Fprintf(a.stderr, "lux: repo %s: submodules with uncommitted changes of their own, not in the patch: %s\n",
+				r.Repo, strings.Join(r.DirtySubmodules, ", "))
+		}
 		header := diffHeader(r)
 		if colored {
 			header = "\x1b[33m" + header + "\x1b[m"

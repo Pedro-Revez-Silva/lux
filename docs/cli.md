@@ -122,7 +122,9 @@ ignored) files alike.
   A Run without repositories, or that has never stopped since it started,
   has none: `no_diff`, exit code 3.
 - Each repository's section starts with a comment line, which `git apply`
-  skips, so the output applies as it is:
+  skips, so the output applies as it is at the base, and gives the
+  working tree but for what a patch cannot carry (named on stderr, see
+  below):
 
   ```
   # repo app: 1a2b3c4d5e6f..9f8e7d6c5b4a (snapshot, snapshot snap_… at 2026-09-29T10:00:00Z)
@@ -140,7 +142,10 @@ ignored) files alike.
   nothing changed. A repository whose diff failed is reported on stderr and
   the exit code is 1, with `-o json` too (`base_unreachable`: its base is no longer in its
   history; `--base head` still works). Files with clean/smudge filters,
-  which are never run, are compared raw, and named on stderr.
+  which are never run, are compared raw, and named on stderr; so are the
+  files whose line endings or encoding git converts, and submodules with
+  uncommitted changes of their own, which the patch cannot carry (see
+  [Diffs](runspec.md#diffs)).
 - `-o json` prints the API's response: per repository `repo`, `push`,
   `base`, `head`, `source`, `snapshotId`, `at`, `truncated`, `files`,
   `insertions`, `deletions`, `fileStats` and `patch`. The API also answers

@@ -26,20 +26,41 @@ def diff_json(lux, run_id: str, *args: str) -> dict:
 
 def wait_diff(lux, run_id: str, *args: str, timeout: float = 90) -> dict:
     """The stopped Run's diff, once its snapshot's diff is computed (after
-    the snapshot is reported) and its patches uploaded."""
+    the snapshot is reported: lux diff --wait) and its patches uploaded."""
     def ready():
-        p = lux.run("diff", run_id, "-o", "json", *args, check=False)
-        if p.returncode in (3, 4):  # no_diff yet; not_uploaded yet
+        p = lux.run("diff", run_id, "-o", "json", "--wait", "--timeout", "60s", *args, check=False)
+        if p.returncode == 4 and "not_uploaded" not in p.stderr and "still being uploaded" not in p.stderr:
+            raise AssertionError(f"lux diff --wait: {p.stderr}")
+        if p.returncode == 4:  # its patches not uploaded yet
             return None
         return json.loads(p.stdout)
     return wait_until(ready, timeout, 0.5, f"no diff for {run_id}")
 
 
-def apply_check(git_server, repo: str, base: str, patch: str):
-    """git apply --check of patch on a fresh clone of repo at base."""
-    sh("docker", "exec", "-i", git_server.container, "sh", "-c",
-       f"set -e; rm -rf /tmp/ac && git clone -q /repos/{repo}.git /tmp/ac && cd /tmp/ac && "
-       f"git checkout -q {base} && git apply --check -", input=patch.encode())
+# A working tree as git sees it, .git aside: per path, its type, executable
+# bit, and a symlink's target or a file's sha256. Run with the tree as the
+# working directory (in the Run's container, or in the git server's).
+MANIFEST = r"""
+find . -path ./.git -prune -o \( -type f -o -type l \) -print | LC_ALL=C sort | while IFS= read -r p; do
+  if [ -L "$p" ]; then echo "link $p -> $(readlink "$p")"
+  elif [ -x "$p" ]; then echo "exec $p $(sha256sum < "$p" | cut -d' ' -f1)"
+  else echo "file $p $(sha256sum < "$p" | cut -d' ' -f1)"; fi
+done
+"""
+
+
+def workload_manifest(hosts, run_id: str, path: str) -> str:
+    return hosts[0].exec("podman", "exec", "--user", "agent", "--workdir", path, f"lux-{run_id}", "sh", "-c", MANIFEST)
+
+
+def apply_and_compare(git_server, repo: str, base: str, patch: str, want: str):
+    """Applies patch (lux diff's output) to a fresh clone of repo at base,
+    and checks the result is the workload's tree, want (MANIFEST's): every
+    path, its content, symlink target and executable bit."""
+    got = sh("docker", "exec", "-i", git_server.container, "sh", "-c",
+             f"set -e; rm -rf /tmp/ac && git clone -q /repos/{repo}.git /tmp/ac && cd /tmp/ac && "
+             f"git checkout -q {base} && git apply --allow-empty - && {MANIFEST}", input=patch.encode())
+    assert got == want, f"applied:\n{got}\nworkload:\n{want}"
 
 
 def test_diff_live_then_from_the_snapshot_then_across_a_resume(lux, runners, hosts, fake_image, git_server):
@@ -62,7 +83,8 @@ def test_diff_live_then_from_the_snapshot_then_across_a_resume(lux, runners, hos
         assert want in live["patch"], live["patch"]
     text = lux.run("diff", run_id).stdout
     assert text.startswith(f"# repo dapp: {base[:12]}..{live['head'][:12]} (live)\n"), text
-    apply_check(git_server, "dapp", base, text)
+    tree = workload_manifest(hosts, run_id, "/workspace/repos/dapp")
+    apply_and_compare(git_server, "dapp", base, text, tree)
     # Against HEAD: the commit is not there.
     head = diff_json(lux, run_id, "--base", "head")["repos"][0]
     assert {f["path"] for f in head["fileStats"]} == {"a.txt", "new.txt"}, head
@@ -77,7 +99,7 @@ def test_diff_live_then_from_the_snapshot_then_across_a_resume(lux, runners, hos
     assert snap["patch"] == live["patch"] and snap["base"] == base and snap["head"] == live["head"], snap
     text = lux.run("diff", run_id).stdout
     assert f"(snapshot, snapshot {snapshot_id} at " in text.splitlines()[0], text
-    apply_check(git_server, "dapp", base, text)
+    apply_and_compare(git_server, "dapp", base, text, tree)
     # Both kinds are stored.
     assert {f["path"] for f in diff_json(lux, run_id, "--base", "head")["repos"][0]["fileStats"]} == {"a.txt", "new.txt"}
 
@@ -87,7 +109,33 @@ def test_diff_live_then_from_the_snapshot_then_across_a_resume(lux, runners, hos
     again = diff_json(lux, run_id)["repos"][0]
     assert again["source"] == "live" and again["base"] == base, again
     assert {f["path"] for f in again["fileStats"]} == {"a.txt", "b.txt", "c.txt", "new.txt"}, again["fileStats"]
-    apply_check(git_server, "dapp", base, lux.run("diff", run_id).stdout)
+    apply_and_compare(git_server, "dapp", base, lux.run("diff", run_id).stdout,
+                      workload_manifest(hosts, run_id, "/workspace/repos/dapp"))
+
+
+def test_the_patch_reproduces_symlinks_modes_and_binaries(lux, runners, hosts, fake_image, git_server):
+    """The workload makes a symlink, an executable, a binary file and an
+    export-ignore'd one, changes a symlink's target and a file's mode.
+    Applied at the base, lux diff's output (live, then the snapshot's) is
+    the workload's tree, byte for byte."""
+    base = git_server.create("dfaith", {"a.txt": "one\n", "run.sh": "#!/bin/sh\necho hi\n",
+                                        ".gitattributes": "internal/** export-ignore\n"})
+    runners.start(hosts[0])
+    run_id = lux.submit(diff_spec(fake_image, git_server, "echo ready", "dfaith"))
+    lux.wait_activity(run_id, "idle")
+    hosts[0].exec("podman", "exec", "--user", "agent", "--workdir", "/workspace/repos/dfaith", f"lux-{run_id}", "sh", "-c",
+                  "set -e; ln -s a.txt link; chmod +x run.sh; printf '\\000\\001\\377bin\\000' > data.bin; "
+                  "mkdir -p internal && echo private > internal/x.txt; mkdir sub && ln -s ../run.sh sub/tool; "
+                  "printf 'one\\ntwo\\n' > a.txt")
+    tree = workload_manifest(hosts, run_id, "/workspace/repos/dfaith")
+    assert "link ./link -> a.txt" in tree and "exec ./run.sh" in tree and "./internal/x.txt" in tree, tree
+    live = diff_json(lux, run_id)["repos"][0]
+    assert "internal/x.txt" in {f["path"] for f in live["fileStats"]}, live["fileStats"]
+    apply_and_compare(git_server, "dfaith", base, lux.run("diff", run_id).stdout, tree)
+    lux.run("stop", run_id, "--wait")
+    lux.wait_uploaded(run_id)
+    wait_diff(lux, run_id)
+    apply_and_compare(git_server, "dfaith", base, lux.run("diff", run_id).stdout, tree)
 
 
 def test_no_diff_before_a_snapshot_and_nothing_when_unchanged(lux, runners, hosts, fake_image, git_server):
@@ -110,8 +158,8 @@ def test_no_diff_before_a_snapshot_and_nothing_when_unchanged(lux, runners, host
 
 
 def test_a_failed_diff_does_not_fail_the_stop(lux, runners, hosts, fake_image, git_server):
-    """The workload deletes its checkout: the snapshot's diff fails, the Run
-    still stops cleanly, with a diff.failed event."""
+    """The workload deletes its checkout: the repository's diff fails, the
+    Run still stops cleanly, with a diff.failed event."""
     git_server.create("dgone", {"a.txt": "one\n"})
     runners.start(hosts[0])
     run_id = lux.submit(diff_spec(fake_image, git_server, "echo ready", "dgone"))

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -921,4 +922,158 @@ func TestUntilEOF(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("did not end with stdin")
 	}
+}
+
+// submoduleCheckout is a checkout at base with a submodule sub (its own
+// repository beside it), and the submodule's second commit.
+func submoduleCheckout(t *testing.T) (dir, base, subNext string) {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	os.Mkdir(sub, 0o755)
+	run(t, sub, "init", "-q")
+	write(t, sub, "f", "one\n")
+	run(t, sub, "add", "-A")
+	run(t, sub, "commit", "-q", "-m", "s1")
+	write(t, sub, "g", "two\n")
+	run(t, sub, "add", "-A")
+	run(t, sub, "commit", "-q", "-m", "s2")
+	subNext = run(t, sub, "rev-parse", "HEAD")
+	run(t, sub, "checkout", "-q", "HEAD~1")
+	dir = filepath.Join(root, "top")
+	os.Mkdir(dir, 0o755)
+	run(t, dir, "init", "-q")
+	write(t, dir, "x.txt", "x\n")
+	run(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sub")
+	run(t, dir, "commit", "-q", "-m", "base")
+	return dir, run(t, dir, "rev-parse", "HEAD"), subNext
+}
+
+// A changed gitlink (the submodule at another commit) is in the patch,
+// which applies; changes inside a submodule are not (the parent's patch
+// cannot carry them): the submodule is listed as dirty, and the patch
+// still applies.
+func TestSubmodules(t *testing.T) {
+	dir, base, next := submoduleCheckout(t)
+	run(t, filepath.Join(dir, "sub"), "checkout", "-q", next)
+	write(t, dir, "x.txt", "x\ny\n")
+	diffs, err := Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, proto.DiffLimit)
+	if err != nil || diffs[0].Stat.Error != "" {
+		t.Fatal(err, diffs)
+	}
+	st := diffs[0].Stat
+	if _, ok := files(st)["sub"]; !ok || len(st.DirtySubmodules) != 0 {
+		t.Errorf("committed gitlink change: %+v", st)
+	}
+	if !bytes.Contains(diffs[0].Patch, []byte("+Subproject commit "+next)) {
+		t.Errorf("no gitlink in the patch:\n%s", diffs[0].Patch)
+	}
+	fresh := applyAt(t, dir, base, diffs[0].Patch, "--index")
+	if got := run(t, fresh, "ls-files", "-s", "sub"); !strings.Contains(got, next) {
+		t.Errorf("applied gitlink: %s", got)
+	}
+
+	// Dirty inside: an edit and an untracked file.
+	write(t, dir, "sub/f", "one\nedited\n")
+	write(t, dir, "sub/new", "new\n")
+	diffs, err = Compute(context.Background(), dir, base, []string{proto.DiffBaseClone, proto.DiffBaseHead}, false, proto.DiffLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range diffs {
+		if d.Stat.Error != "" || !slices.Equal(d.Stat.DirtySubmodules, []string{"sub"}) {
+			t.Errorf("%s: %+v", d.Stat.Kind, d.Stat)
+		}
+		if bytes.Contains(d.Patch, []byte("edited")) {
+			t.Errorf("%s: the submodule's own change is in the parent's patch", d.Stat.Kind)
+		}
+	}
+	applyAt(t, dir, base, diffs[0].Patch, "--index")
+}
+
+// applyAt applies patch (with args) to a fresh clone of dir at base, and
+// returns the clone.
+func applyAt(t *testing.T, dir, base string, patch []byte, args ...string) string {
+	t.Helper()
+	fresh := t.TempDir()
+	run(t, fresh, "clone", "-q", "--no-checkout", dir, ".")
+	run(t, fresh, "checkout", "-q", base)
+	pf := filepath.Join(t.TempDir(), "p")
+	if err := os.WriteFile(pf, patch, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, fresh, append(append([]string{"apply", "--allow-empty"}, args...), pf)...)
+	return fresh
+}
+
+// With text=auto, git compares a file as it would store it: a CRLF file
+// whose lines did not change shows no change, and a CRLF file that did
+// change applies with LF endings. Both are listed (normalizedPaths); a
+// file git stores as it is is not.
+func TestLineEndingNormalization(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	dir := t.TempDir()
+	run(t, dir, "init", "-q")
+	write(t, dir, ".gitattributes", "* text=auto\n*.bin -text\n")
+	write(t, dir, "same.txt", "a\nb\n")
+	write(t, dir, "edited.txt", "a\n")
+	write(t, dir, "plain.txt", "p\n")
+	write(t, dir, "raw.bin", "r\r\n")
+	run(t, dir, "add", "-A")
+	run(t, dir, "commit", "-q", "-m", "base")
+	base := run(t, dir, "rev-parse", "HEAD")
+	write(t, dir, "same.txt", "a\r\nb\r\n")   // only the endings: hidden
+	write(t, dir, "edited.txt", "a\r\nb\r\n") // and a line
+	write(t, dir, "plain.txt", "p\nq\n")      // no conversion
+	write(t, dir, "raw.bin", "r\r\ns\r\n")    // -text: stored as it is
+	diffs, err := Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, proto.DiffLimit)
+	if err != nil || diffs[0].Stat.Error != "" {
+		t.Fatal(err, diffs)
+	}
+	st := diffs[0].Stat
+	if _, ok := files(st)["same.txt"]; ok {
+		t.Errorf("an endings-only change shows as changed: %+v", st.FileStats)
+	}
+	got := slices.Sorted(slices.Values(st.NormalizedPaths))
+	if !slices.Equal(got, []string{"edited.txt", "same.txt"}) {
+		t.Errorf("normalizedPaths %v", st.NormalizedPaths)
+	}
+	// Applied at the base, the patch gives git's stored form of the files.
+	fresh := applyAt(t, dir, base, diffs[0].Patch)
+	for name, want := range map[string]string{"edited.txt": "a\nb\n", "same.txt": "a\nb\n", "plain.txt": "p\nq\n", "raw.bin": "r\r\ns\r\n"} {
+		if b, _ := os.ReadFile(filepath.Join(fresh, name)); string(b) != want {
+			t.Errorf("%s applied: %q, want %q", name, b, want)
+		}
+	}
+}
+
+// export-ignore only affects git archive: such files are in the diff like
+// any other, and the patch reproduces them.
+func TestExportIgnoreIsDiffed(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	dir := t.TempDir()
+	run(t, dir, "init", "-q")
+	write(t, dir, ".gitattributes", "internal/** export-ignore\nsecret.txt export-ignore\n")
+	write(t, dir, "secret.txt", "one\n")
+	run(t, dir, "add", "-A")
+	run(t, dir, "commit", "-q", "-m", "base")
+	base := run(t, dir, "rev-parse", "HEAD")
+	write(t, dir, "secret.txt", "one\ntwo\n")
+	write(t, dir, "internal/new.txt", "new\n")
+	diffs, err := Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, proto.DiffLimit)
+	if err != nil || diffs[0].Stat.Error != "" {
+		t.Fatal(err, diffs)
+	}
+	fs := files(diffs[0].Stat)
+	if _, ok := fs["secret.txt"]; !ok {
+		t.Errorf("secret.txt missing: %+v", diffs[0].Stat.FileStats)
+	}
+	if _, ok := fs["internal/new.txt"]; !ok {
+		t.Errorf("internal/new.txt missing: %+v", diffs[0].Stat.FileStats)
+	}
+	applyAndCompare(t, dir, base, diffs[0].Patch)
 }

@@ -511,10 +511,26 @@ committed changes, staged, unstaged and untracked (not ignored) files.
   the copy needs, the empty blob, goes to a temporary object directory).
 - Patches are git's binary patches (`--binary`): applied with `git apply`
   at the base, a patch reproduces the working tree, binary files, symlinks
-  and executable bits included. Each patch is cut at 10 MiB (binary
-  content counts), after the last whole file's diff that fits, and marked
-  `truncated`: what is kept still applies, and is empty when the first
-  file's diff alone is over the limit. The stats cover the whole diff.
+  and executable bits included, with the exceptions below. Each patch is
+  cut at 10 MiB (binary content counts), after the last whole file's diff
+  that fits, and marked `truncated`: what is kept still applies, and is
+  empty when the first file's diff alone is over the limit. The stats
+  cover the whole diff.
+- What a patch cannot carry, each listed per repository (at most 100
+  paths) and named on `lux diff`'s stderr:
+  - **Submodules.** A submodule moved to another commit is in the patch
+    (its gitlink); `git apply --index` records it. Uncommitted changes and
+    untracked files *inside* a submodule are its own repository's, and the
+    parent's patch cannot hold them: the submodule is listed in
+    `dirtySubmodules`, and the patch still applies.
+  - **Line endings and encodings.** Where git converts files on their way
+    in (`text`, `eol`, `core.autocrlf`, `working-tree-encoding`), the diff
+    compares their converted form: a change of line endings alone does not
+    show, and an applied patch gives git's stored form (LF endings), not
+    the bytes on disk. Such files are listed in `normalizedPaths`.
+  - Clean/smudge filters: below.
+- `export-ignore` (and the rest of `git archive`'s attributes) has no
+  effect on a diff: such files are in it like any other.
 - **Clean/smudge filters are never run** (their programs are the
   workload's choice). A file with a `filter` attribute is compared raw, as
   it is on disk, so it may show as changed when its filter would have made

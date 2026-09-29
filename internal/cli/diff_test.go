@@ -47,6 +47,18 @@ func TestPrintDiff(t *testing.T) {
 		}
 	}
 
+	// What the patch cannot carry is said on stderr.
+	errOut.Reset()
+	lim := server.RunDiff{Repos: []server.RepoDiff{{Repo: "app", Files: 1, Patch: "p\n", NormalizedPaths: []string{"crlf.txt"}, DirtySubmodules: []string{"vendor/lib"}}}}
+	if err := a.printDiff(lim, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range []string{"line endings or encoding; the patch has its stored form: crlf.txt", "not in the patch: vendor/lib"} {
+		if !strings.Contains(errOut.String(), w) {
+			t.Errorf("stderr lacks %q: %q", w, errOut.String())
+		}
+	}
+
 	// Nothing changed: nothing printed. A failed repository: an error.
 	out.Reset()
 	if err := a.printDiff(server.RunDiff{Repos: []server.RepoDiff{{Repo: "same"}}}, false, false); err != nil || out.Len() != 0 {

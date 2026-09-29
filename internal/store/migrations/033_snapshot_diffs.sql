@@ -32,6 +32,10 @@ CREATE TABLE snapshot_diffs (
   -- Changed paths with a clean/smudge filter attribute, compared raw.
   filters_ignored boolean NOT NULL DEFAULT false,
   filtered_paths  jsonb NOT NULL DEFAULT '[]',
+  -- Changed paths whose bytes git converts (text, eol, autocrlf), and
+  -- submodules with changes of their own: what the patch cannot carry.
+  normalized_paths jsonb NOT NULL DEFAULT '[]',
+  dirty_submodules jsonb NOT NULL DEFAULT '[]',
   error        text NOT NULL DEFAULT '',
   -- A known cause of error: base_unreachable.
   error_code   text NOT NULL DEFAULT '',

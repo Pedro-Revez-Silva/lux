@@ -1104,6 +1104,13 @@ components:
         deletions:
           format: int64
           type: integer
+        dirtySubmodules:
+          description: Submodules with uncommitted changes or untracked files of their own, which the patch does not carry (only a changed commit of a submodule is in it; at most 100).
+          items:
+            type: string
+          type:
+            - array
+            - "null"
         error:
           description: Why this repository's diff could not be computed.
           type: string
@@ -1137,6 +1144,13 @@ components:
         insertions:
           format: int64
           type: integer
+        normalizedPaths:
+          description: "Files git converts before comparing them (text, eol, core.autocrlf, working-tree-encoding): the patch has git's stored form, and a change of line endings alone does not show (at most 100)."
+          items:
+            type: string
+          type:
+            - array
+            - "null"
         patch:
           description: The patch (git diff format), when it is valid UTF-8.
           type: string

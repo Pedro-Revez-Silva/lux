@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -197,6 +198,12 @@ func Compute(ctx context.Context, dir, base string, kinds []string, statOnly boo
 				d.Patch = nil
 			}
 		}
+		if d.Stat.Error == "" {
+			if err := r.unfaithful(ctx, &d.Stat); err != nil {
+				d.Stat.Error = err.Error()
+				d.Patch = nil
+			}
+		}
 		out = append(out, d)
 	}
 	return out, nil
@@ -352,6 +359,136 @@ func (r *repo) filtered(ctx context.Context, st *proto.DiffStat) error {
 	}
 	return nil
 }
+
+// unfaithful notes what the patch cannot carry: files whose bytes git
+// converts before comparing them (NormalizedPaths), and submodules with
+// changes of their own (DirtySubmodules).
+func (r *repo) unfaithful(ctx context.Context, st *proto.DiffStat) error {
+	changed := make([]string, 0, len(st.FileStats))
+	for _, f := range st.FileStats {
+		changed = append(changed, f.Path)
+	}
+	// Tracked files touched since the index was written: a change that
+	// conversion hides is not in the diff, so not among its files.
+	var touched []string
+	w := &nulFields{fn: func(f string) error {
+		if len(touched) < maxFileStats {
+			touched = append(touched, f)
+		}
+		return nil
+	}}
+	if err := r.git(ctx, w, "diff-files", "--name-only", "-z", "--ignore-submodules=all"); err != nil {
+		return err
+	}
+	if err := w.end(); err != nil {
+		return err
+	}
+	var files, subs []string
+	seen := map[string]bool{}
+	for _, p := range append(changed, touched...) {
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		fi, err := os.Lstat(filepath.Join(r.dir, p))
+		switch {
+		case err != nil:
+		case fi.Mode().IsRegular():
+			files = append(files, p)
+		case fi.IsDir():
+			subs = append(subs, p)
+		}
+	}
+	var err error
+	if st.NormalizedPaths, err = r.normalized(ctx, files); err != nil {
+		return err
+	}
+	st.DirtySubmodules, err = r.dirtySubmodules(ctx, subs)
+	return err
+}
+
+// maxListed bounds NormalizedPaths and DirtySubmodules.
+const maxListed = 100
+
+// normalized lists the files (of paths, regular files in the working
+// tree) whose content git converts on its way in: those it hashes
+// differently with and without its conversions.
+func (r *repo) normalized(ctx context.Context, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	hashes := func(args ...string) ([]string, error) {
+		var in bytes.Buffer
+		for _, p := range paths {
+			in.WriteString(p)
+			in.WriteByte('\n')
+		}
+		out := &head{max: len(paths) * 80}
+		if err := r.gitIn(ctx, &in, out, append([]string{"hash-object", "--stdin-paths"}, args...)...); err != nil {
+			return nil, err
+		}
+		h := strings.Fields(out.String())
+		if out.over || len(h) != len(paths) {
+			return nil, errors.New("git hash-object: malformed output")
+		}
+		return h, nil
+	}
+	// --stdin-paths reads a path per line: one with a newline cannot be
+	// named, and is left out.
+	paths = slices.DeleteFunc(slices.Clone(paths), func(p string) bool { return strings.ContainsAny(p, "\n\"") })
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	converted, err := hashes()
+	if err != nil {
+		return nil, err
+	}
+	raw, err := hashes("--no-filters")
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for i, p := range paths {
+		if converted[i] != raw[i] && len(out) < maxListed {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// dirtySubmodules lists the submodules (of paths, directories in the
+// working tree) with uncommitted changes or untracked files of their own:
+// the parent's patch carries only their commit. (git diff looks inside
+// them the same way to mark a gitlink -dirty.)
+func (r *repo) dirtySubmodules(ctx context.Context, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	args := []string{"status", "--porcelain=v2", "-z", "--ignore-submodules=none", "--untracked-files=normal", "--no-renames", "--"}
+	for _, p := range paths[:min(len(paths), maxSubmodules)] {
+		args = append(args, ":(literal)"+p)
+	}
+	var out []string
+	w := &nulFields{fn: func(f string) error {
+		// "1 XY sub mH mI mW hH hI path": sub is S<c><m><u> for a
+		// submodule, m or u set when it has changes or untracked files.
+		fields := strings.SplitN(f, " ", 9)
+		if len(fields) < 9 || fields[0] != "1" {
+			return nil
+		}
+		if sub := fields[2]; len(sub) == 4 && sub[0] == 'S' && (sub[2] == 'M' || sub[3] == 'U') && len(out) < maxListed {
+			out = append(out, fields[8])
+		}
+		return nil
+	}}
+	if err := r.git(ctx, w, args...); err != nil {
+		return nil, err
+	}
+	return out, w.end()
+}
+
+// maxSubmodules bounds the submodules looked into.
+const maxSubmodules = 1000
 
 func (r *repo) diff(ctx context.Context, d *Diff, from string, statOnly bool, limit int64) error {
 	num := &numstat{}

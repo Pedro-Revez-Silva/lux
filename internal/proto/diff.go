@@ -91,7 +91,15 @@ type DiffStat struct {
 	// are compared raw. FilteredPaths lists them (at most 100).
 	FiltersIgnored bool     `json:"filtersIgnored,omitempty"`
 	FilteredPaths  []string `json:"filteredPaths,omitempty"`
-	Error          string   `json:"error,omitempty"`
+	// NormalizedPaths: files whose bytes on disk git converts (text, eol,
+	// core.autocrlf, working-tree-encoding) before it compares them, so
+	// the patch may not reproduce them byte for byte, or may not show a
+	// change at all (at most 100).
+	NormalizedPaths []string `json:"normalizedPaths,omitempty"`
+	// DirtySubmodules: submodules with uncommitted changes of their own,
+	// which the parent's patch cannot carry (at most 100).
+	DirtySubmodules []string `json:"dirtySubmodules,omitempty"`
+	Error           string   `json:"error,omitempty"`
 	// ErrorCode classifies Error when it has a known cause
 	// (DiffBaseUnreachable).
 	ErrorCode string `json:"errorCode,omitempty"`

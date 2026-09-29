@@ -59,8 +59,11 @@ type RepoDiff struct {
 	PatchBase64    []byte   `json:"patchBase64,omitempty" doc:"The patch, base64, when it is not valid UTF-8 (patch is then absent)."`
 	FiltersIgnored bool     `json:"filtersIgnored,omitempty" doc:"Some changed files have a clean/smudge filter attribute; filters are not run, so they are compared raw and may show as changed when they are not."`
 	FilteredPaths  []string `json:"filteredPaths,omitempty" doc:"Those files (at most 100)."`
-	Error          string   `json:"error,omitempty" doc:"Why this repository's diff could not be computed."`
-	ErrorCode      string   `json:"errorCode,omitempty" enum:"base_unreachable" doc:"base_unreachable: the commit it was cloned at is no longer in its history (base=head still works)."`
+	// What the patch cannot carry.
+	NormalizedPaths []string `json:"normalizedPaths,omitempty" doc:"Files git converts before comparing them (text, eol, core.autocrlf, working-tree-encoding): the patch has git's stored form, and a change of line endings alone does not show (at most 100)."`
+	DirtySubmodules []string `json:"dirtySubmodules,omitempty" doc:"Submodules with uncommitted changes or untracked files of their own, which the patch does not carry (only a changed commit of a submodule is in it; at most 100)."`
+	Error           string   `json:"error,omitempty" doc:"Why this repository's diff could not be computed."`
+	ErrorCode       string   `json:"errorCode,omitempty" enum:"base_unreachable" doc:"base_unreachable: the commit it was cloned at is no longer in its history (base=head still works)."`
 }
 
 // RunDiff is a Run's diff, per repository.
@@ -313,7 +316,8 @@ func ordered(t diffTarget, got map[string]RepoDiff, source string, at time.Time)
 func repoDiff(st proto.DiffStat, patch []byte) RepoDiff {
 	d := RepoDiff{Repo: st.Repo, Base: st.Base, Head: st.Head, Truncated: st.Truncated,
 		Files: st.Files, Insertions: st.Insertions, Deletions: st.Deletions, FileStats: st.FileStats,
-		FiltersIgnored: st.FiltersIgnored, FilteredPaths: st.FilteredPaths, Error: st.Error, ErrorCode: st.ErrorCode}
+		FiltersIgnored: st.FiltersIgnored, FilteredPaths: st.FilteredPaths, NormalizedPaths: st.NormalizedPaths,
+		DirtySubmodules: st.DirtySubmodules, Error: st.Error, ErrorCode: st.ErrorCode}
 	setPatch(&d, patch)
 	return d
 }
@@ -397,7 +401,7 @@ func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget
 		// The blob must be this Run's own (its tenant's): a row naming
 		// another's is refused on report, and never read here either.
 		q, err := tx.Query(ctx, `SELECT d.repo, d.base, d.head, d.truncated, d.files, d.insertions, d.deletions, d.file_stats,
-				d.filters_ignored, d.filtered_paths, d.error, d.error_code,
+				d.filters_ignored, d.filtered_paths, d.normalized_paths, d.dirty_submodules, d.error, d.error_code,
 				coalesce(b.s3_key, ''), coalesce(b.location, ''), d.size, d.sha256,
 				d.blob_id IS NOT NULL AND (b.id IS NULL OR b.tenant_id <> d.tenant_id OR b.run_id <> d.run_id OR b.kind <> 'diff')
 			FROM snapshot_diffs d LEFT JOIN blobs b ON b.id = d.blob_id
@@ -408,7 +412,8 @@ func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget
 		rows, err = pgx.CollectRows(q, func(r pgx.CollectableRow) (row, error) {
 			var x row
 			err := r.Scan(&x.d.Repo, &x.d.Base, &x.d.Head, &x.d.Truncated, &x.d.Files, &x.d.Insertions, &x.d.Deletions,
-				&x.d.FileStats, &x.d.FiltersIgnored, &x.d.FilteredPaths, &x.d.Error, &x.d.ErrorCode, &x.key, &x.location, &x.size, &x.sum, &x.foreign)
+				&x.d.FileStats, &x.d.FiltersIgnored, &x.d.FilteredPaths, &x.d.NormalizedPaths, &x.d.DirtySubmodules,
+				&x.d.Error, &x.d.ErrorCode, &x.key, &x.location, &x.size, &x.sum, &x.foreign)
 			return x, err
 		})
 		return err
@@ -747,19 +752,13 @@ func recordSnapshotDiffs(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID
 			}
 			blobID = &d.Blob.BlobID
 		}
-		stats, filtered := d.FileStats, d.FilteredPaths
-		if stats == nil {
-			stats = []proto.DiffFile{}
-		}
-		if filtered == nil {
-			filtered = []string{}
-		}
 		if _, err := tx.Exec(ctx, `INSERT INTO snapshot_diffs (tenant_id, run_id, snapshot_id, epoch, repo, kind, base, head, blob_id,
-				size, sha256, truncated, files, insertions, deletions, file_stats, filters_ignored, filtered_paths, error, error_code)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) ON CONFLICT DO NOTHING`,
+				size, sha256, truncated, files, insertions, deletions, file_stats, filters_ignored, filtered_paths,
+				normalized_paths, dirty_submodules, error, error_code)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) ON CONFLICT DO NOTHING`,
 			tenantID, runID, snapID, epoch, d.Repo, d.Kind, d.Base, d.Head, blobID,
-			d.PatchBytes, d.PatchSHA256, d.Truncated, d.Files, d.Insertions, d.Deletions, stats,
-			d.FiltersIgnored, filtered, d.Error, d.ErrorCode); err != nil {
+			d.PatchBytes, d.PatchSHA256, d.Truncated, d.Files, d.Insertions, d.Deletions, nonNil(d.FileStats),
+			d.FiltersIgnored, nonNil(d.FilteredPaths), nonNil(d.NormalizedPaths), nonNil(d.DirtySubmodules), d.Error, d.ErrorCode); err != nil {
 			return err
 		}
 	}
