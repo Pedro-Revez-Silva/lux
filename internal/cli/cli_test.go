@@ -28,6 +28,8 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// isolateConfig points the user config dir at a temp dir, so the real
+// ~/.config/lux/config.toml is never read, and writes config there.
 func isolateConfig(t *testing.T, config string) {
 	t.Helper()
 	home := t.TempDir()
