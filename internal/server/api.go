@@ -1569,6 +1569,7 @@ func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostO
 			if err != nil {
 				return err
 			}
+			// drainHosts writes its events last: lock nothing after it here.
 			hosts, err = s.drainHosts(ctx, tx, "drain requested", causeManual, stopReason, "id = $1 AND (tenant_id = $2 OR $3)", id, p.TenantID, p.Operator)
 			if err == nil && len(hosts) == 0 {
 				return errNotFound

@@ -2,13 +2,16 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/marcioapm/lux/internal/ids"
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -434,5 +437,116 @@ func TestPoolRemovalTakesItsStreamAfterItsRuns(t *testing.T) {
 	}
 	if n := len(events(t, s, evRetired)); n != 1 {
 		t.Fatalf("%d pool.retired events, want 1", n)
+	}
+}
+
+// streamWaiter waits until a backend is blocked on owner's event-stream
+// lock in tbl, and returns its pid.
+func streamWaiter(t *testing.T, ctx context.Context, s *Server, tbl eventTable, owner string) int {
+	t.Helper()
+	for {
+		var pid int
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `WITH k AS (SELECT hashtextextended($1, 0) AS key)
+				SELECT coalesce((SELECT l.pid FROM pg_locks l, k WHERE NOT l.granted AND l.locktype = 'advisory'
+					AND l.classid = ((k.key >> 32) & 4294967295)::oid AND l.objid = (k.key & 4294967295)::oid AND l.objsubid = 1 LIMIT 1), 0)`,
+				tbl.table+":"+owner).Scan(&pid)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pid != 0 {
+			return pid
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("nothing waits on the %s stream of %s", tbl.table, owner)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// heldElsewhere fails unless another transaction holds what each probe
+// asks for: a row lock taken NOWAIT, or an advisory lock tried.
+func heldElsewhere(t *testing.T, ctx context.Context, s *Server, probes map[string]string) {
+	t.Helper()
+	for name, q := range probes {
+		var got bool
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, q).Scan(&got)
+		})
+		var pgErr *pgconn.PgError
+		switch {
+		case errors.As(err, &pgErr) && pgErr.Code == "55P03":
+		case err != nil:
+			t.Fatalf("%s: %v", name, err)
+		case got:
+			t.Errorf("%s is not held by the time the event stream is requested", name)
+		}
+	}
+}
+
+// A drain (drainHost, hostEvicting) requests its event streams after every
+// other lock: blocked on a stream, it already holds its Run, placement,
+// cost-host lock and host row (and, for spot_interrupted, the host's
+// stream), so a fold queued on that stream never waits on a writer that
+// waits on the fold's own locks.
+func TestDrainsTakeTheirEventStreamsLast(t *testing.T) {
+	type blocked struct {
+		tbl   eventTable
+		owner string
+	}
+	for _, c := range []struct {
+		name  string
+		drain func(s *Server, ctx context.Context) error
+		at    blocked
+	}{
+		{"drainHost", func(s *Server, ctx context.Context) error {
+			admin := context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+			_, err := s.drainHost(admin, &drainHostInput{HostPath: HostPath{ID: "h1"}, Body: &drainHostRequest{ForceEvict: true}})
+			return err
+		}, blocked{hostEvents, "h1"}},
+		{"hostEvicting at drain_requested", func(s *Server, ctx context.Context) error {
+			return s.hostEvicting(ctx, "h1", proto.Evicting{Reason: "spot"})
+		}, blocked{hostEvents, "h1"}},
+		{"hostEvicting at spot_interrupted", func(s *Server, ctx context.Context) error {
+			return s.hostEvicting(ctx, "h1", proto.Evicting{Reason: "spot"})
+		}, blocked{poolEvents, "pool1"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := testServer(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			infraFixture(t, s, ctx)
+			running(t, s, ctx)
+			fold := holdTx(ctx, s, func(tx pgx.Tx) error { return lockStream(ctx, tx, c.at.tbl, c.at.owner, true) })
+			if !fold.settle(t, ctx, s) {
+				t.Fatal("the stream holder waited on nothing")
+			}
+			drained := make(chan error, 1)
+			go func() { drained <- c.drain(s, ctx) }()
+			streamWaiter(t, ctx, s, c.at.tbl, c.at.owner)
+			probes := map[string]string{
+				"the Run":            `SELECT true FROM runs WHERE id = 'r1' FOR UPDATE NOWAIT`,
+				"the placement":      `SELECT true FROM placements WHERE id = 'p1' FOR UPDATE NOWAIT`,
+				"the host row":       `SELECT true FROM hosts WHERE id = 'h1' FOR NO KEY UPDATE NOWAIT`,
+				"the cost-host lock": `SELECT pg_try_advisory_xact_lock(hashtextextended('cost-host:h1', 0))`,
+			}
+			if c.at.tbl == poolEvents {
+				probes["the host's stream"] = `SELECT pg_try_advisory_xact_lock(hashtextextended('host_events:h1', 0))`
+			}
+			heldElsewhere(t, ctx, s, probes)
+			fold.finish(t, ctx)
+			select {
+			case err := <-drained:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-ctx.Done():
+				t.Fatal("the drain never finished")
+			}
+			if !queryOne[bool](t, s, `SELECT stop_requested_at IS NOT NULL FROM placements WHERE id = 'p1'`) {
+				t.Fatal("the drain did not stop the placement")
+			}
+		})
 	}
 }

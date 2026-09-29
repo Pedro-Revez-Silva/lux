@@ -746,6 +746,8 @@ func (s *Server) hostEvicting(ctx context.Context, hostID string, ev proto.Evict
 			if !ev.Deadline.IsZero() {
 				reason += " at " + ev.Deadline.UTC().Format(time.RFC3339)
 			}
+			// drainHosts writes its events last, then spot_interrupted: lock
+			// no row after them here (event streams come last).
 			hosts, err = s.drainHosts(ctx, tx, reason, causePreempt, "preempt", "id = $1", hostID)
 			if err != nil || len(hosts) == 0 {
 				return err
