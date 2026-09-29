@@ -324,6 +324,15 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
 		if p := r.placement(f.RunID, f.Epoch); p != nil {
 			p.interrupt(ctx)
 		}
+	case proto.MsgServers:
+		var sv proto.Servers
+		if err := json.Unmarshal(f.Data, &sv); err != nil {
+			r.log.Error("bad servers", "err", err)
+			return
+		}
+		if p := r.placement(f.RunID, f.Epoch); p != nil {
+			p.setServers(ctx, sv)
+		}
 	case proto.MsgPush:
 		if p := r.placement(f.RunID, f.Epoch); p != nil {
 			var req proto.Push

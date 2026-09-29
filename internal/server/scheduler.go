@@ -486,6 +486,10 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	if err := enqueue(ctx, tx, h.ID, r.ID, epoch, proto.MsgAssign, a); err != nil {
 		return err
 	}
+	// Then its servers: the spec's start on every placement.
+	if err := s.startSpecServers(ctx, tx, r.TenantID, r.ID, epoch); err != nil {
+		return err
+	}
 	h.UsedRuns++
 	h.UsedCPUs += r.Spec.Resources.CPUs
 	h.UsedMem += int64(r.Spec.Resources.Memory)

@@ -450,6 +450,10 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 				if err := recordImageResolved(ctx, tx, f.RunID, ev.Data); err != nil {
 					return err
 				}
+			case proto.EvServerState:
+				// The runner's own account, applied to the server's state:
+				// not stored as the event it came as.
+				return applyServerState(ctx, tx, tenantID, f.RunID, f.Epoch, ev.Data)
 			case proto.EvDiskExceeded:
 				if _, err := s.requestStop(ctx, tx, tenantID, f.RunID, "disk"); err != nil {
 					return err

@@ -39,3 +39,21 @@ export function IconButton({ label, size = "md", variant = "ghost", active, chil
     </button>
   );
 }
+
+export interface LinkButtonProps extends Omit<ComponentPropsWithRef<"a">, "children"> {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  icon?: ReactNode;
+  children?: ReactNode;
+}
+
+/** A link that looks like a Button: for navigation, where a Button would need a click handler that navigates. */
+export function LinkButton({ variant = "default", size = "md", icon, children, className, ...rest }: LinkButtonProps) {
+  const cls = ["btn", `btn-${variant}`, `btn-${size}`, className ?? ""].join(" ").trim();
+  return (
+    <a className={cls} {...rest}>
+      {icon && <span className="btn-icon">{icon}</span>}
+      {children != null && <span className="btn-label">{children}</span>}
+    </a>
+  );
+}

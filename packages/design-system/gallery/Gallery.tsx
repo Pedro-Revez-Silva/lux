@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Badge,
   Button,
@@ -8,6 +8,7 @@ import {
   ColorKey,
   compareMoney,
   ConfirmDialog,
+  ConnectionBadge,
   CostFigure,
   CostStatusBadge,
   EmptyState,
@@ -38,8 +39,12 @@ import {
   RUN_STATE_LIST,
   SectionHeader,
   Select,
+  SERVER_STATE_LIST,
+  ServerList,
+  ServerStateMark,
   Skeleton,
   SkeletonLines,
+  solarized,
   Sparkline,
   Spinner,
   sumMoney,
@@ -48,6 +53,8 @@ import {
   TenantPicker,
   Table,
   Tabs,
+  Terminal,
+  TerminalOverlay,
   TimeRangePicker,
   TimeSeriesChart,
   Timeline,
@@ -56,10 +63,13 @@ import {
   useTheme,
   useToast,
   type Column,
+  type ConnectionStatus,
+  type ServerInfo,
+  type TerminalHandle,
   type TimeRange,
 } from "../src/index.ts";
-import { IconDots, IconInfo, IconMoon, IconRefresh, IconRows, IconRowsLoose, IconSun } from "../src/icons.tsx";
-import { fakeCostLines, fakeCostSeries, fakeHosts, fakeLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
+import { IconDots, IconInfo, IconMinus, IconMoon, IconPlus, IconRefresh, IconRows, IconRowsLoose, IconSun, IconTerminal, IconWarning } from "../src/icons.tsx";
+import { fakeCostLines, fakeCostSeries, fakeHosts, fakeLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeShellScript, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
 
 function Section({ id, title, children, note }: { id: string; title: string; note?: ReactNode; children: ReactNode }) {
   return (
@@ -73,7 +83,7 @@ function Section({ id, title, children, note }: { id: string; title: string; not
   );
 }
 
-const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "tabs", "selects", "charts", "costs", "timeline", "events", "logs", "keyvalue", "dialogs", "feedback", "format"];
+const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "tabs", "selects", "charts", "costs", "timeline", "events", "logs", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
 
 /** The gallery: a slim bar (brand, theme and density) over the sections. */
 export function Gallery() {
@@ -133,6 +143,8 @@ function Sections() {
         <TimelineDemo />
         <EventsDemo />
         <Logs />
+        <TerminalDemo />
+        <Servers />
         <KeyValueDemo />
         <Dialogs />
         <Feedback />
@@ -574,6 +586,22 @@ function States() {
           <StatePill key={s} kind="host" state={s} />
         ))}
       </div>
+      <h3 className="sg-h3">Server states (ServerStateMark)</h3>
+      <div className="sg-row">
+        {SERVER_STATE_LIST.map((s) => (
+          <ServerStateMark key={s} state={s} />
+        ))}
+        <ServerStateMark state="exited" exitCode={1} />
+        <ServerStateMark state="ready" compact />
+      </div>
+      <h3 className="sg-h3">Connection (ConnectionBadge)</h3>
+      <div className="sg-row">
+        {(["connecting", "connected", "exited", "disconnected"] as ConnectionStatus[]).map((s) => (
+          <ConnectionBadge key={s} status={s} exitCode={s === "exited" ? 0 : undefined} />
+        ))}
+        <ConnectionBadge status="exited" exitCode={130} />
+        <ConnectionBadge status="connecting" label="Reconnecting" />
+      </div>
     </Section>
   );
 }
@@ -801,6 +829,206 @@ function Logs() {
       <LogView lines={lines} height={320} lineNumbers />
       <LogView lines={lines.slice(0, 6)} height={160} timestamps={false} follow={false} />
       <LogView lines={[]} height={100} />
+    </Section>
+  );
+}
+
+/* A fake shell behind the Terminal: the script plays on open and Reconnect;
+   typing echoes locally, Enter answers with a prompt. Enough to see the
+   frame, the palette in both themes, the font stepper and the overlays. */
+function TerminalDemo() {
+  const term = useRef<TerminalHandle>(null);
+  const [state, setState] = useState<ConnectionStatus>("connecting");
+  const [fontSize, setFontSize] = useState(13);
+  const [size, setSize] = useState({ cols: 80, rows: 24 });
+  const [round, setRound] = useState(0);
+  const { resolved } = useTheme();
+  const prompt = "\x1b[1;32magent@run-k3jq7x2m\x1b[0m:\x1b[1;34m/workspace\x1b[0m$ ";
+
+  useEffect(() => {
+    const t = term.current;
+    if (!t) return;
+    t.reset();
+    setState("connecting");
+    t.write("\x1b[2mOpening a shell on gp-eu-west-1-c4 (bash -l, falling back to sh)…\x1b[0m\r\n");
+    let i = 0;
+    const timer = setInterval(() => {
+      if (i === 0) {
+        t.reset();
+        setState("connected");
+        t.focus();
+      }
+      const line = fakeShellScript[i++];
+      if (line == null) {
+        clearInterval(timer);
+        return;
+      }
+      t.write(line);
+    }, 40);
+    return () => clearInterval(timer);
+  }, [round]);
+
+  const onData = (d: string) => {
+    const t = term.current;
+    if (!t || state !== "connected") return;
+    if (d === "\r") t.write("\r\n" + prompt);
+    else if (d === "\x7f") t.write("\b \b");
+    else if (d === "\x04") {
+      t.write("exit\r\n");
+      setState("exited");
+    } else t.write(d);
+  };
+
+  const overlay =
+    state === "exited" ? (
+      <TerminalOverlay
+        icon={<IconTerminal size={18} />}
+        title={
+          <>
+            Shell exited <Badge mono>code 0</Badge>
+          </>
+        }
+        description={
+          <>
+            The shell ended (you typed <span className="mono">exit</span>, or it was killed). The run is still running; a new shell starts fresh in <span className="mono">/workspace</span>.
+          </>
+        }
+        actions={
+          <>
+            <Button variant="primary" icon={<IconRefresh size={14} />} onClick={() => setRound((r) => r + 1)}>
+              Start a new shell
+            </Button>
+            <Button variant="ghost">Back to run</Button>
+          </>
+        }
+        meta={
+          <>
+            Lasted 3m 12s · recorded as <span className="mono">terminal.closed</span> on the run.
+          </>
+        }
+      />
+    ) : state === "disconnected" ? (
+      <TerminalOverlay
+        warn
+        icon={<IconWarning size={18} />}
+        title="Connection to the host was lost"
+        description="The run may be moving to another host. This shell is gone; when the run is running again, Reconnect opens a new one."
+        actions={
+          <>
+            <Button variant="primary" icon={<IconRefresh size={14} />} onClick={() => setRound((r) => r + 1)}>
+              Reconnect
+            </Button>
+            <Button variant="ghost">Back to run</Button>
+          </>
+        }
+        meta="Socket closed (1006) · host last seen 8s ago."
+      />
+    ) : undefined;
+
+  return (
+    <Section id="terminal" title="Terminal, ConnectionBadge, TerminalOverlay" note="xterm.js in the LogView's frame, Solarized inside (terminalThemes: exact dark and light, following the console theme). Transport-agnostic: the page writes bytes through the handle and gets keystrokes and resizes back; WebGL rendering with a DOM fallback. Type into it; Ctrl-D ends the fake shell; Ctrl+Shift+C copies the selection.">
+      <div className="sg-row">
+        <ConnectionBadge status={state} exitCode={state === "exited" ? 0 : undefined} />
+        <div className="btn-group" role="group" aria-label="Font size">
+          <IconButton label="Smaller text" onClick={() => setFontSize((f) => Math.max(10, f - 1))}>
+            <IconMinus size={15} />
+          </IconButton>
+          <span className="btn-group-val">{fontSize} px</span>
+          <IconButton label="Larger text" onClick={() => setFontSize((f) => Math.min(20, f + 1))}>
+            <IconPlus size={15} />
+          </IconButton>
+        </div>
+        <Button size="sm" onClick={() => setRound((r) => r + 1)}>
+          Reconnect
+        </Button>
+        <Button size="sm" onClick={() => setState("exited")}>
+          Shell exits
+        </Button>
+        <Button size="sm" onClick={() => setState("disconnected")}>
+          Connection lost
+        </Button>
+        <span className="muted">
+          {resolved === "dark" ? "Solarized Dark" : "Solarized Light"} · <span className="mono">{solarized.base03}</span> / <span className="mono">{solarized.base3}</span>
+        </span>
+      </div>
+      <div style={{ height: 420, display: "flex" }}>
+        <Terminal
+          ref={term}
+          fontSize={fontSize}
+          disabled={state !== "connected"}
+          onData={onData}
+          onResize={setSize}
+          onReady={setSize}
+          overlay={overlay}
+          bar={
+            <>
+              <div className="term-bar-group">
+                <span className="num">
+                  {size.cols} × {size.rows}
+                </span>
+                <span className="sep">·</span>
+                <span>
+                  <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> / <kbd>V</kbd> to copy and paste
+                </span>
+                <span className="sep">·</span>
+                <span>Closing this tab ends the shell</span>
+              </div>
+              <div className="term-bar-group is-audit">
+                Opened by <span className="mono">ada@example.com</span> · recorded as a run event
+              </div>
+            </>
+          }
+        />
+      </div>
+    </Section>
+  );
+}
+
+function Servers() {
+  const [servers, setServers] = useState<ServerInfo[]>(fakeServers);
+  const [busy, setBusy] = useState<string | null>(null);
+  const toast = useToast();
+  const act = (label: string, s: ServerInfo, next: Partial<ServerInfo>) => {
+    setBusy(s.name);
+    setTimeout(() => {
+      setServers((xs) => xs.map((x) => (x.name === s.name ? { ...x, ...next } : x)));
+      setBusy(null);
+      toast({ title: `${label} ${s.name}`, tone: "success" });
+    }, 600);
+  };
+  const renderLog = (s: ServerInfo) => <LogView lines={fakeServerLogs[s.name] ?? []} height={240} timestamps />;
+  const handlers = {
+    now: NOW,
+    onStart: (s: ServerInfo) => act("Started", s, { state: "starting", since: new Date(NOW).toISOString() }),
+    onStop: (s: ServerInfo) => act("Stopped", s, { state: "stopped", stopReason: "stopped", since: new Date(NOW).toISOString() }),
+    onRestart: (s: ServerInfo) => act("Restarted", s, { state: "starting", since: new Date(NOW).toISOString() }),
+    onRemove: (s: ServerInfo) => {
+      setServers((xs) => xs.filter((x) => x.name !== s.name));
+      toast({ title: `Removed ${s.name}`, tone: "warn" });
+    },
+    renderLog,
+  };
+  return (
+    <Section id="servers" title="ServerList, ServerRow" note="A run's servers: name and port lead, state (ServerStateMark) with how long, the preview URL to copy or open (dimmed while it does not answer), and what can be done: start, stop, restart, remove, and an expandable log (LogView) fetched when opened. A server without a command was started by hand: lux only watches its port.">
+      <Card title="Servers" subtitle="live: try the actions and open a log" flush actions={<Button size="sm" icon={<IconPlus size={13} />}>Add server</Button>}>
+        <ServerList servers={servers} busy={busy ? [busy] : undefined} runRunning {...handlers} note={<>Servers stop when the run stops or moves host; they do not restart on their own. Output streams into the run's output as <span className="mono">server:&lt;name&gt;</span>.</>} />
+      </Card>
+      <div className="grid grid-2">
+        <Card title="Exited" subtitle="the log is open on the failed server" flush>
+          <ServerList servers={fakeServersExited} open={["api"]} runRunning now={NOW} onStart={() => {}} onStop={() => {}} onRestart={() => {}} renderLog={renderLog} />
+        </Card>
+        <div className="stack">
+          <Card title="After a migration" subtitle="every server stopped by the move; the run is not running yet" flush>
+            <ServerList servers={fakeServersMigrated} runRunning={false} now={NOW} onStart={() => {}} onStop={() => {}} renderLog={renderLog} />
+          </Card>
+          <Card title="Started by hand, no previews configured" flush>
+            <ServerList servers={[fakeServerManual]} runRunning now={NOW} onStop={() => {}} onRemove={() => {}} />
+          </Card>
+          <Card title="Empty" flush>
+            <ServerList servers={[]} runRunning empty={<EmptyState compact title="No servers" description="Add one to expose a port of this run, with a command lux starts for you." action={<Button size="sm" icon={<IconPlus size={13} />}>Add server</Button>} />} />
+          </Card>
+        </div>
+      </div>
     </Section>
   );
 }

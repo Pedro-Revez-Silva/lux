@@ -22,9 +22,11 @@ interface Session {
   role: Role;
   /** Signed in by Cloudflare Access, as this person (no key). */
   user: User | null;
+  /** How luxd's console signs people in, once whoami has said (null until then). */
+  consoleAuth: "key" | "cloudflare-access" | null;
 }
 
-let session: Session = { key: readKey(), role: "unknown", user: null };
+let session: Session = { key: readKey(), role: "unknown", user: null, consoleAuth: null };
 
 function readKey(): string | null {
   try {
@@ -50,13 +52,13 @@ export function signIn(key: string) {
   try {
     sessionStorage.setItem(KEY, key);
   } catch {}
-  session = { key, role: "unknown", user: null };
+  session = { ...session, key, role: "unknown", user: null };
   emit();
 }
 
 /** Signed in by the console auth luxd sits behind (Cloudflare Access). */
 export function signInAs(user: User, role: Role) {
-  session = { key: null, role, user };
+  session = { ...session, key: null, role, user, consoleAuth: "cloudflare-access" };
   emit();
 }
 
@@ -64,13 +66,13 @@ export function signOut() {
   try {
     sessionStorage.removeItem(KEY);
   } catch {}
-  session = { key: null, role: "unknown", user: null };
+  session = { ...session, key: null, role: "unknown", user: null };
   emit();
 }
 
-export function setRole(role: Role) {
-  if (session.role === role) return;
-  session = { ...session, role };
+export function setRole(role: Role, consoleAuth?: Session["consoleAuth"]) {
+  if (session.role === role && (consoleAuth == null || session.consoleAuth === consoleAuth)) return;
+  session = { ...session, role, consoleAuth: consoleAuth ?? session.consoleAuth };
   emit();
 }
 

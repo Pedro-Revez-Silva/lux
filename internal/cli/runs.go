@@ -305,6 +305,12 @@ func (a *app) getCmd() *cobra.Command {
 					fmt.Fprintf(w, "  %d  %-12s %-8s exit=%s %s\n", p.Epoch, p.HostName, p.State, code, p.ExitReason)
 				}
 			}
+			if len(run.Servers) > 0 {
+				fmt.Fprintln(w, "servers:")
+				for _, sv := range run.Servers {
+					fmt.Fprintf(w, "  %-12s %-6d %-24s %s\n", sv.Name, sv.Port, serverState(sv), serverURL(sv))
+				}
+			}
 			if u := run.Usage; u != nil && u.Placements > 0 {
 				fmt.Fprintf(w, "usage:     peak memory %s, peak disk %s, cpu %.1fs\n",
 					bytesHuman(u.PeakMemoryBytes), bytesHuman(u.PeakDiskBytes), u.CPUSeconds)
@@ -339,6 +345,9 @@ func (a *app) getCmd() *cobra.Command {
 
 type logOpts struct {
 	stderr, events bool
+	// server: only this server's output; servers: servers' output too.
+	server  string
+	servers bool
 }
 
 func (a *app) logsCmd() *cobra.Command {
@@ -363,6 +372,8 @@ func (a *app) logsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&since, "since", "", "resume from a cursor")
 	cmd.Flags().BoolVar(&o.stderr, "stderr", true, "include stderr")
 	cmd.Flags().BoolVar(&o.events, "events", false, "include structured events and lifecycle")
+	cmd.Flags().StringVar(&o.server, "server", "", "only this server's output")
+	cmd.Flags().BoolVar(&o.servers, "servers", false, "include the Run's servers' output (prefixed with their names)")
 	return cmd
 }
 
@@ -397,6 +408,12 @@ func (a *app) printLogs(ctx context.Context, id, since string, follow bool, o lo
 	if o.events {
 		q.Set("events", "true")
 	}
+	if o.server != "" {
+		q.Set("server", o.server)
+	}
+	if o.servers {
+		q.Set("servers", "true")
+	}
 	cur := since
 	ended := false
 	err := a.c.Stream(ctx, "/v1/runs/"+id+"/output", q, func(ev client.SSEEvent) error {
@@ -419,6 +436,28 @@ func (a *app) printLogs(ctx context.Context, id, since string, follow bool, o lo
 			case "stderr":
 				if o.stderr {
 					fmt.Fprint(a.stderr, r.Data)
+				}
+			case "server":
+				w := a.stdout
+				if r.Stream == "stderr" {
+					if !o.stderr {
+						return nil
+					}
+					w = a.stderr
+				}
+				switch {
+				case r.Data == "":
+					if o.events {
+						fmt.Fprintf(a.stderr, "· [%s] %s\n", r.Server, r.Event)
+					}
+				case o.server != "":
+					fmt.Fprint(w, r.Data)
+				default:
+					for _, l := range strings.SplitAfter(r.Data, "\n") {
+						if l != "" {
+							fmt.Fprintf(w, "[%s] %s", r.Server, l)
+						}
+					}
 				}
 			case "event":
 				if o.events {
