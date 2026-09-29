@@ -51,3 +51,17 @@ cd tests && uv run python run_tests.py       # bring up Postgres, versitygw (S3)
 ```
 
 See [docs/development.md](docs/development.md).
+
+## License
+
+lux is source-available under the [PolyForm Perimeter License 1.0.1](LICENSE).
+Copyright 2026 Márcio Martins. It is not an OSI-approved open-source license.
+
+Personal use, internal business use, and use in noncompeting commercial products
+are permitted. For example, using lux for your company's internal workloads, including infrastructure supporting noncompeting commercial products
+is permitted. Using lux to provide others with a competing execution or sandbox service
+is not permitted, even if that offering is free or uses a different interface.
+
+These examples summarize the license; they do not change its terms. The full
+[license](LICENSE) governs. Third-party components retain their own licenses.
+For a separate license permitting a competing offering, contact the maintainer.
