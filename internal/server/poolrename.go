@@ -3,7 +3,7 @@ package server
 // Renaming a pool (POST /v1/pools/{name}/rename).
 //
 // A pool's name is in the database (pools.name, hosts.pool,
-// host_tokens.pool, cost_hourly.pool, the spec of every Run not yet final)
+// host_tokens.pool, cost_hourly.pool, the spec of every Run naming the pool)
 // and, for a provisioned pool, on its instances: the lux:pool tag. The
 // provisioner does not find a pool's instances by that tag but by
 // lux:pool-id, the pool's id, set at launch and never changed
@@ -60,7 +60,7 @@ type renamePoolRequest struct {
 type PoolRenamed struct {
 	Pool      Pool `json:"pool"`
 	Hosts     int  `json:"hosts" doc:"The pool's hosts that are not terminated; they follow the rename."`
-	Runs      int  `json:"runs" doc:"Runs not yet final (neither succeeded, failed nor cancelled) that name the pool; their spec names the new one."`
+	Runs      int  `json:"runs" doc:"Runs not yet final (neither succeeded, failed nor cancelled) that name the pool. Every Run naming it, final ones too, names the new one after the rename."`
 	Instances int  `json:"instances" doc:"Of those hosts, the ones a provider launched: they keep running, and the provisioner updates their lux:pool name tag after the rename."`
 	DryRun    bool `json:"dryRun,omitempty"`
 }
@@ -279,12 +279,12 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 
 		// A platform pool's Runs are those of every tenant that names it
 		// and has no live pool of its own by that name (as poolState's
-		// demand counts them).
-		runs := `FROM runs r WHERE r.state NOT IN ('succeeded', 'failed', 'cancelled')
-			AND coalesce(r.spec->'placement'->>'pool', 'default') = $2
+		// demand counts them). Final Runs move too, but are not counted
+		// among the Runs that will schedule under the new name.
+		runs := `FROM runs r WHERE coalesce(r.spec->'placement'->>'pool', 'default') = $2
 			AND CASE WHEN $1 = '' THEN NOT EXISTS (SELECT 1 FROM pools o WHERE o.tenant_id = r.tenant_id AND o.name = $2 AND NOT o.retired)
 			         ELSE r.tenant_id = $1 END`
-		if err := tx.QueryRow(ctx, `SELECT count(*) `+runs, tenantID, from).Scan(&out.Runs); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*) `+runs+` AND r.state NOT IN ('succeeded', 'failed', 'cancelled')`, tenantID, from).Scan(&out.Runs); err != nil {
 			return err
 		}
 		if checkName && tenantID == "" {
@@ -294,7 +294,7 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 			// exists, rather than by "no pool of their own by that name".
 			var tenant string
 			err := tx.QueryRow(ctx, `SELECT coalesce(t.name, o.tenant_id) FROM pools o LEFT JOIN tenants t ON t.id = o.tenant_id
-				WHERE o.name = $3 AND NOT o.retired AND o.tenant_id IN (SELECT r.tenant_id `+runs+`)
+				WHERE o.name = $3 AND NOT o.retired AND o.tenant_id IN (SELECT r.tenant_id `+runs+` AND r.state NOT IN ('succeeded', 'failed', 'cancelled'))
 				ORDER BY 1 LIMIT 1`, tenantID, from, to).Scan(&tenant)
 			if err == nil {
 				return errf(http.StatusConflict, "pool_exists",

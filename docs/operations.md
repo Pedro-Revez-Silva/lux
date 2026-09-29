@@ -370,9 +370,9 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
 renames a pool with its hosts running: nothing is drained or terminated.
 In one transaction the pool, its hosts (terminated ones too, which cost
 lookups join by name), its host tokens, their `cost_hourly` rows and every
-Run not yet final that names it move to the new name; finished Runs keep
-the spec they ran with. A Run waiting for the pool schedules under the new
-name at once. The new name follows the [pool-name rule](cli.md#hosts-and-pools)
+Run naming it move to the new name; final Runs' specs move without a
+new Run event. Only Runs not yet final count in the rename response. A Run
+waiting for the pool schedules under the new name at once. The new name follows the [pool-name rule](cli.md#hosts-and-pools)
 (422 `invalid_pool` otherwise; a name kept from before the rule is never
 given anew). Refused with 409:
 

@@ -372,7 +372,7 @@ func TestRenamePoolWithLiveHosts(t *testing.T) {
 	if got := f.query(t, `SELECT string_agg(DISTINCT pool, ',') FROM host_tokens`); got != "burst-eu" {
 		t.Errorf("host_tokens.pool = %s", got)
 	}
-	for id, want := range map[string]string{"waiting": "burst-eu", "stopped": "burst-eu", "done": "burst", "other": "elsewhere"} {
+	for id, want := range map[string]string{"waiting": "burst-eu", "stopped": "burst-eu", "done": "burst-eu", "other": "elsewhere"} {
 		if got := f.runPool(t, id); got != want {
 			t.Errorf("run %s names pool %q, want %q", id, got, want)
 		}

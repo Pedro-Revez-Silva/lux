@@ -127,7 +127,7 @@ export function Pools() {
   const mustType = r != null && (preview == null || preview.hosts > 0);
   let description = "Counting what follows the rename…";
   if (r && preview) {
-    description = `${plural(preview.hosts, "host")} and ${plural(preview.runs, "Run")} not yet finished will follow the rename; finished Runs keep the name they ran with.`;
+    description = `${plural(preview.hosts, "host")} and ${plural(preview.runs, "Run")} not yet finished will follow the rename, as will finished Runs, should they be resumed.`;
     if (preview.instances > 0)
       description += ` Its ${plural(preview.instances, "instance")} keep running; their name tag follows in the background.`;
   }

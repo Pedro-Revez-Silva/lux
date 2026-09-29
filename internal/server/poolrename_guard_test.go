@@ -239,3 +239,32 @@ func TestPoolTagsInBatches(t *testing.T) {
 	}
 	f.noneTerminated(t)
 }
+
+// A rename moves every Run naming the pool, final ones too, so a final
+// Run resumed later waits for the pool, not its old name; only the Runs
+// not yet final are counted, and final ones get no event.
+func TestRenameMovesFinalRunSpecsWithoutFinalRunEvents(t *testing.T) {
+	f := newRenameFixture(t, false)
+	execSQL(t, f.s, f.ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES
+		('failed-final', 't1', '{"placement":{"pool":"burst"}}', 'failed'),
+		('cancelled-final', 't1', '{"placement":{"pool":"burst"}}', 'cancelled')`)
+	execSQL(t, f.s, f.ctx, `INSERT INTO run_events (tenant_id, run_id, type) VALUES ('t1', 'done', 'completed')`)
+	out := f.rename(t, "burst", "burst-eu")
+	if out.Runs != 2 {
+		t.Fatalf("counted %d schedulable Runs, want 2", out.Runs)
+	}
+	for _, id := range []string{"done", "failed-final", "cancelled-final", "waiting", "stopped"} {
+		if got := f.runPool(t, id); got != "burst-eu" {
+			t.Errorf("%s names %q after rename", id, got)
+		}
+	}
+	if got := f.runPool(t, "other"); got != "elsewhere" {
+		t.Errorf("unrelated Run names %q", got)
+	}
+	if got := f.query(t, `SELECT count(*)::text FROM run_events WHERE run_id IN ('done', 'failed-final', 'cancelled-final')`); got != "1" {
+		t.Errorf("final Runs have %s events, want only the pre-existing event", got)
+	}
+	if got := f.query(t, `SELECT type FROM run_events WHERE run_id = 'done'`); got != "completed" {
+		t.Errorf("existing final Run event changed to %q", got)
+	}
+}

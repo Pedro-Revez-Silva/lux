@@ -120,7 +120,7 @@ lux pools ls
 lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON]
 lux pools set <name> --provider static --hourly-price 0.40 --currency USD   # default price of hosts registering into it
 lux pools rm <name> [--force-evict]      # admin: cordons its hosts, terminated once idle; --force-evict stops their live Runs too
-lux pools rename <name> <new-name>       # admin: hosts and Runs not yet final follow; instances keep running
+lux pools rename <name> <new-name>       # admin: hosts and Run specs follow; instances keep running
 ```
 
 A pool name is 1-32 characters: lowercase letters, digits and `-`,
@@ -129,9 +129,10 @@ reaches AWS in each instance's `lux:pool` tag and in its host name
 (`<pool>-xxxxxxxx`, which must fit a hostname). A pool created before this
 rule keeps its name and can still be updated; a new one cannot take it.
 
-`lux pools rename` moves the pool's hosts, host tokens and Runs not yet
-final to the new name at once, so a Run waiting for the pool still
-schedules. Finished Runs keep the spec they ran with. An `ec2` pool's
+`lux pools rename` moves the pool's hosts, host tokens and every Run spec
+naming it to the new name at once, so a Run waiting for the pool still
+schedules. Final Runs' specs move without a new Run event; only non-final
+Runs count in the rename response. An `ec2` pool's
 instances keep running; luxd finds them by the pool's id, and updates
 their `lux:pool` name tag in the background
 ([operations](operations.md#renaming-a-pool)). The old name is free at

@@ -325,8 +325,8 @@ func (s *Server) routes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "renamePool", Method: http.MethodPost, Path: "/v1/pools/{name}/rename", Tags: []string{"pools"},
 		Summary: "Rename a pool",
-		Description: "Its hosts, host tokens and Runs not yet final follow in one step: they name the new pool from then on, and Runs waiting for it still schedule. " +
-			"Final Runs keep the spec they ran with. A provisioned pool's instances stay up: luxd finds them by their lux:pool-id tag, which a rename does not change, " +
+		Description: "Its hosts, host tokens and every Run naming it follow in one step: they name the new pool from then on, Runs waiting for it still schedule, and a final Run resumed later resumes on it. " +
+			"A provisioned pool's instances stay up: luxd finds them by their lux:pool-id tag, which a rename does not change, " +
 			"and updates their lux:pool name tag afterwards, in the background. The old name is free for any pool at once; until one takes it, a Run or host token naming it is refused with 409 pool_renamed, naming the new name. " +
 			"409 pool_not_migrated for a provisioned pool with instances not yet confirmed to carry lux:pool-id (launched before it): wait for the next provider checks to tag them, or scale the pool to zero. " +
 			"409 pool_exists if the new name is taken, by a live or retired pool of the tenant, or by hosts or host tokens, or, for a platform pool, by a pool of a tenant whose Runs would follow the rename; 422 invalid_pool for a name outside the pool-name rule (a name kept from before the rule is never given anew). " +
