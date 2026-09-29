@@ -1,4 +1,4 @@
--- 030_pool_template_tags.sql — an EC2 pool's template may no longer set
+-- 031_pool_template_tags.sql — an EC2 pool's template may no longer set
 -- lux:* tags: lux tags every instance itself (lux:pool, lux:host, …) and
 -- finds a pool's instances by them. A template naming one (the Terraform
 -- module once generated "lux:pool") made every launch send that key twice,

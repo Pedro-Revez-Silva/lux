@@ -9,14 +9,14 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// 030 drops lux:* keys from EC2 pool templates stored before putPool
+// 031 drops lux:* keys from EC2 pool templates stored before putPool
 // refused them (production had {"lux:pool": "arm64"} from the Terraform
 // module), keeping other tags and every other field. A template left with
 // no tags loses "tags"; static pools and tag-free templates are untouched.
 func TestPoolTemplateTagsMigration(t *testing.T) {
 	owner, _ := emptyDB(t)
 	ctx := context.Background()
-	if _, err := store.MigrateTo(ctx, owner, "lux_app", "029_process_samples"); err != nil {
+	if _, err := store.MigrateTo(ctx, owner, "lux_app", "030_servers"); err != nil {
 		t.Fatal(err)
 	}
 	conn, err := pgx.Connect(ctx, owner)
