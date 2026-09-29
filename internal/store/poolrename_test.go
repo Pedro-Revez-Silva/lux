@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -152,5 +153,77 @@ func TestPoolRenameRLS(t *testing.T) {
 		if got != want {
 			t.Errorf("%s may call lux_pool_renamed_to: %v, want %v", role, got, want)
 		}
+	}
+}
+
+// A database that reached 037_snapshot_records without 036 (luxd from main
+// before the rename shipped) gets 036 at the next start: the migrator
+// applies every unrecorded version, in name order, not only those after
+// the latest. Both schemas are then there, and the rows from before too.
+func TestPoolRenameMigrationAfter037(t *testing.T) {
+	owner, appDSN := emptyDB(t)
+	ctx := context.Background()
+	if _, err := store.MigrateTo(ctx, owner, "lux_app", "035_snapshot_refused"); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := pgx.Connect(ctx, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	body, err := store.Migration("037_snapshot_records")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		string(body),
+		`INSERT INTO schema_migrations (version) VALUES ('037_snapshot_records')`,
+		`INSERT INTO tenants (id, name) VALUES ('t1', 't1')`,
+		`INSERT INTO pools (id, tenant_id, name, provider, is_default) VALUES ('p1', 't1', 'burst', 'ec2', true)`,
+	} {
+		if _, err := conn.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var has036 bool
+	if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '036_pool_rename')`).Scan(&has036); err != nil || has036 {
+		t.Fatalf("036 before the upgrade: %v (%v)", has036, err)
+	}
+
+	done, err := store.Migrate(ctx, owner, "lux_app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(done, "036_pool_rename") || slices.Contains(done, "037_snapshot_records") {
+		t.Fatalf("applied %v, want 036_pool_rename and not 037 again", done)
+	}
+	for _, col := range []struct{ table, column string }{
+		{"pools", "previous_names"}, {"pools", "id_migrated_at"}, {"hosts", "pool_id_tagged"}, {"leases", "token"},
+		{"luxd_instances", "capabilities"}, {"pool_rename_fence", "armed_at"},
+		{"blobs", "snapshot_id"}, {"artifacts", "snapshot_id"}, {"snapshots", "owns_records"},
+		{"placements", "snapshot_refused"}, {"pools", "is_default"}, {"runs", "pool_owner"},
+	} {
+		var ok bool
+		if err := conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2)`,
+			col.table, col.column).Scan(&ok); err != nil || !ok {
+			t.Errorf("%s.%s missing after the upgrade (%v)", col.table, col.column, err)
+		}
+	}
+	var name string
+	var isDefault bool
+	var previous []string
+	if err := conn.QueryRow(ctx, `SELECT name, is_default, previous_names FROM pools WHERE id = 'p1'`).Scan(&name, &isDefault, &previous); err != nil ||
+		name != "burst" || !isDefault || len(previous) != 0 {
+		t.Errorf("pool from before the upgrade: %s default %v previous %v (%v)", name, isDefault, previous, err)
+	}
+	// 036's function, granted to lux_app by the same start.
+	app, err := pgx.Connect(ctx, appDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close(ctx)
+	var renamedTo *string
+	if err := app.QueryRow(ctx, `SELECT lux_pool_renamed_to('burst')`).Scan(&renamedTo); err != nil || renamedTo != nil {
+		t.Errorf("lux_pool_renamed_to as lux_app: %v (%v)", renamedTo, err)
 	}
 }
