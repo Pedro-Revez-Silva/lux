@@ -54,14 +54,22 @@ See [docs/development.md](docs/development.md).
 
 ## License
 
-lux is source-available under the [PolyForm Perimeter License 1.0.1](LICENSE).
+lux is source-available under the [Elastic License 2.0](LICENSE) (ELv2).
 Copyright 2026 Márcio Martins. It is not an OSI-approved open-source license.
 
-Personal use, internal business use, and use in noncompeting commercial products
-are permitted. For example, using lux for your company's internal workloads, including infrastructure supporting noncompeting commercial products
-is permitted. Using lux to provide others with a competing execution or sandbox service
-is not permitted, even if that offering is free or uses a different interface.
+Personal use, internal business use, modification, and redistribution are
+permitted subject to the license. For example, using lux as internal
+infrastructure for a noncompeting commercial application is permitted. Providing
+lux to third parties as a hosted or managed service that gives users access to a
+substantial set of its features or functionality is not permitted. For example,
+hosting lux and giving customers access to a substantial set of its execution or
+sandbox features falls within this restriction.
 
-These examples summarize the license; they do not change its terms. The full
-[license](LICENSE) governs. Third-party components retain their own licenses.
-For a separate license permitting a competing offering, contact the maintainer.
+ELv2 also prohibits circumventing license-key functionality or removing or
+obscuring licensing, copyright, or other notices. It does not impose a general
+ban on commercial redistribution or selling self-hosted derivatives.
+
+This summary does not change the terms; the full [license](LICENSE) governs.
+Third-party components retain their own licenses. For separate permission to
+provide a hosted or managed service covered by the restriction, contact the
+maintainer.
