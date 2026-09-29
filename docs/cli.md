@@ -23,8 +23,9 @@ was reached; `1` anything else.
 ## Runs
 
 ```bash
-lux run -f spec.yaml [--follow | --wait] [--name N] [-l k=v] [--idempotency-key K] [--secrets-from .env]
+lux run -f spec.yaml [--follow | --wait] [--name N] [-l k=v] [--pool P] [--idempotency-key K] [--secrets-from .env]
 lux run --image alpine -- echo hello           # a quick generic Run
+lux run --image alpine --pool arm64 -- uname -m
 lux ls [--state running,stopped] [-l team=x] [--resumable] [--host H] [--limit N]   # with a COST column
 lux get <run>                                  # state, placements, usage
 lux logs <run> [-f] [--since <cursor>] [--events] [--stderr=false]
@@ -36,6 +37,10 @@ Specs are YAML or JSON (`-f -` reads stdin). A secret's value can come from
 the environment (`value: ${GITHUB_TOKEN}`), from a `.env` file
 (`--secrets-from`), or, when the spec omits the value, from an environment
 variable of the same name.
+
+Flags win over the spec file: `--pool` replaces `placement.pool`, as
+`--image` and `--name` replace theirs. Without `--pool` or
+`placement.pool`, the server picks the pool.
 
 `lux logs -o json` prints one JSON record per line:
 `{"cursor","epoch","seq","t","ch","data"|"event"}`. Pass a record's
