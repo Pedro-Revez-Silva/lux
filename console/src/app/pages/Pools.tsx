@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Badge, Button, Card, ConfirmDialog, PageHeader, Table, Tooltip, useToast, type Column } from "@lux/design-system";
-import { api, errorText, invalidate, type Pool, type PoolRenamed } from "../../api/index.ts";
+import { api, errorText, invalidate, isApiError, type Pool, type PoolRenamed } from "../../api/index.ts";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, labelsText } from "./common.tsx";
 
@@ -19,6 +19,9 @@ export function Pools() {
   // What would follow the rename, counted by luxd when the dialog opens.
   const [preview, setPreview] = useState<PoolRenamed | null>(null);
   const [busy, setBusy] = useState(false);
+  // Which dialog is current: a count answered for one opened earlier (or
+  // closed) is dropped.
+  const dialog = useRef(0);
 
   const rows = useMemo<PoolRow[]>(() => {
     const counts = new Map<string, { n: number; ready: number }>();
@@ -41,24 +44,49 @@ export function Pools() {
   // key acts on its own pools only.
   const owner = (p: Pool) => (operator && !p.platform ? p.tenant : undefined);
 
-  const openRename = (p: PoolRow) => {
-    setRenaming(p);
-    setPreview(null);
-    api.renamePool(owner(p), p.name, "", true).then(setPreview, (e) => {
-      toast({ title: `Cannot rename ${p.name}`, description: errorText(e), tone: "danger", duration: 8000 });
-      setRenaming(null);
-    });
+  const count = (p: PoolRow) => {
+    const id = dialog.current;
+    api.renamePool(owner(p), p.name, "", undefined, true).then(
+      (r) => {
+        if (dialog.current === id) setPreview(r);
+      },
+      (e) => {
+        if (dialog.current !== id) return;
+        toast({ title: `Cannot rename ${p.name}`, description: errorText(e), tone: "danger", duration: 8000 });
+        closeRename();
+      },
+    );
   };
 
-  const rename = async (p: PoolRow, newName: string) => {
+  const openRename = (p: PoolRow) => {
+    dialog.current++;
+    setRenaming(p);
+    setPreview(null);
+    count(p);
+  };
+
+  const closeRename = () => {
+    dialog.current++;
+    setRenaming(null);
+  };
+
+  // confirmed: the current name was typed. luxd requires it while the pool
+  // has hosts, counted when it renames, not when the dialog opened.
+  const rename = async (p: PoolRow, newName: string, confirmed: boolean) => {
+    const id = dialog.current;
     setBusy(true);
     try {
-      const r = await api.renamePool(owner(p), p.name, newName.trim());
+      const r = await api.renamePool(owner(p), p.name, newName.trim(), confirmed ? p.name : undefined);
       const retag = r.instances > 0 ? `; its ${plural(r.instances, "instance")} are being re-tagged` : "";
       toast({ title: `Renamed ${p.name} to ${r.pool.name}`, description: `${plural(r.hosts, "host")} and ${plural(r.runs, "Run")} followed${retag}.`, tone: "success" });
-      setRenaming(null);
+      if (dialog.current === id) closeRename();
       invalidate((k) => k.startsWith("pools@") || k.startsWith("hosts@"));
     } catch (e) {
+      if (isApiError(e) && e.code === "confirm_required" && dialog.current === id) {
+        // Hosts joined since the count: count again, and ask for the name.
+        setPreview(null);
+        count(p);
+      }
       toast({ title: "Rename failed", description: errorText(e), tone: "danger", duration: 8000 });
     } finally {
       setBusy(false);
@@ -114,7 +142,8 @@ export function Pools() {
   }, [showTenant, operator]);
 
   const r = renaming;
-  const live = preview?.hosts ?? r?.hostCount ?? 0;
+  // Until luxd has counted, the name is asked for as if there were hosts.
+  const mustType = r != null && (preview == null || preview.hosts > 0);
   let description = "Counting what follows the rename…";
   if (r && preview) {
     description = `${plural(preview.hosts, "host")} and ${plural(preview.runs, "Run")} not yet finished will follow the rename; finished Runs keep the name they ran with.`;
@@ -140,10 +169,10 @@ export function Pools() {
         confirmLabel="Rename pool"
         input={{ label: "New name", placeholder: r?.name, required: true }}
         // A pool with live hosts: the current name, typed, confirms.
-        confirmText={r && live > 0 ? r.name : undefined}
-        loading={busy || (r != null && preview == null)}
-        onConfirm={(name) => r && void rename(r, name ?? "")}
-        onCancel={() => setRenaming(null)}
+        confirmText={mustType ? r.name : undefined}
+        loading={busy}
+        onConfirm={(name) => r && void rename(r, name ?? "", mustType)}
+        onCancel={closeRename}
       />
     </div>
   );

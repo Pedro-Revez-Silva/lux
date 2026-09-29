@@ -47,9 +47,9 @@ export const api = {
   drainHost: (id: string, forceEvict = false) => request<{ draining: boolean; host: string }>(`/hosts/${enc(id)}/drain`, { method: "POST", body: { forceEvict } }),
 
   pools: (tenant: Scope, signal?: Sig) => request<{ pools: Pool[] }>("/pools", { tenant, signal }).then((r) => r.pools),
-  /** tenant: the pool's owner (id or name) for an operator key; undefined for a platform pool or a tenant key. */
-  renamePool: (tenant: Scope, name: string, newName: string, dryRun = false) =>
-    request<PoolRenamed>(`/pools/${enc(name)}/rename`, { method: "POST", tenant, query: { dryRun }, body: { name: newName } }),
+  /** tenant: the pool's owner (id or name) for an operator key; undefined for a platform pool or a tenant key. confirm: the pool's name, typed; luxd requires it while the pool has hosts. */
+  renamePool: (tenant: Scope, name: string, newName: string, confirm?: string, dryRun = false) =>
+    request<PoolRenamed>(`/pools/${enc(name)}/rename`, { method: "POST", tenant, query: { dryRun }, body: { name: newName, confirm } }),
   tenants: (signal?: Sig) => request<{ tenants: Tenant[] }>("/tenants", { signal }).then((r) => r.tenants),
 };
 

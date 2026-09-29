@@ -6,9 +6,11 @@ system's Chrome, or Playwright's own Chromium if installed
 from __future__ import annotations
 
 import re
+import threading
 from decimal import ROUND_HALF_EVEN, Decimal
 
 import pytest
+import requests
 from playwright.sync_api import expect
 
 from conftest import generic
@@ -543,3 +545,51 @@ def test_rename_a_pool_through_the_dialog(page, lux, runners, hosts):
     assert lux.get(waiting)["spec"]["placement"]["pool"] == new
     assert not page.errors, page.errors
     lux.run("cancel", waiting)
+
+
+def test_rename_dialog_ignores_a_late_count_and_waits_for_the_name(page, lux, runners, hosts):
+    """Pool A's count, answered after A's dialog was closed and B's opened,
+    does not fill B's dialog; while B's own count is pending, B's name must
+    be typed; and luxd itself refuses a rename of a pool with hosts
+    without that confirmation."""
+    a, b = f"a-{lux.tenant_id[-6:]}", f"b-{lux.tenant_id[-6:]}"
+    lux.run("pools", "set", a, "--provider", "static")
+    lux.run("pools", "set", b, "--provider", "static")
+    runners.start(hosts[0], token=runners.token("--pool", a))
+    wait_until(lambda: [h for h in lux.json("hosts", "ls") if h["name"] == hosts[0].name and h["pool"] == a], 60, 0.3, "no host")
+    # luxd: a pool with a host is renamed only with its name as confirmation.
+    r = requests.post(f"{lux.env.luxd_url}/v1/pools/{a}/rename", json={"name": a + "x"}, timeout=10,
+                      headers={"Authorization": f"Bearer {lux.api_key}"})
+    assert r.status_code == 409 and "confirm_required" in r.text, r.text
+
+    release_a, release_b = threading.Event(), threading.Event()
+
+    def delay(route):
+        # Held off the browser's thread: A's count until B's dialog is open,
+        # B's until the test has looked at the pending dialog.
+        gate = release_a if f"/pools/{a}/rename" in route.request.url else release_b
+        threading.Thread(target=lambda: (gate.wait(30), route.continue_()), daemon=True).start()
+    page.route(re.compile(r".*/v1/pools/[^/]+/rename\?dryRun=true.*"), delay)
+    page.sign_in(lux.api_key, "/pools")
+    page.get_by_role("row").filter(has_text=a).get_by_role("button", name="Rename", exact=True).click()
+    dialog = page.get_by_role("dialog")
+    expect(dialog.get_by_text("Counting what follows the rename")).to_be_visible(timeout=15_000)
+    dialog.get_by_role("button", name="Cancel", exact=True).click()
+    page.get_by_role("row").filter(has_text=b).get_by_role("button", name="Rename", exact=True).click()
+    expect(dialog.get_by_role("heading", name=f"Rename {b}?")).to_be_visible()
+    # Pending: B's name is asked for, as if it had hosts.
+    dialog.get_by_label("New name").fill(b + "2")
+    confirm = dialog.get_by_role("button", name="Rename pool", exact=True)
+    expect(dialog.get_by_label(re.compile(f"Type {b} to confirm"))).to_be_visible()
+    expect(confirm).to_be_disabled()
+    # A's count (1 host) arrives late: B's dialog keeps waiting for its own.
+    release_a.set()
+    page.wait_for_timeout(1000)
+    expect(dialog.get_by_text("1 host", exact=False)).to_have_count(0)
+    expect(dialog.get_by_text("Counting what follows the rename")).to_be_visible()
+    release_b.set()
+    expect(dialog.get_by_text("0 hosts and 0 Runs not yet finished will follow the rename", exact=False)).to_be_visible(timeout=15_000)
+    expect(dialog.get_by_label(re.compile(f"Type {b} to confirm"))).to_have_count(0)
+    confirm.click()
+    page.get_by_text(f"Renamed {b} to {b}2").wait_for(timeout=15_000)
+    assert not page.errors, page.errors
