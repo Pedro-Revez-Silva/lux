@@ -101,11 +101,20 @@ func (r *Runner) serveDiffRequest(ctx, sctx context.Context, cancel context.Canc
 func (r *Runner) answerDiff(ctx context.Context, runID string, epoch int, req proto.DiffRequest, send func(proto.DiffResult) error) proto.DiffEnd {
 	end := proto.DiffEnd{SubID: req.SubID}
 	p := r.placement(runID, epoch)
-	if p == nil || !p.running(ctx) {
+	if p == nil {
 		end.NotRunning = true
 		return end
 	}
 	req.Repos = p.withGitBases(req.Repos)
+	// A request that would be busy spawns nothing, podman inspect included.
+	if p.liveBusy(liveKey(req)) {
+		end.Busy = true
+		return end
+	}
+	if !p.running(ctx) {
+		end.NotRunning = true
+		return end
+	}
 	if busy, err := p.serveLiveDiff(ctx, req, send); busy {
 		end.Busy = true
 	} else if err != nil {
@@ -155,6 +164,13 @@ func liveKey(req proto.DiffRequest) string {
 	req.SubID = ""
 	b, _ := json.Marshal(req)
 	return string(b)
+}
+
+// liveBusy reports whether a live diff other than key's holds the slot.
+func (p *placement) liveBusy(key string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.live != nil && p.live.key != key
 }
 
 // serveLiveDiff answers one live diff request: it starts the diff, or

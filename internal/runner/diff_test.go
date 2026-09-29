@@ -25,7 +25,8 @@ import (
 // records its arguments in exec.args, sleeps $FAKE_DIFF_SLEEP seconds,
 // then prints the file out; the end of its stdin kills the sleep (as the
 // shim stops when its stdin ends). With the file exec-linger, it lingers
-// that many seconds after its stdin ends. With the file running, the Run's
+// that many seconds after its stdin ends; with exec-ignore-eof, it ignores
+// its stdin and runs until signalled. With the file running, the Run's
 // container is running (`container inspect`).
 const fakePodman = `#!/bin/sh
 D=$(dirname "$0")
@@ -35,6 +36,15 @@ container)
 	[ "$2" = inspect ] && [ -f "$D/running" ] && echo '[{"State":{"Running":true}}]' ;;
 exec)
 	echo $$ > "$D/exec.pid"
+	if [ -f "$D/exec-ignore-eof" ]; then
+		# A shim that ignores the end of its stdin: only a signal ends it.
+		sleep 60 >/dev/null 2>&1 &
+		echo $! > "$D/sleep.pid"
+		echo "$(date +%s.%N) exec started" >> "$D/log"
+		wait $!
+		echo "$(date +%s.%N) exec ended" >> "$D/log"
+		exit 0
+	fi
 	printf '%s\n' "$@" > "$D/exec.args"
 	sleep "${FAKE_DIFF_SLEEP:-0}" &
 	S=$!
@@ -382,5 +392,23 @@ func TestLiveDiffRetainsAtMostTheBudget(t *testing.T) {
 			!g[3].Stat.Truncated || g[3].Stat.Files != 1 || g[3].Stat.Insertions != 3 {
 			t.Errorf("request %d: %d results", i, len(g))
 		}
+	}
+}
+
+// A request that will be busy is answered without spawning anything:
+// podman inspect included.
+func TestBusyDiffSpawnsNothing(t *testing.T) {
+	r, dir := diffRunner(t)
+	touch(t, dir, "running")
+	p := runningPlacement(t, r)
+	p.mu.Lock()
+	p.live = &liveRun{key: "another diff", changed: make(chan struct{}), exited: make(chan struct{})}
+	p.mu.Unlock()
+	req := proto.DiffRequest{SubID: "b", Kind: "clone", Repos: []proto.DiffRepo{{Name: "app", Path: "/workspace/repos/app"}}}
+	if e := r.answerDiff(context.Background(), "r1", 1, req, nil); !e.Busy {
+		t.Fatalf("not busy: %+v", e)
+	}
+	if l := logOf(t, dir); l != "" {
+		t.Errorf("a busy request ran podman:\n%s", l)
 	}
 }
