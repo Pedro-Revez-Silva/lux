@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { Badge, Button, Card, ConfirmDialog, PageHeader, Table, Tooltip, useToast, type Column } from "@lux/design-system";
+import { Badge, Button, Card, ConfirmDialog, PageHeader, Table, useToast, type Column } from "@lux/design-system";
 import { api, errorText, invalidate, isApiError, type Pool, type PoolRenamed } from "../../api/index.ts";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, labelsText } from "./common.tsx";
@@ -77,7 +77,7 @@ export function Pools() {
     setBusy(true);
     try {
       const r = await api.renamePool(owner(p), p.name, newName.trim(), confirmed ? p.name : undefined);
-      const retag = r.instances > 0 ? `; its ${plural(r.instances, "instance")} are being re-tagged` : "";
+      const retag = r.instances > 0 ? `; its ${plural(r.instances, "instance")} keep running` : "";
       toast({ title: `Renamed ${p.name} to ${r.pool.name}`, description: `${plural(r.hosts, "host")} and ${plural(r.runs, "Run")} followed${retag}.`, tone: "success" });
       if (dialog.current === id) closeRename();
       invalidate((k) => k.startsWith("pools@") || k.startsWith("hosts@"));
@@ -94,26 +94,7 @@ export function Pools() {
   };
 
   const cols = useMemo<Column<PoolRow>[]>(() => {
-    const c: Column<PoolRow>[] = [
-      {
-        key: "name",
-        header: "Pool",
-        cell: (p) =>
-          p.renamedFrom ? (
-            <>
-              {p.name}{" "}
-              <Tooltip content={`Renamed from ${p.renamedFrom}: its instances are being re-tagged, and it cannot be renamed again until that is done. No other pool can take that name until no instance has carried it for a while.`}>
-                <Badge tone="warn">renaming</Badge>
-              </Tooltip>
-            </>
-          ) : (
-            p.name
-          ),
-        sortValue: (p) => p.name,
-        lead: true,
-        width: 220,
-      },
-    ];
+    const c: Column<PoolRow>[] = [{ key: "name", header: "Pool", cell: (p) => p.name, sortValue: (p) => p.name, lead: true, width: 180 }];
     if (showTenant) c.push({ key: "tenant", header: "Tenant", cell: (p) => (p.platform ? <span className="muted">platform</span> : p.tenant || DASH), sortValue: (p) => (p.platform ? "" : p.tenant), width: 130 });
     c.push(
       { key: "provider", header: "Provider", cell: (p) => <span className="secondary">{p.provider}</span>, sortValue: (p) => p.provider, width: 110 },
@@ -129,7 +110,7 @@ export function Pools() {
         // A platform pool is the operators' to rename.
         cell: (p) =>
           operator || !p.platform ? (
-            <Button size="sm" disabled={!!p.renamedFrom} title={p.renamedFrom ? "Its previous rename is still re-tagging its instances" : undefined} onClick={() => openRename(p)}>
+            <Button size="sm" onClick={() => openRename(p)}>
               Rename
             </Button>
           ) : null,
@@ -148,7 +129,7 @@ export function Pools() {
   if (r && preview) {
     description = `${plural(preview.hosts, "host")} and ${plural(preview.runs, "Run")} not yet finished will follow the rename; finished Runs keep the name they ran with.`;
     if (preview.instances > 0)
-      description += ` Its ${plural(preview.instances, "instance")} keep running and are re-tagged with the new name; no other pool can take the name ${r.name} until no instance has carried it for a while.`;
+      description += ` Its ${plural(preview.instances, "instance")} keep running; their name tag follows in the background.`;
   }
 
   return (
