@@ -100,7 +100,35 @@ lux resume run_x --add-repo docs=git@github.com:o/docs.git,ref=v2,push=false --r
 
 ```bash
 lux push <run> [--wait]         # push each repository to git.push.branch (leased)
+lux diff <run> [--base clone|head] [--stat]   # what a running Run changed, per repository
 ```
+
+`lux diff` computes each repository's diff now, inside the Run's container,
+as its workload user, without writing anything in the checkout: committed,
+staged, unstaged and untracked (not ignored) changes, from the commit it was
+cloned at (`--base clone`, kept across resumes) or from its `HEAD`
+(`--base head`). Each repository's patch is headed by
+`# repo <name>: <base12>..<head12>`, a line `git apply` skips; `--stat`
+prints git-style stat lines instead, and `-o json` the whole result
+(`repos[]`: `repo`, `base`, `head`, `patch`, `files`, `insertions`,
+`deletions`, `truncated`, `omitted`, `omittedCount`, `error`).
+
+- An untracked file over 32 KiB carries only its first 32 KiB, then
+  `\ lux: truncated at 32768 of <size> bytes`; if the whole diff would pass
+  1 MiB, 8 KiB each instead. A binary untracked file is named only
+  (`Binary files /dev/null and b/<path> differ`). Either marks the
+  repository `truncated`, said on stderr: its patch does not apply cleanly.
+- Tracked changes are never cut. A diff over 16 MiB in all is refused.
+- Tracked files marked assume-unchanged or skip-worktree and untracked
+  nested repositories (`dir/`) are not diffed: they are listed in `omitted`
+  (at most 50, `omittedCount` all of them), named on stderr, and mark the
+  repository `truncated`. Like `git status`, the diff does not see fifos or
+  sockets.
+- One diff per Run at a time (`diff_busy`); a runner too old for diffs is
+  `diff_unsupported`.
+- Exit 4 when the Run is not running (keep a patch with
+  [beforeStop](runspec.md#before-stop)), 3 when it has no repositories, 1
+  when a repository's diff failed.
 
 ## Files
 
