@@ -138,6 +138,11 @@ const runSeenAt = new WeakMap<Run, number>();
 // its Run may have finished, so it stops rather than growing forever.
 const RUNTIME_EXTRAPOLATE_MS = 60_000;
 
+/**
+ * Time the Run's placements have spent running, summed (runtimeSeconds);
+ * ticks on the shared clock while a placement runs (runtimeSince). An en
+ * dash for a Run that has never run.
+ */
 function RuntimeCell({ run }: { run: Run }) {
   useNow(); // re-render on the shared clock
   const now = Date.now();
