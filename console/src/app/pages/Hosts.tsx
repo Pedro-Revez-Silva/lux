@@ -17,7 +17,7 @@ function LiveRuns({ host: h, wholeHost }: { host: Host; wholeHost: boolean }) {
   const tip = wholeHost ? `${h.liveRuns} live · max ${cap} runs on this host` : `${h.liveRuns} of yours live · the host runs at most ${cap}, across tenants`;
   return (
     <Tooltip content={tip}>
-      <Link to={hostRunsPath(h.id)}>{near ? <Badge tone="warn" mono>{`${h.liveRuns} / ${cap}`}</Badge> : h.liveRuns}</Link>
+      <Link to={hostRunsPath(h.id)} className="live-runs">{near ? <Badge tone="warn" mono>{`${h.liveRuns} / ${cap}`}</Badge> : h.liveRuns}</Link>
     </Tooltip>
   );
 }

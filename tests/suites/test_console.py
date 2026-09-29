@@ -51,6 +51,33 @@ def test_console_is_served_with_client_routing(env):
         assert r.status_code == 301 and r.headers["Location"] == new, (old, r.status_code, r.headers)
 
 
+def _assert_unclipped(tip):
+    """The tooltip is drawn whole: inside the viewport, inside every ancestor
+    that clips its overflow, and on top at its centre and corners."""
+    hidden = tip.evaluate("""t => {
+        const r = t.getBoundingClientRect();
+        const vw = document.documentElement.clientWidth, vh = document.documentElement.clientHeight;
+        if (r.left < 0 || r.top < 0 || r.right > vw || r.bottom > vh) return 'viewport';
+        for (let e = t.parentElement; e; e = e.parentElement) {
+            if (getComputedStyle(e).overflow === 'visible') continue;
+            const c = e.getBoundingClientRect();
+            if (r.left < c.left || r.right > c.right || r.top < c.top || r.bottom > c.bottom) return e.tagName + '.' + e.className;
+        }
+        // A tooltip ignores the pointer; hit-test it for a moment. Corners
+        // are probed inside its border radius, which hit-testing honours.
+        t.style.pointerEvents = 'auto';
+        try {
+            const i = 4, pts = [[(r.left + r.right) / 2, (r.top + r.bottom) / 2], [r.left + i, r.top + i], [r.right - i, r.top + i], [r.left + i, r.bottom - i], [r.right - i, r.bottom - i]];
+            for (const [x, y] of pts) {
+                const hit = document.elementFromPoint(x, y);
+                if (!hit || !t.contains(hit)) return `covered at ${x},${y} by ${hit && hit.tagName + '.' + hit.className}`;
+            }
+        } finally { t.style.pointerEvents = ''; }
+        return null;
+    }""")
+    assert hidden is None, hidden
+
+
 def _parked(lux, name: str) -> str:
     """A Run that waits for a host that will never come: it stays listed."""
     return lux.submit(generic(ALPINE_IMAGE, "true", name=name, placement={"requires": {"nowhere": "yes"}}))
@@ -166,7 +193,9 @@ def test_hosts_live_runs_shows_the_count_and_the_cap_only_near_it(page, lux, run
     expect(cell).to_have_text(re.compile(r"^\s*0\s*$"), timeout=15_000)
     expect(cell.locator(".badge-warn")).to_have_count(0)
     link.hover()
-    expect(page.get_by_role("tooltip")).to_have_text("0 live · max 4 runs on this host")
+    tip = page.get_by_role("tooltip")
+    expect(tip).to_have_text("0 live · max 4 runs on this host")
+    _assert_unclipped(tip)
     page.mouse.move(0, 0)
     # Half the cap is still just the count; three quarters is "N / M" in the warn tone.
     # Small reservations: the cap, not CPU or memory, is what fills first.
@@ -372,17 +401,7 @@ def test_runs_list_cost_column_matches_the_run_page(page, env, lux, operator, ru
         tip = page.get_by_role("tooltip")
         expect(tip).to_contain_text(re.compile(r"^(Final|Estimate|Incomplete) · "))
         expect(tip).to_contain_text(_dollars(total["amount"], exact=True))
-        # Not clipped: every ancestor that clips its overflow contains the whole tooltip.
-        clipped = tip.evaluate("""t => {
-            const r = t.getBoundingClientRect();
-            for (let e = t.parentElement; e; e = e.parentElement) {
-                if (getComputedStyle(e).overflow === 'visible') continue;
-                const c = e.getBoundingClientRect();
-                if (r.left < c.left || r.right > c.right || r.top < c.top || r.bottom > c.bottom) return e.tagName + '.' + e.className;
-            }
-            return null;
-        }""")
-        assert clipped is None, clipped
+        _assert_unclipped(tip)
     _both_themes(page, env, "/runs", check)
 
     # The Run page shows the same figure.
