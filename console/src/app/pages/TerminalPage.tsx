@@ -160,7 +160,7 @@ export function TerminalPage({ id }: { id: string }) {
             {running && (
               <>
                 <span>
-                  <span className="mono">bash -l</span> as <span className="mono">{run.spec.workload.user || "the workload's user"}</span>
+                  a login shell as <span className="mono">{run.spec.workload.user || "the workload's user"}</span>
                 </span>
                 {run.spec.workload.workdir && (
                   <span>

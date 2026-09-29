@@ -256,6 +256,17 @@ def test_lux_shell(lux, runners, hosts, fake_image):
     lux.run("cancel", run_id)
 
 
+def test_lux_shell_without_bash(lux, runners, hosts):
+    # alpine has no bash: the shell falls back to sh instead of exiting 127.
+    runners.start(hosts[0])
+    run_id = lux.submit(idle(ALPINE_IMAGE))
+    lux.wait_state(run_id, "running")
+    lux.run("exec", run_id, "-T", "--", "/bin/sh", "-c", "! command -v bash", input="")
+    out = lux.run("shell", run_id, input="echo shell-$((20+22)); exit\n", timeout=60).stdout
+    assert "shell-42" in out.splitlines(), out
+    lux.run("cancel", run_id)
+
+
 # ---- previews ----------------------------------------------------------------------
 
 

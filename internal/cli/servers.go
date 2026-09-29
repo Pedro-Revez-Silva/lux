@@ -17,7 +17,7 @@ import (
 )
 
 // shellCommand is what lux shell runs: a login bash where there is one.
-var shellCommand = []string{"/bin/sh", "-c", "exec bash -l 2>/dev/null || exec sh -l"}
+var shellCommand = []string{"/bin/sh", "-c", "command -v bash >/dev/null && exec bash -l; exec /bin/sh -l"}
 
 func (a *app) shellCmd() *cobra.Command {
 	return &cobra.Command{
@@ -25,7 +25,7 @@ func (a *app) shellCmd() *cobra.Command {
 		Short: "Open a shell in a running Run",
 		Long: `Open a login shell (bash, else sh) in a running Run's container, as its
 workload user, with its environment, on a terminal. The same as
-lux exec -t <run> -- /bin/sh -c 'exec bash -l 2>/dev/null || exec sh -l'.`,
+lux exec -t <run> -- /bin/sh -c 'command -v bash >/dev/null && exec bash -l; exec /bin/sh -l'.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.exec(ctxOf(cmd), args[0], proto.StreamOpen{Command: shellCommand, TTY: true}, a.stdinTerminal())
