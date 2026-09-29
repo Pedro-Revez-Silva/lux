@@ -192,12 +192,35 @@ func (h *hubStream) took() {
 		return
 	}
 	h.taken++
-	// A grant that could not be sent stays owed: the next frame taken
-	// tries again, so a busy host never loses its window for good.
-	if h.taken >= h.window/2 && h.send(proto.MsgStreamData, proto.Marshal(proto.StreamData{Credit: h.taken})) == nil {
+	h.grant()
+}
+
+// grant sends the runner what the reader has taken, once that is half the
+// window. A grant that could not be sent stays owed: the reader retries it
+// on the next frame, and every grantRetry while it waits for one, so a
+// runner left without credit is never left waiting for good.
+func (h *hubStream) grant() {
+	if h.window == 0 || h.taken < h.window/2 {
+		return
+	}
+	if h.send(proto.MsgStreamData, proto.Marshal(proto.StreamData{Credit: h.taken})) == nil {
 		h.taken = 0
 	}
 }
+
+// owed fires after grantRetry while a grant is owed (a nil channel,
+// never firing, otherwise); the caller stops the timer after its wait.
+func (h *hubStream) owed() (<-chan time.Time, *time.Timer) {
+	if h.window == 0 || h.taken < h.window/2 {
+		return nil, nil
+	}
+	t := time.NewTimer(grantRetry)
+	return t.C, t
+}
+
+// grantRetry: how often a reader waiting for frames retries a grant the
+// host's queue refused.
+const grantRetry = time.Second
 
 func (h *hubStream) send(typ string, data []byte) error {
 	return h.s.hub.SendLive(h.hostID, proto.Frame{Type: typ, RunID: h.runID, Epoch: h.epoch, Stream: h.id, Data: data})
@@ -248,29 +271,62 @@ func (s *Server) relayStream(ctx context.Context, ws *websocket.Conn, runID, kin
 	}()
 	// Host → client, forwarded as they come.
 	for {
-		select {
-		case <-ctx.Done():
+		f, ok, why := st.recv(ctx)
+		switch {
+		case why == recvOwed:
+			continue
+		case why == recvDone:
 			return
-		case <-st.gone:
+		case why == recvGone:
 			closeWith(ctx, ws, []byte(`{"error":"the Run's host disconnected"}`))
 			return
-		case f, ok := <-st.ch:
-			if !ok {
-				closeWith(ctx, ws, []byte(`{"error":"the stream fell behind and was dropped"}`))
-				return
-			}
-			if f.Type == proto.MsgStreamClose {
-				closeWith(ctx, ws, f.Data)
-				return
-			}
-			wctx, wcancel := context.WithTimeout(ctx, 30*time.Second)
-			err := ws.Write(wctx, websocket.MessageText, f.Data)
-			wcancel()
-			if err != nil {
-				return
-			}
-			st.took()
+		case !ok:
+			closeWith(ctx, ws, []byte(`{"error":"the stream fell behind and was dropped"}`))
+			return
+		case f.Type == proto.MsgStreamClose:
+			closeWith(ctx, ws, f.Data)
+			return
 		}
+		wctx, wcancel := context.WithTimeout(ctx, 30*time.Second)
+		err := ws.Write(wctx, websocket.MessageText, f.Data)
+		wcancel()
+		if err != nil {
+			return
+		}
+		st.took()
+	}
+}
+
+type recvEnd int
+
+const (
+	recvFrame recvEnd = iota // a frame, or the stream dropped (ok false)
+	recvOwed                 // an owed grant was retried: wait again
+	recvDone                 // ctx ended
+	recvGone                 // the host went away
+)
+
+// recv waits for the stream's next frame, retrying an owed grant every
+// grantRetry meanwhile.
+func (h *hubStream) recv(ctx context.Context) (proto.Frame, bool, recvEnd) {
+	retry, rt := h.owed()
+	defer stopTimer(rt)
+	select {
+	case <-retry:
+		h.grant()
+		return proto.Frame{}, false, recvOwed
+	case <-ctx.Done():
+		return proto.Frame{}, false, recvDone
+	case <-h.gone:
+		return proto.Frame{}, false, recvGone
+	case f, ok := <-h.ch:
+		return f, ok, recvFrame
+	}
+}
+
+func stopTimer(t *time.Timer) {
+	if t != nil {
+		t.Stop()
 	}
 }
 
@@ -378,7 +434,12 @@ func (c *hubConn) Read(p []byte) (int, error) {
 // ok, no error), or an end: the deadline, Close, the host or the stream
 // going away (recorded in c.err for the reads after).
 func (c *hubConn) next(changed <-chan struct{}, expired <-chan time.Time) (proto.Frame, bool, error) {
+	retry, rt := c.st.owed()
+	defer stopTimer(rt)
 	select {
+	case <-retry:
+		c.st.grant()
+		return proto.Frame{}, false, nil
 	case <-c.closed:
 		return proto.Frame{}, false, net.ErrClosed
 	case <-c.st.gone:

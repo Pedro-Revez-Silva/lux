@@ -42,7 +42,7 @@ export function parsePreviewUrl(to: string | null): PreviewTarget | { error: str
  * domain) is refused: it would hand the ticket to whoever runs it.
  */
 export function parsePreviewTarget(to: string | null, previewDomain: string | null): PreviewTarget | { error: string } {
-  if (!previewDomain) return { error: "This lux serves no previews." };
+  if (!previewDomain) return { error: "This lux signs no one in to previews here: previews are off, or behind Cloudflare Access." };
   const t = parsePreviewUrl(to);
   if ("error" in t) return t;
   const domain = previewDomain.toLowerCase().replace(/\.$/, "");

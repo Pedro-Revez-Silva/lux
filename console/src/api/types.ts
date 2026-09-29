@@ -438,7 +438,7 @@ export interface WhoAmI {
   scopes: string[];
   /** key: the console needs an API key; cloudflare-access: Access signs people in. */
   consoleAuth: "key" | "cloudflare-access";
-  /** Where preview URLs are (https://<server>-<run suffix>.<previewDomain>); null when previews are off. */
+  /** Where preview URLs are (https://<server>-<run suffix>.<previewDomain>); null when previews are off, or signed in to through Cloudflare Access. */
   previewDomain?: string | null;
 }
 
