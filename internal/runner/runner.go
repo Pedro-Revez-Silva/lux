@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -111,6 +112,9 @@ type Runner struct {
 	// process, so the hash is stable for the process's life).
 	runnerSHA256, shimSHA256 string
 	helpers                  helpers
+	// snapshotDiffs: the luxd this runner last talked to accepts
+	// snapshot.diffs (its welcome says so).
+	snapshotDiffs atomic.Bool
 }
 
 // mountpoint is where a volume's data is on this host. It never changes for
@@ -261,6 +265,7 @@ func (r *Runner) hello(ctx context.Context) proto.Hello {
 		LocalSnapshots:  r.localSnapshots(),
 		RunnerSHA256:    r.runnerSHA256,
 		ShimSHA256:      r.shimSHA256,
+		Capabilities:    []string{proto.CapDiff},
 	}
 	r.mu.Lock()
 	for _, p := range r.placements {
@@ -278,6 +283,9 @@ func (r *Runner) onWelcome(ctx context.Context, w proto.Welcome) {
 	if w.LeaseSeconds > 0 {
 		r.lease.Store(int64(w.LeaseSeconds * float64(time.Second)))
 	}
+	// An older luxd would refuse snapshot.diffs: none are computed for it.
+	r.snapshotDiffs.Store(slices.Contains(w.Capabilities, proto.CapSnapshotDiffs))
+	r.startOwedDiffs(ctx)
 	want := map[string]int{}
 	for _, l := range w.Live {
 		want[l.RunID] = l.Epoch

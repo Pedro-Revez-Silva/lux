@@ -241,7 +241,7 @@ func fakeConn(t *testing.T, s *Server, answer func(proto.DiffRequest) []proto.Fr
 // fakeConnCancels returns the requests seen so far, when called.
 func fakeConnCancels(t *testing.T, s *Server, answer func(proto.DiffRequest) []proto.Frame, cancels chan<- string) func() []proto.DiffRequest {
 	t.Helper()
-	c := &runnerConn{hostID: "h1", send: make(chan proto.Frame, 16), notify: make(chan struct{}, 1), done: make(chan struct{})}
+	c := &runnerConn{hostID: "h1", send: make(chan proto.Frame, 16), notify: make(chan struct{}, 1), done: make(chan struct{}), caps: []string{proto.CapDiff}}
 	s.hub.mu.Lock()
 	s.hub.conns["h1"] = c
 	s.hub.mu.Unlock()
@@ -678,5 +678,46 @@ func TestDiffReadChecksTheBlobsOwner(t *testing.T) {
 	code, _, body = getDiff(t, s, keys["op"], "/v1/runs/r1/diff", "")
 	if d := decodeDiff(t, body); code != http.StatusOK || d.Repos[0].Patch != "" || d.Repos[0].Error == "" {
 		t.Errorf("operator, t2's blob: %d %s", code, body)
+	}
+}
+
+// A runner without the diff capability (an older release) is never sent a
+// live diff request: 503 diff_unsupported. luxd's welcome advertises
+// snapshot diffs, and a runner's capabilities are stored with its host.
+func TestDiffCapabilities(t *testing.T) {
+	s, keys, _ := diffFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'running' WHERE id = 'r1'`)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'running' WHERE id = 'p2'`)
+	reqs := fakeConn(t, s, liveFrames)
+	s.hub.mu.Lock()
+	s.hub.conns["h1"].caps = nil
+	s.hub.mu.Unlock()
+	code, _, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff", "")
+	if code != http.StatusServiceUnavailable || !strings.Contains(string(body), "diff_unsupported") || len(reqs()) != 0 {
+		t.Errorf("old runner: %d %s (%d requests)", code, body, len(reqs()))
+	}
+	s.hub.mu.Lock()
+	s.hub.conns["h1"].caps = []string{proto.CapDiff}
+	s.hub.mu.Unlock()
+	if code, _, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff", ""); code != http.StatusOK || len(reqs()) != 1 {
+		t.Errorf("new runner: %d %s", code, body)
+	}
+
+	tok := testHostToken(t, s, ctx)
+	for _, caps := range [][]string{{proto.CapDiff}, nil} {
+		w, err := s.registerHost(ctx, tok, proto.Hello{Name: "hc", ProtocolVersion: proto.Version, Arch: "arm64", Capabilities: caps})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(w.Capabilities, proto.CapSnapshotDiffs) {
+			t.Errorf("welcome: %v", w.Capabilities)
+		}
+		var got []string
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT capabilities FROM hosts WHERE id = $1`, w.HostID).Scan(&got)
+		}); err != nil || !slices.Equal(got, nonNil(caps)) {
+			t.Errorf("stored %v (%v), want %v", got, err, caps)
+		}
 	}
 }

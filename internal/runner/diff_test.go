@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/marcioapm/lux/internal/egress"
 	"github.com/marcioapm/lux/internal/gitdiff"
+	"github.com/marcioapm/lux/internal/gitws"
 	"github.com/marcioapm/lux/internal/podman"
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
@@ -138,9 +140,11 @@ func diffRunner(t *testing.T) (*Runner, *fakeLuxd, string) {
 		os.MkdirAll(filepath.Join(data, d), 0o700)
 	}
 	r := &Runner{cfg: Config{DataDir: data, Shim: "/shim"}, log: slog.New(slog.DiscardHandler),
-		pm: &podman.Podman{Bin: bin}, placements: map[string]*placement{}, egress: &egress.Firewall{}}
+		pm: &podman.Podman{Bin: bin}, placements: map[string]*placement{}, egress: &egress.Firewall{},
+		git: gitws.New(data), subs: map[string]context.CancelFunc{}}
 	r.conn = newConn(r)
 	r.conn.polling = true
+	r.snapshotDiffs.Store(true)
 	r.uploads = newUploader(r)
 	l := &fakeLuxd{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -640,4 +644,68 @@ func lastLine(t *testing.T, dir, what string) time.Time {
 		t.Fatalf("the log never says %q", what)
 	}
 	return at
+}
+
+// A luxd that does not advertise snapshot diffs (an older release) gets
+// none: no helper runs, no snapshot.diffs is sent, nothing is owed. One
+// that does gets them; a runner's hello says it has diffs.
+func TestSnapshotDiffsOnlyForALuxdThatTakesThem(t *testing.T) {
+	r, l, dir := diffRunner(t)
+	if !slices.Contains(r.hello(context.Background()).Capabilities, proto.CapDiff) {
+		t.Error("the hello does not advertise diffs")
+	}
+	r.onWelcome(context.Background(), proto.Welcome{})
+	p := exitedPlacement(t, r, 1)
+	p.finish(context.Background(), &exitRecord{Code: 0, Reason: "stopped"})
+	l.wait(t, proto.MsgSnapshotDone, 5*time.Second)
+	time.Sleep(200 * time.Millisecond)
+	if n := len(l.frames(proto.MsgSnapshotDiffs)); n != 0 || strings.Contains(logOf(t, dir), " run ") {
+		t.Errorf("an old luxd got %d snapshot.diffs:\n%s", n, logOf(t, dir))
+	}
+	if st, _ := readRunState(p.dir); st.DiffsFor != "" {
+		t.Errorf("diffs owed to an old luxd: %s", st.DiffsFor)
+	}
+
+	r2, l2, dir2 := diffRunner(t)
+	r2.onWelcome(context.Background(), proto.Welcome{Capabilities: []string{proto.CapSnapshotDiffs}})
+	p2 := exitedPlacement(t, r2, 1)
+	p2.finish(context.Background(), &exitRecord{Code: 0, Reason: "stopped"})
+	l2.wait(t, proto.MsgSnapshotDiffs, 5*time.Second)
+	if !strings.Contains(logOf(t, dir2), " run ") {
+		t.Error("no diff container for a luxd that takes them")
+	}
+}
+
+// A restarted runner owes a snapshot's diffs: it computes them once a
+// welcome says luxd takes them, and once only across reconnects.
+func TestOwedDiffsWaitForTheWelcome(t *testing.T) {
+	r, l, dir := diffRunner(t)
+	r.snapshotDiffs.Store(false)
+	sp := spec.RunSpec{Git: &spec.Git{Repositories: []spec.Repository{{Name: "app", Path: "/workspace/repos/app"}}}}
+	st := &runState{RunID: "r1", TenantID: "t1", Epoch: 1, Phase: "reported", Spec: &sp, Image: "img", User: "1000:1000",
+		DiffsFor: "snap_owed", GitBases: map[string]string{"app": "abc"},
+		Volumes: []volumeRef{{Name: "workspace", Volume: "lux-r1-workspace", Path: "/workspace", Kind: "state"}}}
+	if err := writeRunState(r.runDir("r1"), st); err != nil {
+		t.Fatal(err)
+	}
+	r.readopt(context.Background())
+	time.Sleep(200 * time.Millisecond)
+	if strings.Contains(logOf(t, dir), " run ") {
+		t.Fatal("a diff started before luxd's welcome")
+	}
+	w := proto.Welcome{Capabilities: []string{proto.CapSnapshotDiffs}}
+	r.onWelcome(context.Background(), w)
+	r.onWelcome(context.Background(), w)
+	d := diffsOf(t, l.wait(t, proto.MsgSnapshotDiffs, 5*time.Second))
+	if d.SnapshotID != "snap_owed" {
+		t.Errorf("%+v", d)
+	}
+	p := r.placement("r1", 0)
+	p.mu.Lock()
+	done := p.diffDone
+	p.mu.Unlock()
+	<-done
+	if n := strings.Count(logOf(t, dir), " run started"); n != 1 {
+		t.Errorf("%d diff containers for one owed diff", n)
+	}
 }

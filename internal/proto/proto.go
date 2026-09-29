@@ -93,7 +93,18 @@ type Hello struct {
 	// runners that predate self-update: luxd never drains those for it.
 	RunnerSHA256 string `json:"runnerSha256,omitempty"`
 	ShimSHA256   string `json:"shimSha256,omitempty"`
+	// Capabilities: optional features this runner has (CapDiff), so a
+	// luxd and runners of different releases work together.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
+
+// Capabilities. A runner's (Hello): CapDiff, it answers diff.request and
+// can compute a snapshot's diffs. luxd's (Welcome): CapSnapshotDiffs, it
+// accepts snapshot.diffs; a runner computes none without it.
+const (
+	CapDiff          = "diff"
+	CapSnapshotDiffs = "snapshot-diffs"
+)
 
 type Capacity struct {
 	CPUs   float64 `json:"cpus"`
@@ -155,6 +166,8 @@ type Welcome struct {
 	// Epochs luxd considers live on this host; the runner stops anything else
 	// it finds running.
 	Live []LivePlacement `json:"live"`
+	// Capabilities: optional features this luxd has (CapSnapshotDiffs).
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type Heartbeat struct {

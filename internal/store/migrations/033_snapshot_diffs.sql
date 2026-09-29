@@ -6,6 +6,10 @@
 ALTER TABLE blobs DROP CONSTRAINT blobs_kind_check;
 ALTER TABLE blobs ADD CONSTRAINT blobs_kind_check CHECK (kind IN ('volume', 'output', 'artifact', 'context', 'diff'));
 
+-- What a host's runner offers beyond the protocol version (its hello):
+-- 'diff' (live diffs, and a snapshot's diffs).
+ALTER TABLE hosts ADD COLUMN capabilities text[] NOT NULL DEFAULT '{}';
+
 CREATE TABLE snapshot_diffs (
   tenant_id    text NOT NULL REFERENCES tenants(id),
   run_id       text NOT NULL REFERENCES runs(id),

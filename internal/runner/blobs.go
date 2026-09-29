@@ -363,12 +363,6 @@ func (r *Runner) gcLoop(ctx context.Context) {
 // supervised again; ones that exited while the runner was down are
 // finished (snapshot and report) now.
 func (r *Runner) readopt(ctx context.Context) {
-	var owed []*placement
-	defer func() {
-		for _, p := range owed {
-			p.startSnapshotDiffs(context.WithoutCancel(ctx), p.state.DiffsFor)
-		}
-	}()
 	entries, _ := os.ReadDir(filepath.Join(r.cfg.DataDir, "runs"))
 	for _, e := range entries {
 		st, err := readRunState(r.runDir(e.Name()))
@@ -387,10 +381,8 @@ func (r *Runner) readopt(ctx context.Context) {
 		case "reported":
 			p.phase = "done"
 			close(p.done)
-			// Diffs owed for its last snapshot, which luxd has.
-			if st.DiffsFor != "" {
-				owed = append(owed, p)
-			}
+			// Diffs owed for its last snapshot, which luxd has, start once
+			// luxd's welcome says it takes them (startOwedDiffs).
 		case "exited":
 			p.phase = "exited"
 			r.log.Info("re-adopting exited placement", "run", st.RunID, "epoch", st.Epoch)

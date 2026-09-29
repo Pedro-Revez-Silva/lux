@@ -458,12 +458,41 @@ func (r *Runner) diffBudget() (budget time.Duration, skip string) {
 	return budget, ""
 }
 
+// startOwedDiffs starts the snapshot diffs a restarted runner still owes
+// (re-adopted placements whose last snapshot luxd has).
+func (r *Runner) startOwedDiffs(ctx context.Context) {
+	r.mu.Lock()
+	var owed []*placement
+	for _, p := range r.placements {
+		p.mu.Lock()
+		if p.phase == "done" && p.diffDone == nil && p.state != nil && p.state.DiffsFor != "" {
+			owed = append(owed, p)
+		}
+		p.mu.Unlock()
+	}
+	r.mu.Unlock()
+	for _, p := range owed {
+		p.startSnapshotDiffs(context.WithoutCancel(ctx), p.state.DiffsFor)
+	}
+}
+
 // startSnapshotDiffs computes snapshot snapID's diffs in the background
-// and reports them. stopDiffs cancels them.
+// and reports them. supersede cancels them. Nothing is computed for a luxd
+// that does not take them.
 func (p *placement) startSnapshotDiffs(ctx context.Context, snapID string) {
+	// Once per placement: a second welcome (a reconnect) finds it started.
+	done := make(chan struct{})
+	p.mu.Lock()
+	if p.diffDone != nil {
+		p.mu.Unlock()
+		return
+	}
+	p.diffDone = done
+	p.mu.Unlock()
 	repos := p.diffRepos()
-	if len(repos) == 0 {
+	if len(repos) == 0 || !p.r.snapshotDiffs.Load() {
 		p.setDiffsFor("")
+		close(done)
 		return
 	}
 	// A runner that restarted mid-way: luxd has them already, or what was
@@ -471,12 +500,13 @@ func (p *placement) startSnapshotDiffs(ctx context.Context, snapID string) {
 	if rec := p.r.snapshotRecords()[diffsRecord(snapID)]; rec != nil {
 		if rec.Reported {
 			p.setDiffsFor("")
+			close(done)
 			return
 		}
 		removeSnapshotFiles(p.r, diffsRecord(snapID), rec)
 	}
 	dctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
-	released, done := make(chan struct{}), make(chan struct{})
+	released := make(chan struct{})
 	// Checked and set under one lock with supersede: either the diff
 	// starts and supersede waits for its helper, or it never starts.
 	p.mu.Lock()
@@ -484,7 +514,6 @@ func (p *placement) startSnapshotDiffs(ctx context.Context, snapID string) {
 	if superseded == nil {
 		p.diffCancel, p.diffReleased = cancel, released
 	}
-	p.diffDone = done
 	p.mu.Unlock()
 	go func() {
 		defer close(done)

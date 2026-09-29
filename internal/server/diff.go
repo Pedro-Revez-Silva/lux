@@ -225,6 +225,9 @@ func (s *Server) liveDiff(ctx context.Context, t diffTarget, kind string, statOn
 		}
 		return nil, errNotRunning
 	}
+	if !s.hub.Can(t.hostID, proto.CapDiff) {
+		return nil, errf(http.StatusServiceUnavailable, "diff_unsupported", "the Run's host runs a lux-runner without diffs; its diff is available once the host is upgraded")
+	}
 	req := proto.DiffRequest{SubID: ids.New("diff"), Kind: kind, StatOnly: statOnly}
 	for _, r := range t.repos {
 		req.Repos = append(req.Repos, proto.DiffRepo{Name: r.Name, Path: r.Path, Base: t.bases[r.Name]})

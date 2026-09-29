@@ -69,6 +69,7 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 
 	var w proto.Welcome
 	w.LeaseSeconds = s.cfg.LeaseDuration.Seconds()
+	w.Capabilities = []string{proto.CapSnapshotDiffs}
 	var outdatedDrained []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var hostID string
@@ -133,14 +134,15 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 				drain_requested_at = CASE WHEN $10 THEN drain_requested_at ELSE NULL END,
 				exit_requested_at = CASE WHEN $10 THEN exit_requested_at ELSE NULL END,
 				labels = $2, arch = $3, capacity = $4, versions = $5, caches = $6,
-				local_snapshots = $7, provider_id = coalesce(nullif($8, ''), provider_id),
+				local_snapshots = $7, provider_id = coalesce(nullif($8, ''), provider_id), capabilities = $11,
 				registered_at = coalesce(registered_at, now()),
 				provisioned_at = coalesce(provisioned_at, now()),
 				last_heartbeat = now(), lost_at = NULL
 			WHERE id = $1
 			RETURNING hourly_price IS NOT NULL
 				OR EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = $1 AND r.valid_to IS NULL AND r.source = 'static')`,
-			hostID, labels, h.Arch, h.Capacity, versions, caches, nonNil(h.LocalSnapshots), h.ProviderID, nonNil(causes), draining).Scan(&priced)
+			hostID, labels, h.Arch, h.Capacity, versions, caches, nonNil(h.LocalSnapshots), h.ProviderID, nonNil(causes), draining,
+			nonNil(h.Capabilities)).Scan(&priced)
 		if err != nil {
 			return err
 		}
