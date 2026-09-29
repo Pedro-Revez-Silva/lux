@@ -283,6 +283,23 @@ components:
           description: The part from final lines.
           type: string
       type: object
+    DiffFile:
+      additionalProperties: false
+      properties:
+        binary:
+          type: boolean
+        deletions:
+          format: int64
+          type: integer
+        insertions:
+          format: int64
+          type: integer
+        oldPath:
+          description: The path before a rename or copy.
+          type: string
+        path:
+          type: string
+      type: object
     DiskSample:
       additionalProperties: false
       properties:
@@ -1064,6 +1081,61 @@ components:
           description: The secret (in secrets) holding user:password, or a bare token (sent as the password, with the user lux).
           type: string
       type: object
+    RepoDiff:
+      additionalProperties: false
+      properties:
+        at:
+          description: "When it was computed: now (live), or the snapshot's time."
+          format: date-time
+          type: string
+        base:
+          description: The commit diffed from.
+          type: string
+        deletions:
+          format: int64
+          type: integer
+        error:
+          description: Why this repository's diff could not be computed.
+          type: string
+        fileStats:
+          items:
+            $ref: "#/components/schemas/DiffFile"
+          type:
+            - array
+            - "null"
+        files:
+          format: int64
+          type: integer
+        head:
+          description: The checkout's HEAD commit.
+          type: string
+        insertions:
+          format: int64
+          type: integer
+        patch:
+          description: The patch (git diff format), when it is valid UTF-8.
+          type: string
+        patchBase64:
+          contentEncoding: base64
+          description: The patch, base64, when it is not valid UTF-8 (patch is then absent).
+          type: string
+        push:
+          description: "Whether lux push pushes it (false: push: false in the spec)."
+          type: boolean
+        repo:
+          type: string
+        snapshotId:
+          description: "With source snapshot: the snapshot it is from."
+          type: string
+        source:
+          enum:
+            - live
+            - snapshot
+          type: string
+        truncated:
+          description: The patch was cut at the limit (10 MiB); the stat is still the whole diff's.
+          type: boolean
+      type: object
     Repository:
       additionalProperties: false
       properties:
@@ -1341,6 +1413,21 @@ components:
           description: Per currency, ordered by currency; empty while pending.
           items:
             $ref: "#/components/schemas/CostTotal"
+          type:
+            - array
+            - "null"
+      type: object
+    RunDiff:
+      additionalProperties: false
+      properties:
+        base:
+          enum:
+            - clone
+            - head
+          type: string
+        repos:
+          items:
+            $ref: "#/components/schemas/RepoDiff"
           type:
             - array
             - "null"
@@ -3507,6 +3594,137 @@ paths:
       security:
         - apiKey: []
       summary: What a Run cost
+      tags:
+        - runs
+  /v1/runs/{id}/diff:
+    get:
+      description: |-
+        Per repository, from its base to its working tree: committed changes, staged, unstaged and untracked (not ignored) files. `base=clone` (default) diffs from the commit the repository was cloned at (for one added on resume, that clone's); `base=head` from its HEAD, uncommitted work only. While the Run's container runs the diff is computed there, now (`source: live`); otherwise it is the one stored with the latest snapshot that has one (`source: snapshot`, with its id and time), which holds both bases. 404 `no_diff` when no snapshot has one (the Run never stopped since it started, or its snapshots predate diffs). Each patch is cut at 10 MiB (`truncated`); the stats cover the whole diff. Binary files are git's "Binary files differ".
+
+        With `Accept: text/x-diff`, the patches alone, one after the other.
+
+        Needs the `read` scope.
+      operationId: runDiff
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+        - description: Only this repository.
+          explode: false
+          in: query
+          name: repo
+          schema:
+            description: Only this repository.
+            type: string
+        - description: "clone (default): from the commit each repository was cloned at. head: from its HEAD (uncommitted work only)."
+          explode: false
+          in: query
+          name: base
+          schema:
+            description: "clone (default): from the commit each repository was cloned at. head: from its HEAD (uncommitted work only)."
+            enum:
+              - clone
+              - head
+            type: string
+        - description: true for only the stats, no patches.
+          explode: false
+          in: query
+          name: stat
+          schema:
+            description: true for only the stats, no patches.
+            examples:
+              - "true"
+            type: string
+        - description: text/x-diff for the patches alone, concatenated.
+          in: header
+          name: Accept
+          schema:
+            description: text/x-diff for the patches alone, concatenated.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunDiff"
+            text/x-diff:
+              schema:
+                description: The patches, concatenated (git diff format).
+                type: string
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "410":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Gone
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+        "502":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Gateway
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Service Unavailable
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Gateway Timeout
+      security:
+        - apiKey: []
+      summary: What a Run changed in its repositories
       tags:
         - runs
   /v1/runs/{id}/events:

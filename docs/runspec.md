@@ -449,6 +449,46 @@ POST /v1/runs/{id}/resume
 The workload commits as it likes. The checkout is a normal git repository
 owned by the workload user.
 
+### Diffs
+
+`lux diff <run>` (`GET /v1/runs/{id}/diff`) shows what a Run changed in
+each of its repositories, `push: false` ones included (their `push` is
+false in the response), from its **base** to its working tree:
+committed changes, staged, unstaged and untracked (not ignored) files.
+
+- The base is the commit of the repository's successful `git.clone`
+  event: the one it was cloned at. A resumed Run keeps it; a repository
+  added on resume has its own clone's. `base=head` diffs from the
+  checkout's `HEAD` instead.
+- **While the Run runs**, luxd asks the runner, which runs the diff in the
+  Run's container. **On every exit** (stop, cancel, failure, success, a
+  drain), once the state volumes are saved, the runner starts a throwaway
+  container from the Run's image with its state volumes mounted, with no
+  network, the Run's resource limits and a one-minute deadline, and
+  computes each repository's diff there, against the clone and against
+  `HEAD`. The patches are stored as blobs of the snapshot, uploaded
+  before its volumes; each has its base and head commits, byte size,
+  sha256, `truncated`, and files, insertions and deletions. A stopped Run's
+  diff is its latest snapshot's.
+- **The runner never runs git in the checkout**, as for a push: `lux-shim
+  diff` runs git inside the container, as the workload user, with the
+  checkout's hooks, `core.fsmonitor`, `diff.external`, textconv and
+  clean/smudge filters, and pager disabled, and `GIT_*` from the Run's
+  environment ignored.
+- **The checkout is never changed.** Untracked files are marked
+  intent-to-add in a copy of the index in a temporary directory, and the
+  working tree is diffed through that copy. Nothing is written to the
+  repository: not its index, `HEAD`, refs, or object store (the one object
+  the copy needs, the empty blob, goes to a temporary object directory).
+- Each patch is cut at 10 MiB (at the start of a file's diff), and marked
+  `truncated`; the stats cover the whole diff. Binary files are git's
+  "Binary files differ".
+- A diff that cannot be computed never fails the snapshot or the exit: a
+  `diff.failed` event says why (`{error, repo?, kind?}`), and the
+  repository's entry carries the error.
+- A Run with no snapshot that has a diff (it never stopped since it
+  started, or its snapshots predate diffs) answers 404 `no_diff`.
+
 ## MCP servers
 
 `workload.mcpServers` gives an agent remote MCP servers (streamable HTTP),

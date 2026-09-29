@@ -89,6 +89,48 @@ lux resume run_x --add-repo docs=git@github.com:o/docs.git,ref=v2,push=false --r
 lux push <run> [--wait]         # push each repository to git.push.branch (leased)
 ```
 
+## Diff
+
+```bash
+lux diff <run> [--repo NAME] [--base clone|head] [--stat] [--color never|always|auto] [-o json]
+```
+
+What a Run changed in its repositories, while it runs and after it stops
+(stopped, lost, failed, succeeded): per repository, from its base to its
+working tree, committed changes, staged, unstaged and untracked (not
+ignored) files alike.
+
+- `--base clone` (the default) diffs from the commit the repository was
+  cloned at; a resumed Run keeps its original base, and a repository added
+  on resume diffs from its own clone. `--base head` diffs from the
+  checkout's `HEAD`: uncommitted work only.
+- While the Run's container runs, the diff is computed there, now
+  (`live`). Otherwise it is the one saved with the latest snapshot
+  (`snapshot`), which has both bases. A Run that has never stopped since it
+  started (or whose snapshots predate this) has none: exit code 3.
+- Each repository's section starts with a comment line, which `git apply`
+  skips, so the output applies as it is:
+
+  ```
+  # repo app: 1a2b3c4d5e6f..9f8e7d6c5b4a (snapshot, snapshot snap_… at 2026-09-29T10:00:00Z)
+  diff --git a/src/x.go b/src/x.go
+  …
+  ```
+
+  `, TRUNCATED` ends it when the patch was cut at its limit (10 MiB per
+  repository; binary files are git's "Binary files differ"). `--stat`
+  prints `git diff --stat`'s lines instead, for the whole diff even when
+  its patch was cut.
+- Colour follows `git diff`: on when stdout is a terminal (`--color auto`,
+  and `NO_COLOR` unset). Nothing is printed, and the exit code is 0, when
+  nothing changed. A repository whose diff failed is reported on stderr and
+  the exit code is 1.
+- `-o json` prints the API's response: per repository `repo`, `push`,
+  `base`, `head`, `source`, `snapshotId`, `at`, `truncated`, `files`,
+  `insertions`, `deletions`, `fileStats` and `patch`. The API also answers
+  `Accept: text/x-diff` with the patches alone
+  (`GET /v1/runs/{id}/diff`).
+
 ## Files
 
 ```bash
