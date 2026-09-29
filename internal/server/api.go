@@ -312,8 +312,9 @@ func (s *Server) routes(api huma.API) {
 	}, "read", streamed(s, s.serveFeed))
 	register(s, api, huma.Operation{
 		OperationID: "putPool", Method: http.MethodPost, Path: "/v1/pools", Tags: []string{"pools"},
-		Summary: "Create or update a pool",
-		Errors:  []int{http.StatusUnprocessableEntity},
+		Summary:     "Create or update a pool",
+		Description: "409 pool_has_hosts for a change of provider while the pool has provisioned hosts that are not terminated: scale it to zero first.",
+		Errors:      []int{http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "admin", forTenant(s.putPool))
 	register(s, api, huma.Operation{
 		OperationID: "deletePool", Method: http.MethodDelete, Path: "/v1/pools/{name}", Tags: []string{"pools"},
@@ -1930,6 +1931,20 @@ type poolBody struct {
 	Body Pool
 }
 
+// PoolProviderUnchangedOrEmpty, the WHERE of a pool upsert's DO UPDATE:
+// a pool's provider changes only while it has no live provisioned host.
+// The new provider would not list the instances, which would run on with
+// nothing to terminate them. An upsert it refuses affects no row.
+const PoolProviderUnchangedOrEmpty = `(pools.provider = EXCLUDED.provider OR NOT EXISTS (
+	SELECT 1 FROM hosts h WHERE coalesce(h.tenant_id, '') = coalesce(pools.tenant_id, '') AND h.pool = pools.name
+		AND h.provision_requested_at IS NOT NULL AND h.state <> 'terminated'))`
+
+// ErrPoolHasHosts: a pool upsert refused by PoolProviderUnchangedOrEmpty.
+func ErrPoolHasHosts(name string) error {
+	return errf(http.StatusConflict, "pool_has_hosts",
+		"pool %q has provisioned hosts that are not terminated: scale it to zero first, then change its provider", name)
+}
+
 func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	p := principal(ctx)
 	pl := in.Body
@@ -1977,17 +1992,24 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 		if err := LockPoolName(ctx, tx, p.TenantID, pl.Name); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
+		tag, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
 				scale_down_after_s, warm_while_active, hourly_price, price_currency)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''))
 			ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 				min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
 				scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
 				hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
-				retired = false`,
+				retired = false
+			WHERE `+PoolProviderUnchangedOrEmpty,
 			ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
 			sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency)
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrPoolHasHosts(pl.Name)
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err

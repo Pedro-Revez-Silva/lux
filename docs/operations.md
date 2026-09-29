@@ -433,11 +433,14 @@ do in `luxd_instances` before its first attempt at the provisioner lease,
 and again every `LUX_PROVIDER_CHECK_EVERY` (at most every lease duration).
 Two guards follow from it:
 
-- Once any `ec2` pool has been renamed (`pools.renamed_at`), the database
-  refuses the provisioner lease to a luxd that has not checked in with the
+- Once any `ec2` pool has been renamed, the database refuses the
+  provisioner lease to a luxd that has not checked in with the
   `pool-id-discovery` capability: a trigger on `leases` raises an error,
-  which an older luxd logs and retries. Before the first rename, any luxd
-  may hold it: a mixed fleet keeps working as long as nobody renames.
+  which an older luxd logs and retries. The first such rename records it
+  in `pool_rename_fence`, which nothing clears: switching the pool to
+  `static`, removing it or renaming it back does not re-admit an older
+  luxd. Before the first rename, any luxd may hold the lease: a mixed
+  fleet keeps working as long as nobody renames.
 - A rename of an `ec2` pool locks the provisioner lease row (creating it,
   expired and held by no one, if there is none) and is refused while its
   current holder, or any luxd that wrote a control sample within the last
@@ -448,7 +451,10 @@ Two guards follow from it:
   the rename and is refused.
 
 Static pools carry no tags and can always be renamed; their renames do not
-arm the fence. Do not roll luxd back below this version once an `ec2` pool
+arm the fence. An `ec2` pool with hosts that are not terminated cannot be
+switched to `static` (409 `pool_has_hosts`): scale it to zero first. Its
+instances would otherwise be left running with no provisioner to find
+them. Do not roll luxd back below this version once an `ec2` pool
 has been renamed: the database refuses the older luxd the provisioner
 lease. Roll forward.
 

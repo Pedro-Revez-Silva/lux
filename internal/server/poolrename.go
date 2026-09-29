@@ -20,11 +20,14 @@ package server
 //     it by name and adds the tag, and a rename is refused
 //     (pool_not_migrated): renamed, those instances would be listed by
 //     nothing.
-//   - A luxd of an earlier version lists by name. Once any pool has been
-//     renamed (pools.renamed_at), the database refuses it the provisioner
-//     lease (migration 036's trigger), and a rename of a provisioned pool
-//     locks the lease row and refuses to start while such a luxd holds it
-//     or runs (rename_unsupported_by_deployment).
+//   - A luxd of an earlier version lists by name. Once any provisioned
+//     pool has been renamed (pool_rename_fence, never cleared), the
+//     database refuses it the provisioner lease (migration 036's trigger),
+//     and a rename of a provisioned pool locks the lease row and refuses
+//     to start while such a luxd holds it or runs
+//     (rename_unsupported_by_deployment). A provisioned pool with hosts
+//     cannot become static (pool_has_hosts): its instances would be left
+//     to no provisioner.
 //
 // A pool's old names are kept (pools.previous_names), only to tell a host
 // token or a Run naming one what the pool is called now (pool_renamed);
@@ -337,9 +340,13 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 		if err := renameCostHours(ctx, tx, tenantID, from, to); err != nil {
 			return err
 		}
-		// renamed_at only for a provisioned pool: it is what fences older
-		// luxd out of the provisioner lease, and a static pool's rename
-		// changes nothing they list.
+		// A provisioned pool's rename arms the lease fence for good: a
+		// static pool's rename changes nothing an older luxd lists.
+		if provisioned {
+			if _, err := tx.Exec(ctx, `INSERT INTO pool_rename_fence (armed_at) VALUES (now()) ON CONFLICT DO NOTHING`); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec(ctx, `UPDATE pools SET name = $2,
 				previous_names = array_append(array_remove(previous_names, $2), $3),
 				renamed_at = CASE WHEN provider <> 'static' THEN now() ELSE renamed_at END
@@ -399,7 +406,7 @@ const costRepairAfterRename = time.Hour
 // samples; the ones that discover by lux:pool-id also check in to
 // luxd_instances. The lease row must be locked (lockProvisionerLease): the
 // lease fence (migration 036) is what keeps an older luxd from taking the
-// lease once renamed_at is set.
+// lease once the rename has armed it.
 func (s *Server) checkDeploymentCanRename(ctx context.Context, tx pgx.Tx) error {
 	// The lease's holder too: a luxd that took it before its first
 	// control sample.

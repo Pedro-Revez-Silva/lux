@@ -85,6 +85,33 @@ func TestProvisionLeaseFence(t *testing.T) {
 	}
 }
 
+// The fence a rename arms is the deployment's, not the pool's: an ec2
+// pool renamed, then (once empty) switched to static, still keeps an older
+// luxd from the lease. While it has hosts, it cannot be switched at all.
+func TestProvisionLeaseFenceOutlivesTheRenamedPool(t *testing.T) {
+	f := newRenameFixture(t, false)
+	f.rename(t, "burst", "burst-eu")
+	ctx := context.WithValue(f.ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+	toStatic := func() error {
+		_, err := f.s.putPool(ctx, &poolBody{Body: Pool{Name: "burst-eu", Provider: "static"}})
+		return err
+	}
+	if status, code, _ := httpErr(toStatic()); status != http.StatusConflict || code != "pool_has_hosts" {
+		t.Fatalf("switching a renamed ec2 pool with hosts to static: %d %s, want 409 pool_has_hosts", status, code)
+	}
+	execSQL(t, f.s, f.ctx, `UPDATE hosts SET state = 'terminated' WHERE tenant_id = 't1' AND pool = 'burst-eu'`)
+	if err := toStatic(); err != nil {
+		t.Fatalf("switching an empty renamed pool to static: %v", err)
+	}
+	if pl := f.pool(t); pl.Provider != "static" {
+		t.Fatalf("provider after switch: %s", pl.Provider)
+	}
+	old := f.oldLuxd()
+	if _, err := old.provisionLease(f.ctx); !isFenceRefusal(err) {
+		t.Fatalf("old luxd took the lease after the renamed ec2 pool became static: %v, want the fence's refusal", err)
+	}
+}
+
 // An older luxd takes the lease in a transaction that has not committed
 // when a rename begins: the rename waits for it, then sees the holder and
 // is refused. Without the lock, it would read the lease as free, and
@@ -129,6 +156,9 @@ func TestLeaseAcquisitionWaitsForARename(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := f.s.checkDeploymentCanRename(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO pool_rename_fence (armed_at) VALUES (now())`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE pools SET name = 'burst-eu', renamed_at = now() WHERE id = 'pool1'`); err != nil {

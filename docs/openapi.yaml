@@ -3171,7 +3171,10 @@ paths:
       tags:
         - pools
     post:
-      description: Needs the `admin` scope.
+      description: |-
+        409 pool_has_hosts for a change of provider while the pool has provisioned hosts that are not terminated: scale it to zero first.
+
+        Needs the `admin` scope.
       operationId: putPool
       parameters:
         - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
@@ -3211,6 +3214,12 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
           description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
         "422":
           content:
             application/json:

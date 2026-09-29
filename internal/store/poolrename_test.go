@@ -61,8 +61,8 @@ func TestPoolRenameMigration(t *testing.T) {
 	}
 }
 
-// Row-level security on what 036 adds or changes: luxd_instances and
-// leases are luxd's own (no tenant scope reads or writes them); pools and
+// Row-level security on what 036 adds or changes: luxd_instances,
+// pool_rename_fence and leases are luxd's own (no tenant scope reads or writes them); pools and
 // hosts, with their new columns, stay each tenant's own; and
 // lux_pool_renamed_to, which runs as the owner, answers a tenant only
 // about pools its Runs may use, and only lux_app may call it.
@@ -83,6 +83,7 @@ func TestPoolRenameRLS(t *testing.T) {
 	sys(`INSERT INTO tenants (id, name) VALUES ('t1', 'a'), ('t2', 'b')`)
 	sys(`INSERT INTO luxd_instances (instance, version, capabilities, seen_at) VALUES ('luxd-a', 'v1', '{pool-id-discovery}', now())`)
 	sys(`INSERT INTO leases (name, holder, expires_at) VALUES ('provisioner', 'luxd-a', now() + interval '1 minute')`)
+	sys(`INSERT INTO pool_rename_fence (armed_at) VALUES (now())`)
 	sys(`INSERT INTO pools (id, tenant_id, name, provider, renamed_at, previous_names) VALUES
 		('p1', 't1', 'one', 'ec2', now(), '{old1}'), ('p2', 't2', 'two', 'ec2', now(), '{old2}'), ('pp', NULL, 'plat', 'static', now(), '{oldp}')`)
 	sys(`INSERT INTO hosts (id, tenant_id, name, pool, state, pool_id_tagged) VALUES ('h1', 't1', 'h1', 'one', 'ready', true), ('h2', 't2', 'h2', 'two', 'ready', true)`)
@@ -92,7 +93,8 @@ func TestPoolRenameRLS(t *testing.T) {
 		err := db.Tx(ctx, store.Tenant(tenant), func(tx pgx.Tx) error { return tx.QueryRow(ctx, q, args...).Scan(&n) })
 		return n, err
 	}
-	for _, q := range []string{`SELECT count(*) FROM luxd_instances`, `SELECT count(*) FROM leases`} {
+	for _, q := range []string{`SELECT count(*) FROM luxd_instances`, `SELECT count(*) FROM leases`, `SELECT count(*) FROM pool_rename_fence`,
+		`WITH d AS (DELETE FROM pool_rename_fence RETURNING 1) SELECT count(*) FROM d`} {
 		if n, err := inTenant("t1", q); err != nil || n != 0 {
 			t.Errorf("%s in a tenant scope: %d (%v)", q, n, err)
 		}

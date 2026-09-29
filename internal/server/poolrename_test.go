@@ -564,8 +564,7 @@ func TestRenamePoolRefusals(t *testing.T) {
 }
 
 // A pool with no hosts: a static one and an ec2 one are renamed outright,
-// and again; only the ec2 one records renamed_at (the lease fence's
-// trigger).
+// and again; only the ec2 one records renamed_at and arms the lease fence.
 func TestRenamePoolWithoutHosts(t *testing.T) {
 	s := testServer(t)
 	s.deployment = "d1"
@@ -584,6 +583,18 @@ func TestRenamePoolWithoutHosts(t *testing.T) {
 	if readPool(t, ctx, s, "ps").RenamedAt != nil {
 		t.Error("a static pool's rename set renamed_at")
 	}
+	armed := func() string {
+		var n string
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*)::text FROM pool_rename_fence`).Scan(&n)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := armed(); n != "0" {
+		t.Error("a static pool's rename armed the lease fence")
+	}
 	if _, err := renameConfirmed(ctx, s, "", "burst", "burst2", false); err != nil {
 		t.Fatalf("ec2: %v", err)
 	}
@@ -592,6 +603,9 @@ func TestRenamePoolWithoutHosts(t *testing.T) {
 	}
 	if readPool(t, ctx, s, "pe").RenamedAt == nil {
 		t.Error("an ec2 pool's rename left renamed_at unset")
+	}
+	if n := armed(); n != "1" {
+		t.Errorf("lease fence rows after two ec2 renames: %s, want 1", n)
 	}
 }
 

@@ -16,8 +16,8 @@
 ALTER TABLE hosts ADD COLUMN pool_id_tagged boolean NOT NULL DEFAULT false;
 ALTER TABLE hosts ADD COLUMN not_found_since timestamptz;
 
--- renamed_at: when the pool was last renamed; a provisioned pool having
---   one fences older luxd out of the provisioner lease (below).
+-- renamed_at: when a provisioned pool was last renamed: the provisioner
+--   moves cost hours written under an old name for a while after it.
 -- previous_names: names the pool had, oldest first: a host token or Run
 --   naming one while nothing else does is refused, naming the pool's new
 --   name, rather than joining a pool that no longer exists. Any pool may
@@ -51,17 +51,27 @@ CREATE POLICY system_only ON luxd_instances USING (lux_system()) WITH CHECK (lux
 -- An older luxd lists a pool's instances by name: once a provisioned pool
 -- has been renamed, instances whose lux:pool still carries an old name
 -- (the re-tag is asynchronous) would be missed or taken for another
--- pool's orphans. So once any such pool has a renamed_at, taking the provisioner lease (an INSERT, or an UPDATE that
--- changes its holder or follows its expiry) is refused unless the new
--- holder checked in with the pool-id-discovery capability. A luxd checks
--- in before its first attempt at the lease, and its instance id is new
--- with every process; an older binary never checks in. Before the first
--- rename, a mixed fleet provisions as it always did.
+-- pool's orphans. The first rename of a provisioned pool arms this
+-- deployment-wide fence, in its own transaction; nothing disarms it (a
+-- pool switched to static, or back to an old name, still has instances an
+-- older luxd would misread). Once armed, taking the provisioner lease (an
+-- INSERT, or an UPDATE that changes its holder or follows its expiry) is
+-- refused unless the new holder checked in with the pool-id-discovery
+-- capability. A luxd checks in before its first attempt at the lease, and
+-- its instance id is new with every process; an older binary never checks
+-- in. Before the first rename, a mixed fleet provisions as it always did.
+CREATE TABLE pool_rename_fence (
+  one      boolean PRIMARY KEY DEFAULT true CHECK (one),
+  armed_at timestamptz NOT NULL
+);
+ALTER TABLE pool_rename_fence ENABLE ROW LEVEL SECURITY;
+CREATE POLICY system_only ON pool_rename_fence USING (lux_system()) WITH CHECK (lux_system());
+
 -- A rename makes sure the lease row exists (holder '', expired: a
 -- placeholder anyone may take) and locks it before it reads the holder and
--- sets renamed_at, so a lease acquisition waits for the rename's commit and
--- sees renamed_at, or commits first and the rename sees the new holder.
--- SECURITY DEFINER: the check sees every pool whatever the writer's scope.
+-- arms the fence, so a lease acquisition waits for the rename's commit and
+-- sees the fence, or commits first and the rename sees the new holder.
+-- SECURITY DEFINER: the check sees the fence whatever the writer's scope.
 CREATE FUNCTION lux_provisioner_lease_fence() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 BEGIN
@@ -71,7 +81,7 @@ BEGIN
   IF TG_OP = 'UPDATE' AND OLD.holder = NEW.holder AND OLD.expires_at > clock_timestamp() THEN
     RETURN NEW; -- a renewal
   END IF;
-  IF EXISTS (SELECT 1 FROM pools WHERE renamed_at IS NOT NULL AND provider <> 'static')
+  IF EXISTS (SELECT 1 FROM pool_rename_fence)
      AND NOT EXISTS (SELECT 1 FROM luxd_instances WHERE instance = NEW.holder AND 'pool-id-discovery' = ANY (capabilities)) THEN
     RAISE EXCEPTION 'luxd % discovers instances by pool name: it may not take the provisioner lease once a pool has been renamed (upgrade it)', NEW.holder
       USING ERRCODE = 'LX001';
