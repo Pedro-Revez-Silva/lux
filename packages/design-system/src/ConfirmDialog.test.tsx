@@ -1,27 +1,84 @@
-import { expect, test } from "bun:test";
-import { renderToStaticMarkup } from "react-dom/server";
-import { ConfirmDialog, confirmBlocked, type ConfirmDialogProps } from "./ConfirmDialog.tsx";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import type { act as Act } from "react";
+import type { createRoot as CreateRoot } from "react-dom/client";
+import type { ConfirmDialog as Dialog, ConfirmDialogProps } from "./ConfirmDialog.tsx";
 
-const noop = () => {};
+// react-dom decides at load whether the DOM has input events (which its
+// onChange needs), so it is loaded once the DOM is there.
+let act: typeof Act;
+let createRoot: typeof CreateRoot;
+let ConfirmDialog: typeof Dialog;
 
-/** The confirm (submit) button's opening tag. */
-function submitButton(props: Partial<ConfirmDialogProps>): string {
-  const html = renderToStaticMarkup(<ConfirmDialog open title="t" onConfirm={noop} onCancel={noop} {...props} />);
-  const m = /<button type="submit"[^>]*>/.exec(html);
-  if (!m) throw new Error(`no submit button in ${html}`);
-  return m[0];
+/** Mounts an open dialog in a DOM; `confirmed` counts onConfirm calls. */
+async function mount(props: Partial<ConfirmDialogProps>) {
+  const el = document.createElement("div");
+  document.body.appendChild(el);
+  const root = createRoot(el);
+  const calls: unknown[][] = [];
+  const render = (p: Partial<ConfirmDialogProps>) =>
+    act(async () => root.render(<ConfirmDialog open title="Rename lab?" onConfirm={(...a) => calls.push(a)} onCancel={() => {}} {...props} {...p} />));
+  await render({});
+  const form = el.querySelector("form") as HTMLFormElement;
+  const submitButton = el.querySelector('button[type="submit"]') as HTMLButtonElement;
+  /** Submits the form as Enter in one of its fields does, whatever the button's state. */
+  const submit = () => act(async () => form.requestSubmit());
+  const type = (input: HTMLInputElement, value: string) =>
+    act(async () => {
+      // React tracks the value it last set; set it past React, then say so.
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  const unmount = () => act(async () => root.unmount());
+  return { el, calls, render, submit, submitButton, type, unmount };
 }
 
-test("ConfirmDialog: while loading, confirming is refused, whatever was typed", () => {
-  expect(confirmBlocked({ loading: true, typed: "", text: "" })).toBe(true);
-  expect(confirmBlocked({ loading: true, confirmText: "lab", typed: "lab", inputRequired: true, text: "lab2" })).toBe(true);
-  expect(submitButton({ loading: true })).toContain("disabled");
-});
+describe("ConfirmDialog in a DOM", () => {
+  beforeAll(async () => {
+    GlobalRegistrator.register();
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    ({ act } = await import("react"));
+    ({ createRoot } = await import("react-dom/client"));
+    ({ ConfirmDialog } = await import("./ConfirmDialog.tsx"));
+  });
+  afterAll(async () => {
+    await GlobalRegistrator.unregister();
+  });
 
-test("ConfirmDialog: once loaded, the typed confirmation and a required input decide", () => {
-  expect(confirmBlocked({ typed: "", text: "" })).toBe(false);
-  expect(confirmBlocked({ loading: false, confirmText: "lab", typed: "la", text: "" })).toBe(true);
-  expect(confirmBlocked({ confirmText: "lab", typed: "lab", inputRequired: true, text: "  " })).toBe(true);
-  expect(confirmBlocked({ confirmText: "lab", typed: "lab", inputRequired: true, text: "lab2" })).toBe(false);
-  expect(submitButton({})).not.toContain("disabled");
+  test("submitted while loading, it does not confirm; once loaded, it does", async () => {
+    const d = await mount({ loading: true });
+    expect(d.submitButton.disabled).toBe(true);
+    await d.submit();
+    expect(d.calls).toHaveLength(0);
+    await d.render({ loading: false });
+    expect(d.submitButton.disabled).toBe(false);
+    await d.submit();
+    expect(d.calls).toHaveLength(1);
+    await d.unmount();
+  });
+
+  test("while loading, typing the confirmation and the input does not unblock it", async () => {
+    const d = await mount({ loading: true, confirmText: "lab", input: { label: "New name", required: true } });
+    const [name, confirm] = [...d.el.querySelectorAll("input")] as HTMLInputElement[];
+    await d.type(name!, "lab2");
+    await d.type(confirm!, "lab");
+    await d.submit();
+    expect(d.calls).toHaveLength(0);
+    await d.render({ loading: false });
+    await d.submit();
+    expect(d.calls).toEqual([["lab2", undefined]]);
+    await d.unmount();
+  });
+
+  test("without loading, the typed confirmation decides", async () => {
+    const d = await mount({ confirmText: "lab" });
+    const confirm = d.el.querySelector("input") as HTMLInputElement;
+    await d.type(confirm, "la");
+    await d.submit();
+    expect(d.calls).toHaveLength(0);
+    await d.type(confirm, "lab");
+    await d.submit();
+    expect(d.calls).toHaveLength(1);
+    await d.unmount();
+  });
 });
