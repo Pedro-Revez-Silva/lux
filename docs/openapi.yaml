@@ -2694,6 +2694,15 @@ paths:
             examples:
               - "0"
             type: string
+        - description: "Only events newer than this id. With before, the events between the two (both exclusive), still newest first: a gap between two pages already read."
+          explode: false
+          in: query
+          name: after
+          schema:
+            description: "Only events newer than this id. With before, the events between the two (both exclusive), still newest first: a gap between two pages already read."
+            examples:
+              - "0"
+            type: string
         - description: "At most this many events: 1 to 1000, default 100."
           explode: false
           in: query
@@ -3177,6 +3186,15 @@ paths:
           name: before
           schema:
             description: "Only events older than this id: the next page after a page's last event."
+            examples:
+              - "0"
+            type: string
+        - description: "Only events newer than this id. With before, the events between the two (both exclusive), still newest first: a gap between two pages already read."
+          explode: false
+          in: query
+          name: after
+          schema:
+            description: "Only events newer than this id. With before, the events between the two (both exclusive), still newest first: a gap between two pages already read."
             examples:
               - "0"
             type: string

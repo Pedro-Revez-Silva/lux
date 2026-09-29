@@ -402,6 +402,7 @@ type LifecycleEvent struct {
 // EventPage is a page of events, newest first.
 type EventPage struct {
 	Before string `query:"before" doc:"Only events older than this id: the next page after a page's last event." example:"0"`
+	After  string `query:"after" doc:"Only events newer than this id. With before, the events between the two (both exclusive), still newest first: a gap between two pages already read." example:"0"`
 	Limit  string `query:"limit" doc:"At most this many events: 1 to 1000, default 100." example:"100"`
 }
 
@@ -502,20 +503,27 @@ func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable,
 	if n, err := strconv.Atoi(page.Limit); err == nil && n > 0 && n <= 1000 {
 		limit = n
 	}
-	var before *int64
-	if page.Before != "" {
-		n, err := strconv.ParseInt(page.Before, 10, 64)
-		if err != nil {
-			return nil, errf(http.StatusBadRequest, "bad_request", "before: an event id")
+	var before, after *int64
+	for _, b := range []struct {
+		name, raw string
+		to        **int64
+	}{{"before", page.Before, &before}, {"after", page.After, &after}} {
+		if b.raw == "" {
+			continue
 		}
-		before = &n
+		n, err := strconv.ParseInt(b.raw, 10, 64)
+		if err != nil {
+			return nil, errf(http.StatusBadRequest, "bad_request", "%s: an event id", b.name)
+		}
+		*b.to = &n
 	}
 	sc := p.scope()
 	out := &lifecycleEventsOutput{}
 	out.Body.Events = []LifecycleEvent{}
 	err := s.db.Tx(ctx, sc, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, type, data, count, created_at, last_at FROM `+t.table+`
-			WHERE `+t.owner+` = $1 AND ($2::bigint IS NULL OR id < $2) ORDER BY id DESC LIMIT $3`, owner, before, limit)
+			WHERE `+t.owner+` = $1 AND ($2::bigint IS NULL OR id < $2) AND ($4::bigint IS NULL OR id > $4)
+			ORDER BY id DESC LIMIT $3`, owner, before, limit, after)
 		if err != nil {
 			return err
 		}

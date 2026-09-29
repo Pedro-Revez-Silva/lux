@@ -552,6 +552,32 @@ func TestInfraEventsPagination(t *testing.T) {
 	if want := []float64{6, 5, 4, 3, 2, 1, 0}; !slices.Equal(seen, want) {
 		t.Fatalf("pages gave %v, want %v", seen, want)
 	}
+	// Between two ids, both exclusive, newest first, a page at a time.
+	evIDs := queryOne[[]int64](t, s, `SELECT array_agg(id ORDER BY id) FROM host_events WHERE host_id = 'h1'`)
+	between := func(q string) []float64 {
+		t.Helper()
+		code, evs := getEvents(t, s, key, "/v1/hosts/h1/events?"+q)
+		if code != http.StatusOK {
+			t.Fatalf("%s: %d", q, code)
+		}
+		var got []float64
+		for _, e := range evs {
+			got = append(got, e.Data["i"].(float64))
+		}
+		return got
+	}
+	if got := between(fmt.Sprintf("after=%d&before=%d", evIDs[1], evIDs[5])); !slices.Equal(got, []float64{4, 3, 2}) {
+		t.Fatalf("after i=1, before i=5: %v, want [4 3 2]", got)
+	}
+	if got := between(fmt.Sprintf("after=%d&before=%d&limit=2", evIDs[1], evIDs[5])); !slices.Equal(got, []float64{4, 3}) {
+		t.Fatalf("after i=1, before i=5, limit 2: %v, want [4 3]", got)
+	}
+	if got := between(fmt.Sprintf("after=%d", evIDs[4])); !slices.Equal(got, []float64{6, 5}) {
+		t.Fatalf("after i=4: %v, want [6 5]", got)
+	}
+	if code, _ := getEvents(t, s, key, "/v1/hosts/h1/events?after=x"); code != http.StatusBadRequest {
+		t.Fatalf("after=x: %d, want 400", code)
+	}
 }
 
 // A tenant reads its own pool's and hosts' events, never another tenant's
