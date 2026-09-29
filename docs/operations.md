@@ -150,7 +150,8 @@ reach S3 in the background:
    records; a report that does not match is refused whole (a
    `snapshot.failed` event on the Run, which keeps its previous snapshot
    and is not resumed automatically). The Run's state reason says so; a
-   resume starts it from that previous snapshot.
+   resume starts it from that previous snapshot. The runner deletes the
+   refused snapshot's files instead of uploading them.
 2. The host keeps its local copy, so a resume there moves nothing. It
    deletes the copy when:
    - luxd tells it the Run now runs elsewhere (from S3), or
