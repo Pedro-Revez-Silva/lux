@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/server"
 )
 
@@ -25,7 +26,8 @@ const cliPatch = "diff --git a/a.txt b/a.txt\nindex 1..2 100644\n--- a/a.txt\n++
 
 func TestDiffText(t *testing.T) {
 	d := server.RunDiff{Base: "clone", Repos: []server.RepoDiff{
-		{Repo: "app", Base: "0123456789abcdef", Head: "fedcba9876543210", Patch: cliPatch, Files: 2, Insertions: 2, Deletions: 1, Truncated: true},
+		{Repo: "app", Base: "0123456789abcdef", Head: "fedcba9876543210", Patch: cliPatch, Files: 2, Insertions: 2, Deletions: 1, Truncated: true,
+			FileStats: []proto.DiffFileStat{{Name: "a.txt", Insertions: 2, Deletions: 1}, {Name: "sp ace.bin", Binary: true}}},
 		{Repo: "same", Base: "0123456789abcdef", Head: "0123456789abcdef"},
 	}}
 	code, out, errOut := diffCLI(t, d)

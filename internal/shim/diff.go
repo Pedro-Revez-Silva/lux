@@ -49,13 +49,14 @@ func Diff(args []string) int {
 }
 
 type repoWork struct {
-	d         proto.RepoDiff
-	path      string
-	tracked   []byte
-	untracked []string
-	extra     []byte // the untracked files' patches, at the current cap
-	extraIns  int
-	cut       bool
+	d          proto.RepoDiff
+	path       string
+	tracked    []byte
+	untracked  []string
+	extra      []byte // the untracked files' patches, at the current cap
+	extraIns   int
+	extraStats []proto.DiffFileStat
+	cut        bool
 }
 
 func diffRepos(ctx context.Context, a proto.DiffArgs) proto.DiffResult {
@@ -96,6 +97,7 @@ func diffRepos(ctx context.Context, a proto.DiffArgs) proto.DiffResult {
 			w.d.Patch = append(w.tracked, w.extra...)
 			w.d.Files += len(w.untracked)
 			w.d.Insertions += w.extraIns
+			w.d.FileStats = append(w.d.FileStats, w.extraStats...)
 			w.d.Truncated = w.cut
 		}
 		res.Repos = append(res.Repos, w.d)
@@ -139,6 +141,7 @@ func (w *repoWork) trackedDiff(ctx context.Context, r proto.DiffRepo, base strin
 		if f := strings.SplitN(rec, "\t", 3); len(f) == 3 {
 			ins, _ := strconv.Atoi(f[0])
 			del, _ := strconv.Atoi(f[1])
+			w.d.FileStats = append(w.d.FileStats, proto.DiffFileStat{Name: quoteName(f[2]), Insertions: ins, Deletions: del, Binary: f[0] == "-"})
 			w.d.Files, w.d.Insertions, w.d.Deletions = w.d.Files+1, w.d.Insertions+ins, w.d.Deletions+del
 		}
 	}
@@ -159,6 +162,7 @@ func (w *repoWork) trackedDiff(ctx context.Context, r proto.DiffRepo, base strin
 func (w *repoWork) untrackedDiff(limit int64) error {
 	var b bytes.Buffer
 	w.extraIns, w.cut = 0, false
+	w.extraStats = nil
 	for _, p := range w.untracked {
 		ins, cut, err := newFilePatch(&b, w.path, p, limit)
 		if err != nil {
@@ -166,6 +170,7 @@ func (w *repoWork) untrackedDiff(limit int64) error {
 		}
 		w.extraIns += ins
 		w.cut = w.cut || cut
+		w.extraStats = append(w.extraStats, proto.DiffFileStat{Name: quoteName(p), Insertions: ins, Binary: cut && ins == 0})
 	}
 	w.extra = b.Bytes()
 	return nil

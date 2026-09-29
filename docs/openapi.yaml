@@ -283,6 +283,20 @@ components:
           description: The part from final lines.
           type: string
       type: object
+    DiffFileStat:
+      additionalProperties: false
+      properties:
+        binary:
+          type: boolean
+        deletions:
+          format: int64
+          type: integer
+        insertions:
+          format: int64
+          type: integer
+        name:
+          type: string
+      type: object
     DiskSample:
       additionalProperties: false
       properties:
@@ -1123,6 +1137,12 @@ components:
         error:
           description: Why this repository's diff could not be computed.
           type: string
+        fileStats:
+          items:
+            $ref: "#/components/schemas/DiffFileStat"
+          type:
+            - array
+            - "null"
         files:
           format: int64
           type: integer

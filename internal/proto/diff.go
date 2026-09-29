@@ -35,18 +35,26 @@ type DiffRepo struct {
 	Base string `json:"base,omitempty"`
 }
 
+type DiffFileStat struct {
+	Name       string `json:"name"`
+	Insertions int    `json:"insertions"`
+	Deletions  int    `json:"deletions"`
+	Binary     bool   `json:"binary,omitempty"`
+}
+
 // RepoDiff is one repository's diff. Patch is bytes, not a string: a text
 // file in another encoding is not valid UTF-8.
 type RepoDiff struct {
-	Repo       string `json:"repo"`
-	Base       string `json:"base"`
-	Head       string `json:"head"`
-	Patch      []byte `json:"patch,omitempty"`
-	Files      int    `json:"files"`
-	Insertions int    `json:"insertions"`
-	Deletions  int    `json:"deletions"`
-	Truncated  bool   `json:"truncated,omitempty"`
-	Error      string `json:"error,omitempty"`
+	Repo       string         `json:"repo"`
+	Base       string         `json:"base"`
+	Head       string         `json:"head"`
+	Patch      []byte         `json:"patch,omitempty"`
+	Files      int            `json:"files"`
+	Insertions int            `json:"insertions"`
+	Deletions  int            `json:"deletions"`
+	FileStats  []DiffFileStat `json:"fileStats,omitempty"`
+	Truncated  bool           `json:"truncated,omitempty"`
+	Error      string         `json:"error,omitempty"`
 }
 
 // DiffResult is the shim's output and the runner's answer. Busy: another

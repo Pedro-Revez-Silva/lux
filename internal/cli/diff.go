@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"bufio"
-	"bytes"
 	"fmt"
 	"io"
 	"net/url"
@@ -35,7 +33,7 @@ on stderr. Exit 3: the Run has no repositories; 1: a repository's diff failed.`,
 				return fmt.Errorf("--base must be clone or head")
 			}
 			q := url.Values{"base": {base}}
-			// Text --stat counts from the patch; JSON --stat leaves it out.
+			// JSON --stat omits the patch.
 			if stat && a.output == "json" {
 				q.Set("stat", "true")
 			}
@@ -80,7 +78,7 @@ func (a *app) printDiff(d server.RunDiff, stat bool) {
 			patch = r.PatchBase64
 		}
 		if stat {
-			writeStat(a.stdout, patch, r)
+			writeStat(a.stdout, r)
 		} else {
 			a.stdout.Write(patch)
 		}
@@ -97,50 +95,12 @@ func short(sha string) string {
 	return sha[:min(len(sha), 12)]
 }
 
-type fileStat struct {
-	name     string
-	ins, del int
-	binary   bool
-}
-
-// patchStats counts each file's lines in a patch. lux's patches never
-// rename, so a file's two header paths are the same.
-func patchStats(patch []byte) []fileStat {
-	var out []fileStat
-	inHunk := false
-	sc := bufio.NewScanner(bytes.NewReader(patch))
-	sc.Buffer(nil, len(patch)+1)
-	for sc.Scan() {
-		l := sc.Text()
-		switch {
-		case strings.HasPrefix(l, "diff --git "):
-			names := l[len("diff --git "):]
-			name := names[2 : (len(names)-1)/2] // "a/P b/P"
-			if strings.HasPrefix(names, `"`) {
-				name = `"` + names[3:(len(names)-1)/2] // `"a/P" "b/P"`, left quoted
-			}
-			out = append(out, fileStat{name: name})
-			inHunk = false
-		case len(out) == 0:
-		case strings.HasPrefix(l, "@@"):
-			inHunk = true
-		case strings.HasPrefix(l, "GIT binary patch") || strings.HasPrefix(l, "Binary files "):
-			out[len(out)-1].binary = true
-		case inHunk && strings.HasPrefix(l, "+"):
-			out[len(out)-1].ins++
-		case inHunk && strings.HasPrefix(l, "-"):
-			out[len(out)-1].del++
-		}
-	}
-	return out
-}
-
 // writeStat prints git diff --stat's lines for one repository.
-func writeStat(w io.Writer, patch []byte, r server.RepoDiff) {
-	files := patchStats(patch)
+func writeStat(w io.Writer, r server.RepoDiff) {
+	files := r.FileStats
 	width, most := 0, 0
 	for _, f := range files {
-		width, most = max(width, len(f.name)), max(most, f.ins+f.del)
+		width, most = max(width, len(f.Name)), max(most, f.Insertions+f.Deletions)
 	}
 	const bar = 50
 	scale := func(n int) int {
@@ -150,11 +110,11 @@ func writeStat(w io.Writer, patch []byte, r server.RepoDiff) {
 		return max(1, n*bar/most)
 	}
 	for _, f := range files {
-		if f.binary {
-			fmt.Fprintf(w, " %-*s | Bin\n", width, f.name)
+		if f.Binary {
+			fmt.Fprintf(w, " %-*s | Bin\n", width, f.Name)
 			continue
 		}
-		fmt.Fprintf(w, " %-*s | %d %s%s\n", width, f.name, f.ins+f.del, strings.Repeat("+", scale(f.ins)), strings.Repeat("-", scale(f.del)))
+		fmt.Fprintf(w, " %-*s | %d %s%s\n", width, f.Name, f.Insertions+f.Deletions, strings.Repeat("+", scale(f.Insertions)), strings.Repeat("-", scale(f.Deletions)))
 	}
 	fmt.Fprintf(w, " %d %s changed", r.Files, plural(r.Files, "file", "files"))
 	if r.Insertions > 0 {
