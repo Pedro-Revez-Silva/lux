@@ -63,7 +63,10 @@ func TestAdminPoolNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	stdout := os.Stdout
-	devnull, _ := os.Open(os.DevNull)
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	os.Stdout = devnull
 	t.Cleanup(func() { os.Stdout = stdout; devnull.Close() })
 
