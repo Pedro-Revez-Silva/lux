@@ -168,6 +168,8 @@ type poolState struct {
 	existing []hostRef
 	// Hosts launched whose instance id is not recorded yet, by id.
 	launching map[string]bool
+	// Hosts whose launch never completed: written off.
+	abandoned []string
 }
 
 // hostRef is a provisioned host, with the template it was launched with
@@ -189,6 +191,9 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	})
 	if err != nil {
 		return err
+	}
+	for _, id := range st.abandoned {
+		s.markTerminated(ctx, id, "launch never completed")
 	}
 
 	// Every ProviderCheckEvery (provider API limits), the provider's view of the
@@ -452,10 +457,10 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 		case h.ProviderID == "" && launchLong:
 			// Launched, but its instance id was never recorded (luxd
 			// stopped mid-launch, and no instance carries its tag): the
-			// row goes; an instance found later is an orphan.
-			if err := s.markTerminatedTx(ctx, tx, h.ID, "launch never completed"); err != nil {
-				return err
-			}
+			// row goes; an instance found later is an orphan. Each in a
+			// transaction of its own (reconcilePool): this one must not
+			// lock a host after writing a pool event (infraevents.go).
+			st.abandoned = append(st.abandoned, h.ID)
 			continue
 		case h.ProviderID == "":
 			// Being launched (perhaps by another luxd, or this one before

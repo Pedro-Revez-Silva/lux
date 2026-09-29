@@ -18,6 +18,44 @@ import (
 // Pool and host events (migration 031): what happened to a pool or a host,
 // written in the transaction of the change each records. Type names carry
 // their table's prefix.
+//
+// Each pool's and each host's events are a stream, and every write to one
+// takes that stream's transaction-scoped advisory lock (lockStream), keyed
+// by table and owner id, so unrelated pools and hosts never wait on each
+// other. An append takes it shared: appends never wait on each other, only
+// on a fold. A fold (collapse) takes it exclusive before it reads the
+// stream's latest events, so no other write to the stream is in flight
+// uncommitted while it decides, and none can land until it commits: under
+// READ COMMITTED it would otherwise fold across an event another
+// transaction has written but not yet committed, and two writers could both
+// write a "first" failure.
+//
+// Lock order, for every transaction that writes events:
+//
+//  1. pool rows, FOR NO KEY UPDATE (ChangePool, deletePool; an event's
+//     foreign key takes KEY SHARE on its pool, which NO KEY UPDATE does
+//     not conflict with, so appending to a pool never waits on its edit);
+//  2. runs, FOR UPDATE in id order (lockReaperRuns, the scheduler);
+//  3. the cost-host advisory locks, in host id order (lockCostHost);
+//  4. host rows, FOR NO KEY UPDATE, in id order;
+//  5. event streams, shared, each right before its event is written.
+//
+// A fold takes its stream exclusive after every other lock its transaction
+// takes (launch writes its host row, then folds; a failed launch
+// terminates its host, then folds). An exclusive request waits for every
+// shared holder to commit, so by then the folding transaction holds only
+// rows no appender waits for: a host it has just created, or one whose
+// launch failed, and that host's token and copies. Appenders may lock more
+// after appending (the scheduler places several Runs a batch; a
+// registration may then drain its host): at worst one queues for a shared
+// lock behind a waiting fold while another shared holder waits on it, a
+// cycle through a queue position only, which Postgres's deadlock check
+// resolves after deadlock_timeout by granting the shared lock ahead of the
+// fold, not by aborting. A fold waits for shared holders to commit: the
+// scheduler's placement transaction holds its pools' and hosts' streams
+// shared until it commits, so a failing pool's fold waits out at most one
+// scheduler batch, and a batch waits at most for one fold (a few
+// statements, once per failing provider call).
 const (
 	evScaleUp          = "pool.scale_up"
 	evLaunchRequested  = "pool.launch_requested"
@@ -48,23 +86,47 @@ var poolRetry = []string{evScaleUp, evLaunchRequested, evLaunchFailed, evPoolPro
 // hostRetry: a terminate the provider keeps refusing.
 var hostRetry = []string{evHostProviderErr}
 
+// lockStream takes an owner's event-stream lock (see the top of this file):
+// shared to append, exclusive to fold.
+func lockStream(ctx context.Context, tx pgx.Tx, t eventTable, owner string, exclusive bool) error {
+	fn := "pg_advisory_xact_lock_shared"
+	if exclusive {
+		fn = "pg_advisory_xact_lock"
+	}
+	_, err := tx.Exec(ctx, `SELECT `+fn+`(hashtextextended($1 || ':' || $2, 0))`, t.table, owner)
+	return err
+}
+
 func poolEvent(ctx context.Context, tx pgx.Tx, poolID, typ string, data map[string]any) error {
+	if err := lockStream(ctx, tx, poolEvents, poolID, false); err != nil {
+		return err
+	}
 	_, err := tx.Exec(ctx, `INSERT INTO pool_events (tenant_id, pool_id, type, data)
 		SELECT tenant_id, id, $2, $3 FROM pools WHERE id = $1`, poolID, typ, nonNilData(data))
 	return err
 }
 
-// hostPoolEvent records an event on the pool a host belongs to; none when
-// that pool has no row (a static pool only its host tokens name).
+// hostPoolEvent records an event on the pool a host belongs to: the pool
+// of its owner (a platform host's is the platform's) and its pool's name.
+// None when that pool has no row (a static pool only its host tokens name).
 func hostPoolEvent(ctx context.Context, tx pgx.Tx, hostID, typ string, data map[string]any) error {
-	_, err := tx.Exec(ctx, `INSERT INTO pool_events (tenant_id, pool_id, type, data)
-		SELECT p.tenant_id, p.id, $2, $3 FROM hosts h
+	var poolID string
+	err := tx.QueryRow(ctx, `SELECT p.id FROM hosts h
 		JOIN pools p ON p.name = h.pool AND p.tenant_id IS NOT DISTINCT FROM h.tenant_id
-		WHERE h.id = $1`, hostID, typ, nonNilData(data))
-	return err
+		WHERE h.id = $1`, hostID).Scan(&poolID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return poolEvent(ctx, tx, poolID, typ, data)
 }
 
 func hostEvent(ctx context.Context, tx pgx.Tx, hostID, typ string, data map[string]any) error {
+	if err := lockStream(ctx, tx, hostEvents, hostID, false); err != nil {
+		return err
+	}
 	_, err := tx.Exec(ctx, `INSERT INTO host_events (tenant_id, host_id, type, data)
 		SELECT tenant_id, id, $2, $3 FROM hosts WHERE id = $1`, hostID, typ, nonNilData(data))
 	return err
@@ -102,17 +164,21 @@ var (
 )
 
 // collapse bumps the count of the event typ would repeat, if any (see
-// poolRepeatEvent), and reports whether it did. The row is locked, so two
-// writers cannot both fold into it and lose a count.
+// poolRepeatEvent), and reports whether it did. It holds the owner's
+// stream exclusively from before its read (see the top of this file), so
+// what it reads as the latest events stays the latest until it commits.
 func collapse(ctx context.Context, tx pgx.Tx, t eventTable, owner, typ string, data map[string]any, volatile, retry []string, afterFailure bool) (bool, error) {
+	if err := lockStream(ctx, tx, t, owner, true); err != nil {
+		return false, err
+	}
 	var id int64
 	err := tx.QueryRow(ctx, `SELECT e.id FROM `+t.table+` e
 		WHERE e.`+t.owner+` = $1 AND e.type = $2
 		  AND e.data - $4::text[] = $3::jsonb - $4::text[]
 		  AND NOT EXISTS (SELECT 1 FROM `+t.table+` x WHERE x.`+t.owner+` = $1 AND x.id > e.id AND x.type <> ALL($5))
 		  AND (NOT $6 OR EXISTS (SELECT 1 FROM `+t.table+` x WHERE x.`+t.owner+` = $1 AND x.id > e.id AND x.type = $7))
-		  AND e.id = (SELECT max(y.id) FROM `+t.table+` y WHERE y.`+t.owner+` = $1 AND y.type = $2)
-		FOR UPDATE`, owner, typ, nonNilData(data), nonNil(volatile), retry, afterFailure, evLaunchFailed).Scan(&id)
+		  AND e.id = (SELECT max(y.id) FROM `+t.table+` y WHERE y.`+t.owner+` = $1 AND y.type = $2)`,
+		owner, typ, nonNilData(data), nonNil(volatile), retry, afterFailure, evLaunchFailed).Scan(&id)
 	if err == pgx.ErrNoRows {
 		return false, nil
 	}
