@@ -12,23 +12,22 @@ import (
 // Interleavings of a provisioner pass with a rename, a lease handoff, a
 // launch and a late re-tag. A fakeCloud call blocks on a channel while the
 // test changes the world under it; no pass may terminate a live instance
-// or write off its host. Every wait is bounded, so a regression fails
-// rather than hangs.
-
-const raceWait = 10 * time.Second
+// or write off its host. Every wait is bounded by the test's deadline
+// (testCtx), and a gate still closed when the test ends is opened.
 
 // gate blocks the first fakeCloud call match accepts until release is
 // closed; entered is closed once it arrives. With onTheWire, the blocked
-// call ignores its context: a request already sent lands whatever
-// happened to its caller.
+// call ignores its caller's context (a request already sent lands whatever
+// happened to its caller), though not the test's.
 type gate struct {
 	entered, release chan struct{}
 	once             sync.Once
+	ctx              context.Context
 }
 
 func (f *renameFixture) gate(t *testing.T, onTheWire bool, match func(call string, tags map[string]string) bool) *gate {
 	t.Helper()
-	g := &gate{entered: make(chan struct{}), release: make(chan struct{})}
+	g := &gate{entered: make(chan struct{}), release: make(chan struct{}), ctx: f.ctx}
 	f.cloud.mu.Lock()
 	f.cloud.before = func(ctx context.Context, call string, tags map[string]string) error {
 		hit := false
@@ -40,15 +39,13 @@ func (f *renameFixture) gate(t *testing.T, onTheWire bool, match func(call strin
 		}
 		close(g.entered)
 		if onTheWire {
-			ctx = context.Background()
+			ctx = f.ctx
 		}
 		select {
 		case <-g.release:
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(raceWait):
-			return errors.New("gate never released")
 		}
 	}
 	f.cloud.mu.Unlock()
@@ -64,12 +61,13 @@ func (f *renameFixture) gate(t *testing.T, onTheWire bool, match func(call strin
 
 func (g *gate) open() { close(g.release) }
 
-func recv[T any](t *testing.T, ch <-chan T, what string) T {
+// recv waits for a value on ch until ctx ends.
+func recv[T any](t *testing.T, ctx context.Context, ch <-chan T, what string) T {
 	t.Helper()
 	select {
 	case v := <-ch:
 		return v
-	case <-time.After(raceWait):
+	case <-ctx.Done():
 		t.Fatalf("timed out waiting for %s", what)
 		panic("unreachable")
 	}
@@ -79,7 +77,7 @@ func (g *gate) waitEntered(t *testing.T, what string) {
 	t.Helper()
 	select {
 	case <-g.entered:
-	case <-time.After(raceWait):
+	case <-g.ctx.Done():
 		t.Fatalf("timed out waiting for %s", what)
 	}
 }
@@ -107,7 +105,7 @@ func listing(tag string) func(string, map[string]string) bool {
 func TestRenameRaceStalePassAfterRetag(t *testing.T) {
 	f := newRenameFixture(t, true)
 	g := f.gate(t, false, listing("t1/burst"))
-	done := f.pass(t, f.s, f.pool(t), takeLease(t, f.s))
+	done := f.pass(t, f.s, f.pool(t), takeLease(t, f.ctx, f.s))
 	g.waitEntered(t, "the pass's listing")
 
 	f.rename(t, "burst", "burst-eu")
@@ -115,7 +113,7 @@ func TestRenameRaceStalePassAfterRetag(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.open()
-	if err := recv(t, done, "the pass"); err != nil {
+	if err := recv(t, f.ctx, done, "the pass"); err != nil {
 		t.Fatal(err)
 	}
 	f.noneTerminated(t)
@@ -133,7 +131,7 @@ func TestRenameRaceStalePassAfterRetag(t *testing.T) {
 func TestRenameRaceLeaseHandoffFencesThePass(t *testing.T) {
 	f := newRenameFixture(t, false)
 	execSQL(t, f.s, f.ctx, `UPDATE hosts SET state = 'lost', lost_at = now() - interval '1 hour' WHERE id = 'h1'`)
-	lease := takeLease(t, f.s)
+	lease := takeLease(t, f.ctx, f.s)
 	var deadline time.Time
 	var hasDeadline bool
 	g := f.gate(t, false, func(call string, tags map[string]string) bool { return call == "Instances" })
@@ -152,12 +150,12 @@ func TestRenameRaceLeaseHandoffFencesThePass(t *testing.T) {
 
 	execSQL(t, f.s, f.ctx, `UPDATE leases SET expires_at = now() - interval '1 second' WHERE name = 'provisioner'`)
 	s2 := f.otherLuxd(t)
-	if l2 := takeLease(t, s2); l2.token == lease.token {
+	if l2 := takeLease(t, f.ctx, s2); l2.token == lease.token {
 		t.Fatalf("a new holder kept token %d", l2.token)
 	}
 	execSQL(t, f.s, f.ctx, `UPDATE hosts SET state = 'ready', lost_at = NULL, last_heartbeat = now() WHERE id = 'h1'`)
 	g.open()
-	if err := recv(t, done, "the pass"); !errors.Is(err, errFenced) {
+	if err := recv(t, f.ctx, done, "the pass"); !errors.Is(err, errFenced) {
 		t.Errorf("pass: %v, want it fenced", err)
 	}
 	f.noneTerminated(t)
@@ -170,7 +168,7 @@ func TestRenameRaceLeaseHandoffFencesThePass(t *testing.T) {
 func TestRenameRaceLaunchDuringListingIsNoOrphan(t *testing.T) {
 	f := newRenameFixture(t, false)
 	g := f.gate(t, false, listing("t1/burst"))
-	done := f.pass(t, f.s, f.pool(t), takeLease(t, f.s))
+	done := f.pass(t, f.s, f.pool(t), takeLease(t, f.ctx, f.s))
 	g.waitEntered(t, "the pass's listing")
 
 	execSQL(t, f.s, f.ctx, `INSERT INTO host_tokens (id, tenant_id, pool, token_hash) VALUES ('tok3', 't1', 'burst', 'x3')`)
@@ -179,7 +177,7 @@ func TestRenameRaceLaunchDuringListingIsNoOrphan(t *testing.T) {
 	f.cloud.add("i-3", map[string]string{tagManaged: "true", tagDeployment: "d1", tagPool: "t1/burst", tagHost: "h3"})
 	f.rename(t, "burst", "burst-eu")
 	g.open()
-	if err := recv(t, done, "the pass"); err != nil {
+	if err := recv(t, f.ctx, done, "the pass"); err != nil {
 		t.Fatal(err)
 	}
 	f.noneTerminated(t)
@@ -201,12 +199,12 @@ func TestRenameRaceLateRetagAfterSecondRename(t *testing.T) {
 	g := f.gate(t, true, func(call string, tags map[string]string) bool {
 		return call == "Retag" && tags[tagPool] == "t1/burst-eu"
 	})
-	late := f.pass(t, f.s, f.pool(t), takeLease(t, f.s))
+	late := f.pass(t, f.s, f.pool(t), takeLease(t, f.ctx, f.s))
 	g.waitEntered(t, "the first provisioner's CreateTags")
 
 	execSQL(t, f.s, f.ctx, `UPDATE leases SET expires_at = now() - interval '1 second' WHERE name = 'provisioner'`)
 	s2 := f.otherLuxd(t)
-	l2 := takeLease(t, s2)
+	l2 := takeLease(t, f.ctx, s2)
 	converge := func(name string) {
 		t.Helper()
 		for range 2 {
@@ -233,7 +231,7 @@ func TestRenameRaceLateRetagAfterSecondRename(t *testing.T) {
 	}
 
 	g.open()
-	recv(t, late, "the first provisioner's pass")
+	recv(t, f.ctx, late, "the first provisioner's pass")
 	for _, pid := range []string{"i-1", "i-2"} {
 		if got := f.cloud.tag(pid, tagPool); got != "t1/burst-eu" {
 			t.Fatalf("%s lux:pool = %q: the late re-tag did not land", pid, got)
@@ -255,13 +253,13 @@ func TestRenameRaceLateRetagAfterSecondRename(t *testing.T) {
 func TestRenameRaceUnlistedRunningHostIsKept(t *testing.T) {
 	f := newRenameFixture(t, true)
 	g := f.gate(t, false, listing("t1/burst"))
-	done := f.pass(t, f.s, f.pool(t), takeLease(t, f.s))
+	done := f.pass(t, f.s, f.pool(t), takeLease(t, f.ctx, f.s))
 	g.waitEntered(t, "the pass's listing")
 	if err := f.cloud.Retag(f.ctx, nil, []string{"i-1"}, tagPool, "t1/elsewhere"); err != nil {
 		t.Fatal(err)
 	}
 	g.open()
-	if err := recv(t, done, "the pass"); err != nil {
+	if err := recv(t, f.ctx, done, "the pass"); err != nil {
 		t.Fatal(err)
 	}
 	f.noneTerminated(t)
@@ -299,8 +297,8 @@ func (f *renameFixture) otherLuxd(t *testing.T) *Server {
 // another takes it, also after a release (the row deleted).
 func TestProvisionLeaseToken(t *testing.T) {
 	f := newRenameFixture(t, false)
-	a := takeLease(t, f.s)
-	if again := takeLease(t, f.s); again.token != a.token {
+	a := takeLease(t, f.ctx, f.s)
+	if again := takeLease(t, f.ctx, f.s); again.token != a.token {
 		t.Errorf("renewal changed the token %d → %d", a.token, again.token)
 	}
 	s2 := f.otherLuxd(t)
@@ -308,7 +306,7 @@ func TestProvisionLeaseToken(t *testing.T) {
 		t.Fatalf("another luxd took a held lease: %v, %v", l, err)
 	}
 	f.s.releaseProvisionLease()
-	b := takeLease(t, s2)
+	b := takeLease(t, f.ctx, s2)
 	if b.token == a.token {
 		t.Errorf("a new holder after a release kept token %d", a.token)
 	}
@@ -316,7 +314,7 @@ func TestProvisionLeaseToken(t *testing.T) {
 		t.Errorf("the first holder renewing after losing the lease: %v", err)
 	}
 	execSQL(t, f.s, f.ctx, `UPDATE leases SET expires_at = now() - interval '1 second'`)
-	c := takeLease(t, f.s)
+	c := takeLease(t, f.ctx, f.s)
 	if c.token == b.token || c.token == a.token {
 		t.Errorf("taking over an expired lease kept a token (%d; before %d, %d)", c.token, a.token, b.token)
 	}
@@ -330,7 +328,7 @@ func TestProvisionLeaseToken(t *testing.T) {
 	if got := f.query(t, `SELECT (expires_at < now())::text FROM leases`); got != "true" {
 		t.Error("a refused renewal took the lease again")
 	}
-	d := takeLease(t, f.s)
+	d := takeLease(t, f.ctx, f.s)
 	if d.token == c.token {
 		t.Errorf("re-taking its own expired lease kept token %d", c.token)
 	}
@@ -354,7 +352,7 @@ func TestRenameRaceLateLaunchUnderTheOldTag(t *testing.T) {
 	f.cloud.launches = true
 	execSQL(t, f.s, f.ctx, `UPDATE pools SET min_hosts = 3`)
 	g := f.gate(t, true, func(call string, tags map[string]string) bool { return call == "Launch" })
-	launching := f.pass(t, f.s, f.pool(t), takeLease(t, f.s))
+	launching := f.pass(t, f.s, f.pool(t), takeLease(t, f.ctx, f.s))
 	g.waitEntered(t, "the launch's RunInstances")
 	if got := f.query(t, `SELECT pool FROM hosts WHERE provider_id IS NULL`); got != "burst" {
 		t.Fatalf("the launching row is in pool %q", got)
@@ -372,7 +370,7 @@ func TestRenameRaceLateLaunchUnderTheOldTag(t *testing.T) {
 	}
 
 	g.open()
-	if err := recv(t, launching, "the launching pass"); err != nil {
+	if err := recv(t, f.ctx, launching, "the launching pass"); err != nil {
 		t.Fatal(err)
 	}
 	late := f.cloud.launchedIDs()
@@ -395,9 +393,8 @@ func TestRenameRaceLateLaunchUnderTheOldTag(t *testing.T) {
 // transaction's start.
 func TestLeaseRenewalAfterALockWait(t *testing.T) {
 	f := newRenameFixture(t, false)
-	ctx, cancel := context.WithTimeout(f.ctx, raceWait)
-	defer cancel()
-	l := takeLease(t, f.s)
+	ctx := f.ctx
+	l := takeLease(t, f.ctx, f.s)
 	execSQL(t, f.s, ctx, `UPDATE leases SET expires_at = now() + interval '300 milliseconds'`)
 	tx := systemTx(t, ctx, f.s)
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM leases WHERE name = 'provisioner' FOR UPDATE`); err != nil {
@@ -409,7 +406,7 @@ func TestLeaseRenewalAfterALockWait(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := recv(t, done, "the renewal"); !errors.Is(err, errFenced) {
+	if err := recv(t, f.ctx, done, "the renewal"); !errors.Is(err, errFenced) {
 		t.Fatalf("a renewal that waited past the expiry: %v, want fenced", err)
 	}
 }
@@ -418,9 +415,8 @@ func TestLeaseRenewalAfterALockWait(t *testing.T) {
 // acquisition waited for the row's lock is taken with a new token.
 func TestLeaseAcquisitionAfterALockWait(t *testing.T) {
 	f := newRenameFixture(t, false)
-	ctx, cancel := context.WithTimeout(f.ctx, raceWait)
-	defer cancel()
-	l := takeLease(t, f.s)
+	ctx := f.ctx
+	l := takeLease(t, f.ctx, f.s)
 	execSQL(t, f.s, ctx, `UPDATE leases SET expires_at = now() + interval '300 milliseconds'`)
 	tx := systemTx(t, ctx, f.s)
 	if _, err := tx.Exec(ctx, `SELECT 1 FROM leases WHERE name = 'provisioner' FOR UPDATE`); err != nil {
@@ -440,7 +436,7 @@ func TestLeaseAcquisitionAfterALockWait(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	g := recv(t, done, "the acquisition")
+	g := recv(t, f.ctx, done, "the acquisition")
 	if g.err != nil || g.l == nil {
 		t.Fatalf("taking the lease after it expired: %v, %v", g.l, g.err)
 	}

@@ -95,7 +95,7 @@ func TestRenamePoolRefusedWhileAnOlderLuxdHoldsTheLease(t *testing.T) {
 // resolved to that pool. Refused, naming the tenant.
 func TestRenamePlatformPoolOntoATenantsPoolName(t *testing.T) {
 	s := testServer(t)
-	ctx := t.Context()
+	ctx := testCtx(t)
 	if err := s.checkIn(ctx); err != nil {
 		t.Fatal(err)
 	}

@@ -40,7 +40,11 @@ func systemTx(t *testing.T, ctx context.Context, s *Server) pgx.Tx {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	t.Cleanup(func() {
+		rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(rctx)
+	})
 	if _, err := tx.Exec(ctx, `SELECT set_config('lux.system', 'on', true)`); err != nil {
 		t.Fatal(err)
 	}
@@ -49,8 +53,7 @@ func systemTx(t *testing.T, ctx context.Context, s *Server) pgx.Tx {
 
 func TestProvisionLeaseFence(t *testing.T) {
 	f := newRenameFixture(t, false)
-	ctx, cancel := context.WithTimeout(f.ctx, raceWait)
-	defer cancel()
+	ctx := f.ctx
 	old := f.oldLuxd()
 
 	// No alias: a mixed fleet provisions as before.
@@ -65,7 +68,7 @@ func TestProvisionLeaseFence(t *testing.T) {
 		t.Fatalf("an older luxd taking the lease with a live alias: %v, want the fence's refusal", err)
 	}
 	// Nor after the lease expired from a luxd that holds it.
-	takeLease(t, f.s)
+	takeLease(t, ctx, f.s)
 	execSQL(t, f.s, ctx, `UPDATE leases SET expires_at = now() - interval '1 second'`)
 	if _, err := old.provisionLease(ctx); !isFenceRefusal(err) {
 		t.Fatalf("an older luxd taking over an expired lease with a live alias: %v", err)
@@ -89,8 +92,7 @@ func TestProvisionLeaseFence(t *testing.T) {
 // an alias the older luxd's provisioning ignores.
 func TestRenameWaitsForALeaseAcquisition(t *testing.T) {
 	f := newRenameFixture(t, false)
-	ctx, cancel := context.WithTimeout(f.ctx, raceWait)
-	defer cancel()
+	ctx := f.ctx
 	tx := systemTx(t, ctx, f.s)
 	if _, err := tx.Exec(ctx, `INSERT INTO leases (name, holder, expires_at) VALUES ('provisioner', 'luxd-old', now() + interval '1 minute')`); err != nil {
 		t.Fatal(err)
@@ -108,7 +110,7 @@ func TestRenameWaitsForALeaseAcquisition(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	err := recv(t, done, "the rename")
+	err := recv(t, ctx, done, "the rename")
 	if _, code, _ := httpErr(err); code != "rename_unsupported_by_deployment" {
 		t.Fatalf("rename after an older luxd took the lease: %v", err)
 	}
@@ -121,8 +123,7 @@ func TestRenameWaitsForALeaseAcquisition(t *testing.T) {
 // lease meanwhile waits, then is refused: the alias is there.
 func TestLeaseAcquisitionWaitsForARename(t *testing.T) {
 	f := newRenameFixture(t, false)
-	ctx, cancel := context.WithTimeout(f.ctx, raceWait)
-	defer cancel()
+	ctx := f.ctx
 	tx := systemTx(t, ctx, f.s)
 	// What the rename's transaction does, up to its commit.
 	if err := lockProvisionerLease(ctx, tx); err != nil {
@@ -148,7 +149,7 @@ func TestLeaseAcquisitionWaitsForARename(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := recv(t, done, "the older luxd's lease"); !isFenceRefusal(err) {
+	if err := recv(t, ctx, done, "the older luxd's lease"); !isFenceRefusal(err) {
 		t.Fatalf("an older luxd taking the lease after the rename committed: %v", err)
 	}
 }
@@ -159,8 +160,7 @@ func TestProvisionerChecksInBeforeTheLease(t *testing.T) {
 	s := testServer(t)
 	s.cfg.Tick = 10 * time.Millisecond
 	s.cfg.Providers = map[string]Provider{"ec2": newFakeCloud()}
-	ctx, cancel := context.WithTimeout(context.Background(), raceWait)
-	defer cancel()
+	ctx := testCtx(t)
 	execSQL(t, s, ctx, `INSERT INTO settings (name, value) VALUES ('deployment', 'd1') ON CONFLICT (name) DO NOTHING`)
 	loop, stop := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -212,8 +212,7 @@ func blocked[T any](t *testing.T, ch <-chan T, what string) {
 // rename waits for it and moves the token. Never a token for the old name.
 func TestHostTokenDuringARename(t *testing.T) {
 	f := newRenameFixture(t, false)
-	ctx, cancel := context.WithTimeout(f.ctx, raceWait)
-	defer cancel()
+	ctx := f.ctx
 	t1 := "t1"
 	mint := func(pool string) <-chan error {
 		done := make(chan error, 1)
@@ -243,10 +242,10 @@ func TestHostTokenDuringARename(t *testing.T) {
 	if err := row.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := recv(t, renamed, "the rename"); err != nil {
+	if err := recv(t, ctx, renamed, "the rename"); err != nil {
 		t.Fatal(err)
 	}
-	err := recv(t, minted, "the mint")
+	err := recv(t, ctx, minted, "the mint")
 	if st, code, msg := httpErr(err); st != http.StatusConflict || code != "pool_name_reserved" || !strings.Contains(msg, "burst-eu") {
 		t.Fatalf("a mint for the old name after the rename: %v", err)
 	}
@@ -263,7 +262,7 @@ func TestHostTokenDuringARename(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := recv(t, renamed, "the rename"); err != nil {
+	if err := recv(t, ctx, renamed, "the rename"); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.query(t, `SELECT string_agg(DISTINCT pool, ',') FROM host_tokens`); got != "burst-us" {
@@ -276,8 +275,7 @@ func TestHostTokenDuringARename(t *testing.T) {
 // that follow the platform pool would resolve to it) and is refused.
 func TestTenantPoolCreatedDuringAPlatformRename(t *testing.T) {
 	s := testServer(t)
-	ctx, cancel := context.WithTimeout(context.Background(), raceWait)
-	defer cancel()
+	ctx := testCtx(t)
 	if err := s.checkIn(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +299,7 @@ func TestTenantPoolCreatedDuringAPlatformRename(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	err := recv(t, done, "the rename")
+	err := recv(t, ctx, done, "the rename")
 	if st, code, _ := httpErr(err); st != http.StatusConflict || code != "pool_exists" {
 		t.Fatalf("platform rename onto a tenant's pool created meanwhile: %v", err)
 	}

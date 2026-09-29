@@ -190,12 +190,24 @@ type renameFixture struct {
 	cloud *fakeCloud
 }
 
+// testWait bounds each rename test: every database and provider call, and
+// every wait for another goroutine, ends by then, so a regression fails
+// rather than hangs.
+const testWait = 30 * time.Second
+
+// testCtx is the test's deadline context, cancelled when it ends.
+func testCtx(t *testing.T) context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), testWait)
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func newRenameFixture(t *testing.T, settled bool) *renameFixture {
 	t.Helper()
 	s := testServer(t)
 	s.deployment = "d1"
 	s.cfg.ListingLag = 300 * time.Millisecond
-	ctx := context.Background()
+	ctx := testCtx(t)
 	cloud := newFakeCloud()
 	s.cfg.Providers = map[string]Provider{"ec2": cloud}
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
@@ -258,15 +270,15 @@ func readPool(t *testing.T, ctx context.Context, s *Server, id string) poolRow {
 // check is one provisioner pass with a provider check.
 func (f *renameFixture) check(t *testing.T, pl poolRow) {
 	t.Helper()
-	if err := f.s.reconcilePool(f.ctx, f.cloud, pl, true, takeLease(t, f.s)); err != nil {
+	if err := f.s.reconcilePool(f.ctx, f.cloud, pl, true, takeLease(t, f.ctx, f.s)); err != nil {
 		t.Fatal(err)
 	}
 }
 
 // takeLease makes s the provisioner.
-func takeLease(t *testing.T, s *Server) *passLease {
+func takeLease(t *testing.T, ctx context.Context, s *Server) *passLease {
 	t.Helper()
-	l, err := s.provisionLease(context.Background())
+	l, err := s.provisionLease(ctx)
 	if err != nil || l == nil {
 		t.Fatalf("provisioner lease: %v, %v", l, err)
 	}
@@ -492,7 +504,7 @@ func TestRenamePoolWithoutHosts(t *testing.T) {
 	s := testServer(t)
 	s.deployment = "d1"
 	s.cfg.ListingLag = time.Millisecond
-	ctx := context.Background()
+	ctx := testCtx(t)
 	if err := s.checkIn(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +522,7 @@ func TestRenamePoolWithoutHosts(t *testing.T) {
 	}
 	cloud := newFakeCloud()
 	time.Sleep(time.Millisecond)
-	if err := s.reconcilePool(ctx, cloud, readPool(t, ctx, s, "pe"), true, takeLease(t, s)); err != nil {
+	if err := s.reconcilePool(ctx, cloud, readPool(t, ctx, s, "pe"), true, takeLease(t, ctx, s)); err != nil {
 		t.Fatal(err)
 	}
 	if pl := readPool(t, ctx, s, "pe"); pl.RenamedFrom != nil || !slices.Equal(pl.Aliases, []string{"burst"}) {
@@ -593,7 +605,7 @@ func TestRenamePoolLaunchUnderTheOldNameIsSkipped(t *testing.T) {
 // a platform pool, or a tenant's with ?tenant=.
 func TestRenamePoolAPIPermissions(t *testing.T) {
 	s := testServer(t)
-	ctx := context.Background()
+	ctx := testCtx(t)
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
 	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('mine', 't1', 'lab', 'static'), ('plat', NULL, 'shared', 'static')`)
 	keys := map[string]string{"admin": ids.Secret("luxk"), "read": ids.Secret("luxk"), "operator": ids.Secret("luxk")}
@@ -603,7 +615,7 @@ func TestRenamePoolAPIPermissions(t *testing.T) {
 	post := func(key, path, name string) (int, string) {
 		t.Helper()
 		body, _ := json.Marshal(map[string]string{"name": name})
-		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, path, bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+key)
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
