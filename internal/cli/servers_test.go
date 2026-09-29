@@ -40,8 +40,9 @@ func TestShellPrefersBash(t *testing.T) {
 	if err := os.Symlink(bash, filepath.Join(dir, "bash")); err != nil {
 		t.Fatal(err)
 	}
-	out := runShell(t, dir, "echo bash-${BASH_VERSION:+yes}; exit\n")
-	if !slices.Contains(out, "bash-yes") {
+	// $0 too: bash as /bin/sh (macOS) sets BASH_VERSION in the fallback.
+	out := runShell(t, dir, "echo bash-${BASH_VERSION:+yes}; echo \"0=$0\"; exit\n")
+	if !slices.Contains(out, "bash-yes") || !slices.Contains(out, "0=bash") {
 		t.Fatalf("got %q", out)
 	}
 }
