@@ -49,8 +49,9 @@ var safeConfig = []string{
 }
 
 // diffFlags make the patch git's plain format, whatever the config says.
+// --binary: a binary file's patch carries its content, so it applies.
 var diffFlags = []string{
-	"--no-ext-diff", "--no-textconv", "--no-color", "--no-relative",
+	"--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--no-relative",
 	"--src-prefix=a/", "--dst-prefix=b/", "-M", "-O/dev/null", "--ignore-submodules=none",
 }
 
@@ -96,8 +97,8 @@ type Diff struct {
 
 // Compute diffs the checkout at dir for each kind (proto.DiffBaseClone
 // against base, proto.DiffBaseHead against HEAD). Patches are cut at limit
-// bytes (at the last file boundary before it, if there is one); the stat
-// always covers the whole diff. A failure is the returned error when the
+// bytes, after the last whole file's diff that fits (empty if none does);
+// the stat always covers the whole diff. A failure is the returned error when the
 // checkout could not be staged at all, else in each Diff's Stat.Error.
 func Compute(ctx context.Context, dir, base string, kinds []string, statOnly bool, limit int64) ([]Diff, error) {
 	r := &repo{dir: dir}
@@ -236,38 +237,40 @@ func (r *repo) diff(ctx context.Context, d *Diff, from string, statOnly bool, li
 	return nil
 }
 
-// capped keeps the first limit bytes written to it and counts the rest.
+// fileHeader starts every file's diff but the first. No other patch line
+// can match it: content lines start with ' ', '+', '-' or '\', binary
+// patch lines are base85 (no spaces), and git quotes a path with a newline.
+var fileHeader = []byte("\ndiff --git ")
+
+// capped keeps the first limit bytes written to it, plus enough to see
+// whether a file's diff starts right at the limit, and counts the rest.
 type capped struct {
 	limit int64
 	buf   bytes.Buffer
-	over  bool
+	total int64
 }
 
 func (c *capped) Write(p []byte) (int, error) {
-	room := c.limit - int64(c.buf.Len())
-	if int64(len(p)) <= room {
-		c.buf.Write(p)
-		return len(p), nil
-	}
-	if room > 0 {
-		c.buf.Write(p[:room])
-	}
-	c.over = true
+	room := c.limit + int64(len(fileHeader)) - int64(c.buf.Len())
+	c.buf.Write(p[:min(int64(len(p)), max(room, 0))])
+	c.total += int64(len(p))
 	return len(p), nil
 }
 
-// result is the kept patch: whole, or cut where a file's diff starts (or at
-// a line end) so that what is kept still applies.
+// result is the kept patch: whole, or cut at the end of the last file's
+// diff that fits, so that what is kept applies. Nothing when even the first
+// file's does not fit.
 func (c *capped) result() ([]byte, bool) {
 	b := c.buf.Bytes()
-	if !c.over {
+	if c.total <= c.limit {
 		return b, false
 	}
-	if i := bytes.LastIndex(b, []byte("\ndiff --git ")); i > 0 {
-		return b[:i+1], true
-	}
-	if i := bytes.LastIndexByte(b, '\n'); i >= 0 {
-		return b[:i+1], true
+	// A header at i keeps b[:i+1]: it must start at or before limit-1.
+	end := min(int64(len(b)), c.limit-1+int64(len(fileHeader)))
+	if end > 0 {
+		if i := bytes.LastIndex(b[:end], fileHeader); i >= 0 {
+			return b[:i+1], true
+		}
 	}
 	return nil, true
 }

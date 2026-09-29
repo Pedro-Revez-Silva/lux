@@ -480,9 +480,12 @@ committed changes, staged, unstaged and untracked (not ignored) files.
   working tree is diffed through that copy. Nothing is written to the
   repository: not its index, `HEAD`, refs, or object store (the one object
   the copy needs, the empty blob, goes to a temporary object directory).
-- Each patch is cut at 10 MiB (at the start of a file's diff), and marked
-  `truncated`; the stats cover the whole diff. Binary files are git's
-  "Binary files differ".
+- Patches are git's binary patches (`--binary`): applied with `git apply`
+  at the base, a patch reproduces the working tree, binary files, symlinks
+  and executable bits included. Each patch is cut at 10 MiB (binary
+  content counts), after the last whole file's diff that fits, and marked
+  `truncated`: what is kept still applies, and is empty when the first
+  file's diff alone is over the limit. The stats cover the whole diff.
 - A diff that cannot be computed never fails the snapshot or the exit: a
   `diff.failed` event says why (`{error, repo?, kind?}`), and the
   repository's entry carries the error.

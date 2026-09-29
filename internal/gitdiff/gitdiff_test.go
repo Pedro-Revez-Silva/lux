@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -150,7 +151,7 @@ func TestEveryKindOfChangeAgainstTheCloneBase(t *testing.T) {
 		t.Errorf("stat: %d files +%d -%d", clone.Stat.Files, clone.Stat.Insertions, clone.Stat.Deletions)
 	}
 	p := string(clone.Patch)
-	for _, want := range []string{"+two", "+staged", "+unstaged", "+new", "-gone soon", "rename from rename-me.txt", "Binary files /dev/null and b/image.bin differ"} {
+	for _, want := range []string{"+two", "+staged", "+unstaged", "+new", "-gone soon", "rename from rename-me.txt", "GIT binary patch"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("patch lacks %q:\n%s", want, p)
 		}
@@ -163,14 +164,136 @@ func TestEveryKindOfChangeAgainstTheCloneBase(t *testing.T) {
 	if strings.Contains(string(diffs[1].Patch), "+two") {
 		t.Error("head diff has the committed change")
 	}
-	// Applies to a fresh checkout at the base (but for the binary file: a
-	// "Binary files differ" patch carries no content to apply).
+	applyAndCompare(t, dir, base, clone.Patch)
+	applyAndCompare(t, dir, clone.Stat.Head, diffs[1].Patch)
+}
+
+// tree is a working tree as git sees it, ignored files and .git aside:
+// per path, its type, executable bit, and content (a symlink's target).
+func tree(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	ignored := map[string]bool{}
+	for _, p := range strings.Split(run(t, dir, "ls-files", "-oi", "--exclude-standard", "--directory"), "\n") {
+		if p != "" {
+			ignored[strings.TrimSuffix(p, "/")] = true
+		}
+	}
+	out := map[string]string{}
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(dir, p)
+		if rel == ".git" || ignored[rel] {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.Type()&fs.ModeSymlink != 0:
+			target, err := os.Readlink(p)
+			if err != nil {
+				return err
+			}
+			out[rel] = "link " + target
+		case d.Type().IsRegular():
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			out[rel] = fmt.Sprintf("file x=%v %q", info.Mode()&0o111 != 0, b)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// applyAndCompare applies patch to a fresh clone of dir at base and checks
+// the result is dir's working tree: contents, types and modes.
+func applyAndCompare(t *testing.T, dir, base string, patch []byte) {
+	t.Helper()
 	fresh := t.TempDir()
-	run(t, fresh, "clone", "-q", dir, ".")
+	run(t, fresh, "clone", "-q", "--no-checkout", dir, ".")
 	run(t, fresh, "checkout", "-q", base)
-	patch := filepath.Join(t.TempDir(), "p")
-	os.WriteFile(patch, clone.Patch, 0o644)
-	run(t, fresh, "apply", "--check", "--exclude=image.bin", patch)
+	pf := filepath.Join(t.TempDir(), "p")
+	if err := os.WriteFile(pf, patch, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, fresh, "apply", "--allow-empty", pf)
+	got, want := tree(t, fresh), tree(t, dir)
+	for p, w := range want {
+		if got[p] != w {
+			t.Errorf("%s: applied %.80s, workload %.80s", p, got[p], w)
+		}
+	}
+	for p, g := range got {
+		if _, ok := want[p]; !ok {
+			t.Errorf("%s: applied has it (%.80s), workload does not", p, g)
+		}
+	}
+}
+
+// The patch is faithful: applied at the base it makes the workload's tree,
+// for every kind of change git can carry.
+func TestPatchAppliesFaithfully(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	dir := t.TempDir()
+	run(t, dir, "init", "-q")
+	write(t, dir, "modified.txt", "one\ntwo\n")
+	write(t, dir, "deleted.txt", "gone\n")
+	write(t, dir, "rename-me.txt", strings.Repeat("a line that stays the same\n", 20))
+	write(t, dir, "tool.sh", "#!/bin/sh\necho hi\n")
+	write(t, dir, "crlf.txt", "one\r\ntwo\r\n")
+	write(t, dir, "eol.txt", "one\ntwo\n")
+	write(t, dir, "image.bin", "\x00\x01\x02 old binary \x00\xff")
+	write(t, dir, ".gitignore", "*.log\n")
+	if err := os.Symlink("modified.txt", filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	run(t, dir, "add", "-A")
+	run(t, dir, "commit", "-q", "-m", "base")
+	base := run(t, dir, "rev-parse", "HEAD")
+
+	write(t, dir, "modified.txt", "one\n2\n")
+	os.Remove(filepath.Join(dir, "deleted.txt"))
+	run(t, dir, "mv", "rename-me.txt", "renamed.txt")
+	write(t, dir, "added.txt", "added\n")
+	write(t, dir, "image.bin", "\x00\x01\x02 new binary \x00\xfe\xfd")
+	write(t, dir, "new.bin", "\x00\x00\x00\x07\x08")
+	os.Remove(filepath.Join(dir, "link"))
+	os.Symlink("added.txt", filepath.Join(dir, "link"))
+	write(t, dir, "newdir/sub/file.txt", "deep\n")
+	os.Symlink("../eol.txt", filepath.Join(dir, "newdir", "sub", "link2"))
+	os.Chmod(filepath.Join(dir, "tool.sh"), 0o755)
+	write(t, dir, "crlf.txt", "one\r\n2\r\nthree\r\n")
+	write(t, dir, "eol.txt", "one\ntwo") // no final newline
+	write(t, dir, "debug.log", "ignored\n")
+	run(t, dir, "add", "newdir/sub/file.txt") // staged; the rest is not
+
+	before := digest(t, dir)
+	diffs, err := Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, proto.DiffLimit)
+	if err != nil || diffs[0].Stat.Error != "" {
+		t.Fatal(err, diffs)
+	}
+	if digest(t, dir) != before {
+		t.Fatal("the checkout changed")
+	}
+	if diffs[0].Stat.Truncated {
+		t.Fatal("truncated")
+	}
+	if !bytes.Contains(diffs[0].Patch, []byte("GIT binary patch")) {
+		t.Errorf("no binary patch:\n%s", diffs[0].Patch)
+	}
+	applyAndCompare(t, dir, base, diffs[0].Patch)
 }
 
 // The checkout's own config and hooks name programs; none of them may run.
@@ -242,6 +365,93 @@ func TestTruncationKeepsTheWholeStat(t *testing.T) {
 	}
 	if !bytes.HasPrefix(full[0].Patch, cut[0].Patch) || !bytes.HasPrefix(full[0].Patch[len(cut[0].Patch):], []byte("diff --git ")) {
 		t.Error("not cut at a file boundary")
+	}
+	// What is kept applies.
+	fresh := t.TempDir()
+	run(t, fresh, "clone", "-q", dir, ".")
+	run(t, fresh, "checkout", "-q", base)
+	pf := filepath.Join(t.TempDir(), "p")
+	os.WriteFile(pf, cut[0].Patch, 0o644)
+	run(t, fresh, "apply", pf)
+}
+
+// A cut between files: limits on either side of each boundary keep whole
+// files only.
+func TestTruncationBetweenFiles(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	dir := t.TempDir()
+	run(t, dir, "init", "-q")
+	run(t, dir, "commit", "-q", "--allow-empty", "-m", "base")
+	base := run(t, dir, "rev-parse", "HEAD")
+	write(t, dir, "a.txt", strings.Repeat("a\n", 50))
+	write(t, dir, "b.bin", "\x00"+strings.Repeat("b", 500))
+	write(t, dir, "c.txt", strings.Repeat("c\n", 50))
+	full, err := Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, proto.DiffLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := full[0].Patch
+	starts := []int{0}
+	for i := 0; ; {
+		j := bytes.Index(p[i+1:], []byte("\ndiff --git "))
+		if j < 0 {
+			break
+		}
+		i += j + 1
+		starts = append(starts, i+1)
+	}
+	if len(starts) != 3 {
+		t.Fatalf("%d files in\n%s", len(starts), p)
+	}
+	s1, s2 := int64(starts[1]), int64(starts[2])
+	for _, limit := range []int64{int64(len(p)) - 1, s2 + 1, s2, s2 - 1, s1 + 1, s1} {
+		cut, err := Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := p[:starts[2]]
+		if limit < int64(starts[2]) {
+			want = p[:starts[1]]
+		}
+		if !cut[0].Stat.Truncated || !bytes.Equal(cut[0].Patch, want) {
+			t.Fatalf("limit %d: kept %d bytes, want %d", limit, len(cut[0].Patch), len(want))
+		}
+	}
+}
+
+// The first file alone is over the limit: an empty patch, marked, which
+// applies (as nothing), and the whole stat.
+func TestTruncationOfTheFirstFileKeepsNothing(t *testing.T) {
+	dir, base := checkout(t)
+	full, err := Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, proto.DiffLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// first: the newline that ends the first file's diff.
+	first := bytes.Index(full[0].Patch[1:], []byte("\ndiff --git ")) + 1
+	for _, limit := range []int64{1, int64(first) / 2, int64(first), int64(first) + 1} {
+		cut, err := Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := cut[0].Stat
+		if limit <= int64(first) {
+			if !st.Truncated || len(cut[0].Patch) != 0 || st.PatchBytes != 0 {
+				t.Fatalf("limit %d: %d bytes kept, truncated %v", limit, len(cut[0].Patch), st.Truncated)
+			}
+			if st.Files != full[0].Stat.Files || st.Insertions != full[0].Stat.Insertions {
+				t.Errorf("stat not whole: %+v", st)
+			}
+			fresh := t.TempDir()
+			run(t, fresh, "init", "-q")
+			pf := filepath.Join(t.TempDir(), "p")
+			os.WriteFile(pf, cut[0].Patch, 0o644)
+			run(t, fresh, "apply", "--check", "--allow-empty", pf)
+		} else if !bytes.Equal(cut[0].Patch, full[0].Patch[:first+1]) {
+			// Exactly the first file's diff and its newline fit.
+			t.Errorf("limit %d: kept %q", limit, cut[0].Patch)
+		}
 	}
 }
 

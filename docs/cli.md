@@ -118,7 +118,8 @@ ignored) files alike.
   ```
 
   `, TRUNCATED` ends it when the patch was cut at its limit (10 MiB per
-  repository; binary files are git's "Binary files differ"). `--stat`
+  repository, binary files' content included): it then holds only the
+  whole files' diffs that fit, possibly none, so it still applies. `--stat`
   prints `git diff --stat`'s lines instead, for the whole diff even when
   its patch was cut.
 - Colour follows `git diff`: on when stdout is a terminal (`--color auto`,
