@@ -28,17 +28,11 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// isolateConfig points the user config dir at a temp dir, so the real
-// ~/.config/lux/config.toml is never read, and writes config there.
 func isolateConfig(t *testing.T, config string) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	for _, k := range []string{"LUX_URL", "LUX_API_KEY", "LUX_TENANT"} {
-		t.Setenv(k, "") // restored after the test
-		os.Unsetenv(k)
-	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		t.Fatal(err)

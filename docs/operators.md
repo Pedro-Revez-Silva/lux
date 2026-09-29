@@ -19,7 +19,8 @@ operator's request on a Run runs in that Run's tenant's scope.
 ## One tenant, or all of them
 
 With no tenant from the flag, the environment or the config file, an
-operator sees every tenant, and lists show a TENANT column. `--tenant <id or name>` (env `LUX_TENANT`, `tenant` in
+operator sees every tenant, and lists show a TENANT column.
+`--tenant <id or name>` (env `LUX_TENANT`, `tenant` in
 `~/.config/lux/config.toml`, `?tenant=` in the API)
 narrows every command to one tenant and shows what that tenant would see.
 Tenant keys ignore it. With a default tenant in the config file,
