@@ -322,9 +322,20 @@ luxd picks the pool when the Run is submitted, in this order:
 The pool is written into the Run's spec, so its resumes, retries and
 migrations stay there even when the default changes later. The Run's
 `submitted` event says which pool and why: `{"pool": "arm64", "poolFrom":
-"tenant-default"}` (`platform-default`, `fallback`, or `spec` when the
-spec named it). A Run that names a pool, `default` included, is never
-redirected.
+"tenant-default", "poolOwner": "tenant"}` (`platform-default`, `fallback`,
+or `spec` when the spec named it). A Run that names a pool, `default`
+included, is never redirected.
+
+A tenant pool and a platform pool may share a name, so luxd records whose
+pool it is too (`runs.pool_owner`; `poolOwner` in the event): the default's
+owner, or for a name, the tenant's own pool of that name, else the
+platform's. The Run then goes only to that owner's hosts, and only that
+pool provisions for it. A name no pool has (static hosts that joined by
+host token with a pool name no pool was created for) records no owner, and
+such Runs, like those submitted before this was recorded, match hosts by
+name as before. If the Run's pool is removed, it waits ("its pool burst
+was removed") rather than taking another owner's pool of that name;
+re-creating the pool serves it again.
 
 A tenant has at most one default pool, and the platform one (Postgres
 refuses a second). Marking another pool moves the mark in one statement.

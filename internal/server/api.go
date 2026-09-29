@@ -474,19 +474,23 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		}
 		// Stored in the spec, so every later placement of the Run stays
 		// in this pool whatever the default becomes.
-		pool, poolFrom, err := resolvePool(ctx, tx, stored.Placement.Pool)
+		// pool_owner too: another owner's pool of the same name is not it.
+		rp, err := resolvePool(ctx, tx, p.TenantID, stored.Placement.Pool)
 		if err != nil {
 			return err
 		}
-		stored.Placement.Pool = pool
-		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key)
-			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7)`,
-			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg)
+		stored.Placement.Pool = rp.Name
+		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_owner)
+			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8)`,
+			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.Owner)
 		if err != nil {
 			return err
 		}
-		if err := addEvent(ctx, tx, p.TenantID, id, 0, "submitted", map[string]any{
-			"by": p.Actor(), "pool": pool, "poolFrom": poolFrom}); err != nil {
+		ev := map[string]any{"by": p.Actor(), "pool": rp.Name, "poolFrom": rp.From}
+		if o := rp.ownerLabel(); o != "" {
+			ev["poolOwner"] = o
+		}
+		if err := addEvent(ctx, tx, p.TenantID, id, 0, "submitted", ev); err != nil {
 			return err
 		}
 		created = true
@@ -1871,21 +1875,49 @@ const (
 	poolFromFallback = "fallback"         // neither is marked: the pool named "default"
 )
 
+// resolvedPool is the pool a Run was submitted to. Owner is runs.pool_owner:
+// "" for a platform pool, the tenant id for the tenant's, nil when no
+// active pool has the name (hosts then match by name alone).
+type resolvedPool struct {
+	Name, From string
+	Owner      *string
+}
+
+// ownerLabel is the owner as the submitted event's poolOwner says it.
+func (rp resolvedPool) ownerLabel() string {
+	switch {
+	case rp.Owner == nil:
+		return ""
+	case *rp.Owner == "":
+		return "platform"
+	default:
+		return "tenant"
+	}
+}
+
 // resolvePool is the pool of a Run whose spec names pool ("" for none), in
 // the submitting tenant's scope: the named one, else the tenant's default,
-// else the platform's, else "default".
-func resolvePool(ctx context.Context, tx pgx.Tx, pool string) (string, string, error) {
-	if pool != "" {
-		return pool, poolFromSpec, nil
+// else the platform's, else "default". A default is that pool row; a name
+// is the tenant's pool of that name, else the platform's, as hosts and
+// provisioning have always preferred.
+func resolvePool(ctx context.Context, tx pgx.Tx, tenantID, pool string) (resolvedPool, error) {
+	rp := resolvedPool{Name: pool, From: poolFromSpec}
+	if pool == "" {
+		var name, from *string
+		if err := tx.QueryRow(ctx, `SELECT pool, pool_from FROM lux_default_pool()`).Scan(&name, &from); err != nil {
+			return rp, err
+		}
+		if name != nil {
+			owner := ""
+			if *from == poolFromTenant {
+				owner = tenantID
+			}
+			return resolvedPool{Name: *name, From: *from, Owner: &owner}, nil
+		}
+		rp = resolvedPool{Name: "default", From: poolFromFallback}
 	}
-	var name, from *string
-	if err := tx.QueryRow(ctx, `SELECT pool, pool_from FROM lux_default_pool()`).Scan(&name, &from); err != nil {
-		return "", "", err
-	}
-	if name == nil {
-		return "default", poolFromFallback, nil
-	}
-	return *name, *from, nil
+	err := tx.QueryRow(ctx, `SELECT lux_pool_owner($1)`, rp.Name).Scan(&rp.Owner)
+	return rp, err
 }
 
 // putPool creates or updates one of the tenant's pools.

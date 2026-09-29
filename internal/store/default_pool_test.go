@@ -49,6 +49,61 @@ func TestDefaultPoolMigration(t *testing.T) {
 	}
 }
 
+// 032 adds runs.pool_owner and leaves existing Runs' NULL: they keep
+// matching hosts and pools by name alone. lux_pool_owner, like
+// lux_default_pool, is lux_app's only, and prefers the tenant's pool.
+func TestRunPoolOwnerMigration(t *testing.T) {
+	owner, appDSN := emptyDB(t)
+	ctx := context.Background()
+	if _, err := store.MigrateTo(ctx, owner, "lux_app", "031"); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := pgx.Connect(ctx, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1');
+		INSERT INTO pools (id, tenant_id, name, provider) VALUES ('p1', 't1', 'burst', 'static'), ('p2', NULL, 'burst', 'static'), ('p3', NULL, 'x86', 'static');
+		INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r1', 't1', '{"placement":{"pool":"burst"}}', 'submitted')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Migrate(ctx, owner, "lux_app"); err != nil {
+		t.Fatal(err)
+	}
+	var legacy *string
+	if err := conn.QueryRow(ctx, `SELECT pool_owner FROM runs WHERE id = 'r1'`).Scan(&legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy != nil {
+		t.Fatalf("a Run from before 032 has pool_owner %q, want NULL", *legacy)
+	}
+	var public, app bool
+	if err := conn.QueryRow(ctx, `SELECT has_function_privilege('public', 'lux_pool_owner(text)', 'EXECUTE'),
+		has_function_privilege('lux_app', 'lux_pool_owner(text)', 'EXECUTE')`).Scan(&public, &app); err != nil {
+		t.Fatal(err)
+	}
+	if public || !app {
+		t.Fatalf("lux_pool_owner callable by public: %v, by lux_app: %v", public, app)
+	}
+	db, err := store.Open(ctx, appDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for pool, want := range map[string]string{"burst": "t1", "x86": "", "none": "<nil>"} {
+		var got *string
+		if err := db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT coalesce(lux_pool_owner($1), '<nil>')`, pool).Scan(&got)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if *got != want {
+			t.Errorf("lux_pool_owner(%q) = %q, want %q", pool, *got, want)
+		}
+	}
+}
+
 func defaultPoolFixture(t *testing.T) (*store.Store, context.Context) {
 	t.Helper()
 	_, appDSN := testDB(t)

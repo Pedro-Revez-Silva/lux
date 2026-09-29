@@ -128,9 +128,11 @@ artifacts:
   `default` ([default pools](operations.md#pools-and-the-default-pool)).
   luxd chooses when the Run is submitted and writes the choice into the
   stored spec, so the Run stays in that pool when the default changes; its
-  `submitted` event carries `pool` and `poolFrom` (`tenant-default`,
-  `platform-default`, `fallback` or `spec`). A named pool, `default`
-  included, is used as it is.
+  `submitted` event carries `pool`, `poolFrom` (`tenant-default`,
+  `platform-default`, `fallback` or `spec`) and `poolOwner` (`tenant` or
+  `platform`, absent when no pool has the name). A named pool, `default`
+  included, is used as it is: the tenant's pool of that name if it has
+  one, else the platform's.
 
 ## Images
 
