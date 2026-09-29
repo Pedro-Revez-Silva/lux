@@ -416,6 +416,15 @@ func TestRenamePoolDryRun(t *testing.T) {
 	if f.pool(t).Name != "burst" || f.runPool(t, "waiting") != "burst" {
 		t.Fatal("a dry run renamed")
 	}
+	// Without a name it only counts; with a taken one it says so.
+	out, err = renamePool(f.ctx, f.s.db, f.s.log, "t1", "burst", "", true)
+	if err != nil || out.Hosts != 2 || out.Runs != 2 {
+		t.Fatalf("dry run without a name: %+v, %v", out, err)
+	}
+	execSQL(t, f.s, f.ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool2', 't1', 'live', 'static')`)
+	if _, err := renamePool(f.ctx, f.s.db, f.s.log, "t1", "burst", "live", true); err == nil {
+		t.Fatal("a dry run onto a taken name passed")
+	}
 }
 
 // The rename does not finish while a live host's instance is missing from

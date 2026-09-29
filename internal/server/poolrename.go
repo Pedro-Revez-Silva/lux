@@ -51,7 +51,7 @@ import (
 type renamePoolInput struct {
 	TenantQuery
 	Name   string `path:"name" doc:"The pool's current name."`
-	DryRun bool   `query:"dryRun" doc:"Check the rename and count what would follow it, without renaming."`
+	DryRun bool   `query:"dryRun" doc:"Count what would follow the rename, and check the new name if one is given, without renaming."`
 	Body   renamePoolRequest
 }
 
@@ -112,13 +112,16 @@ func CheckPoolNameFree(ctx context.Context, tx pgx.Tx, tenantID, name string) er
 // pool.
 func renamePool(ctx context.Context, db *store.Store, log *slog.Logger, tenantID, from, to string, dryRun bool) (PoolRenamed, error) {
 	var out PoolRenamed
+	// A dry run without a name only counts (the console's confirmation).
 	// A new name is never grandfathered: it becomes a tag value and a
 	// hostname, and the rule keeps "<tenant>/<name>" tag values unambiguous.
-	if err := ValidPoolName(to); err != nil {
-		return out, errf(http.StatusUnprocessableEntity, "invalid_pool", "%s", err.Error())
-	}
-	if to == from {
-		return out, errf(http.StatusUnprocessableEntity, "invalid_pool", "the pool is already named %q", to)
+	if !dryRun || to != "" {
+		if err := ValidPoolName(to); err != nil {
+			return out, errf(http.StatusUnprocessableEntity, "invalid_pool", "%s", err.Error())
+		}
+		if to == from {
+			return out, errf(http.StatusUnprocessableEntity, "invalid_pool", "the pool is already named %q", to)
+		}
 	}
 	var err error
 	// Runs are locked before hosts, as drainHosts does; a deadlock with a
@@ -155,6 +158,7 @@ func renamePoolTx(ctx context.Context, db *store.Store, tenantID, from, to strin
 		if err := lockPoolName(ctx, tx, tenantID, max(from, to)); err != nil {
 			return err
 		}
+		checkName := to != ""
 		var id, provider string
 		var renaming *string
 		err := tx.QueryRow(ctx, `SELECT id, provider, renamed_from FROM pools
@@ -165,21 +169,14 @@ func renamePoolTx(ctx context.Context, db *store.Store, tenantID, from, to strin
 		if err != nil {
 			return err
 		}
-		if renaming != nil {
+		if renaming != nil && checkName {
 			return errf(http.StatusConflict, "rename_in_progress",
 				"pool %q is still being renamed from %q (its instances are being re-tagged): rename it again once that is done", from, *renaming)
 		}
-		// Hosts and host tokens can name a pool no pool row has (a static
-		// host's token): renaming onto that name would merge them in.
-		var taken bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pools WHERE coalesce(tenant_id, '') = $1 AND (name = $2 OR renamed_from = $2))
-				OR EXISTS (SELECT 1 FROM hosts WHERE coalesce(tenant_id, '') = $1 AND pool = $2 AND state <> 'terminated')
-				OR EXISTS (SELECT 1 FROM host_tokens WHERE coalesce(tenant_id, '') = $1 AND pool = $2 AND revoked_at IS NULL)`,
-			tenantID, to).Scan(&taken); err != nil {
-			return err
-		}
-		if taken {
-			return errf(http.StatusConflict, "pool_exists", "the name %q is taken: a pool (live, retired or being renamed from it), or hosts or host tokens, have it", to)
+		if checkName {
+			if err := checkRenameTarget(ctx, tx, tenantID, to); err != nil {
+				return err
+			}
 		}
 
 		// A platform pool's Runs are those of every tenant that names it
@@ -237,6 +234,22 @@ func renamePoolTx(ctx context.Context, db *store.Store, tenantID, from, to strin
 		return err
 	})
 	return out, err
+}
+
+// checkRenameTarget: hosts and host tokens can name a pool no pool row has
+// (a static host's token): renaming onto that name would merge them in.
+func checkRenameTarget(ctx context.Context, tx pgx.Tx, tenantID, to string) error {
+	var taken bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pools WHERE coalesce(tenant_id, '') = $1 AND (name = $2 OR renamed_from = $2))
+			OR EXISTS (SELECT 1 FROM hosts WHERE coalesce(tenant_id, '') = $1 AND pool = $2 AND state <> 'terminated')
+			OR EXISTS (SELECT 1 FROM host_tokens WHERE coalesce(tenant_id, '') = $1 AND pool = $2 AND revoked_at IS NULL)`,
+		tenantID, to).Scan(&taken); err != nil {
+		return err
+	}
+	if taken {
+		return errf(http.StatusConflict, "pool_exists", "the name %q is taken: a pool (live, retired or being renamed from it), or hosts or host tokens, have it", to)
+	}
+	return nil
 }
 
 func poolByID(ctx context.Context, tx pgx.Tx, id string) (Pool, error) {

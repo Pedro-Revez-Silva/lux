@@ -3318,12 +3318,12 @@ paths:
           schema:
             description: The pool's current name.
             type: string
-        - description: Check the rename and count what would follow it, without renaming.
+        - description: Count what would follow the rename, and check the new name if one is given, without renaming.
           explode: false
           in: query
           name: dryRun
           schema:
-            description: Check the rename and count what would follow it, without renaming.
+            description: Count what would follow the rename, and check the new name if one is given, without renaming.
             type: boolean
       requestBody:
         content:

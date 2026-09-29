@@ -1,6 +1,6 @@
-import { useMemo } from "react";
-import { Badge, Card, PageHeader, Table, type Column } from "@lux/design-system";
-import { api, type Pool } from "../../api/index.ts";
+import { useMemo, useState } from "react";
+import { Badge, Button, Card, ConfirmDialog, PageHeader, Table, Tooltip, useToast, type Column } from "@lux/design-system";
+import { api, errorText, invalidate, type Pool, type PoolRenamed } from "../../api/index.ts";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, labelsText } from "./common.tsx";
 
@@ -11,9 +11,14 @@ interface PoolRow extends Pool {
 }
 
 export function Pools() {
-  const { showTenant } = useScope();
+  const { showTenant, operator } = useScope();
+  const toast = useToast();
   const pools = useScopedQuery("pools", api.pools, { interval: 15_000 });
   const hosts = useScopedQuery("hosts", (t, s) => api.hosts(t, {}, s), { interval: 15_000 });
+  const [renaming, setRenaming] = useState<PoolRow | null>(null);
+  // What would follow the rename, counted by luxd when the dialog opens.
+  const [preview, setPreview] = useState<PoolRenamed | null>(null);
+  const [busy, setBusy] = useState(false);
 
   const rows = useMemo<PoolRow[]>(() => {
     const counts = new Map<string, { n: number; ready: number }>();
@@ -32,8 +37,55 @@ export function Pools() {
     });
   }, [pools.data, hosts.data]);
 
+  // An operator names the owning tenant; a platform pool has none. A tenant
+  // key acts on its own pools only.
+  const owner = (p: Pool) => (operator && !p.platform ? p.tenant : undefined);
+
+  const openRename = (p: PoolRow) => {
+    setRenaming(p);
+    setPreview(null);
+    api.renamePool(owner(p), p.name, "", true).then(setPreview, (e) => {
+      toast({ title: `Cannot rename ${p.name}`, description: errorText(e), tone: "danger", duration: 8000 });
+      setRenaming(null);
+    });
+  };
+
+  const rename = async (p: PoolRow, newName: string) => {
+    setBusy(true);
+    try {
+      const r = await api.renamePool(owner(p), p.name, newName.trim());
+      const retag = r.instances > 0 ? `; its ${plural(r.instances, "instance")} are being re-tagged` : "";
+      toast({ title: `Renamed ${p.name} to ${r.pool.name}`, description: `${plural(r.hosts, "host")} and ${plural(r.runs, "Run")} followed${retag}.`, tone: "success" });
+      setRenaming(null);
+      invalidate((k) => k.startsWith("pools@") || k.startsWith("hosts@"));
+    } catch (e) {
+      toast({ title: "Rename failed", description: errorText(e), tone: "danger", duration: 8000 });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const cols = useMemo<Column<PoolRow>[]>(() => {
-    const c: Column<PoolRow>[] = [{ key: "name", header: "Pool", cell: (p) => p.name, sortValue: (p) => p.name, lead: true, width: 180 }];
+    const c: Column<PoolRow>[] = [
+      {
+        key: "name",
+        header: "Pool",
+        cell: (p) =>
+          p.renamedFrom ? (
+            <>
+              {p.name}{" "}
+              <Tooltip content={`Renamed from ${p.renamedFrom}: its instances are being re-tagged. Until then, no pool can take that name and this one cannot be renamed again.`}>
+                <Badge tone="warn">renaming</Badge>
+              </Tooltip>
+            </>
+          ) : (
+            p.name
+          ),
+        sortValue: (p) => p.name,
+        lead: true,
+        width: 220,
+      },
+    ];
     if (showTenant) c.push({ key: "tenant", header: "Tenant", cell: (p) => (p.platform ? <span className="muted">platform</span> : p.tenant || DASH), sortValue: (p) => (p.platform ? "" : p.tenant), width: 130 });
     c.push(
       { key: "provider", header: "Provider", cell: (p) => <span className="secondary">{p.provider}</span>, sortValue: (p) => p.provider, width: 110 },
@@ -43,9 +95,32 @@ export function Pools() {
       { key: "max", header: "Max", cell: (p) => p.maxHosts, sortValue: (p) => p.maxHosts, align: "right", mono: true, width: 70 },
       { key: "shared", header: "Shared", cell: (p) => (p.shared ? <Badge tone="info">shared</Badge> : DASH), sortValue: (p) => (p.shared ? 1 : 0), width: 100 },
       { key: "template", header: "Template", cell: (p) => (p.template && Object.keys(p.template).length > 0 ? <span className="mono muted">{labelsText(p.template)}</span> : DASH), optional: true },
+      {
+        key: "actions",
+        header: "",
+        // A platform pool is the operators' to rename.
+        cell: (p) =>
+          operator || !p.platform ? (
+            <Button size="sm" disabled={!!p.renamedFrom} title={p.renamedFrom ? "Its previous rename is still re-tagging its instances" : undefined} onClick={() => openRename(p)}>
+              Rename
+            </Button>
+          ) : null,
+        align: "right",
+        width: 100,
+      },
     );
     return c;
-  }, [showTenant]);
+    // openRename reads only state setters and the scope's operator flag.
+  }, [showTenant, operator]);
+
+  const r = renaming;
+  const live = preview?.hosts ?? r?.hostCount ?? 0;
+  let description = "Counting what follows the rename…";
+  if (r && preview) {
+    description = `${plural(preview.hosts, "host")} and ${plural(preview.runs, "Run")} not yet finished will follow the rename; finished Runs keep the name they ran with.`;
+    if (preview.instances > 0)
+      description += ` Its ${plural(preview.instances, "instance")} keep running and are re-tagged with the new name; until that is done, no pool can take the name ${r.name}.`;
+  }
 
   return (
     <div className="page page-list">
@@ -58,6 +133,22 @@ export function Pools() {
           <Table columns={cols} rows={rows} rowKey={(p) => p.key} loading={pools.loading} defaultSort={{ key: "name", dir: "asc" }} empty="No pools." />
         )}
       </Card>
+      <ConfirmDialog
+        open={r != null}
+        title={`Rename ${r?.name ?? ""}?`}
+        description={description}
+        confirmLabel="Rename pool"
+        input={{ label: "New name", placeholder: r?.name, required: true }}
+        // A pool with live hosts: the current name, typed, confirms.
+        confirmText={r && live > 0 ? r.name : undefined}
+        loading={busy || (r != null && preview == null)}
+        onConfirm={(name) => r && void rename(r, name ?? "")}
+        onCancel={() => setRenaming(null)}
+      />
     </div>
   );
+}
+
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
 }

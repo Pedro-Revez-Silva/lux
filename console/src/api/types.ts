@@ -420,6 +420,17 @@ export interface Pool {
   warmHosts: number;
   shared: boolean;
   platform: boolean;
+  /** While a rename re-tags the pool's instances: its previous name. */
+  renamedFrom?: string;
+}
+
+/** POST /v1/pools/{name}/rename: what followed the rename (or would, with dryRun). */
+export interface PoolRenamed {
+  pool: Pool;
+  hosts: number;
+  runs: number;
+  instances: number;
+  dryRun?: boolean;
 }
 
 /** GET /v1/whoami: who the key belongs to. */
