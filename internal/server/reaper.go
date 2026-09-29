@@ -53,13 +53,14 @@ func (s *Server) reapLeases(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		var later laterEvents
 		for _, p := range expired {
-			if err := s.placementLost(ctx, tx, p.RunID, p.Epoch, "lease expired: host stopped heartbeating"); err != nil {
+			if err := s.placementLost(ctx, tx, p.RunID, p.Epoch, "lease expired: host stopped heartbeating", &later); err != nil {
 				return err
 			}
 		}
 		n = len(expired)
-		return nil
+		return later.write()
 	})
 	if err == nil && n > 0 {
 		s.Kick()
@@ -151,9 +152,6 @@ func (s *Server) reapHosts(ctx context.Context) error {
 				return err
 			}
 			lost = append(lost, host)
-			if err := hostEvent(ctx, tx, host, evLost, map[string]any{"reason": "missed heartbeats"}); err != nil {
-				return err
-			}
 		}
 		if len(lost) == 0 {
 			return nil
@@ -161,17 +159,22 @@ func (s *Server) reapHosts(ctx context.Context) error {
 		if err := hostsGone(ctx, tx, lost); err != nil {
 			return err
 		}
+		// The events after every row: event streams come last (infraevents.go).
+		var later laterEvents
+		for _, host := range lost {
+			later.host(ctx, tx, host, evLost, map[string]any{"reason": "missed heartbeats"})
+		}
 		// A fresh assignment's lease can outlast its host's heartbeat.
 		live, err := livePlacements(ctx, tx, "p.host_id = ANY($1)", lost)
 		if err != nil {
 			return err
 		}
 		for _, p := range live {
-			if err := s.placementLost(ctx, tx, p.RunID, p.Epoch, "host lost: missed heartbeats"); err != nil {
+			if err := s.placementLost(ctx, tx, p.RunID, p.Epoch, "host lost: missed heartbeats", &later); err != nil {
 				return err
 			}
 		}
-		return nil
+		return later.write()
 	})
 	if err == nil && len(lost) > 0 {
 		s.log.Warn("hosts lost", "hosts", lost)

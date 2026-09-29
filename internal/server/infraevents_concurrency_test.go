@@ -375,3 +375,64 @@ func TestConcurrentFirstPoolWritesCreateOnce(t *testing.T) {
 		t.Fatalf("second write's changes %v, want %v", got, want)
 	}
 }
+
+// slowDeadlockCheck makes Postgres's deadlock check wait longer than any
+// test deadline, so a lock cycle through a queued fold hangs the test
+// instead of being quietly untangled after the default second.
+func slowDeadlockCheck(t *testing.T, s *Server) {
+	t.Helper()
+	ownerExec(t, s, `ALTER DATABASE `+s.db.Pool.Config().ConnConfig.Database+` SET deadlock_timeout = '60s'`)
+	s.db.Pool.Reset()
+}
+
+// A pool removal waiting for a Run the scheduler holds must not hold the
+// pool's event stream meanwhile: a fold queued for it exclusively would
+// make the scheduler's next append to that stream wait behind the fold,
+// the fold wait for the removal, and the removal for the scheduler.
+func TestPoolRemovalTakesItsStreamAfterItsRuns(t *testing.T) {
+	s := testServer(t)
+	slowDeadlockCheck(t, s)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	infraFixture(t, s, ctx)
+	running(t, s, ctx)
+	// The scheduler's order: its Runs, later its pool's stream.
+	sched := holdTx(ctx, s, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT 1 FROM runs WHERE id = 'r1' FOR UPDATE`)
+		return err
+	})
+	if !sched.settle(t, ctx, s) {
+		t.Fatal("the scheduler waited on nothing")
+	}
+	admin := context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+	removed := make(chan error, 1)
+	go func() {
+		_, err := s.deletePool(admin, &deletePoolInput{Name: "burst", ForceEvict: true})
+		removed <- err
+	}()
+	waitForRunWaiter(t, s, ctx, "r1")
+	fold := holdTx(ctx, s, func(tx pgx.Tx) error { return failure(ctx, tx) })
+	folded := fold.settle(t, ctx, s)
+	if folded {
+		fold.finish(t, ctx)
+	}
+	if err := sched.finishWith(t, ctx, func(tx pgx.Tx) error {
+		return poolEvent(ctx, tx, "pool1", evPlacement, map[string]any{"run": "r2", "epoch": 1, "host": "h1"})
+	}); err != nil {
+		t.Fatalf("scheduler: %v", err)
+	}
+	select {
+	case err := <-removed:
+		if err != nil {
+			t.Fatalf("removal: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("the removal never finished")
+	}
+	if !folded {
+		fold.finish(t, ctx)
+	}
+	if n := len(events(t, s, evRetired)); n != 1 {
+		t.Fatalf("%d pool.retired events, want 1", n)
+	}
+}

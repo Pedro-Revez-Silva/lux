@@ -74,6 +74,8 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		var hostID string
 		// created: a static host's first registration, its row made ready.
 		var created bool
+		// The events after every row lock: event streams come last.
+		var later laterEvents
 		err := tx.QueryRow(ctx, `SELECT id FROM hosts
 			WHERE coalesce(tenant_id, '') = coalesce($1, '') AND name = $2 AND state <> 'terminated'`,
 			tok.TenantID, h.Name).Scan(&hostID)
@@ -164,20 +166,14 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 			if h.ProviderID != "" {
 				d["providerId"] = h.ProviderID
 			}
-			if err := hostEvent(ctx, tx, hostID, evRegistered, d); err != nil {
-				return err
-			}
-			if err := hostPoolEvent(ctx, tx, hostID, evHostRegistered, map[string]any{"host": hostID, "name": h.Name}); err != nil {
-				return err
-			}
+			later.host(ctx, tx, hostID, evRegistered, d)
+			later.hostPool(ctx, tx, hostID, evHostRegistered, map[string]any{"host": hostID, "name": h.Name})
 		}
 		if created {
 			wasState = "new"
 		}
 		if !draining && wasState != "ready" {
-			if err := hostEvent(ctx, tx, hostID, evReady, map[string]any{"from": wasState}); err != nil {
-				return err
-			}
+			later.host(ctx, tx, hostID, evReady, map[string]any{"from": wasState})
 		}
 		if undrainOutdated {
 			if _, err := tx.Exec(ctx, `UPDATE host_messages SET acked_at = now()
@@ -189,12 +185,12 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 			// A static host's Runs finish undisturbed and the reaper sends
 			// MsgExit once none are left; a provisioned host is replaced by
 			// the pool once it is idle.
-			if outdatedDrained, err = s.drainIfOutdated(ctx, tx, hostID, h.Arch, h.RunnerSHA256, h.ShimSHA256); err != nil {
+			if outdatedDrained, err = s.drainIfOutdated(ctx, tx, &later, hostID, h.Arch, h.RunnerSHA256, h.ShimSHA256); err != nil {
 				return err
 			}
 		}
 		w.HostID = hostID
-		return nil
+		return later.write()
 	})
 	if err == nil {
 		// Reconciliation discovers Runs anew after registration commits.
@@ -292,15 +288,16 @@ func (s *Server) reconcileHostPlacements(ctx context.Context, tx pgx.Tx, hostID 
 	for _, lp := range reported {
 		have[lp.RunID] = lp.Epoch
 	}
+	var later laterEvents
 	for _, lp := range live {
 		if e, ok := have[lp.RunID]; ok && e == lp.Epoch || lp.State == "assigned" {
 			continue
 		}
-		if err := s.placementLost(ctx, tx, lp.RunID, lp.Epoch, "runner restarted without the container"); err != nil {
+		if err := s.placementLost(ctx, tx, lp.RunID, lp.Epoch, "runner restarted without the container", &later); err != nil {
 			return err
 		}
 	}
-	return nil
+	return later.write()
 }
 
 // syncProviderCapacity splits only the open provider period. A price fetched
@@ -488,6 +485,8 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 	}
 	var outdatedDrained []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// The events after every row lock: event streams come last.
+		var later laterEvents
 		var back bool
 		if err := tx.QueryRow(ctx, `WITH old AS (SELECT id, state FROM hosts WHERE id = $1 FOR NO KEY UPDATE)
 			UPDATE hosts SET last_heartbeat = now(),
@@ -499,9 +498,7 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 		}
 		// Back from lost (a network blip longer than the lease).
 		if back {
-			if err := hostEvent(ctx, tx, hostID, evReady, map[string]any{"from": "lost"}); err != nil {
-				return err
-			}
+			later.host(ctx, tx, hostID, evReady, map[string]any{"from": "lost"})
 		}
 		if err := forgetMissingCopies(ctx, tx, hostID, hb.LocalSnapshots); err != nil {
 			return err
@@ -515,7 +512,7 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 		}
 		if !draining {
 			var err error
-			if outdatedDrained, err = s.drainIfOutdated(ctx, tx, hostID, arch, hb.RunnerSHA256, hb.ShimSHA256); err != nil {
+			if outdatedDrained, err = s.drainIfOutdated(ctx, tx, &later, hostID, arch, hb.RunnerSHA256, hb.ShimSHA256); err != nil {
 				return err
 			}
 		}
@@ -554,7 +551,7 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 				hostID, runs, epochs, curMem, disk, curPids, cpu, rx, tx_)
 			return err
 		})
-		return nil
+		return later.write()
 	})
 	if err == nil {
 		s.notifyAll(outdatedDrained)

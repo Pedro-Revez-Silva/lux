@@ -43,24 +43,51 @@ import (
 //  2. runs, FOR UPDATE in id order (lockReaperRuns, the scheduler);
 //  3. the cost-host advisory locks, in host id order (lockCostHost);
 //  4. host rows, FOR NO KEY UPDATE, in id order;
-//  5. event streams, shared, each right before its event is written.
+//  5. event streams, last: no row or advisory lock is requested after one.
+//
+// Where each writer takes its stream locks, after every other lock:
+//
+//   - ChangePool (putPool, deletePool, luxd admin create-pool): its one
+//     event after change returns; deletePool drains inside change.
+//   - drainHosts (drainHost, deletePool, drainForScaleDown, hostEvicting):
+//     host.drain_requested after its Runs, hosts and placement stops;
+//     hostEvicting's pool.spot_interrupted after that. drainHostsLater
+//     leaves them to a caller that locks more (drainIfOutdated).
+//   - registerHost: host.registered, pool.host_registered, host.ready and
+//     an outdated drain's event at the end of its first transaction; its
+//     reconciliation's placement_ended events after all its Runs and hosts.
+//   - heartbeat: host.ready and an outdated drain's event at its end.
+//   - reapLeases, reapHosts: host.lost and placement_ended once every Run,
+//     cost-host lock and host is held (laterEvents).
+//   - placementExited (a runner's status report): host.placement_ended
+//     after the Run, its placement, host row and any auto-resume.
+//   - the scheduler (assign): Runs are locked up front (SKIP LOCKED) and
+//     hosts by cost-host lock before the first Run is placed; each Run's
+//     events are then written as it is placed, and the rest of the batch
+//     writes only rows of Runs it already holds (their placements,
+//     messages, cost rows), never a lock another writer takes first.
+//   - launch: pool.scale_up and pool.launch_requested (folds) after the
+//     host row it creates; pool.launch_failed (fold) after terminating that
+//     host; pool.host_launched after recording the instance id.
+//   - recordProviderID, terminateRequested, terminateTx, providerError:
+//     after their one host row (terminateTx: its copies and token too).
 //
 // A fold takes its stream exclusive after every other lock its transaction
 // takes (launch writes its host row, then folds; a failed launch
 // terminates its host, then folds). An exclusive request waits for every
 // shared holder to commit, so by then the folding transaction holds only
 // rows no appender waits for: a host it has just created, or one whose
-// launch failed, and that host's token and copies. Appenders may lock more
-// after appending (the scheduler places several Runs a batch; a
-// registration may then drain its host): at worst one queues for a shared
-// lock behind a waiting fold while another shared holder waits on it, a
-// cycle through a queue position only, which Postgres's deadlock check
-// resolves after deadlock_timeout by granting the shared lock ahead of the
-// fold, not by aborting. A fold waits for shared holders to commit: the
-// scheduler's placement transaction holds its pools' and hosts' streams
-// shared until it commits, so a failing pool's fold waits out at most one
-// scheduler batch, and a batch waits at most for one fold (a few
-// statements, once per failing provider call).
+// launch failed, and that host's token and copies. Since no appender
+// requests another lock after its first stream lock but another stream
+// (the scheduler's next Run), an appender queued behind a waiting fold is
+// never what the fold's shared holders wait on, except through such a
+// queue position, which Postgres's deadlock check resolves after
+// deadlock_timeout by granting the shared lock ahead of the fold. A fold
+// waits for shared holders to commit: the scheduler's placement
+// transaction holds its pools' and hosts' streams shared until it commits,
+// so a failing pool's fold waits out at most one scheduler batch, and a
+// batch waits at most for one fold (a few statements, once per failing
+// provider call).
 const (
 	evScaleUp          = "pool.scale_up"
 	evLaunchRequested  = "pool.launch_requested"
@@ -137,6 +164,28 @@ func hostEvent(ctx context.Context, tx pgx.Tx, hostID, typ string, data map[stri
 	_, err := tx.Exec(ctx, `INSERT INTO host_events (tenant_id, host_id, type, data)
 		SELECT tenant_id, id, $2, $3 FROM hosts WHERE id = $1`, hostID, typ, nonNilData(data))
 	return err
+}
+
+// laterEvents holds appends a transaction decides on while it still has
+// rows to lock, to write once it has locked them all (event streams come
+// last). Written in the order they were added.
+type laterEvents []func() error
+
+func (l *laterEvents) host(ctx context.Context, tx pgx.Tx, hostID, typ string, data map[string]any) {
+	*l = append(*l, func() error { return hostEvent(ctx, tx, hostID, typ, data) })
+}
+
+func (l *laterEvents) hostPool(ctx context.Context, tx pgx.Tx, hostID, typ string, data map[string]any) {
+	*l = append(*l, func() error { return hostPoolEvent(ctx, tx, hostID, typ, data) })
+}
+
+func (l laterEvents) write() error {
+	for _, w := range l {
+		if err := w(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // poolRepeatEvent records a pool event that a stuck pool repeats every

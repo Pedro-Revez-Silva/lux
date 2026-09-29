@@ -1604,6 +1604,17 @@ const (
 // (provisioned) takes it once idle. Returns their ids, to notify once the
 // transaction commits.
 func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, cause, stopReason, where string, args ...any) ([]string, error) {
+	var later laterEvents
+	hosts, err := s.drainHostsLater(ctx, tx, &later, reason, cause, stopReason, where, args...)
+	if err != nil {
+		return nil, err
+	}
+	return hosts, later.write()
+}
+
+// drainHostsLater is drainHosts leaving its events in later, for a caller
+// that locks more rows after it.
+func (s *Server) drainHostsLater(ctx context.Context, tx pgx.Tx, later *laterEvents, reason, cause, stopReason, where string, args ...any) ([]string, error) {
 	var candidates []string
 	if stopReason != "" {
 		rows, err := tx.Query(ctx, `SELECT id FROM hosts WHERE state <> 'terminated' AND `+where+` ORDER BY id`, args...)
@@ -1732,7 +1743,19 @@ func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, cause, stopR
 		}
 	}
 	// One event per new cause or new eviction: draining a drained host
-	// again for the same cause says nothing new.
+	// again for the same cause says nothing new. Left to later, after the
+	// stops, which lock placements: event streams come last (infraevents.go).
+	if len(hosts) > 0 && stopReason != "" {
+		live, err := livePlacements(ctx, tx, "p.host_id = ANY($1)", hosts)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range live {
+			if _, err := s.requestStop(ctx, tx, p.TenantID, p.RunID, stopReason); err != nil {
+				return nil, err
+			}
+		}
+	}
 	for _, h := range got {
 		if !h.Fresh && !evicting[h.ID] {
 			continue
@@ -1741,21 +1764,7 @@ func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, cause, stopR
 		if evicting[h.ID] {
 			d["evict"] = true
 		}
-		if err := hostEvent(ctx, tx, h.ID, evDrainRequested, d); err != nil {
-			return nil, err
-		}
-	}
-	if len(hosts) == 0 || stopReason == "" {
-		return hosts, nil
-	}
-	live, err := livePlacements(ctx, tx, "p.host_id = ANY($1)", hosts)
-	if err != nil {
-		return nil, err
-	}
-	for _, p := range live {
-		if _, err := s.requestStop(ctx, tx, p.TenantID, p.RunID, stopReason); err != nil {
-			return nil, err
-		}
+		later.host(ctx, tx, h.ID, evDrainRequested, d)
 	}
 	return hosts, nil
 }
@@ -1861,22 +1870,22 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 	var hosts []string
 	err := retryHostPlacements(ctx, func() error {
 		return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			// The pool row first, then its hosts (drainHosts): the lock
-			// order of infraevents.go.
-			err := ChangePool(ctx, tx, &p.TenantID, name, func() error {
+			// The pool row, then its Runs and hosts (drainHosts), and its
+			// pool.retired event last, after the drain: the lock order of
+			// infraevents.go puts event streams after every row lock.
+			return ChangePool(ctx, tx, &p.TenantID, name, func() error {
 				tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0
 					WHERE tenant_id = $1 AND name = $2 AND NOT retired`, p.TenantID, name)
-				if err == nil && tag.RowsAffected() == 0 {
+				if err != nil {
+					return err
+				}
+				if tag.RowsAffected() == 0 {
 					return errNotFound
 				}
+				hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
+					"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
 				return err
 			})
-			if err != nil {
-				return err
-			}
-			hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
-				"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
-			return err
 		})
 	})
 	if err != nil {

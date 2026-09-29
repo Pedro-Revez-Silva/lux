@@ -687,25 +687,27 @@ func (s *Server) terminateTx(ctx context.Context, tx pgx.Tx, hostID, reason stri
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
-	if record && err == nil && was != "terminated" {
-		if err := hostEvent(ctx, tx, hostID, evTerminated, map[string]any{"reason": reason}); err != nil {
-			return err
-		}
-		d := map[string]any{"host": hostID, "name": name, "reason": releaseReason(causes, retired, reason), "detail": reason}
-		if slices.Contains(causes, causeScaleDown) && idle != nil {
-			d["idleSeconds"] = int(*idle)
-		}
-		if err := hostPoolEvent(ctx, tx, hostID, evHostReleased, d); err != nil {
-			return err
-		}
-	}
+	found := err == nil
 	if err := hostsGone(ctx, tx, []string{hostID}); err != nil {
 		return err
 	}
 	// Its host token was made for it alone (launch): spent.
-	_, err = tx.Exec(ctx, `UPDATE host_tokens SET revoked_at = now()
-		WHERE id = (SELECT token_id FROM hosts WHERE id = $1 AND provision_requested_at IS NOT NULL)`, hostID)
-	return err
+	if _, err := tx.Exec(ctx, `UPDATE host_tokens SET revoked_at = now()
+		WHERE id = (SELECT token_id FROM hosts WHERE id = $1 AND provision_requested_at IS NOT NULL)`, hostID); err != nil {
+		return err
+	}
+	// The events last: event streams come after every row lock.
+	if !record || !found || was == "terminated" {
+		return nil
+	}
+	if err := hostEvent(ctx, tx, hostID, evTerminated, map[string]any{"reason": reason}); err != nil {
+		return err
+	}
+	d := map[string]any{"host": hostID, "name": name, "reason": releaseReason(causes, retired, reason), "detail": reason}
+	if slices.Contains(causes, causeScaleDown) && idle != nil {
+		d["idleSeconds"] = int(*idle)
+	}
+	return hostPoolEvent(ctx, tx, hostID, evHostReleased, d)
 }
 
 // releaseReason says why a pool let a host go, from why it was drained
