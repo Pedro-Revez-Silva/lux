@@ -45,9 +45,13 @@ const (
 	MsgStreamOpen      = "stream.open" // exec, attach, tunnel
 	MsgStreamData      = "stream.data"
 	MsgStreamClose     = "stream.close"
-	MsgAck             = "ack" // luxd acking a runner report (reply)
-	MsgNack            = "nack"
-	MsgWelcome         = "welcome"
+	// MsgServers is a placement's servers: the whole desired set, durable
+	// and epoch-fenced like input. The runner keeps the newest (by Rev)
+	// and reconciles to it.
+	MsgServers = "servers"
+	MsgAck     = "ack" // luxd acking a runner report (reply)
+	MsgNack    = "nack"
+	MsgWelcome = "welcome"
 	// MsgExit asks the runner to exit with ExitHost.Code: sent only once
 	// luxd has drained the host and it has nothing left to lose, so the
 	// runner's systemd unit restarts it and its ExecStartPre re-downloads
@@ -362,11 +366,40 @@ type OutputEnd struct {
 type Record struct {
 	Seq  int64  `json:"seq"`
 	Time int64  `json:"t"`  // unix ms
-	Ch   string `json:"ch"` // stdout | stderr | event
+	Ch   string `json:"ch"` // stdout | stderr | event | server
 	Data string `json:"data,omitempty"`
-	// Event payload for ch=event.
+	// Event payload for ch=event (and a server's lifecycle, ch=server).
 	Event json.RawMessage `json:"event,omitempty"`
+	// Server and Stream, for ch=server: which server's process wrote it,
+	// and on which of its streams (stdout | stderr).
+	Server string `json:"server,omitempty"`
+	Stream string `json:"stream,omitempty"`
 }
+
+// Servers is a placement's servers as luxd wants them: every server that
+// should be running (with a command) or watched (without one) now, and
+// the ports of all the Run's servers (a tunnel may reach any of them).
+type Servers struct {
+	Rev     int64        `json:"rev"`
+	Servers []ServerSpec `json:"servers"`
+	Ports   []int        `json:"ports,omitempty"`
+}
+
+// ServerSpec is one server to run or watch. Gen changes with every start
+// (and stop): a process or a report of another Gen is not this one's.
+type ServerSpec struct {
+	Name    string            `json:"name"`
+	Port    int               `json:"port"`
+	Gen     int64             `json:"gen"`
+	Command []string          `json:"command,omitempty"`
+	Workdir string            `json:"workdir,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+}
+
+// EvServerState is the runner's report of a server's state (a RunEvent):
+// {name, gen, state: starting | ready | unreachable | exited, exitCode?,
+// error?}. luxd applies it only for the server's current gen.
+const EvServerState = "server.state"
 
 // Stream channels for interactive access, multiplexed over the WebSocket.
 type StreamOpen struct {
@@ -377,6 +410,11 @@ type StreamOpen struct {
 	Port     int      `json:"port,omitempty"`
 	Rows     int      `json:"rows,omitempty"`
 	Cols     int      `json:"cols,omitempty"`
+	// Window is flow control for the stream's output: the runner sends at
+	// most this many output StreamData frames ahead of luxd, which grants
+	// more (StreamData.Credit) as its reader takes them. 0 (a luxd from
+	// before): no flow control.
+	Window int `json:"window,omitempty" doc:"luxd to runner only (tunnel flow control); ignored from clients."`
 }
 
 // StreamData is one message of an interactive stream, on every link:
@@ -394,6 +432,9 @@ type StreamData struct {
 	EOF      bool `json:"eof,omitempty"`
 	// Error, on close: why the stream could not be opened, or ended.
 	Error string `json:"error,omitempty"`
+	// Credit, luxd → runner only: this many more output frames may be sent
+	// (StreamOpen.Window). A runner from before takes it as empty input.
+	Credit int `json:"credit,omitempty" doc:"luxd to runner only (tunnel flow control); a client that sends it ends its stream."`
 }
 
 // Push asks the runner to push each repository's current commit to the

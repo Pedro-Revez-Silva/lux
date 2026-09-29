@@ -121,7 +121,9 @@ export function Table<Row>(props: TableProps<Row>) {
 
   const sorted = useMemo(() => {
     if (!sort) return rows;
-    const col = columns.find((c) => c.key === sort.key);
+    // Any declared column, shown or not: a default sort by an optional
+    // column holds when a narrow container drops it.
+    const col = props.columns.find((c) => c.key === sort.key);
     if (!col?.sortValue) return rows;
     const sv = col.sortValue;
     const dir = sort.dir === "asc" ? 1 : -1;
@@ -134,7 +136,7 @@ export function Table<Row>(props: TableProps<Row>) {
       if (typeof x === "number" && typeof y === "number") return (x - y) * dir;
       return String(x).localeCompare(String(y)) * dir;
     });
-  }, [rows, sort, columns]);
+  }, [rows, sort, props.columns]);
 
   const toggleSort = (c: Column<Row>) => {
     if (!c.sortValue) return;

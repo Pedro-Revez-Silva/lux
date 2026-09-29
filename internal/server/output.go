@@ -48,9 +48,11 @@ type OutputRecord struct {
 	Epoch  int             `json:"epoch"`
 	Seq    int64           `json:"seq"`
 	Time   int64           `json:"t"`
-	Ch     string          `json:"ch"`
+	Ch     string          `json:"ch" doc:"stdout, stderr, event, or server (a server's output: with servers=true or server=)."`
 	Data   string          `json:"data,omitempty"`
 	Event  json.RawMessage `json:"event,omitempty"`
+	Server string          `json:"server,omitempty" doc:"ch=server: the server whose command wrote it."`
+	Stream string          `json:"stream,omitempty" doc:"ch=server: stdout or stderr (none: its start or exit, as event)."`
 }
 
 // The other SSE events' data. Fields in key order: they were maps.
@@ -85,6 +87,8 @@ type outputInput struct {
 	Follow     string `query:"follow" doc:"true to keep streaming until the Run stops or finishes." example:"true"`
 	Events     string `query:"events" doc:"true to interleave lifecycle events (lux events)." example:"true"`
 	AfterEvent string `query:"afterEvent" doc:"With events, only lifecycle events after this id." example:"0"`
+	Servers    string `query:"servers" doc:"true to include the output of the Run's servers (ch=server), left out by default." example:"true"`
+	Server     string `query:"server" doc:"Only this server's output (ch=server records naming it)."`
 }
 
 // serveOutput is GET /v1/runs/{id}/output: the Run's output as SSE, from
@@ -101,6 +105,17 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request, in *outputI
 	}
 	follow := in.Follow == "true"
 	withEvents := in.Events == "true"
+	// Which records go out: servers' output only when asked for, so a
+	// client that knows nothing of servers never sees it mixed in.
+	wanted := func(rec proto.Record) bool {
+		switch {
+		case in.Server != "":
+			return rec.Ch == "server" && rec.Server == in.Server
+		case rec.Ch == "server":
+			return in.Servers == "true"
+		}
+		return true
+	}
 	if _, err := s.loadRun(r.Context(), p.TenantID, runID, false); err != nil {
 		return err
 	}
@@ -159,7 +174,11 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request, in *outputI
 			liveNow := pl.state == "assigned" || pl.state == "starting" || pl.state == "running" || pl.state == "stopping"
 			emit := func(rec proto.Record) error {
 				cur = Cursor{pl.epoch, rec.Seq}
-				return send("record", OutputRecord{Cursor: cur.String(), Epoch: pl.epoch, Seq: rec.Seq, Time: rec.Time, Ch: rec.Ch, Data: rec.Data, Event: rec.Event})
+				if !wanted(rec) {
+					return nil
+				}
+				return send("record", OutputRecord{Cursor: cur.String(), Epoch: pl.epoch, Seq: rec.Seq, Time: rec.Time, Ch: rec.Ch,
+					Data: rec.Data, Event: rec.Event, Server: rec.Server, Stream: rec.Stream})
 			}
 			var done bool
 			switch {

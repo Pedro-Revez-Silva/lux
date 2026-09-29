@@ -16,6 +16,17 @@ anything from an epoch that is not the Run's current one. This is
 given up on it: the host is told its placement is stale and stops it, and
 nothing it says can overwrite the newer placement's state.
 
+A Run's `epoch` is therefore also how many times it has been placed on a
+host (first start, retries, resumes, migrations): the Runs list shows it
+as **Placements**. Its **runtime** (`runtimeSeconds` on `GET /v1/runs` and
+`GET /v1/runs/{id}`) is the sum over its placements of the time each
+spent running, from reaching running (`started_at`) to exiting or being
+lost (`ended_at`). A placement still running counts up to the time of the
+response, and `runtimeSince` then says when it started, so a client can
+keep counting; a placement that never reached running adds nothing.
+Queueing, pulling images and restoring volumes before that are not
+runtime.
+
 ## States
 
 ```
@@ -119,6 +130,58 @@ move.
 
 If a host dies unannounced, the output of its live placement is lost along
 with its state. Everything before that placement is safe.
+
+A Run's servers write their output into the same file, as records with
+`ch: "server"`, `server: <name>` and `stream: stdout | stderr` (and their
+starts and exits as `lux.server` events there). `GET /v1/runs/{id}/output`
+leaves them out unless asked: `servers=true` for everything,
+`server=<name>` for one server's alone (`lux logs --servers`,
+`lux logs --server web`), so a client that knows nothing of servers
+never sees them mixed into the workload's output.
+
+## Servers
+
+A **server** is a named port of a Run, optionally with a command lux runs
+in its container ([the RunSpec](runspec.md#servers) has the fields). Its
+record outlives placements; its process does not: a placement's end (a
+stop, a migration, a lost host) stops every server with it.
+
+```
+lux server add <run> web 3000 -- npm run dev -- --host 0.0.0.0 --port 3000
+lux server ls <run>
+lux server stop|start|restart|rm <run> web
+```
+
+- **States:** `stopped` → (start) `starting` → `ready` once its port
+  accepts connections. A `ready` server whose port refuses twice in a row
+  is `unreachable` (and `ready` again when it answers). A command that
+  ends is `exited`, with its exit code and the last line it wrote to
+  stderr (`error`). The runner checks each port every 3 seconds, from the
+  host, on the container's address.
+- **Without a command**, only the port is exposed, and lux watches it
+  whenever the Run runs: once it accepts connections the server is
+  `ready`, whatever it was (whoever started the process by hand made it
+  so). There is nothing to start (409 `no_command`); stopping one stops
+  the watching until the Run's next placement.
+- **`stopReason`** says why one is `stopped`: `stopped` (asked for),
+  `run stopped`, `migrated` or `host lost` (its placement ended), with
+  `stoppedEpoch`, the placement it stopped in.
+- **On a new placement**, the spec's servers (`fromSpec`) start again;
+  servers added at runtime stay `stopped` until someone starts them.
+- **Changes:** adding, editing (`PUT`) and removing work in any state but
+  finished. Starting needs the Run `running` (409 `not_running`). An edit
+  applies at the server's next start: a running command keeps what it
+  started with.
+- **Events:** `server.added`, `server.removed` and `server.state` (name,
+  state, epoch, and exitCode and error when it exited) are the Run's
+  events.
+- **Ports:** `lux port-forward <run> web <local-port>` reaches a server by
+  its name, as it reaches `network.ports`.
+- **Previews:** with previews configured, each server has a URL,
+  `https://<name>-<run suffix>.<preview domain>`, that reaches it from a
+  browser wherever the Run is now ([operators](operators.md#previews)).
+  `lastRequestAt` is when it was last requested (written at most every
+  30 seconds), for whoever parks idle Runs.
 
 ## Hosts and pools
 

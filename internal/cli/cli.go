@@ -54,6 +54,10 @@ func (a *app) main(args []string) int {
 	fmt.Fprintln(a.stderr, "lux:", err)
 	var ae *client.APIError
 	if errors.As(err, &ae) {
+		if ae.Code == "tenant_required" {
+			// luxd's message speaks of ?tenant=; say how the CLI sets it.
+			fmt.Fprintln(a.stderr, "lux: name one with --tenant, LUX_TENANT, or tenant in ~/.config/lux/config.toml")
+		}
 		switch {
 		case ae.Status == 404:
 			return 3
@@ -74,6 +78,7 @@ func (e exitCode) Error() string { return fmt.Sprintf("exit %d", int(e)) }
 type config struct {
 	URL    string `toml:"url"`
 	APIKey string `toml:"api_key"`
+	Tenant string `toml:"tenant"`
 }
 
 func loadConfig() config {
@@ -116,19 +121,26 @@ func (a *app) root() *cobra.Command {
 				return fmt.Errorf("-o must be text or json")
 			}
 			a.c = client.New(a.url, a.key)
-			a.c.Tenant = cmp.Or(a.tenant, os.Getenv("LUX_TENANT"))
+			a.c.Tenant = cfg.Tenant
+			if env, ok := os.LookupEnv("LUX_TENANT"); ok {
+				a.c.Tenant = env
+			}
+			// An explicitly empty flag overrides both the environment and config.
+			if cmd.Flags().Changed("tenant") {
+				a.c.Tenant = a.tenant
+			}
 			return nil
 		},
 	}
 	root.PersistentFlags().StringVar(&a.url, "url", "", "luxd URL (env LUX_URL)")
 	root.PersistentFlags().StringVar(&a.key, "api-key", "", "API key (env LUX_API_KEY)")
-	root.PersistentFlags().StringVar(&a.tenant, "tenant", "", "with an operator key: act on this tenant only, by id or name (env LUX_TENANT)")
+	root.PersistentFlags().StringVar(&a.tenant, "tenant", "", "with an operator key: act on this tenant only, by id or name (env LUX_TENANT, config tenant); --tenant \"\" means all tenants")
 	root.PersistentFlags().StringVarP(&a.output, "output", "o", "text", "output format: text | json")
 	root.AddCommand(
 		a.runCmd(), a.lsCmd(), a.getCmd(), a.logsCmd(), a.eventsCmd(), a.steerCmd(), a.interruptCmd(),
 		a.stopCmd(), a.resumeCmd(), a.cancelCmd(), a.waitCmd(), a.pushCmd(), a.diffCmd(), a.snapshotsCmd(),
 		a.artifactsCmd(), a.execCmd(), a.attachCmd(), a.portForwardCmd(), a.hostsCmd(), a.poolsCmd(),
-		a.tenantsCmd(), a.statusCmd(), a.historyCmd(), a.costCmd(), a.costsCmd(), a.migrateCmd(),
+		a.tenantsCmd(), a.statusCmd(), a.historyCmd(), a.costCmd(), a.costsCmd(), a.migrateCmd(), a.shellCmd(), a.serverCmd(),
 	)
 	return root
 }

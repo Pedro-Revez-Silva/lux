@@ -358,3 +358,41 @@ surprise = 1`, "surprise"},
 		}
 	}
 }
+
+// [preview] and console.allowed_origins: off by default; checked when set.
+func TestPreviewConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "luxd.toml")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := loadConfig(path)
+	if err != nil || c.Preview.Domain != "" || c.Preview.Listen != "127.0.0.1:7071" || c.Preview.HoldFor.Duration != 20*time.Second {
+		t.Fatalf("defaults: %+v %v", c.Preview, err)
+	}
+	t.Setenv("LUX_CONSOLE_ALLOWED_ORIGINS", "https://console.example.com, http://localhost:5173")
+	t.Setenv("LUX_PREVIEW_DOMAIN", "lux.example.com")
+	t.Setenv("LUX_PUBLIC_URL", "https://luxd.example.com")
+	c, err = loadConfig(path)
+	if err != nil || !slices.Equal(c.Console.AllowedOrigins, []string{"https://console.example.com", "http://localhost:5173"}) {
+		t.Fatalf("set: %+v %v", c.Console, err)
+	}
+	for _, c := range []struct{ env, value, want string }{
+		{"LUX_PREVIEW_DOMAIN", "*.lux.example.com", "preview.domain"},
+		{"LUX_PREVIEW_LISTEN", "nope", "preview.listen"},
+		{"LUX_PREVIEW_AUTH", "basic", "preview.auth"},
+		{"LUX_PREVIEW_AUTH", "cloudflare-access", "preview.cloudflare_access.aud"},
+		{"LUX_CONSOLE_ALLOWED_ORIGINS", "https://x.com/a/", "console.allowed_origins"},
+	} {
+		t.Run(c.env+"="+c.value, func(t *testing.T) {
+			t.Setenv(c.env, c.value)
+			if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("got %v, want %q", err, c.want)
+			}
+		})
+	}
+	// Ticket mode sends people to public_url to sign in.
+	os.Unsetenv("LUX_PUBLIC_URL")
+	if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), "needs public_url") {
+		t.Fatalf("no public_url: %v", err)
+	}
+}

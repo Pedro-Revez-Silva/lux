@@ -1,8 +1,9 @@
 import { useMemo } from "react";
 import { Badge, Card, PageHeader, Table, type Column } from "@lux/design-system";
 import { api, type Pool } from "../../api/index.ts";
+import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip, labelsText } from "./common.tsx";
+import { DASH, ErrorBlock, ErrorStrip, labelsText, poolPath } from "./common.tsx";
 
 interface PoolRow extends Pool {
   key: string;
@@ -33,7 +34,7 @@ export function Pools() {
   }, [pools.data, hosts.data]);
 
   const cols = useMemo<Column<PoolRow>[]>(() => {
-    const c: Column<PoolRow>[] = [{ key: "name", header: "Pool", cell: (p) => p.name, sortValue: (p) => p.name, lead: true, width: 180 }];
+    const c: Column<PoolRow>[] = [{ key: "name", header: "Pool", cell: (p) => <Link to={poolLink(p, showTenant)}>{p.name}</Link>, sortValue: (p) => p.name, lead: true, width: 180 }];
     if (showTenant) c.push({ key: "tenant", header: "Tenant", cell: (p) => (p.platform ? <span className="muted">platform</span> : p.tenant || DASH), sortValue: (p) => (p.platform ? "" : p.tenant), width: 130 });
     c.push(
       { key: "provider", header: "Provider", cell: (p) => <span className="secondary">{p.provider}</span>, sortValue: (p) => p.provider, width: 110 },
@@ -55,9 +56,14 @@ export function Pools() {
         {pools.error && rows.length === 0 && !pools.loading ? (
           <ErrorBlock error={pools.error} onRetry={pools.refetch} />
         ) : (
-          <Table columns={cols} rows={rows} rowKey={(p) => p.key} loading={pools.loading} defaultSort={{ key: "name", dir: "asc" }} empty="No pools." />
+          <Table columns={cols} rows={rows} rowKey={(p) => p.key} onRowClick={(p) => go(poolLink(p, showTenant))} loading={pools.loading} defaultSort={{ key: "name", dir: "asc" }} empty="No pools." />
         )}
       </Card>
     </div>
   );
+}
+
+/** A platform pool's page is the platform's; across tenants, a tenant's pool is linked in its tenant's scope (names repeat across tenants). */
+function poolLink(p: Pool, acrossTenants: boolean): string {
+  return poolPath(p.name, { platform: p.platform, tenant: acrossTenants ? p.tenant : undefined });
 }

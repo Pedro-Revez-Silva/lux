@@ -102,6 +102,19 @@ separate private repo should hold the real values and state.
   authenticate with lux API keys and runner tokens that luxd itself
   checks (see the module's comment for how Access resolves the overlap
   between the two applications).
+  Optional previews, all off by default: `preview_domain` (e.g.
+  `preview.example.com`) adds a proxied wildcard CNAME
+  `*.<preview_domain>` to the same tunnel and an ingress rule sending it
+  to luxd's preview listener on `preview_origin_port` (default 7071; set
+  luxd's `[preview]` `listen = "127.0.0.1:7071"`).
+  `preview_access_emails`/`preview_access_email_domains` add a separate
+  Access application on `*.<preview_domain>` whose AUD tag, output as
+  `preview_access_application_aud`, goes in luxd's
+  `LUX_PREVIEW_CF_ACCESS_AUD`. Universal SSL does not cover a
+  second-level wildcard, so `preview_certificate_pack = true` orders an
+  Advanced certificate pack for `*.<preview_domain>` and
+  `<preview_domain>` (needs Advanced Certificate Manager on the zone);
+  otherwise upload a custom certificate.
 
 ## Cost (eu-north-1, monthly, on-demand unless noted)
 

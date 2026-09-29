@@ -24,10 +24,19 @@ export interface RunSpec {
   name?: string;
   labels?: Record<string, string>;
   image: { ref?: string; build?: { containerfile: string; context?: string; args?: Record<string, string> } };
-  workload: { adapter: string; command?: string[]; prompt?: string; workdir?: string; user?: string; tty?: boolean };
+  workload: { adapter: string; command?: string[]; prompt?: string; workdir?: string; user?: string; tty?: boolean; servers?: SpecServer[] };
   resources: SpecResources;
   placement: { pool?: string; requires?: Record<string, string>; prefers?: Record<string, string> };
   [key: string]: unknown;
+}
+
+/** workload.servers[]: a server declared in the spec. */
+export interface SpecServer {
+  name: string;
+  port: number;
+  command?: string[];
+  workdir?: string;
+  env?: Record<string, string>;
 }
 
 export interface SecretRef {
@@ -108,11 +117,76 @@ export interface Run {
   firstScheduledAt?: string;
   firstStartedAt?: string;
   finishedAt?: string;
+  /** Seconds its placements spent running (started to ended; a live one up to the response), summed. */
+  runtimeSeconds: number;
+  /** When the placement still running started; set while one is. */
+  runtimeSince?: string;
   placements?: Placement[];
   usage?: RunUsage;
   resume?: Resumability;
+  /** The Run's servers (named ports, optionally with a command lux starts). */
+  servers?: Server[];
   /** In GET /v1/runs only (not GET /v1/runs/{id}); absent means unknown, not zero. */
   cost?: RunCostBrief;
+}
+
+export type ServerState = "stopped" | "starting" | "ready" | "unreachable" | "exited";
+
+/** A Run's server: a named port, optionally with a command lux starts in the container. */
+export interface Server {
+  name: string;
+  port: number;
+  command?: string[] | null;
+  workdir?: string;
+  env?: Record<string, string>;
+  /** Declared in the spec (auto-started on every start of the Run). */
+  fromSpec: boolean;
+  state: ServerState;
+  /** When exited. */
+  exitCode?: number;
+  /** The last stderr line on exit, if any. */
+  error?: string;
+  /** When the state last changed. */
+  since: string;
+  /** When it last became ready. */
+  readySince?: string | null;
+  /** Why it is stopped. */
+  stopReason?: "stopped" | "run stopped" | "migrated" | "host lost" | null;
+  /** Placement epoch it stopped in (null if never started). */
+  stoppedEpoch?: number | null;
+  /** Placement epoch of the current state. */
+  epoch: number;
+  /** The preview URL; null when previews are not configured. */
+  url?: string | null;
+  /** When the preview last proxied a request for it. */
+  lastRequestAt?: string | null;
+}
+
+/** POST /v1/runs/{id}/servers; PUT takes the same minus name. */
+export interface ServerInput {
+  name: string;
+  port: number;
+  command?: string[];
+  workdir?: string;
+  env?: Record<string, string>;
+  /** Start it now; defaults to true when a command is set. */
+  start?: boolean;
+}
+
+/** GET /v1/runs/{id}/servers/{name}/log: one line of the server's output. */
+export interface ServerLogLine {
+  /** Unix ms. */
+  t: number;
+  stream: "stdout" | "stderr";
+  text: string;
+}
+
+/** POST /v1/runs/{id}/tickets: a single-use token for a browser's WebSocket or preview. */
+export interface StreamTicket {
+  ticket: string;
+  kind: "exec" | "preview";
+  runId: string;
+  expiresAt: string;
 }
 
 /** RunCostBrief in internal/server/costs.go: GET /v1/runs/{id}/cost's status and totals. */
@@ -267,6 +341,18 @@ export interface Event {
   time: string;
 }
 
+/** A pool's or a host's event (GET /v1/pools/{name}/events, /v1/hosts/{id}/events). */
+export interface LifecycleEvent {
+  id: number;
+  type: string;
+  data: Record<string, unknown>;
+  /** How many times in a row it happened; 1 for most. */
+  count: number;
+  time: string;
+  /** When it last happened, if more than once. */
+  lastTime?: string;
+}
+
 export interface FeedEvent extends Event {
   runId: string;
   tenant: string;
@@ -348,8 +434,13 @@ export interface Pool {
   minHosts: number;
   maxHosts: number;
   warmHosts: number;
+  /** e.g. "600s"; absent: luxd's default. */
+  scaleDownAfter?: string;
+  warmWhileActive?: boolean;
   shared: boolean;
   platform: boolean;
+  hourlyPrice?: string;
+  currency?: string;
 }
 
 /** GET /v1/whoami: who the key belongs to. */
@@ -368,6 +459,8 @@ export interface WhoAmI {
   scopes: string[];
   /** key: the console needs an API key; cloudflare-access: Access signs people in. */
   consoleAuth: "key" | "cloudflare-access";
+  /** Where preview URLs are (https://<server>-<run suffix>.<previewDomain>); null when previews are off, or signed in to through Cloudflare Access. */
+  previewDomain?: string | null;
 }
 
 export interface Tenant {
@@ -537,6 +630,8 @@ export const TERMINAL_RUN_STATES = new Set(["succeeded", "failed", "cancelled"])
 export const INPUT_RUN_STATES = new Set(["starting", "running"]);
 /** What POST /resume accepts. */
 export const RESUMABLE_RUN_STATES = new Set(["stopped", "lost", "failed"]);
+/** What the exec stream (a terminal) and a server's start/stop/restart need. */
+export const EXEC_RUN_STATES = new Set(["running"]);
 
 /** Still changing: worth polling. */
 export function isRunActive(state: string): boolean {

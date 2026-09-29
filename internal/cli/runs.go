@@ -24,7 +24,7 @@ import (
 type Run = server.Run
 
 func (a *app) runCmd() *cobra.Command {
-	var file, idem, secretsFrom string
+	var file, idem, secretsFrom, pool string
 	var follow, wait bool
 	var labels []string
 	cmd := &cobra.Command{
@@ -34,6 +34,11 @@ func (a *app) runCmd() *cobra.Command {
 
   lux run -f spec.yaml --follow
   lux run --image alpine -- echo hello
+  lux run --image alpine --pool arm64 -- uname -m
+
+Flags win over the spec file: --pool replaces placement.pool, as --image
+and --name replace theirs. Without --pool or placement.pool, the server
+picks the pool.
 
 Secret values in the spec can be read from the environment with
 value: ${NAME}, or from a .env file with --secrets-from.`,
@@ -60,6 +65,9 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 			}
 			if name, _ := cmd.Flags().GetString("name"); name != "" {
 				sp.Name = name
+			}
+			if pool != "" {
+				sp.Placement.Pool = pool
 			}
 			for _, l := range labels {
 				k, v, _ := strings.Cut(l, "=")
@@ -98,6 +106,7 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 	cmd.Flags().StringVarP(&file, "file", "f", "", "spec file (YAML or JSON; - for stdin)")
 	cmd.Flags().String("image", "", "image ref, for a quick generic Run")
 	cmd.Flags().String("name", "", "a name for humans")
+	cmd.Flags().StringVar(&pool, "pool", "", "pool to place the Run in (overrides the spec's placement.pool)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "label key=value (repeatable)")
 	cmd.Flags().StringVar(&idem, "idempotency-key", "", "make the submission safe to retry")
 	cmd.Flags().StringVar(&secretsFrom, "secrets-from", "", ".env file supplying secret values")
@@ -171,6 +180,9 @@ func (a *app) lsCmd() *cobra.Command {
 		Long: `List Runs, newest first. With an operator key, every tenant's
 (--tenant narrows it), with a TENANT column.
 
+RUNTIME is the time the Run's placements have spent running, summed (a
+placement still running counts up to now); - for a Run that never ran.
+
 COST is the Run's list-price total when it has one currency, "multi" when
 it has several (lux cost <run> shows them), and — while nothing has been
 reported. A leading ~ marks a total that may still change: part of it is
@@ -211,13 +223,13 @@ an estimate, or a cost source has not answered yet.`,
 				if r.Activity == "idle" && r.State == "running" {
 					state += " (waiting for input)"
 				}
-				row := []string{r.ID, orDash(r.Name), state, orDash(r.Host), r.Spec.Workload.Adapter, runCostCell(r.Cost), ago(&r.CreatedAt)}
+				row := []string{r.ID, orDash(r.Name), state, orDash(r.Host), r.Spec.Workload.Adapter, runtimeCell(r), runCostCell(r.Cost), ago(&r.CreatedAt)}
 				if len(tenants) > 1 {
 					row = append([]string{r.Tenant}, row...)
 				}
 				rows = append(rows, row)
 			}
-			header := "ID\tNAME\tSTATE\tHOST\tADAPTER\tCOST\tCREATED"
+			header := "ID\tNAME\tSTATE\tHOST\tADAPTER\tRUNTIME\tCOST\tCREATED"
 			if len(tenants) > 1 {
 				header = "TENANT\t" + header
 			}
@@ -231,6 +243,29 @@ an estimate, or a cost source has not answered yet.`,
 	cmd.Flags().IntVar(&limit, "limit", 0, "at most this many (default 100, max 1000)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "filter by label key=value")
 	return cmd
+}
+
+// runtimeCell is the Runs list's RUNTIME column: runtimeSeconds in its two
+// largest units ("45s", "3m20s", "2h5m", "1d3h"), "-" for a Run that never ran.
+func runtimeCell(r Run) string {
+	if r.RuntimeSince == nil && r.RuntimeSeconds == 0 {
+		return "-"
+	}
+	s := int64(r.RuntimeSeconds)
+	units := []struct {
+		name string
+		size int64
+	}{{"d", 86400}, {"h", 3600}, {"m", 60}, {"s", 1}}
+	for i, u := range units[:3] {
+		if s >= u.size {
+			out := fmt.Sprintf("%d%s", s/u.size, u.name)
+			if rest := s % u.size / units[i+1].size; rest > 0 {
+				out += fmt.Sprintf("%d%s", rest, units[i+1].name)
+			}
+			return out
+		}
+	}
+	return fmt.Sprintf("%ds", s)
 }
 
 func orDash(s string) string {
@@ -305,6 +340,12 @@ func (a *app) getCmd() *cobra.Command {
 					fmt.Fprintf(w, "  %d  %-12s %-8s exit=%s %s\n", p.Epoch, p.HostName, p.State, code, p.ExitReason)
 				}
 			}
+			if len(run.Servers) > 0 {
+				fmt.Fprintln(w, "servers:")
+				for _, sv := range run.Servers {
+					fmt.Fprintf(w, "  %-12s %-6d %-24s %s\n", sv.Name, sv.Port, serverState(sv), serverURL(sv))
+				}
+			}
 			if u := run.Usage; u != nil && u.Placements > 0 {
 				fmt.Fprintf(w, "usage:     peak memory %s, peak disk %s, cpu %.1fs\n",
 					bytesHuman(u.PeakMemoryBytes), bytesHuman(u.PeakDiskBytes), u.CPUSeconds)
@@ -339,6 +380,9 @@ func (a *app) getCmd() *cobra.Command {
 
 type logOpts struct {
 	stderr, events bool
+	// server: only this server's output; servers: servers' output too.
+	server  string
+	servers bool
 }
 
 func (a *app) logsCmd() *cobra.Command {
@@ -363,6 +407,8 @@ func (a *app) logsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&since, "since", "", "resume from a cursor")
 	cmd.Flags().BoolVar(&o.stderr, "stderr", true, "include stderr")
 	cmd.Flags().BoolVar(&o.events, "events", false, "include structured events and lifecycle")
+	cmd.Flags().StringVar(&o.server, "server", "", "only this server's output")
+	cmd.Flags().BoolVar(&o.servers, "servers", false, "include the Run's servers' output (prefixed with their names)")
 	return cmd
 }
 
@@ -397,6 +443,12 @@ func (a *app) printLogs(ctx context.Context, id, since string, follow bool, o lo
 	if o.events {
 		q.Set("events", "true")
 	}
+	if o.server != "" {
+		q.Set("server", o.server)
+	}
+	if o.servers {
+		q.Set("servers", "true")
+	}
 	cur := since
 	ended := false
 	err := a.c.Stream(ctx, "/v1/runs/"+id+"/output", q, func(ev client.SSEEvent) error {
@@ -419,6 +471,28 @@ func (a *app) printLogs(ctx context.Context, id, since string, follow bool, o lo
 			case "stderr":
 				if o.stderr {
 					fmt.Fprint(a.stderr, r.Data)
+				}
+			case "server":
+				w := a.stdout
+				if r.Stream == "stderr" {
+					if !o.stderr {
+						return nil
+					}
+					w = a.stderr
+				}
+				switch {
+				case r.Data == "":
+					if o.events {
+						fmt.Fprintf(a.stderr, "· [%s] %s\n", r.Server, r.Event)
+					}
+				case o.server != "":
+					fmt.Fprint(w, r.Data)
+				default:
+					for _, l := range strings.SplitAfter(r.Data, "\n") {
+						if l != "" {
+							fmt.Fprintf(w, "[%s] %s", r.Server, l)
+						}
+					}
 				}
 			case "event":
 				if o.events {

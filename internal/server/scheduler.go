@@ -451,9 +451,19 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 		WHERE id = $1`, r.ID, epoch); err != nil {
 		return err
 	}
+	// The placement is on the Run, its host and its host's pool alike.
 	// snapshotId: what this placement's volumes start from (null: empty),
 	// the lineage its repositories' clone bases follow (gitBases).
-	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID, "snapshotId": r.SnapshotID}); err != nil {
+	// TODO(pool-owner): name the pool by runs.pool_owner too, once it
+	// exists; by name alone a tenant pool and a platform pool are the same.
+	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID, "pool": h.Pool, "snapshotId": r.SnapshotID}); err != nil {
+		return err
+	}
+	placed := map[string]any{"run": r.ID, "epoch": epoch, "host": h.ID}
+	if err := hostEvent(ctx, tx, h.ID, evPlacementAssign, placed); err != nil {
+		return err
+	}
+	if err := hostPoolEvent(ctx, tx, h.ID, evPlacement, placed); err != nil {
 		return err
 	}
 
@@ -479,6 +489,10 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	}
 	// Secrets are attached when the message is sent, from memory.
 	if err := enqueue(ctx, tx, h.ID, r.ID, epoch, proto.MsgAssign, a); err != nil {
+		return err
+	}
+	// Then its servers: the spec's start on every placement.
+	if err := s.startSpecServers(ctx, tx, r.TenantID, r.ID, epoch); err != nil {
 		return err
 	}
 	h.UsedRuns++

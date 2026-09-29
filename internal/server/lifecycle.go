@@ -249,12 +249,29 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	if err := setRunState(ctx, tx, tenantID, runID, next, reason, epoch); err != nil {
 		return err
 	}
-	if slices.Contains(movedStops, stopReason) {
+	if err := stopServersAtEnd(ctx, tx, tenantID, runID, epoch, endReason(stopReason)); err != nil {
+		return err
+	}
+	ended := map[string]any{"run": runID, "epoch": epoch, "outcome": next}
+	if st.ExitCode != nil {
+		ended["exitCode"] = *st.ExitCode
+	}
+	if stopReason != "" {
+		ended["stopReason"] = stopReason
+	}
+	moved := slices.Contains(movedStops, stopReason)
+	if moved {
 		// Moved, not stopped by a person: resume elsewhere automatically
 		// (with the input a migration left, if any).
-		return s.requestResume(ctx, tx, tenantID, runID, nil, "auto-resume after "+stopReason)
+		if err := s.requestResume(ctx, tx, tenantID, runID, nil, "auto-resume after "+stopReason); err != nil {
+			return err
+		}
 	}
-	if terminal(next) {
+	// Last: event streams come after every row lock (infraevents.go).
+	if err := hostEvent(ctx, tx, hostID, evPlacementEnded, ended); err != nil {
+		return err
+	}
+	if !moved && terminal(next) {
 		s.secrets.drop(runID)
 	}
 	return nil
@@ -262,8 +279,10 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 
 // placementLost gives up on a placement: its host stopped answering (or came
 // back without it). Its Run is lost and resumable only from the last
-// snapshot taken before it.
-func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epoch int, why string) error {
+// snapshot taken before it. Its host.placement_ended goes to later, for
+// the caller to write once it has locked every row it will (callers lose
+// several placements in one transaction; event streams come last).
+func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epoch int, why string, later *laterEvents) error {
 	var tenantID, runState string
 	var current int
 	if err := tx.QueryRow(ctx, `SELECT tenant_id, state, current_epoch FROM runs WHERE id = $1 FOR UPDATE`, runID).Scan(&tenantID, &runState, &current); err != nil {
@@ -281,8 +300,12 @@ func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epo
 	if err != nil || tag.RowsAffected() == 0 {
 		return err
 	}
+	later.host(ctx, tx, hostID, evPlacementEnded, map[string]any{"run": runID, "epoch": epoch, "outcome": "lost", "reason": why})
 	if epoch != current || terminal(runState) {
 		return nil
+	}
+	if err := stopServersAtEnd(ctx, tx, tenantID, runID, epoch, "host lost"); err != nil {
+		return err
 	}
 	var cancel bool
 	_ = tx.QueryRow(ctx, `SELECT cancel_requested FROM runs WHERE id = $1`, runID).Scan(&cancel)

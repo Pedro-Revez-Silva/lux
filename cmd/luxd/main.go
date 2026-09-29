@@ -214,6 +214,14 @@ func serve(ctx context.Context, c config) error {
 			CFOperators:     c.Console.CloudflareAccess.Operators,
 			CFDefaultTenant: c.Console.CloudflareAccess.DefaultTenant,
 		},
+		AllowedOrigins: c.Console.AllowedOrigins,
+		Preview: server.PreviewConfig{
+			Domain:  c.Preview.Domain,
+			Listen:  c.Preview.Listen,
+			Auth:    c.Preview.Auth,
+			HoldFor: c.Preview.HoldFor.Duration,
+			CFAud:   c.Preview.CloudflareAccess.AUD,
+		},
 	}, db, blobs, log)
 	return srv.Run(ctx)
 }
@@ -322,6 +330,9 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		fs.Parse(args[1:])
 		token := ids.Secret("luxh")
 		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
+			if err := server.CheckPoolName(ctx, tx, optional(*tenant), *pool); err != nil {
+				return err
+			}
 			_, err := tx.Exec(ctx, `INSERT INTO host_tokens (id, tenant_id, pool, labels, token_hash) VALUES ($1, nullif($2, ''), $3, $4, $5)`,
 				ids.New(ids.HostToken), *tenant, *pool, map[string]string(labels), ids.Hash(token))
 			return err
@@ -356,17 +367,26 @@ func admin(ctx context.Context, cfg config, args []string) error {
 			return err
 		}
 		id := ids.New(ids.Pool)
+		var tenantID *string
+		if *tenant != "" {
+			tenantID = tenant
+		}
 		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
-					scale_down_after_s, warm_while_active, hourly_price, price_currency)
-				VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11, nullif($12, '')::numeric, nullif($13, ''))
-				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
-					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts, shared = EXCLUDED.shared,
-					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
-					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
-					retired = false`,
-				id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive, *price, *currency)
-			return err
+			if err := server.CheckPoolName(ctx, tx, optional(*tenant), *name); err != nil {
+				return err
+			}
+			return server.ChangePool(ctx, tx, tenantID, *name, func() error {
+				_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
+						scale_down_after_s, warm_while_active, hourly_price, price_currency)
+					VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11, nullif($12, '')::numeric, nullif($13, ''))
+					ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
+						min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts, shared = EXCLUDED.shared,
+						scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
+						hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
+						retired = false`,
+					id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive, *price, *currency)
+				return err
+			})
 		})
 		if err != nil {
 			return err
@@ -396,4 +416,12 @@ func admin(ctx context.Context, cfg config, args []string) error {
 	}
 	usage()
 	return nil
+}
+
+// optional is s, or nil when empty: a tenant flag left out means the platform.
+func optional(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }

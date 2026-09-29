@@ -113,8 +113,8 @@ func (s *Server) binariesMatch(arch, runnerSHA, shimSHA string) bool {
 // The pool's pg_advisory_xact_lock serializes count-then-cordon across
 // concurrent Hellos (a luxd restart wakes a whole pool at once); under
 // READ COMMITTED they would otherwise all read the same count and
-// overshoot the cap. Returns the hosts to notify.
-func (s *Server) drainIfOutdated(ctx context.Context, tx pgx.Tx, hostID, arch, runnerSHA, shimSHA string) ([]string, error) {
+// overshoot the cap. Returns the hosts to notify; its event goes to later.
+func (s *Server) drainIfOutdated(ctx context.Context, tx pgx.Tx, later *laterEvents, hostID, arch, runnerSHA, shimSHA string) ([]string, error) {
 	if !s.binariesOutdated(arch, runnerSHA, shimSHA) {
 		return nil, nil
 	}
@@ -136,7 +136,7 @@ func (s *Server) drainIfOutdated(ctx context.Context, tx pgx.Tx, hostID, arch, r
 	if err != nil || draining >= max(1, live*s.cfg.OutdatedDrainPercent/100) {
 		return nil, err
 	}
-	return s.drainHosts(ctx, tx, outdatedBinariesReason, causeOutdated, "", "id = $1", hostID)
+	return s.drainHostsLater(ctx, tx, later, outdatedBinariesReason, causeOutdated, "", "id = $1", hostID)
 }
 
 // runnerBinManifest is the contract's {"linux-arm64": {"lux-runner": sha,

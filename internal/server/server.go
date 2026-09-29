@@ -89,6 +89,25 @@ type Config struct {
 	// Costs: the cost tick and drainer (costqueue.go). Zero durations and
 	// batch: the defaults.
 	Costs CostsConfig
+	// AllowedOrigins: origins besides public_url's and the request's own
+	// whose pages may open interactive streams (console.allowed_origins).
+	AllowedOrigins []string
+	// Preview: the preview listener (preview.go).
+	Preview PreviewConfig
+}
+
+// PreviewConfig is the preview listener's ([preview]).
+type PreviewConfig struct {
+	// Domain: previews are <server>-<run suffix>.<Domain>; "" is off.
+	Domain string
+	// Listen is the preview listener's own address.
+	Listen string
+	// Auth: cloudflare-access or ticket ("": as the console's).
+	Auth string
+	// HoldFor: how long a request to a starting server waits.
+	HoldFor time.Duration
+	// CFAud: the preview Access application's AUD tag.
+	CFAud string
 }
 
 type Server struct {
@@ -107,6 +126,8 @@ type Server struct {
 	cfAccess *cfAccess
 	// cfTenantID is bound at startup, never re-resolved by name on requests.
 	cfTenantID string
+	// preview is the preview listener's state (preview.go), nil when off.
+	preview *previews
 	// wakeups wake followers of Run events (wakeups.go).
 	wakeups *wakeups
 	kick    chan struct{}
@@ -208,6 +229,9 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 	}
 	s.hub = newHub(s)
 	s.loadRunnerBinaries()
+	if cfg.Preview.Domain != "" {
+		s.preview = newPreviews(s)
+	}
 	return s
 }
 
@@ -259,7 +283,20 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	srv := &http.Server{Addr: s.cfg.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	s.wg.Add(8)
+	var psrv *http.Server
+	errc := make(chan error, 2)
+	if s.preview != nil {
+		if err := s.preview.init(ctx); err != nil {
+			return err
+		}
+		psrv = &http.Server{Addr: s.cfg.Preview.Listen, Handler: s.preview, ReadHeaderTimeout: 10 * time.Second}
+		s.wg.Add(1)
+		go func() { defer s.wg.Done(); s.preview.flushLoop(ctx) }()
+		go func() { errc <- psrv.ListenAndServe() }()
+		s.log.Info("previews listening", "addr", s.cfg.Preview.Listen, "domain", s.cfg.Preview.Domain)
+	}
+	s.wg.Add(9)
+	go func() { defer s.wg.Done(); s.ticketReaper(ctx) }()
 	go func() { defer s.wg.Done(); s.schedulerLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.provisionerLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.reaperLoop(ctx) }()
@@ -268,7 +305,6 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() { defer s.wg.Done(); s.listenLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.costLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.priceLoop(ctx) }()
-	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	s.log.Info("luxd listening", "addr", s.cfg.Listen)
 	select {
@@ -277,6 +313,9 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 		s.hub.closeAll()
 		_ = srv.Shutdown(shutdown)
+		if psrv != nil {
+			_ = psrv.Shutdown(shutdown)
+		}
 		s.wg.Wait()
 		return nil
 	case err := <-errc:

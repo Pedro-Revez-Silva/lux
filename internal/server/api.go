@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -61,7 +62,8 @@ func (s *Server) routes(api huma.API) {
 			"Events: `record` (one output record; its `cursor` resumes the stream with `since`), " +
 			"`lux` (a lifecycle event, with `events=true`), `gap` (output that cannot be had, e.g. lost with its host), " +
 			"`error` (the stream failed) and `end` (the last event: where to resume and the Run's state). " +
-			"Without `follow` the stream ends after what is there now.",
+			"Without `follow` the stream ends after what is there now. " +
+			"The output of the Run's servers (ch `server`) is left out unless `servers=true`, or `server=<name>` for one server's alone.",
 		Responses: map[string]*huma.Response{"200": {Description: "OK", Content: map[string]*huma.MediaType{"text/event-stream": {Schema: sseEvents(
 			sseEvent("record", "One output record.", schemaRef[OutputRecord](api)),
 			sseEvent("lux", "A lifecycle event (events=true).", schemaRef[Event](api)),
@@ -187,15 +189,69 @@ func (s *Server) routes(api huma.API) {
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict},
 	}, "run", s.postInput)
-	register(s, api, streamOp(api, "execRun", "/v1/runs/{id}/exec", "exec", "Run a command in a running Run",
+	register(s, api, s.streamOp(api, "execRun", "/v1/runs/{id}/exec", "exec", "Run a command in a running Run",
 		"The client's first message is a StreamOpen: `{\"command\": [...], \"tty\": true, \"rows\": 24, \"cols\": 80}`. "),
 		"run", streamed(s, s.runStream("exec")))
-	register(s, api, streamOp(api, "attachRun", "/v1/runs/{id}/attach", "attach", "Attach to a running Run's terminal",
+	register(s, api, s.streamOp(api, "attachRun", "/v1/runs/{id}/attach", "attach", "Attach to a running Run's terminal",
 		"Needs a generic workload with workload.tty. "),
 		"run", streamed(s, s.runStream("attach")))
-	register(s, api, streamOp(api, "portForward", "/v1/runs/{id}/ports/{name}", "tunnel", "Reach one of a running Run's ports",
-		"A TCP connection to a port the spec declares in network.ports, carried as StreamData. "),
+	register(s, api, s.streamOp(api, "portForward", "/v1/runs/{id}/ports/{name}", "tunnel", "Reach one of a running Run's ports",
+		"A TCP connection to a port the spec declares in network.ports, or to one of the Run's servers (by its name), carried as StreamData. "),
 		"run", streamed(s, s.streamHandler("tunnel")))
+	register(s, api, huma.Operation{
+		OperationID: "mintTicket", Method: http.MethodPost, Path: "/v1/runs/{id}/tickets", Tags: []string{"interactive"},
+		Summary: "Mint a stream ticket",
+		Description: "A single-use credential, good for 60 seconds, for what a browser cannot send an Authorization header with. " +
+			"kind exec: `?ticket=` on this Run's exec, attach and ports streams, which then act as the caller. " +
+			"kind preview: the sign-in of this Run's preview URLs (`https://<host>/.lux/auth?ticket=...&to=/path`). " +
+			"An exec ticket needs the `run` scope; a preview one, `read`.",
+		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusNotFound, http.StatusUnprocessableEntity},
+	}, "read", s.mintTicket)
+
+	// Servers.
+	register(s, api, huma.Operation{
+		OperationID: "listServers", Method: http.MethodGet, Path: "/v1/runs/{id}/servers", Tags: []string{"servers"},
+		Summary: "List a Run's servers", Errors: []int{http.StatusNotFound},
+	}, "read", s.listServers)
+	register(s, api, huma.Operation{
+		OperationID: "addServer", Method: http.MethodPost, Path: "/v1/runs/{id}/servers", Tags: []string{"servers"},
+		Summary: "Add a server to a Run",
+		Description: "A named port of the Run, with an optional command lux runs in its container. " +
+			"It starts now if start (default: when it has a command), which needs the Run running. Any state but finished may add one. " +
+			"One without a command is watched: ready whenever its port accepts connections while the Run runs.",
+		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
+	}, "run", s.addServer)
+	register(s, api, huma.Operation{
+		OperationID: "putServer", Method: http.MethodPut, Path: "/v1/runs/{id}/servers/{name}", Tags: []string{"servers"},
+		Summary: "Change a server", Description: "Its port, command, workdir and env. A running one keeps what it was started with until it is started again.",
+		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
+	}, "run", s.putServer)
+	for _, a := range []struct{ action, summary, doc string }{
+		{"start", "Start a server", "Runs its command. Idempotent while it runs. 409 not_running unless the Run is running; 409 no_command for a server without one (its port is watched whenever the Run runs)."},
+		{"stop", "Stop a server", "Stops its command; a server without one is no longer watched, until the Run's next placement. Idempotent."},
+		{"restart", "Restart a server", "Stops its command and runs it again, as it is defined now. 409 not_running unless the Run is running; 409 no_command without a command."},
+	} {
+		register(s, api, huma.Operation{
+			OperationID: a.action + "Server", Method: http.MethodPost, Path: "/v1/runs/{id}/servers/{name}/" + a.action, Tags: []string{"servers"},
+			Summary: a.summary, Description: a.doc,
+			Errors: []int{http.StatusNotFound, http.StatusConflict},
+		}, "run", s.serverAction(a.action))
+	}
+	register(s, api, huma.Operation{
+		OperationID: "removeServer", Method: http.MethodDelete, Path: "/v1/runs/{id}/servers/{name}", Tags: []string{"servers"},
+		Summary: "Remove a server", Description: "Stops it first.",
+		DefaultStatus: http.StatusNoContent,
+		Errors:        []int{http.StatusNotFound, http.StatusConflict},
+	}, "run", s.removeServer)
+	register(s, api, huma.Operation{
+		OperationID: "serverLog", Method: http.MethodGet, Path: "/v1/runs/{id}/servers/{name}/log", Tags: []string{"servers"},
+		Summary: "A server's recent output",
+		Description: "The last lines its command wrote, newest last, across placements: the current one's from its host, earlier ones' from their uploaded output. " +
+			"A placement whose output cannot be had (lost with its host, or on a host not connected to this luxd) is skipped.",
+		Errors: []int{http.StatusNotFound},
+	}, "read", s.serverLog)
 
 	// Hosts and pools.
 	register(s, api, huma.Operation{
@@ -219,6 +275,13 @@ func (s *Server) routes(api huma.API) {
 		Summary: "A host's hourly allocation and rate periods",
 		Errors:  []int{http.StatusNotFound, http.StatusForbidden, http.StatusConflict},
 	}, "read", s.hostCost)
+	register(s, api, huma.Operation{
+		OperationID: "listHostEvents", Method: http.MethodGet, Path: "/v1/hosts/{id}/events", Tags: []string{"hosts"},
+		Summary: "List a host's events",
+		Description: "What happened to the host, newest first: registered, ready, placements assigned and ended, drains and their cause, lost, termination, provider errors. " +
+			"A tenant sees its own hosts' events only, and so does an operator narrowed to it with `?tenant=`.",
+		Errors: []int{http.StatusNotFound, http.StatusForbidden, http.StatusConflict},
+	}, "read", s.listHostEvents)
 	register(s, api, huma.Operation{
 		OperationID: "drainHost", Method: http.MethodPost, Path: "/v1/hosts/{id}/drain", Tags: []string{"hosts"},
 		Summary: "Drain a host",
@@ -245,6 +308,14 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "listPools", Method: http.MethodGet, Path: "/v1/pools", Tags: []string{"pools"},
 		Summary: "List pools", Description: "The tenant's pools and the platform pools it can use. Operators: every pool.",
 	}, "read", s.listPools)
+	register(s, api, huma.Operation{
+		OperationID: "listPoolEvents", Method: http.MethodGet, Path: "/v1/pools/{name}/events", Tags: []string{"pools"},
+		Summary: "List a pool's events",
+		Description: "What happened to the pool, newest first: scale-ups and why, launches and their failures, placements on its hosts, hosts released and why, spot interruptions, configuration changes, removal (retired) and being set again (restored). " +
+			"A failure repeated on every provisioner pass is one event, its `count` and `lastTime` updated in place. " +
+			"A tenant's own pool of that name, else the platform's (`?owner=` picks one); a platform pool's events are the operators' (they name other tenants' Runs), and not shown to an operator narrowed with `?tenant=`.",
+		Errors: []int{http.StatusNotFound, http.StatusForbidden, http.StatusConflict},
+	}, "read", s.listPoolEvents)
 
 	// Operators and the system.
 	register(s, api, huma.Operation{
@@ -298,8 +369,9 @@ type statusOutput struct {
 	Body statusBody
 }
 
-// streamOp declares an interactive stream: a WebSocket (stream.go).
-func streamOp(api huma.API, id, path, kind, summary, doc string) huma.Operation {
+// streamOp declares an interactive stream: a WebSocket (stream.go),
+// authenticated by a key, the console's sign-in or a ticket (streamAuth).
+func (s *Server) streamOp(api huma.API, id, path, kind, summary, doc string) huma.Operation {
 	// OpenAPI cannot describe WebSocket messages: named in x-websocket.
 	ws := map[string]any{"message": schemaRef[proto.StreamData](api)}
 	if kind == "exec" {
@@ -309,6 +381,7 @@ func streamOp(api huma.API, id, path, kind, summary, doc string) huma.Operation 
 		OperationID: id, Method: http.MethodGet, Path: path, Tags: []string{"interactive"},
 		Summary: summary,
 		Description: "A WebSocket (send `Upgrade: websocket`), relayed to the Run's host, carrying JSON text messages. " + doc +
+			"A browser authenticates with `?ticket=` (POST /v1/runs/{id}/tickets, kind exec) instead of a header; a page of another origin than luxd's is refused (403 bad_origin). " +
 			"Then StreamData both ways: `{\"data\": <base64>}` for bytes, `{\"eof\": true}` to close input, `{\"rows\", \"cols\"}` to resize. " +
 			"The stream ends with one `{\"exitCode\": N}` (exec) or `{\"error\": \"...\"}`, or just the socket closing, and luxd closes it.\n\n" +
 			"Without the upgrade the same URL answers 200 `{\"status\": \"ok\"}` if the stream could be opened, and the error it would get otherwise, so a client can check first.",
@@ -316,8 +389,9 @@ func streamOp(api huma.API, id, path, kind, summary, doc string) huma.Operation 
 			"101": {Description: "Switching to the WebSocket."},
 			"200": {Description: "The stream can be opened (no Upgrade header).", Content: jsonContent(schemaRef[statusBody](api))},
 		},
-		Errors:     []int{http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
-		Extensions: map[string]any{"x-websocket": ws},
+		Errors:      []int{http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
+		Extensions:  map[string]any{"x-websocket": ws},
+		Middlewares: huma.Middlewares{s.streamAuth},
 	}
 }
 
@@ -342,18 +416,22 @@ type Run struct {
 	HostID      string            `json:"hostId,omitempty" doc:"That host's id."`
 	Spec        spec.RunSpec      `json:"spec"`
 	// Image is how a built image was resolved on its first build.
-	Image       *ImageResolution `json:"image,omitempty"`
-	Secrets     []spec.SecretRef `json:"secrets"`
-	CreatedAt   time.Time        `json:"createdAt"`
-	ScheduledAt *time.Time       `json:"firstScheduledAt,omitempty"`
-	StartedAt   *time.Time       `json:"firstStartedAt,omitempty"`
-	FinishedAt  *time.Time       `json:"finishedAt,omitempty"`
-	Placements  []Placement      `json:"placements,omitempty"`
-	Usage       *RunUsage        `json:"usage,omitempty"`
+	Image          *ImageResolution `json:"image,omitempty"`
+	Secrets        []spec.SecretRef `json:"secrets"`
+	CreatedAt      time.Time        `json:"createdAt"`
+	ScheduledAt    *time.Time       `json:"firstScheduledAt,omitempty"`
+	StartedAt      *time.Time       `json:"firstStartedAt,omitempty"`
+	FinishedAt     *time.Time       `json:"finishedAt,omitempty"`
+	RuntimeSeconds float64          `json:"runtimeSeconds" doc:"Seconds its placements have spent running, summed: each from reaching running to exiting or being lost; one still running counts up to the time of the response."`
+	RuntimeSince   *time.Time       `json:"runtimeSince,omitempty" doc:"When the placement still running started, if one is: runtimeSeconds grows from the response's time on."`
+	Placements     []Placement      `json:"placements,omitempty"`
+	Usage          *RunUsage        `json:"usage,omitempty"`
 	// Resume: on GET /v1/runs/{id} of a stopped, lost or failed Run, what
 	// a resume would take.
 	Resume *Resumability `json:"resume,omitempty"`
-	Cost   *RunCostBrief `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
+	// Servers: on GET /v1/runs/{id}, its servers.
+	Servers []RunServer   `json:"servers,omitzero" doc:"On GET /v1/runs/{id}: the Run's servers."`
+	Cost    *RunCostBrief `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
 }
 
 // Resumability says whether a Run can be resumed now, and from what.
@@ -418,17 +496,28 @@ type RunUsage struct {
 // Select runColumns FROM runsFrom.
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
-	coalesce(rh.name, ''), coalesce(rp.host_id, '')`
+	coalesce(rh.name, ''), coalesce(rp.host_id, ''), rr.seconds, rr.since`
 
-// runsFrom: a Run with its tenant and its current placement's host.
+// runsFrom: a Run with its tenant, its current placement's host, and its
+// runtime (rr). Runtime is the sum over its placements of started_at
+// (reached running) to ended_at (exited or lost), or to now() for one still
+// live (stopping included); a placement that never reached running adds 0,
+// and so does a terminal one missing ended_at, rather than growing forever.
+// since is when the live one started. Per Run, one scan of placements
+// (run_id, epoch).
 const runsFrom = `runs r JOIN tenants rt ON rt.id = r.tenant_id
 	LEFT JOIN placements rp ON rp.run_id = r.id AND rp.epoch = r.current_epoch
-	LEFT JOIN hosts rh ON rh.id = rp.host_id`
+	LEFT JOIN hosts rh ON rh.id = rp.host_id
+	CROSS JOIN LATERAL (SELECT
+			coalesce(sum(extract(epoch FROM coalesce(p.ended_at, CASE WHEN p.state IN ` + livePlacementStates + ` THEN now() ELSE p.started_at END) - p.started_at)), 0)::float8 AS seconds,
+			max(p.started_at) FILTER (WHERE p.ended_at IS NULL AND p.state IN ` + livePlacementStates + `) AS since
+		FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) rr`
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
-		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID)
+		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
+		&r.RuntimeSeconds, &r.RuntimeSince)
 	return &r, err
 }
 
@@ -494,6 +583,9 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 			return err
 		}
 		if err := addEvent(ctx, tx, p.TenantID, id, 0, "submitted", map[string]any{"by": p.Actor()}); err != nil {
+			return err
+		}
+		if err := insertSpecServers(ctx, tx, p.TenantID, id, sp); err != nil {
 			return err
 		}
 		created = true
@@ -642,8 +734,10 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 	}
 	runs := []*Run{}
 	err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE `+strings.Join(where, " AND ")+
-			` ORDER BY r.created_at DESC LIMIT `+strconv.Itoa(limit), args...)
+		// The page is chosen first, so runsFrom's joins and runtime
+		// aggregate run for its rows only, not for every Run matched.
+		rows, err := tx.Query(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.id IN (SELECT r.id FROM runs r WHERE `+
+			strings.Join(where, " AND ")+` ORDER BY r.created_at DESC, r.id DESC LIMIT `+strconv.Itoa(limit)+`) ORDER BY r.created_at DESC, r.id DESC`, args...)
 		if err != nil {
 			return err
 		}
@@ -720,7 +814,12 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 			u.QueueSeconds = &q
 		}
 		run.Usage = u
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		servers, err := s.listServersTx(ctx, tx, id)
+		run.Servers = nonNil(servers)
+		return err
 	})
 	return run, err
 }
@@ -1575,6 +1674,7 @@ func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostO
 			if err != nil {
 				return err
 			}
+			// drainHosts writes its events last: lock nothing after it here.
 			hosts, err = s.drainHosts(ctx, tx, "drain requested", causeManual, stopReason, "id = $1 AND (tenant_id = $2 OR $3)", id, p.TenantID, p.Operator)
 			if err == nil && len(hosts) == 0 {
 				return errNotFound
@@ -1599,6 +1699,8 @@ const (
 	causeManual    = "manual" // drainHost, deletePool
 	causeScaleDown = "scale-down"
 	causePreempt   = "preempt"
+
+	poolRemovedReason = "pool removed"
 )
 
 // drainHosts takes hosts out of service (no new placements), adds cause to
@@ -1610,6 +1712,17 @@ const (
 // (provisioned) takes it once idle. Returns their ids, to notify once the
 // transaction commits.
 func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, cause, stopReason, where string, args ...any) ([]string, error) {
+	var later laterEvents
+	hosts, err := s.drainHostsLater(ctx, tx, &later, reason, cause, stopReason, where, args...)
+	if err != nil {
+		return nil, err
+	}
+	return hosts, later.write()
+}
+
+// drainHostsLater is drainHosts leaving its events in later, for a caller
+// that locks more rows after it.
+func (s *Server) drainHostsLater(ctx context.Context, tx pgx.Tx, later *laterEvents, reason, cause, stopReason, where string, args ...any) ([]string, error) {
 	var candidates []string
 	if stopReason != "" {
 		rows, err := tx.Query(ctx, `SELECT id FROM hosts WHERE state <> 'terminated' AND `+where+` ORDER BY id`, args...)
@@ -1693,28 +1806,73 @@ func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, cause, stopR
 		updateWhere = where + fmt.Sprintf(" AND id = ANY($%d)", len(args)+1)
 		updateArgs = append(append([]any{}, args...), candidates)
 	}
-	rows, err := tx.Query(ctx, fmt.Sprintf(`UPDATE hosts SET draining = true,
+	// fresh: the hosts this cause is new on (locked in id order first, so
+	// two drains for one cause cannot both see it new).
+	n := len(updateArgs)
+	rows, err := tx.Query(ctx, fmt.Sprintf(`WITH old AS (
+			SELECT id, $%d = ANY(drain_causes) AS had FROM hosts
+			WHERE state <> 'terminated' AND %s ORDER BY id FOR NO KEY UPDATE)
+		UPDATE hosts SET draining = true,
 			state = CASE WHEN state = 'ready' THEN 'draining' ELSE state END,
 			state_reason = $%d,
-			drain_causes = CASE WHEN $%d = ANY(drain_causes) THEN drain_causes ELSE array_append(drain_causes, $%d) END,
+			drain_causes = CASE WHEN old.had THEN drain_causes ELSE array_append(drain_causes, $%d) END,
 			drain_requested_at = coalesce(drain_requested_at, now())
-		WHERE state <> 'terminated' AND %s
-		RETURNING id`, len(updateArgs)+1, len(updateArgs)+2, len(updateArgs)+2, updateWhere), append(updateArgs, reason, cause)...)
+		FROM old WHERE hosts.id = old.id
+		RETURNING hosts.id, NOT old.had`, n+2, updateWhere, n+1, n+2), append(updateArgs, reason, cause)...)
 	if err != nil {
 		return nil, err
 	}
-	hosts, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil || len(hosts) == 0 || stopReason == "" {
-		return hosts, err
+	type drained struct {
+		ID    string
+		Fresh bool
 	}
-	live, err := livePlacements(ctx, tx, "p.host_id = ANY($1)", hosts)
+	got, err := pgx.CollectRows(rows, pgx.RowToStructByPos[drained])
 	if err != nil {
 		return nil, err
 	}
-	for _, p := range live {
-		if _, err := s.requestStop(ctx, tx, p.TenantID, p.RunID, stopReason); err != nil {
+	hosts := make([]string, 0, len(got))
+	for _, h := range got {
+		hosts = append(hosts, h.ID)
+	}
+	// An eviction is news where it stops a placement not already stopping.
+	evicting := map[string]bool{}
+	if stopReason != "" && len(hosts) > 0 {
+		rows, err := tx.Query(ctx, `SELECT DISTINCT host_id FROM placements
+			WHERE host_id = ANY($1) AND state IN `+livePlacementStates+` AND stop_requested_at IS NULL`, hosts)
+		if err != nil {
 			return nil, err
 		}
+		ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			evicting[id] = true
+		}
+	}
+	// One event per new cause or new eviction: draining a drained host
+	// again for the same cause says nothing new. Left to later, after the
+	// stops, which lock placements: event streams come last (infraevents.go).
+	if len(hosts) > 0 && stopReason != "" {
+		live, err := livePlacements(ctx, tx, "p.host_id = ANY($1)", hosts)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range live {
+			if _, err := s.requestStop(ctx, tx, p.TenantID, p.RunID, stopReason); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, h := range got {
+		if !h.Fresh && !evicting[h.ID] {
+			continue
+		}
+		d := map[string]any{"cause": cause, "reason": reason}
+		if evicting[h.ID] {
+			d["evict"] = true
+		}
+		later.host(ctx, tx, h.ID, evDrainRequested, d)
 	}
 	return hosts, nil
 }
@@ -1820,34 +1978,25 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 	var hosts []string
 	err := retryHostPlacements(ctx, func() error {
 		return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			if stopReason != "" {
-				var exists bool
-				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pools WHERE tenant_id = $1 AND name = $2 AND NOT retired)`, p.TenantID, name).Scan(&exists); err != nil {
-					return err
-				}
-				if !exists {
-					return errNotFound
-				}
-				var err error
-				hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
-					"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
+			// The pool row, then its Runs and hosts (drainHosts), and its
+			// pool.retired event last, after the drain: the lock order of
+			// infraevents.go puts event streams after every row lock.
+			return ChangePool(ctx, tx, &p.TenantID, name, func() error {
+				tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0
+					WHERE tenant_id = $1 AND name = $2 AND NOT retired`, p.TenantID, name)
 				if err != nil {
 					return err
 				}
-			}
-			tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0
-				WHERE tenant_id = $1 AND name = $2 AND NOT retired`, p.TenantID, name)
-			if err != nil {
+				if tag.RowsAffected() == 0 {
+					return errNotFound
+				}
+				// Provisioned hosts, including those whose launch is in
+				// flight (no provider id yet): cordoned now, a launch
+				// that completes later lands on a draining host.
+				hosts, err = s.drainHosts(ctx, tx, poolRemovedReason, causeManual, stopReason,
+					"tenant_id = $1 AND pool = $2 AND (provider_id IS NOT NULL OR provision_requested_at IS NOT NULL)", p.TenantID, name)
 				return err
-			}
-			if tag.RowsAffected() == 0 {
-				return errNotFound
-			}
-			if stopReason == "" {
-				hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
-					"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
-			}
-			return err
+			})
 		})
 	})
 	if err != nil {
@@ -1855,6 +2004,25 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 	}
 	s.notifyAll(hosts)
 	return &struct{}{}, nil
+}
+
+// checkTemplateTags refuses an EC2 template's tags that are not a string
+// map (null included), or that set a lux:* key: lux tags every instance itself (lux:pool,
+// lux:host, …) and finds a pool's instances by those tags.
+func checkTemplateTags(raw any) error {
+	tags, isMap := raw.(map[string]any)
+	if !isMap {
+		return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.tags must be an object of strings, got %T", raw)
+	}
+	for _, k := range slices.Sorted(maps.Keys(tags)) {
+		if _, isString := tags[k].(string); !isString {
+			return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.tags.%s must be a string, got %T", k, tags[k])
+		}
+		if strings.HasPrefix(strings.ToLower(k), "lux:") {
+			return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.tags.%s: lux:* tags are set by lux", k)
+		}
+	}
+	return nil
 }
 
 // putPool creates or updates one of the tenant's pools.
@@ -1869,10 +2037,28 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	if pl.Name == "" || (pl.Provider != "static" && pl.Provider != "ec2") {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "name and provider (static | ec2) are required")
 	}
+	if ValidPoolName(pl.Name) != nil {
+		// A pool stored before the rule may keep its name.
+		var owner *string
+		if p.TenantID != "" {
+			owner = &p.TenantID
+		}
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return CheckPoolName(ctx, tx, owner, pl.Name) }); err != nil {
+			if pne := (*PoolNameError)(nil); errors.As(err, &pne) {
+				return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "%s", err.Error())
+			}
+			return nil, err
+		}
+	}
 	if pl.Shared {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "only platform pools can be shared (luxd admin create-pool --shared)")
 	}
 	if pl.Provider == "ec2" {
+		if raw, present := pl.Template["tags"]; present {
+			if err := checkTemplateTags(raw); err != nil {
+				return nil, err
+			}
+		}
 		if raw, present := pl.Template["userData"]; present {
 			ud, isString := raw.(string)
 			if !isString {
@@ -1894,17 +2080,19 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "scaleDownAfter must be at least 1s")
 	}
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
-				scale_down_after_s, warm_while_active, hourly_price, price_currency)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''))
-			ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
-				min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
-				scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
-				hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
-				retired = false`,
-			ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
-			sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency)
-		return err
+		return ChangePool(ctx, tx, &p.TenantID, pl.Name, func() error {
+			_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
+					scale_down_after_s, warm_while_active, hourly_price, price_currency)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''))
+				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
+					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
+					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
+					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
+					retired = false`,
+				ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
+				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency)
+			return err
+		})
 	})
 	if err != nil {
 		return nil, err
