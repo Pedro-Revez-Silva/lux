@@ -152,6 +152,9 @@ def test_renaming_a_pool_keeps_its_running_host(lux, ec2):
         # Finished: listed under the new name for LUX_LISTING_LAG (4s).
         wait_until(lambda: "renamedFrom" not in next(p for p in lux.json("pools", "ls") if p["name"] == "burst-eu"),
                    60, 0.5, "the rename never finished")
+        # The old name stays an alias, listed and reserved, for a while.
+        assert next(p for p in lux.json("pools", "ls") if p["name"] == "burst-eu")["aliases"] == ["burst"]
+        assert lux.run("pools", "set", "burst", "--provider", "static", check=False).returncode == 4
         assert [i["id"] for i in ec2.running()] == [inst["id"]]
         if not ec2.real:
             assert "TerminateInstances" not in ec2.calls, ec2.calls
