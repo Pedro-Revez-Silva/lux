@@ -15,7 +15,7 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// The lease fence (migration 031): once a provisioned pool has been
+// The lease fence (migration 036): once a provisioned pool has been
 // renamed, a luxd that never checked in with the pool-id-discovery
 // capability (an older binary) cannot take the provisioner lease; before,
 // it can.

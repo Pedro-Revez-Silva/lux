@@ -22,7 +22,7 @@ package server
 //     nothing.
 //   - A luxd of an earlier version lists by name. Once any pool has been
 //     renamed (pools.renamed_at), the database refuses it the provisioner
-//     lease (migration 031's trigger), and a rename of a provisioned pool
+//     lease (migration 036's trigger), and a rename of a provisioned pool
 //     locks the lease row and refuses to start while such a luxd holds it
 //     or runs (rename_unsupported_by_deployment).
 //
@@ -186,7 +186,7 @@ type renameArgs struct {
 
 // capPoolIDDiscovery is the capability a luxd advertises (luxd_instances)
 // when its provisioner finds instances by lux:pool-id, whatever their
-// lux:pool says. Migration 031's lease fence names it too.
+// lux:pool says. Migration 036's lease fence names it too.
 const capPoolIDDiscovery = "pool-id-discovery"
 
 // rename is the whole rename, in one transaction; tenantID "" names a
@@ -398,7 +398,7 @@ const costRepairAfterRename = time.Hour
 // name, for another pool's, or miss them. Every luxd writes control
 // samples; the ones that discover by lux:pool-id also check in to
 // luxd_instances. The lease row must be locked (lockProvisionerLease): the
-// lease fence (migration 031) is what keeps an older luxd from taking the
+// lease fence (migration 036) is what keeps an older luxd from taking the
 // lease once renamed_at is set.
 func (s *Server) checkDeploymentCanRename(ctx context.Context, tx pgx.Tx) error {
 	// The lease's holder too: a luxd that took it before its first
@@ -458,7 +458,7 @@ func (s *Server) checkInEvery() time.Duration {
 
 // checkInLoop checks in at start, then every checkInEvery. checkedIn is
 // closed after the first check-in: the provisioner waits for it, as the
-// lease fence (migration 031) refuses a holder that has not checked in
+// lease fence (migration 036) refuses a holder that has not checked in
 // once a pool has been renamed.
 func (s *Server) checkInLoop(ctx context.Context) {
 	every := s.checkInEvery()

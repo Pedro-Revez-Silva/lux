@@ -1,4 +1,4 @@
--- 031_pool_rename.sql — renaming a pool (internal/server/poolrename.go).
+-- 036_pool_rename.sql — renaming a pool (internal/server/poolrename.go).
 -- The provisioner finds a pool's instances by an immutable tag,
 -- lux:pool-id (pools.id), not by its name (lux:pool), so a rename is a
 -- database change; the name tag is updated afterwards, for people only.

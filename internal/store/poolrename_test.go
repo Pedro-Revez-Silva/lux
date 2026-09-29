@@ -9,14 +9,14 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// 031 gives a lease held when it runs a token (0) and keeps it held, so a
+// 036 gives a lease held when it runs a token (0) and keeps it held, so a
 // provisioner that upgrades mid-lease keeps its lease; hosts from before
 // it are not confirmed to carry lux:pool-id (their pool is migrated by the
 // provisioner); pools keep their names, never renamed.
 func TestPoolRenameMigration(t *testing.T) {
 	owner, _ := emptyDB(t)
 	ctx := context.Background()
-	if _, err := store.MigrateTo(ctx, owner, "lux_app", "029_process_samples"); err != nil {
+	if _, err := store.MigrateTo(ctx, owner, "lux_app", "030_servers"); err != nil {
 		t.Fatal(err)
 	}
 	conn, err := pgx.Connect(ctx, owner)
@@ -33,7 +33,7 @@ func TestPoolRenameMigration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := store.MigrateTo(ctx, owner, "lux_app", "031_pool_rename"); err != nil {
+	if _, err := store.MigrateTo(ctx, owner, "lux_app", "036_pool_rename"); err != nil {
 		t.Fatal(err)
 	}
 	var holder string
@@ -50,7 +50,7 @@ func TestPoolRenameMigration(t *testing.T) {
 	}
 	var tagged bool
 	if err := conn.QueryRow(ctx, `SELECT pool_id_tagged FROM hosts WHERE id = 'h1'`).Scan(&tagged); err != nil || tagged {
-		t.Errorf("a host from before 031 confirmed to carry lux:pool-id: %v (%v)", tagged, err)
+		t.Errorf("a host from before 036 confirmed to carry lux:pool-id: %v (%v)", tagged, err)
 	}
 	var name string
 	var renamed bool
@@ -61,7 +61,7 @@ func TestPoolRenameMigration(t *testing.T) {
 	}
 }
 
-// Row-level security on what 031 adds or changes: luxd_instances and
+// Row-level security on what 036 adds or changes: luxd_instances and
 // leases are luxd's own (no tenant scope reads or writes them); pools and
 // hosts, with their new columns, stay each tenant's own; and
 // lux_pool_renamed_to, which runs as the owner, answers a tenant only
