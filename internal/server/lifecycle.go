@@ -423,12 +423,12 @@ func insertSnapshot(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID, pla
 	var total int64
 	for _, v := range sd.Manifest.Volumes {
 		total += v.Size
-		if err := insertBlob(ctx, tx, tenantID, runID, epoch, hostID, v.BlobID, "volume", v.Name, v.Size, v.SHA256); err != nil {
+		if err := insertBlob(ctx, tx, tenantID, runID, epoch, hostID, v.BlobID, "volume", v.Name, v.Size, v.SHA256, ""); err != nil {
 			return err
 		}
 	}
 	if sd.Output != nil {
-		if err := insertBlob(ctx, tx, tenantID, runID, epoch, hostID, sd.Output.BlobID, "output", "output", sd.Output.Size, sd.Output.SHA256); err != nil {
+		if err := insertBlob(ctx, tx, tenantID, runID, epoch, hostID, sd.Output.BlobID, "output", "output", sd.Output.Size, sd.Output.SHA256, sd.Manifest.SnapshotID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE placements SET output_blob_id = $3, output_seq = greatest(output_seq, nullif($4, 0))
@@ -437,20 +437,20 @@ func insertSnapshot(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID, pla
 		}
 	}
 	for _, a := range sd.Artifacts {
-		if err := insertBlob(ctx, tx, tenantID, runID, epoch, hostID, a.BlobID, "artifact", a.Path, a.Size, a.SHA256); err != nil {
+		if err := insertBlob(ctx, tx, tenantID, runID, epoch, hostID, a.BlobID, "artifact", a.Path, a.Size, a.SHA256, sd.Manifest.SnapshotID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO artifacts (id, tenant_id, run_id, epoch, path, blob_id, content_type, size, sha256)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT DO NOTHING`,
-			ids.New(ids.Artifact), tenantID, runID, epoch, a.Path, a.BlobID, a.ContentType, a.FileSize, a.FileSHA256); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO artifacts (id, tenant_id, run_id, epoch, path, blob_id, content_type, size, sha256, snapshot_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT DO NOTHING`,
+			ids.New(ids.Artifact), tenantID, runID, epoch, a.Path, a.BlobID, a.ContentType, a.FileSize, a.FileSHA256, sd.Manifest.SnapshotID); err != nil {
 			return err
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE placements SET snapshot_bytes = $3 WHERE run_id = $1 AND epoch = $2`, runID, epoch, total); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest, host_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`, sd.Manifest.SnapshotID, tenantID, runID, placementID, epoch, sd.Manifest, hostID); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest, host_id, owns_records)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, true)`, sd.Manifest.SnapshotID, tenantID, runID, placementID, epoch, sd.Manifest, hostID); err != nil {
 		return err
 	}
 	// Recorded for any epoch, late ones too: the session ran in that
@@ -472,32 +472,38 @@ func insertSnapshot(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID, pla
 	return addEvent(ctx, tx, tenantID, runID, epoch, "snapshot", map[string]any{"snapshotId": sd.Manifest.SnapshotID, "bytes": total, "volumes": len(sd.Manifest.Volumes)})
 }
 
-// recordedBlobsMatch compares the placement's output pointer and artifact
-// rows with the redelivery. Artifacts have no snapshot_id, so multiple
-// reports in one placement share the same artifact set.
+// recordedBlobsMatch compares a redelivered report's output and artifacts
+// with those its snapshot recorded: the output blob and artifact rows whose
+// snapshot_id is that snapshot, in full. Another report of the same
+// placement recorded its own, so they are not compared.
 func recordedBlobsMatch(ctx context.Context, tx pgx.Tx, runID string, epoch int, sd proto.SnapshotDone) error {
-	var outputID *string
-	if err := tx.QueryRow(ctx, `SELECT output_blob_id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&outputID); err != nil {
+	snapID := sd.Manifest.SnapshotID
+	var owns bool
+	if err := tx.QueryRow(ctx, `SELECT owns_records FROM snapshots WHERE id = $1`, snapID).Scan(&owns); err != nil {
 		return err
 	}
-	if (outputID == nil) != (sd.Output == nil) || outputID != nil && *outputID != sd.Output.BlobID {
-		return &foreignBlobError{sd.Manifest.SnapshotID}
+	// Recorded before output and artifact rows carried their snapshot_id:
+	// there is nothing to tell its rows from another report's, so only the
+	// manifest (already compared) is checked.
+	if !owns {
+		return nil
 	}
-	if outputID != nil {
-		var stored proto.BlobInfo
-		err := tx.QueryRow(ctx, `SELECT id, size, sha256 FROM blobs
-			WHERE id = $1 AND run_id = $2 AND epoch = $3 AND kind = 'output'`, *outputID, runID, epoch).
-			Scan(&stored.BlobID, &stored.Size, &stored.SHA256)
-		if errors.Is(err, pgx.ErrNoRows) || err == nil && stored != *sd.Output {
-			return &foreignBlobError{*outputID}
-		}
-		if err != nil {
-			return err
-		}
+	rows, err := tx.Query(ctx, `SELECT id, size, sha256 FROM blobs
+		WHERE snapshot_id = $1 AND run_id = $2 AND epoch = $3 AND kind = 'output'`, snapID, runID, epoch)
+	if err != nil {
+		return err
 	}
-	rows, err := tx.Query(ctx, `SELECT a.blob_id, b.size, b.sha256, a.path, a.content_type, a.size, a.sha256
+	outputs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[proto.BlobInfo])
+	if err != nil {
+		return err
+	}
+	if len(outputs) > 1 || (len(outputs) == 1) != (sd.Output != nil) || sd.Output != nil && outputs[0] != *sd.Output {
+		return &foreignBlobError{snapID}
+	}
+	rows, err = tx.Query(ctx, `SELECT a.blob_id, b.size, b.sha256, a.path, a.content_type, a.size, a.sha256
 		FROM artifacts a JOIN blobs b ON b.id = a.blob_id
-		WHERE a.run_id = $1 AND a.epoch = $2 AND b.run_id = $1 AND b.epoch = $2 AND b.kind = 'artifact'`, runID, epoch)
+		WHERE a.snapshot_id = $1 AND a.run_id = $2 AND a.epoch = $3 AND b.run_id = $2 AND b.epoch = $3 AND b.kind = 'artifact'`,
+		snapID, runID, epoch)
 	if err != nil {
 		return err
 	}
@@ -516,7 +522,7 @@ func recordedBlobsMatch(ctx context.Context, tx pgx.Tx, runID string, epoch int,
 		return err
 	}
 	if count != len(sd.Artifacts) {
-		return &foreignBlobError{sd.Manifest.SnapshotID}
+		return &foreignBlobError{snapID}
 	}
 	for _, a := range sd.Artifacts {
 		if stored[a] == 0 {
@@ -538,17 +544,18 @@ func recordSession(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch
 // insertBlob records a reported blob. The runner names a new blob id in
 // every report, so an id already recorded is accepted only as the same
 // blob of the same placement (a report written again); anything else is a
-// *foreignBlobError.
-func insertBlob(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, hostID, blobID, kind, name string, size int64, sha string) error {
+// *foreignBlobError. snapshotID names the report that owns an output or
+// artifact blob ("" for a volume); a blob recorded before keeps its owner.
+func insertBlob(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, hostID, blobID, kind, name string, size int64, sha, snapshotID string) error {
 	var gotTenant, gotRun, gotKind, gotSHA string
 	var gotEpoch int
 	var gotSize int64
 	// DO UPDATE (a no-op) rather than DO NOTHING, so the existing row is
 	// returned, locked, to compare.
-	err := tx.QueryRow(ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, size, sha256, location, host_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'host', $9) ON CONFLICT (id) DO UPDATE SET id = blobs.id
+	err := tx.QueryRow(ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, size, sha256, location, host_id, snapshot_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'host', $9, nullif($10, '')) ON CONFLICT (id) DO UPDATE SET id = blobs.id
 		RETURNING tenant_id, run_id, epoch, kind, size, sha256`,
-		blobID, tenantID, runID, epoch, kind, name, size, sha, hostID).Scan(&gotTenant, &gotRun, &gotEpoch, &gotKind, &gotSize, &gotSHA)
+		blobID, tenantID, runID, epoch, kind, name, size, sha, hostID, snapshotID).Scan(&gotTenant, &gotRun, &gotEpoch, &gotKind, &gotSize, &gotSHA)
 	if err != nil {
 		return err
 	}

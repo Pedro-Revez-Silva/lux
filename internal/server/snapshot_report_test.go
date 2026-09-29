@@ -87,14 +87,14 @@ func recordsOf(t *testing.T, s *Server, runID string) runRecords {
 			return pgx.CollectRows(rows, pgx.RowTo[string])
 		}
 		var err error
-		if r.Snapshots, err = collect(`SELECT id || ' ' || manifest::text FROM snapshots WHERE run_id = $1 ORDER BY id`); err != nil {
+		if r.Snapshots, err = collect(`SELECT id || ' ' || owns_records || ' ' || manifest::text FROM snapshots WHERE run_id = $1 ORDER BY id`); err != nil {
 			return err
 		}
-		if r.Blobs, err = collect(`SELECT concat_ws(' ', id, tenant_id, run_id, epoch, kind, name, size, sha256, location)
+		if r.Blobs, err = collect(`SELECT concat_ws(' ', id, tenant_id, run_id, epoch, kind, name, size, sha256, location, 'owner=' || snapshot_id)
 			FROM blobs WHERE run_id = $1 ORDER BY id`); err != nil {
 			return err
 		}
-		if r.Artifacts, err = collect(`SELECT concat_ws(' ', path, blob_id, tenant_id, content_type, size, sha256) FROM artifacts WHERE run_id = $1 ORDER BY path, blob_id`); err != nil {
+		if r.Artifacts, err = collect(`SELECT concat_ws(' ', path, blob_id, tenant_id, content_type, size, sha256, 'owner=' || snapshot_id) FROM artifacts WHERE run_id = $1 ORDER BY path, blob_id`); err != nil {
 			return err
 		}
 		return tx.QueryRow(ctx, `SELECT coalesce(r.snapshot_id, ''),
@@ -549,5 +549,95 @@ func TestResumeRefusedWithoutSnapshot(t *testing.T) {
 				t.Errorf("rb is %s after resume, want %s", state, want)
 			}
 		})
+	}
+}
+
+// Two reports in one placement (a runner restarted between recording its
+// exit and reporting it snapshots again): A with artifact X, then B with
+// artifact Y. A redelivered is compared with A's own output and artifacts,
+// not the placement's: unchanged it is acknowledged and changes nothing;
+// with Y's artifact, without X, or with X's path changed it is refused.
+func TestSnapshotReportRedeliveryComparesItsOwnRecords(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		redo    string
+		change  func(sd *proto.SnapshotDone)
+		refused bool
+	}{
+		{"A unchanged", "snapB-A", func(*proto.SnapshotDone) {}, false},
+		{"B unchanged", "snapB-B", func(*proto.SnapshotDone) {}, false},
+		{"A with Y", "snapB-A", func(sd *proto.SnapshotDone) { sd.Artifacts = snapshotB("snapB-B", 1).Artifacts }, true},
+		{"A with X and Y", "snapB-A", func(sd *proto.SnapshotDone) {
+			sd.Artifacts = append(sd.Artifacts, snapshotB("snapB-B", 1).Artifacts...)
+		}, true},
+		{"A without X", "snapB-A", func(sd *proto.SnapshotDone) { sd.Artifacts = nil }, true},
+		{"A with X's path changed", "snapB-A", func(sd *proto.SnapshotDone) { sd.Artifacts[0].Path = "/out/other.txt" }, true},
+		{"A with B's output", "snapB-A", func(sd *proto.SnapshotDone) { sd.Output = snapshotB("snapB-B", 1).Output }, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, _ := reportFixture(t)
+			for _, id := range []string{"snapB-A", "snapB-B"} {
+				if f := reportSnapshot(t, s, "hb", "rb", 1, snapshotB(id, 1)); f.Type != proto.MsgAck || ackRefused(t, f) {
+					t.Fatalf("report %s: %s %s", id, f.Type, f.Data)
+				}
+			}
+			before := recordsOf(t, s, "rb")
+			sd := snapshotB(c.redo, 1)
+			c.change(&sd)
+			// Never refused to the runner: the snapshot id is recorded.
+			if f := reportSnapshot(t, s, "hb", "rb", 1, sd); f.Type != proto.MsgAck || ackRefused(t, f) {
+				t.Fatalf("redelivery: %s %s, want an ack without refused", f.Type, f.Data)
+			}
+			if got := recordsOf(t, s, "rb"); !reflect.DeepEqual(got, before) {
+				t.Errorf("stored\nbefore %+v\nafter  %+v", before, got)
+			}
+			if n := len(eventErrors(t, s, "rb", "snapshot")); n != 2 {
+				t.Errorf("%d snapshot events, want 2", n)
+			}
+			var want []string
+			if c.refused {
+				want = []string{foreignBlobsReason}
+			}
+			if got := eventErrors(t, s, "rb", "snapshot.failed"); !slices.Equal(got, want) {
+				t.Errorf("snapshot.failed events %q, want %q", got, want)
+			}
+			var refused bool
+			systemScan(t, s, `SELECT snapshot_refused FROM placements WHERE id = 'pb1'`, nil, &refused)
+			if refused != c.refused {
+				t.Errorf("pb1 snapshot_refused %v, want %v", refused, c.refused)
+			}
+		})
+	}
+}
+
+// A snapshot recorded before output and artifact rows carried their
+// snapshot_id has only its manifest to compare a redelivery with.
+func TestSnapshotReportRedeliveryOfUnownedSnapshot(t *testing.T) {
+	s, ctx := reportFixture(t)
+	if f := reportSnapshot(t, s, "hb", "rb", 1, snapshotB("snapB", 1)); f.Type != proto.MsgAck {
+		t.Fatalf("first report: %s %s", f.Type, f.Data)
+	}
+	execSQL(t, s, ctx, `UPDATE snapshots SET owns_records = false WHERE id = 'snapB'`)
+	execSQL(t, s, ctx, `UPDATE blobs SET snapshot_id = NULL WHERE run_id = 'rb'`)
+	execSQL(t, s, ctx, `UPDATE artifacts SET snapshot_id = NULL WHERE run_id = 'rb'`)
+	before := recordsOf(t, s, "rb")
+
+	sd := snapshotB("snapB", 1)
+	sd.Artifacts = nil
+	if f := reportSnapshot(t, s, "hb", "rb", 1, sd); f.Type != proto.MsgAck || ackRefused(t, f) {
+		t.Fatalf("redelivery: %s %s", f.Type, f.Data)
+	}
+	if n := len(eventErrors(t, s, "rb", "snapshot.failed")); n != 0 {
+		t.Errorf("%d snapshot.failed events, want 0", n)
+	}
+	sd.Manifest.Volumes[0].SHA256 = "changed"
+	if f := reportSnapshot(t, s, "hb", "rb", 1, sd); f.Type != proto.MsgAck || ackRefused(t, f) {
+		t.Fatalf("changed manifest: %s %s", f.Type, f.Data)
+	}
+	if got := eventErrors(t, s, "rb", "snapshot.failed"); !reflect.DeepEqual(got, []string{foreignBlobsReason}) {
+		t.Errorf("snapshot.failed events %q", got)
+	}
+	if got := recordsOf(t, s, "rb"); !reflect.DeepEqual(got, before) {
+		t.Errorf("stored\nbefore %+v\nafter  %+v", before, got)
 	}
 }
