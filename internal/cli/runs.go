@@ -24,7 +24,7 @@ import (
 type Run = server.Run
 
 func (a *app) runCmd() *cobra.Command {
-	var file, idem, secretsFrom string
+	var file, idem, secretsFrom, pool string
 	var follow, wait bool
 	var labels []string
 	cmd := &cobra.Command{
@@ -34,6 +34,11 @@ func (a *app) runCmd() *cobra.Command {
 
   lux run -f spec.yaml --follow
   lux run --image alpine -- echo hello
+  lux run --image alpine --pool arm64 -- uname -m
+
+Flags win over the spec file: --pool replaces placement.pool, as --image
+and --name replace theirs. Without --pool or placement.pool, the server
+picks the pool.
 
 Secret values in the spec can be read from the environment with
 value: ${NAME}, or from a .env file with --secrets-from.`,
@@ -60,6 +65,9 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 			}
 			if name, _ := cmd.Flags().GetString("name"); name != "" {
 				sp.Name = name
+			}
+			if pool != "" {
+				sp.Placement.Pool = pool
 			}
 			for _, l := range labels {
 				k, v, _ := strings.Cut(l, "=")
@@ -98,6 +106,7 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 	cmd.Flags().StringVarP(&file, "file", "f", "", "spec file (YAML or JSON; - for stdin)")
 	cmd.Flags().String("image", "", "image ref, for a quick generic Run")
 	cmd.Flags().String("name", "", "a name for humans")
+	cmd.Flags().StringVar(&pool, "pool", "", "pool to place the Run in (overrides the spec's placement.pool)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "label key=value (repeatable)")
 	cmd.Flags().StringVar(&idem, "idempotency-key", "", "make the submission safe to retry")
 	cmd.Flags().StringVar(&secretsFrom, "secrets-from", "", ".env file supplying secret values")
