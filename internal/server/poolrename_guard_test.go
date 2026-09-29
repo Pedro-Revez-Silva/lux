@@ -327,3 +327,36 @@ func TestNotFoundIsInconclusive(t *testing.T) {
 		t.Fatalf("terminated %v", got)
 	}
 }
+
+// A pool with more instances than one CreateTags takes (1000) is
+// re-tagged in several calls.
+func TestRenamePoolRetagsInBatches(t *testing.T) {
+	f := newRenameFixture(t, false)
+	const n = 1200
+	execSQL(t, f.s, f.ctx, `INSERT INTO host_tokens (id, tenant_id, pool, token_hash)
+		SELECT 'tokb' || g, 't1', 'burst', 'xb' || g FROM generate_series(1, $1) g`, n)
+	execSQL(t, f.s, f.ctx, `INSERT INTO hosts (id, tenant_id, name, pool, token_id, state, provider_id, provision_requested_at, tagged, launch_template, last_heartbeat, registered_at)
+		SELECT 'hb' || g, 't1', 'burst-hb' || g, 'burst', 'tokb' || g, 'ready', 'i-b' || g, now() - interval '1 hour', true, '{"region":"eu-west-1"}', now(), now()
+		FROM generate_series(1, $1) g`, n)
+	for i := 1; i <= n; i++ {
+		f.cloud.add(fmt.Sprintf("i-b%d", i), map[string]string{tagManaged: "true", tagDeployment: "d1", tagPool: "t1/burst", tagHost: fmt.Sprintf("hb%d", i)})
+	}
+	f.rename(t, "burst", "burst-eu")
+	f.check(t, f.pool(t))
+	total := 0
+	for _, size := range f.cloud.retagSizes {
+		if size > retagBatch {
+			t.Errorf("a CreateTags for %d instances", size)
+		}
+		total += size
+	}
+	if total != n+2 || len(f.cloud.retagSizes) < 3 {
+		t.Fatalf("re-tag calls %v, want %d instances in batches", f.cloud.retagSizes, n+2)
+	}
+	for i := 1; i <= n; i += 97 {
+		if got := f.cloud.tag(fmt.Sprintf("i-b%d", i), tagPool); got != "t1/burst-eu" {
+			t.Fatalf("i-b%d lux:pool = %q", i, got)
+		}
+	}
+	f.noneTerminated(t)
+}

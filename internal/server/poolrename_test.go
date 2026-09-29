@@ -33,6 +33,8 @@ type fakeCloud struct {
 	launched   int
 	// launches: Launch starts an instance; otherwise it fails.
 	launches bool
+	// retagSizes: how many instances each Retag named.
+	retagSizes []int
 	// before, if set, runs before each call, outside the lock: a test
 	// blocks a call there to interleave it with other work.
 	before func(ctx context.Context, call string, tags map[string]string) error
@@ -161,6 +163,10 @@ func (c *fakeCloud) Retag(ctx context.Context, template json.RawMessage, pids []
 	defer c.mu.Unlock()
 	if c.deny {
 		return errors.New("UnauthorizedOperation: not authorized to perform ec2:CreateTags (fake)")
+	}
+	c.retagSizes = append(c.retagSizes, len(pids))
+	if len(pids) > 1000 {
+		return errors.New("InvalidParameterValue: at most 1000 resources per CreateTags (fake)")
 	}
 	for _, pid := range pids {
 		if i := c.insts[pid]; i != nil {

@@ -414,7 +414,7 @@ and the pool keeps its previous names as **aliases**
    so no instance ever carries a name no pool answers to.
 2. On each provider check (`LUX_PROVIDER_CHECK_EVERY`) the provisioner
    re-tags the instances still carrying an alias (`ec2:CreateTags`,
-   `lux:pool` only). EC2's tag filters lag behind
+   `lux:pool` only, 500 instances per call). EC2's tag filters lag behind
    tags, so for `LUX_LISTING_LAG` after a re-tag a host missing from every
    listing is not even looked up; after it, it is looked up by id like any
    unlisted host, and kept while it runs. The rename finishes (`pools ls`

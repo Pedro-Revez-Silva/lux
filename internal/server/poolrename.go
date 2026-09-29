@@ -534,6 +534,9 @@ func (s *Server) aliasRetireAfter() time.Duration {
 	return 2 * max(s.cfg.LaunchTimeout, s.cfg.ListingLag)
 }
 
+// retagBatch: EC2's CreateTags takes at most 1000 resources per call.
+const retagBatch = 500
+
 // followAliases is step 2, after a provider check listed the pool under
 // its name and every alias: it records what each alias held, finishes the
 // rename or retires aliases when their time has come, and re-tags what
@@ -625,7 +628,7 @@ func (s *Server) followAliases(ctx context.Context, prov Provider, pl poolRow, s
 	n := 0
 	var failed error
 	for key, pids := range rc.stale {
-		for _, batch := range [][]string{pids} {
+		for batch := range slices.Chunk(pids, retagBatch) {
 			// retagged_at is recorded before each call: a luxd that stops
 			// mid-call leaves instances whose new tag the listings may not
 			// show yet, and the next provisioner must know not to take them
