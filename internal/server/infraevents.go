@@ -167,11 +167,12 @@ var (
 	hostEvents = eventTable{"host_events", "host_id"}
 )
 
-// foldWindow is how many of an owner's latest events a fold looks at: more
-// than one failing provisioner pass writes (a list error, a scale-up, a
-// launch request and its failure, for want hosts at most 2+2*want; one
-// pass rarely wants many). A repeat whose earlier event is further back
-// starts a new row: the history stays right, if less compact.
+// foldWindow is how many of an owner's latest events a fold looks at. A
+// failing provisioner pass stops at its first failed launch, so it writes
+// at most a list error, a scale-up, a launch request and its failure,
+// plus whatever else happened to the pool since. Eight is a bounded,
+// best-effort compaction window, not a guarantee: a repeat whose earlier
+// event lies outside it becomes another row, which is still accurate.
 const foldWindow = 8
 
 // foldLookup reads an owner's latest events, newest first, through its

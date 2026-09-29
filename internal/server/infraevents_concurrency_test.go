@@ -19,6 +19,8 @@ type heldTx struct {
 	wrote   chan struct{}
 	release chan func(pgx.Tx) error
 	done    chan error
+	// backend: its pid, once settle has read it.
+	backend int
 }
 
 func holdTx(ctx context.Context, s *Server, write func(tx pgx.Tx) error) *heldTx {
@@ -52,14 +54,16 @@ func holdTx(ctx context.Context, s *Server, write func(tx pgx.Tx) error) *heldTx
 // reports whether it wrote.
 func (h *heldTx) settle(t *testing.T, ctx context.Context, s *Server) bool {
 	t.Helper()
-	var pid int
-	select {
-	case pid = <-h.pid:
-	case err := <-h.done:
-		t.Fatalf("transaction ended early: %v", err)
-	case <-ctx.Done():
-		t.Fatal("transaction never started")
+	if h.backend == 0 {
+		select {
+		case h.backend = <-h.pid:
+		case err := <-h.done:
+			t.Fatalf("transaction ended early: %v", err)
+		case <-ctx.Done():
+			t.Fatal("transaction never started")
+		}
 	}
+	pid := h.backend
 	for {
 		select {
 		case <-h.wrote:
@@ -81,6 +85,27 @@ func (h *heldTx) settle(t *testing.T, ctx context.Context, s *Server) bool {
 			t.Fatal("neither wrote nor waited")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitsOnStream fails unless h is blocked, and blocked on the event-stream
+// advisory lock of owner in tbl (lockStream's key), not on some other lock.
+func (h *heldTx) waitsOnStream(t *testing.T, ctx context.Context, s *Server, tbl eventTable, owner string) {
+	t.Helper()
+	if h.settle(t, ctx, s) {
+		t.Fatalf("wrote without waiting for %s %s's stream", tbl.table, owner)
+	}
+	var onStream bool
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `WITH k AS (SELECT hashtextextended($2 || ':' || $3, 0) AS key)
+			SELECT EXISTS (SELECT 1 FROM pg_locks l, k WHERE l.pid = $1 AND NOT l.granted AND l.locktype = 'advisory'
+				AND l.classid = ((k.key >> 32) & 4294967295)::oid AND l.objid = (k.key & 4294967295)::oid AND l.objsubid = 1)`,
+			h.backend, tbl.table, owner).Scan(&onStream)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !onStream {
+		t.Fatalf("blocked, but not on %s %s's stream lock", tbl.table, owner)
 	}
 }
 
@@ -122,7 +147,7 @@ func TestConcurrentIdenticalFailuresFoldIntoOne(t *testing.T) {
 		t.Fatal("the first failure waited on nothing")
 	}
 	second := holdTx(ctx, s, func(tx pgx.Tx) error { return failure(ctx, tx) })
-	second.settle(t, ctx, s)
+	second.waitsOnStream(t, ctx, s, poolEvents, "pool1")
 	first.finish(t, ctx)
 	second.finish(t, ctx)
 	if evs := events(t, s, evLaunchFailed); len(evs) != 1 || evs[0].Count != 2 {
@@ -148,7 +173,7 @@ func TestFailureDoesNotFoldAcrossAConcurrentLaunch(t *testing.T) {
 		t.Fatal("the launch waited on nothing")
 	}
 	repeat := holdTx(ctx, s, func(tx pgx.Tx) error { return failure(ctx, tx) })
-	repeat.settle(t, ctx, s)
+	repeat.waitsOnStream(t, ctx, s, poolEvents, "pool1")
 	launched.finish(t, ctx)
 	repeat.finish(t, ctx)
 	failed := events(t, s, evLaunchFailed)
