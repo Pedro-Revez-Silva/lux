@@ -47,17 +47,20 @@ func readDiffs(r io.Reader, repos []proto.DiffRepo, kinds []string, fn func(prot
 }
 
 // liveRun is a live diff under way in a placement's container: at most
-// one at a time. Identical requests share it; each reads its results from
-// the start.
+// one at a time, from its start until its exec has ended. Identical
+// requests share it; each reads its results from the start.
 type liveRun struct {
 	key     string
 	cancel  context.CancelFunc
+	exited  chan struct{} // closed once its exec has ended
 	mu      sync.Mutex
 	results []proto.DiffResult
 	done    bool
 	err     error
 	changed chan struct{} // closed, and replaced, on every change
 	waiters int
+	// abandoned: its last request went; it is being stopped.
+	abandoned bool
 }
 
 func (l *liveRun) add(res proto.DiffResult) error {
@@ -83,46 +86,65 @@ func liveKey(req proto.DiffRequest) string {
 }
 
 // serveLiveDiff answers one live diff request: it starts the diff, or
-// shares the identical one under way. busy: a different one is under way.
-// When the last request sharing a diff goes (ctx ends), the diff stops.
+// shares the identical one under way. busy: a different one is under way,
+// or still stopping (its exec has not ended). When the last request
+// sharing a diff goes (ctx ends), the diff stops; an identical request
+// meanwhile waits for it to end and starts afresh.
 func (p *placement) serveLiveDiff(ctx context.Context, req proto.DiffRequest, send func(proto.DiffResult) error) (busy bool, err error) {
 	key := liveKey(req)
-	p.mu.Lock()
-	l := p.live
-	if l != nil && l.key != key {
+	var l *liveRun
+	for {
+		p.mu.Lock()
+		l = p.live
+		if l == nil {
+			break
+		}
+		if l.key != key {
+			p.mu.Unlock()
+			return true, nil
+		}
+		// Joined under its lock: it cannot be abandoned in between.
+		l.mu.Lock()
+		joined := !l.abandoned
+		if joined {
+			l.waiters++
+		}
+		l.mu.Unlock()
+		if joined {
+			break
+		}
 		p.mu.Unlock()
-		return true, nil
+		select {
+		case <-l.exited:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
 	}
 	if l == nil {
 		runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-		l = &liveRun{key: key, cancel: cancel, changed: make(chan struct{})}
+		l = &liveRun{key: key, cancel: cancel, changed: make(chan struct{}), exited: make(chan struct{}), waiters: 1}
 		p.live = l
 		go func() {
+			defer close(l.exited)
 			defer cancel()
 			err := p.liveDiff(runCtx, req, l.add)
+			l.finish(err)
 			p.mu.Lock()
 			if p.live == l {
 				p.live = nil
 			}
 			p.mu.Unlock()
-			l.finish(err)
 		}()
 	}
-	l.mu.Lock()
-	l.waiters++
-	l.mu.Unlock()
 	p.mu.Unlock()
 	defer func() {
-		p.mu.Lock()
 		l.mu.Lock()
 		if l.waiters--; l.waiters == 0 && !l.done {
+			// It stays the placement's live diff until its exec ends.
+			l.abandoned = true
 			l.cancel()
-			if p.live == l {
-				p.live = nil // a request from now on starts afresh
-			}
 		}
 		l.mu.Unlock()
-		p.mu.Unlock()
 	}()
 	for sent := 0; ; {
 		l.mu.Lock()

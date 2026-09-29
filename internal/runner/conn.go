@@ -153,9 +153,21 @@ func (c *conn) dispatch(ctx context.Context, f proto.Frame) {
 		// Live, not durable: no ack. Handled here, in the order read, so
 		// a stream's input stays in order (see stream.go).
 		c.r.handleStreamFrame(ctx, f)
-	case proto.MsgOutputSubscribe, proto.MsgOutputCancel, proto.MsgDiffRequest, proto.MsgDiffCancel:
+	case proto.MsgOutputSubscribe, proto.MsgOutputCancel:
 		// Live, not durable: no ack.
 		go c.r.handleLive(ctx, f)
+	case proto.MsgDiffRequest:
+		// Registered here, in the order read, so that its cancel, read
+		// next, finds it; served asynchronously.
+		var req proto.DiffRequest
+		_ = json.Unmarshal(f.Data, &req)
+		if sctx, cancel, ok := c.r.subscribeDiff(ctx, req.SubID); ok {
+			go c.r.serveDiffRequest(ctx, sctx, cancel, f, req)
+		}
+	case proto.MsgDiffCancel:
+		var end proto.DiffEnd
+		_ = json.Unmarshal(f.Data, &end)
+		c.r.cancelDiff(end.SubID)
 	default:
 		// Durable control message: handle, then ack. Handling must be
 		// idempotent: an unacked message is redelivered on reconnect.

@@ -88,12 +88,14 @@ type Runner struct {
 	mu         sync.Mutex
 	placements map[string]*placement // by run id
 	subs       map[string]context.CancelFunc
-	uploads    *uploader
-	control    *serialQueues
-	egress     *egress.Firewall
-	images     *imageUse
-	graph      string // Podman's graph root, once asked
-	graphOnce  sync.Once
+	// cancelled: diff cancels that came before their request, by subId.
+	cancelled map[string]time.Time
+	uploads   *uploader
+	control   *serialQueues
+	egress    *egress.Firewall
+	images    *imageUse
+	graph     string // Podman's graph root, once asked
+	graphOnce sync.Once
 	// recordMu serializes read-modify-write of snapshot records (uploader,
 	// discard, report).
 	recordMu sync.Mutex
@@ -416,8 +418,8 @@ func (r *Runner) assign(ctx context.Context, a proto.Assign) {
 	}
 }
 
-// handleLive handles non-durable frames: output subscriptions, diffs, and
-// their cancellations (by subId).
+// handleLive handles output subscriptions and their cancellations (by
+// subId).
 func (r *Runner) handleLive(ctx context.Context, f proto.Frame) {
 	switch f.Type {
 	case proto.MsgOutputSubscribe:
@@ -441,34 +443,7 @@ func (r *Runner) handleLive(ctx context.Context, f proto.Frame) {
 		if sctx.Err() == nil {
 			_ = r.conn.Send(ctx, proto.Frame{Type: proto.MsgOutputEnd, RunID: f.RunID, Epoch: f.Epoch, Data: proto.Marshal(end)})
 		}
-	case proto.MsgDiffRequest:
-		var req proto.DiffRequest
-		_ = json.Unmarshal(f.Data, &req)
-		sctx, cancel := context.WithCancel(ctx)
-		r.mu.Lock()
-		r.subs[req.SubID] = cancel
-		r.mu.Unlock()
-		defer func() {
-			cancel()
-			r.mu.Lock()
-			delete(r.subs, req.SubID)
-			r.mu.Unlock()
-		}()
-		send := func(typ string, v any) error {
-			return r.conn.Send(sctx, proto.Frame{Type: typ, RunID: f.RunID, Epoch: f.Epoch, Data: proto.Marshal(v)})
-		}
-		end := proto.DiffEnd{SubID: req.SubID}
-		if p := r.placement(f.RunID, f.Epoch); p == nil || !p.running(sctx) {
-			end.NotRunning = true
-		} else if busy, err := p.serveLiveDiff(sctx, req, func(res proto.DiffResult) error { return send(proto.MsgDiffResult, res) }); busy {
-			end.Busy = true
-		} else if err != nil {
-			end.Error = err.Error()
-		}
-		if sctx.Err() == nil {
-			_ = send(proto.MsgDiffEnd, end)
-		}
-	case proto.MsgOutputCancel, proto.MsgDiffCancel:
+	case proto.MsgOutputCancel:
 		var s proto.OutputSubscribe
 		_ = json.Unmarshal(f.Data, &s)
 		r.mu.Lock()
@@ -476,6 +451,83 @@ func (r *Runner) handleLive(ctx context.Context, f proto.Frame) {
 			c()
 		}
 		r.mu.Unlock()
+	}
+}
+
+// A diff request and its cancel are two frames that must take effect in
+// the order luxd sent them: both are handled on the connection's read
+// loop (subscribe registers before the diff is served, asynchronously),
+// and a cancel for a request not seen yet is remembered for a while.
+const (
+	diffCancelTTL  = time.Minute
+	diffCancelKeep = 1024
+)
+
+// subscribeDiff registers a diff request's subId; false when its cancel
+// came first (nothing is to be served).
+func (r *Runner) subscribeDiff(ctx context.Context, subID string) (context.Context, context.CancelFunc, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, gone := r.cancelled[subID]; gone {
+		delete(r.cancelled, subID)
+		return nil, nil, false
+	}
+	sctx, cancel := context.WithCancel(ctx)
+	r.subs[subID] = cancel
+	return sctx, cancel, true
+}
+
+// cancelDiff cancels a diff request, or remembers the cancel of one not
+// seen yet (the most recent diffCancelKeep, for diffCancelTTL).
+func (r *Runner) cancelDiff(subID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if c := r.subs[subID]; c != nil {
+		c()
+		return
+	}
+	now := time.Now()
+	if r.cancelled == nil {
+		r.cancelled = map[string]time.Time{}
+	}
+	for id, at := range r.cancelled {
+		if now.Sub(at) > diffCancelTTL {
+			delete(r.cancelled, id)
+		}
+	}
+	if len(r.cancelled) >= diffCancelKeep {
+		oldest, at := "", now
+		for id, t := range r.cancelled {
+			if t.Before(at) {
+				oldest, at = id, t
+			}
+		}
+		delete(r.cancelled, oldest)
+	}
+	r.cancelled[subID] = now
+}
+
+// serveDiffRequest answers a registered diff request (subscribeDiff).
+func (r *Runner) serveDiffRequest(ctx, sctx context.Context, cancel context.CancelFunc, f proto.Frame, req proto.DiffRequest) {
+	defer func() {
+		cancel()
+		r.mu.Lock()
+		delete(r.subs, req.SubID)
+		r.mu.Unlock()
+	}()
+	send := func(typ string, v any) error {
+		return r.conn.Send(sctx, proto.Frame{Type: typ, RunID: f.RunID, Epoch: f.Epoch, Data: proto.Marshal(v)})
+	}
+	end := proto.DiffEnd{SubID: req.SubID}
+	if p := r.placement(f.RunID, f.Epoch); p == nil || !p.running(sctx) {
+		end.NotRunning = true
+	} else if busy, err := p.serveLiveDiff(sctx, req, func(res proto.DiffResult) error { return send(proto.MsgDiffResult, res) }); busy {
+		end.Busy = true
+	} else if err != nil {
+		end.Error = err.Error()
+	}
+	if sctx.Err() == nil {
+		_ = r.conn.Send(ctx, proto.Frame{Type: proto.MsgDiffEnd, RunID: f.RunID, Epoch: f.Epoch, Data: proto.Marshal(end)})
 	}
 }
 

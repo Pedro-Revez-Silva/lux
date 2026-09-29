@@ -33,7 +33,8 @@ import (
 // it. With the file rm-fail, `rm` fails and removes nothing; with
 // rm-noop, it succeeds and removes nothing; with rm-hang, it hangs; with $FAKE_RM_STUCK, it removes the container but
 // the `run` goes on; with exec-linger, an `exec` lingers that many
-// seconds after its stdin ends.
+// seconds after its stdin ends. With the file running, the Run's
+// container is running (`container inspect`).
 const fakePodman = `#!/bin/sh
 D=$(dirname "$0")
 echo "$(date +%s.%N) $*" >> "$D/log"
@@ -45,7 +46,8 @@ volume)
 	export) printf 'tar' ;;
 	esac ;;
 container)
-	[ "$2" = exists ] && { [ -f "$D/ctr/$3" ]; exit $?; } ;;
+	[ "$2" = exists ] && { [ -f "$D/ctr/$3" ]; exit $?; }
+	[ "$2" = inspect ] && [ -f "$D/running" ] && echo '[{"State":{"Running":true}}]' ;;
 ps)
 	ls "$D/ctr" ;;
 run|exec)
@@ -435,12 +437,15 @@ func TestLiveDiffsCoalesceAndCancel(t *testing.T) {
 		t.Error("the exec still runs after its request was cancelled")
 	}
 	// The next request starts afresh.
-	p.mu.Lock()
-	live := p.live
-	p.mu.Unlock()
-	if live != nil {
-		t.Error("a cancelled diff is still the placement's live one")
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		p.mu.Lock()
+		live := p.live
+		p.mu.Unlock()
+		if live == nil {
+			return
+		}
 	}
+	t.Error("a cancelled diff is still the placement's live one after its exec ended")
 }
 
 func setVar[T any](t *testing.T, v *T, to T) {
@@ -629,21 +634,28 @@ func TestSweepRemovesLeftoverHelpers(t *testing.T) {
 	}
 }
 
-// lastLine is when the log last said what.
-func lastLine(t *testing.T, dir, what string) time.Time {
+// linesAt is every time the log said what.
+func linesAt(t *testing.T, dir, what string) []time.Time {
 	t.Helper()
-	var at time.Time
+	var at []time.Time
 	for _, l := range strings.Split(logOf(t, dir), "\n") {
 		if ts, rest, ok := strings.Cut(l, " "); ok && rest == what {
 			var sec, nsec int64
 			fmt.Sscanf(ts, "%d.%d", &sec, &nsec)
-			at = time.Unix(sec, nsec)
+			at = append(at, time.Unix(sec, nsec))
 		}
 	}
-	if at.IsZero() {
+	return at
+}
+
+// lastLine is when the log last said what.
+func lastLine(t *testing.T, dir, what string) time.Time {
+	t.Helper()
+	at := linesAt(t, dir, what)
+	if len(at) == 0 {
 		t.Fatalf("the log never says %q", what)
 	}
-	return at
+	return at[len(at)-1]
 }
 
 // A luxd that does not advertise snapshot diffs (an older release) gets
@@ -707,5 +719,100 @@ func TestOwedDiffsWaitForTheWelcome(t *testing.T) {
 	<-done
 	if n := strings.Count(logOf(t, dir), " run started"); n != 1 {
 		t.Errorf("%d diff containers for one owed diff", n)
+	}
+}
+
+// A cancelled live diff keeps the placement's one slot until its exec has
+// ended: meanwhile a different request is busy, an identical one waits
+// and then starts afresh; once it has ended, a different one runs.
+func TestLiveDiffHoldsItsSlotUntilTheExecEnds(t *testing.T) {
+	r, _, dir := diffRunner(t)
+	t.Setenv("FAKE_DIFF_SLEEP", "60")
+	os.WriteFile(filepath.Join(dir, "exec-linger"), []byte("1"), 0o644)
+	var out bytes.Buffer
+	gitdiff.WriteRecord(&out, gitdiff.Diff{Stat: proto.DiffStat{Repo: "app", Kind: "clone", Files: 1}, Patch: []byte("p\n")})
+	os.WriteFile(filepath.Join(dir, "out"), out.Bytes(), 0o644)
+	p := exitedPlacement(t, r, 1)
+	req := proto.DiffRequest{SubID: "a", Kind: "clone", Repos: []proto.DiffRepo{{Name: "app", Path: "/workspace/repos/app"}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() {
+		_, err := p.serveLiveDiff(ctx, req, func(proto.DiffResult) error { return nil })
+		errc <- err
+	}()
+	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(logOf(t, dir), " exec started") && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-errc
+	cancelled := time.Now()
+	other := req
+	other.SubID, other.Kind = "b", "head"
+	if busy, _ := p.serveLiveDiff(context.Background(), other, func(proto.DiffResult) error { return nil }); !busy {
+		t.Error("a different diff ran while the cancelled one's exec still lingered")
+	}
+	// Identical: waits for the old exec, then a fresh one with results.
+	t.Setenv("FAKE_DIFF_SLEEP", "0")
+	same := req
+	same.SubID = "c"
+	var got []proto.DiffResult
+	busy, err := p.serveLiveDiff(context.Background(), same, func(r proto.DiffResult) error { got = append(got, r); return nil })
+	if busy || err != nil || len(got) != 1 || got[0].SubID != "c" {
+		t.Errorf("identical after cancel: busy %v, %v, %+v", busy, err, got)
+	}
+	started, ended := linesAt(t, dir, "exec started"), linesAt(t, dir, "exec ended")
+	if len(started) != 2 || len(ended) != 2 || !started[1].After(ended[0]) || ended[0].Before(cancelled.Add(900*time.Millisecond)) {
+		t.Errorf("execs started %v, ended %v; cancelled at %v", started, ended, cancelled)
+	}
+	if n := strings.Count(logOf(t, dir), " exec started"); n != 2 {
+		t.Errorf("%d execs", n)
+	}
+	if busy, _ := p.serveLiveDiff(context.Background(), other, func(proto.DiffResult) error { return nil }); busy {
+		t.Error("a different diff is still busy once the slot is free")
+	}
+}
+
+// A diff request's cancel takes effect whatever the order its frames are
+// handled in: right after the request (it stops at once), or even before
+// it (it is never served).
+func TestLiveDiffCancelOrdering(t *testing.T) {
+	r, _, dir := diffRunner(t)
+	t.Setenv("FAKE_DIFF_SLEEP", "60")
+	touch(t, dir, "running")
+	p := exitedPlacement(t, r, 1)
+	req := func(sub string) proto.Frame {
+		return proto.Frame{Type: proto.MsgDiffRequest, RunID: "r1", Epoch: 1, Data: proto.Marshal(proto.DiffRequest{SubID: sub, Kind: "clone",
+			Repos: []proto.DiffRepo{{Name: "app", Path: "/workspace/repos/app"}}})}
+	}
+	cancelOf := func(sub string) proto.Frame {
+		return proto.Frame{Type: proto.MsgDiffCancel, RunID: "r1", Epoch: 1, Data: proto.Marshal(proto.DiffEnd{SubID: sub})}
+	}
+	idle := func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return p.live == nil && len(r.subs) == 0
+	}
+	ctx := context.Background()
+	// Cancel first: nothing is served.
+	r.conn.dispatch(ctx, cancelOf("early"))
+	r.conn.dispatch(ctx, req("early"))
+	time.Sleep(300 * time.Millisecond)
+	if strings.Contains(logOf(t, dir), "container inspect") || !idle() {
+		t.Fatalf("a request cancelled before it arrived was served:\n%s", logOf(t, dir))
+	}
+	// Request then cancel, back to back, many times: each ends at once.
+	for i := range 20 {
+		sub := fmt.Sprint("s", i)
+		r.conn.dispatch(ctx, req(sub))
+		r.conn.dispatch(ctx, cancelOf(sub))
+		deadline := time.Now().Add(5 * time.Second)
+		for !idle() && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if !idle() {
+			t.Fatalf("request %d still served after its cancel", i)
+		}
 	}
 }
