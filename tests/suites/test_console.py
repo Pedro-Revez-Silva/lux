@@ -130,7 +130,8 @@ def test_run_page_streams_output_and_stops_the_run(page, operator, lux, runners,
 
 def test_run_output_tabs_separate_the_workloads_lines_from_luxs(page, env, operator, lux, runners, hosts):
     runners.start(hosts[0])
-    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "echo tabs-err >&2; echo tabs-out; sleep 300"))
+    # A generic workload's steer arrives on stdin: the later line comes once the Output tab is up.
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "echo tabs-err >&2; echo tabs-out; read l; echo \"tabs-$l\"; sleep 300"))
     lux.wait_output(run_id, "tabs-out")
     page.sign_in(operator.api_key, f"/runs/{run_id}")
     log = page.locator(".logview")
@@ -161,6 +162,12 @@ def test_run_output_tabs_separate_the_workloads_lines_from_luxs(page, env, opera
     assert texts("stdout") == ["tabs-out"] and texts("stderr") == ["tabs-err"], (texts("stdout"), texts("stderr"))
     expect(log.locator(".logline-no").first).to_have_text("1")
     expect(log.locator(".logline")).to_have_count(2)
+
+    # A line written after the switch streams into the Output tab as it stands.
+    lux.run("steer", run_id, "later")
+    expect(log.get_by_text("tabs-later", exact=True)).to_have_count(1, timeout=20_000)
+    expect(log.locator(".logline")).to_have_count(3)
+    expect(log.locator(".logline-system")).to_have_count(0)
 
     # Lux: only Lux's lines.
     tab("Lux").click()
