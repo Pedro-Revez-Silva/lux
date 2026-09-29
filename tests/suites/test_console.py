@@ -480,6 +480,31 @@ def _add_pool_events(env, tenant_id: str, pool: str, n: int, tag: str):
                      (tenant_id, tag, n, tenant_id, pool))
 
 
+def _event_tags(card) -> list[str]:
+    """The tags of the placement events the card lists, top to bottom."""
+    return card.evaluate("""c => [...c.querySelectorAll('tbody tr')]
+        .map(tr => (/((?:old|mid|late|new)-\\d+) epoch/.exec(tr.textContent) || [])[1])
+        .filter(Boolean)""")
+
+
+def _expected(*batches: tuple[str, int]) -> list[str]:
+    """Every tag added, oldest batch first, as the card lists them: newest first."""
+    return [f"{tag}-{i}" for tag, n in reversed(batches) for i in range(n, 0, -1)]
+
+
+def _events_card(page, key: str, name: str):
+    page.sign_in(key, f"/pools/{name}")
+    return page.locator(".card", has=page.get_by_role("heading", name="Events", exact=True))
+
+
+def _load_every_older(card):
+    button = card.get_by_role("button", name="Load older events")
+    while button.count() > 0:
+        n = card.locator("tbody tr").count()
+        button.click()
+        expect(card.locator("tbody tr")).not_to_have_count(n, timeout=15_000)
+
+
 def test_pool_events_keep_every_event_as_new_ones_arrive_above_older_pages(page, env, tenant_factory):
     """With older pages loaded, new events push some off the polled newest
     page: the page reads them back, so none goes missing between the two."""
@@ -487,15 +512,69 @@ def test_pool_events_keep_every_event_as_new_ones_arrive_above_older_pages(page,
     name = f"busy-{a.tenant_id[-6:]}"
     a.run("pools", "set", name, "--provider", "static")
     _add_pool_events(env, a.tenant_id, name, 1100, "old")
-    page.sign_in(a.api_key, f"/pools/{name}")
-    card = page.locator(".card", has=page.get_by_role("heading", name="Events", exact=True))
+    card = _events_card(page, a.api_key, name)
     expect(card.get_by_text(re.compile(r"^1000 events"))).to_have_count(1, timeout=15_000)
-    card.get_by_role("button", name="Load older events").click()
+    _load_every_older(card)
     expect(card.get_by_text(re.compile(r"^1101 events"))).to_have_count(1, timeout=15_000)
     _add_pool_events(env, a.tenant_id, name, 30, "new")
     card.get_by_role("button", name="Refresh").click()
     expect(card.get_by_text(re.compile(r"^1131 events"))).to_have_count(1, timeout=15_000)
-    # The ones pushed off the newest page are there: old-101 .. old-130.
-    for i in (101, 115, 130):
-        expect(card.get_by_text(f"old-{i} epoch 1 on h", exact=True)).to_have_count(1)
+    assert _event_tags(card) == _expected(("old", 1100), ("new", 30))
+    assert not page.errors, page.errors
+
+
+def test_pool_events_read_back_a_burst_before_older_pages_are_loaded(page, env, tenant_factory):
+    """More than a page arrives between two reads of the newest page, before
+    any older page is loaded: the events between the two pages are read
+    back, and "load older" then continues below the first page, so every
+    event is listed once, in order."""
+    a = tenant_factory()
+    name = f"burst-{a.tenant_id[-6:]}"
+    a.run("pools", "set", name, "--provider", "static")
+    _add_pool_events(env, a.tenant_id, name, 1100, "old")
+    card = _events_card(page, a.api_key, name)
+    expect(card.get_by_text(re.compile(r"^1000 events"))).to_have_count(1, timeout=15_000)
+    _add_pool_events(env, a.tenant_id, name, 1030, "new")
+    card.get_by_role("button", name="Refresh").click()
+    # The new page (new-31..new-1030), the gap read back (new-1..new-30),
+    # the first page (old-101..old-1100).
+    expect(card.get_by_text(re.compile(r"^2030 events"))).to_have_count(1, timeout=15_000)
+    _load_every_older(card)
+    expect(card.get_by_text(re.compile(r"^2131 events"))).to_have_count(1, timeout=15_000)
+    assert _event_tags(card) == _expected(("old", 1100), ("new", 1030))
+    assert not page.errors, page.errors
+
+
+def test_pool_events_keep_reading_a_gap_while_the_stream_moves(page, env, tenant_factory):
+    """Events keep arriving while a gap larger than a page is read back: a
+    refresh landing mid-read adds a gap above, the read in flight carries
+    on (no request is repeated), and in the end every event is there once."""
+    a = tenant_factory()
+    name = f"stream-{a.tenant_id[-6:]}"
+    a.run("pools", "set", name, "--provider", "static")
+    _add_pool_events(env, a.tenant_id, name, 1100, "old")
+    gap_requests: list[str] = []
+    page.on("request", lambda r: "after=" in r.url and gap_requests.append(r.url))
+    held, holding = [], [True]
+    page.route(re.compile(r"/events\?.*after="), lambda route: held.append(route) if holding[0] else route.continue_())
+    card = _events_card(page, a.api_key, name)
+    expect(card.get_by_text(re.compile(r"^1000 events"))).to_have_count(1, timeout=15_000)
+    # 2500 more: a new newest page over a gap of 1500, read a page at a time.
+    _add_pool_events(env, a.tenant_id, name, 2500, "mid")
+    card.get_by_role("button", name="Refresh").click()
+    wait_until(lambda: (page.wait_for_timeout(50), len(held) == 1)[1], timeout=15, message="the first gap read")
+    # While it is in flight, 1200 more, and another refresh: a gap above.
+    _add_pool_events(env, a.tenant_id, name, 1200, "late")
+    card.get_by_role("button", name="Refresh").click()
+    expect(card.get_by_text(re.compile(r"^3000 events"))).to_have_count(1, timeout=15_000)
+    # The read in flight was not abandoned for the new gap: still the one request.
+    assert len(held) == 1, [r.request.url for r in held]
+    holding[0] = False
+    held[0].continue_()
+    # old-101 and up, all of it: 1000 + 2500 + 1200.
+    expect(card.get_by_text(re.compile(r"^4700 events"))).to_have_count(1, timeout=30_000)
+    assert len(gap_requests) == len(set(gap_requests)), gap_requests
+    _load_every_older(card)
+    expect(card.get_by_text(re.compile(r"^4801 events"))).to_have_count(1, timeout=15_000)
+    assert _event_tags(card) == _expected(("old", 1100), ("mid", 2500), ("late", 1200))
     assert not page.errors, page.errors
