@@ -3,7 +3,7 @@ package proto
 const (
 	MsgDiffRequest = "diff.request"
 	MsgDiffResult  = "diff.result"
-	CapDiff = "diff"
+	CapDiff        = "diff"
 )
 
 const (
