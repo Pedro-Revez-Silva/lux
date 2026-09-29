@@ -21,12 +21,52 @@ func (s *Server) reaperLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		for _, f := range []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapRetention, s.reapOutdatedStaticHosts} {
+		reaps := []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapRetention, s.reapOutdatedStaticHosts}
+		if err := s.forgiveOutage(ctx); err != nil {
+			// Unsure whether leases ran out while nobody listened: judge
+			// none of them this tick.
+			reaps = reaps[2:]
+			if ctx.Err() == nil {
+				s.log.Warn("reaper", "err", err)
+			}
+		}
+		for _, f := range reaps {
 			if err := f(ctx); err != nil && ctx.Err() == nil {
 				s.log.Warn("reaper", "err", err)
 			}
 		}
 	}
+}
+
+// forgiveOutage adds time no reaper ran (every luxd stopped or hung, or
+// Postgres unreachable) back to host heartbeats and placement leases: no
+// luxd could hear a runner then, so it is not the runner's to answer for.
+// A gap shorter than a heartbeat interval (or a couple of ticks) is
+// ordinary. Nothing is extended past what a heartbeat now would give it.
+func (s *Server) forgiveOutage(ctx context.Context) error {
+	ordinary := max(s.cfg.LeaseDuration/3, 2*s.cfg.Tick)
+	var gap time.Duration
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT now() - at FROM reaper_alive FOR UPDATE`).Scan(&gap); err != nil {
+			return err
+		}
+		if gap > ordinary {
+			if _, err := tx.Exec(ctx, `UPDATE hosts SET last_heartbeat = least(last_heartbeat + $1::interval, now())
+				WHERE state IN ('ready', 'draining')`, interval(gap)); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE placements SET lease_expires_at = least(lease_expires_at + $1::interval, now() + $2::interval)
+				WHERE state IN `+livePlacementStates, interval(gap), interval(s.cfg.LeaseDuration)); err != nil {
+				return err
+			}
+		}
+		_, err := tx.Exec(ctx, `UPDATE reaper_alive SET at = now()`)
+		return err
+	})
+	if err == nil && gap > ordinary {
+		s.log.Warn("no reaper ran for a while: leases extended by the gap", "gap", gap.Round(time.Millisecond))
+	}
+	return err
 }
 
 // reapLeases: a placement whose lease expired is lost.
