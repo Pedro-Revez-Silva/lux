@@ -63,3 +63,41 @@ CREATE TABLE luxd_instances (
 );
 ALTER TABLE luxd_instances ENABLE ROW LEVEL SECURITY;
 CREATE POLICY system_only ON luxd_instances USING (lux_system()) WITH CHECK (lux_system());
+
+-- The fence against an older luxd provisioning while a pool has a live
+-- alias: it would list the pool under its current name only, and
+-- terminate every instance still carrying an alias. Taking the
+-- provisioner lease (an INSERT, or an UPDATE that changes its holder or
+-- follows its expiry) is refused then unless the new holder checked in
+-- with the pool-rename capability. A luxd checks in before its first
+-- attempt at the lease, and its instance id is new with every process, so
+-- the row's presence is enough; an older binary never writes one. Its
+-- attempts fail, are logged and retried; with no live alias, anyone may
+-- hold the lease.
+-- A rename makes sure the lease row exists (holder '', expired: a
+-- placeholder anyone may take) and locks it before it reads the holder and
+-- adds an alias (poolrename.go). Taking the lease updates that row, so it
+-- waits for the rename's commit and its check, run after the wait with a
+-- fresh snapshot, sees the alias; or it committed first, and the rename
+-- sees the new holder.
+-- SECURITY DEFINER: the check sees every alias whatever the writer's
+-- row-level scope.
+CREATE FUNCTION lux_provisioner_lease_fence() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+  IF NEW.name <> 'provisioner' OR NEW.holder = '' THEN
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'UPDATE' AND OLD.holder = NEW.holder AND OLD.expires_at > clock_timestamp() THEN
+    RETURN NEW; -- a renewal
+  END IF;
+  IF EXISTS (SELECT 1 FROM pool_tag_aliases WHERE retired_at IS NULL)
+     AND NOT EXISTS (SELECT 1 FROM luxd_instances WHERE instance = NEW.holder AND 'pool-rename' = ANY (capabilities)) THEN
+    RAISE EXCEPTION 'luxd % cannot follow a pool rename: it may not take the provisioner lease while a pool has a live alias (upgrade it)', NEW.holder
+      USING ERRCODE = 'LX001';
+  END IF;
+  RETURN NEW;
+END $$;
+REVOKE ALL ON FUNCTION lux_provisioner_lease_fence() FROM PUBLIC;
+CREATE TRIGGER leases_provisioner_fence BEFORE INSERT OR UPDATE ON leases
+  FOR EACH ROW EXECUTE FUNCTION lux_provisioner_lease_fence();

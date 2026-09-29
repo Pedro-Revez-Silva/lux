@@ -43,9 +43,12 @@ package server
 //
 // Around that: a pool that finished a rename is not renamed again for the
 // lease plus listing_lag (a late re-tag of the previous rename may still
-// land); a pool keeps at most maxPoolAliases live aliases; a provisioned
-// pool is not renamed while a luxd that cannot follow a rename runs
-// (luxd_instances); its provider cannot change while it has a live alias.
+// land); a pool keeps at most maxPoolAliases live aliases; its provider
+// cannot change while it has a live alias. A luxd that cannot follow a
+// rename (an older binary: no pool-rename capability in luxd_instances)
+// never provisions while any alias is live: the database refuses it the
+// provisioner lease (migration 031's trigger), and a rename locks the
+// lease row and refuses to start while such a luxd holds it or runs.
 //
 // Nothing is tagged before step 1 commits, so no instance carries a name
 // no pool row answers to. A luxd that stops before the commit leaves
@@ -208,6 +211,11 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 			return err
 		}
 		checkName := to != ""
+		if checkName {
+			if err := lockProvisionerLease(ctx, tx); err != nil {
+				return err
+			}
+		}
 		var id, provider string
 		var renaming *string
 		var cooldown float64
@@ -355,13 +363,15 @@ func (s *Server) renameCooldown() time.Duration {
 // that cannot follow one may hold the provisioner lease: an older luxd
 // lists only the new name, and would terminate every instance still
 // carrying the old one. Every luxd writes control samples; the ones that
-// can follow a rename also check in to luxd_instances.
+// can follow a rename also check in to luxd_instances. The lease row must
+// be locked (lockProvisionerLease): the lease fence (migration 031) is
+// what keeps an older luxd from taking the lease once the alias exists.
 func (s *Server) checkDeploymentCanRename(ctx context.Context, tx pgx.Tx) error {
-	// The provisioner lease's holder too: a luxd that took it before its
-	// first control sample.
+	// The lease's holder too: a luxd that took it before its first
+	// control sample.
 	rows, err := tx.Query(ctx, `SELECT instance FROM (
 			SELECT c.instance FROM control_samples c WHERE c.res = 0 AND c.at > now() - $1::interval
-			UNION SELECT holder FROM leases WHERE name = 'provisioner' AND expires_at > now()) seen
+			UNION SELECT holder FROM leases WHERE name = 'provisioner' AND expires_at > clock_timestamp()) seen
 		WHERE NOT EXISTS (SELECT 1 FROM luxd_instances l WHERE l.instance = seen.instance
 		                  AND $2 = ANY(l.capabilities) AND l.seen_at > now() - $1::interval - $3::interval)
 		ORDER BY 1 LIMIT 10`, interval(2*s.provisionLeaseDuration()), capPoolRename, interval(s.checkInEvery()))
@@ -377,6 +387,18 @@ func (s *Server) checkDeploymentCanRename(ctx context.Context, tx pgx.Tx) error 
 			"luxd instances %v run a version that cannot follow a pool rename (it would terminate the pool's instances): upgrade every luxd first", old)
 	}
 	return nil
+}
+
+// lockProvisionerLease locks the provisioner lease's row until tx ends,
+// creating it (expired, held by no one) if there is none: a luxd taking
+// the lease meanwhile waits, and its fence then sees what tx committed.
+// Taken before the pool row, in the provisioner's order.
+func lockProvisionerLease(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `INSERT INTO leases (name, holder, expires_at) VALUES ('provisioner', '', '-infinity') ON CONFLICT (name) DO NOTHING`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `SELECT 1 FROM leases WHERE name = 'provisioner' FOR UPDATE`)
+	return err
 }
 
 // checkIn records this luxd in luxd_instances: its version and what it
@@ -400,17 +422,31 @@ func (s *Server) checkInEvery() time.Duration {
 	return min(s.cfg.ProviderCheckEvery, s.provisionLeaseDuration())
 }
 
-// checkInLoop checks in at start, then every checkInEvery.
+// checkInLoop checks in at start, then every checkInEvery. checkedIn is
+// closed after the first check-in: the provisioner waits for it, as the
+// lease fence (migration 031) refuses a holder that has not checked in
+// while a pool has a live alias.
 func (s *Server) checkInLoop(ctx context.Context) {
 	every := s.checkInEvery()
+	first := true
 	for {
-		if err := s.checkIn(ctx); err != nil && ctx.Err() == nil {
+		err := s.checkIn(ctx)
+		if err != nil && ctx.Err() == nil {
 			s.log.Warn("luxd check-in", "err", err)
+		}
+		if err == nil && first {
+			close(s.checkedIn)
+			first = false
+		}
+		// Retried sooner until the first one lands.
+		next := every
+		if first {
+			next = min(every, 5*time.Second)
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(every):
+		case <-time.After(next):
 		}
 	}
 }

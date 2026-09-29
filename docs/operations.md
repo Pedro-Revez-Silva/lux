@@ -442,13 +442,29 @@ cannot change while it has a live alias (`lux pools set` and
 renamed.** An older luxd lists a pool under its current name only: holding
 the provisioner lease during a rename, it would terminate every instance
 still tagged with the old name. Each luxd records its version and what it
-can do in `luxd_instances` when it starts and every provider check; a
-rename of an `ec2` pool is refused while any luxd that wrote a control
-sample, or holds the provisioner lease, within the last two lease
-durations has not (the message names them). Static pools can always be
-renamed. Do not roll luxd back below this version while any pool has a
-live alias (`lux pools ls -o json` shows `aliases`). Wait for them to
-retire, or roll forward.
+can do in `luxd_instances` before its first attempt at the provisioner
+lease, and again every `LUX_PROVIDER_CHECK_EVERY` (at most every lease
+duration). Two guards follow from it:
+
+- The database refuses the provisioner lease to a luxd that has not
+  checked in with the `pool-rename` capability while any pool has a live
+  alias: a trigger on `leases` raises an error, which an older luxd logs
+  and retries, so it never becomes the provisioner while an alias is
+  live. With no live alias, any luxd may hold it: a mixed fleet keeps
+  working as long as nobody renames.
+- A rename of an `ec2` pool locks the provisioner lease row (creating it,
+  expired and held by no one, if there is none) and is refused while its
+  current holder, or any luxd that wrote a control sample within the last
+  two lease durations, has not checked in with that capability
+  (`rename_unsupported_by_deployment`, naming them). The rename and a
+  lease acquisition both take that row's lock, so one waits for the
+  other: either the rename sees the new holder, or the acquisition sees
+  the alias and is refused.
+
+Static pools can always be renamed. Do not roll luxd back below this
+version while any pool has a live alias (`lux pools ls -o json` shows
+`aliases`): the database would refuse the older luxd the provisioner
+lease until the aliases retire. Wait for them to, or roll forward.
 
 The re-tag needs this IAM statement on luxd's role (the Terraform module
 has it as `RetagManagedInstancePool`): `ec2:CreateTags` on instances

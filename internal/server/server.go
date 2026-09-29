@@ -154,6 +154,8 @@ type Server struct {
 	pgFailing    atomic.Bool
 	diskMu       sync.Mutex
 	diskFailing  map[string]bool
+	// checkedIn is closed once this luxd is in luxd_instances.
+	checkedIn chan struct{}
 	// proc reads luxd's own process for its control samples.
 	proc        hoststat.ProcessSampler
 	wg          sync.WaitGroup
@@ -220,6 +222,7 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 		diskFailing: map[string]bool{},
 		id:          instanceID,
 		hostname:    hostname(),
+		checkedIn:   make(chan struct{}),
 	}
 	s.readPostgres = s.postgresFigures
 	if cfg.ConsoleAuth.Mode == "cloudflare-access" {

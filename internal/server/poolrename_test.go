@@ -487,6 +487,9 @@ func TestRenamePoolWithoutHosts(t *testing.T) {
 	s.deployment = "d1"
 	s.cfg.ListingLag = time.Millisecond
 	ctx := context.Background()
+	if err := s.checkIn(ctx); err != nil {
+		t.Fatal(err)
+	}
 	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('ps', 'lab', 'static'), ('pe', 'burst', 'ec2')`)
 	out, err := renameConfirmed(ctx, s, "", "lab", "lab2", false)
 	if err != nil || out.Pool.Name != "lab2" || out.Pool.RenamedFrom != nil || out.Hosts != 0 || !out.Pool.Platform {

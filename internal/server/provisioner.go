@@ -86,6 +86,12 @@ func (s *Server) provisionerLoop(ctx context.Context) {
 			}
 		}
 	}
+	// Checked in first: the lease fence refuses a luxd that has not.
+	select {
+	case <-ctx.Done():
+		return
+	case <-s.checkedIn:
+	}
 	// A luxd shutting down (a deploy) lets another take over at once
 	// rather than after the lease's expiry.
 	defer s.releaseProvisionLease()
