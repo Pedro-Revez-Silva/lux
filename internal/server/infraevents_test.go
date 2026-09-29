@@ -913,6 +913,37 @@ func TestRecoveredLaunchOfARemovedPoolIsDrained(t *testing.T) {
 	}
 }
 
+// The same with a Run already placed on the recovered host (its runner
+// registered first): the host is cordoned, and the Run finishes where it is.
+func TestRecoveredLaunchOfARemovedPoolKeepsItsRunningPlacement(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	infraFixture(t, s, ctx)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, capacity, last_heartbeat, provision_requested_at, registered_at, token_id, tagged)
+		VALUES ('h2', 't1', 'burst-h2', 'burst', 'ready', '{"runs": 2}', now(), now(), now(), 'tok1', true)`)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'running', current_epoch = 1 WHERE id = 'r1'`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, lease_expires_at)
+		VALUES ('p2', 't1', 'r1', 'h2', 1, 'running', now() + interval '1 hour')`)
+	execSQL(t, s, ctx, `UPDATE pools SET retired = true WHERE id = 'pool1'`)
+	s.recordProviderID(ctx, "pool1", "h2", "i-lost")
+	if !queryOne[bool](t, s, `SELECT draining AND state = 'draining' AND provider_id = 'i-lost' FROM hosts WHERE id = 'h2'`) {
+		t.Fatal("the recovered host of a removed pool is not draining")
+	}
+	if !queryOne[bool](t, s, `SELECT state = 'running' AND stop_requested_at IS NULL FROM placements WHERE id = 'p2'`) {
+		t.Fatal("the cordon stopped the placement")
+	}
+	if st := queryOne[string](t, s, `SELECT state FROM runs WHERE id = 'r1'`); st != "running" {
+		t.Fatalf("run %s, want running", st)
+	}
+	if n := queryOne[int](t, s, `SELECT count(*) FROM host_messages WHERE host_id = 'h2'`); n != 0 {
+		t.Fatalf("%d messages to the host, want no stop", n)
+	}
+	ev := events(t, s, evDrainRequested)
+	if len(ev) != 1 || ev[0].Data["evict"] != nil {
+		t.Fatalf("drain events %+v, want one without evict", ev)
+	}
+}
+
 // A pool removed after the provisioner read it, before it asks for a host:
 // no provider call, no host.
 func TestLaunchSkipsAPoolRemovedSinceThePass(t *testing.T) {
