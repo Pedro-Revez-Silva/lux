@@ -1,34 +1,26 @@
 package proto
 
-// Live diffs: what a running Run changed in its repositories, computed by
-// `lux-shim diff` inside its container as the workload user. luxd sends
-// diff.request over the runner's WebSocket and gets one diff.result back.
 const (
 	MsgDiffRequest = "diff.request"
 	MsgDiffResult  = "diff.result"
-	// CapDiff is the Hello capability of a runner that answers diff.request.
 	CapDiff = "diff"
 )
 
-// Base kinds: the commit each repository was cloned at, or its HEAD.
 const (
 	DiffBaseClone = "clone"
 	DiffBaseHead  = "head"
 )
 
-// DiffRequest asks the runner for a placement's diff.
 type DiffRequest struct {
 	SubID string `json:"subId"`
 	Base  string `json:"base"`
 }
 
-// DiffArgs is `lux-shim diff`'s one argument, as JSON.
 type DiffArgs struct {
 	Base  string     `json:"base"`
 	Repos []DiffRepo `json:"repos"`
 }
 
-// DiffRepo is a checkout to diff; Base is its clone commit ("" unknown).
 type DiffRepo struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
@@ -42,8 +34,7 @@ type DiffFileStat struct {
 	Binary     bool   `json:"binary,omitempty"`
 }
 
-// RepoDiff is one repository's diff. Patch is bytes, not a string: a text
-// file in another encoding is not valid UTF-8.
+// Patch is bytes because a file may not be valid UTF-8.
 type RepoDiff struct {
 	Repo       string         `json:"repo"`
 	Base       string         `json:"base"`
@@ -57,8 +48,6 @@ type RepoDiff struct {
 	Error      string         `json:"error,omitempty"`
 }
 
-// DiffResult is the shim's output and the runner's answer. Busy: another
-// diff of the placement is under way. NotRunning: its container is not.
 type DiffResult struct {
 	SubID      string     `json:"subId,omitempty"`
 	Repos      []RepoDiff `json:"repos"`
