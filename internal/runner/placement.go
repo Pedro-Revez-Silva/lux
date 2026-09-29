@@ -11,9 +11,11 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -54,7 +56,10 @@ type placement struct {
 	done        chan struct{}
 	session     string      // latest session id the adapter reported
 	user        passwd.User // who the workload runs as
-	peakDisk    int64
+	// env is what the runner places things by in the workload's
+	// environment (workloadEnv: HOME, XDG_DATA_HOME).
+	env      map[string]string
+	peakDisk int64
 	// diskReported: this placement was reported over its disk limit.
 	diskReported bool
 	netRx        int64
@@ -259,7 +264,11 @@ func (p *placement) run(ctx context.Context) {
 		fail("user", err)
 		return
 	}
-	if err := p.prepareVolumes(startCtx, sp, a.Resume); err != nil {
+	if p.env, err = p.workloadEnv(startCtx, sp, image); err != nil {
+		fail("user", err)
+		return
+	}
+	if err := p.prepareVolumes(startCtx, sp, image, a.Resume, p.env); err != nil {
 		fail("volumes", err)
 		return
 	}
@@ -445,13 +454,35 @@ func (p *placement) finishWithoutContainer(ctx context.Context, state, msg strin
 
 // ---- volumes ----------------------------------------------------------------
 
-func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, resume *proto.ResumeInfo) error {
+func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, image string, resume *proto.ResumeInfo, env map[string]string) error {
 	labels := map[string]string{LabelManaged: "true", LabelRun: p.runID, LabelTenant: p.tenantID}
 	var refs []volumeRef
 	for _, v := range sp.Volumes {
 		refs = append(refs, volumeRef{Name: v.Name, Volume: volumeName(p.runID, v.Name), Path: v.Path, Kind: v.Kind})
 	}
+	refs = append(refs, nestedVolumes(p.runID, sp, p.user, env)...)
 	p.state.Volumes = refs
+
+	// An earlier placement's container still running (createContainer
+	// expects it may be) would write to its volumes while they are emptied
+	// or restored: it is stopped first.
+	name := containerName(p.runID)
+	st, err := p.r.pm.Inspect(ctx, name)
+	if err != nil {
+		return fmt.Errorf("inspect previous container: %w", err)
+	}
+	if st.Running {
+		if err := p.r.pm.Kill(ctx, name, "KILL"); err != nil {
+			return fmt.Errorf("stop previous container: %w", err)
+		}
+		if _, err := p.r.pm.Wait(ctx, name); err != nil {
+			return fmt.Errorf("wait for previous container: %w", err)
+		}
+		st, err = p.r.pm.Inspect(ctx, name)
+		if err != nil || st.Running {
+			return fmt.Errorf("previous container still running after stop: %v", err)
+		}
+	}
 
 	// The runtime volume holds the shim's socket, config and output files.
 	// A named volume, because an idmapped mount needs a filesystem that
@@ -480,10 +511,28 @@ func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, resume 
 
 	for _, v := range refs {
 		switch {
+		case v.Kind == "ephemeral" && p.r.pm.VolumeExists(ctx, v.Volume):
+			// Ephemeral volumes start as a fresh one would on every
+			// placement. Emptied in place: removing one (-f) also removes a
+			// stopped container that mounts it, which a same-host resume may
+			// reuse. Its root goes back to root, as a fresh volume's is, for
+			// the shim to hand to whoever the workload runs as now; what the
+			// image has at its path is copied in, as podman does into a new
+			// volume (an image that preloads images for its engine).
+			mp, err := p.r.mountpoint(ctx, v.Volume)
+			if err == nil {
+				err = emptyDir(mp)
+			}
+			if err == nil {
+				err = errors.Join(os.Lchown(mp, 0, 0), os.Chmod(mp, 0o755))
+			}
+			if err == nil {
+				err = p.copyUp(ctx, image, v.Path, mp)
+			}
+			if err != nil {
+				return fmt.Errorf("empty %s: %w", v.Volume, err)
+			}
 		case v.Kind == "ephemeral":
-			// Ephemeral volumes start empty on every placement.
-			_ = p.r.pm.VolumeRemove(ctx, v.Volume)
-			p.r.forgetMountpoint(v.Volume)
 			if err := p.r.pm.VolumeCreate(ctx, v.Volume, labels); err != nil {
 				return err
 			}
@@ -602,7 +651,7 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 			_, _ = p.r.pm.Wait(ctx, name)
 		}
 		id, _ := p.r.pm.ImageID(ctx, image)
-		if a.Resume != nil && id != "" && id == st.ImageID && st.Labels["lux.spec"] == specHash(sp) {
+		if a.Resume != nil && id != "" && id == st.ImageID && st.Labels["lux.spec"] == specHash(sp, p.state.Volumes, p.extraArgs(sp)) {
 			if err := p.writeShimConfig(ctx, sp, image); err != nil {
 				return err
 			}
@@ -623,7 +672,7 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 		"--label", LabelManaged+"=true",
 		"--label", LabelRun+"="+p.runID,
 		"--label", LabelTenant+"="+p.tenantID,
-		"--label", "lux.spec="+specHash(sp),
+		"--label", "lux.spec="+specHash(sp, p.state.Volumes, p.extraArgs(sp)),
 		"--network", networkName(p.runID),
 		"--user", "0:0",
 		"--entrypoint", proto.ShimBinary,
@@ -652,16 +701,33 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 	return nil
 }
 
-func specHash(sp spec.RunSpec) string {
+// specHash identifies how a Run's container is made: a stopped one is
+// reused only if it matches. It covers what the runner adds for this host
+// (nested engines' stores, and the extra security options, AppArmor's
+// among them), so a container made before those changed is not.
+func specHash(sp spec.RunSpec, vols []volumeRef, extra []string) string {
 	b, _ := json.Marshal(struct {
 		Image     spec.Image
 		Volumes   []spec.Volume
 		Resources spec.Resources
 		Sandbox   spec.Sandbox
 		Network   spec.Network
-	}{sp.Image, sp.Volumes, sp.Resources, sp.Sandbox, sp.Network})
+		Mounts    []volumeRef `json:",omitempty"`
+		Extra     []string    `json:",omitempty"`
+	}{sp.Image, sp.Volumes, sp.Resources, sp.Sandbox, sp.Network, runnerMounts(vols), extra})
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:8])
+}
+
+// runnerMounts are the runner's own volumes among a placement's.
+func runnerMounts(vols []volumeRef) []volumeRef {
+	var out []volumeRef
+	for _, v := range vols {
+		if v.Engine {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, image string) error {
@@ -704,8 +770,18 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, image 
 			cfg.ResumeCommand = sp.Workload.Resume.Command
 		}
 	}
-	for _, v := range sp.Volumes {
+	for _, v := range p.state.Volumes {
 		cfg.VolumePaths = append(cfg.VolumePaths, v.Path)
+		if v.Engine {
+			cfg.OwnParents = append(cfg.OwnParents, v.Path)
+		}
+	}
+	if len(cfg.OwnParents) > 0 {
+		cfg.Home = nestedHome(p.user, p.env)
+		cfg.MadeParents, err = p.madeParents(ctx, image, cfg.Home, runnerMounts(p.state.Volumes))
+		if err != nil {
+			return err
+		}
 	}
 	for i := range cfg.Secrets {
 		cfg.Secrets[i].Value = ""
@@ -1016,8 +1092,11 @@ func (p *placement) usage() *proto.Usage {
 }
 
 // sampleSlow measures what costs real work: disk use (walking the state
-// volumes, and podman sizing the writable layer) and network counters.
-// Run off the heartbeat path, on its own schedule.
+// volumes and the nested engines' stores, and podman sizing the writable
+// layer) and network counters. Run off the heartbeat path, on its own
+// schedule. An engine's store is measured every time, as the writable layer
+// it would otherwise be in is: a stale size would let a Run write past its
+// disk limit.
 func (p *placement) sampleSlow(ctx context.Context) {
 	p.mu.Lock()
 	vols := append([]volumeRef{}, p.stateVolumes()...)
@@ -1063,6 +1142,63 @@ func (p *placement) checkDisk(ctx context.Context, used int64) {
 	}
 }
 
+// emptyDir removes what is in dir, not dir itself. RemoveAll does not follow
+// links, so nothing outside dir goes.
+func emptyDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// copyUp copies what the image has at a container path into a volume, as
+// podman does into a new named volume the first time it is mounted. The
+// directory is opened through an os.Root of the image (a link in the image
+// cannot lead out of it) and copied from that open fd by `cp -a
+// --preserve=all`, which keeps what an engine store needs as it was: owners,
+// setuid bits, hardlinks, and xattrs (file capabilities among them).
+func (p *placement) copyUp(ctx context.Context, image, path, dst string) error {
+	mnt, err := p.r.pm.Run(ctx, "image", "mount", image)
+	if err != nil {
+		return err
+	}
+	defer p.r.pm.Run(context.WithoutCancel(ctx), "image", "unmount", image)
+	root, err := os.OpenRoot(strings.TrimSpace(string(mnt)))
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	src := strings.TrimPrefix(filepath.Clean(path), "/")
+	fi, err := root.Lstat(src)
+	if err != nil || !fi.IsDir() {
+		return nil // the image has nothing there: the volume stays empty
+	}
+	dir, err := root.Open(src)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return copyTree(ctx, dir, dst)
+}
+
+// copyTree copies the contents of the open directory from into dir, with
+// every attribute cp can keep. from is handed to cp as its fd 3, so no path
+// is resolved again.
+func copyTree(ctx context.Context, from *os.File, dir string) error {
+	cmd := exec.CommandContext(ctx, "cp", "-a", "--preserve=all", "--no-target-directory", "/proc/self/fd/3/.", dir)
+	cmd.ExtraFiles = []*os.File{from}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("copy: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func (p *placement) stateVolumes() []volumeRef {
 	if p.state == nil {
 		return nil
@@ -1070,11 +1206,20 @@ func (p *placement) stateVolumes() []volumeRef {
 	return p.state.Volumes
 }
 
+// dirSize is the bytes of the regular files under root, a hardlinked file
+// once (image stores hardlink layer files).
 func dirSize(root string) int64 {
 	var n int64
+	seen := map[uint64]bool{}
 	_ = filepath.WalkDir(root, func(_ string, d os.DirEntry, err error) error {
 		if err == nil && d.Type().IsRegular() {
 			if fi, err := d.Info(); err == nil {
+				if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Nlink > 1 {
+					if seen[st.Ino] {
+						return nil
+					}
+					seen[st.Ino] = true
+				}
 				n += fi.Size()
 			}
 		}

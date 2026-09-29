@@ -900,13 +900,19 @@ func (n Network) allows(host string) bool {
 	return false
 }
 
+// Under reports whether container path p is root or inside it. Both are
+// clean absolute paths; "/" holds every path.
+func Under(p, root string) bool {
+	return p == root || root == "/" || strings.HasPrefix(p, root+"/")
+}
+
 // volumeFor is the volume a path is on: the most specific one, as mounts
 // nest (a volume at /workspace/repos hides /workspace's files there).
 func (s *RunSpec) volumeFor(p string) *Volume {
 	var best *Volume
 	for i := range s.Volumes {
 		v := &s.Volumes[i]
-		if (p == v.Path || strings.HasPrefix(p, v.Path+"/")) && (best == nil || len(v.Path) > len(best.Path)) {
+		if Under(p, v.Path) && (best == nil || len(v.Path) > len(best.Path)) {
 			best = v
 		}
 	}

@@ -132,6 +132,48 @@ container. Under `--userns=auto` that needed more than the commonly cited
   minimal example.
 - A private IPC namespace matters here: rootless Podman keeps its locks
   in `/dev/shm`.
+- **AppArmor (Ubuntu 24.04 and later).** With
+  `kernel.apparmor_restrict_unprivileged_userns=1`, a user namespace made
+  under an AppArmor profile that does not grant `userns` loses its
+  capabilities. The profile Podman gives containers by default
+  (`containers-default`) does not grant it, so rootless Docker inside a Run
+  fails with "failed to create a detached netns … Permission denied"
+  (measured on an Ubuntu EC2 host: the same Run starts with
+  `apparmor=unconfined`). A `--nested` runner on such a host runs nested
+  Runs `apparmor=unconfined`, which lifts that profile's other rules too
+  (mount and ptrace ones among them). Seccomp, the capability set and the
+  Run's own user namespace still bound them. A narrower profile (the
+  default plus `userns`) is a possible follow-up. Fedora hosts have no
+  AppArmor, so the e2e suite does not see this.
+- **Rootless Docker** (`dockerd-rootless`, RootlessKit) works with the
+  same grants, including BuildKit and compose; `tests/images/docker` is an
+  example. `docker run --privileged` inside is refused (it cannot mount
+  `/sys`), and what it starts has the Run's egress.
+- **Each engine's store is on its own volume.** Kernel overlay cannot
+  stack on the container's own overlay root, so an engine there falls back
+  to `fuse-overlayfs` (Docker, Podman) or `vfs`. The runner mounts an
+  ephemeral volume at `$XDG_DATA_HOME/docker` and
+  `$XDG_DATA_HOME/containers` (`~/.local/share` by default; `/var/lib/...`
+  for a root workload), where both get kernel overlay: a file-heavy build
+  measured 1.6 to 2.2 times faster than on `fuse-overlayfs`.
+  `tests/suites/test_nested_docker.py::test_disk_speed_is_native` fails if
+  that regresses.
+  - The shim hands the directories the mount created (`~/.local`,
+    `~/.local/share`) to the workload user: only those the image does not
+    have (the runner checks the image), walking down from the home through
+    directory file descriptors with `O_NOFOLLOW`, so a link the workload
+    planted (or swaps in meanwhile) is never followed.
+  - The runner empties every existing ephemeral volume in place rather than
+    removing it (`podman volume rm -f` would also remove the stopped
+    container a same-host resume reuses), gives its root back to root, and
+    copies in what the image has at its path, as podman does into a new
+    volume. It stops a still-running earlier container first, so nothing
+    writes to the volume while it is emptied.
+  - These mounts are part of the container's `lux.spec` label, so a
+    container made without them (by an older runner) is not reused.
+  - They are not artifact sources. Their size counts toward the Run's
+    `resources.disk` on every usage sample, as the writable layer they
+    replace did, with hardlinked layer files counted once.
 
 ## Exec, attach, ports
 

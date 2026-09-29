@@ -58,6 +58,17 @@ type ShimConfig struct {
 	// Paths of mounted volumes: their roots are handed to the workload user
 	// when empty (a fresh volume is owned by root).
 	VolumePaths []string `json:"volumePaths,omitempty"`
+	// OwnParents are volumes the runner mounts for itself under the
+	// workload's home (nested engines' stores): the directories their
+	// mounts made on the way are handed to the workload user too.
+	OwnParents []string `json:"ownParents,omitempty"`
+	// Home is the home OwnParents are walked from: the spec's HOME if it
+	// sets one, else the workload user's (empty: the user's).
+	Home string `json:"home,omitempty"`
+	// MadeParents are the directories between Home and OwnParents that the
+	// image does not have: their mounts make them, as root. Only these are
+	// handed over; one the image ships stays as the image has it.
+	MadeParents []string `json:"madeParents,omitempty"`
 	// Secrets by name: how each is exposed (values arrive with "start").
 	Secrets []spec.Secret `json:"secrets,omitempty"`
 	// ArtifactsDir is watched for on-demand artifacts ($LUX_ARTIFACTS).

@@ -47,6 +47,9 @@ type volumeRef struct {
 	Volume string `json:"volume"` // podman volume
 	Path   string `json:"path"`
 	Kind   string `json:"kind"`
+	// Engine: the runner's own, for a nested engine's store (nested.go),
+	// not the spec's. Never an artifact source or a repository's home.
+	Engine bool `json:"engine,omitempty"`
 }
 
 type exitRecord struct {

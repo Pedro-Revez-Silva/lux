@@ -747,7 +747,7 @@ func (s *Shim) workloadOwns(path string) bool {
 		return false
 	}
 	for _, root := range append([]string{s.user.home}, s.cfg.VolumePaths...) {
-		if root != "/" && (path == root || strings.HasPrefix(path, root+"/")) {
+		if root != "/" && spec.Under(path, root) {
 			return true
 		}
 	}
@@ -755,7 +755,9 @@ func (s *Shim) workloadOwns(path string) bool {
 }
 
 // prepareVolumes hands a fresh (root-owned) volume's root to the workload
-// user, so a non-root workload can write to it.
+// user, so a non-root workload can write to it. For the runner's engine
+// stores under the home (cfg.OwnParents) it also hands over the
+// directories their mounts made on the way (~/.local, ~/.local/share).
 func (s *Shim) prepareVolumes() {
 	// $LUX_ARTIFACTS: the workload's to write, whoever it runs as.
 	if s.cfg.ArtifactsDir != "" {
@@ -774,6 +776,60 @@ func (s *Shim) prepareVolumes() {
 			_ = os.Chown(p, s.user.uid, s.user.gid)
 		}
 	}
+	for _, p := range s.cfg.OwnParents {
+		s.ownParents(p)
+	}
+}
+
+// ownParents hands the directories on the way to path that its mount made
+// (cfg.MadeParents: the runner found them in neither the image nor a
+// restored volume) to the workload user; anything else stays as it is. The
+// walk starts at the workload's home (the runner's cfg.Home), or, for a
+// store outside it ($XDG_DATA_HOME elsewhere), at the data home's parent,
+// so only the data home itself can be handed over there. It goes down one
+// directory fd at a time, with O_NOFOLLOW, and chowns each through its fd:
+// on a state volume the workload may have planted a link anywhere on the
+// way, and an exec running meanwhile could swap one in behind a directory
+// just handed over. Neither is ever followed.
+func (s *Shim) ownParents(path string) {
+	home := s.cfg.Home
+	if home == "" {
+		home = s.user.home
+	}
+	home = filepath.Clean(home)
+	path = filepath.Clean(path)
+	start := home
+	if home == "/" || !spec.Under(path, home) {
+		start = filepath.Dir(filepath.Dir(path)) // the data home's parent
+	}
+	rel, err := filepath.Rel(start, filepath.Dir(path))
+	// start may be "/" (XDG_DATA_HOME=/data): only MadeParents are ever
+	// chowned, so walking from the root hands over nothing else.
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
+		return
+	}
+	fd, err := unix.Open(start, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return
+	}
+	d := start
+	for _, part := range strings.Split(rel, "/") {
+		d = filepath.Join(d, part)
+		next, err := unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		unix.Close(fd)
+		if err != nil {
+			return // a link, or gone: stop, never follow
+		}
+		fd = next
+		if !slices.Contains(s.cfg.MadeParents, d) {
+			continue // the image's: as it made it
+		}
+		var st unix.Stat_t
+		if unix.Fstat(fd, &st) == nil && st.Uid == 0 {
+			_ = unix.Fchown(fd, s.user.uid, s.user.gid)
+		}
+	}
+	unix.Close(fd)
 }
 
 func (s *Shim) command(argv []string, env []string) *exec.Cmd {

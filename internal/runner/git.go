@@ -2,7 +2,10 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -159,9 +162,12 @@ func (p *placement) gitRepo(r spec.Repository) gitws.Repo {
 func (p *placement) hostPath(path string) (string, error) {
 	var best *volumeRef
 	for i, v := range p.state.Volumes {
-		if (path == v.Path || strings.HasPrefix(path, v.Path+"/")) && (best == nil || len(v.Path) > len(best.Path)) {
+		if spec.Under(path, v.Path) && (best == nil || len(v.Path) > len(best.Path)) {
 			best = &p.state.Volumes[i]
 		}
+	}
+	if best != nil && best.Engine {
+		return "", fmt.Errorf("%s is hidden by the nested engine store", path)
 	}
 	if best == nil {
 		return "", fmt.Errorf("%s is not on a volume", path)
@@ -194,11 +200,118 @@ func (p *placement) workloadUser(ctx context.Context, sp spec.RunSpec, image str
 	return passwd.Lookup(name, b)
 }
 
+// workloadEnv is the part of the workload's environment the runner places
+// things by (HOME, XDG_DATA_HOME), as the shim builds it: the image's ENV,
+// then HOME set to the user's (the image's HOME never reaches the
+// workload), then the spec's env over both. Only for nested Runs.
+func (p *placement) workloadEnv(ctx context.Context, sp spec.RunSpec, image string) (map[string]string, error) {
+	env := map[string]string{}
+	if !sp.Sandbox.NestedContainers {
+		return env, nil
+	}
+	out, err := p.r.pm.Run(ctx, "image", "inspect", "--format", "{{json .Config.Env}}", image)
+	if err != nil {
+		return nil, fmt.Errorf("inspect image env: %w", err)
+	}
+	var kvs []string
+	if err := json.Unmarshal(out, &kvs); err != nil {
+		return nil, fmt.Errorf("image env: %w", err)
+	}
+	for _, kv := range kvs {
+		if k, v, _ := strings.Cut(kv, "="); k == "XDG_DATA_HOME" {
+			env[k] = v
+		}
+	}
+	for _, k := range []string{"HOME", "XDG_DATA_HOME"} {
+		if v, ok := sp.Env[k]; ok {
+			env[k] = v
+		}
+	}
+	return env, nil
+}
+
+// madeParents returns the directories on the way to each engine store that
+// its mount makes, as root: those the image does not have and, where a spec
+// volume covers them, that volume (a restored state home, say) does not
+// have either. Only those are handed to the workload; anything that exists
+// stays as it is. Within the home that is every directory below it; for a
+// store outside it ($XDG_DATA_HOME elsewhere) only the data home itself,
+// the directory the workload was configured with. A failure to look fails
+// the placement rather than leave the workload unable to write there.
+func (p *placement) madeParents(ctx context.Context, image, home string, stores []volumeRef) ([]string, error) {
+	if len(stores) == 0 {
+		return nil, nil
+	}
+	mnt, err := p.r.pm.Run(ctx, "image", "mount", image)
+	if err != nil {
+		return nil, fmt.Errorf("mount image for engine parents: %w", err)
+	}
+	defer p.r.pm.Run(context.WithoutCancel(ctx), "image", "unmount", image)
+	imageRoot, err := os.OpenRoot(strings.TrimSpace(string(mnt)))
+	if err != nil {
+		return nil, fmt.Errorf("open image for engine parents: %w", err)
+	}
+	defer imageRoot.Close()
+	return parentsMissing(stores, home, p.state.Volumes, imageRoot, func(v volumeRef) (string, error) {
+		return p.r.mountpoint(ctx, v.Volume)
+	})
+}
+
+// parentsMissing is madeParents' walk, over an open image and the host
+// mountpoints of the spec's volumes.
+func parentsMissing(stores []volumeRef, home string, vols []volumeRef, imageRoot *os.Root, mountpoint func(volumeRef) (string, error)) ([]string, error) {
+	var made []string
+	for _, store := range stores {
+		boundary := home
+		if boundary == "" || boundary == "/" || !spec.Under(store.Path, boundary) {
+			boundary = filepath.Dir(filepath.Dir(store.Path)) // $XDG_DATA_HOME's parent
+		}
+		for d := filepath.Dir(store.Path); d != boundary && spec.Under(d, boundary); d = filepath.Dir(d) {
+			var selected *volumeRef
+			for i := range vols {
+				v := &vols[i]
+				if !v.Engine && spec.Under(d, v.Path) && (selected == nil || len(v.Path) > len(selected.Path)) {
+					selected = v
+				}
+			}
+			root := imageRoot
+			rel := strings.TrimPrefix(d, "/")
+			if selected != nil {
+				mp, err := mountpoint(*selected)
+				if err != nil {
+					return nil, err
+				}
+				if root, err = os.OpenRoot(mp); err != nil {
+					return nil, err
+				}
+				rel = strings.TrimPrefix(strings.TrimPrefix(d, selected.Path), "/")
+				if rel == "" {
+					rel = "."
+				}
+			}
+			_, statErr := root.Lstat(rel)
+			if selected != nil {
+				root.Close()
+			}
+			if statErr == nil {
+				continue
+			}
+			if !errors.Is(statErr, fs.ErrNotExist) {
+				return nil, fmt.Errorf("inspect engine parent %s: %w", d, statErr)
+			}
+			if !slices.Contains(made, d) {
+				made = append(made, d)
+			}
+		}
+	}
+	return made, nil
+}
+
 // volumeRoot is the container path of the volume a path is on.
 func (p *placement) volumeRoot(path string) string {
 	best := ""
 	for _, v := range p.state.Volumes {
-		if (path == v.Path || strings.HasPrefix(path, v.Path+"/")) && len(v.Path) > len(best) {
+		if !v.Engine && spec.Under(path, v.Path) && len(v.Path) > len(best) {
 			best = v.Path
 		}
 	}

@@ -288,11 +288,48 @@ Hosts remove the images lux put there once they go unused:
 ## Nested containers
 
 `sandbox.nestedContainers: true` lets the workload run containers itself,
-with rootless Podman inside its container. The Run is placed only on hosts
-started with `lux-runner --nested`. Its image must have Podman (and
-`fuse-overlayfs`, and `newuidmap`/`newgidmap`), and the workload user
-needs `/etc/subuid` and `/etc/subgid` entries. `tests/images/nested` is a
-minimal example.
+with rootless Podman or rootless Docker inside its container. The Run is
+placed only on hosts started with `lux-runner --nested`. Its image must
+have the engine (Podman, or `dockerd-rootless` with RootlessKit and
+`slirp4netns`), `fuse-overlayfs`, and `newuidmap`/`newgidmap`, and the
+workload user needs `/etc/subuid` and `/etc/subgid` entries.
+`tests/images/nested` (Podman) and `tests/images/docker` (Docker, with
+BuildKit and compose) are minimal examples.
+
+The runner mounts an **ephemeral volume at each engine's store**:
+`$XDG_DATA_HOME/docker` and `$XDG_DATA_HOME/containers` for a non-root
+workload (`~/.local/share` by default, from the spec's `env` when it sets
+`XDG_DATA_HOME` or `HOME`), `/var/lib/docker` and `/var/lib/containers`
+for root. On the
+container's own overlay root an engine cannot use kernel overlay (Linux
+has no overlay on overlay) and falls back to `fuse-overlayfs`, which takes
+about twice as long for file-heavy builds; on a volume it gets `overlay2`
+at native speed. Images and layers are never snapshotted, even under a
+state volume (at the home, at `/home`, or at a directory holding
+`XDG_DATA_HOME`), and every placement starts with an empty store. A spec
+that puts its own volume at or inside one of those paths, or around one
+strictly under the home (say `~/.local/share`), keeps it: a `state` volume
+there makes the images survive a move, at the cost of snapshotting them.
+An engine configured elsewhere (a Docker `data-root`, or `XDG_DATA_HOME`
+set through a secret rather than `env` or the image) is not seen, and its
+store stays on the slow root.
+
+On a host whose AppArmor restricts unprivileged user namespaces (Ubuntu
+24.04 and later), the runner also runs nested Runs `apparmor=unconfined`:
+without it, rootless Docker cannot create its network namespace.
+
+A same-host resume can reuse the container, `/tmp` included: clear the
+engine's runtime directory before starting it (rootless Docker's pid file
+in `$XDG_RUNTIME_DIR` otherwise stops `dockerd` with "process is still
+running").
+
+```bash
+# inside the container, as the workload user
+rm -rf /tmp/xdg && mkdir -p /tmp/xdg
+export XDG_RUNTIME_DIR=/tmp/xdg DOCKER_HOST=unix:///tmp/xdg/docker.sock
+dockerd-rootless >/tmp/dockerd.log 2>&1 &
+docker build -t app . && docker compose up
+```
 
 A nested Run is never `--privileged`. Beyond what every Run gets, it gets:
 
