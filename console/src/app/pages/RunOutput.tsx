@@ -8,10 +8,6 @@ import { useRunOutput } from "./useRunOutput.ts";
 /** all: every line; output: the workload's stdout and stderr; lux: Lux's own (system) lines. */
 type OutputView = "all" | "output" | "lux";
 
-function parseOutputView(v: string | null): OutputView {
-  return v === "output" || v === "lux" ? v : "all";
-}
-
 /** The lines the view shows, and each view's count, in one pass. */
 function filterOutput(lines: LogLine[], view: OutputView): { lines: LogLine[]; counts: Record<OutputView, number> } {
   const counts = { all: lines.length, output: 0, lux: 0 };
@@ -28,9 +24,13 @@ function filterOutput(lines: LogLine[], view: OutputView): { lines: LogLine[]; c
 export function RunOutput({ run }: { run: Run }) {
   const out = useRunOutput(run.id, run.epoch);
   // The filter lives in the URL (?output=), so a filtered view is a link.
-  const view = parseOutputView(useSearchParams().get("output"));
+  const requested = useSearchParams().get("output");
+  const view: OutputView = requested === "output" || requested === "lux" ? requested : "all";
   const setView = (v: OutputView) => setSearchParams({ output: v === "all" ? null : v });
   const shown = useMemo(() => filterOutput(out.lines, view), [out.lines, view]);
+  let emptyText = "No output.";
+  if (out.status === "connecting") emptyText = "Connecting…";
+  else if (view === "lux") emptyText = "No lines from Lux.";
   const toast = useToast();
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -89,7 +89,7 @@ export function RunOutput({ run }: { run: Run }) {
           { key: "lux", label: "Lux", count: shown.counts.lux },
         ]}
       />
-      <LogView lines={shown.lines} height="clamp(320px, calc(100vh - 470px), 720px)" lineNumbers emptyText={out.status === "connecting" ? "Connecting…" : view === "lux" ? "No lines from Lux." : "No output."} />
+      <LogView lines={shown.lines} height="clamp(320px, calc(100vh - 470px), 720px)" lineNumbers emptyText={emptyText} />
       <form className="output-form" onSubmit={send}>
         <input className="input mono" placeholder={canInput ? "Send input to the agent…" : "Input needs a starting or running run"} value={text} onChange={(e) => setText(e.target.value)} disabled={!canInput || sending} />
         <Button type="submit" icon={<IconSend size={14} />} disabled={!canInput || text.trim() === ""} loading={sending}>
