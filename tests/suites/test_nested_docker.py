@@ -114,15 +114,15 @@ sleep 600
     lux.run("cancel", run_id, "--wait")
 
 
-# A file-heavy build, then a run of it: 20k small files and 512 MiB. The
-# same work runs on fuse-overlayfs (the store on the container's root, as
-# it was before the runner mounted a volume there) for comparison.
+# A small-file-heavy build, then a run of it: where fuse-overlayfs pays per
+# file. The same work runs on fuse-overlayfs (the store on the container's
+# root, as it was before the runner mounted a volume there) for comparison.
 BENCH = f"""
 mkdir -p /tmp/bench && cd /tmp/bench
-printf '{FROM}\\nRUN i=0; while [ $i -lt 20000 ]; do echo $i > /f$i; i=$((i+1)); done\\nRUN tar cf /t.tar /f1* && rm /f*\\nRUN dd if=/dev/zero of=/big bs=1M count=512 2>/dev/null && sha256sum /big >/dev/null\\n' > Dockerfile
+printf '{FROM}\\nRUN i=0; while [ $i -lt 5000 ]; do echo $i > /f$i; i=$((i+1)); done\\nRUN tar cf /t.tar /f* && rm /f*\\n' > Dockerfile
 t() {{ cut -d' ' -f1 /proc/uptime | tr -d .; }}
 s=$(t); docker build -q --no-cache -t bench . >/dev/null || exit 1
-docker run --rm bench sh -c 'i=0; while [ $i -lt 20000 ]; do echo $i > /tmp/g$i; i=$((i+1)); done; sha256sum /t.tar >/dev/null' || exit 1
+docker run --rm bench sh -c 'i=0; while [ $i -lt 5000 ]; do echo $i > /tmp/g$i; i=$((i+1)); done; sha256sum /t.tar >/dev/null' || exit 1
 echo "bench-cs=$(( $(t)-s ))"
 """
 
@@ -137,21 +137,15 @@ docker load -q -i /opt/alpine.tar >/dev/null
 
 
 def test_disk_speed_is_native(lux, runners, hosts):
-    """On its volume the store is overlay2 and a file-heavy build is well
-    faster than on fuse-overlayfs, which is what a store on the container's
-    root falls back to: a regression to that fails here. A busy machine
-    squeezes both, so the best of two tries counts."""
+    """On its volume the store is overlay2 and a small-file-heavy build is
+    well faster than on fuse-overlayfs, which is what a store on the
+    container's root falls back to: a regression to that fails here."""
     runners.start(hosts[0], "--nested")
-    ratios = []
-    for _ in range(2):
-        run_id = lux.submit(docker(BENCH + SLOW + BENCH))
-        run = lux.wait_state(run_id, "succeeded", "failed", timeout=600)
-        out = lux.logs(run_id).split()
-        assert run["state"] == "succeeded", (run.get("stateReason"), out)
-        fast, slow = (int(w.split("=")[1]) for w in out if w.startswith("bench-cs="))
-        print(f"overlay2 {fast / 100:.1f}s, fuse-overlayfs {slow / 100:.1f}s")
-        ratios.append(slow / fast)
-        # Measured 1.6-2.2x apart; the same store (a regression) is ~1x.
-        if ratios[-1] > 1.3:
-            return
-    raise AssertionError(f"overlay2 is not clearly faster than fuse-overlayfs: {ratios}")
+    run_id = lux.submit(docker(BENCH + SLOW + BENCH))
+    run = lux.wait_state(run_id, "succeeded", "failed", timeout=180)
+    out = lux.logs(run_id).split()
+    assert run["state"] == "succeeded", (run.get("stateReason"), out)
+    fast, slow = (int(w.split("=")[1]) for w in out if w.startswith("bench-cs="))
+    print(f"overlay2 {fast / 100:.1f}s, fuse-overlayfs {slow / 100:.1f}s")
+    # The same store (a regression) is ~1x.
+    assert slow > fast * 1.3, f"overlay2 {fast / 100:.1f}s is not clearly faster than fuse-overlayfs {slow / 100:.1f}s"

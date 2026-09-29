@@ -142,7 +142,7 @@ def http_forward_fails(lux, run_id: str, name: str) -> bool:
     local = free_port()
     p = lux.popen("port-forward", run_id, name, str(local))
     try:
-        time.sleep(1.5)
+        p.stderr.readline()  # "forwarding ...", once it listens
         return "hello" not in http_get(local)
     finally:
         p.terminate()
