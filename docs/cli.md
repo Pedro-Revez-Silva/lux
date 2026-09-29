@@ -125,7 +125,9 @@ ignored) files alike.
 - Colour follows `git diff`: on when stdout is a terminal (`--color auto`,
   and `NO_COLOR` unset). Nothing is printed, and the exit code is 0, when
   nothing changed. A repository whose diff failed is reported on stderr and
-  the exit code is 1.
+  the exit code is 1 (`base_unreachable`: its base is no longer in its
+  history; `--base head` still works). Files with clean/smudge filters,
+  which are never run, are compared raw, and named on stderr.
 - `-o json` prints the API's response: per repository `repo`, `push`,
   `base`, `head`, `source`, `snapshotId`, `at`, `truncated`, `files`,
   `insertions`, `deletions`, `fileStats` and `patch`. The API also answers

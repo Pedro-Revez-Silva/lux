@@ -23,6 +23,11 @@ const (
 	DiffBaseHead  = "head"
 )
 
+// DiffBaseUnreachable is DiffStat.ErrorCode when the commit a repository
+// was cloned at is not in its history any more (a shallow clone, a history
+// rewrite, a new repository): only base=head can be diffed.
+const DiffBaseUnreachable = "base_unreachable"
+
 // DiffLimit is the most patch bytes kept per repository and base kind; the
 // stat always covers the whole diff.
 const DiffLimit = 10 << 20
@@ -67,8 +72,16 @@ type DiffStat struct {
 	Deletions  int        `json:"deletions"`
 	FileStats  []DiffFile `json:"fileStats,omitempty"`
 	// PatchBytes is the length of the patch that follows (kept bytes).
-	PatchBytes int64  `json:"patchBytes"`
-	Error      string `json:"error,omitempty"`
+	PatchBytes int64 `json:"patchBytes"`
+	// FiltersIgnored: some changed files have a clean/smudge filter
+	// attribute, which is not run (the workload chose its program): they
+	// are compared raw. FilteredPaths lists them (at most 100).
+	FiltersIgnored bool     `json:"filtersIgnored,omitempty"`
+	FilteredPaths  []string `json:"filteredPaths,omitempty"`
+	Error          string   `json:"error,omitempty"`
+	// ErrorCode classifies Error when it has a known cause
+	// (DiffBaseUnreachable).
+	ErrorCode string `json:"errorCode,omitempty"`
 }
 
 // DiffRequest asks the runner for a running placement's diff.

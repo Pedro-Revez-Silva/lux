@@ -1097,6 +1097,11 @@ components:
         error:
           description: Why this repository's diff could not be computed.
           type: string
+        errorCode:
+          description: "base_unreachable: the commit it was cloned at is no longer in its history (base=head still works)."
+          enum:
+            - base_unreachable
+          type: string
         fileStats:
           items:
             $ref: "#/components/schemas/DiffFile"
@@ -1106,6 +1111,16 @@ components:
         files:
           format: int64
           type: integer
+        filteredPaths:
+          description: Those files (at most 100).
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        filtersIgnored:
+          description: Some changed files have a clean/smudge filter attribute; filters are not run, so they are compared raw and may show as changed when they are not.
+          type: boolean
         head:
           description: The checkout's HEAD commit.
           type: string

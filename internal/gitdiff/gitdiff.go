@@ -27,9 +27,6 @@ import (
 	"github.com/marcioapm/lux/internal/proto"
 )
 
-// emptyTree is git's empty tree (SHA-1): the base of an unborn HEAD.
-const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-
 // safeConfig keeps whatever the workload configured from running programs
 // or reshaping the output. Filters (which git add would run) are disabled
 // per name in filterOverrides.
@@ -61,6 +58,11 @@ type repo struct {
 }
 
 func (r *repo) git(ctx context.Context, stdout io.Writer, args ...string) error {
+	return r.gitIn(ctx, nil, stdout, args...)
+}
+
+// gitIn runs git in the checkout. A failure wraps its *exec.ExitError.
+func (r *repo) gitIn(ctx context.Context, stdin io.Reader, stdout io.Writer, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", append(append(append([]string{}, safeConfig...), r.conf...), args...)...)
 	cmd.Dir = r.dir
 	// The container's environment is the Run's: a GIT_DIR, GIT_INDEX_FILE
@@ -75,11 +77,20 @@ func (r *repo) git(ctx context.Context, stdout io.Writer, args ...string) error 
 		"GIT_NO_LAZY_FETCH=1")
 	cmd.Env = append(cmd.Env, r.env...)
 	stderr := &head{max: 4 << 10}
-	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git %s: %v: %s", args[0], err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// exitCode is a failed git's exit code, or -1 if it did not exit.
+func exitCode(err error) int {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
 }
 
 // out is a small command's output (at most maxOut bytes).
@@ -122,8 +133,9 @@ type Diff struct {
 // Compute diffs the checkout at dir for each kind (proto.DiffBaseClone
 // against base, proto.DiffBaseHead against HEAD). Patches are cut at limit
 // bytes, after the last whole file's diff that fits (empty if none does);
-// the stat always covers the whole diff. A failure is the returned error when the
-// checkout could not be staged at all, else in each Diff's Stat.Error.
+// the stat always covers the whole diff. A failure is the returned error
+// when the checkout could not be read at all, else in each Diff's
+// Stat.Error.
 func Compute(ctx context.Context, dir, base string, kinds []string, statOnly bool, limit int64) ([]Diff, error) {
 	r := &repo{dir: dir}
 	top, err := r.out(ctx, "rev-parse", "--show-toplevel")
@@ -135,9 +147,12 @@ func Compute(ctx context.Context, dir, base string, kinds []string, statOnly boo
 			return nil, fmt.Errorf("%s is not the top of a checkout (%s is)", dir, top)
 		}
 	}
-	head, err := r.out(ctx, "rev-parse", "--verify", "-q", "HEAD^{commit}")
+	head, headErr := r.head(ctx)
+	// The empty tree in the repository's own object format (SHA-1 or
+	// SHA-256): the base of an unborn HEAD. Nothing is written.
+	emptyTree, err := r.out(ctx, "hash-object", "-t", "tree", "--stdin")
 	if err != nil {
-		head = "" // unborn: nothing committed yet
+		return nil, err
 	}
 	tmp, err := os.MkdirTemp("", "lux-diff-")
 	if err != nil {
@@ -157,11 +172,15 @@ func Compute(ctx context.Context, dir, base string, kinds []string, statOnly boo
 			from = base
 			if base == "" {
 				d.Stat.Error = "the commit this repository was cloned at is not known"
+			} else if err := r.reachable(ctx, base, head); err != nil {
+				d.Stat.Error, d.Stat.ErrorCode = err.Error(), proto.DiffBaseUnreachable
 			}
 		case proto.DiffBaseHead:
 			d.Stat.Base = head
 			from = head
-			if head == "" {
+			if headErr != nil {
+				d.Stat.Error = headErr.Error()
+			} else if head == "" {
 				from = emptyTree
 			}
 		default:
@@ -172,9 +191,57 @@ func Compute(ctx context.Context, dir, base string, kinds []string, statOnly boo
 				d.Stat.Error = err.Error()
 			}
 		}
+		if d.Stat.Error == "" {
+			if err := r.filtered(ctx, &d.Stat); err != nil {
+				d.Stat.Error = err.Error()
+				d.Patch = nil
+			}
+		}
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// head is the checkout's HEAD commit: "" for an unborn branch (HEAD names
+// a branch that does not exist yet), an error when HEAD is damaged (it
+// names a commit, directly or through a branch, that is not there).
+func (r *repo) head(ctx context.Context) (string, error) {
+	ref, err := r.out(ctx, "symbolic-ref", "-q", "HEAD")
+	switch {
+	case err == nil:
+		// A branch: unborn if the ref does not exist at all.
+		if _, err := r.out(ctx, "rev-parse", "--verify", "-q", ref); exitCode(err) == 1 {
+			return "", nil
+		}
+	case exitCode(err) == 1:
+		ref = "HEAD" // detached
+	default:
+		return "", fmt.Errorf("HEAD cannot be read: %v", err)
+	}
+	c, err := r.out(ctx, "rev-parse", "--verify", "-q", ref+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("HEAD (%s) does not point at a commit in this repository", ref)
+	}
+	return c, nil
+}
+
+// reachable checks that base is in HEAD's history: a commit that is gone
+// (a shallow clone, a new repository) or that HEAD no longer descends from
+// (a reset to unrelated history) is no base to diff from.
+func (r *repo) reachable(ctx context.Context, base, head string) error {
+	if _, err := r.out(ctx, "rev-parse", "--verify", "-q", base+"^{commit}"); err != nil {
+		return fmt.Errorf("the commit this repository was cloned at (%s) is not in it any more (base=head still diffs from HEAD)", base)
+	}
+	if head == "" {
+		return fmt.Errorf("HEAD has no commits, so the commit this repository was cloned at (%s) is not in its history (base=head still diffs from HEAD)", base)
+	}
+	if err := r.git(ctx, io.Discard, "merge-base", "--is-ancestor", base, head); err != nil {
+		if exitCode(err) == 1 {
+			return fmt.Errorf("HEAD is not a descendant of the commit this repository was cloned at (%s): its history was replaced (base=head still diffs from HEAD)", base)
+		}
+		return fmt.Errorf("the commit this repository was cloned at (%s) cannot be read: %v (base=head still diffs from HEAD)", base, err)
+	}
+	return nil
 }
 
 // stage makes a copy of the index, in tmp, that also lists untracked (not
@@ -210,16 +277,26 @@ func (r *repo) stage(ctx context.Context, tmp string) error {
 		return err
 	}
 	r.env = append(r.env, "GIT_ALTERNATE_OBJECT_DIRECTORIES="+p[1])
-	return r.git(ctx, io.Discard, "add", "--all", "--intent-to-add")
+	// --sparse: in a sparse checkout, untracked files outside the cone are
+	// the workload's too (and without it git add refuses them all).
+	return r.git(ctx, io.Discard, "add", "--all", "--intent-to-add", "--sparse")
 }
 
 // filterOverrides disables every configured clean/smudge filter: git add
-// would otherwise run the programs they name.
+// and git diff would otherwise run the programs they name, which the
+// workload chose. Files with a filter attribute are compared raw (see
+// filtered).
 func (r *repo) filterOverrides(ctx context.Context) ([]string, error) {
-	var b bytes.Buffer
-	err := r.git(ctx, &b, "config", "--null", "--name-only", "--get-regexp", `^filter\.`)
-	if err != nil && b.Len() == 0 {
-		return nil, nil // none configured (git config exits 1)
+	b := &head{max: maxOut}
+	err := r.git(ctx, b, "config", "--null", "--name-only", "--get-regexp", `^filter\.`)
+	if exitCode(err) == 1 && len(b.b) == 0 {
+		return nil, nil // none configured
+	}
+	if err != nil {
+		return nil, err
+	}
+	if b.over {
+		return nil, fmt.Errorf("git config: more than %d bytes of filter settings", maxOut)
 	}
 	seen := map[string]bool{}
 	var conf []string
@@ -235,9 +312,54 @@ func (r *repo) filterOverrides(ctx context.Context) ([]string, error) {
 	return conf, nil
 }
 
+// maxFilteredPaths bounds DiffStat.FilteredPaths.
+const maxFilteredPaths = 100
+
+// filtered notes the changed files (of those listed) that have a filter
+// attribute: their content is compared raw, as it is on disk, not as the
+// filter would have cleaned it, so they may show as changed when they are
+// not (a Git LFS file, for one).
+func (r *repo) filtered(ctx context.Context, st *proto.DiffStat) error {
+	if len(st.FileStats) == 0 {
+		return nil
+	}
+	var in bytes.Buffer
+	for _, f := range st.FileStats {
+		in.WriteString(f.Path)
+		in.WriteByte(0)
+	}
+	// check-attr -z: path, attribute, value, each NUL-terminated.
+	var fields []string
+	w := &nulFields{fn: func(f string) error {
+		fields = append(fields, f)
+		if len(fields) < 3 {
+			return nil
+		}
+		if v := fields[2]; v != "unspecified" && v != "unset" {
+			st.FiltersIgnored = true
+			if len(st.FilteredPaths) < maxFilteredPaths {
+				st.FilteredPaths = append(st.FilteredPaths, fields[0])
+			}
+		}
+		fields = fields[:0]
+		return nil
+	}}
+	if err := r.gitIn(ctx, &in, w, "check-attr", "-z", "--stdin", "filter"); err != nil {
+		return err
+	}
+	if err := w.end(); err != nil || len(fields) != 0 {
+		return errors.New("git check-attr: malformed output")
+	}
+	return nil
+}
+
 func (r *repo) diff(ctx context.Context, d *Diff, from string, statOnly bool, limit int64) error {
 	num := &numstat{}
-	if err := r.git(ctx, num, append(append([]string{"diff", "--numstat", "-z"}, diffFlags...), from, "--")...); err != nil {
+	w0 := &nulFields{fn: num.field}
+	if err := r.git(ctx, w0, append(append([]string{"diff", "--numstat", "-z"}, diffFlags...), from, "--")...); err != nil {
+		return err
+	}
+	if err := w0.end(); err != nil {
 		return err
 	}
 	if err := num.end(); err != nil {
@@ -297,12 +419,50 @@ func (c *capped) result() ([]byte, bool) {
 	return nil, true
 }
 
-// numstat parses `git diff --numstat -z` as git writes it: "ins\tdel\tpath\0",
-// or for a rename "ins\tdel\t\0old\0new\0"; "-" counts for a binary file.
-// It keeps the first maxFileStats files and totals all of them, holding at
-// most one path at a time.
+// nulFields splits NUL-terminated fields as they are written, holding at
+// most one (maxPath bytes) at a time.
+type nulFields struct {
+	tok []byte
+	fn  func(string) error
+}
+
+// maxPath bounds one field (PATH_MAX is 4096).
+const maxPath = 64 << 10
+
+func (s *nulFields) Write(p []byte) (int, error) {
+	n := len(p)
+	for len(p) > 0 {
+		i := bytes.IndexByte(p, 0)
+		if i < 0 {
+			i = len(p)
+		}
+		if len(s.tok)+i > maxPath {
+			return 0, fmt.Errorf("a field over %d bytes", maxPath)
+		}
+		s.tok = append(s.tok, p[:i]...)
+		if i == len(p) {
+			break
+		}
+		if err := s.fn(string(s.tok)); err != nil {
+			return 0, err
+		}
+		s.tok, p = s.tok[:0], p[i+1:]
+	}
+	return n, nil
+}
+
+// end checks the last field was terminated.
+func (s *nulFields) end() error {
+	if len(s.tok) > 0 {
+		return errors.New("output cut short")
+	}
+	return nil
+}
+
+// numstat reads the fields of `git diff --numstat -z`: "ins\tdel\tpath", or
+// for a rename "ins\tdel\t", "old", "new"; "-" counts for a binary file.
+// It keeps the first maxFileStats files and totals all of them.
 type numstat struct {
-	tok   []byte
 	cur   proto.DiffFile
 	need  int // paths still owed to cur (a rename's two)
 	files []proto.DiffFile
@@ -311,32 +471,7 @@ type numstat struct {
 	del   int
 }
 
-// maxPath bounds one NUL-terminated field (PATH_MAX is 4096).
-const maxPath = 64 << 10
-
 var errNumstat = errors.New("git diff --numstat: malformed output")
-
-func (s *numstat) Write(p []byte) (int, error) {
-	n := len(p)
-	for len(p) > 0 {
-		i := bytes.IndexByte(p, 0)
-		if i < 0 {
-			i = len(p)
-		}
-		if len(s.tok)+i > maxPath {
-			return 0, fmt.Errorf("git diff --numstat: a field over %d bytes", maxPath)
-		}
-		s.tok = append(s.tok, p[:i]...)
-		if i == len(p) {
-			break
-		}
-		if err := s.field(string(s.tok)); err != nil {
-			return 0, err
-		}
-		s.tok, p = s.tok[:0], p[i+1:]
-	}
-	return n, nil
-}
 
 func (s *numstat) field(f string) error {
 	switch s.need {
@@ -380,20 +515,28 @@ func (s *numstat) add() {
 	}
 }
 
-// end checks nothing was left half-written.
+// end checks no rename was left without its paths.
 func (s *numstat) end() error {
-	if len(s.tok) > 0 || s.need > 0 {
+	if s.need > 0 {
 		return errNumstat
 	}
 	return nil
 }
 
+// copyFile copies src to dst with src's modification time: git trusts an
+// index entry's stat data only if the file's mtime is older than the
+// index's own, so a copy with a newer mtime would hide a same-size change
+// made in the same instant as the last index write ("racy git").
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
+	fi, err := in.Stat()
+	if err != nil {
+		return err
+	}
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
@@ -402,7 +545,10 @@ func copyFile(src, dst string) error {
 		out.Close()
 		return err
 	}
-	return out.Close()
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Chtimes(dst, fi.ModTime(), fi.ModTime())
 }
 
 // ---- the stream between `lux-shim diff` and the runner ----------------------

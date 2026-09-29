@@ -25,7 +25,12 @@ CREATE TABLE snapshot_diffs (
   deletions    int NOT NULL DEFAULT 0,
   -- [{path, oldPath?, insertions, deletions, binary?}]
   file_stats   jsonb NOT NULL DEFAULT '[]',
+  -- Changed paths with a clean/smudge filter attribute, compared raw.
+  filters_ignored boolean NOT NULL DEFAULT false,
+  filtered_paths  jsonb NOT NULL DEFAULT '[]',
   error        text NOT NULL DEFAULT '',
+  -- A known cause of error: base_unreachable.
+  error_code   text NOT NULL DEFAULT '',
   created_at   timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (snapshot_id, repo, kind)
 );

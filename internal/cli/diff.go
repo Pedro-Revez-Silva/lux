@@ -88,6 +88,10 @@ func (a *app) printDiff(d server.RunDiff, stat, colored bool) error {
 		if r.Files == 0 {
 			continue
 		}
+		if r.FiltersIgnored {
+			fmt.Fprintf(a.stderr, "lux: repo %s: files with clean/smudge filters are compared raw (filters are not run): %s\n",
+				r.Repo, strings.Join(r.FilteredPaths, ", "))
+		}
 		header := diffHeader(r)
 		if colored {
 			header = "\x1b[33m" + header + "\x1b[m"

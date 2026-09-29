@@ -486,6 +486,19 @@ committed changes, staged, unstaged and untracked (not ignored) files.
   content counts), after the last whole file's diff that fits, and marked
   `truncated`: what is kept still applies, and is empty when the first
   file's diff alone is over the limit. The stats cover the whole diff.
+- **Clean/smudge filters are never run** (their programs are the
+  workload's choice). A file with a `filter` attribute is compared raw, as
+  it is on disk, so it may show as changed when its filter would have made
+  it identical (Git LFS pointers, for one). The response then has
+  `filtersIgnored: true` and lists those files (`filteredPaths`, at most
+  100).
+- A sparse checkout's untracked files outside its cone are in the diff;
+  tracked files it did not check out are not deletions.
+- `base=clone` needs the base in the checkout's history. After a history
+  rewrite, a reset to unrelated history, a shallow clone without it, or a
+  new `.git`, the repository's entry has `errorCode: base_unreachable`;
+  `base=head` still works. A checkout whose `.git` is gone, or replaced by
+  a file, is an error for that repository only.
 - A diff that cannot be computed never fails the snapshot or the exit: a
   `diff.failed` event says why (`{error, repo?, kind?}`), and the
   repository's entry carries the error.

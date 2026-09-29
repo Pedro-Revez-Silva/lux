@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -597,14 +598,15 @@ func TestNumstatOverTheEntryCap(t *testing.T) {
 		}
 	}
 	s := &numstat{}
+	w := &nulFields{fn: s.field}
 	for b := in.Bytes(); len(b) > 0; {
 		k := min(len(b), 7)
-		if _, err := s.Write(b[:k]); err != nil {
+		if _, err := w.Write(b[:k]); err != nil {
 			t.Fatal(err)
 		}
 		b = b[k:]
 	}
-	if err := s.end(); err != nil {
+	if err := errors.Join(w.end(), s.end()); err != nil {
 		t.Fatal(err)
 	}
 	renames, bins := 10, 10 // i%1000 == 7 or 8 for i < 10005
@@ -621,16 +623,17 @@ func TestNumstatOverTheEntryCap(t *testing.T) {
 	// Malformed or cut short: an error, not a wrong count.
 	for _, bad := range []string{"3\t1\tf\x00x\x00", "3\t1\t\x00old\x00", "a\tb\tf\x00", "3\t1\tf"} {
 		s := &numstat{}
-		_, err := s.Write([]byte(bad))
+		w := &nulFields{fn: s.field}
+		_, err := w.Write([]byte(bad))
 		if err == nil {
-			err = s.end()
+			err = errors.Join(w.end(), s.end())
 		}
 		if err == nil {
 			t.Errorf("%q accepted", bad)
 		}
 	}
 	// A field over the bound is refused as it arrives.
-	if _, err := (&numstat{}).Write(bytes.Repeat([]byte("x"), maxPath+1)); err == nil {
+	if _, err := (&nulFields{fn: (&numstat{}).field}).Write(bytes.Repeat([]byte("x"), maxPath+1)); err == nil {
 		t.Error("an unbounded field was buffered")
 	}
 }
@@ -643,5 +646,261 @@ func TestGitStderrIsBounded(t *testing.T) {
 	}
 	if len(h.b) != 10 || !h.over {
 		t.Errorf("kept %d bytes", len(h.b))
+	}
+}
+
+// Filters are never run, but a diff says which changed files have one:
+// they are compared raw.
+func TestFiltersIgnoredAreReported(t *testing.T) {
+	dir, base := checkout(t)
+	marker := t.TempDir()
+	clean := filepath.Join(marker, "clean.sh")
+	os.WriteFile(clean, []byte("#!/bin/sh\ntouch "+filepath.Join(marker, "ran")+"\ntr a-z A-Z\n"), 0o755)
+	run(t, dir, "config", "filter.up.clean", clean)
+	run(t, dir, "config", "filter.up.smudge", "cat")
+	write(t, dir, ".gitattributes", "staged.txt filter=up\nunstaged.txt filter=up\nuntouched.txt filter=up\n")
+	diffs, err := Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, proto.DiffLimit)
+	if err != nil || diffs[0].Stat.Error != "" {
+		t.Fatal(err, diffs)
+	}
+	st := diffs[0].Stat
+	if !st.FiltersIgnored || strings.Join(st.FilteredPaths, ",") != "staged.txt,unstaged.txt" {
+		t.Errorf("filtersIgnored %v, paths %v", st.FiltersIgnored, st.FilteredPaths)
+	}
+	if !strings.Contains(string(diffs[0].Patch), "+unstaged") {
+		t.Error("the filtered file was not compared raw")
+	}
+	if _, err := os.Stat(filepath.Join(marker, "ran")); err == nil {
+		t.Error("the filter ran")
+	}
+	// No filter attributes: nothing reported.
+	os.Remove(filepath.Join(dir, ".gitattributes"))
+	diffs, _ = Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, proto.DiffLimit)
+	if diffs[0].Stat.FiltersIgnored || diffs[0].Stat.FilteredPaths != nil {
+		t.Errorf("no attributes: %+v", diffs[0].Stat)
+	}
+}
+
+// git config failing for any reason but "no match" is an error, not "no
+// filters" (which would let a filter run). A git wrapper makes it fail.
+func TestFilterConfigErrorIsAnError(t *testing.T) {
+	dir, base := checkout(t)
+	real, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	os.WriteFile(filepath.Join(bin, "git"), []byte(`#!/bin/sh
+for a; do [ "$a" = --get-regexp ] && { echo "fatal: cannot read config" >&2; exit 128; }; done
+exec `+real+` "$@"
+`), 0o755)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	if _, err := Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, proto.DiffLimit); err == nil ||
+		!strings.Contains(err.Error(), "cannot read config") {
+		t.Errorf("a failed git config: %v", err)
+	}
+}
+
+// A cone-mode sparse checkout: untracked files outside the cone are in the
+// diff, and do not fail it.
+func TestSparseCheckout(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	dir := t.TempDir()
+	run(t, dir, "init", "-q")
+	write(t, dir, "in/a.txt", "a\n")
+	write(t, dir, "out/b.txt", "b\n")
+	run(t, dir, "add", "-A")
+	run(t, dir, "commit", "-q", "-m", "base")
+	base := run(t, dir, "rev-parse", "HEAD")
+	run(t, dir, "sparse-checkout", "set", "--cone", "in")
+	write(t, dir, "in/new.txt", "new in\n")
+	write(t, dir, "out/new.txt", "new out\n")
+	before := digest(t, dir)
+	diffs, err := Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, proto.DiffLimit)
+	if err != nil || diffs[0].Stat.Error != "" {
+		t.Fatal(err, diffs)
+	}
+	if digest(t, dir) != before {
+		t.Error("the checkout changed")
+	}
+	fs := files(diffs[0].Stat)
+	if _, ok := fs["in/new.txt"]; !ok {
+		t.Errorf("in/new.txt missing: %+v", diffs[0].Stat.FileStats)
+	}
+	if _, ok := fs["out/new.txt"]; !ok {
+		t.Errorf("out/new.txt missing: %+v", diffs[0].Stat.FileStats)
+	}
+	// Files outside the cone that are not checked out are not deletions.
+	if _, ok := fs["out/b.txt"]; ok || len(fs) != 2 {
+		t.Errorf("stat: %+v", diffs[0].Stat.FileStats)
+	}
+}
+
+// An unborn branch diffs from the empty tree; a HEAD naming a commit that
+// is not there is an error for base=head, not an empty base.
+func TestUnbornAndDamagedHead(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	dir := t.TempDir()
+	run(t, dir, "init", "-q")
+	write(t, dir, "a.txt", "a\n")
+	diffs, err := Compute(context.Background(), dir, "", []string{proto.DiffBaseHead}, false, proto.DiffLimit)
+	if err != nil || diffs[0].Stat.Error != "" || diffs[0].Stat.Files != 1 || diffs[0].Stat.Head != "" {
+		t.Fatalf("unborn: %v %+v", err, diffs)
+	}
+	run(t, dir, "add", "a.txt")
+	run(t, dir, "commit", "-q", "-m", "a")
+	// The branch names a commit that is not in the repository.
+	missing := strings.Repeat("1", 40)
+	os.WriteFile(filepath.Join(dir, ".git", "refs", "heads", "main"), []byte(missing+"\n"), 0o644)
+	diffs, err = Compute(context.Background(), dir, "", []string{proto.DiffBaseHead}, false, proto.DiffLimit)
+	if err != nil || diffs[0].Stat.Error == "" || diffs[0].Stat.Files != 0 {
+		t.Errorf("missing HEAD commit: %v %+v", err, diffs)
+	}
+	// Detached at a missing commit.
+	os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte(missing+"\n"), 0o644)
+	diffs, err = Compute(context.Background(), dir, "", []string{proto.DiffBaseHead}, false, proto.DiffLimit)
+	if err == nil && diffs[0].Stat.Error == "" {
+		t.Errorf("detached at a missing commit: %+v", diffs)
+	}
+}
+
+// A SHA-256 repository: an unborn HEAD diffs from its own empty tree, and
+// a patch against a base applies.
+func TestSHA256Repository(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	dir := t.TempDir()
+	run(t, dir, "init", "-q", "--object-format=sha256")
+	write(t, dir, "a.txt", "a\n")
+	diffs, err := Compute(context.Background(), dir, "", []string{proto.DiffBaseHead}, false, proto.DiffLimit)
+	if err != nil || diffs[0].Stat.Error != "" || diffs[0].Stat.Files != 1 {
+		t.Fatalf("unborn: %v %+v", err, diffs)
+	}
+	run(t, dir, "add", "a.txt")
+	run(t, dir, "commit", "-q", "-m", "a")
+	base := run(t, dir, "rev-parse", "HEAD")
+	if len(base) != 64 {
+		t.Fatalf("not sha256: %s", base)
+	}
+	write(t, dir, "a.txt", "b\n")
+	write(t, dir, "bin", "\x00\x01")
+	diffs, err = Compute(context.Background(), dir, base, []string{proto.DiffBaseClone, proto.DiffBaseHead}, false, proto.DiffLimit)
+	if err != nil || diffs[0].Stat.Error != "" || diffs[1].Stat.Error != "" || diffs[0].Stat.Files != 2 {
+		t.Fatalf("%v %+v", err, diffs)
+	}
+	applyAndCompare(t, dir, base, diffs[0].Patch)
+}
+
+// A checkout the workload damaged, or whose history no longer holds its
+// base: an error for that repository (base_unreachable when the base is
+// gone, with base=head still working), the checkout unchanged, and the
+// stream going on to the next repository.
+func TestDamagedCheckouts(t *testing.T) {
+	cases := map[string]func(t *testing.T, dir, base string) (wantCode string, headWorks bool){
+		"reset to an unrelated commit": func(t *testing.T, dir, base string) (string, bool) {
+			run(t, dir, "checkout", "-q", "--orphan", "other")
+			run(t, dir, "commit", "-q", "-m", "unrelated")
+			run(t, dir, "branch", "-D", "main")
+			run(t, dir, "reflog", "expire", "--expire=now", "--all")
+			run(t, dir, "gc", "-q", "--prune=now")
+			return proto.DiffBaseUnreachable, true
+		},
+		"history rewritten, base still stored": func(t *testing.T, dir, base string) (string, bool) {
+			run(t, dir, "checkout", "-q", "--orphan", "rewritten")
+			run(t, dir, "commit", "-q", "-m", "rewritten")
+			return proto.DiffBaseUnreachable, true
+		},
+		"shallow clone without the base": func(t *testing.T, dir, base string) (string, bool) {
+			src := t.TempDir()
+			run(t, src, "clone", "-q", "--bare", dir, ".")
+			os.RemoveAll(dir)
+			run(t, filepath.Dir(dir), "clone", "-q", "--depth=1", "file://"+src, dir)
+			return proto.DiffBaseUnreachable, true
+		},
+		".git replaced by a fresh git init": func(t *testing.T, dir, base string) (string, bool) {
+			os.RemoveAll(filepath.Join(dir, ".git"))
+			run(t, dir, "init", "-q")
+			return proto.DiffBaseUnreachable, true
+		},
+		".git deleted": func(t *testing.T, dir, base string) (string, bool) {
+			os.RemoveAll(filepath.Join(dir, ".git"))
+			return "", false
+		},
+		"the path replaced by a file": func(t *testing.T, dir, base string) (string, bool) {
+			os.RemoveAll(dir)
+			os.WriteFile(dir, []byte("a file\n"), 0o644)
+			return "", false
+		},
+	}
+	for name, damage := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir, base := checkout(t)
+			run(t, dir, "add", "-A")
+			run(t, dir, "commit", "-q", "-m", "more")
+			// A second commit on top of base, so a depth-1 clone lacks it.
+			write(t, dir, "committed.txt", "three\n")
+			run(t, dir, "commit", "-q", "-am", "more")
+			wantCode, headWorks := damage(t, dir, base)
+			other, otherBase := checkout(t)
+			// The parent too: a file where the checkout was must stay one.
+			before := digest(t, filepath.Dir(dir))
+			var buf bytes.Buffer
+			err := Run(context.Background(), proto.DiffArgs{
+				Repos: []proto.DiffRepo{{Name: "bad", Path: dir, Base: base}, {Name: "ok", Path: other, Base: otherBase}},
+				Kinds: []string{proto.DiffBaseClone, proto.DiffBaseHead},
+			}, &buf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]proto.DiffStat{}
+			inc, err := ReadStream(&buf, []string{"bad", "ok"}, []string{proto.DiffBaseClone, proto.DiffBaseHead}, proto.DiffLimit,
+				func(st proto.DiffStat, _ io.Reader) error { got[st.Repo+"/"+st.Kind] = st; return nil })
+			if err != nil || len(inc) != 0 {
+				t.Fatal(err, inc)
+			}
+			if digest(t, filepath.Dir(dir)) != before {
+				t.Error("the checkout changed")
+			}
+			if c := got["bad/clone"]; c.Error == "" || c.ErrorCode != wantCode {
+				t.Errorf("clone: error %q code %q, want code %q", c.Error, c.ErrorCode, wantCode)
+			}
+			if h := got["bad/head"]; (h.Error == "") != headWorks {
+				t.Errorf("head: %+v", h)
+			}
+			if got["ok/clone"].Error != "" || got["ok/clone"].Files == 0 {
+				t.Errorf("the next repository: %+v", got["ok/clone"])
+			}
+		})
+	}
+}
+
+// A same-size change within the instant of the last index write (racy git)
+// is still seen: git rehashes entries not older than its index, so the
+// index copy must keep the index's time.
+func TestRacyCleanChangeIsSeen(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	dir := t.TempDir()
+	run(t, dir, "init", "-q")
+	// Stat data is mtime (whole seconds) and size only: as on a git built
+	// without nanosecond times, within one second.
+	run(t, dir, "config", "core.checkStat", "minimal")
+	write(t, dir, "a.txt", "a\n")
+	at := time.Now().Truncate(time.Second)
+	os.Chtimes(filepath.Join(dir, "a.txt"), at, at)
+	run(t, dir, "add", "a.txt")
+	run(t, dir, "commit", "-q", "-m", "a")
+	base := run(t, dir, "rev-parse", "HEAD")
+	// Same size, same mtime as the index entry, the index written in that
+	// second too: only git's racy check can tell.
+	write(t, dir, "a.txt", "b\n")
+	os.Chtimes(filepath.Join(dir, "a.txt"), at, at)
+	os.Chtimes(filepath.Join(dir, ".git", "index"), at, at)
+	time.Sleep(1100 * time.Millisecond)
+	diffs, err := Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, proto.DiffLimit)
+	if err != nil || diffs[0].Stat.Files != 1 {
+		t.Fatalf("the change was missed: %v %+v", err, diffs)
 	}
 }
