@@ -133,10 +133,8 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 	}
 	// EC2 refuses a key given twice, and lux lists a pool's instances by
 	// its own tags, so those win over a template's same key.
-	merged := maps.Clone(t.Tags)
-	if merged == nil {
-		merged = map[string]string{}
-	}
+	merged := make(map[string]string, len(t.Tags)+len(tags))
+	maps.Copy(merged, t.Tags)
 	maps.Copy(merged, tags)
 	instTags := make([]types.Tag, 0, len(merged))
 	for _, k := range slices.Sorted(maps.Keys(merged)) {

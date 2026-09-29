@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -89,7 +90,7 @@ func TestLaunchSendsEachTagKeyOnceLuxWins(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := [][2]string{{"lux:managed", "true"}, {"lux:pool", "ten_1/default"}, {"team", "platform"}}
-	if fmt.Sprint(sent) != fmt.Sprint(want) {
+	if !slices.Equal(sent, want) {
 		t.Errorf("tags sent %v, want %v", sent, want)
 	}
 }
