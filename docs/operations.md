@@ -146,7 +146,11 @@ reach S3 in the background:
 
 1. The runner uploads each blob with `PUT /runner/v1/blobs/{id}`. luxd streams
    it into S3 and verifies its sha256 on the way. Runners never hold S3
-   credentials.
+   credentials. A snapshot report is validated against its Run's blob
+   records; a report that does not match is refused whole (a
+   `snapshot.failed` event on the Run, which keeps its previous snapshot
+   and is not resumed automatically). The Run's state reason says so; a
+   resume starts it from that previous snapshot.
 2. The host keeps its local copy, so a resume there moves nothing. It
    deletes the copy when:
    - luxd tells it the Run now runs elsewhere (from S3), or

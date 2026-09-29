@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -199,17 +201,20 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 // resumable once it has.
 func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, st proto.Status, runState string, cancel bool) error {
 	var stopReason, hostID string
+	var snapshotRefused, hasSnapshot bool
 	if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID); err != nil {
 		return err
 	}
 	if err := lockCostHost(ctx, tx, hostID); err != nil {
 		return err
 	}
-	err := tx.QueryRow(ctx, `UPDATE placements SET state = 'exited', ended_at = now(),
+	err := tx.QueryRow(ctx, `UPDATE placements p SET state = 'exited', ended_at = now(),
 			exited_at = coalesce(exited_at, now()), exit_code = $3, exit_reason = $4, output_seq = nullif($5, 0),
 			lease_expires_at = NULL
 		WHERE run_id = $1 AND epoch = $2 AND state <> 'exited'
-		RETURNING stop_reason, host_id`, runID, epoch, st.ExitCode, st.Reason, st.OutputSeq).Scan(&stopReason, &hostID)
+		RETURNING stop_reason, host_id, snapshot_refused,
+			(SELECT snapshot_id IS NOT NULL FROM runs WHERE id = p.run_id)`,
+		runID, epoch, st.ExitCode, st.Reason, st.OutputSeq).Scan(&stopReason, &hostID, &snapshotRefused, &hasSnapshot)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil // already recorded: a redelivered report
 	}
@@ -246,13 +251,23 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		}
 		next, reason = StateFailed, fmt.Sprintf("exit code %d", code)
 	}
+	if snapshotRefused {
+		why := refusedSnapshotReason
+		if !hasSnapshot {
+			why = refusedNoSnapshotReason
+		}
+		reason = strings.TrimPrefix(reason+"; "+why, "; ")
+	}
 	if err := setRunState(ctx, tx, tenantID, runID, next, reason, epoch); err != nil {
 		return err
 	}
 	if err := stopServersAtEnd(ctx, tx, tenantID, runID, epoch, endReason(stopReason)); err != nil {
 		return err
 	}
-	if slices.Contains(movedStops, stopReason) {
+	// A move resumes the Run from the snapshot its placement just took;
+	// with that snapshot refused it would resume from an older one, so it
+	// stays stopped and a person decides.
+	if slices.Contains(movedStops, stopReason) && !snapshotRefused {
 		// Moved, not stopped by a person: resume elsewhere automatically
 		// (with the input a migration left, if any).
 		return s.requestResume(ctx, tx, tenantID, runID, nil, "auto-resume after "+stopReason)
@@ -298,22 +313,92 @@ func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epo
 	return setRunState(ctx, tx, tenantID, runID, StateLost, why, epoch)
 }
 
-// applySnapshotDone records a placement's final state.
-func (s *Server) applySnapshotDone(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID string, epoch, current int, sd proto.SnapshotDone) error {
+// foreignBlobsReason is the snapshot.failed error for a refused report.
+const foreignBlobsReason = "the report does not match this Run's blob records"
+
+// refusedSnapshotReason (or refusedNoSnapshotReason, for a Run without an
+// earlier snapshot) is added to the state_reason of a Run whose placement's
+// snapshot report was refused.
+const (
+	refusedSnapshotReason   = "the last snapshot was refused; the Run still has its previous snapshot"
+	refusedNoSnapshotReason = "the last snapshot was refused; the Run has no earlier snapshot"
+)
+
+// foreignBlobError: a snapshot report does not match its Run's records: it
+// names a blob or snapshot id recorded for another Run, or for this Run as
+// something else.
+type foreignBlobError struct{ id string }
+
+func (e *foreignBlobError) Error() string { return "id " + e.id + " does not match this Run's records" }
+
+// applySnapshotDone records a placement's final state. A report that does
+// not match its Run's records is refused whole: none of its records are
+// stored (not even snapshot_done_at), the placement is marked
+// snapshot_refused, a snapshot.failed event says so, and the report is
+// still acknowledged, as resending it cannot change the outcome. refused:
+// the reported snapshot id is not one recorded for this placement, so the
+// runner may delete its files.
+func (s *Server) applySnapshotDone(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID string, epoch, current int, sd proto.SnapshotDone) (refused bool, err error) {
 	var placementID string
-	if err := tx.QueryRow(ctx, `UPDATE placements SET snapshot_done_at = coalesce(snapshot_done_at, now())
-		WHERE run_id = $1 AND epoch = $2 RETURNING id`, runID, epoch).Scan(&placementID); err != nil {
-		return err
+	if err := tx.QueryRow(ctx, `SELECT id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&placementID); err != nil {
+		return false, err
+	}
+	// A savepoint, so that a refusal found halfway undoes what came before.
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	if _, err := sp.Exec(ctx, `UPDATE placements SET snapshot_done_at = coalesce(snapshot_done_at, now()) WHERE id = $1`, placementID); err != nil {
+		return false, err
 	}
 	if sd.Error != "" {
-		return addEvent(ctx, tx, tenantID, runID, epoch, "snapshot.failed", map[string]any{"error": sd.Error})
+		if err := addEvent(ctx, sp, tenantID, runID, epoch, "snapshot.failed", map[string]any{"error": sd.Error}); err != nil {
+			return false, err
+		}
+		return false, sp.Commit(ctx)
 	}
-	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM snapshots WHERE id = $1)`, sd.Manifest.SnapshotID).Scan(&exists); err != nil {
+	err = s.recordSnapshot(ctx, sp, tenantID, hostID, runID, placementID, epoch, current, sd)
+	var foreign *foreignBlobError
+	if errors.As(err, &foreign) {
+		if err := sp.Rollback(ctx); err != nil {
+			return false, err
+		}
+		s.log.Warn("snapshot report refused", "host", hostID, "run", runID, "epoch", epoch, "err", err)
+		// Unless the placement's snapshot was recorded from an earlier
+		// report: that one stays the placement's. The runner is told to
+		// drop the files of the reported snapshot id unless it is that one.
+		if err := tx.QueryRow(ctx, `UPDATE placements SET snapshot_refused = NOT EXISTS (SELECT 1 FROM snapshots WHERE placement_id = $1)
+			WHERE id = $1 RETURNING NOT EXISTS (SELECT 1 FROM snapshots WHERE id = $2 AND placement_id = $1)`,
+			placementID, sd.Manifest.SnapshotID).Scan(&refused); err != nil {
+			return false, err
+		}
+		return refused, addEvent(ctx, tx, tenantID, runID, epoch, "snapshot.failed", map[string]any{"error": foreignBlobsReason})
+	}
+	if err != nil {
+		return false, err
+	}
+	// A report recorded after a refused one (a restarted runner snapshots
+	// again): the placement's snapshot is the Run's after all.
+	if _, err := sp.Exec(ctx, `UPDATE placements SET snapshot_refused = false WHERE id = $1 AND snapshot_refused`, placementID); err != nil {
+		return false, err
+	}
+	return false, sp.Commit(ctx)
+}
+
+func (s *Server) recordSnapshot(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID, placementID string, epoch, current int, sd proto.SnapshotDone) error {
+	var snapRun, snapPlacement string
+	var snapEpoch int
+	var stored proto.Manifest
+	err := tx.QueryRow(ctx, `SELECT run_id, placement_id, epoch, manifest FROM snapshots WHERE id = $1`,
+		sd.Manifest.SnapshotID).Scan(&snapRun, &snapPlacement, &snapEpoch, &stored)
+	switch {
+	case err == nil && snapRun == runID && snapPlacement == placementID && snapEpoch == epoch && reflect.DeepEqual(stored, sd.Manifest):
+		// Redelivered, if its output and artifacts are the recorded ones too.
+		return recordedBlobsMatch(ctx, tx, runID, epoch, sd)
+	case err == nil:
+		return &foreignBlobError{sd.Manifest.SnapshotID}
+	case !errors.Is(err, pgx.ErrNoRows):
 		return err
-	}
-	if exists {
-		return nil // redelivered
 	}
 	var total int64
 	for _, v := range sd.Manifest.Volumes {
@@ -367,6 +452,35 @@ func (s *Server) applySnapshotDone(ctx context.Context, tx pgx.Tx, tenantID, hos
 	return addEvent(ctx, tx, tenantID, runID, epoch, "snapshot", map[string]any{"snapshotId": sd.Manifest.SnapshotID, "bytes": total, "volumes": len(sd.Manifest.Volumes)})
 }
 
+// recordedBlobsMatch: every output and artifact blob of a redelivered
+// report is already recorded as that blob of this placement. The manifest's
+// volumes were compared with the stored manifest.
+func recordedBlobsMatch(ctx context.Context, tx pgx.Tx, runID string, epoch int, sd proto.SnapshotDone) error {
+	type want struct {
+		id, kind string
+		size     int64
+		sha      string
+	}
+	var ws []want
+	if sd.Output != nil {
+		ws = append(ws, want{sd.Output.BlobID, "output", sd.Output.Size, sd.Output.SHA256})
+	}
+	for _, a := range sd.Artifacts {
+		ws = append(ws, want{a.BlobID, "artifact", a.Size, a.SHA256})
+	}
+	for _, w := range ws {
+		var ok bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM blobs WHERE id = $1 AND run_id = $2 AND epoch = $3
+				AND kind = $4 AND size = $5 AND sha256 = $6)`, w.id, runID, epoch, w.kind, w.size, w.sha).Scan(&ok); err != nil {
+			return err
+		}
+		if !ok {
+			return &foreignBlobError{w.id}
+		}
+	}
+	return nil
+}
+
 // recordSession notes that a Run's placement epoch had session id: one row
 // per (run, epoch, id), its last_seen moved on a repeat.
 func recordSession(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, id string) error {
@@ -375,11 +489,27 @@ func recordSession(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch
 	return err
 }
 
+// insertBlob records a reported blob. The runner names a new blob id in
+// every report, so an id already recorded is accepted only as the same
+// blob of the same placement (a report written again); anything else is a
+// *foreignBlobError.
 func insertBlob(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, hostID, blobID, kind, name string, size int64, sha string) error {
-	_, err := tx.Exec(ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, size, sha256, location, host_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'host', $9) ON CONFLICT (id) DO NOTHING`,
-		blobID, tenantID, runID, epoch, kind, name, size, sha, hostID)
-	return err
+	var gotTenant, gotRun, gotKind, gotSHA string
+	var gotEpoch int
+	var gotSize int64
+	// DO UPDATE (a no-op) rather than DO NOTHING, so the existing row is
+	// returned, locked, to compare.
+	err := tx.QueryRow(ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, size, sha256, location, host_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'host', $9) ON CONFLICT (id) DO UPDATE SET id = blobs.id
+		RETURNING tenant_id, run_id, epoch, kind, size, sha256`,
+		blobID, tenantID, runID, epoch, kind, name, size, sha, hostID).Scan(&gotTenant, &gotRun, &gotEpoch, &gotKind, &gotSize, &gotSHA)
+	if err != nil {
+		return err
+	}
+	if gotTenant != tenantID || gotRun != runID || gotEpoch != epoch || gotKind != kind || gotSize != size || gotSHA != sha {
+		return &foreignBlobError{blobID}
+	}
+	return nil
 }
 
 func (s *Server) applyAdapterEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, ev proto.AdapterEvent) error {
