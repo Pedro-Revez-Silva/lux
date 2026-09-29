@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { LifecycleEvent } from "../../api/index.ts";
-import { emptyWindow, nextGap, olderFrom, windowEvents, withGap, withNewest, withOlder, type EventWindow } from "./eventWindow.ts";
+import { emptyWindow, nextGap, olderFrom, windowEvents, withGap, withNewest, withOlder, withOlderFor, type EventWindow } from "./eventWindow.ts";
 
 const PAGE = 10;
 
@@ -201,5 +201,20 @@ describe("eventWindow", () => {
     expect(ids(w)).toEqual(range(120, 106));
     // A page for the gap that is gone changes nothing.
     expect(withGap(w, gap, s.page(gap), PAGE, 15)).toBe(w);
+  });
+
+  test("an older page read for one view does not land in another", () => {
+    const a = new Stream();
+    a.add(25);
+    const aw = refresh(a, emptyWindow);
+    const before = olderFrom(aw)!;
+    const aOlder = a.page({ before });
+    // B's oldest kept is the same id as A's, so only the key tells them apart.
+    const b = new Stream();
+    b.add(70);
+    const bView = { key: "B", w: withNewest(emptyWindow, b.page({ before: before + PAGE }), PAGE) };
+    expect(olderFrom(bView.w)).toBe(before);
+    expect(withOlderFor(bView, "A", before, aOlder, PAGE)).toBe(bView);
+    expect(ids(withOlderFor({ key: "A", w: aw }, "A", before, aOlder, PAGE).w)).toEqual(range(25, 6));
   });
 });

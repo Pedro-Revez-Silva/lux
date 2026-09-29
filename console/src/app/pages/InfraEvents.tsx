@@ -3,7 +3,7 @@ import { Button, Card, EventTable, IconButton } from "@lux/design-system";
 import { IconRefresh } from "@lux/design-system/icons";
 import { errorText, EVENTS_PAGE, useQuery, type EventRange, type LifecycleEvent } from "../../api/index.ts";
 import { ErrorBlock, ErrorStrip, JsonBlock } from "./common.tsx";
-import { emptyWindow, nextGap, olderFrom, windowEvents, withGap, withNewest, withOlder, type EventWindow } from "./eventWindow.ts";
+import { emptyWindow, nextGap, olderFrom, windowEvents, withGap, withNewest, withOlderFor, type EventWindow, type KeyedWindow } from "./eventWindow.ts";
 import { infraEventSummary } from "./events.ts";
 
 type Page = (range: EventRange, signal?: AbortSignal) => Promise<LifecycleEvent[]>;
@@ -24,7 +24,7 @@ export function InfraEvents({ queryKey, page, interval, subtitle }: { queryKey: 
   pageRef.current = page;
   // Tagged with its key: the page read for another view is not this one's.
   const latest = useQuery(queryKey, async (s) => ({ key: queryKey, events: await pageRef.current({}, s) }), { interval });
-  const [view, setView] = useState<{ key: string; w: EventWindow }>({ key: queryKey, w: emptyWindow });
+  const [view, setView] = useState<KeyedWindow>({ key: queryKey, w: emptyWindow });
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const w = view.key === queryKey ? view.w : emptyWindow;
@@ -66,20 +66,40 @@ export function InfraEvents({ queryKey, page, interval, subtitle }: { queryKey: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gapKey, retry, update]);
 
+  // An older page belongs to the view that asked for it: switching views or
+  // unmounting aborts it, and a response that lands anyway is applied only
+  // to a window still under its key.
+  const olderReq = useRef<AbortController | null>(null);
+  useEffect(
+    () => () => {
+      olderReq.current?.abort();
+      olderReq.current = null;
+      setLoadingOlder(false);
+    },
+    [queryKey],
+  );
   const older = olderFrom(w);
   const loadOlder = useCallback(async () => {
     if (older == null) return;
+    olderReq.current?.abort();
+    const ac = new AbortController();
+    olderReq.current = ac;
+    const key = queryKey;
     setLoadingOlder(true);
     setError(null);
     try {
-      const p = await pageRef.current({ before: older });
-      update((w) => withOlder(w, older, p, EVENTS_PAGE));
+      const p = await pageRef.current({ before: older }, ac.signal);
+      if (ac.signal.aborted) return;
+      setView((v) => withOlderFor(v, key, older, p, EVENTS_PAGE));
     } catch (e) {
-      setError(errorText(e));
+      if (!ac.signal.aborted) setError(errorText(e));
     } finally {
-      setLoadingOlder(false);
+      if (olderReq.current === ac) {
+        olderReq.current = null;
+        setLoadingOlder(false);
+      }
     }
-  }, [older, update]);
+  }, [older, queryKey]);
 
   if (latest.error && !latest.data) return <ErrorBlock error={latest.error} onRetry={latest.refetch} />;
   const events = windowEvents(w);

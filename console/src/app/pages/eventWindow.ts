@@ -127,6 +127,17 @@ export function withOlder(w: EventWindow, before: number, page: LifecycleEvent[]
   return { runs, done: page.length < pageSize };
 }
 
+/** A window and the view (pool or host) it is for. */
+export interface KeyedWindow {
+  key: string;
+  w: EventWindow;
+}
+
+/** withOlder for the view key asked from; v unchanged if the page shows another view now. */
+export function withOlderFor(v: KeyedWindow, key: string, before: number, page: LifecycleEvent[], pageSize: number): KeyedWindow {
+  return v.key === key ? { key, w: withOlder(v.w, before, page, pageSize) } : v;
+}
+
 /** Every event kept, newest first. */
 export function windowEvents(w: EventWindow): LifecycleEvent[] {
   return w.runs.flat();
