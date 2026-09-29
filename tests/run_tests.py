@@ -28,7 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from build import build_agent_images, build_binaries, build_fake_image, build_nested_image  # noqa: E402
+from build import build_agent_images, build_binaries, build_fake_image, build_nested_images  # noqa: E402
 from env import TestEnvironment  # noqa: E402
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -60,12 +60,18 @@ def main() -> None:
     # Agent images are big: build (and ship to hosts) only when their suite runs.
     agent_images = build_agent_images(any("agents" in a for a in pytest_args))
 
-    # The nested image is only for its suite (a full run, or one naming it).
-    # Suites named on the command line (paths); options and their values
-    # are not.
+    # The nested images are only for their suites (a full run, or one naming
+    # them). Suites named on the command line (paths); options and their
+    # values are not.
     selected = [a for a in pytest_args if a.startswith("suites/") or a.endswith(".py")]
-    nested = build_nested_image() if not selected or any("nested" in a for a in selected) else None
-    images = {**agent_images, "nested": nested, **{ref: ref for ref in args.image}}
+    # By file, with or without a node id (suites/test_nested.py::test_x); a
+    # directory (suites/) selects every suite in it.
+    files = [a.split("::")[0].rsplit("/", 1)[-1] for a in selected]
+    every = not selected or "" in files
+    nested, docker = build_nested_images(
+        podman=every or "test_nested.py" in files,
+        docker=every or "test_nested_docker.py" in files)
+    images = {**agent_images, "nested": nested, "docker": docker, **{ref: ref for ref in args.image}}
     binaries = {k: str(v) if v else None for k, v in built.items()}
 
     if args.jobs > 1 and not (args.serve or args.infra_only):

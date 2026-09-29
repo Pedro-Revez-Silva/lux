@@ -82,17 +82,24 @@ def build_fake_image(fake_binary: Path | None) -> str | None:
 
 
 NESTED_IMAGE = "localhost/lux-nested:test"
+DOCKER_IMAGE = "localhost/lux-docker:test"
 
 
-def build_nested_image() -> str:
-    """A workload image with Podman in it, and an alpine archive to run
-    inside (see tests/images/nested)."""
+def build_nested_images(podman: bool, docker: bool) -> tuple[str | None, str | None]:
+    """Workload images with Podman and with Docker in them, each only if
+    asked, and an alpine archive to run inside (see tests/images/nested and
+    tests/images/docker)."""
     from env import ALPINE_IMAGE
+    if not (podman or docker):
+        return None, None
     with tempfile.TemporaryDirectory() as d:
         tar = Path(d) / "alpine.tar"
         subprocess.run(["docker", "save", "-o", str(tar), ALPINE_IMAGE], check=True)
-        _build_image(NESTED_IMAGE, {"alpine.tar": tar}, TESTS_DIR / "images" / "nested" / "Containerfile")
-    return NESTED_IMAGE
+        if podman:
+            _build_image(NESTED_IMAGE, {"alpine.tar": tar}, TESTS_DIR / "images" / "nested" / "Containerfile")
+        if docker:
+            _build_image(DOCKER_IMAGE, {"alpine.tar": tar}, TESTS_DIR / "images" / "docker" / "Containerfile")
+    return (NESTED_IMAGE if podman else None), (DOCKER_IMAGE if docker else None)
 
 
 # The opt-in real-agent suites: the credentials each needs, and where its

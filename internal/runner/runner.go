@@ -100,8 +100,11 @@ type Runner struct {
 	// nestedSeccomp is the seccomp profile for nested-containers Runs, or
 	// "" if this host does not offer them.
 	nestedSeccomp string
-	git           *gitws.Manager
-	mounts        sync.Map // volume name → mountpoint
+	// nestedAppArmor: the host's AppArmor denies unconfined processes new
+	// user namespaces (see nested.go), so nested Runs run unconfined by it.
+	nestedAppArmor bool
+	git            *gitws.Manager
+	mounts         sync.Map // volume name → mountpoint
 	// evictBy is when the provider takes this host away (zero: not
 	// evicting). Stops before it get a grace that leaves time to snapshot
 	// and upload.
@@ -226,6 +229,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			return err
 		}
 		r.nestedSeccomp = p
+		r.nestedAppArmor = appArmorRestrictsUserns(appArmorSysctl)
 	}
 	r.readopt(ctx)
 	go r.uploads.loop(ctx)

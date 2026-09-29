@@ -58,6 +58,9 @@ type ShimConfig struct {
 	// Paths of mounted volumes: their roots are handed to the workload user
 	// when empty (a fresh volume is owned by root).
 	VolumePaths []string `json:"volumePaths,omitempty"`
+	// MadeParents are directories the runner's engine-store mounts make, as
+	// root (in neither the image nor a volume): handed to the workload user.
+	MadeParents []string `json:"madeParents,omitempty"`
 	// Secrets by name: how each is exposed (values arrive with "start").
 	Secrets []spec.Secret `json:"secrets,omitempty"`
 	// ArtifactsDir is watched for on-demand artifacts ($LUX_ARTIFACTS).
