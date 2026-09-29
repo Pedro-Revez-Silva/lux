@@ -220,6 +220,10 @@ func TestHostAPIReturnsHostFacts(t *testing.T) {
 	}
 }
 
+func (p *fakeLaunchProvider) Describe(ctx context.Context, template json.RawMessage, providerIDs []string) (map[string]Instance, error) {
+	return nil, nil
+}
+
 func (p *fakeLaunchProvider) Retag(ctx context.Context, template json.RawMessage, providerIDs []string, key, value string) error {
 	return nil
 }

@@ -29,6 +29,9 @@ type fakeCloud struct {
 	hidden     map[string]bool
 	terminated []string
 	launched   int
+	// before, if set, runs before each call, outside the lock: a test
+	// blocks a call there to interleave it with other work.
+	before func(ctx context.Context, call string, tags map[string]string) error
 }
 
 type fakeInstance struct {
@@ -46,6 +49,12 @@ func (c *fakeCloud) add(pid string, tags map[string]string) {
 	c.insts[pid] = &fakeInstance{state: "running", tags: maps.Clone(tags)}
 }
 
+func (c *fakeCloud) terminatedIDs() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.terminated)
+}
+
 func (c *fakeCloud) tag(pid, key string) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -59,7 +68,20 @@ func (c *fakeCloud) Launch(ctx context.Context, template json.RawMessage, tags, 
 	return Launched{}, errors.New("fakeCloud: no launches in this test")
 }
 
+func (c *fakeCloud) hook(ctx context.Context, call string, tags map[string]string) error {
+	c.mu.Lock()
+	before := c.before
+	c.mu.Unlock()
+	if before == nil {
+		return nil
+	}
+	return before(ctx, call, tags)
+}
+
 func (c *fakeCloud) Terminate(ctx context.Context, template json.RawMessage, pid string) error {
+	if err := c.hook(ctx, "Terminate", nil); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.terminated = append(c.terminated, pid)
@@ -70,6 +92,10 @@ func (c *fakeCloud) Terminate(ctx context.Context, template json.RawMessage, pid
 }
 
 func (c *fakeCloud) Instances(ctx context.Context, template json.RawMessage, tags map[string]string) (map[string]Instance, error) {
+	// Evaluated after the hook: a blocked listing answers as of its return.
+	if err := c.hook(ctx, "Instances", tags); err != nil {
+		return nil, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := map[string]Instance{}
@@ -85,7 +111,26 @@ func (c *fakeCloud) Instances(ctx context.Context, template json.RawMessage, tag
 	return out, nil
 }
 
+// Describe answers by id, whatever the listings show (hidden).
+func (c *fakeCloud) Describe(ctx context.Context, template json.RawMessage, pids []string) (map[string]Instance, error) {
+	if err := c.hook(ctx, "Describe", nil); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := map[string]Instance{}
+	for _, pid := range pids {
+		if i := c.insts[pid]; i != nil {
+			out[pid] = Instance{State: i.state, Tags: maps.Clone(i.tags)}
+		}
+	}
+	return out, nil
+}
+
 func (c *fakeCloud) Retag(ctx context.Context, template json.RawMessage, pids []string, key, value string) error {
+	if err := c.hook(ctx, "Retag", map[string]string{key: value}); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.deny {
@@ -97,6 +142,11 @@ func (c *fakeCloud) Retag(ctx context.Context, template json.RawMessage, pids []
 		}
 	}
 	return nil
+}
+
+// renameConfirmed renames as a caller who typed the pool's name.
+func renameConfirmed(ctx context.Context, s *Server, tenantID, from, to string, dryRun bool) (PoolRenamed, error) {
+	return s.rename(ctx, tenantID, renameArgs{From: from, To: to, Confirm: from, DryRun: dryRun})
 }
 
 // renameFixture: tenant t1's ec2 pool "burst" with two live hosts (i-1,
@@ -130,6 +180,10 @@ func newRenameFixture(t *testing.T, settled bool) *renameFixture {
 			VALUES ('h`+h+`', 't1', 'burst-h`+h+`', 'burst', 'tok`+h+`', 'ready', 'i-`+h+`', now() - interval '1 hour', true, '{"region":"eu-west-1"}', `+heartbeat+`, now())`)
 		cloud.add("i-"+h, map[string]string{tagManaged: "true", tagDeployment: "d1", tagPool: "t1/burst", tagHost: "h" + h})
 	}
+	// A luxd that follows renames, as every luxd of this version checks in.
+	if err := s.checkIn(ctx); err != nil {
+		t.Fatal(err)
+	}
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES
 		('waiting', 't1', '{"placement":{"pool":"burst"}}', 'provisioning'),
 		('stopped', 't1', '{"placement":{"pool":"burst"}}', 'stopped'),
@@ -140,7 +194,7 @@ func newRenameFixture(t *testing.T, settled bool) *renameFixture {
 
 func (f *renameFixture) rename(t *testing.T, from, to string) PoolRenamed {
 	t.Helper()
-	out, err := renamePool(f.ctx, f.s.db, f.s.log, "t1", from, to, false)
+	out, err := renameConfirmed(f.ctx, f.s, "t1", from, to, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,9 +221,19 @@ func (f *renameFixture) pool(t *testing.T) poolRow {
 // check is one provisioner pass with a provider check.
 func (f *renameFixture) check(t *testing.T, pl poolRow) {
 	t.Helper()
-	if err := f.s.reconcilePool(f.ctx, f.cloud, pl, true); err != nil {
+	if err := f.s.reconcilePool(f.ctx, f.cloud, pl, true, takeLease(t, f.s)); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// takeLease makes s the provisioner.
+func takeLease(t *testing.T, s *Server) *passLease {
+	t.Helper()
+	l, err := s.provisionLease(context.Background())
+	if err != nil || l == nil {
+		t.Fatalf("provisioner lease: %v, %v", l, err)
+	}
+	return l
 }
 
 func (f *renameFixture) query(t *testing.T, q string, args ...any) string {
@@ -188,8 +252,8 @@ func (f *renameFixture) runPool(t *testing.T, id string) string {
 
 func (f *renameFixture) noneTerminated(t *testing.T) {
 	t.Helper()
-	if len(f.cloud.terminated) > 0 {
-		t.Fatalf("instances terminated: %v", f.cloud.terminated)
+	if got := f.cloud.terminatedIDs(); len(got) > 0 {
+		t.Fatalf("instances terminated: %v", got)
 	}
 	if n := f.query(t, `SELECT count(*)::text FROM hosts WHERE state = 'terminated'`); n != "0" {
 		t.Fatalf("%s host rows written off", n)
@@ -268,7 +332,7 @@ func TestRenamePoolStaleProvisionerPass(t *testing.T) {
 // (a host missing from the listings is otherwise written off).
 func TestRenamePoolConvergesAfterACrash(t *testing.T) {
 	f := newRenameFixture(t, true)
-	if _, err := renamePoolTx(f.ctx, f.s.db, "t1", "burst", "burst-eu", false); err != nil {
+	if _, err := f.s.renamePoolTx(f.ctx, "t1", renameArgs{From: "burst", To: "burst-eu", Confirm: "burst"}); err != nil {
 		t.Fatal(err)
 	}
 	// Re-tagged by a luxd that stopped before recording it.
@@ -343,7 +407,7 @@ func TestRenamePoolRefusals(t *testing.T) {
 	}
 	try := func(from, to string, wantStatus int, wantCode string) {
 		t.Helper()
-		_, err := renamePool(f.ctx, f.s.db, f.s.log, "t1", from, to, false)
+		_, err := renameConfirmed(f.ctx, f.s, "t1", from, to, false)
 		if st, code := status(err); st != wantStatus || code != wantCode {
 			t.Errorf("rename %s → %q: %v; want %d %s", from, to, err, wantStatus, wantCode)
 		}
@@ -360,7 +424,7 @@ func TestRenamePoolRefusals(t *testing.T) {
 	// A platform pool may not become "t1/burst": its lux:pool tag value
 	// would be tenant t1's pool burst's.
 	execSQL(t, f.s, f.ctx, `INSERT INTO pools (id, name, provider, template) VALUES ('plat', 'shared', 'ec2', '{}')`)
-	if _, err := renamePool(f.ctx, f.s.db, f.s.log, "", "shared", "t1/burst", false); err == nil {
+	if _, err := renameConfirmed(f.ctx, f.s, "", "shared", "t1/burst", false); err == nil {
 		t.Error("a platform pool renamed to t1/burst")
 	} else if st, code := status(err); st != http.StatusUnprocessableEntity || code != "invalid_pool" {
 		t.Errorf("platform rename to t1/burst: %v", err)
@@ -393,21 +457,21 @@ func TestRenamePoolWithoutHosts(t *testing.T) {
 	s.cfg.ListingLag = time.Millisecond
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('ps', 'lab', 'static'), ('pe', 'burst', 'ec2')`)
-	out, err := renamePool(ctx, s.db, s.log, "", "lab", "lab2", false)
+	out, err := renameConfirmed(ctx, s, "", "lab", "lab2", false)
 	if err != nil || out.Pool.Name != "lab2" || out.Pool.RenamedFrom != nil || out.Hosts != 0 || !out.Pool.Platform {
 		t.Fatalf("static: %+v, %v", out, err)
 	}
-	if _, err := renamePool(ctx, s.db, s.log, "", "lab2", "lab3", false); err != nil {
+	if _, err := renameConfirmed(ctx, s, "", "lab2", "lab3", false); err != nil {
 		t.Fatalf("a static pool renamed again: %v", err)
 	}
-	out, err = renamePool(ctx, s.db, s.log, "", "burst", "burst2", false)
+	out, err = renameConfirmed(ctx, s, "", "burst", "burst2", false)
 	if err != nil || out.Pool.RenamedFrom == nil {
 		t.Fatalf("ec2: %+v, %v", out, err)
 	}
 	cloud := newFakeCloud()
 	pl := poolRow{ID: "pe", Name: "burst2", Provider: "ec2"}
 	time.Sleep(time.Millisecond)
-	if err := s.reconcilePool(ctx, cloud, pl, true); err != nil {
+	if err := s.reconcilePool(ctx, cloud, pl, true, takeLease(t, s)); err != nil {
 		t.Fatal(err)
 	}
 	var renamed *string
@@ -424,7 +488,7 @@ func TestRenamePoolWithoutHosts(t *testing.T) {
 // dryRun counts and renames nothing.
 func TestRenamePoolDryRun(t *testing.T) {
 	f := newRenameFixture(t, false)
-	out, err := renamePool(f.ctx, f.s.db, f.s.log, "t1", "burst", "burst-eu", true)
+	out, err := renameConfirmed(f.ctx, f.s, "t1", "burst", "burst-eu", true)
 	if err != nil || !out.DryRun || out.Hosts != 2 || out.Runs != 2 || out.Pool.Name != "burst" {
 		t.Fatalf("%+v, %v", out, err)
 	}
@@ -432,12 +496,12 @@ func TestRenamePoolDryRun(t *testing.T) {
 		t.Fatal("a dry run renamed")
 	}
 	// Without a name it only counts; with a taken one it says so.
-	out, err = renamePool(f.ctx, f.s.db, f.s.log, "t1", "burst", "", true)
+	out, err = renameConfirmed(f.ctx, f.s, "t1", "burst", "", true)
 	if err != nil || out.Hosts != 2 || out.Runs != 2 {
 		t.Fatalf("dry run without a name: %+v, %v", out, err)
 	}
 	execSQL(t, f.s, f.ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool2', 't1', 'live', 'static')`)
-	if _, err := renamePool(f.ctx, f.s.db, f.s.log, "t1", "burst", "live", true); err == nil {
+	if _, err := renameConfirmed(f.ctx, f.s, "t1", "burst", "live", true); err == nil {
 		t.Fatal("a dry run onto a taken name passed")
 	}
 }

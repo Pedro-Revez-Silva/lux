@@ -25,6 +25,10 @@ type Provider interface {
 	// Instances lists the provider's hosts carrying all the given tags,
 	// by provider id.
 	Instances(ctx context.Context, template json.RawMessage, tags map[string]string) (map[string]Instance, error)
+	// Describe looks hosts up by provider id, which unlike a tag listing
+	// does not lag behind tag changes. An id the provider does not know is
+	// absent from the result, not an error.
+	Describe(ctx context.Context, template json.RawMessage, providerIDs []string) (map[string]Instance, error)
 	// Retag sets one tag on hosts it launched (a pool rename).
 	Retag(ctx context.Context, template json.RawMessage, providerIDs []string, key, value string) error
 }
@@ -121,11 +125,12 @@ func (s *Server) provision(ctx context.Context) error {
 	// Leadership: a lease in the database, not a lock held on a connection
 	// across provider calls. One luxd reconciles at a time; another takes
 	// over when the lease lapses.
-	if ok, err := s.provisionLease(ctx); err != nil || !ok {
+	lease, err := s.provisionLease(ctx)
+	if err != nil || lease == nil {
 		return err
 	}
 	var pools []poolRow
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT `+poolRowColumns+`
 			FROM pools WHERE provider <> 'static'
 			  AND (NOT retired OR renamed_from IS NOT NULL OR EXISTS (SELECT 1 FROM hosts h WHERE h.pool = pools.name
@@ -148,11 +153,11 @@ func (s *Server) provision(ctx context.Context) error {
 		if prov == nil {
 			continue
 		}
-		// Provider calls can be slow: still the provisioner?
-		if ok, err := s.provisionLease(ctx); err != nil || !ok {
-			return err
-		}
-		if err := s.reconcilePool(ctx, prov, pl, checkAlive); err != nil {
+		if err := s.reconcilePool(ctx, prov, pl, checkAlive, lease); err != nil {
+			if errors.Is(err, errFenced) {
+				s.log.Warn("provisioner: lease lost mid-pass; pass abandoned", "pool", pl.Name)
+				return nil
+			}
 			s.log.Warn("pool", "pool", pl.Name, "err", err)
 		}
 	}
@@ -183,15 +188,25 @@ type hostRef struct {
 	ID, ProviderID, Reason string
 	Template               json.RawMessage
 	Draining               bool // not counted in the pool's total
-	// Settled: launched with the tags we list by, long enough ago that the
-	// provider lists it (its listings are eventually consistent), and its
-	// runner is not heartbeating; one missing from the listings is gone.
-	Settled bool
+	// Listable: launched with the tags we list by, long enough ago that
+	// the provider lists it (its listings are eventually consistent).
+	// Settled: that, and its runner is not heartbeating either; one missing
+	// from the listings may be gone.
+	Listable, Settled bool
 }
 
-func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, checkAlive bool) error {
+func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, checkAlive bool, lease *passLease) error {
+	// Provider calls can be slow: still the provisioner, and the same
+	// holding of the lease this pass began with?
+	if err := s.renewLease(ctx, lease); err != nil {
+		return err
+	}
 	var st poolState
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// poolState may write off a launch that never completed.
+		if _, err := s.fenceTx(ctx, tx, lease); err != nil {
+			return err
+		}
 		// The row as of now, held until its hosts are read: a rename that
 		// committed since the pools were listed must not pair the old name
 		// with hosts that carry the new one.
@@ -213,7 +228,9 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	// lost by the usual heartbeat path); instances of this pool that no
 	// live row claims (a launch whose reply was lost) are terminated.
 	if checkAlive {
-		s.reconcileWithProvider(ctx, prov, pl, &st)
+		if err := s.reconcileWithProvider(ctx, prov, pl, &st, lease); err != nil {
+			return err
+		}
 	}
 
 	// Scale down: drain idle hosts beyond what warm and waiting Runs need
@@ -232,11 +249,19 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 		}
 	}
 	for _, h := range st.terminate {
-		if err := prov.Terminate(ctx, h.Template, h.ProviderID); err != nil {
+		err := s.fencedCall(ctx, lease, nil, func(ctx context.Context) error {
+			return prov.Terminate(ctx, h.Template, h.ProviderID)
+		})
+		if errors.Is(err, errFenced) {
+			return err
+		}
+		if err != nil {
 			s.log.Warn("terminate", "host", h.ID, "err", err)
 			continue
 		}
-		s.markTerminated(ctx, h.ID, h.Reason)
+		if err := s.writeOff(ctx, lease, h.ID, h.Reason); err != nil {
+			return err
+		}
 	}
 
 	// Scale up: enough for what waits plus the warm hosts, at least the
@@ -250,18 +275,21 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	}
 	for i := range max(want, 0) {
 		if i > 0 {
-			if ok, err := s.provisionLease(ctx); err != nil || !ok {
+			if err := s.renewLease(ctx, lease); err != nil {
 				return err
 			}
 		}
-		if err := s.launch(ctx, prov, pl); err != nil {
+		lctx, cancel := lease.bound(ctx)
+		err := s.launch(lctx, prov, pl)
+		cancel()
+		if err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl poolRow, st *poolState) {
+func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl poolRow, st *poolState, lease *passLease) error {
 	// Instances are listed with the template each was launched with (its
 	// region): the pool's current one, and any older ones its hosts carry.
 	templates := map[string]json.RawMessage{string(pl.Template): pl.Template}
@@ -283,12 +311,21 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 	rc := renameCheck{stale: map[string][]string{}, templates: templates}
 	listed := map[string]bool{}
 	listedNew := map[string]bool{} // under the pool's current name
+	type orphan struct {
+		pid  string
+		tmpl json.RawMessage
+		inst Instance
+	}
+	var orphans []orphan
+	var gone []hostRef
 	for key, tmpl := range templates {
 		for i, tags := range tagSets {
-			insts, err := prov.Instances(ctx, tmpl, tags)
+			lctx, cancel := lease.bound(ctx)
+			insts, err := prov.Instances(lctx, tmpl, tags)
+			cancel()
 			if err != nil {
 				s.log.Warn("provider check", "pool", pl.Name, "err", err)
-				return
+				return nil
 			}
 			for pid, inst := range insts {
 				if i == 0 {
@@ -298,9 +335,9 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 					continue // two templates in one region, or both names, list the same instances
 				}
 				listed[pid] = true
-				gone := inst.State == "terminated" || inst.State == "shutting-down"
+				isGone := instanceGone(inst)
 				h, known := rows[pid]
-				if oldTag != "" && !gone && inst.Tags[tagPool] == oldTag {
+				if oldTag != "" && !isGone && inst.Tags[tagPool] == oldTag {
 					if known {
 						rc.stale[key] = append(rc.stale[key], pid)
 					} else {
@@ -310,45 +347,186 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 					}
 				}
 				switch {
-				case known && gone:
-					s.providerGone(ctx, h, st)
-				case !known && !gone && st.launching[inst.Tags[tagHost]]:
+				case known && isGone:
+					gone = append(gone, h)
+				case !known && !isGone && st.launching[inst.Tags[tagHost]]:
 					// A launch whose instance id is not recorded yet (in flight,
 					// or luxd stopped mid-launch): its row claims it.
 					s.recordProviderID(ctx, inst.Tags[tagHost], pid)
-				case !known && !gone:
-					// No live row claims it: an orphan (a launch whose reply was
-					// lost, or a host written off). Terminate it.
-					s.log.Warn("terminating an orphaned instance", "pool", pl.Name, "providerId", pid)
-					if err := prov.Terminate(ctx, tmpl, pid); err != nil {
-						s.log.Warn("terminate orphan", "providerId", pid, "err", err)
-					}
+				case !known && !isGone:
+					orphans = append(orphans, orphan{pid, tmpl, inst})
 				}
 			}
 		}
 	}
+	for _, h := range gone {
+		if err := s.writeOff(ctx, lease, h.ID, "the provider terminated this host"); err != nil {
+			return err
+		}
+		if !h.Draining {
+			st.total--
+		}
+	}
+	for _, o := range orphans {
+		if err := s.terminateOrphan(ctx, prov, pl, lease, o.tmpl, o.pid, o.inst); err != nil {
+			return err
+		}
+	}
+
 	// Terminated instances drop out of the provider's listings after a while
-	// (EC2 purges them): a settled host that is not listed is gone too. It
-	// is terminated first all the same: if a listing was merely incomplete,
-	// a host written off must not run on. Not within listing_lag of a
-	// rename's re-tag, when an instance may briefly match neither name.
+	// (EC2 purges them): a settled host that is not listed may be gone. A
+	// tag listing alone never says so (it lags tag changes, a rename's or a
+	// late one's): each host missing from it is looked up by id. A settled
+	// one the provider says is terminated, or does not know, is written
+	// off; one still up is kept and, if its lux:pool is not the pool's,
+	// re-tagged. Not within listing_lag of a rename's re-tag, when an
+	// instance may briefly match neither name.
 	retagging := pl.RetaggedAt != nil && time.Since(*pl.RetaggedAt) < s.cfg.ListingLag
+	unlisted := map[string][]hostRef{} // by template
 	for pid, h := range rows {
 		if !listedNew[pid] {
 			rc.unlisted = true
 		}
-		if listed[pid] || !h.Settled || retagging {
+		if listed[pid] || !h.Listable || retagging {
 			continue
 		}
-		if err := prov.Terminate(ctx, h.Template, pid); err != nil {
-			s.log.Warn("terminate unlisted", "host", h.ID, "err", err)
-			continue
+		unlisted[string(h.Template)] = append(unlisted[string(h.Template)], h)
+	}
+	for _, hosts := range unlisted {
+		if err := s.checkUnlisted(ctx, prov, pl, st, lease, hosts); err != nil {
+			return err
 		}
-		s.providerGone(ctx, h, st)
 	}
 	if pl.RenamedFrom != nil {
-		s.retagRenamed(ctx, prov, pl, st, rc)
+		return s.retagRenamed(ctx, prov, pl, st, rc, lease)
 	}
+	return nil
+}
+
+func instanceGone(inst Instance) bool {
+	return inst.State == "terminated" || inst.State == "shutting-down"
+}
+
+// checkUnlisted looks up by id settled hosts (of one template) that no
+// listing showed, writes off the ones the provider says are gone, and
+// keeps the others, re-tagging any whose lux:pool is not the pool's.
+func (s *Server) checkUnlisted(ctx context.Context, prov Provider, pl poolRow, st *poolState, lease *passLease, hosts []hostRef) error {
+	pids := make([]string, len(hosts))
+	for i, h := range hosts {
+		pids[i] = h.ProviderID
+	}
+	dctx, cancel := lease.bound(ctx)
+	insts, err := prov.Describe(dctx, hosts[0].Template, pids)
+	cancel()
+	if err != nil {
+		s.log.Warn("provider check: describing unlisted hosts; nothing done this pass", "pool", pl.Name, "err", err)
+		return nil
+	}
+	// The pool's name as this pass read it, only to spot a tag that
+	// differs; retagOne re-tags with the name the host row has then.
+	want := poolTagValue(pl.TenantID, pl.Name)
+	for _, h := range hosts {
+		inst, known := insts[h.ProviderID]
+		if (!known || instanceGone(inst)) && h.Settled {
+			if err := s.writeOff(ctx, lease, h.ID, "the provider terminated this host"); err != nil {
+				return err
+			}
+			if !h.Draining {
+				st.total--
+			}
+			continue
+		}
+		if !known || instanceGone(inst) {
+			continue // its runner still heartbeats: the reaper decides
+		}
+		s.log.Warn("provider check: a host missing from its pool's listing is still up; kept",
+			"pool", pl.Name, "host", h.ID, "providerId", h.ProviderID, "state", inst.State, "lux:pool", inst.Tags[tagPool])
+		if inst.Tags[tagPool] == want || inst.Tags[tagHost] != h.ID {
+			continue
+		}
+		if err := s.retagOne(ctx, prov, lease, h.Template, h.ProviderID, h.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// terminateOrphan ends an instance of the pool that no live host row read
+// by this pass claims (a launch whose reply was lost, or a host written
+// off) — unless, checked again at the last moment, a live host row of the
+// pool's owner does claim it, under whatever pool name: a rename or a
+// launch may have committed after the pass read its rows.
+func (s *Server) terminateOrphan(ctx context.Context, prov Provider, pl poolRow, lease *passLease, tmpl json.RawMessage, pid string, inst Instance) error {
+	hostID := inst.Tags[tagHost]
+	var claimed bool
+	var pool string
+	err := s.fencedCall(ctx, lease, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `UPDATE hosts SET provider_id = coalesce(provider_id, $3)
+			WHERE id = $1 AND coalesce(tenant_id, '') = coalesce($2, '') AND state <> 'terminated'
+			  AND coalesce(provider_id, $3) = $3
+			RETURNING pool`, hostID, pl.TenantID, pid).Scan(&pool)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		claimed = err == nil
+		return err
+	}, func(ctx context.Context) error {
+		if claimed {
+			return nil
+		}
+		s.log.Warn("terminating an orphaned instance", "pool", pl.Name, "providerId", pid)
+		return prov.Terminate(ctx, tmpl, pid)
+	})
+	if errors.Is(err, errFenced) {
+		return err
+	}
+	if err != nil {
+		s.log.Warn("terminate orphan", "providerId", pid, "err", err)
+		return nil
+	}
+	if !claimed {
+		return nil
+	}
+	s.log.Warn("provider check: an instance no host row read by this pass claimed is its host's; kept",
+		"pool", pl.Name, "host", hostID, "providerId", pid, "hostPool", pool, "lux:pool", inst.Tags[tagPool])
+	if inst.Tags[tagPool] == poolTagValue(pl.TenantID, pool) {
+		return nil
+	}
+	return s.retagOne(ctx, prov, lease, tmpl, pid, hostID)
+}
+
+// retagOne sets an instance's lux:pool to its host row's pool, read at
+// the call (a rename may have moved it since the pass began); a refusal is
+// logged and retried by a later pass.
+func (s *Server) retagOne(ctx context.Context, prov Provider, lease *passLease, tmpl json.RawMessage, pid, hostID string) error {
+	var value string
+	err := s.fencedCall(ctx, lease, func(tx pgx.Tx) error {
+		var tenantID *string
+		var pool string
+		err := tx.QueryRow(ctx, `SELECT tenant_id, pool FROM hosts WHERE id = $1 AND provider_id = $2 AND state <> 'terminated'`,
+			hostID, pid).Scan(&tenantID, &pool)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		value = poolTagValue(tenantID, pool)
+		return err
+	}, func(ctx context.Context) error {
+		if value == "" {
+			return nil
+		}
+		return prov.Retag(ctx, tmpl, []string{pid}, tagPool, value)
+	})
+	if errors.Is(err, errFenced) {
+		return err
+	}
+	if err != nil {
+		s.log.Warn("re-tagging an instance", "providerId", pid, "lux:pool", value, "err", err)
+		return nil
+	}
+	if value != "" {
+		s.log.Warn("provider check: instance re-tagged with its pool's current name", "providerId", pid, "lux:pool", value)
+	}
+	return nil
 }
 
 func (s *Server) recordProviderID(ctx context.Context, hostID, pid string) {
@@ -358,13 +536,6 @@ func (s *Server) recordProviderID(ctx context.Context, hostID, pid string) {
 	})
 	if err != nil {
 		s.log.Warn("record provider id", "host", hostID, "err", err)
-	}
-}
-
-func (s *Server) providerGone(ctx context.Context, h hostRef, st *poolState) {
-	s.markTerminated(ctx, h.ID, "the provider terminated this host")
-	if !h.Draining {
-		st.total--
 	}
 }
 
@@ -418,8 +589,8 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 			coalesce(h.last_placement_ended_at, h.registered_at, h.created_at) < now() - $3::interval,
 			h.provision_requested_at < now() - $4::interval,
 			coalesce(h.lost_at < now() - $6::interval, false),
-			h.tagged AND h.provision_requested_at < now() - $8::interval
-			  AND coalesce(h.last_heartbeat < now() - $7::interval, true)
+			h.tagged AND h.provision_requested_at < now() - $8::interval,
+			coalesce(h.last_heartbeat < now() - $7::interval, true)
 		FROM hosts h
 		WHERE h.pool = $1 AND coalesce(h.tenant_id, '') = coalesce($2, '') AND h.provision_requested_at IS NOT NULL
 		  AND h.state <> 'terminated'
@@ -432,10 +603,11 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 	for rows.Next() {
 		var h hostRef
 		var state string
-		var draining, busy, pending, idleLong, launchLong, lostLong bool
-		if err := rows.Scan(&h.ID, &h.ProviderID, &h.Template, &state, &draining, &busy, &pending, &idleLong, &launchLong, &lostLong, &h.Settled); err != nil {
+		var draining, busy, pending, idleLong, launchLong, lostLong, silent bool
+		if err := rows.Scan(&h.ID, &h.ProviderID, &h.Template, &state, &draining, &busy, &pending, &idleLong, &launchLong, &lostLong, &h.Listable, &silent); err != nil {
 			return err
 		}
+		h.Settled = h.Listable && silent
 		switch {
 		case h.ProviderID == "" && launchLong:
 			// Launched, but its instance id was never recorded (luxd
@@ -568,20 +740,130 @@ func checkHostQuota(ctx context.Context, tx pgx.Tx, tenantID string) error {
 // instanceID names this luxd process in leases.
 var instanceID = ids.New("luxd")
 
+// errFenced: the provisioner lease was lost, or held by another luxd,
+// since the pass began. The pass stops before acting on what it read.
+var errFenced = errors.New("the provisioner lease changed hands during the pass")
+
+// passLease is a provisioner pass's hold on the lease: the fencing token
+// it began with, and when, by this process's clock, the lease expires at
+// the latest.
+type passLease struct {
+	token   int64
+	expires time.Time
+}
+
+// bound limits a provider call to the lease: cancelled before another luxd
+// can take it over.
+func (l *passLease) bound(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithDeadline(ctx, l.expires)
+}
+
+func (s *Server) provisionLeaseDuration() time.Duration {
+	return max(10*s.cfg.Tick, 30*time.Second)
+}
+
 // provisionLease makes this luxd the provisioner for the next while, if
-// no other one is (a row with a holder and an expiry).
-func (s *Server) provisionLease(ctx context.Context) (bool, error) {
-	var ok bool
+// no other one is (a row with a holder and an expiry); nil if another is.
+// A different holder taking the lease draws a new token.
+func (s *Server) provisionLease(ctx context.Context) (*passLease, error) {
+	start := time.Now()
+	var l passLease
+	var left float64
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `INSERT INTO leases (name, holder, expires_at) VALUES ('provisioner', $1, now() + $2::interval)
-			ON CONFLICT (name) DO UPDATE SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at
+		return tx.QueryRow(ctx, `INSERT INTO leases (name, holder, expires_at, token) VALUES ('provisioner', $1, now() + $2::interval, nextval('lease_tokens'))
+			ON CONFLICT (name) DO UPDATE SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at,
+				token = CASE WHEN leases.holder = EXCLUDED.holder THEN leases.token ELSE EXCLUDED.token END
 				WHERE leases.holder = EXCLUDED.holder OR leases.expires_at < now()
-			RETURNING true`, instanceID, interval(max(10*s.cfg.Tick, 30*time.Second))).Scan(&ok)
+			RETURNING token, extract(epoch FROM expires_at - now())::float8`, s.id, interval(s.provisionLeaseDuration())).Scan(&l.token, &left)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return nil, nil
 	}
-	return ok, err
+	if err != nil {
+		return nil, err
+	}
+	// Measured from before the transaction began: never later than the
+	// database's own expiry.
+	l.expires = start.Add(time.Duration(left * float64(time.Second)))
+	return &l, nil
+}
+
+// renewLease extends the pass's lease, or says it is fenced: another luxd
+// took it (a different token) or it could not be renewed.
+func (s *Server) renewLease(ctx context.Context, l *passLease) error {
+	now, err := s.provisionLease(ctx)
+	if err != nil {
+		return err
+	}
+	if now == nil || now.token != l.token {
+		return errFenced
+	}
+	l.expires = now.expires
+	return nil
+}
+
+// fenceTx checks, in tx, that the pass still holds the lease it began
+// with (same holder, same token, not expired) and renews it. The lease row
+// stays locked until tx ends, so no other luxd takes the lease between
+// this check and what tx decides. It returns when the lease expires, by
+// this process's clock.
+func (s *Server) fenceTx(ctx context.Context, tx pgx.Tx, l *passLease) (time.Time, error) {
+	start := time.Now()
+	var left float64
+	err := tx.QueryRow(ctx, `UPDATE leases SET expires_at = now() + $3::interval
+		WHERE name = 'provisioner' AND holder = $1 AND token = $2 AND expires_at > now()
+		RETURNING extract(epoch FROM expires_at - now())::float8`, s.id, l.token, interval(s.provisionLeaseDuration())).Scan(&left)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, errFenced
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return start.Add(time.Duration(left * float64(time.Second))), nil
+}
+
+// fencedCall runs check (may be nil) in a transaction that confirms the
+// lease, then call with a deadline no later than the lease's expiry. It
+// returns errFenced, without calling, if the lease changed hands.
+func (s *Server) fencedCall(ctx context.Context, l *passLease, check func(pgx.Tx) error, call func(context.Context) error) error {
+	var until time.Time
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var err error
+		if until, err = s.fenceTx(ctx, tx, l); err != nil {
+			return err
+		}
+		if check != nil {
+			return check(tx)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	l.expires = until
+	cctx, cancel := context.WithDeadline(ctx, until)
+	defer cancel()
+	return call(cctx)
+}
+
+// writeOff marks a provisioned host terminated, if the pass still holds
+// its lease.
+func (s *Server) writeOff(ctx context.Context, l *passLease, hostID, reason string) error {
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if _, err := s.fenceTx(ctx, tx, l); err != nil {
+			return err
+		}
+		return s.markTerminatedTx(ctx, tx, hostID, reason)
+	})
+	if errors.Is(err, errFenced) {
+		return err
+	}
+	if err != nil {
+		s.log.Warn("mark terminated", "host", hostID, "err", err)
+		return nil
+	}
+	s.hub.Disconnect(hostID)
+	return nil
 }
 
 // releaseProvisionLease gives the lease up, if this luxd holds it.
@@ -589,7 +871,7 @@ func (s *Server) releaseProvisionLease() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `DELETE FROM leases WHERE name = 'provisioner' AND holder = $1`, instanceID)
+		_, err := tx.Exec(ctx, `DELETE FROM leases WHERE name = 'provisioner' AND holder = $1`, s.id)
 		return err
 	})
 	if err != nil {

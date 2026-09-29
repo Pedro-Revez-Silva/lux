@@ -312,8 +312,9 @@ func (s *Server) routes(api huma.API) {
 	}, "read", streamed(s, s.serveFeed))
 	register(s, api, huma.Operation{
 		OperationID: "putPool", Method: http.MethodPost, Path: "/v1/pools", Tags: []string{"pools"},
-		Summary: "Create or update a pool",
-		Errors:  []int{http.StatusUnprocessableEntity},
+		Summary:     "Create or update a pool",
+		Description: "409 pool_name_reserved for a name an unfinished rename has left; 409 rename_in_progress to change the provider of a pool whose rename is unfinished.",
+		Errors:      []int{http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "admin", forTenant(s.putPool))
 	register(s, api, huma.Operation{
 		OperationID: "deletePool", Method: http.MethodDelete, Path: "/v1/pools/{name}", Tags: []string{"pools"},
@@ -328,7 +329,10 @@ func (s *Server) routes(api huma.API) {
 		Description: "Its hosts, host tokens and Runs not yet final follow in one step: they name the new pool from then on, and Runs waiting for it still schedule. " +
 			"Final Runs keep the spec they ran with. A provisioned pool's instances stay up and are re-tagged with the new name (lux:pool) by the provisioner; " +
 			"until that is done the pool lists `renamedFrom`, its old name stays reserved and the pool cannot be renamed again (409 rename_in_progress). " +
-			"409 pool_exists if the new name is taken, by a live or retired pool of the tenant; 422 for an invalid name. " +
+			"409 pool_exists if the new name is taken, by a live or retired pool of the tenant, or, for a platform pool, by a pool of a tenant whose Runs would follow the rename; 422 invalid_pool for a name outside the pool-name rule (a name kept from before the rule is never given anew). " +
+			"While the pool has hosts, `confirm` must be its current name (409 confirm_required). " +
+			"409 rename_cooldown for a provisioned pool whose previous rename finished within the provisioner lease plus listing_lag; " +
+			"409 rename_unsupported_by_deployment while a luxd that cannot follow a rename (an older version) is running. " +
 			"A tenant's own pools; with an operator key and no tenant, a platform pool. dryRun counts what would follow without renaming.",
 		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "admin", s.renamePool)
@@ -1969,6 +1973,9 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	}
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		if err := CheckPoolNameFree(ctx, tx, p.TenantID, pl.Name); err != nil {
+			return err
+		}
+		if err := CheckPoolProviderChange(ctx, tx, p.TenantID, pl.Name, pl.Provider); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,

@@ -1098,6 +1098,9 @@ components:
     RenamePoolRequest:
       additionalProperties: false
       properties:
+        confirm:
+          description: The pool's current name. Required while the pool has hosts that are not terminated (409 confirm_required otherwise), so a rename confirmed against counts that have since changed is refused.
+          type: string
         name:
           description: The new name.
           examples:
@@ -3172,7 +3175,10 @@ paths:
       tags:
         - pools
     post:
-      description: Needs the `admin` scope.
+      description: |-
+        409 pool_name_reserved for a name an unfinished rename has left; 409 rename_in_progress to change the provider of a pool whose rename is unfinished.
+
+        Needs the `admin` scope.
       operationId: putPool
       parameters:
         - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
@@ -3212,6 +3218,12 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
           description: Forbidden
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
         "422":
           content:
             application/json:
@@ -3299,7 +3311,7 @@ paths:
   /v1/pools/{name}/rename:
     post:
       description: |-
-        Its hosts, host tokens and Runs not yet final follow in one step: they name the new pool from then on, and Runs waiting for it still schedule. Final Runs keep the spec they ran with. A provisioned pool's instances stay up and are re-tagged with the new name (lux:pool) by the provisioner; until that is done the pool lists `renamedFrom`, its old name stays reserved and the pool cannot be renamed again (409 rename_in_progress). 409 pool_exists if the new name is taken, by a live or retired pool of the tenant; 422 for an invalid name. A tenant's own pools; with an operator key and no tenant, a platform pool. dryRun counts what would follow without renaming.
+        Its hosts, host tokens and Runs not yet final follow in one step: they name the new pool from then on, and Runs waiting for it still schedule. Final Runs keep the spec they ran with. A provisioned pool's instances stay up and are re-tagged with the new name (lux:pool) by the provisioner; until that is done the pool lists `renamedFrom`, its old name stays reserved and the pool cannot be renamed again (409 rename_in_progress). 409 pool_exists if the new name is taken, by a live or retired pool of the tenant, or, for a platform pool, by a pool of a tenant whose Runs would follow the rename; 422 invalid_pool for a name outside the pool-name rule (a name kept from before the rule is never given anew). While the pool has hosts, `confirm` must be its current name (409 confirm_required). 409 rename_cooldown for a provisioned pool whose previous rename finished within the provisioner lease plus listing_lag; 409 rename_unsupported_by_deployment while a luxd that cannot follow a rename (an older version) is running. A tenant's own pools; with an operator key and no tenant, a platform pool. dryRun counts what would follow without renaming.
 
         Needs the `admin` scope.
       operationId: renamePool

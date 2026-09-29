@@ -293,7 +293,7 @@ func (s *Server) Run(ctx context.Context) error {
 		go func() { errc <- psrv.ListenAndServe() }()
 		s.log.Info("previews listening", "addr", s.cfg.Preview.Listen, "domain", s.cfg.Preview.Domain)
 	}
-	s.wg.Add(9)
+	s.wg.Add(10)
 	go func() { defer s.wg.Done(); s.ticketReaper(ctx) }()
 	go func() { defer s.wg.Done(); s.schedulerLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.provisionerLoop(ctx) }()
@@ -303,6 +303,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() { defer s.wg.Done(); s.listenLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.costLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.priceLoop(ctx) }()
+	go func() { defer s.wg.Done(); s.checkInLoop(ctx) }()
 	go func() { errc <- srv.ListenAndServe() }()
 	s.log.Info("luxd listening", "addr", s.cfg.Listen)
 	select {

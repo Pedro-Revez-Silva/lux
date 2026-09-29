@@ -613,7 +613,9 @@ again (pools ls shows RENAMED FROM).`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var out server.PoolRenamed
-			if err := a.c.Do(ctxOf(cmd), "POST", "/v1/pools/"+url.PathEscape(args[0])+"/rename", map[string]string{"name": args[1]}, &out); err != nil {
+			// The current name, typed as an argument, is the confirmation a
+			// pool with hosts needs.
+			if err := a.c.Do(ctxOf(cmd), "POST", "/v1/pools/"+url.PathEscape(args[0])+"/rename", map[string]string{"name": args[1], "confirm": args[0]}, &out); err != nil {
 				return err
 			}
 			if a.output == "json" {

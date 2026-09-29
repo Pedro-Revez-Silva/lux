@@ -107,3 +107,24 @@ def test_a_rename_whose_retag_is_refused_terminates_nothing(lux, ec2):
     finally:
         ec2.deny_create_tags = False
         lux.run("pools", "rm", "burst-eu", check=False)
+
+
+def test_a_host_missing_from_its_listing_is_described_and_kept(lux, ec2):
+    """A live instance whose lux:pool no longer names its pool (a late
+    CreateTags from an expired luxd), and which the tag listings miss: luxd
+    looks it up by id, finds it running, keeps it and re-tags it."""
+    fake_only(ec2)
+    pool(lux, ec2, min=1, max=1)
+    [host] = wait_until(lambda: ec2_hosts(lux), 120, 0.3, "no host")
+    [inst] = ec2.running()
+    tag = inst["tags"]["lux:pool"]
+    try:
+        ec2.unlisted.add(inst["id"])
+        ec2.set_tag(inst["id"], "lux:pool", tag + "-stale")
+        # Listed by no name; LUX_LISTING_LAG (4s) after its launch it is
+        # looked up by id, and re-tagged.
+        wait_until(lambda: ec2.running()[0]["tags"]["lux:pool"] == tag, 60, 0.3, "never re-tagged")
+        assert "TerminateInstances" not in ec2.calls, ec2.calls
+        assert [h["name"] for h in ec2_hosts(lux)] == [host["name"]]
+    finally:
+        ec2.unlisted.clear()

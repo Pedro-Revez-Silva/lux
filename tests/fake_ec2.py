@@ -79,6 +79,10 @@ class FakeEC2:
         self.no_boot = False  # launched instances never start a runner
         self.lose_reply = False
         self.deny_create_tags = False  # CreateTags refused, as without IAM's ec2:CreateTags
+        # Instances tag-filtered DescribeInstances calls miss (EC2's
+        # listings lag behind tag changes); a call by InstanceId still
+        # answers for them.
+        self.unlisted: set[str] = set()
         self.notices: dict[str, dict] = {}  # id → spot instance-action
         self.server = ThreadingHTTPServer((env.gateway, 0), self._handler())
         self.url = f"http://{env.gateway}:{self.server.server_address[1]}"
@@ -121,6 +125,12 @@ class FakeEC2:
     def kill(self, instance_id: str):
         """An instance vanishing behind lux's back."""
         self._terminate(instance_id)
+
+    def set_tag(self, instance_id: str, key: str, value: str):
+        """A tag changed behind luxd's back: a CreateTags from an expired
+        luxd that lands late."""
+        with self.lock:
+            self.instances[instance_id]["tags"][key] = value
 
     def purge(self, instance_id: str):
         """EC2 forgetting a terminated instance (it answers NotFound)."""
@@ -283,6 +293,8 @@ class FakeEC2:
             if missing:  # as EC2: unknown InstanceIds fail the call; filters do not
                 raise FakeError("InvalidInstanceID.NotFound", f"The instance IDs '{', '.join(missing)}' do not exist")
             chosen = ids or list(self.instances)
+            if filters and not ids:
+                chosen = [c for c in chosen if c not in self.unlisted]
             for name, values in filters.items():
                 if name == "instance-id":
                     chosen = [c for c in chosen if c in values]
