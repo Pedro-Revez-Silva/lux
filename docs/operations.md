@@ -146,7 +146,17 @@ reach S3 in the background:
 
 1. The runner uploads each blob with `PUT /runner/v1/blobs/{id}`. luxd streams
    it into S3 and verifies its sha256 on the way. Runners never hold S3
-   credentials.
+   credentials. A snapshot report is validated against its Run's blob
+   records; a report that does not match is refused whole (a
+   `snapshot.failed` event on the Run, which keeps its previous snapshot
+   and is not resumed automatically, even when the same placement
+   reported an accepted snapshot before). A redelivered report must match
+   the recorded manifest, output and artifacts exactly. The Run's state
+   reason says so; a resume starts it from that previous snapshot. A Run
+   with no previous snapshot is not resumable (409 `no_snapshot`, and
+   left out of `lux ls --resumable`) unless `--from-snapshot` names one.
+   The runner deletes the refused snapshot's files instead of uploading
+   them.
 2. The host keeps its local copy, so a resume there moves nothing. It
    deletes the copy when:
    - luxd tells it the Run now runs elsewhere (from S3), or
@@ -155,10 +165,13 @@ reach S3 in the background:
    A copy is never deleted before its upload finished.
 3. A runner downloads a snapshot through a presigned S3 URL, valid for 15
    minutes: it asks `GET /runner/v1/blobs/{id}`, and luxd redirects it only
-   for blobs of a Run placed on that host. Artifacts are downloaded through
-   luxd, which decompresses them (blobs are stored zstd) and sends the file
-   with its length and sha256 (`X-Lux-SHA256`), so a download cut short is
-   detected.
+   for the volumes of the snapshot a Run placed on that host is restoring
+   (recorded by the placement that took that snapshot).
+   The assignment carries each volume's size and sha256 as luxd recorded
+   them, and the runner checks what it restores against them. Artifacts are
+   downloaded through luxd, which decompresses them (blobs are stored zstd)
+   and sends the file with its length and sha256 (`X-Lux-SHA256`), so a
+   download cut short is detected.
 4. Retention deletes a finished Run's blobs from S3 after the tenant's
    `retention_days`.
 

@@ -174,6 +174,19 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 				}
 				continue
 			}
+			// The snapshot is checked before a host is looked for, so a Run
+			// that cannot restore it fails instead of waiting (for its
+			// upload, say); assign checks it again.
+			if r.SnapshotID != nil {
+				_, err := restoreManifest(ctx, tx, r.ID, *r.SnapshotID)
+				failed, err := s.failUnrestorable(ctx, tx, r, err)
+				if err != nil {
+					return err
+				}
+				if failed {
+					continue
+				}
+			}
 			h, wait, err := s.pickHost(ctx, tx, r, hosts)
 			if err != nil {
 				return err
@@ -184,8 +197,12 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 				}
 				continue
 			}
-			if err := s.assign(ctx, tx, r, h); err != nil {
+			failed, err := s.failUnrestorable(ctx, tx, r, s.assign(ctx, tx, r, h))
+			if err != nil {
 				return err
+			}
+			if failed {
+				continue
 			}
 			notify = append(notify, h.ID)
 		}
@@ -470,6 +487,14 @@ func (s *Server) noHost(ctx context.Context, tx pgx.Tx, r pendingRun, wait strin
 // assign creates the next placement: a new epoch, fenced. Everything the
 // previous placement reports from now on is stale.
 func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candidateHost) error {
+	var snap *proto.Manifest
+	if r.SnapshotID != nil {
+		m, err := restoreManifest(ctx, tx, r.ID, *r.SnapshotID)
+		if err != nil {
+			return err
+		}
+		snap = m
+	}
 	epoch := r.Epoch + 1
 	placementID := ids.New(ids.Placement)
 	_, err := tx.Exec(ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, lease_expires_at)
@@ -503,14 +528,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 
 	a := proto.Assign{RunID: r.ID, TenantID: r.TenantID, Epoch: epoch, Spec: r.Spec, ImageResolved: r.ImageResolved}
 	if r.SnapshotID != nil || r.SessionID != "" {
-		a.Resume = &proto.ResumeInfo{SessionID: r.SessionID}
-		if r.SnapshotID != nil {
-			var m proto.Manifest
-			if err := tx.QueryRow(ctx, `SELECT manifest FROM snapshots WHERE id = $1`, *r.SnapshotID).Scan(&m); err != nil {
-				return err
-			}
-			a.Resume.Snapshot = &m
-		}
+		a.Resume = &proto.ResumeInfo{SessionID: r.SessionID, Snapshot: snap}
 	}
 	if len(r.PendingInput) > 0 {
 		var in proto.Input
@@ -532,6 +550,76 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	h.UsedDisk += int64(r.Spec.Resources.Disk)
 	h.Tenants = append(h.Tenants, r.TenantID)
 	return nil
+}
+
+// foreignSnapshotReason: why a Run whose snapshot cannot be restored failed.
+const foreignSnapshotReason = "its snapshot does not match this Run's blob records"
+
+// failUnrestorable fails a queued Run whose snapshot restoreManifest
+// refused (err a *foreignBlobError), and reports whether it did. Nothing
+// was written for a placement; resuming the Run again meets the same check.
+func (s *Server) failUnrestorable(ctx context.Context, tx pgx.Tx, r pendingRun, err error) (bool, error) {
+	var foreign *foreignBlobError
+	if !errors.As(err, &foreign) {
+		return false, err
+	}
+	s.log.Warn("resume refused", "run", r.ID, "snapshot", *r.SnapshotID, "err", err)
+	if err := setRunState(ctx, tx, r.TenantID, r.ID, StateFailed, foreignSnapshotReason, r.Epoch); err != nil {
+		return false, err
+	}
+	s.secrets.drop(r.ID)
+	return true, nil
+}
+
+// restoreManifest is the snapshot a placement restores: its stored manifest,
+// with every volume checked to be a volume blob the Run recorded in the
+// snapshot's own placement (epoch), and its size and sha256 taken from that
+// blob's row. A volume that is not is a *foreignBlobError.
+func restoreManifest(ctx context.Context, tx pgx.Tx, runID, snapshotID string) (*proto.Manifest, error) {
+	var m proto.Manifest
+	var epoch int
+	err := tx.QueryRow(ctx, `SELECT manifest, epoch FROM snapshots WHERE id = $1 AND run_id = $2`, snapshotID, runID).Scan(&m, &epoch)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, &foreignBlobError{snapshotID}
+	}
+	if err != nil {
+		return nil, err
+	}
+	type blobRow struct {
+		Size   int64
+		SHA256 string
+	}
+	want := make([]string, len(m.Volumes))
+	for i, v := range m.Volumes {
+		want[i] = v.BlobID
+	}
+	rows, err := tx.Query(ctx, `SELECT id, size, sha256 FROM blobs
+		WHERE id = ANY($1) AND run_id = $2 AND epoch = $3 AND kind = 'volume'`, want, runID, epoch)
+	if err != nil {
+		return nil, err
+	}
+	own := map[string]blobRow{}
+	for rows.Next() {
+		var id string
+		var b blobRow
+		if err := rows.Scan(&id, &b.Size, &b.SHA256); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		own[id] = b
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range m.Volumes {
+		b, ok := own[m.Volumes[i].BlobID]
+		if !ok {
+			return nil, &foreignBlobError{m.Volumes[i].BlobID}
+		}
+		m.Volumes[i].Size, m.Volumes[i].SHA256 = b.Size, b.SHA256
+	}
+	return &m, nil
 }
 
 // requestResume queues a stopped or lost Run for a new placement.

@@ -208,6 +208,27 @@ func (r *Runner) markReported(snapID string) {
 	}
 }
 
+// snapshotAcked follows luxd's ack of a snapshot's report: its blobs are
+// uploaded, or, if luxd refused the report (and so will never ask for
+// them), its record and blob files are deleted.
+func (r *Runner) snapshotAcked(snapID string, ack proto.Ack) {
+	if !ack.Refused {
+		r.markReported(snapID)
+		return
+	}
+	r.log.Warn("luxd refused the snapshot report; deleting its files", "snapshot", snapID)
+	r.recordMu.Lock()
+	b, err := os.ReadFile(r.recordPath(snapID))
+	r.recordMu.Unlock()
+	if err != nil {
+		return
+	}
+	var rec snapshotRecord
+	if json.Unmarshal(b, &rec) == nil {
+		removeSnapshotFiles(r, snapID, &rec)
+	}
+}
+
 // unreportable: a record whose report will never be sent: its placement
 // was fenced off, or the Run has a later placement on this host.
 func (r *Runner) unreportable(rec *snapshotRecord) bool {
