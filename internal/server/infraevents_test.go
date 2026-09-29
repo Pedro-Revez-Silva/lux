@@ -677,3 +677,24 @@ func TestRecoveredLaunchIsRecorded(t *testing.T) {
 		t.Fatalf("host_launched %+v", evs[0])
 	}
 }
+
+// A template key removed, and nothing else changed, is a change: old→null.
+func TestConfigChangedRecordsARemovedTemplateKey(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	infraFixture(t, s, ctx)
+	tenant := context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+	for _, tmpl := range []map[string]any{{"region": "eu-west-1", "subnet": "subnet-1"}, {"region": "eu-west-1"}} {
+		if _, err := s.putPool(tenant, &poolBody{Body: Pool{Name: "burst", Provider: "ec2", Template: tmpl}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	evs := events(t, s, evConfigChanged)
+	if len(evs) != 2 {
+		t.Fatalf("config_changed events %+v, want two", evs)
+	}
+	want := map[string]any{"template.subnet": map[string]any{"old": "subnet-1", "new": nil}}
+	if got := evs[1].Data["changes"]; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("changes %v, want %v", got, want)
+	}
+}

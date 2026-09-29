@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"reflect"
 	"regexp"
@@ -245,13 +246,18 @@ func ChangePool(ctx context.Context, tx pgx.Tx, tenantID *string, name string, c
 	if err != nil || after == nil {
 		return err
 	}
+	// Every field either side has: a template key removed is old→null.
 	changes := map[string]any{}
-	for k, v := range after.fields {
+	keys := maps.Clone(after.fields)
+	if before != nil {
+		maps.Copy(keys, before.fields)
+	}
+	for k := range keys {
 		var old any
 		if before != nil {
 			old = before.fields[k]
 		}
-		if !reflect.DeepEqual(old, v) {
+		if v := after.fields[k]; !reflect.DeepEqual(old, v) {
 			changes[k] = map[string]any{"old": old, "new": v}
 		}
 	}
