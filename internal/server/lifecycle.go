@@ -420,13 +420,14 @@ func (s *Server) applySnapshotDone(ctx context.Context, tx pgx.Tx, tenantID, hos
 func (s *Server) recordSnapshot(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID, placementID string, epoch, current int, sd proto.SnapshotDone) (recorded bool, err error) {
 	var snapRun, snapPlacement string
 	var snapEpoch int
+	var ownsRecords bool
 	var stored proto.Manifest
-	err = tx.QueryRow(ctx, `SELECT run_id, placement_id, epoch, manifest FROM snapshots WHERE id = $1`,
-		sd.Manifest.SnapshotID).Scan(&snapRun, &snapPlacement, &snapEpoch, &stored)
+	err = tx.QueryRow(ctx, `SELECT run_id, placement_id, epoch, manifest, owns_records FROM snapshots WHERE id = $1`,
+		sd.Manifest.SnapshotID).Scan(&snapRun, &snapPlacement, &snapEpoch, &stored, &ownsRecords)
 	switch {
 	case err == nil && snapRun == runID && snapPlacement == placementID && snapEpoch == epoch && reflect.DeepEqual(stored, sd.Manifest):
 		// Redelivered, if its output and artifacts are the recorded ones too.
-		return false, recordedBlobsMatch(ctx, tx, runID, epoch, sd)
+		return false, recordedBlobsMatch(ctx, tx, runID, epoch, ownsRecords, sd)
 	case err == nil:
 		return false, &foreignBlobError{sd.Manifest.SnapshotID}
 	case !errors.Is(err, pgx.ErrNoRows):
@@ -491,17 +492,14 @@ func insertSnapshot(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID, pla
 // recordedBlobsMatch compares a redelivered report's output and artifacts
 // with those its snapshot recorded: the output blob and artifact rows whose
 // snapshot_id is that snapshot, in full. Another report of the same
-// placement recorded its own, so they are not compared.
-func recordedBlobsMatch(ctx context.Context, tx pgx.Tx, runID string, epoch int, sd proto.SnapshotDone) error {
+// placement recorded its own, so they are not compared. ownsRecords is the
+// snapshot row's owns_records.
+func recordedBlobsMatch(ctx context.Context, tx pgx.Tx, runID string, epoch int, ownsRecords bool, sd proto.SnapshotDone) error {
 	snapID := sd.Manifest.SnapshotID
-	var owns bool
-	if err := tx.QueryRow(ctx, `SELECT owns_records FROM snapshots WHERE id = $1`, snapID).Scan(&owns); err != nil {
-		return err
-	}
 	// Recorded before output and artifact rows carried their snapshot_id:
 	// there is nothing to tell its rows from another report's, so only the
 	// manifest (already compared) is checked.
-	if !owns {
+	if !ownsRecords {
 		return nil
 	}
 	rows, err := tx.Query(ctx, `SELECT id, size, sha256 FROM blobs
