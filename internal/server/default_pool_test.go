@@ -628,3 +628,36 @@ func TestMarkerOnlyBodyFromTheEarlierCLI(t *testing.T) {
 		t.Fatalf("a refused marker moved the mark: %v", got)
 	}
 }
+
+// platform is read-only: a body may carry it (a Pool read back and sent
+// again) only when it says what the caller's pool is. A tenant, or an
+// operator acting for one, claiming a platform pool is refused.
+func TestPoolBodyPlatformMatchesTheCaller(t *testing.T) {
+	s, keys := priceFixture(t)
+	execSQL(t, s, context.Background(), `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pp', NULL, 'plat', 'static')`)
+	if code, body := call(t, s, keys["t1"], "POST", "/v1/pools", map[string]any{"name": "a", "provider": "static", "platform": false}); code != http.StatusOK {
+		t.Fatalf("a tenant's pool with platform false: %d %s", code, body)
+	}
+	for _, c := range []struct {
+		key, path string
+		body      map[string]any
+	}{
+		{keys["t1"], "/v1/pools", map[string]any{"name": "a", "provider": "static", "platform": true}},
+		{keys["t1"], "/v1/pools", map[string]any{"name": "a", "isDefault": true, "platform": true}},
+		{keys["op"], "/v1/pools?tenant=t1", map[string]any{"name": "a", "isDefault": true, "platform": true}},
+	} {
+		code, body := call(t, s, c.key, "POST", c.path, c.body)
+		if code != http.StatusUnprocessableEntity || !strings.Contains(body, "platform") {
+			t.Fatalf("%s %v: %d %s, want 422 naming platform", c.path, c.body, code, body)
+		}
+	}
+	if got := defaultPools(t, s); len(got) != 0 {
+		t.Fatalf("a refused body marked %v", got)
+	}
+	if code, body := call(t, s, keys["op"], "POST", "/v1/pools", map[string]any{"name": "plat", "isDefault": true, "platform": true}); code != http.StatusOK {
+		t.Fatalf("an operator marking a platform pool with platform true: %d %s", code, body)
+	}
+	if got := defaultPools(t, s); len(got) != 1 || got[""] != "plat" {
+		t.Fatalf("defaults %v, want the platform's plat", got)
+	}
+}

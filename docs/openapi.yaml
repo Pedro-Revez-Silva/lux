@@ -954,6 +954,8 @@ components:
         name:
           type: string
         platform:
+          description: A platform pool (no tenant). In a request, true is refused unless the caller acts on the platform's pools (an operator key without a tenant).
+          readOnly: true
           type: boolean
         provider:
           type: string

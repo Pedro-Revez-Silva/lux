@@ -1757,7 +1757,7 @@ type Pool struct {
 	ScaleDownAfter  spec.Duration `json:"scaleDownAfter,omitempty" doc:"How long a provisioned host stays idle before it is released, e.g. 600s; empty: luxd's scale_down_after (default 10m)."`
 	WarmWhileActive bool          `json:"warmWhileActive,omitempty" doc:"Keep warmHosts only while the pool is in use (a Run placed or ended within scaleDownAfter, or one waiting); an idle pool scales down to minHosts."`
 	Shared          bool          `json:"shared"`
-	Platform        bool          `json:"platform"`
+	Platform        bool          `json:"platform" readOnly:"true" doc:"A platform pool (no tenant). In a request, true is refused unless the caller acts on the platform's pools (an operator key without a tenant)."`
 	// HourlyPrice and Currency: a static pool's default price, copied to
 	// each host when it first registers. Changing it does not reprice the
 	// pool's existing hosts (PUT /v1/hosts/{id}/price does, one host).
@@ -1783,7 +1783,7 @@ func (pl *poolInput) UnmarshalJSON(b []byte) error {
 // isDefault set serializes (earlier CLIs sent that); the non-zero ones are
 // returned for the refusal. The decoded values are checked, not the keys:
 // the decoder matches keys case-insensitively, and absent and zero decode
-// alike.
+// alike. platform is checked by putPool against the caller.
 func (pl *Pool) markerOnly() (bool, []string) {
 	if pl.Provider != "" || pl.IsDefault == nil {
 		return false, nil
@@ -1792,7 +1792,7 @@ func (pl *Pool) markerOnly() (bool, []string) {
 	v := reflect.ValueOf(*pl)
 	for i, f := range reflect.VisibleFields(v.Type()) {
 		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
-		if name == "name" || name == "isDefault" {
+		if name == "name" || name == "isDefault" || name == "platform" {
 			continue
 		}
 		fv := v.Field(i)
@@ -1974,6 +1974,12 @@ type poolBody struct {
 func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	p := principal(ctx)
 	pl := Pool(in.Body)
+	// platform is read-only, but a round-tripped Pool carries it: accept
+	// it when it says what the caller's pool is. false and absent decode
+	// alike, so only a platform claim from a tenant's scope is refused.
+	if pl.Platform && p.TenantID != "" {
+		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "platform: true, but this pool is the tenant's; platform pools are an operator's without a tenant")
+	}
 	if marker, extra := pl.markerOnly(); marker && pl.Name != "" && (p.TenantID != "" || p.Operator) {
 		if len(extra) > 0 {
 			return nil, errf(http.StatusUnprocessableEntity, "invalid_pool",
