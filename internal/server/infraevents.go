@@ -34,6 +34,9 @@ import (
 //
 // Lock order, for every transaction that writes events:
 //
+//  0. the pool-name advisory lock, keyed by owner and name (ChangePool):
+//     serialises writes to one pool, including its creation, when there
+//     is no row yet to lock;
 //  1. pool rows, FOR NO KEY UPDATE (ChangePool, deletePool; an event's
 //     foreign key takes KEY SHARE on its pool, which NO KEY UPDATE does
 //     not conflict with, so appending to a pool never waits on its edit);
@@ -240,6 +243,12 @@ func nonNilData(d map[string]any) map[string]any {
 // it is restored. So its history shows where it went and came back, those
 // changes are pool.retired and pool.restored; any other, pool.config_changed.
 func ChangePool(ctx context.Context, tx pgx.Tx, tenantID *string, name string, change func() error) error {
+	// Before the baseline read: a pool with no row yet has nothing for FOR
+	// NO KEY UPDATE to lock, so two first writes would both see none and
+	// both record "created".
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('pool-name:' || coalesce($1::text, '') || '/' || $2, 0))`, tenantID, name); err != nil {
+		return err
+	}
 	before, err := poolSettings(ctx, tx, tenantID, name)
 	if err != nil {
 		return err

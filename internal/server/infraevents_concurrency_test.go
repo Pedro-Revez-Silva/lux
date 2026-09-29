@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -92,20 +93,27 @@ func (h *heldTx) settle(t *testing.T, ctx context.Context, s *Server) bool {
 // advisory lock of owner in tbl (lockStream's key), not on some other lock.
 func (h *heldTx) waitsOnStream(t *testing.T, ctx context.Context, s *Server, tbl eventTable, owner string) {
 	t.Helper()
+	h.waitsOnAdvisory(t, ctx, s, tbl.table+":"+owner)
+}
+
+// waitsOnAdvisory fails unless h is blocked on the advisory lock keyed
+// hashtextextended(key, 0).
+func (h *heldTx) waitsOnAdvisory(t *testing.T, ctx context.Context, s *Server, key string) {
+	t.Helper()
 	if h.settle(t, ctx, s) {
-		t.Fatalf("wrote without waiting for %s %s's stream", tbl.table, owner)
+		t.Fatalf("wrote without waiting for the lock %q", key)
 	}
-	var onStream bool
+	var onLock bool
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `WITH k AS (SELECT hashtextextended($2 || ':' || $3, 0) AS key)
+		return tx.QueryRow(ctx, `WITH k AS (SELECT hashtextextended($2, 0) AS key)
 			SELECT EXISTS (SELECT 1 FROM pg_locks l, k WHERE l.pid = $1 AND NOT l.granted AND l.locktype = 'advisory'
 				AND l.classid = ((k.key >> 32) & 4294967295)::oid AND l.objid = (k.key & 4294967295)::oid AND l.objsubid = 1)`,
-			h.backend, tbl.table, owner).Scan(&onStream)
+			h.backend, key).Scan(&onLock)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if !onStream {
-		t.Fatalf("blocked, but not on %s %s's stream lock", tbl.table, owner)
+	if !onLock {
+		t.Fatalf("blocked, but not on the lock %q", key)
 	}
 }
 
@@ -333,5 +341,37 @@ func TestPoolEditDoesNotBlockItsHostsEvents(t *testing.T) {
 	reg.finish(t, ctx)
 	if !wrote {
 		t.Fatal("a host's pool event waited for an edit of its pool")
+	}
+}
+
+// Two first writes of one pool at once, with different settings: one
+// creates it, the other changes it, and its change says from what to what.
+func TestConcurrentFirstPoolWritesCreateOnce(t *testing.T) {
+	s := testServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	infraFixture(t, s, ctx)
+	set := func(tx pgx.Tx, maxHosts int) error {
+		return ChangePool(ctx, tx, new("t1"), "fresh", func() error {
+			_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, max_hosts) VALUES ($1, 't1', 'fresh', 'ec2', $2)
+				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET max_hosts = EXCLUDED.max_hosts`, ids.New(ids.Pool), maxHosts)
+			return err
+		})
+	}
+	first := holdTx(ctx, s, func(tx pgx.Tx) error { return set(tx, 3) })
+	if !first.settle(t, ctx, s) {
+		t.Fatal("the first write waited on nothing")
+	}
+	second := holdTx(ctx, s, func(tx pgx.Tx) error { return set(tx, 5) })
+	second.waitsOnAdvisory(t, ctx, s, "pool-name:t1/fresh")
+	first.finish(t, ctx)
+	second.finish(t, ctx)
+	evs := events(t, s, evConfigChanged)
+	if len(evs) != 2 || evs[0].Data["created"] != true || evs[1].Data["created"] != false {
+		t.Fatalf("config_changed events %+v, want one created, then one change", evs)
+	}
+	want := map[string]any{"maxHosts": map[string]any{"old": 3.0, "new": 5.0}}
+	if got := evs[1].Data["changes"]; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("second write's changes %v, want %v", got, want)
 	}
 }
