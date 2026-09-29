@@ -746,3 +746,22 @@ func TestDrainRequestedOnlyForANewCauseOrEviction(t *testing.T) {
 		t.Fatalf("drain_requested events after a new cause: %+v, want a third, outdated", evs)
 	}
 }
+
+// A static host registering for the first time is registered and ready.
+func TestStaticHostFirstRegistrationIsReady(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	infraFixture(t, s, ctx)
+	w, err := s.registerHost(ctx, &hostToken{ID: "tok1", TenantID: new("t1"), Pool: "burst"},
+		proto.Hello{Name: "static-1", ProtocolVersion: proto.Version, Arch: "arm64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	types := queryOne[[]string](t, s, `SELECT array_agg(type ORDER BY id) FROM host_events WHERE host_id = $1`, w.HostID)
+	if !slices.Equal(types, []string{evRegistered, evReady}) {
+		t.Fatalf("events %v, want registered then ready", types)
+	}
+	if from := events(t, s, evReady)[0].Data["from"]; from != "new" {
+		t.Fatalf("ready from %v, want new", from)
+	}
+}

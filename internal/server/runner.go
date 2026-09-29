@@ -72,6 +72,8 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 	var outdatedDrained []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var hostID string
+		// created: a static host's first registration, its row made ready.
+		var created bool
 		err := tx.QueryRow(ctx, `SELECT id FROM hosts
 			WHERE coalesce(tenant_id, '') = coalesce($1, '') AND name = $2 AND state <> 'terminated'`,
 			tok.TenantID, h.Name).Scan(&hostID)
@@ -89,6 +91,7 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 				}
 			}
 			if hostID == "" {
+				created = true
 				hostID = ids.New(ids.Host)
 				if tok.TenantID != nil {
 					if err := checkHostQuota(ctx, tx, *tok.TenantID); err != nil {
@@ -167,6 +170,9 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 			if err := hostPoolEvent(ctx, tx, hostID, evHostRegistered, map[string]any{"host": hostID, "name": h.Name}); err != nil {
 				return err
 			}
+		}
+		if created {
+			wasState = "new"
 		}
 		if !draining && wasState != "ready" {
 			if err := hostEvent(ctx, tx, hostID, evReady, map[string]any{"from": wasState}); err != nil {
