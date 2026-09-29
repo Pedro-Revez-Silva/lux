@@ -1,8 +1,13 @@
 package cli
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/marcioapm/lux/internal/spec"
@@ -42,5 +47,39 @@ func TestParseAddRepo(t *testing.T) {
 		if r, err := parseAddRepo(bad); err == nil {
 			t.Errorf("%q: want an error, got %+v", bad, r)
 		}
+	}
+}
+
+// pools set --default alone sends a marker-only body, exactly name and
+// isDefault, which luxd refuses to read as anything else; with a setting,
+// the whole pool.
+func TestPoolsSetDefaultSendsOnlyTheMark(t *testing.T) {
+	var got []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("body: %v", err)
+		}
+		got = append(got, body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	for _, args := range [][]string{{"pools", "set", "a", "--default"}, {"pools", "set", "a", "--default=false"}, {"pools", "set", "a", "--provider", "static", "--default"}} {
+		a := &app{stdin: strings.NewReader(""), stdout: io.Discard, stderr: io.Discard}
+		root := a.root()
+		root.SetArgs(append([]string{"--url", srv.URL, "--api-key", "k"}, args...))
+		if err := root.Execute(); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	if want := (map[string]any{"name": "a", "isDefault": true}); !reflect.DeepEqual(got[0], want) {
+		t.Errorf("--default sent %v, want %v", got[0], want)
+	}
+	if want := (map[string]any{"name": "a", "isDefault": false}); !reflect.DeepEqual(got[1], want) {
+		t.Errorf("--default=false sent %v, want %v", got[1], want)
+	}
+	if got[2]["provider"] != "static" || got[2]["isDefault"] != true {
+		t.Errorf("a full set sent %v", got[2])
 	}
 }

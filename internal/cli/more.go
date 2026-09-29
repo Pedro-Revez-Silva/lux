@@ -577,7 +577,9 @@ alone, --default changes only the mark of an existing pool.`,
 			if cmd.Flags().Changed("default") {
 				p.IsDefault = &isDefault
 				if !slices.ContainsFunc(poolFields, cmd.Flags().Changed) {
-					return a.c.Do(ctxOf(cmd), "POST", "/v1/pools", server.Pool{Name: p.Name, IsDefault: &isDefault}, nil)
+					// Exactly these two fields: server.Pool would send its
+					// zero settings too, which luxd refuses without provider.
+					return a.c.Do(ctxOf(cmd), "POST", "/v1/pools", map[string]any{"name": p.Name, "isDefault": isDefault}, nil)
 				}
 			}
 			if template != "" {
