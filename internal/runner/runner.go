@@ -110,6 +110,7 @@ type Runner struct {
 	// hashed once at startup (a self-update replaces the file, not this
 	// process, so the hash is stable for the process's life).
 	runnerSHA256, shimSHA256 string
+	helpers                  helpers
 }
 
 // mountpoint is where a volume's data is on this host. It never changes for
@@ -233,6 +234,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	go r.usageLoop(ctx)
 	go r.egress.Run(ctx)
 	go r.gcLoop(ctx)
+	go r.helperLoop(ctx)
 	if r.cfg.EC2IMDS != "" {
 		go r.watchSpot(ctx, r.cfg.EC2IMDS)
 	}
@@ -387,9 +389,10 @@ func (r *Runner) assign(ctx context.Context, a proto.Assign) {
 	r.placements[a.RunID] = p
 	r.mu.Unlock()
 	// The Run resumes here, on these volumes: a diff of its last snapshot
-	// still reading them stops first.
+	// never starts now, and one under way stops; the new placement waits
+	// until its container is confirmed gone.
 	if old != nil {
-		old.stopDiffs(errSuperseded)
+		p.volumesFence = old.supersede(errSuperseded)
 	}
 	if old != nil && old.liveState() != "" {
 		// The same Run again with a newer epoch while the old one still

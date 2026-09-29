@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"sync"
 	"time"
@@ -261,6 +262,12 @@ var (
 	// diffCleanupTimeout bounds removing the helper container once the
 	// diff's own time is up.
 	diffCleanupTimeout = 10 * time.Second
+	// volumesWait bounds how long a resume on this host, or a discard,
+	// waits for a snapshot diff's helper to be confirmed gone.
+	volumesWait = 2 * time.Minute
+	// helperSweepEvery is how often helpers whose removal failed are
+	// removed again (see sweepHelpers).
+	helperSweepEvery = 30 * time.Second
 )
 
 const (
@@ -273,6 +280,168 @@ const (
 // errSuperseded cancels a snapshot's diff: the Run resumed on this host,
 // and its volumes are about to change.
 var errSuperseded = errors.New("superseded: the Run resumed on this host")
+
+// helperPrefix names every snapshot diff's helper container.
+const helperPrefix = "lux-diff-"
+
+func helperName(runID string) string { return helperPrefix + runID }
+
+// helpers tracks snapshot diffs' helper containers: those running now,
+// which the sweep leaves alone, and those whose removal could not be
+// confirmed, each with the channel to close once it is gone.
+type helpers struct {
+	mu      sync.Mutex
+	active  map[string]bool
+	pending map[string]chan struct{}
+}
+
+func (h *helpers) setActive(name string, on bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.active == nil {
+		h.active = map[string]bool{}
+	}
+	if on {
+		h.active[name] = true
+	} else {
+		delete(h.active, name)
+	}
+}
+
+// removeHelper removes a helper container and confirms it is gone: a
+// removal podman says succeeded is not enough on its own.
+func (r *Runner) removeHelper(name string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), diffCleanupTimeout)
+	defer cancel()
+	if err := r.pm.Remove(ctx, name); err != nil {
+		return err
+	}
+	exists, err := r.pm.ContainerExists(ctx, name)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("%s still exists after podman rm", name)
+	}
+	return nil
+}
+
+// releaseHelper confirms a helper is gone and closes released; if it
+// cannot, the sweep keeps trying and closes released once it is. The
+// helper's volumes stay fenced (released open) until then.
+func (r *Runner) releaseHelper(name string, released chan struct{}) error {
+	err := r.removeHelper(name)
+	r.helpers.mu.Lock()
+	defer r.helpers.mu.Unlock()
+	delete(r.helpers.active, name)
+	if err == nil {
+		close(released)
+		return nil
+	}
+	if r.helpers.pending == nil {
+		r.helpers.pending = map[string]chan struct{}{}
+	}
+	r.helpers.pending[name] = released
+	return err
+}
+
+// sweepHelpers removes helpers left behind: those whose removal failed
+// (their placement's volumes stay fenced until then) and those a crashed
+// runner left.
+func (r *Runner) sweepHelpers(ctx context.Context) {
+	names, err := r.pm.ContainerNames(ctx, helperPrefix)
+	if err != nil {
+		r.log.Warn("diff helpers: listing", "err", err)
+	}
+	r.helpers.mu.Lock()
+	pending := maps.Clone(r.helpers.pending)
+	var leftover []string
+	for _, n := range names {
+		if !r.helpers.active[n] && pending[n] == nil {
+			leftover = append(leftover, n)
+		}
+	}
+	r.helpers.mu.Unlock()
+	for _, n := range leftover {
+		r.helpers.mu.Lock()
+		started := r.helpers.active[n]
+		r.helpers.mu.Unlock()
+		if started {
+			continue // a diff started since the listing: it is its own
+		}
+		if err := r.removeHelper(n); err != nil {
+			r.log.Warn("diff helpers: removing a leftover", "container", n, "err", err)
+		}
+	}
+	for n, released := range pending {
+		if err := r.removeHelper(n); err != nil {
+			r.log.Warn("diff helpers: still not removed; its Run's volumes stay fenced", "container", n, "err", err)
+			continue
+		}
+		r.log.Info("diff helpers: removed at last", "container", n)
+		r.helpers.mu.Lock()
+		delete(r.helpers.pending, n)
+		r.helpers.mu.Unlock()
+		close(released)
+	}
+}
+
+func (r *Runner) helperLoop(ctx context.Context) {
+	t := time.NewTicker(helperSweepEvery)
+	defer t.Stop()
+	for {
+		r.sweepHelpers(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// volumesFree waits until no snapshot diff's helper has the Run's volumes
+// mounted: the previous placement's (fence) confirmed gone, and with
+// leftover, none left by a runner that restarted mid-diff. Each is bounded
+// by volumesWait.
+func (r *Runner) volumesFree(ctx context.Context, runID string, fence <-chan struct{}, leftover bool) error {
+	name := helperName(runID)
+	if err := awaitRelease(ctx, fence, name); err != nil || !leftover {
+		return err
+	}
+	deadline := time.Now().Add(volumesWait)
+	for {
+		err := r.removeHelper(name)
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("a snapshot diff's container %s could not be removed in %s: %w", name, volumesWait, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// awaitRelease waits, at most volumesWait, for a helper to be confirmed
+// gone (released closed; nil: there was none).
+func awaitRelease(ctx context.Context, released <-chan struct{}, name string) error {
+	if released == nil {
+		return nil
+	}
+	t := time.NewTimer(volumesWait)
+	defer t.Stop()
+	select {
+	case <-released:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return fmt.Errorf("the snapshot diff's container %s still has the Run's volumes mounted: it could not be removed in %s", name, volumesWait)
+	}
+}
 
 // diffBudget is how long a snapshot's diff may take: diffTimeout, or while
 // the host is being evicted, the time left before it goes less a margin
@@ -308,30 +477,42 @@ func (p *placement) startSnapshotDiffs(ctx context.Context, snapID string) {
 	}
 	dctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
 	released, done := make(chan struct{}), make(chan struct{})
+	// Checked and set under one lock with supersede: either the diff
+	// starts and supersede waits for its helper, or it never starts.
 	p.mu.Lock()
-	p.diffCancel, p.diffReleased, p.diffDone = cancel, released, done
+	superseded := p.superseded
+	if superseded == nil {
+		p.diffCancel, p.diffReleased = cancel, released
+	}
+	p.diffDone = done
 	p.mu.Unlock()
 	go func() {
 		defer close(done)
 		defer cancel(nil)
+		if superseded != nil {
+			p.reportSkipped(dctx, snapID, repos, superseded.Error())
+			return
+		}
 		p.snapshotDiffs(dctx, snapID, repos, released)
 	}()
 }
 
-// stopDiffs cancels a snapshot's diff under way for why (nil: lets it
-// finish), and waits until its container no longer has the state volumes
-// mounted.
-func (p *placement) stopDiffs(why error) {
+// supersede hands the Run's volumes on (to a later placement, or to a
+// discard): no snapshot diff starts from now on, one under way is
+// cancelled for why, and the returned channel is closed once its helper
+// container is confirmed gone (nil: none ever started).
+func (p *placement) supersede(why error) <-chan struct{} {
 	p.mu.Lock()
+	if p.superseded == nil {
+		p.superseded = why
+	}
 	cancel, released := p.diffCancel, p.diffReleased
 	p.mu.Unlock()
 	if cancel == nil {
-		return
+		return nil
 	}
-	if why != nil {
-		cancel(why)
-	}
-	<-released
+	cancel(why)
+	return released
 }
 
 // setDiffsFor records the snapshot whose diffs are owed, while this is
@@ -352,12 +533,19 @@ func (p *placement) setDiffsFor(snapID string) {
 // placement's state volumes, stores each patch as a blob, and reports them
 // (snapshot.diffs). A repository it could not diff is reported with its
 // error; nothing here affects the snapshot. released is closed once the
-// helper container is gone.
+// helper container is confirmed gone, which may be after this returns.
 func (p *placement) snapshotDiffs(ctx context.Context, snapID string, repos []proto.DiffRepo, released chan struct{}) {
 	rep := proto.SnapshotDiffs{SnapshotID: snapID}
 	budget, skip := p.r.diffBudget()
-	if skip == "" {
+	if skip != "" {
+		close(released)
+	} else {
 		out, err := p.computeSnapshotDiffs(ctx, repos, budget)
+		if cerr := p.r.releaseHelper(helperName(p.runID), released); cerr != nil {
+			p.r.log.Warn("snapshot diff: its container could not be removed; the Run's volumes stay fenced until it is",
+				"run", p.runID, "epoch", p.epoch, "container", helperName(p.runID), "err", cerr)
+			rep.CleanupFailed = cerr.Error()
+		}
 		switch {
 		case context.Cause(ctx) != nil:
 			skip = context.Cause(ctx).Error()
@@ -367,21 +555,36 @@ func (p *placement) snapshotDiffs(ctx context.Context, snapID string, repos []pr
 			rep.Diffs = out
 		}
 	}
-	close(released)
 	if skip != "" || rep.Error != "" {
 		rep.Skipped = skip
-		why := rep.Error
-		if skip != "" {
-			why = "not computed: " + skip
-		}
 		p.logf("snapshot diff", "skipped", skip, "err", rep.Error)
-		for _, r := range repos {
-			for _, k := range diffKinds {
-				rep.Diffs = append(rep.Diffs, proto.SnapshotDiff{DiffStat: proto.DiffStat{Repo: r.Name, Kind: k, Base: baseOf(r, k), Error: why}})
-			}
-		}
+		rep.Diffs = notComputed(repos, rep)
 	}
 	p.reportDiffs(ctx, rep)
+}
+
+// reportSkipped reports a snapshot diff that was never started.
+func (p *placement) reportSkipped(ctx context.Context, snapID string, repos []proto.DiffRepo, why string) {
+	rep := proto.SnapshotDiffs{SnapshotID: snapID, Skipped: why}
+	p.logf("snapshot diff", "skipped", why)
+	rep.Diffs = notComputed(repos, rep)
+	p.reportDiffs(ctx, rep)
+}
+
+// notComputed is every repository's and kind's entry of a snapshot diff
+// that was skipped or failed as a whole.
+func notComputed(repos []proto.DiffRepo, rep proto.SnapshotDiffs) []proto.SnapshotDiff {
+	why := rep.Error
+	if rep.Skipped != "" {
+		why = "not computed: " + rep.Skipped
+	}
+	var out []proto.SnapshotDiff
+	for _, r := range repos {
+		for _, k := range diffKinds {
+			out = append(out, proto.SnapshotDiff{DiffStat: proto.DiffStat{Repo: r.Name, Kind: k, Base: baseOf(r, k), Error: why}})
+		}
+	}
+	return out
 }
 
 // diffsRecord names the snapshot record of a snapshot's diff blobs.
@@ -438,7 +641,8 @@ func baseOf(r proto.DiffRepo, kind string) string {
 // state volumes read-only at their paths (a tmpfs for git's scratch
 // files), the workload user, the Run's limits, no network, no
 // capabilities. budget bounds it all; removing the container once it is
-// up has its own short timeout.
+// up has its own short timeout. The caller confirms it is gone
+// (releaseHelper).
 func (p *placement) computeSnapshotDiffs(ctx context.Context, repos []proto.DiffRepo, budget time.Duration) ([]proto.SnapshotDiff, error) {
 	user := p.userSpec()
 	if user == "" || p.state.Image == "" {
@@ -446,18 +650,19 @@ func (p *placement) computeSnapshotDiffs(ctx context.Context, repos []proto.Diff
 	}
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	name := containerName(p.runID) + "-diff"
-	remove := func() {
+	name := helperName(p.runID)
+	p.r.helpers.setActive(name, true)
+	// One a crashed runner left behind: never run beside it.
+	if err := p.r.removeHelper(name); err != nil {
+		return nil, fmt.Errorf("a previous diff container is still there: %w", err)
+	}
+	// The moment the budget ends (or the diff is cancelled), the container
+	// goes: podman run then returns. Its removal is confirmed after.
+	defer context.AfterFunc(ctx, func() {
 		c, cancel := context.WithTimeout(context.Background(), diffCleanupTimeout)
 		defer cancel()
 		_ = p.r.pm.Remove(c, name)
-	}
-	// One a crashed runner left behind.
-	_ = p.r.pm.Remove(ctx, name)
-	defer remove()
-	// The moment the budget ends (or the diff is cancelled), the container
-	// goes: podman run then returns.
-	defer context.AfterFunc(ctx, remove)()
+	})()
 	args := []string{"run", "--rm", "--name", name,
 		"--label", LabelManaged + "=true", "--label", LabelRun + "=" + p.runID, "--label", LabelTenant + "=" + p.tenantID,
 		"--userns=auto:size=65536", "--cap-drop=ALL", "--security-opt=no-new-privileges",

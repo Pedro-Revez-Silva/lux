@@ -260,17 +260,29 @@ func (r *Runner) isStaleRun(runID string, epoch int) bool {
 func (r *Runner) discard(ctx context.Context, runID string, beforeEpoch int) {
 	r.mu.Lock()
 	p := r.placements[runID]
+	r.mu.Unlock()
 	if p != nil && p.epoch >= beforeEpoch {
-		r.mu.Unlock()
 		return
+	}
+	// Not while a snapshot diff's helper may still have the volumes
+	// mounted: once it is confirmed gone, or never (the copy stays).
+	if p != nil {
+		if err := r.volumesFree(ctx, runID, p.supersede(errDiscarded), true); err != nil {
+			r.log.Error("discard of the local copy failed; it stays", "run", runID, "err", err)
+			return
+		}
+	}
+	r.mu.Lock()
+	if cur := r.placements[runID]; cur != p {
+		r.mu.Unlock()
+		return // a new placement meanwhile: its volumes now
 	}
 	delete(r.placements, runID)
 	r.mu.Unlock()
-	if p != nil {
-		p.stopDiffs(errors.New("the Run's local copy was discarded"))
-	}
 	r.removeRunLocal(ctx, runID)
 }
+
+var errDiscarded = errors.New("the Run's local copy was discarded")
 
 func (r *Runner) removeRunLocal(ctx context.Context, runID string) {
 	_ = r.pm.Remove(ctx, containerName(runID))

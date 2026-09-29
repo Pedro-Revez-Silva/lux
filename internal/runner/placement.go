@@ -63,11 +63,17 @@ type placement struct {
 	cgroup       string
 	ip           string // the container's address, once looked up
 	// diffCancel cancels a snapshot's diff under way; diffReleased is
-	// closed once its container is gone (see stopDiffs), diffDone once it
-	// is reported.
+	// closed once its container is confirmed gone (see stopDiffs),
+	// diffDone once it is reported. superseded: a later placement of the
+	// Run on this host (or a discard) owns the volumes now, so no
+	// snapshot diff starts; set with diffCancel read, under mu.
 	diffCancel   context.CancelCauseFunc
 	diffReleased chan struct{}
 	diffDone     chan struct{}
+	superseded   error
+	// volumesFence is closed once the previous placement's snapshot diff
+	// no longer has the Run's volumes mounted (nil: nothing to wait for).
+	volumesFence <-chan struct{}
 	// live is the live diff under way, if any.
 	live *liveRun
 }
@@ -213,6 +219,13 @@ func (p *placement) run(ctx context.Context) {
 	_ = writeRunState(p.dir, p.state)
 	p.setPhase("starting")
 	go p.report(ctx, proto.MsgStatus, proto.Status{State: "starting"})
+	// Not a thing touched while the previous placement's snapshot diff may
+	// still read the volumes (the Run's volumes are here only if it was).
+	if err := p.r.volumesFree(ctx, p.runID, p.volumesFence, prev != nil); err != nil {
+		p.logf("placement failed", "stage", "volumes", "err", err)
+		p.finishWithoutContainer(ctx, "failed", "volumes: "+err.Error())
+		return
+	}
 
 	// Until the container starts, a stop cancels whatever is under way.
 	startCtx, cancelStart := context.WithCancel(ctx)

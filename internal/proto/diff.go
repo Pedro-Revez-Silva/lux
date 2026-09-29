@@ -22,8 +22,9 @@ const MsgSnapshotDiffs = "snapshot.diffs"
 // repository or all ({snapshotId, error, repo?, kind?}). EvDiffSkipped: it
 // was not attempted ({snapshotId, reason}). Neither affects the snapshot.
 const (
-	EvDiffFailed  = "diff.failed"
-	EvDiffSkipped = "diff.skipped"
+	EvDiffFailed        = "diff.failed"
+	EvDiffSkipped       = "diff.skipped"
+	EvDiffCleanupFailed = "diff.cleanup_failed" // {snapshotId, error}
 )
 
 // Base kinds: from the commit the repository was cloned at, or from the
@@ -130,6 +131,9 @@ type SnapshotDiffs struct {
 	Diffs      []SnapshotDiff `json:"diffs"`
 	Skipped    string         `json:"skipped,omitempty"`
 	Error      string         `json:"error,omitempty"`
+	// CleanupFailed: the diff's helper container could not be confirmed
+	// removed (why); the runner keeps the Run's volumes fenced until it is.
+	CleanupFailed string `json:"cleanupFailed,omitempty"`
 }
 
 // SnapshotDiff is a diff computed at a snapshot: Blob holds the patch

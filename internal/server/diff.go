@@ -480,6 +480,11 @@ func applySnapshotDiffs(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID 
 	if err := recordSnapshotDiffs(ctx, tx, tenantID, hostID, runID, epoch, sd.SnapshotID, sd.Diffs); err != nil {
 		return err
 	}
+	if sd.CleanupFailed != "" {
+		if err := addEvent(ctx, tx, tenantID, runID, epoch, proto.EvDiffCleanupFailed, map[string]any{"snapshotId": sd.SnapshotID, "error": sd.CleanupFailed}); err != nil {
+			return err
+		}
+	}
 	switch {
 	case sd.Skipped != "":
 		return addEvent(ctx, tx, tenantID, runID, epoch, proto.EvDiffSkipped, map[string]any{"snapshotId": sd.SnapshotID, "reason": sd.Skipped})

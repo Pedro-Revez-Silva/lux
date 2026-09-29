@@ -390,6 +390,39 @@ func (p *Podman) Remove(ctx context.Context, name string) error {
 	return err
 }
 
+// ContainerExists reports whether a container named name exists, in any
+// state; an error when podman cannot tell.
+func (p *Podman) ContainerExists(ctx context.Context, name string) (bool, error) {
+	var stderr bytes.Buffer
+	c := p.cmd(ctx, "container", "exists", name)
+	c.Stderr = &stderr
+	err := c.Run()
+	var ee *exec.ExitError
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.As(err, &ee) && ee.ExitCode() == 1:
+		return false, nil
+	}
+	return false, fmt.Errorf("podman container exists %s: %v: %s", name, err, strings.TrimSpace(stderr.String()))
+}
+
+// ContainerNames lists the containers, in any state, whose names start
+// with prefix.
+func (p *Podman) ContainerNames(ctx context.Context, prefix string) ([]string, error) {
+	out, err := p.Run(ctx, "ps", "-a", "--filter", "name=^"+prefix, "--format", "{{.Names}}")
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, n := range fields(out) {
+		if strings.HasPrefix(n, prefix) {
+			names = append(names, n)
+		}
+	}
+	return names, nil
+}
+
 // ContainerIP is a container's address on a network.
 func (p *Podman) ContainerIP(ctx context.Context, name, network string) (string, error) {
 	out, err := p.Run(ctx, "container", "inspect", "--format",
