@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "bun --hot dev.ts",
+    "mock": "bun mock.ts",
     "build": "bun build.ts",
     "preview": "bun preview.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
   },
   "dependencies": {
     "@lux/design-system": "workspace:*",

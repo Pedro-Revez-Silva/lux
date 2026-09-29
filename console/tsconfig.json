@@ -16,5 +16,5 @@
     "skipLibCheck": true,
     "types": ["bun"]
   },
-  "include": ["src", "dev.ts", "build.ts", "preview.ts"]
+  "include": ["src", "dev.ts", "mock.ts", "build.ts", "preview.ts"]
 }

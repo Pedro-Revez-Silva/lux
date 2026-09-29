@@ -32,6 +32,32 @@
 # cookie Access set when the person signed in; luxd's own consoleUser
 # check reads that cookie directly, so the console keeps working without
 # Access gating /v1 a second time.
+#
+# Previews (optional; nothing below exists unless preview_domain is set):
+# luxd serves a Run's preview ports on a listener of its own, under
+# <name>.<preview_domain>. Setting preview_domain adds a proxied wildcard
+# CNAME *.<preview_domain> to the same tunnel, and an ingress rule
+# sending *.<preview_domain> to http://localhost:<preview_origin_port>
+# (after the luxd hostname rule, before the catch-all 404). luxd's side:
+#
+#   [preview]
+#   domain = "<preview_domain>"
+#   listen = "127.0.0.1:<preview_origin_port>"
+#   auth   = "cloudflare-access"
+#
+# with LUX_PREVIEW_CF_ACCESS_AUD set to this module's
+# preview_access_application_aud output. That comes from a third Access
+# application, on *.<preview_domain>, created when preview_access_emails
+# or preview_access_email_domains is non-empty, with its own allow policy
+# (who may open previews need not match who may open the console).
+#
+# Cloudflare's Universal SSL covers the zone apex and one level of
+# wildcard (*.example.com), not a second-level wildcard such as
+# *.preview.example.com, so previews get a certificate error unless
+# something else covers them: preview_certificate_pack = true orders an
+# Advanced certificate pack for *.<preview_domain> and <preview_domain>
+# (needs Advanced Certificate Manager on the zone); otherwise upload a
+# custom certificate outside this module.
 
 variable "account_id" {
   description = "Cloudflare account id."
@@ -84,6 +110,62 @@ variable "enable_api_bypass" {
   default     = true
 }
 
+variable "preview_domain" {
+  description = "Domain luxd serves Run previews under (luxd's [preview] domain), e.g. \"preview.example.com\" — the domain itself, not \"*.\"-prefixed. Empty (default): no preview DNS, ingress, Access or certificate."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = !startswith(var.preview_domain, "*") && !startswith(var.preview_domain, ".")
+    error_message = "preview_domain is the domain itself (e.g. \"preview.example.com\"); the module adds the \"*.\"."
+  }
+}
+
+variable "preview_origin_port" {
+  description = "Port cloudflared reaches luxd's preview listener on (luxd's [preview] listen = \"127.0.0.1:<port>\")."
+  type        = number
+  default     = 7071
+}
+
+variable "preview_access_emails" {
+  description = "Individual emails Access lets in to previews. This or preview_access_email_domains non-empty creates the preview Access application; requires preview_domain."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = length(var.preview_access_emails) == 0 || var.preview_domain != ""
+    error_message = "preview_access_emails requires preview_domain."
+  }
+}
+
+variable "preview_access_email_domains" {
+  description = "Email domains Access lets in to previews (e.g. [\"example.com\"]); requires preview_domain."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = length(var.preview_access_email_domains) == 0 || var.preview_domain != ""
+    error_message = "preview_access_email_domains requires preview_domain."
+  }
+}
+
+variable "preview_certificate_pack" {
+  description = "Order an Advanced certificate pack (Google CA, TXT validation, 90 days) for *.<preview_domain> and <preview_domain>, since Universal SSL does not cover second-level wildcards. Needs Advanced Certificate Manager on the zone; requires preview_domain."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.preview_certificate_pack || var.preview_domain != ""
+    error_message = "preview_certificate_pack requires preview_domain."
+  }
+}
+
+locals {
+  previews         = var.preview_domain != ""
+  preview_wildcard = "*.${var.preview_domain}"
+  preview_access   = local.previews && length(var.preview_access_emails) + length(var.preview_access_email_domains) > 0
+}
+
 resource "random_id" "tunnel_secret" {
   byte_length = 32
 }
@@ -104,15 +186,19 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "lux" {
   tunnel_id  = cloudflare_zero_trust_tunnel_cloudflared.lux.id
 
   config = {
-    ingress = [
-      {
+    ingress = concat(
+      [{
         hostname = var.hostname
         service  = "http://localhost:${var.origin_port}"
-      },
-      {
+      }],
+      local.previews ? [{
+        hostname = local.preview_wildcard
+        service  = "http://localhost:${var.preview_origin_port}"
+      }] : [],
+      [{
         service = "http_status:404"
-      },
-    ]
+      }],
+    )
   }
 }
 
@@ -183,6 +269,60 @@ resource "cloudflare_zero_trust_access_policy" "api_bypass" {
   include    = [{ everyone = {} }]
 }
 
+resource "cloudflare_dns_record" "preview" {
+  count = local.previews ? 1 : 0
+
+  zone_id = var.zone_id
+  name    = local.preview_wildcard
+  type    = "CNAME"
+  content = "${cloudflare_zero_trust_tunnel_cloudflared.lux.id}.cfargotunnel.com"
+  proxied = true
+  ttl     = 1
+}
+
+resource "cloudflare_zero_trust_access_application" "preview" {
+  count = local.preview_access ? 1 : 0
+
+  zone_id              = var.zone_id
+  name                 = "${var.name} previews"
+  domain               = local.preview_wildcard
+  type                 = "self_hosted"
+  session_duration     = var.access_session_duration
+  app_launcher_visible = false
+
+  policies = [{
+    id         = cloudflare_zero_trust_access_policy.preview[0].id
+    precedence = 1
+  }]
+}
+
+resource "cloudflare_zero_trust_access_policy" "preview" {
+  count = local.preview_access ? 1 : 0
+
+  account_id = var.account_id
+  name       = "${var.name} preview viewers"
+  decision   = "allow"
+
+  include = concat(
+    [for e in var.preview_access_emails : { email = { email = e } }],
+    [for d in var.preview_access_email_domains : { email_domain = { domain = d } }],
+  )
+}
+
+# Universal SSL stops at one wildcard level, so *.<preview_domain> needs
+# its own certificate (see the module comment).
+resource "cloudflare_certificate_pack" "preview" {
+  count = local.previews && var.preview_certificate_pack ? 1 : 0
+
+  zone_id               = var.zone_id
+  type                  = "advanced"
+  hosts                 = [local.preview_wildcard, var.preview_domain]
+  validation_method     = "txt"
+  validity_days         = 90
+  certificate_authority = "google"
+  cloudflare_branding   = false
+}
+
 output "tunnel_id" {
   value = cloudflare_zero_trust_tunnel_cloudflared.lux.id
 }
@@ -195,4 +335,9 @@ output "tunnel_token" {
 
 output "access_application_aud" {
   value = cloudflare_zero_trust_access_application.lux.aud
+}
+
+output "preview_access_application_aud" {
+  description = "AUD tag of the preview Access application (luxd's LUX_PREVIEW_CF_ACCESS_AUD); null when it is not created."
+  value       = one(cloudflare_zero_trust_access_application.preview[*].aud)
 }

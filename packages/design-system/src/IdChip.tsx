@@ -1,5 +1,19 @@
-import { useEffect, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useState, type MouseEvent } from "react";
 import { IconCheck, IconCopy } from "./icons.tsx";
+
+/** Copy `value` to the clipboard; `copied` is true for a moment after, for the affordance to say so. */
+export function useCopy(value: string): { copied: boolean; copy: () => void } {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 1200);
+    return () => clearTimeout(t);
+  }, [copied]);
+  const copy = useCallback(() => {
+    void navigator.clipboard?.writeText(value).then(() => setCopied(true));
+  }, [value]);
+  return { copied, copy };
+}
 
 export interface IdChipProps {
   value: string;
@@ -15,18 +29,13 @@ export interface IdChipProps {
 
 /** A quiet id: plain mono, muted, with a copy affordance on hover or focus. Click the icon (or the text when no href) to copy. */
 export function IdChip({ value, truncate, prefix, href, onLinkClick, className }: IdChipProps) {
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    if (!copied) return;
-    const t = setTimeout(() => setCopied(false), 1200);
-    return () => clearTimeout(t);
-  }, [copied]);
+  const { copied, copy: copyValue } = useCopy(value);
 
   const shown = truncate && value.length > truncate ? value.slice(0, truncate) + "…" : value;
   // Chips sit inside clickable rows: their own clicks never bubble.
   const copy = (e: MouseEvent) => {
     e.stopPropagation();
-    navigator.clipboard?.writeText(value).then(() => setCopied(true));
+    copyValue();
   };
   const follow = (e: MouseEvent<HTMLAnchorElement>) => {
     e.stopPropagation();

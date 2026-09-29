@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"math"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -113,7 +114,20 @@ type config struct {
 			Operators     []string `toml:"operators" env:"LUX_CF_ACCESS_OPERATORS"`
 			DefaultTenant string   `toml:"default_tenant" env:"LUX_CF_ACCESS_DEFAULT_TENANT"`
 		} `toml:"cloudflare_access"`
+		// AllowedOrigins: origins (besides public_url's and a request's
+		// own) whose pages may open interactive streams.
+		AllowedOrigins []string `toml:"allowed_origins" env:"LUX_CONSOLE_ALLOWED_ORIGINS"`
 	} `toml:"console"`
+	// Preview: the preview listener (docs/operators.md#previews).
+	Preview struct {
+		Domain           string   `toml:"domain" env:"LUX_PREVIEW_DOMAIN"`
+		Listen           string   `toml:"listen" env:"LUX_PREVIEW_LISTEN"`
+		Auth             string   `toml:"auth" env:"LUX_PREVIEW_AUTH"`
+		HoldFor          duration `toml:"hold_for" env:"LUX_PREVIEW_HOLD_FOR"`
+		CloudflareAccess struct {
+			AUD string `toml:"aud" env:"LUX_PREVIEW_CF_ACCESS_AUD"`
+		} `toml:"cloudflare_access"`
+	} `toml:"preview"`
 }
 
 // Nil timeout and max_batch use the transport defaults; explicit zero is invalid.
@@ -227,6 +241,8 @@ func defaultConfig() config {
 	c.Costs.Compute.PricesRefresh.Duration = server.DefaultPricesRefresh
 	c.Costs.Compute.PricingRegion = "us-east-1"
 	c.Console.Auth = "key"
+	c.Preview.Listen = "127.0.0.1:7071"
+	c.Preview.HoldFor.Duration = 20 * time.Second
 	return c
 }
 
@@ -462,6 +478,47 @@ func (c config) check() error {
 		}
 	default:
 		problems = append(problems, fmt.Sprintf("console.auth (LUX_CONSOLE_AUTH) %q: want key or cloudflare-access", c.Console.Auth))
+	}
+	for _, o := range c.Console.AllowedOrigins {
+		if u, err := url.Parse(o); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || strings.TrimRight(u.Path, "/") != "" || u.RawQuery != "" {
+			problems = append(problems, fmt.Sprintf("console.allowed_origins (LUX_CONSOLE_ALLOWED_ORIGINS) %q: want an origin, scheme://host[:port]", o))
+		}
+	}
+	if p := c.Preview; p.Domain != "" {
+		if strings.HasPrefix(p.Domain, ".") || strings.HasPrefix(p.Domain, "*") || strings.Contains(p.Domain, "/") || !strings.Contains(p.Domain, ".") {
+			problems = append(problems, fmt.Sprintf("preview.domain (LUX_PREVIEW_DOMAIN) %q: want a domain, e.g. lux.example.com", p.Domain))
+		}
+		if _, _, err := net.SplitHostPort(p.Listen); err != nil {
+			problems = append(problems, fmt.Sprintf("preview.listen (LUX_PREVIEW_LISTEN) %q: want host:port", p.Listen))
+		}
+		if p.Listen == c.Listen {
+			problems = append(problems, "preview.listen must differ from listen: the preview listener only ever proxies")
+		}
+		auth := p.Auth
+		if auth == "" {
+			auth = map[string]string{"key": "ticket"}[c.Console.Auth]
+			if auth == "" {
+				auth = c.Console.Auth
+			}
+		}
+		switch auth {
+		case "ticket":
+			if c.PublicURL == "" {
+				problems = append(problems, "preview.auth ticket needs public_url (LUX_PUBLIC_URL): previews send people there to sign in")
+			}
+		case "cloudflare-access":
+			if p.CloudflareAccess.AUD == "" || c.Console.CloudflareAccess.Team == "" {
+				problems = append(problems, "preview.auth cloudflare-access needs preview.cloudflare_access.aud (LUX_PREVIEW_CF_ACCESS_AUD) and console.cloudflare_access.team")
+			}
+			if c.Console.Auth != "cloudflare-access" {
+				problems = append(problems, "preview.auth cloudflare-access needs console.auth cloudflare-access (its operators and default tenant say who may read a Run)")
+			}
+		default:
+			problems = append(problems, fmt.Sprintf("preview.auth (LUX_PREVIEW_AUTH) %q: want cloudflare-access or ticket", p.Auth))
+		}
+		if p.HoldFor.Duration < 0 {
+			problems = append(problems, "preview.hold_for (LUX_PREVIEW_HOLD_FOR) must not be negative")
+		}
 	}
 	if len(problems) > 0 {
 		return errors.New("configuration: " + strings.Join(problems, "; "))

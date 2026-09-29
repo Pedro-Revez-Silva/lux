@@ -249,6 +249,9 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	if err := setRunState(ctx, tx, tenantID, runID, next, reason, epoch); err != nil {
 		return err
 	}
+	if err := stopServersAtEnd(ctx, tx, tenantID, runID, epoch, endReason(stopReason)); err != nil {
+		return err
+	}
 	if slices.Contains(movedStops, stopReason) {
 		// Moved, not stopped by a person: resume elsewhere automatically
 		// (with the input a migration left, if any).
@@ -283,6 +286,9 @@ func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epo
 	}
 	if epoch != current || terminal(runState) {
 		return nil
+	}
+	if err := stopServersAtEnd(ctx, tx, tenantID, runID, epoch, "host lost"); err != nil {
+		return err
 	}
 	var cancel bool
 	_ = tx.QueryRow(ctx, `SELECT cancel_requested FROM runs WHERE id = $1`, runID).Scan(&cancel)

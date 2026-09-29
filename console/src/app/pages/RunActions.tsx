@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Badge, Button, ConfirmDialog, Dialog, formatBytes, IdChip, Select, useToast } from "@lux/design-system";
-import { api, errorText, isApiError, RESUMABLE_RUN_STATES, TERMINAL_RUN_STATES, useQuery, type MigrateRequest, type ResumeRequest, type Run, type Snapshot } from "../../api/index.ts";
+import { IconTerminal } from "@lux/design-system/icons";
+import { api, errorText, EXEC_RUN_STATES, isApiError, RESUMABLE_RUN_STATES, TERMINAL_RUN_STATES, useQuery, type MigrateRequest, type ResumeRequest, type Run, type Snapshot } from "../../api/index.ts";
+import { ButtonLink } from "./common.tsx";
+import { terminalPath } from "./TerminalPage.tsx";
 
 export interface RunActionsProps {
   run: Run;
@@ -41,6 +44,15 @@ export function RunActions({ run, operator, onChanged }: RunActionsProps) {
 
   return (
     <>
+      {EXEC_RUN_STATES.has(run.state) ? (
+        <ButtonLink to={terminalPath(run.id)} icon={<IconTerminal size={15} />} title="Open a shell in the run's container">
+          Terminal
+        </ButtonLink>
+      ) : (
+        <Button icon={<IconTerminal size={15} />} disabled title="A shell needs the run running">
+          Terminal
+        </Button>
+      )}
       <Button disabled={!canStop} onClick={() => setOpen("stop")}>
         Stop
       </Button>

@@ -84,9 +84,23 @@ endpoint = ""                      # LUX_EC2_ENDPOINT (tests)
 #   cloudflare-access  only allowlisted emails are operators; others use the default tenant.
 #                      API keys still work.
 auth = "key"                       # LUX_CONSOLE_AUTH
+# Origins, besides public_url's and a request's own, whose pages may open a
+# Run's exec, attach and ports streams (a console served from elsewhere).
+allowed_origins = []               # LUX_CONSOLE_ALLOWED_ORIGINS (comma-separated), e.g. ["https://console.example.com"]
 
 [console.cloudflare_access]
 team = ""                          # LUX_CF_ACCESS_TEAM: acme, or acme.cloudflareaccess.com
 aud = ""                           # LUX_CF_ACCESS_AUD: the application's AUD tag
 operators = []                     # LUX_CF_ACCESS_OPERATORS: comma-separated operator emails (required in Access mode)
 default_tenant = ""                # LUX_CF_ACCESS_DEFAULT_TENANT: existing tenant ID or exact name (e.g. absmartly)
+
+[preview]
+# A Run's servers at https://<server>-<run suffix>.<domain>, through a
+# listener of their own (docs/operators.md#previews). Empty domain: off.
+domain = ""                        # LUX_PREVIEW_DOMAIN, e.g. lux.example.com
+listen = "127.0.0.1:7071"          # LUX_PREVIEW_LISTEN: only ever proxies
+auth = ""                          # LUX_PREVIEW_AUTH: cloudflare-access | ticket; empty: ticket, or cloudflare-access with console.auth cloudflare-access
+hold_for = "20s"                   # LUX_PREVIEW_HOLD_FOR: how long a request to a starting server waits
+
+[preview.cloudflare_access]
+aud = ""                           # LUX_PREVIEW_CF_ACCESS_AUD: the preview Access application's AUD tag (team: console.cloudflare_access.team)

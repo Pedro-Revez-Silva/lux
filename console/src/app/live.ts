@@ -11,8 +11,11 @@ const RUN_LISTS = ["runs:", "host-runs:", "status@"];
 /** Query key prefixes of one Run's data. */
 const RUN_DATA = ["run:", "run-events:", "run-snapshots:", "run-artifacts:"];
 
+/** Query key prefixes of one Run's data keyed further (run-server-log:<run>:<name>). */
+const RUN_DATA_PREFIX = ["run-server-log:"];
+
 function refetchFor(e: FeedEvent) {
-  invalidate((k) => RUN_LISTS.some((p) => k.startsWith(p)) || RUN_DATA.some((p) => k === p + e.runId));
+  invalidate((k) => RUN_LISTS.some((p) => k.startsWith(p)) || RUN_DATA.some((p) => k === p + e.runId) || RUN_DATA_PREFIX.some((p) => k.startsWith(p + e.runId + ":")));
 }
 
 /** Open the event stream for the current scope and refetch on its events. Mount once. */

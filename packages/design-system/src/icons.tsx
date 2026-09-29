@@ -204,3 +204,42 @@ export const IconPalette = (p: IconProps) => (
     <circle cx="11" cy="7" r=".8" fill="currentColor" stroke="none" />
   </Icon>
 );
+export const IconTerminal = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="2" y="3" width="12" height="10" rx="1.5" />
+    <path d="M5 6.5l2 1.5-2 1.5M8.5 9.5h3" />
+  </Icon>
+);
+export const IconExternal = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M9.5 2.5h4v4M13.5 2.5L7.5 8.5" />
+    <path d="M11.5 9v3.5a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5.5a1 1 0 0 1 1-1H7" />
+  </Icon>
+);
+export const IconCloud = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M4.5 12.5a3 3 0 0 1-.4-6A4.5 4.5 0 0 1 12.7 7 2.8 2.8 0 0 1 12 12.5z" />
+  </Icon>
+);
+export const IconStop = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" />
+  </Icon>
+);
+export const IconPlus = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M8 3.5v9M3.5 8h9" />
+  </Icon>
+);
+export const IconMinus = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M3.5 8h9" />
+  </Icon>
+);
+export const IconTrash = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M3 4.5h10M6.5 4.5v-1a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1" />
+    <path d="M4.5 4.5l.6 8a1 1 0 0 0 1 .9h3.8a1 1 0 0 0 1-.9l.6-8" />
+    <path d="M6.7 7v4M9.3 7v4" />
+  </Icon>
+);

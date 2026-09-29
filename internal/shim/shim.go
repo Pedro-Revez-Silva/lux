@@ -11,6 +11,7 @@ package shim
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
@@ -74,6 +76,11 @@ type Shim struct {
 	term *terminal
 	// streams: exec'd processes, by pid, whose exits the reaper reports.
 	streams map[int]chan syscall.WaitStatus
+	// groups: process groups (by their leader's pid) the reaper kills as
+	// their leader exits, before reaping it (servers' groups).
+	groups map[int]bool
+	// srv: the Run's servers' processes (servers.go).
+	srv servers
 }
 
 // Main is the shim's entry point. It returns the process exit code.
@@ -101,8 +108,10 @@ func Main() int {
 		startCh:   make(chan proto.ShimMsg, 1),
 		delivered: map[string]bool{},
 		streams:   map[int]chan syscall.WaitStatus{},
+		groups:    map[int]bool{},
 		exitCh:    make(chan syscall.WaitStatus, 1),
 		initCh:    make(chan syscall.WaitStatus, 1),
+		srv:       servers{procs: map[string]*serverProc{}, started: map[string]int64{}, stopping: map[string]*serverProc{}},
 	}
 	return s.run()
 }
@@ -116,7 +125,7 @@ func (s *Shim) run() int {
 	s.out = out
 
 	// PID 1 must reap: orphans reparent to us.
-	go s.reap()
+	go s.reap(nil)
 	sigs := make(chan os.Signal, 4)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
@@ -181,6 +190,9 @@ func (s *Shim) run() int {
 	if s.isStopping() {
 		return s.finish(proto.ExitInfo{ExitCode: 0, Reason: "stopped", Message: "stopped during init"})
 	}
+	// The Run's servers start once init has set things up, beside the
+	// workload.
+	s.serversReady()
 
 	s.adapter = ad
 	argv, err := ad.Command(s.cfg)
@@ -266,22 +278,42 @@ func (s *Shim) isStopping() bool {
 }
 
 // reap collects every child: the workload and init script, whose status
-// is handed on, and orphans, which are just reaped.
-func (s *Shim) reap() {
+// is handed on, and orphans, which are just reaped. Each exited child is
+// looked at before it is reaped (waitid WNOWAIT): a group that dies with
+// its leader (a server's) is killed while the leader, a zombie, still
+// holds its pid, so the kill cannot reach another group that reused it.
+//
+// done, when closed, ends it (tests start one per Shim they build; the
+// shim itself reaps until it exits).
+func (s *Shim) reap(done <-chan struct{}) {
 	sigchld := make(chan os.Signal, 16)
 	signal.Notify(sigchld, syscall.SIGCHLD)
-	for range sigchld {
+	defer signal.Stop(sigchld)
+	for {
+		select {
+		case <-done:
+			return
+		case <-sigchld:
+		}
 		for {
-			var ws syscall.WaitStatus
-			pid, err := syscall.Wait4(-1, &ws, syscall.WNOHANG, nil)
-			if pid <= 0 || err != nil {
+			pid := exitedChild()
+			if pid <= 0 {
 				break
 			}
+			var ws syscall.WaitStatus
 			s.mu.Lock()
+			if s.groups[pid] {
+				_ = syscall.Kill(-pid, syscall.SIGKILL)
+				delete(s.groups, pid)
+			}
+			got, err := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
 			work, init := s.workPid, s.initPid
 			stream := s.streams[pid]
 			delete(s.streams, pid)
 			s.mu.Unlock()
+			if got != pid || err != nil {
+				break
+			}
 			switch pid {
 			case work:
 				s.exitCh <- ws
@@ -293,6 +325,31 @@ func (s *Shim) reap() {
 				}
 			}
 		}
+	}
+}
+
+// exitedChild is a child that has exited and is not reaped yet (0 if
+// none), left unreaped.
+func exitedChild() int {
+	var info unix.Siginfo
+	if err := unix.Waitid(unix.P_ALL, 0, &info, unix.WEXITED|unix.WNOHANG|unix.WNOWAIT, nil); err != nil {
+		return 0
+	}
+	// si_pid: the first field of the union after si_signo, si_errno and
+	// si_code, which is pointer-aligned.
+	align := unsafe.Alignof(uintptr(0))
+	off := (3*unsafe.Sizeof(int32(0)) + align - 1) &^ (align - 1)
+	b := unsafe.Slice((*byte)(unsafe.Pointer(&info)), unsafe.Sizeof(info))
+	return int(int32(binary.NativeEndian.Uint32(b[off:])))
+}
+
+// killGroup signals a server's process group, only while its leader is
+// not reaped: after, its pgid may be another's.
+func (s *Shim) killGroup(pgid int, sig syscall.Signal) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.groups[pgid] {
+		_ = syscall.Kill(-pgid, sig)
 	}
 }
 
@@ -357,6 +414,8 @@ func (s *Shim) handleConn(c net.Conn) {
 			}
 		case proto.ShimStop:
 			s.stop(m.Reason, time.Duration(m.GraceSec*float64(time.Second)))
+		case proto.ShimServers:
+			s.setServers(m.Servers)
 		case proto.ShimStream:
 			// The connection is the stream's from now on.
 			if m.Stream != nil {

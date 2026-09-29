@@ -6,6 +6,11 @@ import type { ApiErrorBody } from "./types.ts";
 
 const API_BASE = "/v1";
 
+/** The path of an API call under its base: for the odd request made outside apiFetch (a WebSocket). */
+export function apiUrl(path: string): string {
+  return API_BASE + path;
+}
+
 export class ApiError extends Error {
   status: number;
   code: string;
