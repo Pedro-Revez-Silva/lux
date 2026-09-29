@@ -2260,12 +2260,21 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	if pl.ScaleDownAfter.Duration < 0 || pl.ScaleDownAfter.Duration > 0 && sda == nil {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "scaleDownAfter must be at least 1s")
 	}
+	// Read in system scope: luxd_instances and control_samples are luxd's own.
+	var migrated bool
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var err error
+		migrated, err = NewPoolMigrated(ctx, tx, s.cfg.Tick, s.cfg.ProviderCheckEvery)
+		return err
+	}); err != nil {
+		return nil, err
+	}
 	var out Pool
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		err := SavePool(ctx, tx, p.TenantID, pl.Name, pl.IsDefault, func() error {
 			tag, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
 					scale_down_after_s, warm_while_active, hourly_price, price_currency, id_migrated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''), now())
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''), CASE WHEN $13 THEN now() END)
 				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
 					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
@@ -2273,7 +2282,7 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 					`+PoolRevive+`, retired_at = NULL, last_empty_listing_at = NULL
 				WHERE `+PoolProviderUnchangedOrEmpty,
 				ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
-				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency)
+				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency, migrated)
 			if err != nil {
 				return err
 			}

@@ -273,7 +273,7 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 		provisioned := provider != "static"
 		if provisioned {
 			// Checked on a dry run too: it does not depend on the name.
-			if err := checkPoolMigrated(ctx, tx, id, from); err != nil {
+			if err := s.checkPoolMigrated(ctx, tx, id, from); err != nil {
 				return err
 			}
 		}
@@ -382,15 +382,22 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 
 // checkPoolMigrated requires a completed provider check, not only the
 // current host rows: a lost launch reply can be written off before its
-// instance appears in a name listing.
-func checkPoolMigrated(ctx context.Context, tx pgx.Tx, poolID, name string) error {
-	var migrated bool
-	if err := tx.QueryRow(ctx, `SELECT id_migrated_at IS NOT NULL FROM pools WHERE id = $1`, poolID).Scan(&migrated); err != nil {
+// instance appears in a name listing. A pool marked migrated is refused
+// too while it has such a launch: an older luxd may have launched it
+// without lux:pool-id after the mark.
+func (s *Server) checkPoolMigrated(ctx context.Context, tx pgx.Tx, poolID, name string) error {
+	var migrated, lost bool
+	if err := tx.QueryRow(ctx, `SELECT id_migrated_at IS NOT NULL, EXISTS (SELECT 1 FROM hosts h WHERE `+lostLaunch+`)
+		FROM pools p WHERE p.id = $1`, poolID, interval(s.cfg.LaunchTimeout+poolDiscoveryLag)).Scan(&migrated, &lost); err != nil {
 		return err
 	}
 	if !migrated {
 		return errf(http.StatusConflict, "pool_not_migrated",
 			"pool %q has not completed name-based instance discovery: wait for a clean provider check after its launch window, or scale the pool to zero", name)
+	}
+	if lost {
+		return errf(http.StatusConflict, "pool_not_migrated",
+			"pool %q has a launch whose instance id was never recorded, written off within the last %s: its instance may carry only the pool's name; wait until then", name, s.cfg.LaunchTimeout+poolDiscoveryLag)
 	}
 	return nil
 }
@@ -401,6 +408,14 @@ func checkPoolMigrated(ctx context.Context, tx pgx.Tx, poolID, name string) erro
 // id, so they do not count.
 const legacyHost = `h.pool = p.name AND coalesce(h.tenant_id, '') = coalesce(p.tenant_id, '')
 	AND h.provision_requested_at IS NOT NULL AND h.tagged AND NOT h.pool_id_tagged AND h.state <> 'terminated'`
+
+// lostLaunch, a condition on hosts h of pool p: a launch written off
+// without an instance id since $2 (an interval) ago. Its instance, if any,
+// may appear only later, and carries only the pool's name if an older
+// luxd launched it.
+const lostLaunch = `h.pool = p.name AND coalesce(h.tenant_id, '') = coalesce(p.tenant_id, '')
+	AND h.provision_requested_at IS NOT NULL AND h.provider_id IS NULL
+	AND h.terminated_at >= now() - $2::interval`
 
 // renameCostHours moves the pool's hosts' cost hours still under the old
 // name, from hour since on (zero: all of them). The provisioner runs it
@@ -434,18 +449,7 @@ func costRepairFrom(renamedAt time.Time) time.Time { return renamedAt.Add(-2 * t
 // lease fence (migration 036) is what keeps an older luxd from taking the
 // lease once the rename has armed it.
 func (s *Server) checkDeploymentCanRename(ctx context.Context, tx pgx.Tx) error {
-	// The lease's holder too: a luxd that took it before its first
-	// control sample.
-	rows, err := tx.Query(ctx, `SELECT instance FROM (
-			SELECT c.instance FROM control_samples c WHERE c.res = 0 AND c.at > now() - $1::interval
-			UNION SELECT holder FROM leases WHERE name = 'provisioner' AND expires_at > clock_timestamp()) seen
-		WHERE NOT EXISTS (SELECT 1 FROM luxd_instances l WHERE l.instance = seen.instance
-		                  AND $2 = ANY(l.capabilities) AND l.seen_at > now() - $1::interval - $3::interval)
-		ORDER BY 1 LIMIT 10`, interval(2*s.provisionLeaseDuration()), capPoolIDDiscovery, interval(s.checkInEvery()))
-	if err != nil {
-		return err
-	}
-	old, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	old, err := OlderLuxds(ctx, tx, s.cfg.Tick, s.cfg.ProviderCheckEvery)
 	if err != nil {
 		return err
 	}
@@ -454,6 +458,34 @@ func (s *Server) checkDeploymentCanRename(ctx context.Context, tx pgx.Tx) error 
 			"luxd instances %v run a version that finds a pool's instances by its name (it would lose them after a rename): upgrade every luxd first", old)
 	}
 	return nil
+}
+
+// OlderLuxds lists (up to 10) luxd instances without pool-id-discovery
+// seen within two provisioner lease durations, for a luxd configured
+// with tick and providerCheckEvery. Needs a system-scope tx.
+func OlderLuxds(ctx context.Context, tx pgx.Tx, tick, providerCheckEvery time.Duration) ([]string, error) {
+	lease := leaseDuration(tick)
+	// The lease's holder too: a luxd that took it before its first
+	// control sample.
+	rows, err := tx.Query(ctx, `SELECT instance FROM (
+			SELECT c.instance FROM control_samples c WHERE c.res = 0 AND c.at > now() - $1::interval
+			UNION SELECT holder FROM leases WHERE name = 'provisioner' AND expires_at > clock_timestamp()) seen
+		WHERE NOT EXISTS (SELECT 1 FROM luxd_instances l WHERE l.instance = seen.instance
+		                  AND $2 = ANY(l.capabilities) AND l.seen_at > now() - $1::interval - $3::interval)
+		ORDER BY 1 LIMIT 10`, interval(2*lease), capPoolIDDiscovery, interval(checkInEvery(providerCheckEvery, lease)))
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
+// NewPoolMigrated: whether a pool created now may be marked migrated
+// (pools.id_migrated_at) at once. Not while an older luxd may launch for
+// it: its instances carry only the name, so the mark waits for a clean
+// provider check.
+func NewPoolMigrated(ctx context.Context, tx pgx.Tx, tick, providerCheckEvery time.Duration) (bool, error) {
+	old, err := OlderLuxds(ctx, tx, tick, providerCheckEvery)
+	return len(old) == 0, err
 }
 
 // lockProvisionerLease locks the provisioner lease's row until tx ends,
@@ -486,7 +518,11 @@ func (s *Server) checkIn(ctx context.Context) error {
 // checkInEvery: a luxd's last check-in is at most this much older than
 // its last control sample, which checkDeploymentCanRename allows for.
 func (s *Server) checkInEvery() time.Duration {
-	return min(s.cfg.ProviderCheckEvery, s.provisionLeaseDuration())
+	return checkInEvery(s.cfg.ProviderCheckEvery, s.provisionLeaseDuration())
+}
+
+func checkInEvery(providerCheckEvery, lease time.Duration) time.Duration {
+	return min(providerCheckEvery, lease)
 }
 
 // checkInLoop checks in at start, then every checkInEvery. checkedIn is

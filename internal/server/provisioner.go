@@ -557,10 +557,7 @@ func (s *Server) recordPoolDiscovery(ctx context.Context, lease *passLease, pl p
 			last_empty_listing_at = CASE WHEN $4 THEN now() ELSE NULL END,
 			id_migrated_at = CASE WHEN id_migrated_at IS NULL AND $3
 				AND NOT EXISTS (SELECT 1 FROM hosts h WHERE `+legacyHost+`)
-				AND NOT EXISTS (SELECT 1 FROM hosts h WHERE h.pool = p.name
-					AND coalesce(h.tenant_id, '') = coalesce(p.tenant_id, '')
-					AND h.provision_requested_at IS NOT NULL AND h.provider_id IS NULL
-					AND h.terminated_at >= now() - $2::interval)
+				AND NOT EXISTS (SELECT 1 FROM hosts h WHERE `+lostLaunch+`)
 				THEN now() ELSE id_migrated_at END
 			WHERE p.id = $1`, pl.ID, interval(s.cfg.LaunchTimeout+poolDiscoveryLag), cleanName, empty)
 		return err
@@ -1140,7 +1137,11 @@ func (l *passLease) bound(ctx context.Context) (context.Context, context.CancelF
 }
 
 func (s *Server) provisionLeaseDuration() time.Duration {
-	return max(10*s.cfg.Tick, 30*time.Second)
+	return leaseDuration(s.cfg.Tick)
+}
+
+func leaseDuration(tick time.Duration) time.Duration {
+	return max(10*tick, 30*time.Second)
 }
 
 // provisionLease makes this luxd the provisioner for the next while, if

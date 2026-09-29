@@ -448,7 +448,8 @@ given anew). Refused with 409:
   tenant whose Runs bound to no pool would follow owns a pool by the new
   name (those Runs would then go to its own pool).
 - `pool_not_migrated`: an `ec2` pool with instances launched before
-  `lux:pool-id` that luxd has not yet seen carrying it (see below).
+  `lux:pool-id` that luxd has not yet seen carrying it, or with a recent
+  launch written off without an instance id (see below).
 - `rename_unsupported_by_deployment`: an `ec2` pool, while some luxd that
   finds instances by pool name is running (see below).
 - `confirm_required`: the pool has hosts and the request's `confirm` is
@@ -494,9 +495,16 @@ appears only after its host row was written off. luxd lists such pools by
 both id and name and adds `lux:pool-id` to every name-only instance,
 including orphans, **before** trying to terminate an orphan; if termination
 fails, id discovery retries it. The transition is recorded only once and
-never reversed. New pools carry `id_migrated_at` at creation. A legacy pool
+never reversed. A new pool carries `id_migrated_at` at creation unless a
+luxd without the `pool-id-discovery` capability has been seen within the
+last two lease durations (the window of `rename_unsupported_by_deployment`
+below): such a luxd launches instances with only `lux:pool`, so the pool
+waits for a clean provider check like a legacy one. A legacy pool
 cannot be renamed (`pool_not_migrated`): wait for the next provider checks
-and the lost-launch window if necessary. Without `ec2:CreateTags` the
+and the lost-launch window if necessary. A migrated pool is refused too
+(`pool_not_migrated`) while it has a launch written off without a provider
+id within that same `LUX_LAUNCH_TIMEOUT` plus 10 minutes: an older luxd
+may have launched its instance with only the name. Without `ec2:CreateTags` the
 pool remains legacy and keeps working by name.
 
 A retired `ec2` pool remains discoverable by id until

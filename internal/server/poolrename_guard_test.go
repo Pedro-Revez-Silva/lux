@@ -19,6 +19,60 @@ func httpErr(err error) (int, string, string) {
 	return he.Status, he.Code, he.Error()
 }
 
+// A luxd of an earlier version launches name-only instances: a pool
+// created while one runs is not marked migrated at creation, and waits for
+// a clean provider check. Once none has been seen within the window, a new
+// pool is marked at once.
+func TestNewPoolNotMarkedMigratedWithAnOlderLuxd(t *testing.T) {
+	f := newRenameFixture(t, false)
+	execSQL(t, f.s, f.ctx, `INSERT INTO control_samples (instance, hostname, res, at) VALUES ('luxd-old', 'old-host', 0, now())`)
+	mustPut(t, f.s, "t1", Pool{Name: "fresh", Provider: "ec2"})
+	if got := f.query(t, `SELECT (id_migrated_at IS NULL)::text FROM pools WHERE tenant_id = 't1' AND name = 'fresh'`); got != "true" {
+		t.Fatal("a pool created while an older luxd runs was marked migrated")
+	}
+	execSQL(t, f.s, f.ctx, `UPDATE control_samples SET at = now() - $1::interval`, interval(3*f.s.provisionLeaseDuration()))
+	mustPut(t, f.s, "t1", Pool{Name: "later", Provider: "ec2"})
+	if got := f.query(t, `SELECT (id_migrated_at IS NULL)::text FROM pools WHERE tenant_id = 't1' AND name = 'later'`); got != "false" {
+		t.Fatal("a pool created with no older luxd seen was not marked migrated")
+	}
+}
+
+// A pool marked migrated is still refused a rename while an older luxd
+// has been seen: it may have launched a name-only instance for the pool
+// since the mark.
+func TestMigratedPoolRenameRefusedWithAnOlderLuxd(t *testing.T) {
+	f := newRenameFixture(t, false)
+	if f.pool(t).Legacy {
+		t.Fatal("fixture pool is not marked migrated")
+	}
+	execSQL(t, f.s, f.ctx, `INSERT INTO control_samples (instance, hostname, res, at) VALUES ('luxd-old', 'old-host', 0, now())`)
+	_, err := renameConfirmed(f.ctx, f.s, "t1", "burst", "burst-eu", false)
+	if st, code, msg := httpErr(err); st != http.StatusConflict || code != "rename_unsupported_by_deployment" || !strings.Contains(msg, "luxd-old") {
+		t.Fatalf("rename of a migrated pool with an older luxd seen: %v", err)
+	}
+}
+
+// A pool marked migrated with a launch written off without an instance id
+// inside the orphan-discovery window (LaunchTimeout plus the listing lag)
+// is refused a rename: an older luxd may have launched that instance with
+// only the name. Once the write-off is older than the window, allowed.
+func TestMigratedPoolRenameRefusedWithARecentLostLaunch(t *testing.T) {
+	f := newRenameFixture(t, false)
+	execSQL(t, f.s, f.ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provision_requested_at, tagged, pool_id_tagged, terminated_at)
+		VALUES ('h-lost', 't1', 'burst-lost', 'burst', 'terminated', now() - interval '1 hour', true, true, now() - $1::interval)`,
+		interval(f.s.cfg.LaunchTimeout+poolDiscoveryLag-time.Minute))
+	if f.pool(t).Legacy {
+		t.Fatal("fixture pool is not marked migrated")
+	}
+	_, err := renameConfirmed(f.ctx, f.s, "t1", "burst", "burst-eu", false)
+	if st, code, _ := httpErr(err); st != http.StatusConflict || code != "pool_not_migrated" {
+		t.Fatalf("rename with a lost launch inside the window: %v", err)
+	}
+	execSQL(t, f.s, f.ctx, `UPDATE hosts SET terminated_at = now() - $1::interval WHERE id = 'h-lost'`,
+		interval(f.s.cfg.LaunchTimeout+poolDiscoveryLag+time.Minute))
+	f.rename(t, "burst", "burst-eu")
+}
+
 // A provisioned pool is not renamed while a luxd that discovers by name
 // (it writes control samples, never checks in) is running; a static pool
 // is. The refusal names the luxd.

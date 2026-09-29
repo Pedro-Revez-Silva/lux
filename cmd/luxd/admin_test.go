@@ -225,3 +225,41 @@ func TestAdminPoolDefaultEvents(t *testing.T) {
 		t.Fatalf("after a refused create-pool: default %q, a's max_hosts %d; want b and 0", marked, maxA)
 	}
 }
+
+// create-pool marks a new pool migrated only while no older luxd (one
+// without pool-id-discovery, which launches name-only instances) has been
+// seen.
+func TestAdminCreatePoolMigratedMark(t *testing.T) {
+	cfg, db := adminDB(t)
+	ctx := context.Background()
+	stdout := os.Stdout
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = devnull
+	t.Cleanup(func() { os.Stdout = stdout; devnull.Close() })
+
+	unmarked := func(name string) bool {
+		var v bool
+		if err := db.QueryRow(ctx, `SELECT id_migrated_at IS NULL FROM pools WHERE name = $1`, name).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	if err := admin(ctx, cfg, []string{"create-pool", "--name", "a", "--provider", "ec2"}); err != nil {
+		t.Fatal(err)
+	}
+	if unmarked("a") {
+		t.Fatal("a pool created with no older luxd seen was not marked migrated")
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO control_samples (instance, hostname, res, at) VALUES ('luxd-old', 'old-host', 0, now())`); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin(ctx, cfg, []string{"create-pool", "--name", "b", "--provider", "ec2"}); err != nil {
+		t.Fatal(err)
+	}
+	if !unmarked("b") {
+		t.Fatal("a pool created while an older luxd runs was marked migrated")
+	}
+}
