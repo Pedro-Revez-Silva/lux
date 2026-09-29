@@ -490,7 +490,9 @@ committed changes, staged, unstaged and untracked (not ignored) files.
   clean/smudge filters, and pager disabled, and `GIT_*` from the Run's
   environment ignored.
 - **The checkout is never changed.** Untracked files are marked
-  intent-to-add in a copy of the index in a temporary directory, and the
+  intent-to-add in a copy of the index in a scratch directory under the
+  container's `/tmp` (never `$TMPDIR`; refused if it resolves inside the
+  checkout), and the
   working tree is diffed through that copy. Nothing is written to the
   repository: not its index, `HEAD`, refs, or object store (the one object
   the copy needs, the empty blob, goes to a temporary object directory).
