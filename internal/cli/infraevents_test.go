@@ -82,3 +82,17 @@ func TestInfraEventsLimit(t *testing.T) {
 		t.Fatalf("--all gave %v in %d requests (%v), want %v in 3", ids, len(p.seen), p.seen, want)
 	}
 }
+
+// A rename's event says from and to, what followed, and a kept default.
+func TestPoolRenamedEventLine(t *testing.T) {
+	e := server.LifecycleEvent{Type: "pool.renamed", Count: 1, Data: map[string]any{
+		"from": "burst", "to": "burst-eu", "hosts": 2, "runs": 1, "instances": 2, "isDefault": true}}
+	line := eventLine(e)
+	if !strings.Contains(line, "burst → burst-eu: 2 hosts, 1 Runs, 2 instances followed; still the default") {
+		t.Fatalf("pool.renamed line %q", line)
+	}
+	e.Data["isDefault"] = false
+	if line := eventLine(e); strings.Contains(line, "default") {
+		t.Fatalf("a non-default rename's line %q", line)
+	}
+}
