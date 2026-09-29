@@ -1,7 +1,7 @@
 // Small pieces shared by pages: error/loading blocks, links, the runs table
 // columns, chart series builders and lookups.
 import { useMemo, type ReactNode } from "react";
-import { Button, CostFigure, EmptyState, formatPercent, formatRelative, formatTimestamp, formatUnit, IdChip, KeyValue, Skeleton, SkeletonLines, StatePill, Tooltip, type ChartMark, type Column, type Unit } from "@lux/design-system";
+import { Button, CostFigure, EmptyState, formatDuration, formatPercent, formatRelative, formatTimestamp, formatUnit, IdChip, KeyValue, Skeleton, SkeletonLines, StatePill, Tooltip, type ChartMark, type Column, type Unit } from "@lux/design-system";
 import { useNow, type Run, type Sample } from "../../api/index.ts";
 import { Link, linkTo, useSearch } from "../router.tsx";
 
@@ -117,13 +117,36 @@ export function runColumns({ tenant, host = true, adapter = true, cost = false }
   if (host) c.push({ key: "host", header: "Host", cell: (r) => (r.hostId ? <HostLink id={r.hostId} name={r.host} /> : DASH), sortValue: (r) => r.host, width: 150 });
   if (adapter) c.push({ key: "adapter", header: "Adapter", cell: (r) => <span className="secondary">{r.spec.workload.adapter}</span>, sortValue: (r) => r.spec.workload.adapter, width: 110, optional: true });
   c.push(
-    { key: "epoch", header: "Epoch", cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 76, optional: true },
+    { key: "runtime", header: "Runtime", cell: (r) => <RuntimeCell run={r} />, sortValue: (r) => r.runtimeSeconds, align: "right", mono: true, width: 90 },
+    // The API field is epoch: it goes up by one per placement. A title, not
+    // a Tooltip: table headers clip overflow.
+    { key: "epoch", header: <span title="Times this Run has been placed on a host">Placements</span>, cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 116, optional: true },
   );
   if (cost) c.push({ key: "cost", header: "Cost", cell: (r) => <RunCostCell run={r} />, sortValue: (r) => costSortValue(r), align: "right", mono: true, width: 120 });
   c.push(
     { key: "created", header: "Created", cell: (r) => <RelativeTime at={r.createdAt} />, sortValue: (r) => Date.parse(r.createdAt), align: "right", width: 104 },
   );
   return c;
+}
+
+// When each Run object (one per response) was first rendered: runtimeSeconds
+// is as of the response, so a live Run adds the local time since then,
+// which no clock skew between browser and luxd can distort.
+const runSeenAt = new WeakMap<Run, number>();
+
+/**
+ * Time the Run's placements have spent running, summed (runtimeSeconds);
+ * ticks on the shared clock while a placement runs (runtimeSince). An en
+ * dash for a Run that has never run.
+ */
+function RuntimeCell({ run }: { run: Run }) {
+  useNow(); // re-render on the shared clock
+  const t = Date.now();
+  let seen = runSeenAt.get(run);
+  if (seen === undefined) runSeenAt.set(run, (seen = t));
+  if (!run.runtimeSince && !run.runtimeSeconds) return DASH;
+  const secs = run.runtimeSeconds + (run.runtimeSince ? (t - seen) / 1000 : 0);
+  return <span>{formatDuration(secs >= 1 ? Math.floor(secs) : secs)}</span>;
 }
 
 /** A Run's cost in a list, as `lux ls` shows it (CostFigure); an en dash when luxd sends none. */

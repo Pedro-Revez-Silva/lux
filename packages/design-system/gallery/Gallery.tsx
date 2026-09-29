@@ -323,7 +323,7 @@ function Layout() {
             <td className="mono">768–1279</td>
             <td>icon rail (56px)</td>
             <td>full controls</td>
-            <td>charts 2 across; optional table columns (ids, adapter, epoch) drop out under ~1100px of content</td>
+            <td>charts 2 across; optional table columns (ids, adapter, placements) drop out under ~1100px of content</td>
           </tr>
           <tr>
             <td className="mono">1280–1919</td>
@@ -620,7 +620,7 @@ function RunsTable() {
     { key: "adapter", header: "Adapter", cell: (r) => <span className="secondary">{r.adapter}</span>, sortValue: (r) => r.adapter, width: 110, optional: true },
     { key: "image", header: "Image", cell: (r) => r.image, sortValue: (r) => r.image, mono: true },
     { key: "host", header: "Host", cell: (r) => r.host ?? <span className="muted">–</span>, sortValue: (r) => r.host, width: 170 },
-    { key: "epoch", header: "Epoch", cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 76, optional: true },
+    { key: "epoch", header: <span title="Times this Run has been placed on a host">Placements</span>, cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 116, optional: true },
     { key: "cpu", header: "CPU", cell: (r) => formatDuration(r.cpuSeconds), sortValue: (r) => r.cpuSeconds, align: "right", mono: true, width: 90 },
     { key: "mem", header: "Peak mem", cell: (r) => formatBytes(r.peakMemoryBytes), sortValue: (r) => r.peakMemoryBytes, align: "right", mono: true, width: 100 },
     { key: "age", header: "Created", cell: (r) => <Tooltip content={formatTimestamp(r.createdAt)}><span>{formatRelative(r.createdAt, NOW)}</span></Tooltip>, sortValue: (r) => r.createdAt, align: "right", width: 100 },
