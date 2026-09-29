@@ -345,6 +345,10 @@ pool does not bring it back. Upgrading marks no pool.
 
 ## EC2 pools
 
+Pool names follow the rule in [the CLI reference](cli.md#hosts-and-pools): 1-32
+lowercase letters, digits and `-`. `luxd admin create-pool` and
+`create-host-token --pool` apply it too.
+
 A pool with `provider: ec2` is sized by luxd:
 
 ```bash

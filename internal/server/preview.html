@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{{if .Page.Refresh}}<meta http-equiv="refresh" content="5">{{end}}
+<title>{{.Page.Title}} · lux preview</title>
+<style>
+/* The console's tokens (packages/design-system/src/tokens.css), copied. */
+:root {
+  color-scheme: light dark;
+  --bg-page: #f4f5f7; --bg-surface: #ffffff; --border: #e4e6ea;
+  --fg: #16181d; --fg-secondary: #4b5058; --fg-muted: #6b7079;
+  --neutral-dot: #8a9099; --blue-dot: #2a78d6; --amber-dot: #eda100; --red-dot: #d03b3b; --violet-dot: #6f5fd0;
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-page: #131417; --bg-surface: #1b1c1f; --border: #2a2d33;
+    --fg: #ececee; --fg-secondary: #b4b8bf; --fg-muted: #8b9098;
+    --neutral-dot: #8b9098; --blue-dot: #3987e5; --amber-dot: #c98500; --red-dot: #e66767; --violet-dot: #8f80e6;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg-page); color: var(--fg);
+  font: 15px/1.5 var(--font-sans); }
+main { width: min(440px, calc(100vw - 32px)); background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 28px 28px 22px; }
+h1 { margin: 0 0 8px; font-size: 18px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--neutral-dot); }
+.blue .dot { background: var(--blue-dot); animation: pulse 1.6s ease-in-out infinite; }
+.violet .dot { background: var(--violet-dot); animation: pulse 1.6s ease-in-out infinite; }
+.amber .dot { background: var(--amber-dot); }
+.red .dot { background: var(--red-dot); }
+@keyframes pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .dot { animation: none !important; } }
+p { margin: 0 0 8px; color: var(--fg-secondary); }
+code, pre { font-family: var(--font-mono); font-size: 13px; }
+pre { margin: 10px 0 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; white-space: pre-wrap;
+  word-break: break-word; color: var(--fg-secondary); }
+footer { margin-top: 18px; display: flex; align-items: center; gap: 8px; color: var(--fg-muted); font-size: 12px; }
+footer svg { width: 16px; height: 16px; }
+</style>
+</head>
+<body>
+<main class="{{.Page.Tone}}">
+  <h1><span class="dot"></span>{{.Page.Title}}</h1>
+  {{with .What}}<p>{{.}}</p>{{end}}
+  {{with .State}}<p>The Run is {{.}}: its servers run only while it runs.</p>{{end}}
+  {{with .Reason}}<p>Stopped: {{.}}.</p>{{end}}
+  {{if .Page.Message}}<p>{{.Page.Message}}</p>{{end}}
+  {{if .Code}}<p>Exit code <code>{{.Code}}</code>.</p>{{end}}
+  {{with .Error}}<pre>{{.}}</pre>{{end}}
+  <footer>
+    <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 1.5Q17.3 14.7 30.5 16Q17.3 17.3 16 30.5Q14.7 17.3 1.5 16Q14.7 14.7 16 1.5Z" fill="#ffd166" stroke="#163f7a" stroke-width="1.25" stroke-linejoin="round"/><path d="M16 3Q14.8 14.8 3 16L16 16Z" fill="#fff4cc"/><path d="M29 16Q17.2 17.2 16 29L16 16Z" fill="#ff9f43"/></svg>
+    lux preview{{if .Page.Refresh}} · refreshes every 5 seconds{{end}}
+  </footer>
+</main>
+</body>
+</html>

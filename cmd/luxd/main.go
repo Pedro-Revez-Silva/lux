@@ -215,6 +215,14 @@ func serve(ctx context.Context, c config) error {
 			CFOperators:     c.Console.CloudflareAccess.Operators,
 			CFDefaultTenant: c.Console.CloudflareAccess.DefaultTenant,
 		},
+		AllowedOrigins: c.Console.AllowedOrigins,
+		Preview: server.PreviewConfig{
+			Domain:  c.Preview.Domain,
+			Listen:  c.Preview.Listen,
+			Auth:    c.Preview.Auth,
+			HoldFor: c.Preview.HoldFor.Duration,
+			CFAud:   c.Preview.CloudflareAccess.AUD,
+		},
 	}, db, blobs, log)
 	return srv.Run(ctx)
 }
@@ -339,6 +347,9 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		fs.Parse(args[1:])
 		token := ids.Secret("luxh")
 		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
+			if err := server.CheckPoolName(ctx, tx, optional(*tenant), *pool); err != nil {
+				return err
+			}
 			_, err := tx.Exec(ctx, `INSERT INTO host_tokens (id, tenant_id, pool, labels, token_hash) VALUES ($1, nullif($2, ''), $3, $4, $5)`,
 				ids.New(ids.HostToken), *tenant, *pool, map[string]string(labels), ids.Hash(token))
 			return err
@@ -376,6 +387,9 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		}
 		id := ids.New(ids.Pool)
 		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
+			if err := server.CheckPoolName(ctx, tx, optional(*tenant), *name); err != nil {
+				return err
+			}
 			return server.SavePool(ctx, tx, *tenant, *name, isDefault.v, func() error {
 				_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
 						scale_down_after_s, warm_while_active, hourly_price, price_currency)
@@ -417,4 +431,12 @@ func admin(ctx context.Context, cfg config, args []string) error {
 	}
 	usage()
 	return nil
+}
+
+// optional is s, or nil when empty: a tenant flag left out means the platform.
+func optional(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }

@@ -59,6 +59,10 @@ PRELOAD_IMAGES = [ALPINE_IMAGE]
 
 LABEL = "lux-e2e"
 
+# Previews of Runs' servers: <server>-<run suffix>.lux.test, sent to luxd's
+# preview listener with that Host header (nothing resolves it).
+PREVIEW_DOMAIN = "lux.test"
+
 
 def sh(*args: str, check: bool = True, input: bytes | None = None, capture: bool = True) -> str:
     result = subprocess.run(args, input=input, capture_output=capture)
@@ -289,6 +293,9 @@ class TestEnvironment:
     subnet: str = ""
     luxd_port: int = 0
     luxd_url: str = ""
+    # luxd's preview listener: previews of Runs' servers are
+    # <server>-<run suffix>.<PREVIEW_DOMAIN> on it (by Host header).
+    preview_port: int = 0
     db_name: str = ""
     bucket: str = ""
     hosts: list[Host] = field(default_factory=list)
@@ -352,6 +359,10 @@ class TestEnvironment:
             # A 10s lease: heartbeats every ~3s (lease/3), and a host or a
             # Run's secrets are given up in seconds, not a production 30s.
             "LUX_LEASE": "10s",
+            **({"LUX_PREVIEW_DOMAIN": PREVIEW_DOMAIN, "LUX_PREVIEW_LISTEN": f"{self.gateway}:{self.preview_port}",
+                # Ticket sign-in, whatever the console's auth (a suite
+                # that turns Access on for the console leaves previews be).
+                "LUX_PREVIEW_AUTH": "ticket", "LUX_PREVIEW_HOLD_FOR": "15s"} if self.preview_port else {}),
         }
 
     # -- setup --------------------------------------------------------------
@@ -366,6 +377,7 @@ class TestEnvironment:
         self._hosts()
         self.luxd_port = free_port()
         self.luxd_url = f"http://{self.gateway}:{self.luxd_port}"
+        self.preview_port = free_port()
         if luxd and self.binaries.get("luxd"):
             self._migrate()
             self.start_luxd()

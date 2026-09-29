@@ -882,6 +882,7 @@ components:
       additionalProperties: false
       properties:
         ch:
+          description: "stdout, stderr, event, or server (a server's output: with servers=true or server=)."
           type: string
         cursor:
           type: string
@@ -894,6 +895,12 @@ components:
         seq:
           format: int64
           type: integer
+        server:
+          description: "ch=server: the server whose command wrote it."
+          type: string
+        stream:
+          description: "ch=server: stdout or stderr (none: its start or exit, as event)."
+          type: string
         t:
           format: int64
           type: integer
@@ -1273,6 +1280,13 @@ components:
           type:
             - array
             - "null"
+        servers:
+          description: "On GET /v1/runs/{id}: the Run's servers."
+          items:
+            $ref: "#/components/schemas/RunServer"
+          type:
+            - array
+            - "null"
         sessionId:
           type: string
         snapshotId:
@@ -1420,6 +1434,87 @@ components:
           type: string
         workloadStartedAt:
           format: date-time
+          type: string
+      type: object
+    RunServer:
+      additionalProperties: false
+      properties:
+        command:
+          description: "argv; null: only the port is exposed."
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        env:
+          additionalProperties:
+            type: string
+          type: object
+        epoch:
+          description: The placement epoch its current state is of.
+          format: int64
+          type:
+            - integer
+            - "null"
+        error:
+          description: "When exited: the last line its command wrote to stderr, if any."
+          type: string
+        exitCode:
+          description: When exited.
+          format: int64
+          type: integer
+        fromSpec:
+          description: Declared in the spec's workload.servers (started on every start of the Run).
+          type: boolean
+        lastRequestAt:
+          description: When its preview URL was last requested (updated at most every 30s).
+          format: date-time
+          type: string
+        name:
+          type: string
+        port:
+          format: int64
+          type: integer
+        readySince:
+          description: When it last became ready (null unless ready).
+          format: date-time
+          type:
+            - string
+            - "null"
+        since:
+          description: When its state last changed.
+          format: date-time
+          type: string
+        state:
+          enum:
+            - stopped
+            - starting
+            - ready
+            - unreachable
+            - exited
+          type: string
+        stopReason:
+          description: "Why it is stopped: stopped by request, or its placement ended."
+          enum:
+            - stopped
+            - run stopped
+            - migrated
+            - host lost
+          type:
+            - string
+            - "null"
+        stoppedEpoch:
+          description: The placement epoch it stopped in (null if it never ran).
+          format: int64
+          type:
+            - integer
+            - "null"
+        url:
+          description: Its preview URL; null when previews are not configured.
+          type:
+            - string
+            - "null"
+        workdir:
           type: string
       type: object
     RunSpec:
@@ -1615,6 +1710,96 @@ components:
         name:
           type: string
       type: object
+    Server:
+      additionalProperties: false
+      properties:
+        command:
+          description: "argv, run with the workload's PATH, user and environment. None: only the port is exposed (something else starts the server)."
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        env:
+          additionalProperties:
+            type: string
+          description: "More environment for the command (not secret: it is stored with the Run)."
+          type: object
+        name:
+          description: "Unique: 1-30 lowercase letters, digits and -, starting with a letter, not ending in -. Its preview URL is <name>-<run suffix>.<preview domain>."
+          type: string
+        port:
+          description: The TCP port it listens on in the container, 1-65535 (not a service's loopback port).
+          format: int64
+          type: integer
+        workdir:
+          description: "Where the command runs; a relative path is against the workload's workdir (default: the workload's workdir)."
+          type: string
+      type: object
+    ServerInput:
+      additionalProperties: false
+      properties:
+        command:
+          description: "argv, run as the workload's user with its environment. None: only the port is exposed."
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        env:
+          additionalProperties:
+            type: string
+          description: More environment for its command (not secret).
+          type: object
+        name:
+          description: "Unique within the Run: 1-30 of a-z, 0-9 and -, starting with a letter, not ending in -. (POST only.)"
+          type: string
+        port:
+          description: The port it listens on in the container.
+          format: int64
+          type: integer
+        start:
+          description: "POST: start it now (the Run must be running). Default: true when it has a command."
+          type: boolean
+        workdir:
+          description: "Where the command runs; relative: against the workload's workdir."
+          type: string
+      type: object
+    ServerList:
+      additionalProperties: false
+      properties:
+        servers:
+          items:
+            $ref: "#/components/schemas/RunServer"
+          type:
+            - array
+            - "null"
+      type: object
+    ServerLog:
+      additionalProperties: false
+      properties:
+        lines:
+          items:
+            $ref: "#/components/schemas/ServerLogLine"
+          type:
+            - array
+            - "null"
+      type: object
+    ServerLogLine:
+      additionalProperties: false
+      properties:
+        stream:
+          enum:
+            - stdout
+            - stderr
+          type: string
+        t:
+          description: Unix milliseconds.
+          format: int64
+          type: integer
+        text:
+          type: string
+      type: object
     Service:
       additionalProperties: false
       properties:
@@ -1713,6 +1898,10 @@ components:
         cols:
           format: int64
           type: integer
+        credit:
+          description: luxd to runner only (tunnel flow control); a client that sends it ends its stream.
+          format: int64
+          type: integer
         data:
           contentEncoding: base64
           type: string
@@ -1751,6 +1940,10 @@ components:
           type: string
         tty:
           type: boolean
+        window:
+          description: luxd to runner only (tunnel flow control); ignored from clients.
+          format: int64
+          type: integer
       type: object
     Tenant:
       additionalProperties: false
@@ -1796,6 +1989,30 @@ components:
           type:
             - array
             - "null"
+      type: object
+    Ticket:
+      additionalProperties: false
+      properties:
+        expiresAt:
+          format: date-time
+          type: string
+        kind:
+          type: string
+        runId:
+          type: string
+        ticket:
+          description: Single use; send it as ?ticket= (never logged by luxd).
+          type: string
+      type: object
+    TicketRequest:
+      additionalProperties: false
+      properties:
+        kind:
+          description: "exec: for ?ticket= on the Run's exec, attach and ports streams. preview: for its preview URLs' sign-in (/.lux/auth)."
+          enum:
+            - exec
+            - preview
+          type: string
       type: object
     Totals:
       additionalProperties: false
@@ -1853,6 +2070,11 @@ components:
           type: boolean
         picture:
           type: string
+        previewDomain:
+          description: The preview listener's domain (preview URLs are https://<server>-<run suffix>.<domain>); null when previews are off, or signed in to through Cloudflare Access rather than a ticket.
+          type:
+            - string
+            - "null"
         scopes:
           items:
             type: string
@@ -1897,6 +2119,13 @@ components:
           type: string
         resume:
           $ref: "#/components/schemas/Resume"
+        servers:
+          description: "Servers: named ports of the Run, each optionally with a command lux starts in the container, as the workload's user with its environment. Started on every start of the Run (a resume, a migration). More can be added while it runs (POST /v1/runs/{id}/servers)."
+          items:
+            $ref: "#/components/schemas/Server"
+          type:
+            - array
+            - "null"
         services:
           description: "HTTP services the workload calls through a local socket (/.lux/services/<name>.sock, named in LUX_SERVICE_<NAME>), which adds their headers: the workload never holds the credentials. Same URL rules as mcpServers."
           items:
@@ -3343,7 +3572,7 @@ paths:
   /v1/runs/{id}/attach:
     get:
       description: |-
-        A WebSocket (send `Upgrade: websocket`), relayed to the Run's host, carrying JSON text messages. Needs a generic workload with workload.tty. Then StreamData both ways: `{"data": <base64>}` for bytes, `{"eof": true}` to close input, `{"rows", "cols"}` to resize. The stream ends with one `{"exitCode": N}` (exec) or `{"error": "..."}`, or just the socket closing, and luxd closes it.
+        A WebSocket (send `Upgrade: websocket`), relayed to the Run's host, carrying JSON text messages. Needs a generic workload with workload.tty. A browser authenticates with `?ticket=` (POST /v1/runs/{id}/tickets, kind exec) instead of a header; a page of another origin than luxd's is refused (403 bad_origin). Then StreamData both ways: `{"data": <base64>}` for bytes, `{"eof": true}` to close input, `{"rows", "cols"}` to resize. The stream ends with one `{"exitCode": N}` (exec) or `{"error": "..."}`, or just the socket closing, and luxd closes it.
 
         Without the upgrade the same URL answers 200 `{"status": "ok"}` if the stream could be opened, and the error it would get otherwise, so a client can check first.
 
@@ -3356,6 +3585,13 @@ paths:
           required: true
           schema:
             description: The Run's id.
+            type: string
+        - description: A stream ticket (kind exec), instead of an Authorization header.
+          explode: false
+          in: query
+          name: ticket
+          schema:
+            description: A stream ticket (kind exec), instead of an Authorization header.
             type: string
       responses:
         "101":
@@ -3596,7 +3832,7 @@ paths:
   /v1/runs/{id}/exec:
     get:
       description: |-
-        A WebSocket (send `Upgrade: websocket`), relayed to the Run's host, carrying JSON text messages. The client's first message is a StreamOpen: `{"command": [...], "tty": true, "rows": 24, "cols": 80}`. Then StreamData both ways: `{"data": <base64>}` for bytes, `{"eof": true}` to close input, `{"rows", "cols"}` to resize. The stream ends with one `{"exitCode": N}` (exec) or `{"error": "..."}`, or just the socket closing, and luxd closes it.
+        A WebSocket (send `Upgrade: websocket`), relayed to the Run's host, carrying JSON text messages. The client's first message is a StreamOpen: `{"command": [...], "tty": true, "rows": 24, "cols": 80}`. A browser authenticates with `?ticket=` (POST /v1/runs/{id}/tickets, kind exec) instead of a header; a page of another origin than luxd's is refused (403 bad_origin). Then StreamData both ways: `{"data": <base64>}` for bytes, `{"eof": true}` to close input, `{"rows", "cols"}` to resize. The stream ends with one `{"exitCode": N}` (exec) or `{"error": "..."}`, or just the socket closing, and luxd closes it.
 
         Without the upgrade the same URL answers 200 `{"status": "ok"}` if the stream could be opened, and the error it would get otherwise, so a client can check first.
 
@@ -3609,6 +3845,13 @@ paths:
           required: true
           schema:
             description: The Run's id.
+            type: string
+        - description: A stream ticket (kind exec), instead of an Authorization header.
+          explode: false
+          in: query
+          name: ticket
+          schema:
+            description: A stream ticket (kind exec), instead of an Authorization header.
             type: string
       responses:
         "101":
@@ -3913,7 +4156,7 @@ paths:
   /v1/runs/{id}/output:
     get:
       description: |-
-        The Run's output as server-sent events, from wherever it is: relayed from its host while it runs, from S3 once uploaded. Events: `record` (one output record; its `cursor` resumes the stream with `since`), `lux` (a lifecycle event, with `events=true`), `gap` (output that cannot be had, e.g. lost with its host), `error` (the stream failed) and `end` (the last event: where to resume and the Run's state). Without `follow` the stream ends after what is there now.
+        The Run's output as server-sent events, from wherever it is: relayed from its host while it runs, from S3 once uploaded. Events: `record` (one output record; its `cursor` resumes the stream with `since`), `lux` (a lifecycle event, with `events=true`), `gap` (output that cannot be had, e.g. lost with its host), `error` (the stream failed) and `end` (the last event: where to resume and the Run's state). Without `follow` the stream ends after what is there now. The output of the Run's servers (ch `server`) is left out unless `servers=true`, or `server=<name>` for one server's alone.
 
         Needs the `read` scope.
       operationId: streamOutput
@@ -3960,6 +4203,22 @@ paths:
             description: With events, only lifecycle events after this id.
             examples:
               - "0"
+            type: string
+        - description: true to include the output of the Run's servers (ch=server), left out by default.
+          explode: false
+          in: query
+          name: servers
+          schema:
+            description: true to include the output of the Run's servers (ch=server), left out by default.
+            examples:
+              - "true"
+            type: string
+        - description: Only this server's output (ch=server records naming it).
+          explode: false
+          in: query
+          name: server
+          schema:
+            description: Only this server's output (ch=server records naming it).
             type: string
       responses:
         "200":
@@ -4075,7 +4334,7 @@ paths:
   /v1/runs/{id}/ports/{name}:
     get:
       description: |-
-        A WebSocket (send `Upgrade: websocket`), relayed to the Run's host, carrying JSON text messages. A TCP connection to a port the spec declares in network.ports, carried as StreamData. Then StreamData both ways: `{"data": <base64>}` for bytes, `{"eof": true}` to close input, `{"rows", "cols"}` to resize. The stream ends with one `{"exitCode": N}` (exec) or `{"error": "..."}`, or just the socket closing, and luxd closes it.
+        A WebSocket (send `Upgrade: websocket`), relayed to the Run's host, carrying JSON text messages. A TCP connection to a port the spec declares in network.ports, or to one of the Run's servers (by its name), carried as StreamData. A browser authenticates with `?ticket=` (POST /v1/runs/{id}/tickets, kind exec) instead of a header; a page of another origin than luxd's is refused (403 bad_origin). Then StreamData both ways: `{"data": <base64>}` for bytes, `{"eof": true}` to close input, `{"rows", "cols"}` to resize. The stream ends with one `{"exitCode": N}` (exec) or `{"error": "..."}`, or just the socket closing, and luxd closes it.
 
         Without the upgrade the same URL answers 200 `{"status": "ok"}` if the stream could be opened, and the error it would get otherwise, so a client can check first.
 
@@ -4089,12 +4348,19 @@ paths:
           schema:
             description: The Run's id.
             type: string
-        - description: The port's name in the spec's network.ports.
+        - description: The port's name in the spec's network.ports, or a server's name.
           in: path
           name: name
           required: true
           schema:
-            description: The port's name in the spec's network.ports.
+            description: The port's name in the spec's network.ports, or a server's name.
+            type: string
+        - description: A stream ticket (kind exec), instead of an Authorization header.
+          explode: false
+          in: query
+          name: ticket
+          schema:
+            description: A stream ticket (kind exec), instead of an Authorization header.
             type: string
       responses:
         "101":
@@ -4306,6 +4572,551 @@ paths:
       summary: Resume a stopped, lost or failed Run
       tags:
         - runs
+  /v1/runs/{id}/servers:
+    get:
+      description: Needs the `read` scope.
+      operationId: listServers
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List a Run's servers
+      tags:
+        - servers
+    post:
+      description: |-
+        A named port of the Run, with an optional command lux runs in its container. It starts now if start (default: when it has a command), which needs the Run running. Any state but finished may add one. One without a command is watched: ready whenever its port accepts connections while the Run runs.
+
+        Needs the `run` scope.
+      operationId: addServer
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServerInput"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunServer"
+          description: Created
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Add a server to a Run
+      tags:
+        - servers
+  /v1/runs/{id}/servers/{name}:
+    delete:
+      description: |-
+        Stops it first.
+
+        Needs the `run` scope.
+      operationId: removeServer
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+        - description: The server's name.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The server's name.
+            type: string
+      responses:
+        "204":
+          description: No Content
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Remove a server
+      tags:
+        - servers
+    put:
+      description: |-
+        Its port, command, workdir and env. A running one keeps what it was started with until it is started again.
+
+        Needs the `run` scope.
+      operationId: putServer
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+        - description: The server's name.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The server's name.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServerInput"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunServer"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Change a server
+      tags:
+        - servers
+  /v1/runs/{id}/servers/{name}/log:
+    get:
+      description: |-
+        The last lines its command wrote, newest last, across placements: the current one's from its host, earlier ones' from their uploaded output. A placement whose output cannot be had (lost with its host, or on a host not connected to this luxd) is skipped.
+
+        Needs the `read` scope.
+      operationId: serverLog
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+        - description: The server's name.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The server's name.
+            type: string
+        - description: The last this many lines, 1 to 5000 (default 200).
+          explode: false
+          in: query
+          name: tail
+          schema:
+            description: The last this many lines, 1 to 5000 (default 200).
+            format: int64
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerLog"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: A server's recent output
+      tags:
+        - servers
+  /v1/runs/{id}/servers/{name}/restart:
+    post:
+      description: |-
+        Stops its command and runs it again, as it is defined now. 409 not_running unless the Run is running; 409 no_command without a command.
+
+        Needs the `run` scope.
+      operationId: restartServer
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+        - description: The server's name.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The server's name.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunServer"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Restart a server
+      tags:
+        - servers
+  /v1/runs/{id}/servers/{name}/start:
+    post:
+      description: |-
+        Runs its command. Idempotent while it runs. 409 not_running unless the Run is running; 409 no_command for a server without one (its port is watched whenever the Run runs).
+
+        Needs the `run` scope.
+      operationId: startServer
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+        - description: The server's name.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The server's name.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunServer"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Start a server
+      tags:
+        - servers
+  /v1/runs/{id}/servers/{name}/stop:
+    post:
+      description: |-
+        Stops its command; a server without one is no longer watched, until the Run's next placement. Idempotent.
+
+        Needs the `run` scope.
+      operationId: stopServer
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+        - description: The server's name.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The server's name.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunServer"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Stop a server
+      tags:
+        - servers
   /v1/runs/{id}/snapshots:
     get:
       description: Needs the `read` scope.
@@ -4417,6 +5228,69 @@ paths:
       summary: Stop a Run
       tags:
         - runs
+  /v1/runs/{id}/tickets:
+    post:
+      description: |-
+        A single-use credential, good for 60 seconds, for what a browser cannot send an Authorization header with. kind exec: `?ticket=` on this Run's exec, attach and ports streams, which then act as the caller. kind preview: the sign-in of this Run's preview URLs (`https://<host>/.lux/auth?ticket=...&to=/path`). An exec ticket needs the `run` scope; a preview one, `read`.
+
+        Needs the `read` scope.
+      operationId: mintTicket
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TicketRequest"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ticket"
+          description: Created
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Mint a stream ticket
+      tags:
+        - interactive
   /v1/status:
     get:
       description: |-
@@ -4561,6 +5435,8 @@ tags:
     name: runs
   - description: Steer a live Run, run commands in it, attach to it, reach its ports.
     name: interactive
+  - description: "A Run's servers: named ports, with commands lux runs, and their preview URLs."
+    name: servers
   - description: The hosts that run your workloads.
     name: hosts
   - description: Pools of hosts, and how they are provisioned.

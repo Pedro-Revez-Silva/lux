@@ -187,6 +187,7 @@ func (s *Server) newAPI(mux *http.ServeMux) huma.API {
 			Tags: []*huma.Tag{
 				{Name: "runs", Description: "Submit Runs and follow them through their lifecycle."},
 				{Name: "interactive", Description: "Steer a live Run, run commands in it, attach to it, reach its ports."},
+				{Name: "servers", Description: "A Run's servers: named ports, with commands lux runs, and their preview URLs."},
 				{Name: "hosts", Description: "The hosts that run your workloads."},
 				{Name: "pools", Description: "Pools of hosts, and how they are provisioned."},
 				{Name: "history", Description: "The system, hosts and Runs now and over time."},
@@ -239,7 +240,13 @@ func (s *Server) requireKey(scope string) func(huma.Context, func(huma.Context))
 	return func(ctx huma.Context, next func(huma.Context)) {
 		var p Principal
 		var err error
-		if key := bearerToken(ctx.Header("Authorization")); key != "" || s.cfAccess == nil {
+		if tp, ok := ctx.Context().Value(principalKey).(Principal); ok {
+			// Authenticated already, by a stream ticket (streamAuth).
+			p = tp
+			if !p.Can(scope) {
+				err = errf(http.StatusForbidden, "forbidden", "scope %q", scope)
+			}
+		} else if key := bearerToken(ctx.Header("Authorization")); key != "" || s.cfAccess == nil {
 			p, err = s.authKey(ctx.Context(), key, scope)
 		} else {
 			r, _ := humago.Unwrap(ctx)

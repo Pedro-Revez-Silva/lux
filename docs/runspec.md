@@ -33,6 +33,12 @@ workload:
       url: https://api.acme.dev/v2
       headers:
         - { name: Authorization, secret: TRACKER_TOKEN }  # added by lux; the workload never has it
+  servers:                      # named ports, started on every start of the Run
+    - name: web                 # its preview: https://web-<run suffix>.<preview domain>
+      port: 3000
+      command: [sh, -c, "npm run dev -- --host 0.0.0.0 --port 3000"]   # optional
+      workdir: repos/api        # optional; relative: against workdir
+      env: { VITE_API_URL: "http://localhost:8080" }                   # optional, not secret
 
 init:
   script: npm ci                # runs before the workload, on every start
@@ -343,6 +349,38 @@ while it is already running. A workload that exits on its own meanwhile
 leaves the container up until the hook is done. A container that dies, or a host that is lost, runs
 nothing, so the last state a caller has is whatever the Run wrote before.
 The hook runs once per placement, only after the workload has started.
+
+## Servers
+
+A **server** is a named port of a Run, optionally with a command lux runs
+in its container. `workload.servers` declares the ones that start on
+**every start** of the Run: the first, a resume, a migration. More can be
+added, started and stopped while it runs (`lux server`, or the API: see
+[concepts](concepts.md#servers)); those do not come back by themselves
+after a stop or a move.
+
+- `name`: 1-30 of `a-z`, `0-9` and `-`, a letter first, not ending in `-`,
+  unique in the Run. It names the server's preview URL,
+  `https://<name>-<run suffix>.<preview domain>` (the run suffix is the
+  run id without `run_`), when luxd serves previews.
+- `port`: the TCP port it listens on in the container, 1-65535, not a
+  service's loopback port. It must listen on the container's address
+  (`0.0.0.0`), not only on `127.0.0.1`: that is where lux reaches it.
+- `command` (optional): argv, run with the workload's `PATH`. Without one,
+  only the port is exposed: something else (the workload, a person in
+  `lux shell`) starts the server, and lux marks it `ready` once the port
+  accepts connections.
+- `workdir` (optional): where the command runs; relative paths are against
+  `workload.workdir`. Default: the workload's.
+- `env` (optional): more environment for the command, on top of the
+  workload's (secrets included). Stored with the Run: nothing secret.
+
+The command runs once `init` is done, beside the workload and detached
+from it, in its own process group, as the workload's user. There is no
+restart policy: a command that exits is `exited`, with its code and the
+last line it wrote to stderr, until someone starts it again. Its output
+is the Run's, as records with `ch: "server"` (see
+[concepts](concepts.md#output)).
 
 ## Artifacts
 

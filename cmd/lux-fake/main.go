@@ -8,6 +8,7 @@
 //	lux-fake -p --input-format stream-json …   Claude Code's stream-json
 //	lux-fake app-server                        Codex's app-server
 //	lux-fake plain                             a line-oriented generic workload
+//	lux-fake serve <port> [text]               a small web server (serve.go)
 //
 // It keeps its conversation in a transcript under
 // $HOME/.lux-fake/<session>.jsonl and resumes from it.
@@ -61,6 +62,8 @@ func main() {
 	switch {
 	case len(os.Args) > 1 && os.Args[1] == "plain":
 		plain()
+	case len(os.Args) > 1 && os.Args[1] == "serve":
+		serve(os.Args[2:])
 	case slices.Contains(os.Args, "stream-json"):
 		streamJSON()
 	case slices.Contains(os.Args, "app-server"):

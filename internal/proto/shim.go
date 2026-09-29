@@ -125,6 +125,9 @@ type ShimMsg struct {
 	GraceSec float64 `json:"graceSec,omitempty"`
 	// A stream's handshake: the connection then carries StreamData lines.
 	Stream *StreamOpen `json:"stream,omitempty"`
+	// servers: the ones to run now (with a command); any other the shim
+	// runs is stopped.
+	Servers []ServerSpec `json:"servers,omitempty"`
 	// replies
 	Error string `json:"error,omitempty"`
 	OK    bool   `json:"ok,omitempty"`
@@ -140,6 +143,8 @@ const (
 	// stream from then on, as StreamData lines both ways; the shim's last
 	// one has ExitCode or Error.
 	ShimStream = "stream"
+	// ShimServers reconciles the servers' processes to the set given.
+	ShimServers = "servers"
 )
 
 // Event types the shim writes as ch=event records. The runner forwards the
@@ -154,6 +159,10 @@ const (
 	EvBeforeStop = "lux.beforeStop" // {"phase": "start"|"done", "exitCode", "timedOut"}
 	EvWarning    = "lux.warning"    // {"message"}
 	EvArtifact   = "lux.artifact"   // {"path"}
+	// EvServer is a server process's start or exit, a ch=server record
+	// naming the server: {"phase": "start"|"exit", "gen", "pid"?,
+	// "exitCode"?, "error"?}.
+	EvServer = "lux.server"
 )
 
 // ExitInfo is the shim's account of how the workload ended.
