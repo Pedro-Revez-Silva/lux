@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from decimal import ROUND_HALF_EVEN, Decimal
 
+import psycopg
 import pytest
 from playwright.sync_api import expect
 
@@ -459,7 +460,7 @@ def test_platform_pool_page_is_reachable_beside_a_tenant_pool_of_its_name(page, 
     expect(page.get_by_text("min 0 · warm 0 · max 7")).to_have_count(1, timeout=15_000)
     events = page.locator("tr", has_text="pool.config_changed")
     expect(events).to_have_count(1, timeout=15_000)
-    expect(events.first).to_contain_text("maxHosts 0→7")
+    expect(events.first).to_contain_text("maxHosts –→7")
     # Back to the list: the tenant's row opens the tenant's.
     page.goto(env.luxd_url + "/pools")
     tenant_row = page.locator("tr", has_text=name).filter(has_not_text="platform")
@@ -467,5 +468,34 @@ def test_platform_pool_page_is_reachable_beside_a_tenant_pool_of_its_name(page, 
     tenant_row.get_by_role("link", name=name, exact=True).click()
     page.wait_for_url(re.compile(rf"/pools/{name}\?tenant="), timeout=10_000)
     expect(page.get_by_text("min 0 · warm 0 · max 2")).to_have_count(1, timeout=15_000)
-    expect(page.locator("tr", has_text="pool.config_changed").first).to_contain_text("maxHosts 0→2", timeout=15_000)
+    expect(page.locator("tr", has_text="pool.config_changed").first).to_contain_text("maxHosts –→2", timeout=15_000)
+    assert not page.errors, page.errors
+
+
+def _add_pool_events(env, tenant_id: str, pool: str, n: int, tag: str):
+    with psycopg.connect(env.owner_dsn) as conn:
+        conn.execute("""INSERT INTO pool_events (tenant_id, pool_id, type, data)
+            SELECT %s, p.id, 'pool.placement', jsonb_build_object('run', %s || '-' || i, 'epoch', 1, 'host', 'h')
+            FROM pools p, generate_series(1, %s) i WHERE p.tenant_id = %s AND p.name = %s ORDER BY i""",
+                     (tenant_id, tag, n, tenant_id, pool))
+
+
+def test_pool_events_keep_every_event_as_new_ones_arrive_above_older_pages(page, env, tenant_factory):
+    """With older pages loaded, new events push some off the polled newest
+    page: the page reads them back, so none goes missing between the two."""
+    a = tenant_factory()
+    name = f"busy-{a.tenant_id[-6:]}"
+    a.run("pools", "set", name, "--provider", "static")
+    _add_pool_events(env, a.tenant_id, name, 1100, "old")
+    page.sign_in(a.api_key, f"/pools/{name}")
+    card = page.locator(".card", has=page.get_by_role("heading", name="Events", exact=True))
+    expect(card.get_by_text(re.compile(r"^1000 events"))).to_have_count(1, timeout=15_000)
+    card.get_by_role("button", name="Load older events").click()
+    expect(card.get_by_text(re.compile(r"^1101 events"))).to_have_count(1, timeout=15_000)
+    _add_pool_events(env, a.tenant_id, name, 30, "new")
+    card.get_by_role("button", name="Refresh").click()
+    expect(card.get_by_text(re.compile(r"^1131 events"))).to_have_count(1, timeout=15_000)
+    # The ones pushed off the newest page are there: old-101 .. old-130.
+    for i in (101, 115, 130):
+        expect(card.get_by_text(f"old-{i} epoch 1 on h", exact=True)).to_have_count(1)
     assert not page.errors, page.errors
