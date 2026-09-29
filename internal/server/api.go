@@ -321,14 +321,16 @@ type Run struct {
 	HostID      string            `json:"hostId,omitempty" doc:"That host's id."`
 	Spec        spec.RunSpec      `json:"spec"`
 	// Image is how a built image was resolved on its first build.
-	Image       *ImageResolution `json:"image,omitempty"`
-	Secrets     []spec.SecretRef `json:"secrets"`
-	CreatedAt   time.Time        `json:"createdAt"`
-	ScheduledAt *time.Time       `json:"firstScheduledAt,omitempty"`
-	StartedAt   *time.Time       `json:"firstStartedAt,omitempty"`
-	FinishedAt  *time.Time       `json:"finishedAt,omitempty"`
-	Placements  []Placement      `json:"placements,omitempty"`
-	Usage       *RunUsage        `json:"usage,omitempty"`
+	Image          *ImageResolution `json:"image,omitempty"`
+	Secrets        []spec.SecretRef `json:"secrets"`
+	CreatedAt      time.Time        `json:"createdAt"`
+	ScheduledAt    *time.Time       `json:"firstScheduledAt,omitempty"`
+	StartedAt      *time.Time       `json:"firstStartedAt,omitempty"`
+	FinishedAt     *time.Time       `json:"finishedAt,omitempty"`
+	RuntimeSeconds float64          `json:"runtimeSeconds" doc:"Seconds its placements have spent running, summed: each from reaching running to exiting or being lost; one still running counts up to the time of the response."`
+	RuntimeSince   *time.Time       `json:"runtimeSince,omitempty" doc:"When the placement still running started, if one is: runtimeSeconds grows from the response's time on."`
+	Placements     []Placement      `json:"placements,omitempty"`
+	Usage          *RunUsage        `json:"usage,omitempty"`
 	// Resume: on GET /v1/runs/{id} of a stopped, lost or failed Run, what
 	// a resume would take.
 	Resume *Resumability `json:"resume,omitempty"`
@@ -397,17 +399,26 @@ type RunUsage struct {
 // Select runColumns FROM runsFrom.
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
-	coalesce(rh.name, ''), coalesce(rp.host_id, '')`
+	coalesce(rh.name, ''), coalesce(rp.host_id, ''), rr.seconds, rr.since`
 
-// runsFrom: a Run with its tenant and its current placement's host.
+// runsFrom: a Run with its tenant, its current placement's host, and its
+// runtime (rr). Runtime is the sum over its placements of started_at
+// (reached running) to ended_at (exited or lost), or to now() for one not
+// yet ended; a placement that never reached running adds 0. since is when
+// the unended one started. Per Run, one scan of placements (run_id, epoch).
 const runsFrom = `runs r JOIN tenants rt ON rt.id = r.tenant_id
 	LEFT JOIN placements rp ON rp.run_id = r.id AND rp.epoch = r.current_epoch
-	LEFT JOIN hosts rh ON rh.id = rp.host_id`
+	LEFT JOIN hosts rh ON rh.id = rp.host_id
+	CROSS JOIN LATERAL (SELECT
+			coalesce(sum(extract(epoch FROM coalesce(p.ended_at, now()) - p.started_at)), 0)::float8 AS seconds,
+			max(p.started_at) FILTER (WHERE p.ended_at IS NULL) AS since
+		FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) rr`
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
-		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID)
+		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
+		&r.RuntimeSeconds, &r.RuntimeSince)
 	return &r, err
 }
 
@@ -621,8 +632,10 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 	}
 	runs := []*Run{}
 	err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE `+strings.Join(where, " AND ")+
-			` ORDER BY r.created_at DESC LIMIT `+strconv.Itoa(limit), args...)
+		// The page is chosen first, so runsFrom's joins and runtime
+		// aggregate run for its rows only, not for every Run matched.
+		rows, err := tx.Query(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.id IN (SELECT r.id FROM runs r WHERE `+
+			strings.Join(where, " AND ")+` ORDER BY r.created_at DESC LIMIT `+strconv.Itoa(limit)+`) ORDER BY r.created_at DESC`, args...)
 		if err != nil {
 			return err
 		}

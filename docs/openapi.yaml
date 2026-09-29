@@ -1261,6 +1261,14 @@ components:
             - "null"
         resume:
           $ref: "#/components/schemas/Resumability"
+        runtimeSeconds:
+          description: "Seconds its placements have spent running, summed: each from reaching running to exiting or being lost; one still running counts up to the time of the response."
+          format: double
+          type: number
+        runtimeSince:
+          description: "When the placement still running started, if one is: runtimeSeconds grows from the response's time on."
+          format: date-time
+          type: string
         secrets:
           items:
             $ref: "#/components/schemas/SecretRef"
