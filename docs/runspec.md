@@ -456,10 +456,12 @@ changed in each of its repositories, `push: false` ones included (their
 `push` is false in the response), from its **base** to its working tree:
 committed changes, staged, unstaged and untracked (not ignored) files.
 
-- The base is the commit of the repository's latest successful
-  `git.clone` event: the one it was cloned at. A resumed Run keeps it
-  (luxd sends it with every assignment); a repository added on resume has
-  its own clone's. `base=head` diffs from the checkout's `HEAD` instead.
+- The base is the commit the repository was cloned at: its latest
+  successful `git.clone` event in the history of the running placement's
+  workspace. A resumed Run keeps it (luxd sends it with every
+  assignment); a repository added on resume has its own clone's. A Run
+  resumed from an older snapshot (`fromSnapshot`) diffs from the clones
+  that snapshot descends from, not from those of later placements. `base=head` diffs from the checkout's `HEAD` instead.
 - **Only while the Run is running.** luxd asks the Run's runner, which
   runs the diff in the Run's container, now. A Run that is not running
   answers 409 `run_not_running`: one whose container is not up yet (it is

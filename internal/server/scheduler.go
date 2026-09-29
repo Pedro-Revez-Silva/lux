@@ -451,12 +451,14 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 		WHERE id = $1`, r.ID, epoch); err != nil {
 		return err
 	}
-	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID}); err != nil {
+	// snapshotId: what this placement's volumes start from (null: empty),
+	// the lineage its repositories' clone bases follow (gitBases).
+	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID, "snapshotId": r.SnapshotID}); err != nil {
 		return err
 	}
 
 	a := proto.Assign{RunID: r.ID, TenantID: r.TenantID, Epoch: epoch, Spec: r.Spec, ImageResolved: r.ImageResolved}
-	if a.GitBases, err = gitBases(ctx, tx, r.ID); err != nil {
+	if a.GitBases, err = gitBases(ctx, tx, r.ID, epoch); err != nil {
 		return err
 	}
 	if r.SnapshotID != nil || r.SessionID != "" {

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -177,7 +178,7 @@ func (s *Server) diffTarget(ctx context.Context, tenantID, runID, repo string) (
 		t.live = (t.state == StateRunning || t.state == StateStopping) &&
 			(t.plState == "running" || t.plState == "stopping")
 		var err error
-		t.bases, err = gitBases(ctx, tx, runID)
+		t.bases, err = gitBases(ctx, tx, runID, t.epoch)
 		return err
 	})
 	return t, err
@@ -203,26 +204,64 @@ func notRunning(t diffTarget) error {
 		"%s: its diff is available only while the Run is running; %s", what, keepAPatch)
 }
 
-// gitBases are the commits a Run's repositories were cloned at: each
-// repository's latest successful git.clone (a resume clones only the
-// repositories it adds, so the others keep their first).
-func gitBases(ctx context.Context, tx pgx.Tx, runID string) (map[string]string, error) {
-	rows, err := tx.Query(ctx, `SELECT DISTINCT ON (data->>'repo') data->>'repo', coalesce(data->>'commit', '')
-		FROM run_events WHERE run_id = $1 AND type = $2 AND data->>'status' = 'cloned'
-		ORDER BY data->>'repo', id DESC`, runID, proto.EvGitClone)
-	if err != nil {
-		return nil, err
+// gitBases are the commits the repositories of a Run's placement at epoch
+// were cloned at: each one's latest successful git.clone in that placement,
+// else in the placement whose snapshot it restored, and so on back (a
+// resume clones only the repositories it adds; the others are as the
+// snapshot has them). A snapshot older than the latest (resume
+// --from-snapshot) leads back through its own placement, never through
+// the placements after it. Placements scheduled before their snapshot was
+// recorded fall back to every earlier clone, latest first.
+func gitBases(ctx context.Context, tx pgx.Tx, runID string, epoch int) (map[string]string, error) {
+	m := map[string]string{}
+	clones := func(cond string, e int) error {
+		rows, err := tx.Query(ctx, `SELECT data->>'repo', coalesce(data->>'commit', '')
+			FROM run_events WHERE run_id = $1 AND type = $2 AND data->>'status' = 'cloned' AND `+cond+`
+			ORDER BY epoch DESC, id DESC`, runID, proto.EvGitClone, e)
+		if err != nil {
+			return err
+		}
+		out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) ([2]string, error) {
+			var kv [2]string
+			return kv, r.Scan(&kv[0], &kv[1])
+		})
+		for _, kv := range out {
+			if _, ok := m[kv[0]]; !ok {
+				m[kv[0]] = kv[1]
+			}
+		}
+		return err
 	}
-	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) ([2]string, error) {
-		var kv [2]string
-		return kv, r.Scan(&kv[0], &kv[1])
-	})
-	if err != nil || len(out) == 0 {
-		return nil, err
+	for e := epoch; e > 0; {
+		if err := clones("epoch = $3", e); err != nil {
+			return nil, err
+		}
+		var recorded bool
+		var snap *string
+		err := tx.QueryRow(ctx, `SELECT data ? 'snapshotId', data->>'snapshotId' FROM run_events
+			WHERE run_id = $1 AND epoch = $2 AND type = 'state' AND data->>'state' = $3
+			ORDER BY id DESC LIMIT 1`, runID, e, StateScheduled).Scan(&recorded, &snap)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && !recorded) {
+			if err := clones("epoch < $3", e); err != nil {
+				return nil, err
+			}
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if snap == nil {
+			break // it started from empty volumes: everything was cloned in it
+		}
+		prev := 0
+		if err := tx.QueryRow(ctx, `SELECT epoch FROM snapshots WHERE id = $1 AND run_id = $2`, *snap, runID).Scan(&prev); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+		// Epochs only go back: a snapshot is always an earlier placement's.
+		e = min(prev, e-1)
 	}
-	m := make(map[string]string, len(out))
-	for _, kv := range out {
-		m[kv[0]] = kv[1]
+	if len(m) == 0 {
+		return nil, nil
 	}
 	return m, nil
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -311,13 +312,18 @@ func TestDiffCapability(t *testing.T) {
 }
 
 // Every assignment carries each repository's clone base, so a resumed
-// placement (which does not clone) diffs from where the Run started.
+// placement (which does not clone) diffs from where the Run started. The
+// Run's placements predate recorded lineage: their latest clones count.
 func TestAssignCarriesGitBases(t *testing.T) {
 	s, _ := diffFixture(t)
 	ctx := context.Background()
 	var a proto.Assign
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		if err := s.assign(ctx, tx, pendingRun{ID: "r1", TenantID: "t1", State: StateResuming, Epoch: 2, Spec: spec.RunSpec{}}, &candidateHost{ID: "h1"}); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest) VALUES ('s2', 't1', 'r1', 'p2', 2, '{}')`); err != nil {
+			return err
+		}
+		sid := "s2"
+		if err := s.assign(ctx, tx, pendingRun{ID: "r1", TenantID: "t1", State: StateResuming, Epoch: 2, Spec: spec.RunSpec{}, SnapshotID: &sid}, &candidateHost{ID: "h1"}); err != nil {
 			return err
 		}
 		return tx.QueryRow(ctx, `SELECT payload FROM host_messages WHERE host_id = 'h1' AND type = $1`, proto.MsgAssign).Scan(&a)
@@ -327,6 +333,75 @@ func TestAssignCarriesGitBases(t *testing.T) {
 	}
 	if a.Epoch != 3 || a.GitBases["app"] != "base-app" || a.GitBases["lib"] != "base-lib" || len(a.GitBases) != 2 {
 		t.Errorf("assign: epoch %d, bases %v", a.Epoch, a.GitBases)
+	}
+}
+
+// A Run resumed from an older snapshot diffs from the clones that
+// snapshot descends from, not from a later placement's. Epoch 1 cloned app
+// at c1 and snapshotted s1; epoch 2, from s1, recloned app (its checkout
+// replaced) at c2 and added lib at l2, then snapshotted s2; epoch 3 is
+// resumed --from s1: app's base is c1 again, and lib (not in s1) has none
+// from the Run's history. Epoch 4, from s3 (epoch 3's), keeps c1 and the
+// lib it cloned in epoch 3.
+func TestGitBasesFollowTheRestoredSnapshot(t *testing.T) {
+	s, _ := diffFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('rs', 't1', '{}', 'stopped', 4)`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES
+		('q1', 't1', 'rs', 'h1', 1, 'exited'), ('q2', 't1', 'rs', 'h1', 2, 'exited'), ('q3', 't1', 'rs', 'h1', 3, 'exited'), ('q4', 't1', 'rs', 'h1', 4, 'exited')`)
+	execSQL(t, s, ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest) VALUES
+		('s1', 't1', 'rs', 'q1', 1, '{}'), ('s2', 't1', 'rs', 'q2', 2, '{}'), ('s3', 't1', 'rs', 'q3', 3, '{}')`)
+	schedule := func(epoch int, snap any) {
+		execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES ('t1', 'rs', $1, 'state', jsonb_build_object('state', 'scheduled', 'snapshotId', $2::text))`, epoch, snap)
+	}
+	clone := func(epoch int, repo, commit string) {
+		execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES ('t1', 'rs', $1, 'git.clone', jsonb_build_object('repo', $2::text, 'status', 'cloned', 'commit', $3::text))`, epoch, repo, commit)
+	}
+	schedule(1, nil)
+	clone(1, "app", "c1")
+	schedule(2, "s1")
+	clone(2, "app", "c2")
+	clone(2, "lib", "l2")
+	schedule(3, "s1")
+	clone(3, "lib", "l3")
+	bases := func(epoch int) map[string]string {
+		var m map[string]string
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) (err error) { m, err = gitBases(ctx, tx, "rs", epoch); return }); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	for _, c := range []struct {
+		epoch int
+		want  map[string]string
+	}{
+		{1, map[string]string{"app": "c1"}},
+		{2, map[string]string{"app": "c2", "lib": "l2"}},
+		{3, map[string]string{"app": "c1", "lib": "l3"}},
+	} {
+		if got := bases(c.epoch); !maps.Equal(got, c.want) {
+			t.Errorf("epoch %d: %v, want %v", c.epoch, got, c.want)
+		}
+	}
+	schedule(4, "s3")
+	if got := bases(4); !maps.Equal(got, map[string]string{"app": "c1", "lib": "l3"}) {
+		t.Errorf("epoch 4 from s3: %v", got)
+	}
+	// The scheduler records the lineage it assigns: epoch 5's assignment,
+	// resumed from s1 again, has app at c1 and no lib.
+	var a proto.Assign
+	sid := "s1"
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if err := s.assign(ctx, tx, pendingRun{ID: "rs", TenantID: "t1", State: StateResuming, Epoch: 4, SnapshotID: &sid}, &candidateHost{ID: "h1"}); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT payload FROM host_messages WHERE host_id = 'h1' AND type = $1`, proto.MsgAssign).Scan(&a)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Epoch != 5 || !maps.Equal(a.GitBases, map[string]string{"app": "c1"}) {
+		t.Errorf("assign from s1: epoch %d, bases %v", a.Epoch, a.GitBases)
 	}
 }
 
