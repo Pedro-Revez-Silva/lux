@@ -3,7 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -91,7 +94,7 @@ func recordsOf(t *testing.T, s *Server, runID string) runRecords {
 			FROM blobs WHERE run_id = $1 ORDER BY id`); err != nil {
 			return err
 		}
-		if r.Artifacts, err = collect(`SELECT concat_ws(' ', path, blob_id, tenant_id) FROM artifacts WHERE run_id = $1 ORDER BY path, blob_id`); err != nil {
+		if r.Artifacts, err = collect(`SELECT concat_ws(' ', path, blob_id, tenant_id, content_type, size, sha256) FROM artifacts WHERE run_id = $1 ORDER BY path, blob_id`); err != nil {
 			return err
 		}
 		return tx.QueryRow(ctx, `SELECT coalesce(r.snapshot_id, ''),
@@ -293,9 +296,10 @@ func TestSnapshotReportRefusedEndsRunWithoutResume(t *testing.T) {
 			if doneAt == c.refused || refusedCol != c.refused {
 				t.Errorf("pb2: snapshot_done_at set %v, snapshot_refused %v", doneAt, refusedCol)
 			}
-			// The Run's servers stop with the placement, refused or not.
+			// The Run's servers stop with the placement, refused or not; only
+			// a move that is resumed elsewhere counts as migrated.
 			wantStop := "run stopped"
-			if c.stop == "migrate" || c.stop == "drain" {
+			if (c.stop == "migrate" || c.stop == "drain") && !c.refused {
 				wantStop = "migrated"
 			}
 			var svState, svStop string
@@ -332,6 +336,15 @@ func TestSnapshotReportRedeliveryMustMatch(t *testing.T) {
 		"another artifact": func(sd *proto.SnapshotDone) {
 			sd.Artifacts = append(sd.Artifacts, proto.Artifact{BlobInfo: proto.BlobInfo{BlobID: "bB-art-other", Size: 1, SHA256: "x"}, Path: "/out/c"})
 		},
+		"output omitted":        func(sd *proto.SnapshotDone) { sd.Output = nil },
+		"artifact omitted":      func(sd *proto.SnapshotDone) { sd.Artifacts = nil },
+		"artifact path":         func(sd *proto.SnapshotDone) { sd.Artifacts[0].Path = "/out/other.txt" },
+		"artifact content type": func(sd *proto.SnapshotDone) { sd.Artifacts[0].ContentType = "text/html" },
+		"artifact file size":    func(sd *proto.SnapshotDone) { sd.Artifacts[0].FileSize++ },
+		"artifact file sha256":  func(sd *proto.SnapshotDone) { sd.Artifacts[0].FileSHA256 = "changed" },
+		"artifact twice": func(sd *proto.SnapshotDone) {
+			sd.Artifacts = append(sd.Artifacts, sd.Artifacts[0])
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, _ := reportFixture(t)
@@ -352,12 +365,11 @@ func TestSnapshotReportRedeliveryMustMatch(t *testing.T) {
 			if got := eventErrors(t, s, "rb", "snapshot.failed"); !reflect.DeepEqual(got, []string{foreignBlobsReason}) {
 				t.Errorf("snapshot.failed events %q", got)
 			}
-			// The placement's snapshot was recorded: its Run is not
-			// treated as having lost it.
+			// The latest report was refused, whatever was recorded before.
 			var refused bool
 			systemScan(t, s, `SELECT snapshot_refused FROM placements WHERE id = 'pb1'`, nil, &refused)
-			if refused {
-				t.Error("pb1 marked snapshot_refused")
+			if !refused {
+				t.Error("pb1 not marked snapshot_refused")
 			}
 		})
 	}
@@ -398,4 +410,132 @@ func ackRefused(t *testing.T, f proto.Frame) bool {
 		}
 	}
 	return ack.Refused
+}
+
+// exitPlacement reports rb's placement at epoch as exited with code 0.
+func exitPlacement(t *testing.T, s *Server, epoch int) {
+	t.Helper()
+	code := 0
+	f := s.handleReport(context.Background(), "hb", proto.Frame{Type: proto.MsgStatus, ID: 9, RunID: "rb", Epoch: epoch,
+		Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: "exited"})})
+	if f.Type != proto.MsgAck {
+		t.Fatalf("exit: %s %s", f.Type, f.Data)
+	}
+}
+
+// A moving placement that reported snapshot A, then a refused report B,
+// stays stopped rather than resuming from A. A later accepted report C
+// clears the refusal, and the move then resumes from C.
+func TestSnapshotReportRefusedAfterAcceptedInSamePlacement(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		laterReport  bool
+		state, snap  string
+		reason       string
+		wantResuming bool
+	}{
+		{"refused last", false, StateStopped, "snapB-A", "migrate; " + refusedSnapshotReason, false},
+		{"accepted after refused", true, StateResuming, "snapB-C", "auto-resume after migrate", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, ctx := reportFixture(t)
+			execSQL(t, s, ctx, `UPDATE placements SET stop_reason = 'migrate' WHERE id = 'pb1'`)
+			if f := reportSnapshot(t, s, "hb", "rb", 1, snapshotB("snapB-A", 1)); f.Type != proto.MsgAck || ackRefused(t, f) {
+				t.Fatalf("report A: %s %s", f.Type, f.Data)
+			}
+			refusedB := snapshotB("snapB-B", 1)
+			refusedB.Output = &proto.BlobInfo{BlobID: "bA-out", Size: 20, SHA256: "a-out"}
+			// B's id is not recorded, so the runner may drop its files.
+			if f := reportSnapshot(t, s, "hb", "rb", 1, refusedB); f.Type != proto.MsgAck || !ackRefused(t, f) {
+				t.Fatalf("report B: %s %s, want an ack with refused", f.Type, f.Data)
+			}
+			if c.laterReport {
+				if f := reportSnapshot(t, s, "hb", "rb", 1, snapshotB("snapB-C", 1)); f.Type != proto.MsgAck || ackRefused(t, f) {
+					t.Fatalf("report C: %s %s", f.Type, f.Data)
+				}
+			}
+			exitPlacement(t, s, 1)
+
+			var state, reason, snap string
+			var refused bool
+			systemScan(t, s, `SELECT r.state, r.state_reason, coalesce(r.snapshot_id, ''), p.snapshot_refused
+				FROM runs r JOIN placements p ON p.id = 'pb1' WHERE r.id = 'rb'`, nil, &state, &reason, &snap, &refused)
+			if state != c.state || reason != c.reason || snap != c.snap || refused == c.laterReport {
+				t.Errorf("rb: state %q reason %q snapshot %q refused %v; want %q %q %q %v",
+					state, reason, snap, refused, c.state, c.reason, c.snap, !c.laterReport)
+			}
+			if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+				t.Fatal(err)
+			}
+			var placements int
+			systemScan(t, s, `SELECT count(*) FROM placements WHERE run_id = 'rb'`, nil, &placements)
+			if !c.wantResuming && placements != 1 {
+				t.Errorf("rb has %d placements after scheduling, want 1", placements)
+			}
+		})
+	}
+}
+
+// A Run whose first snapshot report was refused has nothing to restore:
+// resume answers 409 no_snapshot, GET says why, and the resumable filter
+// leaves it out. A Run stopped before any snapshot for another reason
+// keeps resuming from scratch.
+func TestResumeRefusedWithoutSnapshot(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		refused bool
+	}{
+		{"refused first snapshot", true},
+		{"ordinary stop without snapshot", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, ctx := reportFixture(t)
+			execSQL(t, s, ctx, `UPDATE placements SET stop_reason = 'stop' WHERE id = 'pb1'`)
+			if c.refused {
+				sd := snapshotB("snapB", 1)
+				sd.Output = &proto.BlobInfo{BlobID: "bA-out", Size: 20, SHA256: "a-out"}
+				if f := reportSnapshot(t, s, "hb", "rb", 1, sd); f.Type != proto.MsgAck || !ackRefused(t, f) {
+					t.Fatalf("report: %s %s", f.Type, f.Data)
+				}
+			} else if f := reportSnapshot(t, s, "hb", "rb", 1, proto.SnapshotDone{Error: "no volumes"}); f.Type != proto.MsgAck {
+				t.Fatalf("report: %s %s", f.Type, f.Data)
+			}
+			exitPlacement(t, s, 1)
+			actx := context.WithValue(ctx, principalKey, Principal{TenantID: "t2", Scopes: []string{"run", "read"}})
+
+			got, err := s.getRun(actx, &RunPath{ID: "rb"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Body.State != StateStopped || got.Body.SnapshotID != nil || got.Body.Resume == nil {
+				t.Fatalf("rb: %+v", got.Body)
+			}
+			if blocked := slices.Contains(got.Body.Resume.Blockers, noSnapshotReason); blocked != c.refused {
+				t.Errorf("resume blockers %q, want the no-snapshot one: %v", got.Body.Resume.Blockers, c.refused)
+			}
+			list, err := s.listRuns(actx, &listRunsInput{Resumable: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			listed := slices.ContainsFunc(list.Body.Runs, func(r *Run) bool { return r.ID == "rb" })
+			if listed == c.refused {
+				t.Errorf("rb in the resumable list: %v", listed)
+			}
+
+			_, err = s.resumeRun(actx, &resumeRunInput{RunPath: RunPath{ID: "rb"}})
+			var he *HTTPError
+			if c.refused {
+				if !errors.As(err, &he) || he.Status != http.StatusConflict || he.Code != "no_snapshot" {
+					t.Fatalf("resume: %v, want 409 no_snapshot", err)
+				}
+			} else if err != nil {
+				t.Fatalf("resume: %v", err)
+			}
+			var state string
+			systemScan(t, s, `SELECT state FROM runs WHERE id = 'rb'`, nil, &state)
+			if want := map[bool]string{true: StateStopped, false: StateResuming}[c.refused]; state != want {
+				t.Errorf("rb is %s after resume, want %s", state, want)
+			}
+		})
+	}
 }

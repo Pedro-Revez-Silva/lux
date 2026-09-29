@@ -40,6 +40,13 @@ const queuedRunStates = "('submitted', 'resuming', 'provisioning')"
 // resumableRunStates, for SQL: Runs resume accepts.
 const resumableRunStates = "('stopped', 'lost', 'failed')"
 
+// refusedWithoutSnapshot, for SQL over runsFrom: the current placement's
+// latest report was refused and the Run has no snapshot to restore.
+const refusedWithoutSnapshot = "coalesce(rp.snapshot_refused AND r.snapshot_id IS NULL, false)"
+
+// noSnapshotReason explains why resume refuses such a Run.
+const noSnapshotReason = "its only snapshot report was refused, so there is no snapshot to restore"
+
 // movedStops: stop reasons that move a Run rather than stop it; it is
 // resumed elsewhere as soon as it has stopped.
 var movedStops = []string{"drain", "preempt", "migrate"}
@@ -261,7 +268,12 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	if err := setRunState(ctx, tx, tenantID, runID, next, reason, epoch); err != nil {
 		return err
 	}
-	if err := stopServersAtEnd(ctx, tx, tenantID, runID, epoch, endReason(stopReason)); err != nil {
+	serverStop := endReason(stopReason)
+	if snapshotRefused {
+		// A refused move is not resumed elsewhere: the servers just stop.
+		serverStop = endReason("stop")
+	}
+	if err := stopServersAtEnd(ctx, tx, tenantID, runID, epoch, serverStop); err != nil {
 		return err
 	}
 	// A move resumes the Run from the snapshot its placement just took;
@@ -364,10 +376,9 @@ func (s *Server) applySnapshotDone(ctx context.Context, tx pgx.Tx, tenantID, hos
 			return false, err
 		}
 		s.log.Warn("snapshot report refused", "host", hostID, "run", runID, "epoch", epoch, "err", err)
-		// Unless the placement's snapshot was recorded from an earlier
-		// report: that one stays the placement's. The runner is told to
-		// drop the files of the reported snapshot id unless it is that one.
-		if err := tx.QueryRow(ctx, `UPDATE placements SET snapshot_refused = NOT EXISTS (SELECT 1 FROM snapshots WHERE placement_id = $1)
+		// A recorded snapshot keeps its files, but any refused latest report
+		// prevents this placement from auto-resuming on exit.
+		if err := tx.QueryRow(ctx, `UPDATE placements SET snapshot_refused = true
 			WHERE id = $1 RETURNING NOT EXISTS (SELECT 1 FROM snapshots WHERE id = $2 AND placement_id = $1)`,
 			placementID, sd.Manifest.SnapshotID).Scan(&refused); err != nil {
 			return false, err
@@ -452,31 +463,57 @@ func (s *Server) recordSnapshot(ctx context.Context, tx pgx.Tx, tenantID, hostID
 	return addEvent(ctx, tx, tenantID, runID, epoch, "snapshot", map[string]any{"snapshotId": sd.Manifest.SnapshotID, "bytes": total, "volumes": len(sd.Manifest.Volumes)})
 }
 
-// recordedBlobsMatch: every output and artifact blob of a redelivered
-// report is already recorded as that blob of this placement. The manifest's
-// volumes were compared with the stored manifest.
+// recordedBlobsMatch compares the placement's output pointer and artifact
+// rows with the redelivery. Artifacts have no snapshot_id, so multiple
+// reports in one placement share the same artifact set.
 func recordedBlobsMatch(ctx context.Context, tx pgx.Tx, runID string, epoch int, sd proto.SnapshotDone) error {
-	type want struct {
-		id, kind string
-		size     int64
-		sha      string
+	var outputID *string
+	if err := tx.QueryRow(ctx, `SELECT output_blob_id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&outputID); err != nil {
+		return err
 	}
-	var ws []want
-	if sd.Output != nil {
-		ws = append(ws, want{sd.Output.BlobID, "output", sd.Output.Size, sd.Output.SHA256})
+	if (outputID == nil) != (sd.Output == nil) || outputID != nil && *outputID != sd.Output.BlobID {
+		return &foreignBlobError{sd.Manifest.SnapshotID}
 	}
-	for _, a := range sd.Artifacts {
-		ws = append(ws, want{a.BlobID, "artifact", a.Size, a.SHA256})
-	}
-	for _, w := range ws {
-		var ok bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM blobs WHERE id = $1 AND run_id = $2 AND epoch = $3
-				AND kind = $4 AND size = $5 AND sha256 = $6)`, w.id, runID, epoch, w.kind, w.size, w.sha).Scan(&ok); err != nil {
+	if outputID != nil {
+		var stored proto.BlobInfo
+		err := tx.QueryRow(ctx, `SELECT id, size, sha256 FROM blobs
+			WHERE id = $1 AND run_id = $2 AND epoch = $3 AND kind = 'output'`, *outputID, runID, epoch).
+			Scan(&stored.BlobID, &stored.Size, &stored.SHA256)
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && stored != *sd.Output {
+			return &foreignBlobError{*outputID}
+		}
+		if err != nil {
 			return err
 		}
-		if !ok {
-			return &foreignBlobError{w.id}
+	}
+	rows, err := tx.Query(ctx, `SELECT a.blob_id, b.size, b.sha256, a.path, a.content_type, a.size, a.sha256
+		FROM artifacts a JOIN blobs b ON b.id = a.blob_id
+		WHERE a.run_id = $1 AND a.epoch = $2 AND b.run_id = $1 AND b.epoch = $2 AND b.kind = 'artifact'`, runID, epoch)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	stored := map[proto.Artifact]int{}
+	count := 0
+	for rows.Next() {
+		var a proto.Artifact
+		if err := rows.Scan(&a.BlobID, &a.Size, &a.SHA256, &a.Path, &a.ContentType, &a.FileSize, &a.FileSHA256); err != nil {
+			return err
 		}
+		stored[a]++
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if count != len(sd.Artifacts) {
+		return &foreignBlobError{sd.Manifest.SnapshotID}
+	}
+	for _, a := range sd.Artifacts {
+		if stored[a] == 0 {
+			return &foreignBlobError{a.BlobID}
+		}
+		stored[a]--
 	}
 	return nil
 }
