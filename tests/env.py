@@ -481,8 +481,14 @@ class TestEnvironment:
                   "graphroot = \"/var/lib/containers/storage\"\\n' > /etc/containers/storage.conf")
         tar = image_tar or Path(self.log_dir) / "images.tar"
         with open(tar, "rb") as f:
-            subprocess.run(["docker", "exec", "-i", container, "podman", "load", "-q"],
-                           stdin=f, check=True, capture_output=True)
+            loaded = subprocess.run(["docker", "exec", "-i", container, "podman", "load", "-q"],
+                                    stdin=f, capture_output=True)
+        if loaded.returncode:
+            diagnostic = loaded.stdout + loaded.stderr
+            Path(host.log_dir).mkdir(parents=True, exist_ok=True)
+            (Path(host.log_dir) / "image-load.log").write_bytes(diagnostic)
+            raise RuntimeError(f"{container}: podman load exited {loaded.returncode}: "
+                               f"{diagnostic.decode(errors='replace')}")
         # docker save records Docker Hub images by short name (alpine:3.24.2),
         # which podman loads as localhost/alpine; tag them with the full
         # references specs use, so nothing ever reaches a registry.
