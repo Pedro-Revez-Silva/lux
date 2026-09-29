@@ -350,6 +350,8 @@ leaves the container up until the hook is done. A container that dies, or a host
 nothing, so the last state a caller has is whatever the Run wrote before.
 The hook runs once per placement, only after the workload has started.
 
+`lux diff` works only while a Run is running; to keep a repository's changes past a stop, save a patch: `command: [sh, -c, "cd /workspace/repos/app && git add -N . && git diff --binary <base> > $LUX_ARTIFACTS/final.patch"]`, then fetch it with `lux artifacts`.
+
 ## Servers
 
 A **server** is a named port of a Run, optionally with a command lux runs

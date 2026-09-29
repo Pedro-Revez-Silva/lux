@@ -1111,6 +1111,40 @@ components:
           description: The secret (in secrets) holding user:password, or a bare token (sent as the password, with the user lux).
           type: string
       type: object
+    RepoDiff:
+      additionalProperties: false
+      properties:
+        base:
+          description: The commit diffed from.
+          type: string
+        deletions:
+          format: int64
+          type: integer
+        error:
+          description: Why this repository's diff could not be computed.
+          type: string
+        files:
+          format: int64
+          type: integer
+        head:
+          description: The checkout's HEAD commit (empty before its first commit).
+          type: string
+        insertions:
+          format: int64
+          type: integer
+        patch:
+          description: The patch (git diff format), when it is valid UTF-8.
+          type: string
+        patchBase64:
+          contentEncoding: base64
+          description: The patch, base64, when it is not valid UTF-8 (patch is then absent).
+          type: string
+        repo:
+          type: string
+        truncated:
+          description: "Untracked files were cut (at 32 KiB each, or 8 KiB past 1 MiB in all) or are binary: the patch does not recreate them."
+          type: boolean
+      type: object
     Repository:
       additionalProperties: false
       properties:
@@ -1403,6 +1437,21 @@ components:
           description: Per currency, ordered by currency; empty while pending.
           items:
             $ref: "#/components/schemas/CostTotal"
+          type:
+            - array
+            - "null"
+      type: object
+    RunDiff:
+      additionalProperties: false
+      properties:
+        base:
+          enum:
+            - clone
+            - head
+          type: string
+        repos:
+          items:
+            $ref: "#/components/schemas/RepoDiff"
           type:
             - array
             - "null"
@@ -4010,6 +4059,106 @@ paths:
       security:
         - apiKey: []
       summary: What a Run cost
+      tags:
+        - runs
+  /v1/runs/{id}/diff:
+    get:
+      description: |-
+        Per repository, from its base to its working tree: committed, staged, unstaged and untracked (not ignored) changes, computed now in the Run's container. `base=clone` (default) diffs from the commit the repository was cloned at, `base=head` from its HEAD. Untracked files are cut at 32 KiB each, or 8 KiB each if the whole diff would pass 1 MiB, and binary ones are named only: such a patch is `truncated` and does not apply as it is. A diff over 16 MiB is refused (502 `diff_failed`).
+
+        Only while the Run is running: otherwise 409 `run_not_running`. 404 `no_diff` when the Run has no repositories. One diff per Run at a time (409 `diff_busy`). 503 `diff_unsupported` when the Run's runner predates diffs.
+
+        Needs the `read` scope.
+      operationId: runDiff
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+        - description: "clone (default): from the commit each repository was cloned at. head: from its HEAD."
+          explode: false
+          in: query
+          name: base
+          schema:
+            description: "clone (default): from the commit each repository was cloned at. head: from its HEAD."
+            enum:
+              - clone
+              - head
+            type: string
+        - description: Totals only, no patches.
+          explode: false
+          in: query
+          name: stat
+          schema:
+            description: Totals only, no patches.
+            type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunDiff"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+        "502":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Gateway
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Service Unavailable
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Gateway Timeout
+      security:
+        - apiKey: []
+      summary: What a running Run changed in its repositories
       tags:
         - runs
   /v1/runs/{id}/events:
