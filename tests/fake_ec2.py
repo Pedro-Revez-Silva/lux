@@ -79,6 +79,9 @@ class FakeEC2:
         self.no_boot = False  # launched instances never start a runner
         self.lose_reply = False
         self.deny_create_tags = False  # CreateTags refused, as without IAM's ec2:CreateTags
+        # Launches drop lux:pool-id, as instances launched by a luxd from
+        # before it carry only the pool's name.
+        self.untagged_launches = False
         # Instances tag-filtered DescribeInstances calls miss (EC2's
         # listings lag behind tag changes); a call by InstanceId still
         # answers for them.
@@ -197,6 +200,8 @@ class FakeEC2:
         while f"TagSpecification.1.Tag.{i}.Key" in q:
             tags[q[f"TagSpecification.1.Tag.{i}.Key"]] = q.get(f"TagSpecification.1.Tag.{i}.Value", "")
             i += 1
+        if self.untagged_launches:
+            tags.pop("lux:pool-id", None)
         iid = "i-" + uuid.uuid4().hex[:17]
         with self.lock:
             self.instances[iid] = {"state": "pending", "host": None, "tags": tags, "env": env,
