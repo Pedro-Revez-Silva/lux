@@ -5,7 +5,7 @@
 //	luxd admin create-key --tenant T [--scopes run,read]
 //	luxd admin create-operator-key [--name N]    → {"apiKey"}: every tenant
 //	luxd admin create-host-token [--tenant T] [--pool P] [--label k=v]  → {"token"}
-//	luxd admin create-pool --name N --provider static|ec2 [--tenant T] [--shared] ...
+//	luxd admin create-pool --name N --provider static|ec2 [--tenant T] [--shared] [--default] ...
 //	luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--retention-days N]
 //	luxd serve                                    run the API, scheduler and reapers
 //	luxd openapi                                  print the tenant API's OpenAPI spec (YAML)
@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -99,7 +100,7 @@ admin commands:
   create-key --tenant T [--name N] [--scopes read,run,admin]
   create-operator-key [--name N]
   create-host-token [--tenant T] [--pool P] [--label k=v ...]
-  create-pool --name N --provider static|ec2 [--tenant T] [--shared]
+  create-pool --name N --provider static|ec2 [--tenant T] [--shared] [--default[=false]]
               [--min N] [--max N] [--warm N] [--template JSON]
               [--hourly-price D --currency C]   (static pools: hosts' default price)
   set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BYTES] [--retention-days N]`)
@@ -217,6 +218,22 @@ func serve(ctx context.Context, c config) error {
 	}, db, blobs, log)
 	return srv.Run(ctx)
 }
+
+// optBool is a boolean flag that knows whether it was given.
+type optBool struct{ v *bool }
+
+func (b *optBool) String() string {
+	if b.v == nil {
+		return ""
+	}
+	return strconv.FormatBool(*b.v)
+}
+func (b *optBool) Set(s string) error {
+	v, err := strconv.ParseBool(s)
+	b.v = &v
+	return err
+}
+func (b *optBool) IsBoolFlag() bool { return true }
 
 type labelsFlag map[string]string
 
@@ -344,6 +361,8 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		template := fs.String("template", "{}", "provider template (JSON)")
 		price := fs.String("hourly-price", "", "static pools: default hourly price of hosts registering into it (a decimal; with --currency); replaces the pool's, like every flag here")
 		currency := fs.String("currency", "", "the currency of --hourly-price (ISO 4217, e.g. USD)")
+		var isDefault optBool
+		fs.Var(&isDefault, "default", "mark it its owner's default pool (the platform's, without --tenant); --default=false clears the mark; omitted leaves it")
 		fs.Parse(args[1:])
 		var tmpl map[string]any
 		if err := json.Unmarshal([]byte(*template), &tmpl); err != nil {
@@ -366,7 +385,10 @@ func admin(ctx context.Context, cfg config, args []string) error {
 					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
 					retired = false`,
 				id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive, *price, *currency)
-			return err
+			if err != nil || isDefault.v == nil {
+				return err
+			}
+			return server.SetDefaultPool(ctx, tx, *tenant, *name, *isDefault.v)
 		})
 		if err != nil {
 			return err

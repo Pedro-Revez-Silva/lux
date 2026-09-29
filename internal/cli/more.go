@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -526,6 +527,10 @@ func counts(m map[string]int) string {
 	return strings.Join(parts, ", ")
 }
 
+// poolFields are pools set's flags that replace a pool's settings: without
+// any of them, --default only moves the mark.
+var poolFields = []string{"provider", "min", "max", "warm", "scale-down-after", "warm-while-active", "template", "hourly-price", "currency"}
+
 func (a *app) poolsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "pools", Short: "Host pools"}
 	ls := &cobra.Command{
@@ -543,20 +548,38 @@ func (a *app) poolsCmd() *cobra.Command {
 			}
 			var rows [][]string
 			for _, p := range resp.Pools {
-				rows = append(rows, []string{p.Name, p.Provider, fmt.Sprintf("%d-%d", p.MinHosts, p.MaxHosts), fmt.Sprint(p.WarmHosts), fmt.Sprint(p.Shared)})
+				def := ""
+				if p.IsDefault != nil && *p.IsDefault {
+					def = "*"
+				}
+				rows = append(rows, []string{p.Name, def, p.Provider, fmt.Sprintf("%d-%d", p.MinHosts, p.MaxHosts), fmt.Sprint(p.WarmHosts), fmt.Sprint(p.Shared)})
 			}
-			a.table("NAME\tPROVIDER\tHOSTS\tWARM\tSHARED", rows)
+			a.table("NAME\tDEFAULT\tPROVIDER\tHOSTS\tWARM\tSHARED", rows)
 			return nil
 		},
 	}
 	var p server.Pool
 	var template string
+	var isDefault bool
 	set := &cobra.Command{
 		Use:   "set <name>",
 		Short: "Create or update a pool",
-		Args:  cobra.ExactArgs(1),
+		Long: `Create or update a pool. Every flag but --default replaces the pool's
+setting, omitted ones included.
+
+--default marks the pool as the tenant's default: Runs whose spec names no
+pool go to it from now on (Runs already submitted keep theirs). It moves
+the mark from the previous default. --default=false clears it. Given
+alone, --default changes only the mark of an existing pool.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p.Name = args[0]
+			if cmd.Flags().Changed("default") {
+				p.IsDefault = &isDefault
+				if !slices.ContainsFunc(poolFields, cmd.Flags().Changed) {
+					return a.c.Do(ctxOf(cmd), "POST", "/v1/pools", server.Pool{Name: p.Name, IsDefault: &isDefault}, nil)
+				}
+			}
 			if template != "" {
 				if err := json.Unmarshal([]byte(template), &p.Template); err != nil {
 					return fmt.Errorf("--template: %w", err)
@@ -594,6 +617,7 @@ terminated once idle; their live Runs finish where they are.
 	set.Flags().StringVar(&template, "template", "", "provider template (JSON)")
 	set.Flags().StringVar(&p.HourlyPrice, "hourly-price", "", "static pools: default hourly price of hosts registering into it, a decimal (with --currency); existing hosts keep theirs. Like every flag here, it replaces the pool's: omitted, the pool has no default price")
 	set.Flags().StringVar(&p.Currency, "currency", "", "ISO 4217 currency of --hourly-price (e.g. USD)")
+	set.Flags().BoolVar(&isDefault, "default", false, "mark it the tenant's default pool, for Runs that name none (--default=false clears it; omitted: unchanged)")
 	cmd.AddCommand(ls, set)
 	return cmd
 }
