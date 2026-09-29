@@ -38,7 +38,7 @@ type RepoDiff struct {
 	Deletions    int                  `json:"deletions"`
 	FileStats    []proto.DiffFileStat `json:"fileStats,omitempty"`
 	Truncated    bool                 `json:"truncated" doc:"Untracked files were cut (at 32 KiB each, or 8 KiB past 1 MiB in all) or are binary, or paths were omitted: the patch does not recreate them."`
-	Omitted      []string             `json:"omitted,omitempty" doc:"Up to 50 paths the diff cannot show: tracked files marked assume-unchanged or skip-worktree, untracked nested repositories (listed as dir/) and other untracked entries that are neither files nor symlinks."`
+	Omitted      []string             `json:"omitted,omitempty" doc:"Up to 50 paths the diff cannot show: tracked files marked assume-unchanged or skip-worktree, and untracked nested repositories (listed as dir/)."`
 	OmittedCount int                  `json:"omittedCount,omitempty" doc:"How many paths were omitted, all of them."`
 	Error        string               `json:"error,omitempty" doc:"Why this repository's diff could not be computed."`
 }

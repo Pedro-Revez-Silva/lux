@@ -119,10 +119,11 @@ prints git-style stat lines instead, and `-o json` the whole result
   (`Binary files /dev/null and b/<path> differ`). Either marks the
   repository `truncated`, said on stderr: its patch does not apply cleanly.
 - Tracked changes are never cut. A diff over 16 MiB in all is refused.
-- Tracked files marked assume-unchanged or skip-worktree, untracked nested
-  repositories (`dir/`) and untracked fifos or sockets are not diffed:
-  they are listed in `omitted` (at most 50, `omittedCount` all of them),
-  named on stderr, and mark the repository `truncated`.
+- Tracked files marked assume-unchanged or skip-worktree and untracked
+  nested repositories (`dir/`) are not diffed: they are listed in `omitted`
+  (at most 50, `omittedCount` all of them), named on stderr, and mark the
+  repository `truncated`. Like `git status`, the diff does not see fifos or
+  sockets.
 - One diff per Run at a time (`diff_busy`); a runner too old for diffs is
   `diff_unsupported`.
 - Exit 4 when the Run is not running (keep a patch with
