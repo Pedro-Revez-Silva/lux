@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -26,7 +28,8 @@ func httpErr(err error) (int, string, string) {
 func TestRenamePoolCooldown(t *testing.T) {
 	f := newRenameFixture(t, false)
 	f.rename(t, "burst", "burst-eu")
-	execSQL(t, f.s, f.ctx, `UPDATE pools SET renamed_from = NULL, retagged_at = NULL, rename_finished_at = now()`)
+	execSQL(t, f.s, f.ctx, `UPDATE pool_tag_aliases SET finished_at = now()`)
+	execSQL(t, f.s, f.ctx, `UPDATE pools SET retagged_at = NULL, rename_finished_at = now()`)
 	_, err := renameConfirmed(f.ctx, f.s, "t1", "burst-eu", "burst-us", false)
 	if st, code, msg := httpErr(err); st != http.StatusConflict || code != "rename_cooldown" || !strings.Contains(msg, "renamed again in") {
 		t.Fatalf("rename right after the last finished: %v", err)
@@ -185,5 +188,70 @@ func TestRenamePoolMovesLateCostHours(t *testing.T) {
 	}
 	if got := pools(); got != "h1=burst-eu,h2=burst-eu,hx=burst" {
 		t.Errorf("after the finishing pass: %s, want h1=burst-eu,h2=burst-eu,hx=burst", got)
+	}
+}
+
+// A finished rename's alias is still listed and reserved; it is retired
+// only once every check found it empty for aliasRetireAfter, and a check
+// that finds an instance under it starts that wait again.
+func TestRenamePoolAliasRetires(t *testing.T) {
+	f := newRenameFixture(t, false)
+	f.s.cfg.ListingLag = 0
+	f.rename(t, "burst", "burst-eu")
+	f.check(t, f.pool(t))
+	f.check(t, f.pool(t))
+	pl := f.pool(t)
+	if pl.RenamedFrom != nil || !slices.Equal(pl.Aliases, []string{"burst"}) {
+		t.Fatalf("renamed from %v, aliases %v: want finished and still listed", pl.RenamedFrom, pl.Aliases)
+	}
+	ctx := context.WithValue(f.ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+	if _, err := f.s.putPool(ctx, &poolBody{Body: Pool{Name: "burst", Provider: "static"}}); err == nil {
+		t.Fatal("a pool took a live alias")
+	}
+	// An instance turns up under the alias: the wait starts again.
+	execSQL(t, f.s, f.ctx, `UPDATE pool_tag_aliases SET empty_since = now() - $1::interval`, interval(2*f.s.aliasRetireAfter()))
+	f.cloud.add("i-late", map[string]string{tagManaged: "true", tagDeployment: "d1", tagPool: "t1/burst", tagHost: "gone"})
+	f.check(t, f.pool(t))
+	if got := f.cloud.terminatedIDs(); !slices.Equal(got, []string{"i-late"}) {
+		t.Fatalf("terminated %v, want the orphan under the alias", got)
+	}
+	if got := f.query(t, `SELECT coalesce(empty_since::text, 'null') FROM pool_tag_aliases`); got != "null" {
+		t.Fatalf("empty_since %s after an instance was listed under the alias", got)
+	}
+	f.cloud.mu.Lock()
+	delete(f.cloud.insts, "i-late")
+	f.cloud.mu.Unlock()
+	f.check(t, f.pool(t))
+	if pl := f.pool(t); len(pl.Aliases) != 1 {
+		t.Fatalf("aliases %v: retired right after it was found empty", pl.Aliases)
+	}
+	execSQL(t, f.s, f.ctx, `UPDATE pool_tag_aliases SET empty_since = now() - $1::interval`, interval(f.s.aliasRetireAfter()))
+	f.check(t, f.pool(t))
+	if pl := f.pool(t); len(pl.Aliases) != 0 {
+		t.Fatalf("aliases %v after aliasRetireAfter empty", pl.Aliases)
+	}
+	if _, err := f.s.putPool(ctx, &poolBody{Body: Pool{Name: "burst", Provider: "static"}}); err != nil {
+		t.Fatalf("the retired alias's name: %v", err)
+	}
+}
+
+// A pool keeps at most maxPoolAliases live aliases: one more rename is
+// refused, a rename back onto one of its own aliases is not (that alias
+// is its name again).
+func TestRenamePoolTooManyAliases(t *testing.T) {
+	f := newRenameFixture(t, false)
+	for i := range maxPoolAliases {
+		execSQL(t, f.s, f.ctx, `INSERT INTO pool_tag_aliases (pool_id, tenant_id, name, finished_at) VALUES ('pool1', 't1', $1, now())`, fmt.Sprintf("old%d", i))
+	}
+	_, err := renameConfirmed(f.ctx, f.s, "t1", "burst", "burst-eu", false)
+	if st, code, _ := httpErr(err); st != http.StatusConflict || code != "too_many_aliases" {
+		t.Fatalf("a ninth alias: %v", err)
+	}
+	if _, err := renameConfirmed(f.ctx, f.s, "t1", "burst", "old3", false); err != nil {
+		t.Fatalf("renamed back onto its own alias: %v", err)
+	}
+	pl := f.pool(t)
+	if pl.Name != "old3" || len(pl.Aliases) != maxPoolAliases || slices.Contains(pl.Aliases, "old3") || !slices.Contains(pl.Aliases, "burst") {
+		t.Fatalf("pool %s aliases %v", pl.Name, pl.Aliases)
 	}
 }

@@ -102,7 +102,7 @@ export function Pools() {
           p.renamedFrom ? (
             <>
               {p.name}{" "}
-              <Tooltip content={`Renamed from ${p.renamedFrom}: its instances are being re-tagged. Until then, no pool can take that name and this one cannot be renamed again.`}>
+              <Tooltip content={`Renamed from ${p.renamedFrom}: its instances are being re-tagged, and it cannot be renamed again until that is done. No other pool can take that name until no instance has carried it for a while.`}>
                 <Badge tone="warn">renaming</Badge>
               </Tooltip>
             </>
@@ -148,7 +148,7 @@ export function Pools() {
   if (r && preview) {
     description = `${plural(preview.hosts, "host")} and ${plural(preview.runs, "Run")} not yet finished will follow the rename; finished Runs keep the name they ran with.`;
     if (preview.instances > 0)
-      description += ` Its ${plural(preview.instances, "instance")} keep running and are re-tagged with the new name; until that is done, no pool can take the name ${r.name}.`;
+      description += ` Its ${plural(preview.instances, "instance")} keep running and are re-tagged with the new name; no other pool can take the name ${r.name} until no instance has carried it for a while.`;
   }
 
   return (

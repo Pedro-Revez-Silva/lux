@@ -422,6 +422,8 @@ export interface Pool {
   platform: boolean;
   /** While a rename re-tags the pool's instances: its previous name. */
   renamedFrom?: string;
+  /** Previous names its instances may still carry; reserved meanwhile. */
+  aliases?: string[];
 }
 
 /** POST /v1/pools/{name}/rename: what followed the rename (or would, with dryRun). */

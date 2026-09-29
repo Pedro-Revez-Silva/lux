@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -29,6 +31,8 @@ type fakeCloud struct {
 	hidden     map[string]bool
 	terminated []string
 	launched   int
+	// launches: Launch starts an instance; otherwise it fails.
+	launches bool
 	// before, if set, runs before each call, outside the lock: a test
 	// blocks a call there to interleave it with other work.
 	before func(ctx context.Context, call string, tags map[string]string) error
@@ -62,10 +66,32 @@ func (c *fakeCloud) tag(pid, key string) string {
 }
 
 func (c *fakeCloud) Launch(ctx context.Context, template json.RawMessage, tags, env map[string]string) (Launched, error) {
+	// The instance exists, with the tags sent, as of the hook's return.
+	if err := c.hook(ctx, "Launch", tags); err != nil {
+		return Launched{}, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.launched++
-	return Launched{}, errors.New("fakeCloud: no launches in this test")
+	if !c.launches {
+		return Launched{}, errors.New("fakeCloud: no launches in this test")
+	}
+	pid := fmt.Sprintf("i-launched-%d", c.launched)
+	c.insts[pid] = &fakeInstance{state: "pending", tags: maps.Clone(tags)}
+	return Launched{ProviderID: pid}, nil
+}
+
+func (c *fakeCloud) launchedIDs() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []string
+	for pid := range c.insts {
+		if strings.HasPrefix(pid, "i-launched-") {
+			out = append(out, pid)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 func (c *fakeCloud) hook(ctx context.Context, call string, tags map[string]string) error {
@@ -203,9 +229,14 @@ func (f *renameFixture) rename(t *testing.T, from, to string) PoolRenamed {
 
 func (f *renameFixture) pool(t *testing.T) poolRow {
 	t.Helper()
+	return readPool(t, f.ctx, f.s, "pool1")
+}
+
+func readPool(t *testing.T, ctx context.Context, s *Server, id string) poolRow {
+	t.Helper()
 	var pl poolRow
-	err := f.s.db.Tx(f.ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(f.ctx, `SELECT `+poolRowColumns+` FROM pools WHERE id = 'pool1'`)
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT `+poolRowColumns+` FROM pools WHERE id = $1`, id)
 		if err != nil {
 			return err
 		}
@@ -301,7 +332,7 @@ func TestRenamePoolWithLiveHosts(t *testing.T) {
 	f.check(t, f.pool(t))
 	f.check(t, f.pool(t))
 	if rf := f.pool(t).RenamedFrom; rf != nil {
-		t.Fatalf("renamed_from = %q after every instance was re-tagged and listing_lag passed", *rf)
+		t.Fatalf("renamed from %q after every instance was re-tagged and listing_lag passed", *rf)
 	}
 	f.noneTerminated(t)
 	if f.cloud.launched > 0 {
@@ -374,7 +405,7 @@ func TestRenamePoolRetagDenied(t *testing.T) {
 	}
 	f.noneTerminated(t)
 	if pl := f.pool(t); pl.Name != "burst-eu" || pl.RenamedFrom == nil {
-		t.Fatalf("pool %s renamed_from %v; want the rename recorded and unfinished", pl.Name, pl.RenamedFrom)
+		t.Fatalf("pool %s renamed from %v; want the rename recorded and unfinished", pl.Name, pl.RenamedFrom)
 	}
 	if got := f.cloud.tag("i-1", tagPool); got != "t1/burst" {
 		t.Fatalf("i-1 lux:pool = %q", got)
@@ -435,7 +466,7 @@ func TestRenamePoolRefusals(t *testing.T) {
 
 	f.rename(t, "burst", "burst-eu")
 	try("burst-eu", "burst-us", http.StatusConflict, "rename_in_progress")
-	try("live", "burst", http.StatusConflict, "pool_exists")
+	try("live", "burst", http.StatusConflict, "pool_name_reserved")
 	ctx := context.WithValue(f.ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
 	_, err := f.s.putPool(ctx, &poolBody{Body: Pool{Name: "burst", Provider: "static"}})
 	if st, code := status(err); st != http.StatusConflict || code != "pool_name_reserved" {
@@ -469,19 +500,12 @@ func TestRenamePoolWithoutHosts(t *testing.T) {
 		t.Fatalf("ec2: %+v, %v", out, err)
 	}
 	cloud := newFakeCloud()
-	pl := poolRow{ID: "pe", Name: "burst2", Provider: "ec2"}
 	time.Sleep(time.Millisecond)
-	if err := s.reconcilePool(ctx, cloud, pl, true, takeLease(t, s)); err != nil {
+	if err := s.reconcilePool(ctx, cloud, readPool(t, ctx, s, "pe"), true, takeLease(t, s)); err != nil {
 		t.Fatal(err)
 	}
-	var renamed *string
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT renamed_from FROM pools WHERE id = 'pe'`).Scan(&renamed)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if renamed != nil {
-		t.Fatalf("renamed_from = %q with no instances to re-tag", *renamed)
+	if pl := readPool(t, ctx, s, "pe"); pl.RenamedFrom != nil || !slices.Equal(pl.Aliases, []string{"burst"}) {
+		t.Fatalf("renamed from %v, aliases %v: want finished, with burst still listed", pl.RenamedFrom, pl.Aliases)
 	}
 }
 

@@ -65,8 +65,8 @@ func TestPoolRenameMigration(t *testing.T) {
 		t.Errorf("a tenant scope sees %d luxd_instances rows (%v)", n, err)
 	}
 	var name string
-	var renamed *string
-	if err := conn.QueryRow(ctx, `SELECT name, renamed_from FROM pools WHERE id = 'p1'`).Scan(&name, &renamed); err != nil || name != "burst" || renamed != nil {
-		t.Errorf("pool %s renamed_from %v (%v)", name, renamed, err)
+	var aliases int
+	if err := conn.QueryRow(ctx, `SELECT name, (SELECT count(*) FROM pool_tag_aliases) FROM pools WHERE id = 'p1'`).Scan(&name, &aliases); err != nil || name != "burst" || aliases != 0 {
+		t.Errorf("pool %s with %d aliases (%v)", name, aliases, err)
 	}
 }

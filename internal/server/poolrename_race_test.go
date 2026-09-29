@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -218,7 +219,7 @@ func TestRenameRaceLateRetagAfterSecondRename(t *testing.T) {
 			t.Fatal(err)
 		}
 		if pl := f.pool(t); pl.Name != name || pl.RenamedFrom != nil {
-			t.Fatalf("pool %s renamed_from %v, want %s finished", pl.Name, pl.RenamedFrom, name)
+			t.Fatalf("pool %s renamed from %v, want %s finished", pl.Name, pl.RenamedFrom, name)
 		}
 	}
 	converge("burst-eu")
@@ -318,5 +319,50 @@ func TestProvisionLeaseToken(t *testing.T) {
 	c := takeLease(t, f.s)
 	if c.token == b.token || c.token == a.token {
 		t.Errorf("taking over an expired lease kept a token (%d; before %d, %d)", c.token, a.token, b.token)
+	}
+}
+
+// A launch whose RunInstances, sent with the old tag, is answered only
+// after the rename committed and finished (its host row timed out
+// meanwhile): the instance is listed under the pool's alias and, claimed
+// by no live row, terminated as an orphan, never leaked.
+func TestRenameRaceLateLaunchUnderTheOldTag(t *testing.T) {
+	f := newRenameFixture(t, false)
+	f.cloud.launches = true
+	execSQL(t, f.s, f.ctx, `UPDATE pools SET min_hosts = 3`)
+	g := f.gate(t, true, func(call string, tags map[string]string) bool { return call == "Launch" })
+	launching := f.pass(t, f.s, f.pool(t), takeLease(t, f.s))
+	g.waitEntered(t, "the launch's RunInstances")
+	if got := f.query(t, `SELECT pool FROM hosts WHERE provider_id IS NULL`); got != "burst" {
+		t.Fatalf("the launching row is in pool %q", got)
+	}
+	execSQL(t, f.s, f.ctx, `UPDATE pools SET min_hosts = 0`)
+
+	f.rename(t, "burst", "burst-eu")
+	// The launch outlives LaunchTimeout: its row is written off.
+	execSQL(t, f.s, f.ctx, `UPDATE hosts SET provision_requested_at = now() - interval '1 day' WHERE provider_id IS NULL`)
+	f.check(t, f.pool(t))
+	time.Sleep(f.s.cfg.ListingLag)
+	f.check(t, f.pool(t))
+	if pl := f.pool(t); pl.RenamedFrom != nil {
+		t.Fatalf("rename unfinished (from %v) with no launch in flight", *pl.RenamedFrom)
+	}
+
+	g.open()
+	if err := recv(t, launching, "the launching pass"); err != nil {
+		t.Fatal(err)
+	}
+	late := f.cloud.launchedIDs()
+	if len(late) != 1 || f.cloud.tag(late[0], tagPool) != "t1/burst" {
+		t.Fatalf("launched %v, want one instance tagged with the old name", late)
+	}
+	f.check(t, f.pool(t))
+	if got := f.cloud.terminatedIDs(); !slices.Equal(got, late) {
+		t.Fatalf("terminated %v, want the late launch %v", got, late)
+	}
+	for _, h := range []string{"h1", "h2"} {
+		if got := f.query(t, `SELECT state FROM hosts WHERE id = $1`, h); got == "terminated" {
+			t.Errorf("%s written off", h)
+		}
 	}
 }

@@ -313,7 +313,7 @@ func (s *Server) routes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "putPool", Method: http.MethodPost, Path: "/v1/pools", Tags: []string{"pools"},
 		Summary:     "Create or update a pool",
-		Description: "409 pool_name_reserved for a name an unfinished rename has left; 409 rename_in_progress to change the provider of a pool whose rename is unfinished.",
+		Description: "409 pool_name_reserved for a name that is a live alias of another pool (a name it was renamed away from, which its instances may still carry); 409 rename_in_progress to change the provider of a pool that has a live alias.",
 		Errors:      []int{http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "admin", forTenant(s.putPool))
 	register(s, api, huma.Operation{
@@ -328,9 +328,9 @@ func (s *Server) routes(api huma.API) {
 		Summary: "Rename a pool",
 		Description: "Its hosts, host tokens and Runs not yet final follow in one step: they name the new pool from then on, and Runs waiting for it still schedule. " +
 			"Final Runs keep the spec they ran with. A provisioned pool's instances stay up and are re-tagged with the new name (lux:pool) by the provisioner; " +
-			"until that is done the pool lists `renamedFrom`, its old name stays reserved and the pool cannot be renamed again (409 rename_in_progress). " +
+			"until that is done the pool lists `renamedFrom` and cannot be renamed again (409 rename_in_progress). The old name stays one of the pool's `aliases`, listed by the provisioner and reserved, until no instance has carried it for a while; a pool has at most 8 (409 too_many_aliases). " +
 			"409 pool_exists if the new name is taken, by a live or retired pool of the tenant, or, for a platform pool, by a pool of a tenant whose Runs would follow the rename; 422 invalid_pool for a name outside the pool-name rule (a name kept from before the rule is never given anew). " +
-			"While the pool has hosts, `confirm` must be its current name (409 confirm_required). " +
+			"409 pool_name_reserved if it is a live alias of another pool. While the pool has hosts, `confirm` must be its current name (409 confirm_required). " +
 			"409 rename_cooldown for a provisioned pool whose previous rename finished within the provisioner lease plus listing_lag; " +
 			"409 rename_unsupported_by_deployment while a luxd that cannot follow a rename (an older version) is running. " +
 			"A tenant's own pools; with an operator key and no tenant, a platform pool. dryRun counts what would follow without renaming.",
@@ -1821,14 +1821,17 @@ type Pool struct {
 	// HourlyPrice and Currency: a static pool's default price, copied to
 	// each host when it first registers. Changing it does not reprice the
 	// pool's existing hosts (PUT /v1/hosts/{id}/price does, one host).
-	HourlyPrice string  `json:"hourlyPrice,omitempty" doc:"Static pools: the default hourly price of hosts registering into the pool, a decimal string with up to 9 fractional digits. Copied to each host when it first registers; changing it does not reprice existing hosts. Refused for ec2 pools, which the provider prices." example:"0.40"`
-	Currency    string  `json:"currency,omitempty" doc:"The currency of hourlyPrice (ISO 4217); both or neither." example:"USD"`
-	RenamedFrom *string `json:"renamedFrom,omitempty" readOnly:"true" doc:"While a rename is unfinished (its instances are being re-tagged), the pool's previous name. No pool may take that name meanwhile, and the pool cannot be renamed again."`
+	HourlyPrice string   `json:"hourlyPrice,omitempty" doc:"Static pools: the default hourly price of hosts registering into the pool, a decimal string with up to 9 fractional digits. Copied to each host when it first registers; changing it does not reprice existing hosts. Refused for ec2 pools, which the provider prices." example:"0.40"`
+	Currency    string   `json:"currency,omitempty" doc:"The currency of hourlyPrice (ISO 4217); both or neither." example:"USD"`
+	RenamedFrom *string  `json:"renamedFrom,omitempty" readOnly:"true" doc:"While a rename is unfinished (its instances are being re-tagged), the pool's previous name. The pool cannot be renamed again meanwhile."`
+	Aliases     []string `json:"aliases,omitempty" readOnly:"true" doc:"Previous names of a provisioned pool that its instances may still carry (lux:pool): the provisioner lists the pool under each, and no other pool of the owner may take one. Each is dropped once the provisioner has found no instance under it for twice the longer of launch_timeout and listing_lag after the rename finished."`
 }
 
 const poolColumns = `p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
 	coalesce(p.scale_down_after_s, 0), p.warm_while_active,
-	p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, ''), p.renamed_from`
+	p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, ''),
+	(SELECT a.name FROM pool_tag_aliases a WHERE a.pool_id = p.id AND a.retired_at IS NULL AND a.finished_at IS NULL),
+	ARRAY(SELECT a.name FROM pool_tag_aliases a WHERE a.pool_id = p.id AND a.retired_at IS NULL ORDER BY a.id)`
 
 type listPoolsOutput struct {
 	Body struct {
@@ -1851,7 +1854,7 @@ func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutpu
 			var pl Pool
 			var sda int
 			if err := rows.Scan(&pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts,
-				&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &pl.RenamedFrom); err != nil {
+				&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &pl.RenamedFrom, &pl.Aliases); err != nil {
 				return err
 			}
 			pl.ScaleDownAfter.Duration = time.Duration(sda) * time.Second
@@ -1930,7 +1933,7 @@ type poolBody struct {
 func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	p := principal(ctx)
 	pl := in.Body
-	pl.RenamedFrom = nil
+	pl.RenamedFrom, pl.Aliases = nil, nil
 	if pl.Name == "" || (pl.Provider != "static" && pl.Provider != "ec2") {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "name and provider (static | ec2) are required")
 	}

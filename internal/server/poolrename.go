@@ -6,22 +6,29 @@ package server
 // host_tokens.pool, cost_hourly.pool, the spec of every Run not yet final)
 // and, for a provisioned pool, on its instances: the lux:pool tag. The
 // provisioner lists a pool's instances by that tag. The rule for the whole
-// feature: luxd never terminates a running instance, or writes off its
-// host, because of a rename. It is two steps:
+// feature: no rename and no provisioner pass terminates a running
+// instance, writes off its host, or loses track of it because of a tag.
 //
-//  1. One transaction moves every row to the new name and keeps the old
-//     one in pools.renamed_from. From its commit the provisioner lists the
-//     pool under both names, so every instance, re-tagged or not, is
-//     listed and claimed by its (renamed) host row; the old name stays
-//     reserved, so no other pool can take it and list these instances as
-//     its orphans. reconcilePool and launch read the pool row FOR SHARE,
-//     so a pass never pairs the old name with the hosts' new one.
+//  1. One transaction moves every row to the new name and adds the old tag
+//     value to the pool's aliases (pool_tag_aliases). The provisioner lists
+//     the pool under its name and every live alias, on every provider
+//     check, so every instance, re-tagged or not, is listed: claimed by its
+//     host row, or with none, terminated as an orphan, as any instance of
+//     the pool whose launch reply was lost. That includes one whose
+//     RunInstances, sent with the old tag before the rename, returns long
+//     after it. A live alias stays reserved: no other pool of the owner can
+//     take the name and list these instances as its orphans.
+//     reconcilePool and launch read the pool row FOR SHARE, so a pass never
+//     pairs the old name with the hosts' new one.
 //  2. On each provider check the provisioner re-tags the live instances
-//     still listed under the old name (Provider.Retag), and records when in
-//     pools.retagged_at. The rename is finished (renamed_from cleared,
-//     rename_finished_at set) by a pass that lists nothing under the old
-//     name, lists every live host's instance under the new one, has no
-//     launch in flight, and comes listing_lag after the last re-tag.
+//     listed under an alias (Provider.Retag), and records when in
+//     pools.retagged_at. The rename is finished (the alias's finished_at,
+//     pools.rename_finished_at) by a check that comes listing_lag after the
+//     rename and the last re-tag, lists nothing live under any alias,
+//     lists every live host's instance under the new name, and has no
+//     launch in flight. The alias is still listed after that; it is retired
+//     only once every check has found it empty for twice the longest a
+//     launch can take to show in the listings (aliasRetireAfter).
 //
 // A tag listing is never enough to destroy anything (provisioner.go): it
 // may come from a pass that read the old name, lag a re-tag either way, or
@@ -36,22 +43,24 @@ package server
 //
 // Around that: a pool that finished a rename is not renamed again for the
 // lease plus listing_lag (a late re-tag of the previous rename may still
-// land); a provisioned pool is not renamed while a luxd that cannot follow
-// a rename runs (luxd_instances); its provider cannot change mid-rename.
+// land); a pool keeps at most maxPoolAliases live aliases; a provisioned
+// pool is not renamed while a luxd that cannot follow a rename runs
+// (luxd_instances); its provider cannot change while it has a live alias.
 //
 // Nothing is tagged before step 1 commits, so no instance carries a name
 // no pool row answers to. A luxd that stops before the commit leaves
-// nothing done; after it, whichever luxd provisions next finds
-// renamed_from and does step 2, which is idempotent. A re-tag the provider
-// refuses (IAM) is logged and retried on the next check; the double
-// listing keeps every instance claimed meanwhile. Static pools carry no
-// tags: step 1 is the whole rename.
+// nothing done; after it, whichever luxd provisions next does step 2,
+// which is idempotent. A re-tag the provider refuses (IAM) is logged and
+// retried on the next check; the alias listing keeps every instance
+// claimed meanwhile. Static pools carry no tags: step 1 is the whole
+// rename, and they get no alias.
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -105,21 +114,30 @@ func lockPoolName(ctx context.Context, tx pgx.Tx, tenantID, name string) error {
 }
 
 // CheckPoolNameFree holds the tenant's ("": the platform's) pool name
-// until the transaction ends and refuses it while an unfinished rename
-// reserves it: its instances may still carry it.
+// until the transaction ends and refuses it while it is a live alias of a
+// pool: instances may still carry it.
 func CheckPoolNameFree(ctx context.Context, tx pgx.Tx, tenantID, name string) error {
 	if err := lockPoolName(ctx, tx, tenantID, name); err != nil {
 		return err
 	}
-	var reserved bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pools WHERE coalesce(tenant_id, '') = $1 AND renamed_from = $2)`,
-		tenantID, name).Scan(&reserved); err != nil {
+	return checkNotAlias(ctx, tx, tenantID, name, "")
+}
+
+// checkNotAlias refuses a name that is a live alias of a pool of the
+// owner other than exceptPool.
+func checkNotAlias(ctx context.Context, tx pgx.Tx, tenantID, name, exceptPool string) error {
+	var holder string
+	err := tx.QueryRow(ctx, `SELECT p.name FROM pool_tag_aliases a JOIN pools p ON p.id = a.pool_id
+		WHERE coalesce(a.tenant_id, '') = $1 AND a.name = $2 AND a.retired_at IS NULL AND a.pool_id <> $3`,
+		tenantID, name, exceptPool).Scan(&holder)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	if reserved {
-		return errf(http.StatusConflict, "pool_name_reserved", "pool %q is being renamed away from and its instances re-tagged: the name is free once that is done", name)
-	}
-	return nil
+	return errf(http.StatusConflict, "pool_name_reserved",
+		"pool %q was renamed %q, and instances may still carry the name %q: the name stays reserved until the provisioner has found none for a while", name, holder, name)
 }
 
 // renameArgs: rename From to To; Confirm is From, typed, when the pool has
@@ -130,9 +148,13 @@ type renameArgs struct {
 }
 
 // capPoolRename is the capability a luxd advertises (luxd_instances) when
-// its provisioner follows a pool rename: lists both names, never
+// its provisioner follows a pool rename: lists every alias, never
 // terminates a host on a tag listing alone.
 const capPoolRename = "pool-rename"
+
+// maxPoolAliases bounds a pool's live aliases, each one more listing per
+// provider check.
+const maxPoolAliases = 8
 
 // rename is step 1, in one transaction; tenantID "" names a platform pool.
 func (s *Server) rename(ctx context.Context, tenantID string, a renameArgs) (PoolRenamed, error) {
@@ -189,10 +211,13 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 		var id, provider string
 		var renaming *string
 		var cooldown float64
-		err := tx.QueryRow(ctx, `SELECT id, provider, renamed_from,
-				coalesce(extract(epoch FROM rename_finished_at + $3::interval - now()), 0)::float8
+		var aliases []string
+		err := tx.QueryRow(ctx, `SELECT id, provider,
+				(SELECT a.name FROM pool_tag_aliases a WHERE a.pool_id = pools.id AND a.retired_at IS NULL AND a.finished_at IS NULL),
+				coalesce(extract(epoch FROM rename_finished_at + $3::interval - now()), 0)::float8,
+				ARRAY(SELECT a.name FROM pool_tag_aliases a WHERE a.pool_id = pools.id AND a.retired_at IS NULL)
 			FROM pools WHERE coalesce(tenant_id, '') = $1 AND name = $2 AND NOT retired FOR UPDATE`,
-			tenantID, from, interval(s.renameCooldown())).Scan(&id, &provider, &renaming, &cooldown)
+			tenantID, from, interval(s.renameCooldown())).Scan(&id, &provider, &renaming, &cooldown, &aliases)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errNotFound
 		}
@@ -211,9 +236,19 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 				"pool %q finished a rename moments ago: it can be renamed again in %s", from, time.Duration(cooldown*float64(time.Second)).Round(time.Second))
 		}
 		if checkName {
-			if err := checkRenameTarget(ctx, tx, tenantID, to); err != nil {
+			if err := checkRenameTarget(ctx, tx, tenantID, to, id); err != nil {
 				return err
 			}
+		}
+		// Back to one of its own aliases, that alias goes: the pool's name
+		// is listed anyway.
+		keep := len(aliases)
+		if slices.Contains(aliases, to) {
+			keep--
+		}
+		if checkName && provider != "static" && keep+1 > maxPoolAliases {
+			return errf(http.StatusConflict, "too_many_aliases",
+				"pool %q still answers to %d previous names (%v) whose instances may carry them: rename it again once some are retired", from, len(aliases), aliases)
 		}
 		if checkName && provider != "static" {
 			if err := s.checkDeploymentCanRename(ctx, tx); err != nil {
@@ -281,12 +316,16 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 		if err := renameCostHours(ctx, tx, tenantID, from, to); err != nil {
 			return err
 		}
-		var renamedFrom *string
-		if provider != "static" {
-			renamedFrom = &from
-		}
-		if _, err := tx.Exec(ctx, `UPDATE pools SET name = $2, renamed_from = $3, retagged_at = NULL WHERE id = $1`, id, to, renamedFrom); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE pools SET name = $2, retagged_at = NULL WHERE id = $1`, id, to); err != nil {
 			return err
+		}
+		if provider != "static" {
+			if _, err := tx.Exec(ctx, `UPDATE pool_tag_aliases SET retired_at = now() WHERE pool_id = $1 AND name = $2 AND retired_at IS NULL`, id, to); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO pool_tag_aliases (pool_id, tenant_id, name) VALUES ($1, nullif($2, ''), $3)`, id, tenantID, from); err != nil {
+				return err
+			}
 		}
 		out.Pool, err = poolByID(ctx, tx, id)
 		return err
@@ -376,41 +415,44 @@ func (s *Server) checkInLoop(ctx context.Context) {
 	}
 }
 
-// CheckPoolProviderChange refuses changing a pool's provider while a
-// rename re-tags its instances: the old provider's instances would be
-// listed by nothing.
+// CheckPoolProviderChange refuses changing a pool's provider while it has
+// a live alias: instances carrying it would be listed by nothing.
 func CheckPoolProviderChange(ctx context.Context, tx pgx.Tx, tenantID, name, provider string) error {
 	var current string
-	var renaming *string
-	err := tx.QueryRow(ctx, `SELECT provider, renamed_from FROM pools WHERE coalesce(tenant_id, '') = $1 AND name = $2 FOR UPDATE`,
-		tenantID, name).Scan(&current, &renaming)
+	var alias *string
+	err := tx.QueryRow(ctx, `SELECT provider,
+			(SELECT a.name FROM pool_tag_aliases a WHERE a.pool_id = pools.id AND a.retired_at IS NULL ORDER BY a.id DESC LIMIT 1)
+		FROM pools WHERE coalesce(tenant_id, '') = $1 AND name = $2 FOR UPDATE`,
+		tenantID, name).Scan(&current, &alias)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if renaming != nil && current != provider {
+	if alias != nil && current != provider {
 		return errf(http.StatusConflict, "rename_in_progress",
-			"pool %q is still being renamed from %q (its instances are being re-tagged): its provider cannot change until that is done", name, *renaming)
+			"pool %q was renamed from %q and its instances may still carry that name: its provider cannot change until the provisioner stops listing it", name, *alias)
 	}
 	return nil
 }
 
 // checkRenameTarget: hosts and host tokens can name a pool no pool row has
-// (a static host's token): renaming onto that name would merge them in.
-func checkRenameTarget(ctx context.Context, tx pgx.Tx, tenantID, to string) error {
+// (a static host's token): renaming onto that name would merge them in. A
+// live alias of another pool is reserved; one of the renamed pool's own
+// is not.
+func checkRenameTarget(ctx context.Context, tx pgx.Tx, tenantID, to, poolID string) error {
 	var taken bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pools WHERE coalesce(tenant_id, '') = $1 AND (name = $2 OR renamed_from = $2))
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pools WHERE coalesce(tenant_id, '') = $1 AND name = $2)
 			OR EXISTS (SELECT 1 FROM hosts WHERE coalesce(tenant_id, '') = $1 AND pool = $2 AND state <> 'terminated')
 			OR EXISTS (SELECT 1 FROM host_tokens WHERE coalesce(tenant_id, '') = $1 AND pool = $2 AND revoked_at IS NULL)`,
 		tenantID, to).Scan(&taken); err != nil {
 		return err
 	}
 	if taken {
-		return errf(http.StatusConflict, "pool_exists", "the name %q is taken: a pool (live, retired or being renamed from it), or hosts or host tokens, have it", to)
+		return errf(http.StatusConflict, "pool_exists", "the name %q is taken: a pool (live or retired), or hosts or host tokens, have it", to)
 	}
-	return nil
+	return checkNotAlias(ctx, tx, tenantID, to, poolID)
 }
 
 func poolByID(ctx context.Context, tx pgx.Tx, id string) (Pool, error) {
@@ -418,7 +460,7 @@ func poolByID(ctx context.Context, tx pgx.Tx, id string) (Pool, error) {
 	var sda int
 	err := tx.QueryRow(ctx, `SELECT `+poolColumns+` FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id WHERE p.id = $1`, id).Scan(
 		&pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts,
-		&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &pl.RenamedFrom)
+		&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &pl.RenamedFrom, &pl.Aliases)
 	pl.ScaleDownAfter.Duration = time.Duration(sda) * time.Second
 	return pl, err
 }
@@ -431,41 +473,137 @@ func poolTagValue(tenantID *string, name string) string {
 	return name
 }
 
-// renameCheck is what a provider check saw of a pool being renamed.
+// renameCheck is what a provider check saw of a renamed pool.
 type renameCheck struct {
-	// stale: live, claimed instances listed under the old name, by
-	// template (its region), to re-tag.
+	// stale: live, claimed instances listed under an alias, by template
+	// (its region), to re-tag.
 	stale     map[string][]string
 	templates map[string]json.RawMessage
-	// unlisted: a live host whose instance the new name's listing missed.
+	// unlisted: a live host whose instance the new name's listing missed,
+	// or a live instance under an alias no host row claimed yet.
 	unlisted bool
+	// liveUnder: aliases some live instance was listed under.
+	liveUnder map[string]bool
+	// checkedAt: when the listings began.
+	checkedAt time.Time
 }
 
-// retagRenamed is step 2, after a provider check listed the pool under
-// both names.
-func (s *Server) retagRenamed(ctx context.Context, prov Provider, pl poolRow, st *poolState, rc renameCheck, lease *passLease) error {
-	from := *pl.RenamedFrom
+// aliasRetireAfter: how long an alias must have been found empty, on
+// every check, before it is no longer listed. An instance launched under
+// it (its RunInstances sent before the rename) shows in the listings
+// within the launch's own bound (the lease, and at most LaunchTimeout
+// before its row is written off) plus listing_lag; twice the longer of
+// the two leaves a margin for both.
+func (s *Server) aliasRetireAfter() time.Duration {
+	return 2 * max(s.cfg.LaunchTimeout, s.cfg.ListingLag)
+}
+
+// followAliases is step 2, after a provider check listed the pool under
+// its name and every alias: it records what each alias held, finishes the
+// rename or retires aliases when their time has come, and re-tags what
+// still carries an alias.
+func (s *Server) followAliases(ctx context.Context, prov Provider, pl poolRow, st *poolState, rc renameCheck, lease *passLease) error {
+	stale := 0
+	for _, pids := range rc.stale {
+		stale += len(pids)
+	}
+	var live, empty []string
+	for _, a := range pl.Aliases {
+		if rc.liveUnder[a] {
+			live = append(live, a)
+		} else {
+			empty = append(empty, a)
+		}
+	}
+	finish := pl.RenamedFrom != nil && len(live) == 0 && !rc.unlisted && len(st.launching) == 0 &&
+		pl.RenamedAt != nil && rc.checkedAt.Sub(*pl.RenamedAt) >= s.cfg.ListingLag &&
+		(pl.RetaggedAt == nil || rc.checkedAt.Sub(*pl.RetaggedAt) >= s.cfg.ListingLag)
+	var finished bool
+	var retired []string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if _, err := s.fenceTx(ctx, tx, lease); err != nil {
+			return err
+		}
+		// Only if the pool still has the name this pass read: a rename
+		// since has aliases of its own.
+		var current bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pools WHERE id = $1 AND name = $2 FOR UPDATE)`, pl.ID, pl.Name).Scan(&current); err != nil || !current {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE pool_tag_aliases SET empty_since = NULL
+			WHERE pool_id = $1 AND name = ANY($2) AND retired_at IS NULL`, pl.ID, live); err != nil {
+			return err
+		}
+		// now(), after the listings: later than they looked, never earlier.
+		if _, err := tx.Exec(ctx, `UPDATE pool_tag_aliases SET empty_since = coalesce(empty_since, now())
+			WHERE pool_id = $1 AND name = ANY($2) AND retired_at IS NULL`, pl.ID, empty); err != nil {
+			return err
+		}
+		if finish {
+			tag, err := tx.Exec(ctx, `UPDATE pool_tag_aliases SET finished_at = now()
+				WHERE pool_id = $1 AND name = $2 AND retired_at IS NULL AND finished_at IS NULL`, pl.ID, *pl.RenamedFrom)
+			if err != nil {
+				return err
+			}
+			if finished = tag.RowsAffected() > 0; finished {
+				if _, err := tx.Exec(ctx, `UPDATE pools SET retagged_at = NULL, rename_finished_at = now() WHERE id = $1`, pl.ID); err != nil {
+					return err
+				}
+			}
+		}
+		rows, err := tx.Query(ctx, `UPDATE pool_tag_aliases SET retired_at = now()
+			WHERE pool_id = $1 AND retired_at IS NULL AND finished_at IS NOT NULL AND empty_since <= now() - $2::interval
+			RETURNING name`, pl.ID, interval(s.aliasRetireAfter()))
+		if err != nil {
+			return err
+		}
+		if retired, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
+			return err
+		}
+		for _, a := range pl.Aliases {
+			if err := renameCostHours(ctx, tx, ownerOf(pl), a, pl.Name); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if errors.Is(err, errFenced) {
+		return err
+	}
+	if err != nil {
+		s.log.Warn("pool rename", "pool", pl.Name, "err", err)
+		return nil
+	}
+	if finished {
+		// TODO(pool-events): a "rename finished" pool event.
+		s.log.Info("pool rename finished: every instance carries the new name", "pool", pl.Name, "from", *pl.RenamedFrom)
+	}
+	for _, a := range retired {
+		s.log.Info("pool alias retired: no instance carries it any more", "pool", pl.Name, "alias", a)
+	}
+	if stale == 0 {
+		return nil
+	}
+
 	newTag := poolTagValue(pl.TenantID, pl.Name)
-	if len(rc.stale) > 0 {
-		n := 0
-		var failed error
-		for key, pids := range rc.stale {
+	n := 0
+	var failed error
+	for key, pids := range rc.stale {
+		for _, batch := range [][]string{pids} {
 			// retagged_at is recorded before each call: a luxd that stops
 			// mid-call leaves instances whose new tag the listings may not
 			// show yet, and the next provisioner must know not to take them
 			// for gone.
 			var current bool
 			err := s.fencedCall(ctx, lease, func(tx pgx.Tx) error {
-				var err error
-				if current, err = poolRenameStepTx(ctx, tx, pl, `retagged_at = now()`); err != nil || !current {
-					return err
-				}
-				return renameCostHours(ctx, tx, ownerOf(pl), from, pl.Name)
+				tag, err := tx.Exec(ctx, `UPDATE pools SET retagged_at = now() WHERE id = $1 AND name = $2`, pl.ID, pl.Name)
+				current = tag.RowsAffected() > 0
+				return err
 			}, func(ctx context.Context) error {
 				if !current {
 					return nil
 				}
-				return prov.Retag(ctx, rc.templates[key], pids, tagPool, newTag)
+				return prov.Retag(ctx, rc.templates[key], batch, tagPool, newTag)
 			})
 			if errors.Is(err, errFenced) {
 				return err
@@ -477,43 +615,15 @@ func (s *Server) retagRenamed(ctx context.Context, prov Provider, pl poolRow, st
 			if !current {
 				return nil
 			}
-			n += len(pids)
+			n += len(batch)
 		}
-		if failed != nil {
-			s.log.Warn("pool rename: re-tagging instances failed; retried on the next provider check",
-				"pool", pl.Name, "from", from, "retagged", n, "err", failed)
-			return nil
-		}
-		s.log.Info("pool rename: instances re-tagged", "pool", pl.Name, "from", from, "instances", n)
+	}
+	if failed != nil {
+		s.log.Warn("pool rename: re-tagging instances failed; retried on the next provider check",
+			"pool", pl.Name, "aliases", pl.Aliases, "retagged", n, "err", failed)
 		return nil
 	}
-	finish := !rc.unlisted && len(st.launching) == 0 && (pl.RetaggedAt == nil || time.Since(*pl.RetaggedAt) >= s.cfg.ListingLag)
-	set := `retagged_at = retagged_at`
-	if finish {
-		set = `renamed_from = NULL, retagged_at = NULL, rename_finished_at = now()`
-	}
-	var done bool
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		if _, err := s.fenceTx(ctx, tx, lease); err != nil {
-			return err
-		}
-		var err error
-		if done, err = poolRenameStepTx(ctx, tx, pl, set); err != nil || !done {
-			return err
-		}
-		return renameCostHours(ctx, tx, ownerOf(pl), from, pl.Name)
-	})
-	if errors.Is(err, errFenced) {
-		return err
-	}
-	if err != nil {
-		s.log.Warn("pool rename", "pool", pl.Name, "err", err)
-		return nil
-	}
-	if finish && done {
-		// TODO(pool-events): a "rename finished" pool event.
-		s.log.Info("pool rename finished: every instance carries the new name", "pool", pl.Name, "from", from)
-	}
+	s.log.Info("pool rename: instances re-tagged", "pool", pl.Name, "aliases", pl.Aliases, "instances", n)
 	return nil
 }
 
@@ -523,11 +633,4 @@ func ownerOf(pl poolRow) string {
 		return ""
 	}
 	return *pl.TenantID
-}
-
-// poolRenameStepTx updates the pool's rename columns, if the rename it was
-// read with is still the one under way.
-func poolRenameStepTx(ctx context.Context, tx pgx.Tx, pl poolRow, set string) (bool, error) {
-	tag, err := tx.Exec(ctx, `UPDATE pools SET `+set+` WHERE id = $1 AND renamed_from = $2 AND name = $3`, pl.ID, *pl.RenamedFrom, pl.Name)
-	return tag.RowsAffected() > 0, err
 }

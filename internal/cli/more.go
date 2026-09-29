@@ -608,8 +608,9 @@ terminated once idle; their live Runs finish where they are.
 once: Runs waiting for it still schedule, under the new name. Finished
 Runs keep the spec they ran with. A provisioned pool's instances keep
 running and are re-tagged with the new name in the background; until
-that is done, the old name stays reserved and the pool cannot be renamed
-again (pools ls shows RENAMED FROM).`,
+that is done the pool cannot be renamed again (pools ls shows RENAMED
+FROM). The old name stays reserved, as one of the pool's aliases, until
+no instance has carried it for a while.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var out server.PoolRenamed

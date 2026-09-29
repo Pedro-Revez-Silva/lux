@@ -372,6 +372,9 @@ given anew). Refused with 409:
   tenant whose Runs would follow owns a pool by the new name (its Runs
   would then go to its own pool).
 - `rename_in_progress`: the pool's previous rename is unfinished.
+- `pool_name_reserved`: the new name is a live alias of another pool of
+  the owner (see below).
+- `too_many_aliases`: an `ec2` pool already has 8 live aliases.
 - `rename_cooldown`: an `ec2` pool finished a rename less than the
   provisioner lease (30s, or ten scheduler ticks) plus `LUX_LISTING_LAG`
   ago. A `CreateTags` sent by a luxd that has since lost its lease may still
@@ -390,36 +393,50 @@ hours between both names as they are recomputed.
 An `ec2` pool's instances carry its name in the `lux:pool` tag, which is
 how luxd lists them, and an instance listed with no host row to claim it
 is terminated as an orphan. So the tags are changed after the database,
-and the pool is listed under both names meanwhile:
+and the pool keeps its previous names as **aliases**
+(`pool_tag_aliases`), listed alongside its name:
 
-1. The transaction above keeps the old name in `pools.renamed_from`. From
-   its commit, the provisioner lists the pool under both names: every
-   instance, whichever tag it carries, is claimed by its host row. The old
-   name stays reserved, so no other pool can take it and see these
-   instances as its orphans. Nothing is tagged before this commit, so no
-   instance ever carries a name no pool answers to.
+1. The transaction above adds the old name to the pool's aliases. From its
+   commit, the provisioner lists the pool under its name and every live
+   alias: every instance, whichever tag it carries, is claimed by its host
+   row, or, with none, terminated as an orphan. That includes an instance
+   whose `RunInstances` was sent with the old tag before the rename and
+   answered long after it (its reply lost, its host row timed out): it
+   turns up under the alias and is handled like any launch whose reply
+   was lost, never left running untracked. A live alias stays reserved:
+   no other pool of the owner can take it and see these instances as its
+   orphans (`pool_name_reserved`). Nothing is tagged before this commit,
+   so no instance ever carries a name no pool answers to.
 2. On each provider check (`LUX_PROVIDER_CHECK_EVERY`) the provisioner
-   re-tags the instances still carrying the old name (`ec2:CreateTags`,
-   `lux:pool` only). EC2's tag filters lag behind tags, so for
-   `LUX_LISTING_LAG` after a re-tag a host missing from both listings is
-   not even looked up; after it, it is looked up by id like any unlisted
-   host, and kept while it runs. The rename finishes (`renamed_from`
-   cleared) on a check that lists nothing under the old name, every host
-   under the new one, has no launch in flight, and comes
-   `LUX_LISTING_LAG` after the last re-tag. Each check also moves to the
-   new name any `cost_hourly` row a cost pass wrote under the old one from
-   a host row it read before the rename.
+   re-tags the instances still carrying an alias (`ec2:CreateTags`,
+   `lux:pool` only). EC2's tag filters lag behind
+   tags, so for `LUX_LISTING_LAG` after a re-tag a host missing from every
+   listing is not even looked up; after it, it is looked up by id like any
+   unlisted host, and kept while it runs. The rename finishes (`pools ls`
+   no longer shows RENAMED FROM; the console drops its "renaming" badge)
+   on a check at least `LUX_LISTING_LAG` after the rename and the last
+   re-tag that lists nothing live under any alias, every host under the
+   new name, and has no launch in flight. Each check also moves to the new
+   name any `cost_hourly` row a cost pass wrote under an old one from a
+   host row it read before the rename.
+3. A finished rename's alias is still listed. It is retired (no longer
+   listed nor reserved) once every check has found nothing under it for
+   twice the longer of `LUX_LAUNCH_TIMEOUT` and `LUX_LISTING_LAG`; a check
+   that finds an instance under it starts that wait again. `pools ls -o
+   json` shows a pool's live `aliases`; a pool has at most 8, and a rename
+   that would add a ninth is refused (`too_many_aliases`). Renaming a pool
+   back to one of its own aliases is allowed: that alias is its name again.
 
 A luxd that stops before the commit leaves nothing renamed; after it,
 whichever luxd holds the provisioner lease carries on with step 2, which
 is idempotent. A refused `CreateTags` (the IAM statement below missing) is
 logged as a warning and retried on every check; the pool keeps working
 under its new name and nothing is terminated, but it stays listed under
-both names, `lux pools ls` shows RENAMED FROM, and it cannot be renamed
+its aliases, `lux pools ls` shows RENAMED FROM, and it cannot be renamed
 again until the tags are fixed. A static pool has no tags: the
-transaction is the whole rename. A pool's provider cannot change while its
-rename is unfinished (`lux pools set` and `luxd admin create-pool`: 409
-`rename_in_progress`).
+transaction is the whole rename, and it gets no alias. A pool's provider
+cannot change while it has a live alias (`lux pools set` and
+`luxd admin create-pool`: 409 `rename_in_progress`).
 
 **Every luxd must be of this version or later before an `ec2` pool is
 renamed.** An older luxd lists a pool under its current name only: holding
@@ -429,9 +446,9 @@ can do in `luxd_instances` when it starts and every provider check; a
 rename of an `ec2` pool is refused while any luxd that wrote a control
 sample, or holds the provisioner lease, within the last two lease
 durations has not (the message names them). Static pools can always be
-renamed. Do not roll luxd back below this version while any pool has
-`renamed_from` set: `lux pools ls` shows it under RENAMED FROM (the
-console, a "renaming" badge). Wait for it to clear, or roll forward.
+renamed. Do not roll luxd back below this version while any pool has a
+live alias (`lux pools ls -o json` shows `aliases`). Wait for them to
+retire, or roll forward.
 
 The re-tag needs this IAM statement on luxd's role (the Terraform module
 has it as `RetagManagedInstancePool`): `ec2:CreateTags` on instances
