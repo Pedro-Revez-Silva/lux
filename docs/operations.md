@@ -74,7 +74,7 @@ its variable; the table below lists them by variable.
 | `LUX_DEFAULT_CPUS`, `LUX_DEFAULT_MEMORY`, `LUX_DEFAULT_DISK`, `LUX_DEFAULT_PIDS` | `2`, `8Gi`, `20Gi`, `1024` | Resources a Run gets when its spec sets none. |
 | `LUX_PROVIDER_CHECK_EVERY` | `1m` | How often each EC2 pool's instances are listed (orphans terminated, vanished hosts written off). Mind the provider's API limits. |
 | `LUX_LOST_GRACE` | `5m` | How long a lost provisioned host's instance is kept (a runner restart or a network blip is not a loss) before it is terminated. |
-| `LUX_LISTING_LAG` | `1m` | How long after a launch EC2's listings may still miss an instance: until then a host missing from them is not written off. |
+| `LUX_LISTING_LAG` | `1m` | How long after a launch EC2's listings may still miss an instance: until then a host missing from them is not looked up. After it, one is looked up by id, and written off only if EC2 says it is gone. |
 | `LUX_SCALE_DOWN_AFTER` | `10m` | How long a provisioned host stays idle before it is cordoned, then terminated once idle. |
 | `LUX_LAUNCH_TIMEOUT` | `10m` | How long a launched host may take to register before it is terminated. |
 | `LUX_OUTDATED_DRAIN_PERCENT` | `10` | Caps concurrent outdated-binaries drains per pool, as a percentage of its live hosts (at least 1 regardless). |
@@ -341,11 +341,19 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   that never registers within `LUX_LAUNCH_TIMEOUT` (default 10m) is
   terminated. An instance EC2 no longer has is written off and replaced.
 - **Orphans:** once a minute luxd lists the pool's instances by tag. One
-  no host row claims (a launch whose reply was lost) is terminated; a host
-  EC2 no longer lists (and whose runner is silent) is terminated and
-  written off. A host lost for over 5 minutes is
+  no host row claims (a launch whose reply was lost) is terminated, after
+  checking the host rows once more, under any pool name of the owner, right
+  before. A host missing from the listing is looked up by instance id
+  (`DescribeInstances` with `InstanceIds`, which tag changes do not delay):
+  written off only if EC2 says it is terminated or does not know it (and
+  its runner is silent); still running, it is kept, logged at WARN, and
+  re-tagged if its `lux:pool` is not its pool's. A tag listing alone never
+  terminates or writes off anything. A host lost for over 5 minutes is
   terminated.
-- One luxd instance does all this at a time (a lease in Postgres).
+- One luxd instance does all this at a time (a lease in Postgres). The
+  lease carries a fencing token, new whenever another luxd takes it; each
+  terminate, re-tag and write-off first checks that the pass still holds
+  the lease it began with, and EC2 calls are cancelled when it expires.
 
 ### Renaming a pool
 
@@ -355,9 +363,26 @@ In one transaction the pool, its hosts (terminated ones too, which cost
 lookups join by name), its host tokens, their `cost_hourly` rows and every
 Run not yet final that names it move to the new name; finished Runs keep
 the spec they ran with. A Run waiting for the pool schedules under the new
-name at once. Refused with 409 if the name is taken by a live or removed
-pool of the tenant, or by hosts or host tokens, or while the pool's
-previous rename is unfinished; 422 for an invalid name. `cost_hourly` is
+name at once. The new name follows the [pool-name rule](cli.md#hosts-and-pools)
+(422 `invalid_pool` otherwise; a name kept from before the rule is never
+given anew). Refused with 409:
+
+- `pool_exists`: the name is taken by a live or removed pool of the
+  tenant, or by hosts or host tokens; for a platform pool, also when a
+  tenant whose Runs would follow owns a pool by the new name (its Runs
+  would then go to its own pool).
+- `rename_in_progress`: the pool's previous rename is unfinished.
+- `rename_cooldown`: an `ec2` pool finished a rename less than the
+  provisioner lease (30s, or ten scheduler ticks) plus `LUX_LISTING_LAG`
+  ago. A `CreateTags` sent by a luxd that has since lost its lease may still
+  land in that time, and would put the previous name back.
+- `rename_unsupported_by_deployment`: an `ec2` pool, while some luxd that
+  cannot follow a rename is running (see below).
+- `confirm_required`: the pool has hosts and the request's `confirm` is
+  not its current name. `lux pools rename` sends it (the name typed on the
+  command line); the console asks for it to be typed.
+
+`cost_hourly` is
 rewritten rather than kept under the old name because it is recomputed
 from `hosts.pool`: history kept under the old name would split one host's
 hours between both names as they are recomputed.
@@ -377,10 +402,13 @@ and the pool is listed under both names meanwhile:
    re-tags the instances still carrying the old name (`ec2:CreateTags`,
    `lux:pool` only). EC2's tag filters lag behind tags, so for
    `LUX_LISTING_LAG` after a re-tag a host missing from both listings is
-   not written off. The rename finishes (`renamed_from` cleared) on a
-   check that lists nothing under the old name, every host under the new
-   one, has no launch in flight, and comes `LUX_LISTING_LAG` after the
-   last re-tag.
+   not even looked up; after it, it is looked up by id like any unlisted
+   host, and kept while it runs. The rename finishes (`renamed_from`
+   cleared) on a check that lists nothing under the old name, every host
+   under the new one, has no launch in flight, and comes
+   `LUX_LISTING_LAG` after the last re-tag. Each check also moves to the
+   new name any `cost_hourly` row a cost pass wrote under the old one from
+   a host row it read before the rename.
 
 A luxd that stops before the commit leaves nothing renamed; after it,
 whichever luxd holds the provisioner lease carries on with step 2, which
@@ -389,7 +417,21 @@ logged as a warning and retried on every check; the pool keeps working
 under its new name and nothing is terminated, but it stays listed under
 both names, `lux pools ls` shows RENAMED FROM, and it cannot be renamed
 again until the tags are fixed. A static pool has no tags: the
-transaction is the whole rename.
+transaction is the whole rename. A pool's provider cannot change while its
+rename is unfinished (`lux pools set` and `luxd admin create-pool`: 409
+`rename_in_progress`).
+
+**Every luxd must be of this version or later before an `ec2` pool is
+renamed.** An older luxd lists a pool under its current name only: holding
+the provisioner lease during a rename, it would terminate every instance
+still tagged with the old name. Each luxd records its version and what it
+can do in `luxd_instances` when it starts and every provider check; a
+rename of an `ec2` pool is refused while any luxd that wrote a control
+sample, or holds the provisioner lease, within the last two lease
+durations has not (the message names them). Static pools can always be
+renamed. Do not roll luxd back below this version while any pool has
+`renamed_from` set: `lux pools ls` shows it under RENAMED FROM (the
+console, a "renaming" badge). Wait for it to clear, or roll forward.
 
 The re-tag needs this IAM statement on luxd's role (the Terraform module
 has it as `RetagManagedInstancePool`): `ec2:CreateTags` on instances
@@ -403,7 +445,7 @@ only:
   "Resource": "arn:aws:ec2:<region>:<account>:instance/*",
   "Condition": {
     "StringEquals": { "ec2:ResourceTag/lux:managed": "true" },
-    "Null": { "ec2:ResourceTag/lux:host": "false" },
+    "Null": { "ec2:ResourceTag/lux:host": "false", "aws:TagKeys": "false" },
     "ForAllValues:StringEquals": { "aws:TagKeys": ["lux:pool"] }
   }
 }
@@ -490,7 +532,7 @@ Instances are tagged `Name=<host>`, `lux:pool=<pool>` (`<tenant>/<pool>`
 for a tenant's pool), `lux:managed=true`, `lux:deployment=<id>` (which lux
 database launched it: deployments sharing an account never touch each
 other's instances) and `lux:host=<host id>`, plus the
-template's `tags`. luxd also needs `DescribeInstances` filtered by tag.
+template's `tags`. luxd also needs `DescribeInstances`, filtered by tag and by instance id.
 
 Reusable Terraform for running all of this on AWS — control host, S3,
 runner launch templates, Cloudflare Tunnel — is under

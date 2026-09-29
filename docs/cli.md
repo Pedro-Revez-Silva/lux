@@ -138,8 +138,13 @@ shortly after ([operations](operations.md#renaming-a-pool)); until then
 name, and the pool cannot be renamed again (exit 4, `rename_in_progress`).
 A name taken by a live or removed pool is refused too (exit 4,
 `pool_exists`), and the new name must follow the rule above (exit 4,
-`invalid_pool`): an old name is kept, but never given anew. With an
-operator key and no `--tenant`, it renames a platform pool.
+`invalid_pool`): an old name is kept, but never given anew. An `ec2` pool
+that finished a rename moments ago (`rename_cooldown`, saying how long
+remains), or one whose deployment still runs a luxd too old to follow a
+rename (`rename_unsupported_by_deployment`), is refused too (exit 4). The
+current name given as the first argument is the confirmation luxd needs
+for a pool with hosts. With an operator key and no `--tenant`, it renames
+a platform pool.
 
 A static pool's `--hourly-price` is copied to each host when it first
 registers. Changing it later does not reprice the pool's existing hosts:

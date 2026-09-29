@@ -196,16 +196,20 @@ resource "aws_iam_role_policy" "control_luxd" {
       {
         # A pool rename re-tags its running instances (internal/server/
         # poolrename.go): lux:pool only (every key in the request must be
-        # it), and only on instances luxd launched, as TerminateManaged-
-        # Instances below. lux:managed and lux:host themselves cannot be
-        # set or changed after launch.
+        # it, and there must be keys: ForAllValues alone also matches a
+        # request without aws:TagKeys), and only on instances luxd
+        # launched, as TerminateManagedInstances below. lux:managed and
+        # lux:host themselves cannot be set or changed after launch.
         Sid      = "RetagManagedInstancePool"
         Effect   = "Allow"
         Action   = "ec2:CreateTags"
         Resource = "${local.ec2_arn}:instance/*"
         Condition = {
-          StringEquals                = { "ec2:ResourceTag/lux:managed" = "true" }
-          Null                        = { "ec2:ResourceTag/lux:host" = "false" }
+          StringEquals = { "ec2:ResourceTag/lux:managed" = "true" }
+          Null = {
+            "ec2:ResourceTag/lux:host" = "false"
+            "aws:TagKeys"              = "false"
+          }
           "ForAllValues:StringEquals" = { "aws:TagKeys" = ["lux:pool"] }
         }
       },
