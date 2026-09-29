@@ -1,8 +1,11 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,6 +15,7 @@ import (
 	"time"
 
 	"github.com/marcioapm/lux/internal/egress"
+	"github.com/marcioapm/lux/internal/gitdiff"
 	"github.com/marcioapm/lux/internal/podman"
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
@@ -19,8 +23,9 @@ import (
 
 // fakePodman is a podman stand-in: every call is logged; `volume inspect`
 // answers a directory, `volume export` a few bytes; `run` and `exec` (a
-// diff) sleep for $FAKE_DIFF_SLEEP seconds, then print $FAKE_DIFF_OUT's
-// contents; `rm` kills the sleeping `run`.
+// diff) sleep for $FAKE_DIFF_SLEEP seconds, then print the file out; `rm`
+// kills the sleeping `run`, and the end of its stdin the sleeping `exec`
+// (as the shim stops when its stdin ends).
 const fakePodman = `#!/bin/sh
 D=$(dirname "$0")
 echo "$(date +%s.%N) $*" >> "$D/log"
@@ -33,9 +38,13 @@ volume)
 run|exec)
 	echo $$ > "$D/$1.pid"
 	sleep "${FAKE_DIFF_SLEEP:-0}" &
-	echo $! > "$D/sleep.pid"
+	S=$!
+	echo $S > "$D/sleep.pid"
 	echo "$(date +%s.%N) $1 started" >> "$D/log"
-	wait
+	# A background job's stdin is /dev/null unless given another fd.
+	exec 3<&0
+	[ "$1" = exec ] && (cat <&3; kill $S) >/dev/null 2>&1 &
+	wait $S
 	[ -f "$D/out" ] && cat "$D/out"
 	echo "$(date +%s.%N) $1 ended" >> "$D/log" ;;
 rm)
@@ -121,7 +130,7 @@ func diffRunner(t *testing.T) (*Runner, *fakeLuxd, string) {
 
 // exitedPlacement is a Run's placement on r whose container has exited,
 // with one repository.
-func exitedPlacement(r *Runner, epoch int) *placement {
+func exitedPlacement(t *testing.T, r *Runner, epoch int) *placement {
 	sp := spec.RunSpec{Git: &spec.Git{Repositories: []spec.Repository{{Name: "app", Path: "/workspace/repos/app"}}}}
 	p := &placement{r: r, runID: "r1", tenantID: "t1", epoch: epoch, dir: r.runDir("r1"), phase: "exited", done: make(chan struct{}),
 		assign: &proto.Assign{RunID: "r1", TenantID: "t1", Epoch: epoch, Spec: sp},
@@ -132,6 +141,19 @@ func exitedPlacement(r *Runner, epoch int) *placement {
 	r.mu.Lock()
 	r.placements["r1"] = p
 	r.mu.Unlock()
+	// The diff's goroutine writes the state file last: let it finish.
+	t.Cleanup(func() {
+		p.mu.Lock()
+		done := p.diffDone
+		p.mu.Unlock()
+		if done != nil {
+			select {
+			case <-done:
+			case <-time.After(15 * time.Second):
+				t.Error("the snapshot's diff never ended")
+			}
+		}
+	})
 	return p
 }
 
@@ -162,7 +184,7 @@ func TestSlowDiffDoesNotDelaySnapshot(t *testing.T) {
 	r, l, dir := diffRunner(t)
 	t.Setenv("FAKE_DIFF_SLEEP", "30")
 	setDiffTimeout(t, 2*time.Second)
-	p := exitedPlacement(r, 1)
+	p := exitedPlacement(t, r, 1)
 	start := time.Now()
 	go p.finish(context.Background(), &exitRecord{Code: 0, Reason: "stopped"})
 
@@ -208,7 +230,7 @@ func TestSlowDiffDoesNotDelaySnapshot(t *testing.T) {
 func TestDrainWithShortBudgetSkipsDiffs(t *testing.T) {
 	r, l, dir := diffRunner(t)
 	r.evictBy.Store(&evicting{at: time.Now().Add(25 * time.Second), reason: "spot"})
-	p := exitedPlacement(r, 1)
+	p := exitedPlacement(t, r, 1)
 	go p.finish(context.Background(), &exitRecord{Code: 0, Reason: "stopped"})
 	l.wait(t, proto.MsgSnapshotDone, 5*time.Second)
 	d := diffsOf(t, l.wait(t, proto.MsgSnapshotDiffs, 5*time.Second))
@@ -237,7 +259,7 @@ func TestDrainWithShortBudgetSkipsDiffs(t *testing.T) {
 func TestResumeOnTheSameHostCancelsTheDiff(t *testing.T) {
 	r, l, dir := diffRunner(t)
 	t.Setenv("FAKE_DIFF_SLEEP", "30")
-	p := exitedPlacement(r, 1)
+	p := exitedPlacement(t, r, 1)
 	go p.finish(context.Background(), &exitRecord{Code: 0, Reason: "stopped"})
 	l.wait(t, proto.MsgSnapshotDone, 5*time.Second)
 	deadline := time.Now().Add(5 * time.Second)
@@ -276,7 +298,7 @@ func TestStuckPodmanIsBounded(t *testing.T) {
 	old := diffCleanupTimeout
 	diffCleanupTimeout = time.Second
 	t.Cleanup(func() { diffCleanupTimeout = old })
-	p := exitedPlacement(r, 1)
+	p := exitedPlacement(t, r, 1)
 	start := time.Now()
 	go p.finish(context.Background(), &exitRecord{Code: 0, Reason: "stopped"})
 	d := diffsOf(t, l.wait(t, proto.MsgSnapshotDiffs, 20*time.Second))
@@ -285,5 +307,84 @@ func TestStuckPodmanIsBounded(t *testing.T) {
 	}
 	if d.Error == "" {
 		t.Errorf("%+v", d)
+	}
+}
+
+// Live diffs: one at a time per placement. Two identical requests share
+// one exec, each getting every result; a different one meanwhile is busy;
+// the exec stops (its stdin closed) once the last request is cancelled.
+func TestLiveDiffsCoalesceAndCancel(t *testing.T) {
+	r, _, dir := diffRunner(t)
+	t.Setenv("FAKE_DIFF_SLEEP", "1")
+	var out bytes.Buffer
+	gitdiff.WriteRecord(&out, gitdiff.Diff{Stat: proto.DiffStat{Repo: "app", Kind: "clone", Files: 1}, Patch: []byte("p\n")})
+	os.WriteFile(filepath.Join(dir, "out"), out.Bytes(), 0o644)
+	p := exitedPlacement(t, r, 1)
+	req := proto.DiffRequest{Kind: "clone", Repos: []proto.DiffRepo{{Name: "app", Path: "/workspace/repos/app"}}}
+
+	var wg sync.WaitGroup
+	got := make([][]proto.DiffResult, 2)
+	for i := range 2 {
+		wg.Go(func() {
+			rq := req
+			rq.SubID = fmt.Sprint("sub", i)
+			busy, err := p.serveLiveDiff(context.Background(), rq, func(res proto.DiffResult) error {
+				got[i] = append(got[i], res)
+				return nil
+			})
+			if busy || err != nil {
+				t.Errorf("request %d: busy %v, %v", i, busy, err)
+			}
+		})
+	}
+	// A different request while they run.
+	time.Sleep(200 * time.Millisecond)
+	other := req
+	other.Kind = "head"
+	if busy, _ := p.serveLiveDiff(context.Background(), other, func(proto.DiffResult) error { return nil }); !busy {
+		t.Error("a different live diff ran alongside")
+	}
+	wg.Wait()
+	if n := strings.Count(logOf(t, dir), " exec started"); n != 1 {
+		t.Errorf("%d execs for two identical requests", n)
+	}
+	for i, g := range got {
+		if len(g) != 1 || g[0].SubID != fmt.Sprint("sub", i) || string(g[0].Patch) != "p\n" {
+			t.Errorf("request %d got %+v", i, g)
+		}
+	}
+
+	// Cancelled: its exec ends, long before its sleep would.
+	t.Setenv("FAKE_DIFF_SLEEP", "60")
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() {
+		_, err := p.serveLiveDiff(ctx, req, func(proto.DiffResult) error { return nil })
+		errc <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for strings.Count(logOf(t, dir), " exec started") < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	pid, _ := os.ReadFile(filepath.Join(dir, "exec.pid"))
+	cancel()
+	if err := <-errc; !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled request: %v", err)
+	}
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat("/proc/" + strings.TrimSpace(string(pid))); err != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat("/proc/" + strings.TrimSpace(string(pid))); err == nil {
+		t.Error("the exec still runs after its request was cancelled")
+	}
+	// The next request starts afresh.
+	p.mu.Lock()
+	live := p.live
+	p.mu.Unlock()
+	if live != nil {
+		t.Error("a cancelled diff is still the placement's live one")
 	}
 }

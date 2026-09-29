@@ -707,6 +707,17 @@ func readLine(br *bufio.Reader, max int) ([]byte, error) {
 	}
 }
 
+// untilEOF is ctx, cancelled once r ends: the runner keeps a live diff's
+// stdin open while its caller wants the diff, and closes it to stop git.
+func untilEOF(ctx context.Context, r io.Reader) context.Context {
+	ctx, cancel := context.WithCancelCause(ctx)
+	go func() {
+		_, _ = io.Copy(io.Discard, r)
+		cancel(errors.New("stdin closed: the diff was cancelled"))
+	}()
+	return ctx
+}
+
 // Main is `lux-shim diff <json proto.DiffArgs>`: the stream on stdout.
 func Main(args []string) int {
 	if len(args) != 1 {
@@ -718,8 +729,12 @@ func Main(args []string) int {
 		fmt.Fprintln(os.Stderr, "lux-shim diff:", err)
 		return 2
 	}
+	ctx := context.Background()
+	if a.WatchStdin {
+		ctx = untilEOF(ctx, os.Stdin)
+	}
 	w := bufio.NewWriterSize(os.Stdout, 64<<10)
-	if err := Run(context.Background(), a, w); err != nil {
+	if err := Run(ctx, a, w); err != nil {
 		fmt.Fprintln(os.Stderr, "lux-shim diff:", err)
 		return 1
 	}

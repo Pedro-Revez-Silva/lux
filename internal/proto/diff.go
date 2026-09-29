@@ -9,6 +9,7 @@ package proto
 // luxd → runner (live, not durable) and back.
 const (
 	MsgDiffRequest = "diff.request"
+	MsgDiffCancel  = "diff.cancel" // DiffRequest's SubID: its caller is gone
 	MsgDiffResult  = "diff.result" // one per repository and base kind
 	MsgDiffEnd     = "diff.end"
 )
@@ -56,6 +57,8 @@ type DiffArgs struct {
 	// StatOnly skips the patches.
 	StatOnly bool  `json:"statOnly,omitempty"`
 	Limit    int64 `json:"limit"`
+	// WatchStdin: stop when stdin ends (its caller is gone).
+	WatchStdin bool `json:"watchStdin,omitempty"`
 }
 
 // DiffFile is one file's line counts (git diff --numstat); a binary file
@@ -109,11 +112,14 @@ type DiffResult struct {
 }
 
 // DiffEnd ends a live diff. NotRunning: the container is not running (the
-// caller falls back to the latest snapshot).
+// caller falls back to the latest snapshot). Busy: another, different live
+// diff of the placement is under way (one at a time; an identical request
+// shares it instead).
 type DiffEnd struct {
 	SubID      string `json:"subId"`
 	Error      string `json:"error,omitempty"`
 	NotRunning bool   `json:"notRunning,omitempty"`
+	Busy       bool   `json:"busy,omitempty"`
 }
 
 // SnapshotDiffs reports a snapshot's diffs: one per repository and kind,

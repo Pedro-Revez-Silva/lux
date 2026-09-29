@@ -904,3 +904,21 @@ func TestRacyCleanChangeIsSeen(t *testing.T) {
 		t.Fatalf("the change was missed: %v %+v", err, diffs)
 	}
 }
+
+// With watchStdin, the diff's context ends when stdin does: the runner
+// closes it to stop a live diff whose caller is gone.
+func TestUntilEOF(t *testing.T) {
+	r, w := io.Pipe()
+	ctx := untilEOF(context.Background(), r)
+	select {
+	case <-ctx.Done():
+		t.Fatal("ended with stdin open")
+	case <-time.After(50 * time.Millisecond):
+	}
+	w.Close()
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("did not end with stdin")
+	}
+}

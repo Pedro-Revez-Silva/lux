@@ -7,9 +7,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/klauspost/compress/zstd"
@@ -226,8 +228,14 @@ func TestDiffNotUploadedYet(t *testing.T) {
 }
 
 // fakeConn stands in for a runner's WebSocket on host h1: it answers each
-// diff request with answer's frames.
-func fakeConn(t *testing.T, s *Server, answer func(proto.DiffRequest) []proto.Frame) *[]proto.DiffRequest {
+// diff request with answer's frames, and sends each diff.cancel's subId to
+// cancels (if not nil).
+func fakeConn(t *testing.T, s *Server, answer func(proto.DiffRequest) []proto.Frame) func() []proto.DiffRequest {
+	return fakeConnCancels(t, s, answer, nil)
+}
+
+// fakeConnCancels returns the requests seen so far, when called.
+func fakeConnCancels(t *testing.T, s *Server, answer func(proto.DiffRequest) []proto.Frame, cancels chan<- string) func() []proto.DiffRequest {
 	t.Helper()
 	c := &runnerConn{hostID: "h1", send: make(chan proto.Frame, 16), notify: make(chan struct{}, 1), done: make(chan struct{})}
 	s.hub.mu.Lock()
@@ -243,6 +251,11 @@ func fakeConn(t *testing.T, s *Server, answer func(proto.DiffRequest) []proto.Fr
 			case <-stop:
 				return
 			case f := <-c.send:
+				if f.Type == proto.MsgDiffCancel && cancels != nil {
+					var end proto.DiffEnd
+					json.Unmarshal(f.Data, &end)
+					cancels <- end.SubID
+				}
 				if f.Type != proto.MsgDiffRequest {
 					continue
 				}
@@ -257,7 +270,11 @@ func fakeConn(t *testing.T, s *Server, answer func(proto.DiffRequest) []proto.Fr
 			}
 		}
 	}()
-	return &reqs
+	return func() []proto.DiffRequest {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(reqs)
+	}
 }
 
 func liveFrames(req proto.DiffRequest) []proto.Frame {
@@ -280,8 +297,8 @@ func TestDiffLiveWhileTheContainerRuns(t *testing.T) {
 
 	// Stopped: the snapshot, and the host is not asked.
 	_, _, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff", "")
-	if d := decodeDiff(t, body); d.Repos[0].Source != "snapshot" || len(*reqs) != 0 {
-		t.Fatalf("stopped: %s (%d requests)", body, len(*reqs))
+	if d := decodeDiff(t, body); d.Repos[0].Source != "snapshot" || len(reqs()) != 0 {
+		t.Fatalf("stopped: %s (%d requests)", body, len(reqs()))
 	}
 
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'running' WHERE id = 'r1'`)
@@ -295,12 +312,12 @@ func TestDiffLiveWhileTheContainerRuns(t *testing.T) {
 		t.Fatalf("live: %s", body)
 	}
 	// The runner was told each repository's clone base.
-	if r := (*reqs)[0]; r.Kind != "clone" || len(r.Repos) != 2 || r.Repos[0].Base != "base-app" || r.Repos[1].Base != "base-lib" ||
+	if r := reqs()[0]; r.Kind != "clone" || len(r.Repos) != 2 || r.Repos[0].Base != "base-app" || r.Repos[1].Base != "base-lib" ||
 		r.Repos[1].Path != "/workspace/repos/lib" {
 		t.Errorf("request: %+v", r)
 	}
 	code, hdr, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff?base=head&stat=true", "")
-	if code != http.StatusOK || (*reqs)[1].Kind != "head" || !(*reqs)[1].StatOnly || decodeDiff(t, body).Repos[0].Patch != "" {
+	if code != http.StatusOK || reqs()[1].Kind != "head" || !reqs()[1].StatOnly || decodeDiff(t, body).Repos[0].Patch != "" {
 		t.Errorf("head stat: %d %v %s", code, hdr, body)
 	}
 	// Stopping: still the container's while it is there.
@@ -400,5 +417,51 @@ func TestSnapshotDiffsReport(t *testing.T) {
 	err = s.applyReport(ctx, "h1", proto.Frame{Type: proto.MsgSnapshotDiffs, RunID: "r1", Epoch: 1, Data: proto.Marshal(proto.SnapshotDiffs{SnapshotID: "s1"})})
 	if err == nil {
 		t.Error("snapshot.diffs from the wrong epoch was accepted")
+	}
+}
+
+// A live request whose client goes away tells the runner to cancel it; one
+// the runner finds busy (another live diff under way) is 429 diff_busy.
+func TestLiveDiffCancelAndBusy(t *testing.T) {
+	s, keys, _ := diffFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'running' WHERE id = 'r1'`)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'running' WHERE id = 'p2'`)
+	cancels := make(chan string, 4)
+	reqs := fakeConnCancels(t, s, func(req proto.DiffRequest) []proto.Frame {
+		if req.Kind == "head" {
+			return []proto.Frame{{Type: proto.MsgDiffEnd, Data: proto.Marshal(proto.DiffEnd{SubID: req.SubID, Busy: true})}}
+		}
+		return nil // never answers: the client gives up
+	}, cancels)
+
+	rctx, cancel := context.WithCancel(ctx)
+	req := httptest.NewRequestWithContext(rctx, http.MethodGet, "/v1/runs/r1/diff", nil)
+	req.Header.Set("Authorization", "Bearer "+keys["t1"])
+	done := make(chan struct{})
+	go func() { defer close(done); s.Handler().ServeHTTP(httptest.NewRecorder(), req) }()
+	for deadline := time.Now().Add(5 * time.Second); len(reqs()) == 0 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	select {
+	case sub := <-cancels:
+		if sub != reqs()[0].SubID {
+			t.Errorf("cancelled %s, requested %s", sub, reqs()[0].SubID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the runner was not told to cancel")
+	}
+
+	code, _, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff?base=head", "")
+	if code != http.StatusTooManyRequests || !strings.Contains(string(body), "diff_busy") {
+		t.Errorf("busy: %d %s", code, body)
+	}
+	// An answered request is not cancelled.
+	select {
+	case sub := <-cancels:
+		t.Errorf("a finished request was cancelled: %s", sub)
+	case <-time.After(100 * time.Millisecond):
 	}
 }

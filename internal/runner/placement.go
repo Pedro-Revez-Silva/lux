@@ -63,9 +63,13 @@ type placement struct {
 	cgroup       string
 	ip           string // the container's address, once looked up
 	// diffCancel cancels a snapshot's diff under way; diffReleased is
-	// closed once its container is gone (see stopDiffs).
+	// closed once its container is gone (see stopDiffs), diffDone once it
+	// is reported.
 	diffCancel   context.CancelCauseFunc
 	diffReleased chan struct{}
+	diffDone     chan struct{}
+	// live is the live diff under way, if any.
+	live *liveRun
 }
 
 func newPlacement(r *Runner, a proto.Assign) *placement {

@@ -134,6 +134,7 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "runDiff", Method: http.MethodGet, Path: "/v1/runs/{id}/diff", Tags: []string{"runs"},
 		Summary: "What a Run changed in its repositories",
 		Description: "Per repository, from its base to its working tree: committed changes, staged, unstaged and untracked (not ignored) files. " +
+			"One live diff runs per Run at a time: identical requests share it, and a different one meanwhile is 429 `diff_busy`. " +
 			"`base=clone` (default) diffs from the commit the repository was cloned at (for one added on resume, that clone's); `base=head` from its HEAD, " +
 			"uncommitted work only. While the Run's container runs the diff is computed there, now (`source: live`); otherwise it is the one stored " +
 			"with the latest snapshot that has one (`source: snapshot`, with its id and time), which holds both bases. " +
@@ -144,7 +145,7 @@ func (s *Server) routes(api huma.API) {
 			"application/json": {Schema: schemaRef[RunDiff](api)},
 			"text/x-diff":      {Schema: &huma.Schema{Type: huma.TypeString, Description: "The patches, concatenated (git diff format)."}},
 		}}},
-		Errors: []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusGone, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout},
+		Errors: []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusGone, http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout},
 	}, "read", streamed(s, s.serveDiff))
 	register(s, api, huma.Operation{
 		OperationID: "listSnapshots", Method: http.MethodGet, Path: "/v1/runs/{id}/snapshots", Tags: []string{"runs"},

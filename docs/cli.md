@@ -105,7 +105,8 @@ ignored) files alike.
   on resume diffs from its own clone. `--base head` diffs from the
   checkout's `HEAD`: uncommitted work only.
 - While the Run's container runs, the diff is computed there, now
-  (`live`). Otherwise it is the one saved with the latest snapshot
+  (`live`); one at a time per Run (another, different `lux diff` meanwhile
+  fails with `diff_busy`; retry). Otherwise it is the one saved with the latest snapshot
   (`snapshot`), which has both bases. A Run that has never stopped since it
   started (or whose snapshots predate this) has none: exit code 3.
 - Each repository's section starts with a comment line, which `git apply`

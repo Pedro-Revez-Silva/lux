@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/marcioapm/lux/internal/gitdiff"
@@ -28,9 +29,10 @@ import (
 var diffKinds = []string{proto.DiffBaseClone, proto.DiffBaseHead}
 
 // diffArgs is the command line that computes the diffs, after the shim.
-func diffArgs(repos []proto.DiffRepo, kinds []string, statOnly bool) []string {
-	a, _ := json.Marshal(proto.DiffArgs{Repos: repos, Kinds: kinds, StatOnly: statOnly, Limit: proto.DiffLimit})
-	return []string{"diff", string(a)}
+func diffArgs(a proto.DiffArgs) []string {
+	a.Limit = proto.DiffLimit
+	b, _ := json.Marshal(a)
+	return []string{"diff", string(b)}
 }
 
 // readDiffs reads the shim's stream (see gitdiff.ReadStream): incomplete
@@ -43,9 +45,110 @@ func readDiffs(r io.Reader, repos []proto.DiffRepo, kinds []string, fn func(prot
 	return gitdiff.ReadStream(r, names, kinds, proto.DiffLimit, fn)
 }
 
-// liveDiff computes a running placement's diffs in its container and sends
-// each as it comes. A repository whose records turn out incomplete is sent
-// again, with the error, after them.
+// liveRun is a live diff under way in a placement's container: at most
+// one at a time. Identical requests share it; each reads its results from
+// the start.
+type liveRun struct {
+	key     string
+	cancel  context.CancelFunc
+	mu      sync.Mutex
+	results []proto.DiffResult
+	done    bool
+	err     error
+	changed chan struct{} // closed, and replaced, on every change
+	waiters int
+}
+
+func (l *liveRun) add(res proto.DiffResult) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.results = append(l.results, res)
+	close(l.changed)
+	l.changed = make(chan struct{})
+	return nil
+}
+
+func (l *liveRun) finish(err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.done, l.err = true, err
+	close(l.changed)
+}
+
+func liveKey(req proto.DiffRequest) string {
+	req.SubID = ""
+	b, _ := json.Marshal(req)
+	return string(b)
+}
+
+// serveLiveDiff answers one live diff request: it starts the diff, or
+// shares the identical one under way. busy: a different one is under way.
+// When the last request sharing a diff goes (ctx ends), the diff stops.
+func (p *placement) serveLiveDiff(ctx context.Context, req proto.DiffRequest, send func(proto.DiffResult) error) (busy bool, err error) {
+	key := liveKey(req)
+	p.mu.Lock()
+	l := p.live
+	if l != nil && l.key != key {
+		p.mu.Unlock()
+		return true, nil
+	}
+	if l == nil {
+		runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		l = &liveRun{key: key, cancel: cancel, changed: make(chan struct{})}
+		p.live = l
+		go func() {
+			defer cancel()
+			err := p.liveDiff(runCtx, req, l.add)
+			p.mu.Lock()
+			if p.live == l {
+				p.live = nil
+			}
+			p.mu.Unlock()
+			l.finish(err)
+		}()
+	}
+	l.mu.Lock()
+	l.waiters++
+	l.mu.Unlock()
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		l.mu.Lock()
+		if l.waiters--; l.waiters == 0 && !l.done {
+			l.cancel()
+			if p.live == l {
+				p.live = nil // a request from now on starts afresh
+			}
+		}
+		l.mu.Unlock()
+		p.mu.Unlock()
+	}()
+	for sent := 0; ; {
+		l.mu.Lock()
+		res, done, lerr, changed := l.results[sent:], l.done, l.err, l.changed
+		l.mu.Unlock()
+		for _, r := range res {
+			r.SubID = req.SubID
+			if err := send(r); err != nil {
+				return false, err
+			}
+			sent++
+		}
+		if done {
+			return false, lerr
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+}
+
+// liveDiff computes a running placement's diffs in its container and
+// passes each on as it comes. A repository whose records turn out
+// incomplete is passed on again, with the error, after them. When ctx
+// ends, the exec's stdin is closed, which stops the shim and its git.
 func (p *placement) liveDiff(ctx context.Context, req proto.DiffRequest, send func(proto.DiffResult) error) error {
 	ctx, cancel := context.WithTimeout(ctx, diffTimeout)
 	defer cancel()
@@ -53,14 +156,24 @@ func (p *placement) liveDiff(ctx context.Context, req proto.DiffRequest, send fu
 	if user == "" {
 		return errors.New("the workload's user is not known yet")
 	}
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer stdinR.Close()
+	defer stdinW.Close()
+	defer context.AfterFunc(ctx, func() { stdinW.Close() })()
+	// podman itself is signalled only if the shim has not ended by then.
+	execCtx, cancelExec := context.WithTimeout(context.WithoutCancel(ctx), diffTimeout+diffCleanupTimeout)
+	defer cancelExec()
 	pr, pw := io.Pipe()
 	// The reading ends with ctx, not only once podman does.
 	defer context.AfterFunc(ctx, func() { pr.CloseWithError(context.Cause(ctx)) })()
 	done := make(chan error, 1)
 	go func() {
-		args := append([]string{"exec", "--user", user, "--workdir", "/", containerName(p.runID), proto.ShimBinary},
-			diffArgs(req.Repos, []string{req.Kind}, req.StatOnly)...)
-		err := p.r.pm.RunTo(ctx, pw, args...)
+		args := append([]string{"exec", "-i", "--user", user, "--workdir", "/", containerName(p.runID), proto.ShimBinary},
+			diffArgs(proto.DiffArgs{Repos: req.Repos, Kinds: []string{req.Kind}, StatOnly: req.StatOnly, WatchStdin: true})...)
+		err := p.r.pm.RunIO(execCtx, stdinR, pw, args...)
 		pw.CloseWithError(err)
 		done <- err
 	}()
@@ -69,7 +182,7 @@ func (p *placement) liveDiff(ctx context.Context, req proto.DiffRequest, send fu
 		if err != nil {
 			return err
 		}
-		return send(proto.DiffResult{SubID: req.SubID, Stat: st, Patch: patch})
+		return send(proto.DiffResult{Stat: st, Patch: patch})
 	})
 	pr.CloseWithError(errors.New("diff read ended"))
 	cancel()
@@ -81,7 +194,7 @@ func (p *placement) liveDiff(ctx context.Context, req proto.DiffRequest, send fu
 	}
 	for _, rp := range req.Repos {
 		if why, ok := incomplete[rp.Name]; ok {
-			if err := send(proto.DiffResult{SubID: req.SubID, Stat: proto.DiffStat{Repo: rp.Name, Kind: req.Kind, Error: why}}); err != nil {
+			if err := send(proto.DiffResult{Stat: proto.DiffStat{Repo: rp.Name, Kind: req.Kind, Error: why}}); err != nil {
 				return err
 			}
 		}
@@ -194,11 +307,12 @@ func (p *placement) startSnapshotDiffs(ctx context.Context, snapID string) {
 		removeSnapshotFiles(p.r, diffsRecord(snapID), rec)
 	}
 	dctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
-	released := make(chan struct{})
+	released, done := make(chan struct{}), make(chan struct{})
 	p.mu.Lock()
-	p.diffCancel, p.diffReleased = cancel, released
+	p.diffCancel, p.diffReleased, p.diffDone = cancel, released, done
 	p.mu.Unlock()
 	go func() {
+		defer close(done)
 		defer cancel(nil)
 		p.snapshotDiffs(dctx, snapID, repos, released)
 	}()
@@ -370,7 +484,7 @@ func (p *placement) computeSnapshotDiffs(ctx context.Context, repos []proto.Diff
 		}
 	}
 	args = append(args, p.state.Image)
-	args = append(args, diffArgs(repos, diffKinds, false)...)
+	args = append(args, diffArgs(proto.DiffArgs{Repos: repos, Kinds: diffKinds})...)
 
 	pr, pw := io.Pipe()
 	// The reading ends with ctx, not only once podman does.

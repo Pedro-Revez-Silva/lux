@@ -405,7 +405,8 @@ func (r *Runner) assign(ctx context.Context, a proto.Assign) {
 	}
 }
 
-// handleLive handles non-durable frames: output subscriptions, diffs.
+// handleLive handles non-durable frames: output subscriptions, diffs, and
+// their cancellations (by subId).
 func (r *Runner) handleLive(ctx context.Context, f proto.Frame) {
 	switch f.Type {
 	case proto.MsgOutputSubscribe:
@@ -432,17 +433,31 @@ func (r *Runner) handleLive(ctx context.Context, f proto.Frame) {
 	case proto.MsgDiffRequest:
 		var req proto.DiffRequest
 		_ = json.Unmarshal(f.Data, &req)
+		sctx, cancel := context.WithCancel(ctx)
+		r.mu.Lock()
+		r.subs[req.SubID] = cancel
+		r.mu.Unlock()
+		defer func() {
+			cancel()
+			r.mu.Lock()
+			delete(r.subs, req.SubID)
+			r.mu.Unlock()
+		}()
 		send := func(typ string, v any) error {
-			return r.conn.Send(ctx, proto.Frame{Type: typ, RunID: f.RunID, Epoch: f.Epoch, Data: proto.Marshal(v)})
+			return r.conn.Send(sctx, proto.Frame{Type: typ, RunID: f.RunID, Epoch: f.Epoch, Data: proto.Marshal(v)})
 		}
 		end := proto.DiffEnd{SubID: req.SubID}
-		if p := r.placement(f.RunID, f.Epoch); p == nil || !p.running(ctx) {
+		if p := r.placement(f.RunID, f.Epoch); p == nil || !p.running(sctx) {
 			end.NotRunning = true
-		} else if err := p.liveDiff(ctx, req, func(res proto.DiffResult) error { return send(proto.MsgDiffResult, res) }); err != nil {
+		} else if busy, err := p.serveLiveDiff(sctx, req, func(res proto.DiffResult) error { return send(proto.MsgDiffResult, res) }); busy {
+			end.Busy = true
+		} else if err != nil {
 			end.Error = err.Error()
 		}
-		_ = send(proto.MsgDiffEnd, end)
-	case proto.MsgOutputCancel:
+		if sctx.Err() == nil {
+			_ = send(proto.MsgDiffEnd, end)
+		}
+	case proto.MsgOutputCancel, proto.MsgDiffCancel:
 		var s proto.OutputSubscribe
 		_ = json.Unmarshal(f.Data, &s)
 		r.mu.Lock()

@@ -461,7 +461,10 @@ committed changes, staged, unstaged and untracked (not ignored) files.
   added on resume has its own clone's. `base=head` diffs from the
   checkout's `HEAD` instead.
 - **While the Run runs**, luxd asks the runner, which runs the diff in the
-  Run's container. **On every exit** (stop, cancel, failure, success, a
+  Run's container, one at a time: an identical request meanwhile shares
+  the diff under way, and a different one (another base, repository, or
+  `stat`) is 429 `diff_busy`. A request whose client goes away stops the
+  diff (the last one of those sharing it). **On every exit** (stop, cancel, failure, success, a
   drain), once the snapshot is saved, reported and its uploads started,
   the runner starts a throwaway container from the Run's image with its
   state volumes mounted **read-only** (the container's root too; git's

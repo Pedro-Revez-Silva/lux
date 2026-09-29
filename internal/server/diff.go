@@ -232,6 +232,15 @@ func (s *Server) liveDiff(ctx context.Context, t diffTarget, kind string, statOn
 	if err := s.hub.SendLive(t.hostID, proto.Frame{Type: proto.MsgDiffRequest, RunID: t.runID, Epoch: t.epoch, Data: proto.Marshal(req)}); err != nil {
 		return nil, errf(http.StatusServiceUnavailable, "host_unreachable", "%v", err)
 	}
+	// Gone before the end (the client left, or the deadline): the runner
+	// stops the diff (for this request; a shared one when its last goes).
+	ended := false
+	defer func() {
+		if !ended {
+			_ = s.hub.SendLive(t.hostID, proto.Frame{Type: proto.MsgDiffCancel, RunID: t.runID, Epoch: t.epoch,
+				Data: proto.Marshal(proto.DiffEnd{SubID: req.SubID})})
+		}
+	}()
 	// The runner gives the diff a minute; a little more for the relay.
 	deadline := time.NewTimer(75 * time.Second)
 	defer deadline.Stop()
@@ -259,11 +268,14 @@ func (s *Server) liveDiff(ctx context.Context, t diffTarget, kind string, statOn
 				d.Source, d.At = "live", at
 				got[d.Repo] = d
 			case proto.MsgDiffEnd:
+				ended = true
 				var end proto.DiffEnd
 				_ = json.Unmarshal(f.Data, &end)
 				switch {
 				case end.NotRunning:
 					return nil, errNotRunning
+				case end.Busy:
+					return nil, errf(http.StatusTooManyRequests, "diff_busy", "another live diff of this Run is under way (a different base, repository or stat); retry when it is done")
 				case end.Error != "":
 					return nil, errf(http.StatusBadGateway, "diff_failed", "computing the diff in the Run's container: %s", end.Error)
 				}

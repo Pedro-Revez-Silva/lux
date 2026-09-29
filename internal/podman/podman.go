@@ -256,11 +256,20 @@ func (p *Podman) VolumeList(ctx context.Context, label string) ([]string, error)
 // include the end of stderr, of which at most 4 KiB is ever held: what the
 // command prints may come from a workload.
 func (p *Podman) RunTo(ctx context.Context, w io.Writer, args ...string) error {
+	return p.RunIO(ctx, nil, w, args...)
+}
+
+// RunIO is RunTo with stdin (a file, so that nothing copies into it and
+// podman's end is not waited on).
+func (p *Podman) RunIO(ctx context.Context, stdin *os.File, w io.Writer, args ...string) error {
 	stderr := &tail{max: 4096}
 	c := p.cmd(ctx, args...)
 	c.Cancel = func() error { return c.Process.Signal(syscall.SIGTERM) }
 	c.WaitDelay = 30 * time.Second
 	c.Stdout, c.Stderr = w, stderr
+	if stdin != nil {
+		c.Stdin = stdin
+	}
 	if err := c.Run(); err != nil {
 		return fmt.Errorf("podman %s: %v: %s", args[0], err, strings.TrimSpace(string(stderr.b)))
 	}
