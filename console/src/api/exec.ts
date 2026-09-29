@@ -10,7 +10,7 @@ import { apiFetch, apiUrl } from "./client.ts";
 import { api } from "./endpoints.ts";
 
 /** What lux shell runs: bash as a login shell, sh when there is none. */
-export const SHELL_COMMAND = ["/bin/sh", "-c", "exec bash -l 2>/dev/null || exec sh -l"];
+export const SHELL_COMMAND = ["/bin/sh", "-c", "command -v bash >/dev/null && exec bash -l; exec sh -l"];
 
 export interface ExecOptions {
   command: string[];
