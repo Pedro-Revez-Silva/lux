@@ -523,7 +523,7 @@ func (p *placement) computeSnapshotDiffs(ctx context.Context, repos []proto.Diff
 	if err == nil {
 		err = perr
 	}
-	if err == nil && ctx.Err() != nil {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		err = fmt.Errorf("the diff did not finish in %s", budget)
 	}
 	// Only whole repositories are kept: every kind, once each.

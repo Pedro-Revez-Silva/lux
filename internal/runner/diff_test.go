@@ -209,7 +209,7 @@ func TestSlowDiffDoesNotDelaySnapshot(t *testing.T) {
 		t.Error("the diffs came before the snapshot")
 	}
 	d := diffsOf(t, diffs)
-	if d.Error == "" || len(d.Diffs) != 2 || d.Diffs[0].Error == "" {
+	if !strings.Contains(d.Error, "did not finish in 2s") || len(d.Diffs) != 2 || d.Diffs[0].Error == "" {
 		t.Errorf("diffs: %+v", d)
 	}
 	if took := diffs.at.Sub(start); took > 2*time.Second+diffCleanupTimeout {

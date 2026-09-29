@@ -3,6 +3,9 @@ container while it runs and saved with every snapshot once it stops."""
 
 from __future__ import annotations
 
+import json
+import time
+
 import pytest
 
 from env import sh, wait_until
@@ -19,6 +22,17 @@ def diff_spec(image: str, git_server, prompt: str, repo: str) -> dict:
 
 def diff_json(lux, run_id: str, *args: str) -> dict:
     return lux.json("diff", run_id, *args)
+
+
+def wait_diff(lux, run_id: str, *args: str, timeout: float = 90) -> dict:
+    """The stopped Run's diff, once its snapshot's diff is computed (after
+    the snapshot is reported) and its patches uploaded."""
+    def ready():
+        p = lux.run("diff", run_id, "-o", "json", *args, check=False)
+        if p.returncode in (3, 4):  # no_diff yet; not_uploaded yet
+            return None
+        return json.loads(p.stdout)
+    return wait_until(ready, timeout, 0.5, f"no diff for {run_id}")
 
 
 def apply_check(git_server, repo: str, base: str, patch: str):
@@ -57,7 +71,7 @@ def test_diff_live_then_from_the_snapshot_then_across_a_resume(lux, runners, hos
 
     lux.run("stop", run_id, "--wait")
     lux.wait_uploaded(run_id)
-    snap = diff_json(lux, run_id)["repos"][0]
+    snap = wait_diff(lux, run_id)["repos"][0]
     snapshot_id = lux.json("snapshots", run_id)[-1]["id"]
     assert snap["source"] == "snapshot" and snap["snapshotId"] == snapshot_id, snap
     assert snap["patch"] == live["patch"] and snap["base"] == base and snap["head"] == live["head"], snap
@@ -86,6 +100,7 @@ def test_no_diff_before_a_snapshot_and_nothing_when_unchanged(lux, runners, host
     assert p.stdout == "" and p.returncode == 0, p
     lux.run("stop", run_id, "--wait")
     lux.wait_uploaded(run_id)
+    wait_diff(lux, run_id)
     assert lux.run("diff", run_id).stdout == ""
     # A Run with no repositories has no diff.
     other = lux.submit(fake_agent(fake_image, "echo hi"))
@@ -108,5 +123,35 @@ def test_a_failed_diff_does_not_fail_the_stop(lux, runners, hosts, fake_image, g
     assert failed[0]["data"]["repo"] == "dgone" and failed[0]["data"]["error"], failed
     # Snapshotted as usual; the diff says why it has none.
     assert lux.json("snapshots", run_id), "no snapshot"
+    wait_diff(lux, run_id)
     p = lux.run("diff", run_id, check=False)
     assert p.returncode == 1 and "dgone" in p.stderr, (p.stdout, p.stderr)
+    # -o json says so too, and fails the same way.
+    p = lux.run("diff", run_id, "-o", "json", check=False)
+    assert p.returncode == 1 and json.loads(p.stdout)["repos"][0]["error"], p.stdout
+
+
+def test_a_hanging_diff_holds_up_nothing(lux, runners, hosts, fake_image, git_server):
+    """The workload makes its checkout's index a FIFO, on which git blocks.
+    The Run still stops at once; its container has exited but its snapshot
+    has no diff yet, so lux diff says no_diff (exit 3); after the diff's
+    one-minute budget, diff.failed, and the repository's error."""
+    git_server.create("dhang", {"a.txt": "one\n"})
+    runners.start(hosts[0])
+    run_id = lux.submit(diff_spec(fake_image, git_server, "write a.txt changed", "dhang"))
+    lux.wait_output(run_id, "wrote a.txt")
+    lux.wait_activity(run_id, "idle")
+    hosts[0].exec("podman", "exec", "--user", "agent", f"lux-{run_id}", "sh", "-c",
+                  "cd /workspace/repos/dhang && rm .git/index && mkfifo .git/index")
+    start = time.time()
+    lux.run("stop", run_id, "--wait")
+    assert time.time() - start < 30, "the stop waited for the diff"
+    assert lux.get(run_id)["state"] == "stopped"
+    lux.wait_uploaded(run_id)
+    with pytest.raises(CLIError) as e:
+        lux.run("diff", run_id)
+    assert e.value.code == 3 and "still being computed" in e.value.stderr, e.value.stderr
+    failed = wait_until(lambda: lux.events(run_id, "diff.failed"), 120, 1, "no diff.failed event")
+    assert "did not finish" in failed[0]["data"]["error"], failed
+    p = lux.run("diff", run_id, check=False)
+    assert p.returncode == 1 and "dhang" in p.stderr, (p.stdout, p.stderr)
