@@ -352,7 +352,19 @@ func TestRenamePoolRefusals(t *testing.T) {
 	try("burst", "old", http.StatusConflict, "pool_exists")
 	try("burst", "", http.StatusUnprocessableEntity, "invalid_pool")
 	try("burst", "burst", http.StatusUnprocessableEntity, "invalid_pool")
+	try("burst", "Burst", http.StatusUnprocessableEntity, "invalid_pool")
 	try("nope", "other", http.StatusNotFound, "not_found")
+	// A stored name that breaks the rule is kept, but never given anew.
+	execSQL(t, f.s, f.ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('legacy', 't1', 'Legacy_Pool', 'static')`)
+	try("burst", "Legacy_Pool", http.StatusUnprocessableEntity, "invalid_pool")
+	// A platform pool may not become "t1/burst": its lux:pool tag value
+	// would be tenant t1's pool burst's.
+	execSQL(t, f.s, f.ctx, `INSERT INTO pools (id, name, provider, template) VALUES ('plat', 'shared', 'ec2', '{}')`)
+	if _, err := renamePool(f.ctx, f.s.db, f.s.log, "", "shared", "t1/burst", false); err == nil {
+		t.Error("a platform pool renamed to t1/burst")
+	} else if st, code := status(err); st != http.StatusUnprocessableEntity || code != "invalid_pool" {
+		t.Errorf("platform rename to t1/burst: %v", err)
+	}
 	if f.pool(t).Name != "burst" {
 		t.Fatal("a refused rename renamed")
 	}
