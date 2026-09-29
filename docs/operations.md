@@ -301,7 +301,9 @@ unlabeled, which fails with `203/EXEC`. This is unrelated to
 
 Pool names follow the rule in [the CLI reference](cli.md#hosts-and-pools): 1-32
 lowercase letters, digits and `-`. `luxd admin create-pool` and
-`create-host-token --pool` apply it too.
+`create-host-token --pool` apply it too, and refuse a name that is a live
+alias of a renamed pool (`pool_name_reserved`, naming the pool's new
+name; see [Renaming a pool](#renaming-a-pool)).
 
 A pool with `provider: ec2` is sized by luxd:
 

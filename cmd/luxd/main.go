@@ -328,13 +328,10 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		labels := labelsFlag{}
 		fs.Var(labels, "label", "host label key=value (repeatable)")
 		fs.Parse(args[1:])
-		token := ids.Secret("luxh")
+		var token string
 		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
-			if err := server.CheckPoolName(ctx, tx, optional(*tenant), *pool); err != nil {
-				return err
-			}
-			_, err := tx.Exec(ctx, `INSERT INTO host_tokens (id, tenant_id, pool, labels, token_hash) VALUES ($1, nullif($2, ''), $3, $4, $5)`,
-				ids.New(ids.HostToken), *tenant, *pool, map[string]string(labels), ids.Hash(token))
+			var err error
+			token, err = server.CreateHostToken(ctx, tx, optional(*tenant), *pool, labels)
 			return err
 		})
 		if err != nil {

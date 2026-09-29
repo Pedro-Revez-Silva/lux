@@ -69,6 +69,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/store"
 	"github.com/marcioapm/lux/internal/version"
 )
@@ -111,6 +112,8 @@ func (s *Server) renamePool(ctx context.Context, in *renamePoolInput) (*renamePo
 	return &renamePoolOutput{Body: out}, nil
 }
 
+// lockPoolName holds one owner's pool name until tx ends: a rename holds
+// both its names, and whatever writes a row naming a pool holds that name.
 func lockPoolName(ctx context.Context, tx pgx.Tx, tenantID, name string) error {
 	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('pool-name:' || $1 || '/' || $2, 0))`, tenantID, name)
 	return err
@@ -124,6 +127,34 @@ func CheckPoolNameFree(ctx context.Context, tx pgx.Tx, tenantID, name string) er
 		return err
 	}
 	return checkNotAlias(ctx, tx, tenantID, name, "")
+}
+
+// CreateHostToken mints a host token for the owner's pool (tenantID nil:
+// the platform's) in tx and returns it. It holds the pool name as a
+// rename does, so a rename either moves the token or commits first and
+// the name, then one of the pool's aliases, is refused: a token never
+// names a pool that is gone.
+func CreateHostToken(ctx context.Context, tx pgx.Tx, tenantID *string, pool string, labels map[string]string) (string, error) {
+	owner := ""
+	if tenantID != nil {
+		owner = *tenantID
+	}
+	if err := lockPoolName(ctx, tx, owner, pool); err != nil {
+		return "", err
+	}
+	if err := CheckPoolName(ctx, tx, tenantID, pool); err != nil {
+		return "", err
+	}
+	if err := checkNotAlias(ctx, tx, owner, pool, ""); err != nil {
+		return "", err
+	}
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	token := ids.Secret("luxh")
+	_, err := tx.Exec(ctx, `INSERT INTO host_tokens (id, tenant_id, pool, labels, token_hash) VALUES ($1, $2, $3, $4, $5)`,
+		ids.New(ids.HostToken), tenantID, pool, labels, ids.Hash(token))
+	return token, err
 }
 
 // checkNotAlias refuses a name that is a live alias of a pool of the

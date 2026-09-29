@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"errors"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,5 +184,89 @@ func TestProvisionerChecksInBeforeTheLease(t *testing.T) {
 			t.Fatal("the lease was never taken after the check-in")
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+// holdPoolRow locks pool id's row in a transaction the test holds: a
+// rename of that pool waits there, after it took its name locks.
+func holdPoolRow(t *testing.T, ctx context.Context, s *Server, id string) pgx.Tx {
+	t.Helper()
+	tx := systemTx(t, ctx, s)
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM pools WHERE id = $1 FOR UPDATE`, id); err != nil {
+		t.Fatal(err)
+	}
+	return tx
+}
+
+func blocked[T any](t *testing.T, ch <-chan T, what string) {
+	t.Helper()
+	select {
+	case v := <-ch:
+		t.Fatalf("%s did not wait: %v", what, v)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// A host token minted for a pool while it is renamed: the mint waits for
+// the rename, then is refused, naming the new name; minted first, the
+// rename waits for it and moves the token. Never a token for the old name.
+func TestHostTokenDuringARename(t *testing.T) {
+	f := newRenameFixture(t, false)
+	ctx, cancel := context.WithTimeout(f.ctx, raceWait)
+	defer cancel()
+	t1 := "t1"
+	mint := func(pool string) <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			done <- f.s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+				_, err := CreateHostToken(ctx, tx, &t1, pool, nil)
+				return err
+			})
+		}()
+		return done
+	}
+	rename := func(from, to string) <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			_, err := renameConfirmed(ctx, f.s, "t1", from, to, false)
+			done <- err
+		}()
+		return done
+	}
+
+	// The rename first: it holds the name while it waits for the pool row.
+	row := holdPoolRow(t, ctx, f.s, "pool1")
+	renamed := rename("burst", "burst-eu")
+	time.Sleep(200 * time.Millisecond)
+	minted := mint("burst")
+	blocked(t, minted, "a mint during the rename")
+	if err := row.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := recv(t, renamed, "the rename"); err != nil {
+		t.Fatal(err)
+	}
+	err := recv(t, minted, "the mint")
+	if st, code, msg := httpErr(err); st != http.StatusConflict || code != "pool_name_reserved" || !strings.Contains(msg, "burst-eu") {
+		t.Fatalf("a mint for the old name after the rename: %v", err)
+	}
+
+	// The mint first: the rename waits, and moves the token.
+	execSQL(t, f.s, ctx, `UPDATE pool_tag_aliases SET finished_at = now()`)
+	execSQL(t, f.s, ctx, `UPDATE pools SET rename_finished_at = now() - interval '1 day'`)
+	tx := systemTx(t, ctx, f.s)
+	if _, err := CreateHostToken(ctx, tx, &t1, "burst-eu", nil); err != nil {
+		t.Fatal(err)
+	}
+	renamed = rename("burst-eu", "burst-us")
+	blocked(t, renamed, "a rename during a mint")
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := recv(t, renamed, "the rename"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.query(t, `SELECT string_agg(DISTINCT pool, ',') FROM host_tokens`); got != "burst-us" {
+		t.Fatalf("host tokens name %s, want burst-us only", got)
 	}
 }
