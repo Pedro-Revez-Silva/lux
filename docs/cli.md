@@ -6,6 +6,7 @@ environment, then `~/.config/lux/config.toml`:
 ```toml
 url = "https://luxd.example.com"
 api_key = "lux_…"
+tenant = "acme"   # optional: the default --tenant
 ```
 
 | Flag | Env | |
@@ -14,6 +15,10 @@ api_key = "lux_…"
 | `--api-key` | `LUX_API_KEY` | an API key (scopes: `read`, `run`, `admin`; or an operator key) |
 | `--tenant` | `LUX_TENANT` | with an operator key: one tenant only (id or name) |
 | `-o json` | | machine-readable output, for every command that prints data |
+
+For the tenant, a flag or variable set to the empty string still counts:
+`--tenant ""` or `LUX_TENANT=` means all tenants, even with `tenant` in the
+config file. A tenant key ignores it, wherever it comes from.
 
 **Exit codes:** `0` success; the Run's own exit code for `run --follow`,
 `run --wait`, `resume --follow` and `wait`; `3` not found; `4` conflict or
