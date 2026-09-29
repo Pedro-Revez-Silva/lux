@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -89,8 +91,10 @@ func snapshotWithDiffs(t *testing.T, s *Server, mem *memS3, id string, epoch int
 	for _, repo := range []string{"app", "lib"} {
 		for _, kind := range []string{proto.DiffBaseClone, proto.DiffBaseHead} {
 			p := patch(repo, kind)
+			sum := sha256.Sum256([]byte(p))
 			d := proto.SnapshotDiff{DiffStat: proto.DiffStat{Repo: repo, Kind: kind, Base: "b-" + kind, Head: "h-" + id,
-				Files: 1, Insertions: 1, FileStats: []proto.DiffFile{{Path: "f", Insertions: 1}}, PatchBytes: int64(len(p))}}
+				Files: 1, Insertions: 1, FileStats: []proto.DiffFile{{Path: "f", Insertions: 1}}, PatchBytes: int64(len(p))},
+				PatchSHA256: hex.EncodeToString(sum[:])}
 			var z bytes.Buffer
 			zw, _ := zstd.NewWriter(&z)
 			zw.Write([]byte(p))
@@ -522,5 +526,157 @@ func TestDiffSnapshotHasTheKind(t *testing.T) {
 	_, _, body = getDiff(t, s, keys["t1"], "/v1/runs/r1/diff", "")
 	if d := decodeDiff(t, body); d.Repos[0].SnapshotID != "s2" {
 		t.Errorf("clone: %s", body)
+	}
+}
+
+// storedDiffs counts snapshot snapID's diff rows, and the diff blobs of
+// Run runID.
+func storedDiffs(t *testing.T, s *Server, snapID, runID string) (rows, blobs int) {
+	t.Helper()
+	ctx := context.Background()
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM snapshot_diffs WHERE snapshot_id = $1`, snapID).Scan(&rows); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT count(*) FROM blobs WHERE run_id = $1 AND kind = 'diff'`, runID).Scan(&blobs)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return rows, blobs
+}
+
+func diffBlobIDs(t *testing.T, s *Server, snapID string) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	out := map[string]string{}
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT repo || '/' || kind, blob_id FROM snapshot_diffs WHERE snapshot_id = $1 AND blob_id IS NOT NULL`, snapID)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var k, v string
+			if err := rows.Scan(&k, &v); err != nil {
+				return err
+			}
+			out[k] = v
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// A report may not point a diff at a blob that is not a new one of its
+// own: tenant t2's Run naming tenant t1's blob id is refused whole, and
+// nothing of it is stored; so is one Run's snapshot reusing its earlier
+// snapshot's blob.
+func TestSnapshotDiffsRefuseForeignBlobs(t *testing.T) {
+	s, _, mem := diffFixture(t)
+	ctx := context.Background()
+	snapshotWithDiffs(t, s, mem, "s1", 2, func(repo, kind string) string { return "t1's secret " + repo + "\n" })
+	stolen := diffBlobIDs(t, s, "s1")["app/clone"]
+
+	// t2's Run r2, stopped on the same host.
+	execSQL(t, s, ctx, `UPDATE runs SET spec = (SELECT spec FROM runs WHERE id = 'r1'), state = 'stopped', current_epoch = 1 WHERE id = 'r2'`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p9', 't2', 'r2', 'h1', 1, 'exited')`)
+	runnerReport(t, s, "r2", 1, proto.MsgSnapshotDone, proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "s9", RunID: "r2", Epoch: 1, Volumes: []proto.VolumeSnapshot{}}})
+	p := "t1's secret app\n"
+	sum := sha256.Sum256([]byte(p))
+	evil := proto.SnapshotDiffs{SnapshotID: "s9"}
+	for _, repo := range []string{"app", "lib"} {
+		for _, kind := range []string{"clone", "head"} {
+			d := proto.SnapshotDiff{DiffStat: proto.DiffStat{Repo: repo, Kind: kind}}
+			if repo == "app" && kind == "clone" {
+				d.PatchBytes, d.PatchSHA256 = int64(len(p)), hex.EncodeToString(sum[:])
+				d.Blob = &proto.BlobInfo{BlobID: stolen, Size: 10, SHA256: "x"}
+			}
+			evil.Diffs = append(evil.Diffs, d)
+		}
+	}
+	err := s.applyReport(ctx, "h1", proto.Frame{Type: proto.MsgSnapshotDiffs, RunID: "r2", Epoch: 1, Data: proto.Marshal(evil)})
+	if err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Fatalf("t2's report naming t1's blob: %v", err)
+	}
+	if rows, blobs := storedDiffs(t, s, "s9", "r2"); rows != 0 || blobs != 0 {
+		t.Errorf("stored %d rows, %d blobs for the refused report", rows, blobs)
+	}
+	var owner string
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT tenant_id || '/' || run_id FROM blobs WHERE id = $1`, stolen).Scan(&owner)
+	}); err != nil || owner != "t1/r1" {
+		t.Errorf("the blob's owner: %q %v", owner, err)
+	}
+
+	// The same Run's next snapshot reusing s1's blob: refused too.
+	execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 3 WHERE id = 'r1'`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p3', 't1', 'r1', 'h1', 3, 'exited')`)
+	runnerReport(t, s, "r1", 3, proto.MsgSnapshotDone, proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "s3", RunID: "r1", Epoch: 3, Volumes: []proto.VolumeSnapshot{}}})
+	evil.SnapshotID = "s3"
+	evil.Diffs[0].Blob = &proto.BlobInfo{BlobID: stolen, Size: 10, SHA256: "x"}
+	err = s.applyReport(ctx, "h1", proto.Frame{Type: proto.MsgSnapshotDiffs, RunID: "r1", Epoch: 3, Data: proto.Marshal(evil)})
+	if err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Errorf("s3 reusing s1's blob: %v", err)
+	}
+	if rows, _ := storedDiffs(t, s, "s3", "r1"); rows != 0 {
+		t.Errorf("stored %d rows for s3", rows)
+	}
+}
+
+// A stored patch whose bytes are not the ones reported (same length,
+// different content) is that repository's error, never served.
+func TestDiffBlobSHA256IsVerified(t *testing.T) {
+	s, keys, mem := diffFixture(t)
+	ctx := context.Background()
+	snapshotWithDiffs(t, s, mem, "s1", 2, func(repo, kind string) string { return "real " + repo + "\n" })
+	var key string
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT b.s3_key FROM snapshot_diffs d JOIN blobs b ON b.id = d.blob_id
+			WHERE d.snapshot_id = 's1' AND d.repo = 'app' AND d.kind = 'clone'`).Scan(&key)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var z bytes.Buffer
+	zw, _ := zstd.NewWriter(&z)
+	zw.Write([]byte("fake app\n"))
+	zw.Close()
+	mem.mu.Lock()
+	mem.objs["/b/"+key] = z.Bytes()
+	mem.mu.Unlock()
+	code, _, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff", "")
+	d := decodeDiff(t, body)
+	if code != http.StatusOK || d.Repos[0].Patch != "" || !strings.Contains(d.Repos[0].Error, "sha256") || d.Repos[1].Patch != "real lib\n" {
+		t.Errorf("%d %s", code, body)
+	}
+}
+
+// A diff row whose blob is another Run's (written past the report's
+// checks) is an error for that repository, never the other Run's bytes.
+func TestDiffReadChecksTheBlobsOwner(t *testing.T) {
+	s, keys, mem := diffFixture(t)
+	ctx := context.Background()
+	snapshotWithDiffs(t, s, mem, "s1", 2, func(repo, kind string) string { return "mine " + repo + "\n" })
+	// Another Run's blob (r3, the same tenant's: RLS hides another
+	// tenant's), with bytes that would pass the row's size and sha256.
+	var z bytes.Buffer
+	zw, _ := zstd.NewWriter(&z)
+	zw.Write([]byte("mine app\n"))
+	zw.Close()
+	mem.mu.Lock()
+	mem.objs["/b/k-other"] = z.Bytes()
+	mem.mu.Unlock()
+	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, location, s3_key) VALUES ('b_other', 't1', 'r3', 1, 'diff', 'x', 's3', 'k-other')`)
+	execSQL(t, s, ctx, `UPDATE snapshot_diffs SET blob_id = 'b_other' WHERE snapshot_id = 's1' AND repo = 'app' AND kind = 'clone'`)
+	code, _, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff", "")
+	d := decodeDiff(t, body)
+	if code != http.StatusOK || d.Repos[0].Patch != "" || !strings.Contains(d.Repos[0].Error, "not this Run's") || d.Repos[1].Patch != "mine lib\n" {
+		t.Errorf("%d %s", code, body)
+	}
+	// Another tenant's blob: not even visible to the read (RLS).
+	execSQL(t, s, ctx, `UPDATE blobs SET tenant_id = 't2', run_id = 'r2' WHERE id = 'b_other'`)
+	code, _, body = getDiff(t, s, keys["op"], "/v1/runs/r1/diff", "")
+	if d := decodeDiff(t, body); code != http.StatusOK || d.Repos[0].Patch != "" || d.Repos[0].Error == "" {
+		t.Errorf("operator, t2's blob: %d %s", code, body)
 	}
 }

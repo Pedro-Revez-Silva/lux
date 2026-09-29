@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -329,6 +331,7 @@ func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget
 		d                  RepoDiff
 		key, location, sum string
 		size               int64
+		foreign            bool
 	}
 	var rows []row
 	var snapID string
@@ -362,9 +365,12 @@ func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget
 		if err != nil {
 			return err
 		}
+		// The blob must be this Run's own (its tenant's): a row naming
+		// another's is refused on report, and never read here either.
 		q, err := tx.Query(ctx, `SELECT d.repo, d.base, d.head, d.truncated, d.files, d.insertions, d.deletions, d.file_stats,
 				d.filters_ignored, d.filtered_paths, d.error, d.error_code,
-				coalesce(b.s3_key, ''), coalesce(b.location, ''), d.size, d.sha256
+				coalesce(b.s3_key, ''), coalesce(b.location, ''), d.size, d.sha256,
+				d.blob_id IS NOT NULL AND (b.id IS NULL OR b.tenant_id <> d.tenant_id OR b.run_id <> d.run_id OR b.kind <> 'diff')
 			FROM snapshot_diffs d LEFT JOIN blobs b ON b.id = d.blob_id
 			WHERE d.snapshot_id = $1 AND d.kind = $2 AND d.repo = ANY($3)`, snapID, kind, names)
 		if err != nil {
@@ -373,7 +379,7 @@ func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget
 		rows, err = pgx.CollectRows(q, func(r pgx.CollectableRow) (row, error) {
 			var x row
 			err := r.Scan(&x.d.Repo, &x.d.Base, &x.d.Head, &x.d.Truncated, &x.d.Files, &x.d.Insertions, &x.d.Deletions,
-				&x.d.FileStats, &x.d.FiltersIgnored, &x.d.FilteredPaths, &x.d.Error, &x.d.ErrorCode, &x.key, &x.location, &x.size, &x.sum)
+				&x.d.FileStats, &x.d.FiltersIgnored, &x.d.FilteredPaths, &x.d.Error, &x.d.ErrorCode, &x.key, &x.location, &x.size, &x.sum, &x.foreign)
 			return x, err
 		})
 		return err
@@ -385,7 +391,13 @@ func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget
 	for _, x := range rows {
 		x.d.Source, x.d.SnapshotID, x.d.At = "snapshot", snapID, at.UTC()
 		if !statOnly && x.d.Error == "" && x.size > 0 {
-			patch, err := s.readDiffBlob(ctx, x.key, x.location, x.size)
+			var patch []byte
+			var err error
+			if x.foreign {
+				err = errors.New("its blob is not this Run's")
+			} else {
+				patch, err = s.readDiffBlob(ctx, x.key, x.location, x.size, x.sum)
+			}
 			var ae *HTTPError
 			switch {
 			case errors.As(err, &ae):
@@ -410,8 +422,9 @@ func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget
 	return out, nil
 }
 
-// readDiffBlob reads a stored patch (zstd in S3), exactly size bytes.
-func (s *Server) readDiffBlob(ctx context.Context, key, location string, size int64) ([]byte, error) {
+// readDiffBlob reads a stored patch (zstd in S3): exactly size bytes whose
+// sha256 is sum, as the runner reported them.
+func (s *Server) readDiffBlob(ctx context.Context, key, location string, size int64, sum string) ([]byte, error) {
 	switch location {
 	case "s3":
 	case "":
@@ -437,6 +450,9 @@ func (s *Server) readDiffBlob(ctx context.Context, key, location string, size in
 	}
 	if int64(len(b)) != size {
 		return nil, fmt.Errorf("diff blob %s: %d bytes, expected %d", key, len(b), size)
+	}
+	if got := sha256.Sum256(b); hex.EncodeToString(got[:]) != sum {
+		return nil, fmt.Errorf("diff blob %s: sha256 %x, expected %s", key, got, sum)
 	}
 	return b, nil
 }
@@ -487,16 +503,60 @@ func applySnapshotDiffs(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID 
 	return nil
 }
 
+// refusedBlobError: a report names a blob id that is not a new one of its
+// own: another Run's (perhaps another tenant's), or reused within it.
+type refusedBlobError struct {
+	snapID, blobID, why string
+}
+
+func (e *refusedBlobError) Error() string {
+	return fmt.Sprintf("snapshot.diffs for %s refused: blob %s %s", e.snapID, e.blobID, e.why)
+}
+
+// claimDiffBlob records a new blob for a patch of snapshot snapID. An id
+// that exists already is accepted only as a redelivery: the same Run's
+// diff blob of this snapshot, with the same size and sha256. Anything else
+// could make this snapshot's diff read another's bytes.
+func claimDiffBlob(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID string, epoch int, snapID string, d proto.SnapshotDiff) error {
+	b := d.Blob
+	var bTenant, bRun, bKind, bSum string
+	var bSize int64
+	var ours bool
+	err := tx.QueryRow(ctx, `SELECT b.tenant_id, b.run_id, b.kind, b.size, b.sha256,
+			EXISTS (SELECT 1 FROM snapshot_diffs d WHERE d.blob_id = b.id AND d.snapshot_id = $2)
+		FROM blobs b WHERE b.id = $1 FOR UPDATE`, b.BlobID, snapID).Scan(&bTenant, &bRun, &bKind, &bSize, &bSum, &ours)
+	if errors.Is(err, pgx.ErrNoRows) {
+		_, err = tx.Exec(ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, size, sha256, location, host_id)
+			VALUES ($1, $2, $3, $4, 'diff', $5, $6, $7, 'host', $8)`, b.BlobID, tenantID, runID, epoch, d.Repo, b.Size, b.SHA256, hostID)
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	if bTenant != tenantID || bRun != runID || bKind != "diff" || !ours || bSize != b.Size || bSum != b.SHA256 {
+		return &refusedBlobError{snapID, b.BlobID, "exists already and is not this snapshot's"}
+	}
+	return nil
+}
+
 // recordSnapshotDiffs stores a snapshot's diffs: each patch a blob of its
 // placement, each repository and kind a row.
 func recordSnapshotDiffs(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID string, epoch int, snapID string, diffs []proto.SnapshotDiff) error {
+	seen := map[string]bool{}
 	for _, d := range diffs {
 		if d.Kind != proto.DiffBaseClone && d.Kind != proto.DiffBaseHead {
 			continue
 		}
 		var blobID *string
 		if d.Blob != nil {
-			if err := insertBlob(ctx, tx, tenantID, runID, epoch, hostID, d.Blob.BlobID, "diff", d.Repo, d.Blob.Size, d.Blob.SHA256); err != nil {
+			if seen[d.Blob.BlobID] {
+				return &refusedBlobError{snapID, d.Blob.BlobID, "is named twice"}
+			}
+			seen[d.Blob.BlobID] = true
+			if len(d.PatchSHA256) != 64 || d.PatchBytes <= 0 {
+				return fmt.Errorf("snapshot.diffs for %s: %s (%s) has a blob but no patch size or sha256", snapID, d.Repo, d.Kind)
+			}
+			if err := claimDiffBlob(ctx, tx, tenantID, hostID, runID, epoch, snapID, d); err != nil {
 				return err
 			}
 			blobID = &d.Blob.BlobID

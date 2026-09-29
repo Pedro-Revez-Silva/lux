@@ -416,7 +416,11 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 			if err := json.Unmarshal(f.Data, &sd); err != nil {
 				return err
 			}
-			return applySnapshotDiffs(ctx, tx, tenantID, hostID, f.RunID, f.Epoch, sd)
+			err := applySnapshotDiffs(ctx, tx, tenantID, hostID, f.RunID, f.Epoch, sd)
+			if rb := (*refusedBlobError)(nil); errors.As(err, &rb) {
+				s.log.Warn("snapshot.diffs refused", "host", hostID, "run", f.RunID, "epoch", f.Epoch, "snapshot", rb.snapID, "blob", rb.blobID, "why", rb.why)
+			}
+			return err
 		case proto.MsgRunEvent:
 			var ev proto.RunEvent
 			if err := json.Unmarshal(f.Data, &ev); err != nil {
