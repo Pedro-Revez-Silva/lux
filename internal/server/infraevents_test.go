@@ -698,3 +698,51 @@ func TestConfigChangedRecordsARemovedTemplateKey(t *testing.T) {
 		t.Fatalf("changes %v, want %v", got, want)
 	}
 }
+
+// Draining a drained host again for the same cause records nothing new; a
+// new cause does, and so does evicting Runs not yet asked to stop, which
+// are stopped as ever.
+func TestDrainRequestedOnlyForANewCauseOrEviction(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	infraFixture(t, s, ctx)
+	running(t, s, ctx)
+	tenant := context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+	drain := func(force bool) {
+		t.Helper()
+		if _, err := s.drainHost(tenant, &drainHostInput{HostPath: HostPath{ID: "h1"}, Body: &drainHostRequest{ForceEvict: force}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	drain(false)
+	drain(false)
+	if evs := events(t, s, evDrainRequested); len(evs) != 1 {
+		t.Fatalf("drain_requested events after draining twice: %+v, want one", evs)
+	}
+	drain(true)
+	evs := events(t, s, evDrainRequested)
+	if len(evs) != 2 || evs[1].Data["evict"] != true {
+		t.Fatalf("drain_requested events after an eviction: %+v, want a second, evicting", evs)
+	}
+	if reason := queryOne[string](t, s, `SELECT stop_reason FROM placements WHERE id = 'p1'`); reason != "drain" {
+		t.Fatalf("placement stop_reason %q, want drain", reason)
+	}
+	// Evicting again: the Run is already stopping, nothing new.
+	drain(true)
+	if evs := events(t, s, evDrainRequested); len(evs) != 2 {
+		t.Fatalf("drain_requested events after evicting twice: %+v, want two", evs)
+	}
+	// Another cause is news.
+	if _, err := s.drainForScaleDown(ctx, "h1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := s.drainHosts(ctx, tx, outdatedBinariesReason, causeOutdated, "", "id = $1", "h1")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if evs := events(t, s, evDrainRequested); len(evs) != 3 || evs[2].Data["cause"] != causeOutdated {
+		t.Fatalf("drain_requested events after a new cause: %+v, want a third, outdated", evs)
+	}
+}

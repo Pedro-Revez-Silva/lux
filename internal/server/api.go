@@ -1687,26 +1687,61 @@ func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, cause, stopR
 		updateWhere = where + fmt.Sprintf(" AND id = ANY($%d)", len(args)+1)
 		updateArgs = append(append([]any{}, args...), candidates)
 	}
-	rows, err := tx.Query(ctx, fmt.Sprintf(`UPDATE hosts SET draining = true,
+	// fresh: the hosts this cause is new on (locked in id order first, so
+	// two drains for one cause cannot both see it new).
+	n := len(updateArgs)
+	rows, err := tx.Query(ctx, fmt.Sprintf(`WITH old AS (
+			SELECT id, $%d = ANY(drain_causes) AS had FROM hosts
+			WHERE state <> 'terminated' AND %s ORDER BY id FOR NO KEY UPDATE)
+		UPDATE hosts SET draining = true,
 			state = CASE WHEN state = 'ready' THEN 'draining' ELSE state END,
 			state_reason = $%d,
-			drain_causes = CASE WHEN $%d = ANY(drain_causes) THEN drain_causes ELSE array_append(drain_causes, $%d) END,
+			drain_causes = CASE WHEN old.had THEN drain_causes ELSE array_append(drain_causes, $%d) END,
 			drain_requested_at = coalesce(drain_requested_at, now())
-		WHERE state <> 'terminated' AND %s
-		RETURNING id`, len(updateArgs)+1, len(updateArgs)+2, len(updateArgs)+2, updateWhere), append(updateArgs, reason, cause)...)
+		FROM old WHERE hosts.id = old.id
+		RETURNING hosts.id, NOT old.had`, n+2, updateWhere, n+1, n+2), append(updateArgs, reason, cause)...)
 	if err != nil {
 		return nil, err
 	}
-	hosts, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	type drained struct {
+		ID    string
+		Fresh bool
+	}
+	got, err := pgx.CollectRows(rows, pgx.RowToStructByPos[drained])
 	if err != nil {
 		return nil, err
 	}
-	for _, h := range hosts {
+	hosts := make([]string, 0, len(got))
+	for _, h := range got {
+		hosts = append(hosts, h.ID)
+	}
+	// An eviction is news where it stops a placement not already stopping.
+	evicting := map[string]bool{}
+	if stopReason != "" && len(hosts) > 0 {
+		rows, err := tx.Query(ctx, `SELECT DISTINCT host_id FROM placements
+			WHERE host_id = ANY($1) AND state IN `+livePlacementStates+` AND stop_requested_at IS NULL`, hosts)
+		if err != nil {
+			return nil, err
+		}
+		ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			evicting[id] = true
+		}
+	}
+	// One event per new cause or new eviction: draining a drained host
+	// again for the same cause says nothing new.
+	for _, h := range got {
+		if !h.Fresh && !evicting[h.ID] {
+			continue
+		}
 		d := map[string]any{"cause": cause, "reason": reason}
-		if stopReason != "" {
+		if evicting[h.ID] {
 			d["evict"] = true
 		}
-		if err := hostEvent(ctx, tx, h, evDrainRequested, d); err != nil {
+		if err := hostEvent(ctx, tx, h.ID, evDrainRequested, d); err != nil {
 			return nil, err
 		}
 	}
