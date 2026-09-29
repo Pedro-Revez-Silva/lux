@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -65,6 +66,8 @@ type placement struct {
 	exited map[string]int64
 	// srvSet: the servers luxd last sent (servers.go).
 	srvSet *proto.Servers
+	// diffing: a live diff is under way (diff.go).
+	diffing bool
 }
 
 func newPlacement(r *Runner, a proto.Assign) *placement {
@@ -211,6 +214,9 @@ func (p *placement) run(ctx context.Context) {
 	if prev != nil {
 		p.state.VolumesSnapshot, p.state.VolumesEpoch = prev.VolumesSnapshot, prev.VolumesEpoch
 	}
+	// Clone commits of what an earlier placement cloned; a clone here
+	// replaces its repository's.
+	p.state.GitBases = maps.Clone(a.GitBases)
 	_ = writeRunState(p.dir, p.state)
 	p.setPhase("starting")
 	go p.report(ctx, proto.MsgStatus, proto.Status{State: "starting"})
@@ -264,6 +270,9 @@ func (p *placement) run(ctx context.Context) {
 		fail("user", err)
 		return
 	}
+	p.mu.Lock()
+	p.state.User = fmt.Sprintf("%d:%d", p.user.UID, p.user.GID)
+	p.mu.Unlock()
 	if err := p.prepareVolumes(startCtx, sp, a.Resume); err != nil {
 		fail("volumes", err)
 		return

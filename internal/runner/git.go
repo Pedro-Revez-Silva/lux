@@ -49,6 +49,7 @@ func (p *placement) materializeRepos(ctx context.Context, sp spec.RunSpec, user 
 		if res == nil {
 			continue
 		}
+		p.setGitBase(r.Name, res.Base)
 		if err := p.reportClone(ctx, r, map[string]any{"status": "cloned", "commit": res.Base}); err != nil {
 			return err
 		}

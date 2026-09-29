@@ -38,6 +38,10 @@ type runState struct {
 	// Spec is the Run's spec, without secret values: what a placement
 	// re-adopted after a runner restart (which has no assignment) goes by.
 	Spec *spec.RunSpec `json:"spec,omitempty"`
+	// User is who the workload runs as ("uid:gid"), and GitBases each
+	// repository's clone commit: a live diff's, after a runner restart too.
+	User     string            `json:"user,omitempty"`
+	GitBases map[string]string `json:"gitBases,omitempty"`
 	// LastExitAt, unix ms, for host-local TTL.
 	LastExitAt int64 `json:"lastExitAt,omitempty"`
 }

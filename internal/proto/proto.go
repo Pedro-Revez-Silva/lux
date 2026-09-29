@@ -97,6 +97,8 @@ type Hello struct {
 	// runners that predate self-update: luxd never drains those for it.
 	RunnerSHA256 string `json:"runnerSha256,omitempty"`
 	ShimSHA256   string `json:"shimSha256,omitempty"`
+	// Capabilities: optional features this runner has (CapDiff).
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type Capacity struct {
@@ -196,6 +198,9 @@ type Assign struct {
 	// Image build resolution from an earlier placement, so rebuilds use the
 	// same pinned FROMs.
 	ImageResolved *ImageResolution `json:"imageResolved,omitempty"`
+	// GitBases: per repository, the commit an earlier placement cloned it
+	// at, for repositories this one restores rather than clones.
+	GitBases map[string]string `json:"gitBases,omitempty"`
 }
 
 // ImageResolution is a built image as its Run's first build made it: the
