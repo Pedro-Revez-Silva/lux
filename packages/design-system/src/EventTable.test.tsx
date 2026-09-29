@@ -1,7 +1,7 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { EventTable, repeatNote, type LifecycleEventRow } from "./EventTable.tsx";
 
@@ -50,36 +50,52 @@ async function mount(events: LifecycleEventRow[], width: number) {
   const el = document.createElement("div");
   document.body.appendChild(el);
   const root = createRoot(el);
+  mounted.push({ el, root });
   await act(async () => root.render(<EventTable events={events} summary={(e) => e.type} />));
   const types = () => [...el.querySelectorAll("tbody tr")].map((tr) => tr.querySelector("td .secondary")?.textContent);
   const headers = () => [...el.querySelectorAll("thead th")].map((th) => th.textContent);
-  return { el, root, types, headers };
+  return { el, types, headers };
 }
 
+const mounted: { el: HTMLElement; root: Root }[] = [];
+
 describe("EventTable in a DOM", () => {
+  let clientWidth: PropertyDescriptor | undefined;
   beforeAll(() => {
     GlobalRegistrator.register();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    clientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+  });
+  afterEach(async () => {
+    for (const { el, root } of mounted.splice(0)) {
+      await act(async () => root.unmount());
+      el.remove();
+    }
+    if (clientWidth) Object.defineProperty(HTMLElement.prototype, "clientWidth", clientWidth);
+    else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
   });
   afterAll(async () => {
     await GlobalRegistrator.unregister();
   });
 
   test("narrow, without its # column, newest first all the same", async () => {
-    const { root, types, headers } = await mount(events, 700);
+    const { types, headers } = await mount(events, 700);
     expect(headers()).not.toContain("#");
     expect(types()).toEqual(["pool.launch_failed", "pool.scale_up", "pool.placement"]);
-    await act(async () => root.unmount());
   });
 
   test("Time sorts by when each happened, not by id", async () => {
     // Ids and times in different orders: 7 is newest by id, oldest by time.
-    const { el, root, types } = await mount(events, 1400);
+    const { el, types } = await mount(events, 1400);
     const time = [...el.querySelectorAll("thead th")].find((th) => th.textContent === "Time") as HTMLElement;
     await act(async () => time.click());
     expect(types()).toEqual(["pool.launch_failed", "pool.scale_up", "pool.placement"]);
     await act(async () => time.click());
     expect(types()).toEqual(["pool.placement", "pool.scale_up", "pool.launch_failed"]);
-    await act(async () => root.unmount());
+  });
+
+  test("cleanup leaves no container and the real clientWidth", () => {
+    expect(document.body.children.length).toBe(0);
+    expect(Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth")).toEqual(clientWidth);
   });
 });
