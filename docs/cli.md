@@ -165,7 +165,9 @@ container, now (`GET /v1/runs/{id}/diff`).
   stderr; so are the files whose line endings or encoding git converts, and
   submodules with uncommitted changes of their own, which the patch cannot
   carry (see [Diffs](runspec.md#diffs)), even when no file shows as
-  changed.
+  changed. File names with control characters (a newline, an escape) are
+  printed quoted, Go-style (`"a\nb"`), in `--stat` and on stderr; `-o
+  json` has them as they are.
 - `-o json` prints the API's response: per repository `repo`, `push`,
   `base`, `head`, `at`, `truncated`, `files`, `insertions`, `deletions`,
   `fileStats` and `patch` (`patchBase64` when it is not UTF-8). The API

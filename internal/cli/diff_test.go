@@ -154,3 +154,51 @@ func TestDiffWarningsWithNoChangedFiles(t *testing.T) {
 		}
 	}
 }
+
+// File names reach a terminal escaped: a newline or an ESC in one is
+// shown as \n or \x1b in --stat and in warnings, never sent as is; -o
+// json carries them unchanged.
+func TestDiffEscapesControlCharacters(t *testing.T) {
+	evil := "a\nb\x1b[31mred"
+	d := server.RunDiff{Repos: []server.RepoDiff{{Repo: "app", Files: 1, Insertions: 1,
+		FileStats:       []proto.DiffFile{{Path: evil, OldPath: "old\x07", Insertions: 1}},
+		NormalizedPaths: []string{evil}, FiltersIgnored: true, FilteredPaths: []string{evil}, DirtySubmodules: []string{evil}}}}
+	var out, errOut bytes.Buffer
+	a := &app{stdout: &out, stderr: &errOut}
+	if err := a.printDiff(d, true, false); err != nil {
+		t.Fatal(err)
+	}
+	for name, s := range map[string]string{"stdout": out.String(), "stderr": errOut.String()} {
+		if strings.Contains(s, "\x1b") || strings.Contains(s, "\x07") {
+			t.Errorf("%s has a raw control character: %q", name, s)
+		}
+	}
+	if !strings.Contains(out.String(), ` "old\a" => "a\nb\x1b[31mred" | 1 +`) {
+		t.Errorf("stat: %q", out.String())
+	}
+	if n := strings.Count(errOut.String(), `"a\nb\x1b[31mred"`); n != 3 {
+		t.Errorf("stderr names it escaped %d times: %q", n, errOut.String())
+	}
+	if lines := strings.Count(errOut.String(), "\n"); lines != 3 {
+		t.Errorf("stderr: %d lines: %q", lines, errOut.String())
+	}
+	// A repository's error is escaped too.
+	errOut.Reset()
+	a.printDiff(server.RunDiff{Repos: []server.RepoDiff{{Repo: "app", Error: "cannot read " + evil}}}, false, false)
+	if strings.Contains(errOut.String(), "\x1b") || strings.Count(errOut.String(), "\n") != 1 {
+		t.Errorf("error: %q", errOut.String())
+	}
+	// JSON output is the API's, unchanged.
+	out.Reset()
+	a.output = "json"
+	if err := a.json(d); err != nil {
+		t.Fatal(err)
+	}
+	var back server.RunDiff
+	if err := json.Unmarshal(out.Bytes(), &back); err != nil || back.Repos[0].FileStats[0].Path != evil {
+		t.Errorf("json: %v %q", err, out.String())
+	}
+	if printable("plain/name.go") != "plain/name.go" || printable("with space") != "with space" || printable("héllo") != "héllo" {
+		t.Error("a plain name was changed")
+	}
+}

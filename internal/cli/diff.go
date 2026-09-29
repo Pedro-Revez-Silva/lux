@@ -6,7 +6,10 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -95,7 +98,7 @@ func (a *app) printDiff(d server.RunDiff, stat, colored bool) error {
 			if msg == proto.DiffBudgetExceeded {
 				msg += "; diff it alone with --repo " + r.Repo
 			}
-			fmt.Fprintf(a.stderr, "lux: repo %s: %s\n", r.Repo, msg)
+			fmt.Fprintf(a.stderr, "lux: repo %s: %s\n", printable(r.Repo), printable(msg))
 			failed++
 			continue
 		}
@@ -103,15 +106,15 @@ func (a *app) printDiff(d server.RunDiff, stat, colored bool) error {
 		// endings alone, or inside a submodule, is not in the diff.
 		if r.FiltersIgnored {
 			fmt.Fprintf(a.stderr, "lux: repo %s: files with clean/smudge filters are compared raw (filters are not run): %s\n",
-				r.Repo, strings.Join(r.FilteredPaths, ", "))
+				printable(r.Repo), printableList(r.FilteredPaths))
 		}
 		if len(r.NormalizedPaths) > 0 {
 			fmt.Fprintf(a.stderr, "lux: repo %s: git converts these files' line endings or encoding; the patch has its stored form: %s\n",
-				r.Repo, strings.Join(r.NormalizedPaths, ", "))
+				printable(r.Repo), printableList(r.NormalizedPaths))
 		}
 		if len(r.DirtySubmodules) > 0 {
 			fmt.Fprintf(a.stderr, "lux: repo %s: submodules with uncommitted changes of their own, not in the patch: %s\n",
-				r.Repo, strings.Join(r.DirtySubmodules, ", "))
+				printable(r.Repo), printableList(r.DirtySubmodules))
 		}
 		if r.Files == 0 {
 			continue
@@ -134,7 +137,7 @@ func (a *app) printDiff(d server.RunDiff, stat, colored bool) error {
 		}
 		a.stdout.Write(patch)
 		if r.Truncated {
-			fmt.Fprintf(a.stderr, "lux: repo %s: the patch was cut at the size limit; see --stat for all of it\n", r.Repo)
+			fmt.Fprintf(a.stderr, "lux: repo %s: the patch was cut at the size limit; see --stat for all of it\n", printable(r.Repo))
 		}
 	}
 	if failed > 0 {
@@ -146,7 +149,7 @@ func (a *app) printDiff(d server.RunDiff, stat, colored bool) error {
 // diffHeader is a comment line naming the repository and its commits:
 // `# repo app: 1a2b3c4d5e6f..5d6e7f8a9b0c`.
 func diffHeader(r server.RepoDiff) string {
-	h := fmt.Sprintf("# repo %s: %s..%s", r.Repo, short(r.Base), short(r.Head))
+	h := fmt.Sprintf("# repo %s: %s..%s", printable(r.Repo), printable(short(r.Base)), printable(short(r.Head)))
 	if r.Truncated {
 		h += ", TRUNCATED"
 	}
@@ -232,9 +235,28 @@ func writeStat(w io.Writer, r server.RepoDiff, colored bool) {
 
 func statName(path, old string) string {
 	if old == "" {
-		return path
+		return printable(path)
 	}
-	return old + " => " + path
+	return printable(old) + " => " + printable(path)
+}
+
+// printable is s for a terminal: quoted, Go-style (\n, \x1b, \u2028),
+// when it has a character that is not printable or is not UTF-8, so a
+// file name cannot move the cursor or send escape sequences. Plain names
+// are left as they are.
+func printable(s string) string {
+	if !utf8.ValidString(s) || strings.ContainsFunc(s, func(r rune) bool { return !unicode.IsPrint(r) && r != ' ' }) {
+		return strconv.Quote(s)
+	}
+	return s
+}
+
+func printableList(l []string) string {
+	out := make([]string, len(l))
+	for i, s := range l {
+		out[i] = printable(s)
+	}
+	return strings.Join(out, ", ")
 }
 
 // scale shrinks n of most to fit width, keeping any change visible.
