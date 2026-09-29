@@ -186,6 +186,38 @@ def _costed_run(lux, text: str, name: str = "") -> str:
     return run_id
 
 
+def test_runs_list_shows_runtime_and_placements(page, env, lux, runners, hosts):
+    runners.start(hosts[0])
+    name = f"runtime-{lux.tenant_id[-6:]}"
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "sleep 2", name=name))
+    lux.wait_state(run_id, "succeeded")
+    listed = next(r for r in lux.json("ls") if r["id"] == run_id)
+    assert listed["runtimeSeconds"] >= 1 and "runtimeSince" not in listed, listed
+    never = _parked(lux, f"runtime-never-{lux.tenant_id[-6:]}")
+    # Wide enough that the optional Placements column is shown.
+    page.set_viewport_size({"width": 1800, "height": 900})
+    page.sign_in(lux.api_key, "/runs")
+    headers = page.locator("table thead th")
+    expect(headers.filter(has_text=re.compile(r"^Runtime$"))).to_have_count(1, timeout=15_000)
+    placements = headers.filter(has_text=re.compile(r"^Placements$"))
+    expect(placements).to_have_count(1)
+    expect(placements.locator("[title]")).to_have_attribute("title", "Times this Run has been placed on a host")
+    expect(headers.filter(has_text=re.compile(r"^Epoch$"))).to_have_count(0)
+    texts = [t.strip() for t in headers.all_inner_texts()]
+    runtime_col, placements_col = texts.index("Runtime"), texts.index("Placements")
+
+    def cell(run_name, col):
+        row = page.get_by_role("row").filter(has=page.get_by_role("link", name=run_name, exact=True))
+        return row.locator("td").nth(col)
+    expect(cell(name, runtime_col)).to_have_text(re.compile(r"^\d+(\.\d+)?(ms|s)$|^\d+[mhd]( \d+[smh])?$"))
+    expect(cell(name, placements_col)).to_have_text("1")
+    # Never placed: no runtime, no placement.
+    expect(cell(f"runtime-never-{lux.tenant_id[-6:]}", runtime_col)).to_have_text("–")
+    expect(cell(f"runtime-never-{lux.tenant_id[-6:]}", placements_col)).to_have_text("0")
+    assert not page.errors, page.errors
+    lux.run("cancel", never)
+
+
 def _both_themes(page, env, path: str, check):
     """Run `check` on `path` in the light and then the dark theme."""
     for theme in ("light", "dark"):
