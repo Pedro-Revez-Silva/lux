@@ -171,6 +171,9 @@ func (a *app) lsCmd() *cobra.Command {
 		Long: `List Runs, newest first. With an operator key, every tenant's
 (--tenant narrows it), with a TENANT column.
 
+RUNTIME is the time the Run's placements have spent running, summed (a
+placement still running counts up to now); - for a Run that never ran.
+
 COST is the Run's list-price total when it has one currency, "multi" when
 it has several (lux cost <run> shows them), and — while nothing has been
 reported. A leading ~ marks a total that may still change: part of it is
@@ -211,13 +214,13 @@ an estimate, or a cost source has not answered yet.`,
 				if r.Activity == "idle" && r.State == "running" {
 					state += " (waiting for input)"
 				}
-				row := []string{r.ID, orDash(r.Name), state, orDash(r.Host), r.Spec.Workload.Adapter, runCostCell(r.Cost), ago(&r.CreatedAt)}
+				row := []string{r.ID, orDash(r.Name), state, orDash(r.Host), r.Spec.Workload.Adapter, runtimeCell(r), runCostCell(r.Cost), ago(&r.CreatedAt)}
 				if len(tenants) > 1 {
 					row = append([]string{r.Tenant}, row...)
 				}
 				rows = append(rows, row)
 			}
-			header := "ID\tNAME\tSTATE\tHOST\tADAPTER\tCOST\tCREATED"
+			header := "ID\tNAME\tSTATE\tHOST\tADAPTER\tRUNTIME\tCOST\tCREATED"
 			if len(tenants) > 1 {
 				header = "TENANT\t" + header
 			}
@@ -231,6 +234,29 @@ an estimate, or a cost source has not answered yet.`,
 	cmd.Flags().IntVar(&limit, "limit", 0, "at most this many (default 100, max 1000)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "filter by label key=value")
 	return cmd
+}
+
+// runtimeCell is the Runs list's RUNTIME column: runtimeSeconds in its two
+// largest units ("45s", "3m20s", "2h5m", "1d3h"), "-" for a Run that never ran.
+func runtimeCell(r Run) string {
+	if r.RuntimeSince == nil && r.RuntimeSeconds == 0 {
+		return "-"
+	}
+	s := int64(r.RuntimeSeconds)
+	units := []struct {
+		name string
+		size int64
+	}{{"d", 86400}, {"h", 3600}, {"m", 60}, {"s", 1}}
+	for i, u := range units[:3] {
+		if s >= u.size {
+			out := fmt.Sprintf("%d%s", s/u.size, u.name)
+			if rest := s % u.size / units[i+1].size; rest > 0 {
+				out += fmt.Sprintf("%d%s", rest, units[i+1].name)
+			}
+			return out
+		}
+	}
+	return fmt.Sprintf("%ds", s)
 }
 
 func orDash(s string) string {
