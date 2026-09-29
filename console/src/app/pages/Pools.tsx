@@ -1,8 +1,10 @@
-import { useMemo } from "react";
-import { Badge, Card, PageHeader, Table, type Column } from "@lux/design-system";
-import { api, type Pool } from "../../api/index.ts";
+import { useMemo, useState } from "react";
+import { Badge, Button, Card, ConfirmDialog, PageHeader, Table, useToast, type Column } from "@lux/design-system";
+import { api, errorText, type Pool } from "../../api/index.ts";
+import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip, labelsText } from "./common.tsx";
+import { DASH, ErrorBlock, ErrorStrip, labelsText, poolPath } from "./common.tsx";
+import { currentDefaultText } from "./defaultPool.ts";
 
 interface PoolRow extends Pool {
   key: string;
@@ -11,8 +13,11 @@ interface PoolRow extends Pool {
 }
 
 export function Pools() {
-  const { showTenant } = useScope();
+  const { showTenant, operator } = useScope();
+  const toast = useToast();
   const pools = useScopedQuery("pools", api.pools, { interval: 15_000 });
+  const [marking, setMarking] = useState<PoolRow | null>(null);
+  const [busy, setBusy] = useState(false);
   const hosts = useScopedQuery("hosts", (t, s) => api.hosts(t, {}, s), { interval: 15_000 });
 
   const rows = useMemo<PoolRow[]>(() => {
@@ -33,7 +38,20 @@ export function Pools() {
   }, [pools.data, hosts.data]);
 
   const cols = useMemo<Column<PoolRow>[]>(() => {
-    const c: Column<PoolRow>[] = [{ key: "name", header: "Pool", cell: (p) => p.name, sortValue: (p) => p.name, lead: true, width: 180 }];
+    const c: Column<PoolRow>[] = [
+      {
+        key: "name",
+        header: "Pool",
+        cell: (p) => (
+          <>
+            <Link to={poolLink(p, showTenant)}>{p.name}</Link> {p.isDefault && <Badge tone="accent">Default</Badge>}
+          </>
+        ),
+        sortValue: (p) => p.name,
+        lead: true,
+        width: 200,
+      },
+    ];
     if (showTenant) c.push({ key: "tenant", header: "Tenant", cell: (p) => (p.platform ? <span className="muted">platform</span> : p.tenant || DASH), sortValue: (p) => (p.platform ? "" : p.tenant), width: 130 });
     c.push(
       { key: "provider", header: "Provider", cell: (p) => <span className="secondary">{p.provider}</span>, sortValue: (p) => p.provider, width: 110 },
@@ -43,9 +61,52 @@ export function Pools() {
       { key: "max", header: "Max", cell: (p) => p.maxHosts, sortValue: (p) => p.maxHosts, align: "right", mono: true, width: 70 },
       { key: "shared", header: "Shared", cell: (p) => (p.shared ? <Badge tone="info">shared</Badge> : DASH), sortValue: (p) => (p.shared ? 1 : 0), width: 100 },
       { key: "template", header: "Template", cell: (p) => (p.template && Object.keys(p.template).length > 0 ? <span className="mono muted">{labelsText(p.template)}</span> : DASH), optional: true },
+      {
+        key: "actions",
+        header: "",
+        // Operators mark any pool (a platform pool as the platform's default); a tenant, its own pools.
+        cell: (p) =>
+          !p.isDefault && (operator || !p.platform) ? (
+            // The row opens the pool's page: the button's click and Enter stay here.
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={(e) => {
+                e.stopPropagation();
+                setMarking(p);
+              }}
+              onKeyDown={(e) => e.stopPropagation()}
+            >
+              Make default
+            </Button>
+          ) : null,
+        align: "right",
+        width: 140,
+      },
     );
     return c;
-  }, [showTenant]);
+  }, [showTenant, operator]);
+
+  let whose = "your";
+  if (marking?.platform) {
+    whose = "the platform's";
+  } else if (operator) {
+    whose = `tenant ${marking?.tenant}'s`;
+  }
+  const makeDefault = async () => {
+    if (!marking) return;
+    setBusy(true);
+    try {
+      await api.makePoolDefault(marking.platform ? undefined : marking.tenant, marking.name);
+      toast({ title: `${marking.name} is ${whose} default pool`, tone: "success" });
+      setMarking(null);
+      await pools.refetch();
+    } catch (e) {
+      toast({ title: "Make default failed", description: errorText(e), tone: "danger" });
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <div className="page page-list">
@@ -55,9 +116,31 @@ export function Pools() {
         {pools.error && rows.length === 0 && !pools.loading ? (
           <ErrorBlock error={pools.error} onRetry={pools.refetch} />
         ) : (
-          <Table columns={cols} rows={rows} rowKey={(p) => p.key} loading={pools.loading} defaultSort={{ key: "name", dir: "asc" }} empty="No pools." />
+          <Table columns={cols} rows={rows} rowKey={(p) => p.key} onRowClick={(p) => go(poolLink(p, showTenant))} loading={pools.loading} defaultSort={{ key: "name", dir: "asc" }} empty="No pools." />
         )}
       </Card>
+      <ConfirmDialog
+        open={marking != null}
+        title={`Make ${marking?.name} ${whose} default pool?`}
+        description={
+          <>
+            {marking && currentDefaultText(rows, marking, whose)}{" "}
+            {marking?.platform
+              ? `From now on, Runs that name no pool go to ${marking?.name}, for tenants without a default pool of their own.`
+              : `From now on, Runs that name no pool go to ${marking?.name}.`}{" "}
+            Runs already submitted keep their pool.
+          </>
+        }
+        confirmLabel="Make default"
+        loading={busy}
+        onConfirm={() => void makeDefault()}
+        onCancel={() => setMarking(null)}
+      />
     </div>
   );
+}
+
+/** A platform pool's page is the platform's; across tenants, a tenant's pool is linked in its tenant's scope (names repeat across tenants). */
+function poolLink(p: Pool, acrossTenants: boolean): string {
+  return poolPath(p.name, { platform: p.platform, tenant: acrossTenants ? p.tenant : undefined });
 }

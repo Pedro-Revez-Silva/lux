@@ -72,6 +72,10 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 	var outdatedDrained []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var hostID string
+		// created: a static host's first registration, its row made ready.
+		var created bool
+		// The events after every row lock: event streams come last.
+		var later laterEvents
 		err := tx.QueryRow(ctx, `SELECT id FROM hosts
 			WHERE coalesce(tenant_id, '') = coalesce($1, '') AND name = $2 AND state <> 'terminated'`,
 			tok.TenantID, h.Name).Scan(&hostID)
@@ -89,6 +93,7 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 				}
 			}
 			if hostID == "" {
+				created = true
 				hostID = ids.New(ids.Host)
 				if tok.TenantID != nil {
 					if err := checkHostQuota(ctx, tx, *tok.TenantID); err != nil {
@@ -116,7 +121,8 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		// cannot add a cause the UPDATE below would then overwrite.
 		var wasDraining, registering bool
 		var causes []string
-		if err := tx.QueryRow(ctx, `SELECT draining, drain_causes, registered_at IS NULL FROM hosts WHERE id = $1 FOR NO KEY UPDATE`, hostID).Scan(&wasDraining, &causes, &registering); err != nil {
+		var wasState string
+		if err := tx.QueryRow(ctx, `SELECT draining, drain_causes, registered_at IS NULL, state FROM hosts WHERE id = $1 FOR NO KEY UPDATE`, hostID).Scan(&wasDraining, &causes, &registering, &wasState); err != nil {
 			return err
 		}
 		undrainOutdated := wasDraining && slices.Contains(causes, causeOutdated) && s.binariesMatch(h.Arch, h.RunnerSHA256, h.ShimSHA256)
@@ -155,6 +161,20 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		if err := syncProviderCapacity(ctx, tx, hostID, registering); err != nil {
 			return err
 		}
+		if registering {
+			d := map[string]any{"name": h.Name, "arch": h.Arch, "runner": h.RunnerVersion}
+			if h.ProviderID != "" {
+				d["providerId"] = h.ProviderID
+			}
+			later.host(ctx, tx, hostID, evRegistered, d)
+			later.hostPool(ctx, tx, hostID, evHostRegistered, map[string]any{"host": hostID, "name": h.Name})
+		}
+		if created {
+			wasState = "new"
+		}
+		if !draining && wasState != "ready" {
+			later.host(ctx, tx, hostID, evReady, map[string]any{"from": wasState})
+		}
 		if undrainOutdated {
 			if _, err := tx.Exec(ctx, `UPDATE host_messages SET acked_at = now()
 				WHERE host_id = $1 AND type = $2 AND acked_at IS NULL`, hostID, proto.MsgExit); err != nil {
@@ -165,12 +185,12 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 			// A static host's Runs finish undisturbed and the reaper sends
 			// MsgExit once none are left; a provisioned host is replaced by
 			// the pool once it is idle.
-			if outdatedDrained, err = s.drainIfOutdated(ctx, tx, hostID, h.Arch, h.RunnerSHA256, h.ShimSHA256); err != nil {
+			if outdatedDrained, err = s.drainIfOutdated(ctx, tx, &later, hostID, h.Arch, h.RunnerSHA256, h.ShimSHA256); err != nil {
 				return err
 			}
 		}
 		w.HostID = hostID
-		return nil
+		return later.write()
 	})
 	if err == nil {
 		// Reconciliation discovers Runs anew after registration commits.
@@ -268,15 +288,16 @@ func (s *Server) reconcileHostPlacements(ctx context.Context, tx pgx.Tx, hostID 
 	for _, lp := range reported {
 		have[lp.RunID] = lp.Epoch
 	}
+	var later laterEvents
 	for _, lp := range live {
 		if e, ok := have[lp.RunID]; ok && e == lp.Epoch || lp.State == "assigned" {
 			continue
 		}
-		if err := s.placementLost(ctx, tx, lp.RunID, lp.Epoch, "runner restarted without the container"); err != nil {
+		if err := s.placementLost(ctx, tx, lp.RunID, lp.Epoch, "runner restarted without the container", &later); err != nil {
 			return err
 		}
 	}
-	return nil
+	return later.write()
 }
 
 // syncProviderCapacity splits only the open provider period. A price fetched
@@ -475,11 +496,20 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 	}
 	var outdatedDrained []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `UPDATE hosts SET last_heartbeat = now(),
-			state = CASE WHEN state = 'lost' THEN (CASE WHEN draining THEN 'draining' ELSE 'ready' END) ELSE state END,
+		// The events after every row lock: event streams come last.
+		var later laterEvents
+		var back bool
+		if err := tx.QueryRow(ctx, `WITH old AS (SELECT id, state FROM hosts WHERE id = $1 FOR NO KEY UPDATE)
+			UPDATE hosts SET last_heartbeat = now(),
+			state = CASE WHEN hosts.state = 'lost' THEN (CASE WHEN draining THEN 'draining' ELSE 'ready' END) ELSE hosts.state END,
 			caches = jsonb_set(caches, '{gitMirrors}', $2)
-			WHERE id = $1`, hostID, nonNil(hb.GitMirrors)); err != nil {
+			FROM old WHERE hosts.id = old.id
+			RETURNING old.state = 'lost' AND hosts.state = 'ready'`, hostID, nonNil(hb.GitMirrors)).Scan(&back); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
+		}
+		// Back from lost (a network blip longer than the lease).
+		if back {
+			later.host(ctx, tx, hostID, evReady, map[string]any{"from": "lost"})
 		}
 		if err := forgetMissingCopies(ctx, tx, hostID, hb.LocalSnapshots); err != nil {
 			return err
@@ -493,7 +523,7 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 		}
 		if !draining {
 			var err error
-			if outdatedDrained, err = s.drainIfOutdated(ctx, tx, hostID, arch, hb.RunnerSHA256, hb.ShimSHA256); err != nil {
+			if outdatedDrained, err = s.drainIfOutdated(ctx, tx, &later, hostID, arch, hb.RunnerSHA256, hb.ShimSHA256); err != nil {
 				return err
 			}
 		}
@@ -532,7 +562,7 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 				hostID, runs, epochs, curMem, disk, curPids, cpu, rx, tx_)
 			return err
 		})
-		return nil
+		return later.write()
 	})
 	if err == nil {
 		s.notifyAll(outdatedDrained)
@@ -727,8 +757,17 @@ func (s *Server) hostEvicting(ctx context.Context, hostID string, ev proto.Evict
 			if !ev.Deadline.IsZero() {
 				reason += " at " + ev.Deadline.UTC().Format(time.RFC3339)
 			}
+			// drainHosts writes its events last, then spot_interrupted: lock
+			// no row after them here (event streams come last).
 			hosts, err = s.drainHosts(ctx, tx, reason, causePreempt, "preempt", "id = $1", hostID)
-			return err
+			if err != nil || len(hosts) == 0 {
+				return err
+			}
+			d := map[string]any{"host": hostID, "reason": truncate(ev.Reason, 100)}
+			if !ev.Deadline.IsZero() {
+				d["deadline"] = ev.Deadline.UTC()
+			}
+			return hostPoolEvent(ctx, tx, hostID, evSpotInterrupted, d)
 		})
 	})
 	if err != nil {

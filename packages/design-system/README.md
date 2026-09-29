@@ -10,7 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
-bun run test           # bun test: money rounding, y scale, family colours, CostFigure, Table columns (src/*.test.ts*)
+bun run test           # bun test: money rounding, y scale, family colours, CostFigure, Table columns, EventTable (src/*.test.ts*)
 ```
 
 ## Using it
@@ -200,7 +200,7 @@ shorthand), ConnectionBadge,
 StatTile, Sparkline, Card, Table, Tabs,
 Tooltip, Select, TenantPicker, TimeRangePicker, TimeSeriesChart (uPlot, with
 optional vertical `marks`; height from `--chart-h` unless given), Timeline
-(placement waterfall), LogView, Terminal (xterm.js in the LogView's frame,
+(placement waterfall), EventTable (a lifecycle event log: Run, pool, host), LogView, Terminal (xterm.js in the LogView's frame,
 Solarized inside via `terminalThemes`, following the console theme; a
 transport-agnostic handle: `write`, `onData`, `onResize`) with
 TerminalOverlay (the card over a dimmed screen), ServerList / ServerRow (a

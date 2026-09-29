@@ -73,7 +73,7 @@ resources: { cpus: 4, memory: 8Gi, disk: 50Gi, pids: 2048 }
 timeout: 4h                     # running time, over all placements; unset: no limit
 
 placement:
-  pool: default
+  pool: default                 # omitted: the tenant's default pool (see Rules)
   requires: { arch: amd64 }     # host labels that must match
   prefers: { region: eu-west-1 }
 
@@ -129,6 +129,16 @@ artifacts:
 - **Disk is reserved only where the host says how much it has**
   (`lux-runner --disk`); otherwise each Run's limit still applies, but
   the scheduler does not add them up.
+- `placement.pool` names the pool a Run runs in. Omitted: the tenant's
+  default pool, else the platform's default pool, else the pool named
+  `default` ([default pools](operations.md#pools-and-the-default-pool)).
+  luxd chooses when the Run is submitted and writes the choice into the
+  stored spec, so the Run stays in that pool when the default changes; its
+  `submitted` event carries `pool`, `poolFrom` (`tenant-default`,
+  `platform-default`, `fallback` or `spec`) and `poolOwner` (`tenant` or
+  `platform`, absent when no pool has the name). A named pool, `default`
+  included, is used as it is: the tenant's pool of that name if it has
+  one, else the platform's.
 
 ## Images
 
