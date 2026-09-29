@@ -164,7 +164,8 @@ container, now (`GET /v1/runs/{id}/diff`).
   clean/smudge filters, which are never run, are compared raw, and named on
   stderr; so are the files whose line endings or encoding git converts, and
   submodules with uncommitted changes of their own, which the patch cannot
-  carry (see [Diffs](runspec.md#diffs)).
+  carry (see [Diffs](runspec.md#diffs)), even when no file shows as
+  changed.
 - `-o json` prints the API's response: per repository `repo`, `push`,
   `base`, `head`, `at`, `truncated`, `files`, `insertions`, `deletions`,
   `fileStats` and `patch` (`patchBase64` when it is not UTF-8). The API

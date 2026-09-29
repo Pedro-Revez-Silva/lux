@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/server"
 )
 
@@ -90,13 +91,16 @@ func (a *app) printDiff(d server.RunDiff, stat, colored bool) error {
 	failed := 0
 	for _, r := range d.Repos {
 		if r.Error != "" {
-			fmt.Fprintf(a.stderr, "lux: repo %s: %s\n", r.Repo, r.Error)
+			msg := r.Error
+			if msg == proto.DiffBudgetExceeded {
+				msg += "; diff it alone with --repo " + r.Repo
+			}
+			fmt.Fprintf(a.stderr, "lux: repo %s: %s\n", r.Repo, msg)
 			failed++
 			continue
 		}
-		if r.Files == 0 {
-			continue
-		}
+		// Said even when nothing shows as changed: a change of line
+		// endings alone, or inside a submodule, is not in the diff.
 		if r.FiltersIgnored {
 			fmt.Fprintf(a.stderr, "lux: repo %s: files with clean/smudge filters are compared raw (filters are not run): %s\n",
 				r.Repo, strings.Join(r.FilteredPaths, ", "))
@@ -108,6 +112,9 @@ func (a *app) printDiff(d server.RunDiff, stat, colored bool) error {
 		if len(r.DirtySubmodules) > 0 {
 			fmt.Fprintf(a.stderr, "lux: repo %s: submodules with uncommitted changes of their own, not in the patch: %s\n",
 				r.Repo, strings.Join(r.DirtySubmodules, ", "))
+		}
+		if r.Files == 0 {
+			continue
 		}
 		header := diffHeader(r)
 		if colored {

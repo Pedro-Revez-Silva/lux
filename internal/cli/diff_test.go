@@ -135,3 +135,22 @@ func TestDiffCommand(t *testing.T) {
 		t.Errorf("--base snapshot: exit %d", code)
 	}
 }
+
+// What the patch cannot carry is said even when no file shows as changed
+// (a change of line endings alone, a submodule's own changes).
+func TestDiffWarningsWithNoChangedFiles(t *testing.T) {
+	var out, errOut bytes.Buffer
+	a := &app{stdout: &out, stderr: &errOut}
+	d := server.RunDiff{Repos: []server.RepoDiff{{Repo: "app", Files: 0, NormalizedPaths: []string{"crlf.txt"}, DirtySubmodules: []string{"vendor/lib"}}}}
+	if err := a.printDiff(d, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout: %q", out.String())
+	}
+	for _, w := range []string{"the patch has its stored form: crlf.txt", "not in the patch: vendor/lib"} {
+		if !strings.Contains(errOut.String(), w) {
+			t.Errorf("stderr lacks %q: %q", w, errOut.String())
+		}
+	}
+}
