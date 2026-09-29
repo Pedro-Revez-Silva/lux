@@ -747,7 +747,7 @@ func (s *Shim) workloadOwns(path string) bool {
 		return false
 	}
 	for _, root := range append([]string{s.user.home}, s.cfg.VolumePaths...) {
-		if root != "/" && (path == root || strings.HasPrefix(path, root+"/")) {
+		if root != "/" && spec.Under(path, root) {
 			return true
 		}
 	}
@@ -755,7 +755,8 @@ func (s *Shim) workloadOwns(path string) bool {
 }
 
 // prepareVolumes hands a fresh (root-owned) volume's root to the workload
-// user, so a non-root workload can write to it.
+// user, so a non-root workload can write to it, and the directories the
+// runner's engine-store mounts made on the way (cfg.MadeParents).
 func (s *Shim) prepareVolumes() {
 	// $LUX_ARTIFACTS: the workload's to write, whoever it runs as.
 	if s.cfg.ArtifactsDir != "" {
@@ -773,6 +774,38 @@ func (s *Shim) prepareVolumes() {
 		if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid == 0 {
 			_ = os.Chown(p, s.user.uid, s.user.gid)
 		}
+	}
+	for _, d := range s.cfg.MadeParents {
+		s.ownMade(d)
+	}
+}
+
+// ownMade hands directory d, which an engine-store mount made as root, to
+// the workload user. It walks down to d from / one directory fd at a time
+// with O_NOFOLLOW and chowns through d's fd: a link on the way (the workload
+// can plant one on a state volume, or swap one in meanwhile) stops it, and
+// nothing but d is ever touched.
+func (s *Shim) ownMade(d string) {
+	d = filepath.Clean(d)
+	if !filepath.IsAbs(d) || d == "/" {
+		return
+	}
+	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return
+	}
+	for _, part := range strings.Split(strings.TrimPrefix(d, "/"), "/") {
+		next, err := unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		unix.Close(fd)
+		if err != nil {
+			return // a link, or gone: stop, never follow
+		}
+		fd = next
+	}
+	defer unix.Close(fd)
+	var st unix.Stat_t
+	if unix.Fstat(fd, &st) == nil && st.Uid == 0 {
+		_ = unix.Fchown(fd, s.user.uid, s.user.gid)
 	}
 }
 

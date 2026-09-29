@@ -22,7 +22,11 @@ type runState struct {
 	VolumesEpoch    int    `json:"volumesEpoch,omitempty"`
 	// The Run's volumes as of the current placement.
 	Volumes []volumeRef `json:"volumes"`
-	Image   string      `json:"image"`
+	// EngineVolumes are the runner's own, for nested engines' stores
+	// (nested.go): mounted and sized like Volumes, never snapshotted, never
+	// artifact sources.
+	EngineVolumes []volumeRef `json:"engineVolumes,omitempty"`
+	Image         string      `json:"image"`
 	// Times, unix ms, for status reports.
 	Times map[string]int64 `json:"times,omitempty"`
 	// Exit, once known.
