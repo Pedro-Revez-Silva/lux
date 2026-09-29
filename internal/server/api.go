@@ -131,6 +131,25 @@ func (s *Server) routes(api huma.API) {
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "run", s.pushRun)
 	register(s, api, huma.Operation{
+		OperationID: "runDiff", Method: http.MethodGet, Path: "/v1/runs/{id}/diff", Tags: []string{"runs"},
+		Summary: "What a running Run changed in its repositories",
+		Description: "Per repository, from its base to its working tree: committed changes, staged, unstaged and untracked (not ignored) files, " +
+			"computed now in the Run's container. Only while the Run is running: otherwise 409 `run_not_running`, whose message says whether " +
+			"its container is not up yet or it has stopped (to keep a stopped Run's changes, save a patch into `$LUX_ARTIFACTS` with `workload.beforeStop`). " +
+			"One live diff runs per Run at a time: identical requests share it, and a different one meanwhile is 429 `diff_busy`. " +
+			"A host whose runner predates diffs is 503 `diff_unsupported`. " +
+			"`base=clone` (default) diffs from the commit the repository was cloned at (kept across resumes; for one added on resume, that clone's); " +
+			"`base=head` from its HEAD, uncommitted work only. 404 `no_diff` when the Run has no repositories. " +
+			"Patches are git binary patches (they apply with `git apply`; see the RunSpec's Diffs section for what they cannot carry). " +
+			"Each is cut at 10 MiB after the last whole file's diff that fits, possibly none (`truncated`); the stats cover the whole diff.\n\n" +
+			"With `Accept: text/x-diff`, the patches alone, one after the other.",
+		Responses: map[string]*huma.Response{"200": {Description: "OK", Content: map[string]*huma.MediaType{
+			"application/json": {Schema: schemaRef[RunDiff](api)},
+			"text/x-diff":      {Schema: &huma.Schema{Type: huma.TypeString, Description: "The patches, concatenated (git diff format)."}},
+		}}},
+		Errors: []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout},
+	}, "read", streamed(s, s.serveDiff))
+	register(s, api, huma.Operation{
 		OperationID: "listSnapshots", Method: http.MethodGet, Path: "/v1/runs/{id}/snapshots", Tags: []string{"runs"},
 		Summary: "List a Run's snapshots",
 		Errors:  []int{http.StatusNotFound},

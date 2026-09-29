@@ -456,6 +456,9 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	}
 
 	a := proto.Assign{RunID: r.ID, TenantID: r.TenantID, Epoch: epoch, Spec: r.Spec, ImageResolved: r.ImageResolved}
+	if a.GitBases, err = gitBases(ctx, tx, r.ID); err != nil {
+		return err
+	}
 	if r.SnapshotID != nil || r.SessionID != "" {
 		a.Resume = &proto.ResumeInfo{SessionID: r.SessionID}
 		if r.SnapshotID != nil {

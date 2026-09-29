@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -43,6 +44,8 @@ type runnerConn struct {
 	send   chan proto.Frame
 	notify chan struct{}
 	done   chan struct{}
+	// caps: the runner's capabilities, from its hello.
+	caps []string
 }
 
 func (h *Hub) conn(hostID string) *runnerConn {
@@ -65,6 +68,12 @@ func (h *Hub) Reachable(hostID string) bool {
 // Streaming reports whether a host has a WebSocket here: live output and
 // interactive streams need one; a polling host cannot relay them.
 func (h *Hub) Streaming(hostID string) bool { return h.conn(hostID) != nil }
+
+// Can reports whether a host's connected runner said it has capability c.
+func (h *Hub) Can(hostID, c string) bool {
+	conn := h.conn(hostID)
+	return conn != nil && slices.Contains(conn.caps, c)
+}
 
 // Disconnect closes a host's WebSocket, if it has one here (the host was
 // terminated).
@@ -225,6 +234,7 @@ func (s *Server) serveRunnerWS(w http.ResponseWriter, r *http.Request) error {
 		send:   make(chan proto.Frame, 256),
 		notify: make(chan struct{}, 1),
 		done:   make(chan struct{}),
+		caps:   hello.Capabilities,
 	}
 	if err := writeFrame(ctx, ws, proto.Frame{Type: proto.MsgWelcome, Data: proto.Marshal(welcome)}); err != nil {
 		return nil
@@ -286,7 +296,7 @@ func (s *Server) serveRunnerWS(w http.ResponseWriter, r *http.Request) error {
 			}
 		case proto.MsgStreamData, proto.MsgStreamClose:
 			s.hub.route(f.Stream, f)
-		case proto.MsgOutputRecords, proto.MsgOutputEnd:
+		case proto.MsgOutputRecords, proto.MsgOutputEnd, proto.MsgDiffResult, proto.MsgDiffEnd:
 			var ref struct {
 				SubID string `json:"subId"`
 			}
