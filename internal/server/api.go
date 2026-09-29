@@ -61,7 +61,8 @@ func (s *Server) routes(api huma.API) {
 			"Events: `record` (one output record; its `cursor` resumes the stream with `since`), " +
 			"`lux` (a lifecycle event, with `events=true`), `gap` (output that cannot be had, e.g. lost with its host), " +
 			"`error` (the stream failed) and `end` (the last event: where to resume and the Run's state). " +
-			"Without `follow` the stream ends after what is there now.",
+			"Without `follow` the stream ends after what is there now. " +
+			"The output of the Run's servers (ch `server`) is left out unless `servers=true`, or `server=<name>` for one server's alone.",
 		Responses: map[string]*huma.Response{"200": {Description: "OK", Content: map[string]*huma.MediaType{"text/event-stream": {Schema: sseEvents(
 			sseEvent("record", "One output record.", schemaRef[OutputRecord](api)),
 			sseEvent("lux", "A lifecycle event (events=true).", schemaRef[Event](api)),
@@ -166,15 +167,69 @@ func (s *Server) routes(api huma.API) {
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict},
 	}, "run", s.postInput)
-	register(s, api, streamOp(api, "execRun", "/v1/runs/{id}/exec", "exec", "Run a command in a running Run",
+	register(s, api, s.streamOp(api, "execRun", "/v1/runs/{id}/exec", "exec", "Run a command in a running Run",
 		"The client's first message is a StreamOpen: `{\"command\": [...], \"tty\": true, \"rows\": 24, \"cols\": 80}`. "),
 		"run", streamed(s, s.runStream("exec")))
-	register(s, api, streamOp(api, "attachRun", "/v1/runs/{id}/attach", "attach", "Attach to a running Run's terminal",
+	register(s, api, s.streamOp(api, "attachRun", "/v1/runs/{id}/attach", "attach", "Attach to a running Run's terminal",
 		"Needs a generic workload with workload.tty. "),
 		"run", streamed(s, s.runStream("attach")))
-	register(s, api, streamOp(api, "portForward", "/v1/runs/{id}/ports/{name}", "tunnel", "Reach one of a running Run's ports",
-		"A TCP connection to a port the spec declares in network.ports, carried as StreamData. "),
+	register(s, api, s.streamOp(api, "portForward", "/v1/runs/{id}/ports/{name}", "tunnel", "Reach one of a running Run's ports",
+		"A TCP connection to a port the spec declares in network.ports, or to one of the Run's servers (by its name), carried as StreamData. "),
 		"run", streamed(s, s.streamHandler("tunnel")))
+	register(s, api, huma.Operation{
+		OperationID: "mintTicket", Method: http.MethodPost, Path: "/v1/runs/{id}/tickets", Tags: []string{"interactive"},
+		Summary: "Mint a stream ticket",
+		Description: "A single-use credential, good for 60 seconds, for what a browser cannot send an Authorization header with. " +
+			"kind exec: `?ticket=` on this Run's exec, attach and ports streams, which then act as the caller. " +
+			"kind preview: the sign-in of this Run's preview URLs (`https://<host>/.lux/auth?ticket=...&to=/path`). " +
+			"An exec ticket needs the `run` scope; a preview one, `read`.",
+		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusNotFound, http.StatusUnprocessableEntity},
+	}, "read", s.mintTicket)
+
+	// Servers.
+	register(s, api, huma.Operation{
+		OperationID: "listServers", Method: http.MethodGet, Path: "/v1/runs/{id}/servers", Tags: []string{"servers"},
+		Summary: "List a Run's servers", Errors: []int{http.StatusNotFound},
+	}, "read", s.listServers)
+	register(s, api, huma.Operation{
+		OperationID: "addServer", Method: http.MethodPost, Path: "/v1/runs/{id}/servers", Tags: []string{"servers"},
+		Summary: "Add a server to a Run",
+		Description: "A named port of the Run, with an optional command lux runs in its container. " +
+			"It starts now if start (default: when it has a command), which needs the Run running. Any state but finished may add one. " +
+			"One without a command is watched: ready whenever its port accepts connections while the Run runs.",
+		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
+	}, "run", s.addServer)
+	register(s, api, huma.Operation{
+		OperationID: "putServer", Method: http.MethodPut, Path: "/v1/runs/{id}/servers/{name}", Tags: []string{"servers"},
+		Summary: "Change a server", Description: "Its port, command, workdir and env. A running one keeps what it was started with until it is started again.",
+		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
+	}, "run", s.putServer)
+	for _, a := range []struct{ action, summary, doc string }{
+		{"start", "Start a server", "Runs its command. Idempotent while it runs. 409 not_running unless the Run is running; 409 no_command for a server without one (its port is watched whenever the Run runs)."},
+		{"stop", "Stop a server", "Stops its command; a server without one is no longer watched, until the Run's next placement. Idempotent."},
+		{"restart", "Restart a server", "Stops its command and runs it again, as it is defined now. 409 not_running unless the Run is running; 409 no_command without a command."},
+	} {
+		register(s, api, huma.Operation{
+			OperationID: a.action + "Server", Method: http.MethodPost, Path: "/v1/runs/{id}/servers/{name}/" + a.action, Tags: []string{"servers"},
+			Summary: a.summary, Description: a.doc,
+			Errors: []int{http.StatusNotFound, http.StatusConflict},
+		}, "run", s.serverAction(a.action))
+	}
+	register(s, api, huma.Operation{
+		OperationID: "removeServer", Method: http.MethodDelete, Path: "/v1/runs/{id}/servers/{name}", Tags: []string{"servers"},
+		Summary: "Remove a server", Description: "Stops it first.",
+		DefaultStatus: http.StatusNoContent,
+		Errors:        []int{http.StatusNotFound, http.StatusConflict},
+	}, "run", s.removeServer)
+	register(s, api, huma.Operation{
+		OperationID: "serverLog", Method: http.MethodGet, Path: "/v1/runs/{id}/servers/{name}/log", Tags: []string{"servers"},
+		Summary: "A server's recent output",
+		Description: "The last lines its command wrote, newest last, across placements: the current one's from its host, earlier ones' from their uploaded output. " +
+			"A placement whose output cannot be had (lost with its host, or on a host not connected to this luxd) is skipped.",
+		Errors: []int{http.StatusNotFound},
+	}, "read", s.serverLog)
 
 	// Hosts and pools.
 	register(s, api, huma.Operation{
@@ -277,8 +332,9 @@ type statusOutput struct {
 	Body statusBody
 }
 
-// streamOp declares an interactive stream: a WebSocket (stream.go).
-func streamOp(api huma.API, id, path, kind, summary, doc string) huma.Operation {
+// streamOp declares an interactive stream: a WebSocket (stream.go),
+// authenticated by a key, the console's sign-in or a ticket (streamAuth).
+func (s *Server) streamOp(api huma.API, id, path, kind, summary, doc string) huma.Operation {
 	// OpenAPI cannot describe WebSocket messages: named in x-websocket.
 	ws := map[string]any{"message": schemaRef[proto.StreamData](api)}
 	if kind == "exec" {
@@ -288,6 +344,7 @@ func streamOp(api huma.API, id, path, kind, summary, doc string) huma.Operation 
 		OperationID: id, Method: http.MethodGet, Path: path, Tags: []string{"interactive"},
 		Summary: summary,
 		Description: "A WebSocket (send `Upgrade: websocket`), relayed to the Run's host, carrying JSON text messages. " + doc +
+			"A browser authenticates with `?ticket=` (POST /v1/runs/{id}/tickets, kind exec) instead of a header; a page of another origin than luxd's is refused (403 bad_origin). " +
 			"Then StreamData both ways: `{\"data\": <base64>}` for bytes, `{\"eof\": true}` to close input, `{\"rows\", \"cols\"}` to resize. " +
 			"The stream ends with one `{\"exitCode\": N}` (exec) or `{\"error\": \"...\"}`, or just the socket closing, and luxd closes it.\n\n" +
 			"Without the upgrade the same URL answers 200 `{\"status\": \"ok\"}` if the stream could be opened, and the error it would get otherwise, so a client can check first.",
@@ -295,8 +352,9 @@ func streamOp(api huma.API, id, path, kind, summary, doc string) huma.Operation 
 			"101": {Description: "Switching to the WebSocket."},
 			"200": {Description: "The stream can be opened (no Upgrade header).", Content: jsonContent(schemaRef[statusBody](api))},
 		},
-		Errors:     []int{http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
-		Extensions: map[string]any{"x-websocket": ws},
+		Errors:      []int{http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
+		Extensions:  map[string]any{"x-websocket": ws},
+		Middlewares: huma.Middlewares{s.streamAuth},
 	}
 }
 
@@ -334,7 +392,9 @@ type Run struct {
 	// Resume: on GET /v1/runs/{id} of a stopped, lost or failed Run, what
 	// a resume would take.
 	Resume *Resumability `json:"resume,omitempty"`
-	Cost   *RunCostBrief `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
+	// Servers: on GET /v1/runs/{id}, its servers.
+	Servers []RunServer   `json:"servers,omitzero" doc:"On GET /v1/runs/{id}: the Run's servers."`
+	Cost    *RunCostBrief `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
 }
 
 // Resumability says whether a Run can be resumed now, and from what.
@@ -486,6 +546,9 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 			return err
 		}
 		if err := addEvent(ctx, tx, p.TenantID, id, 0, "submitted", map[string]any{"by": p.Actor()}); err != nil {
+			return err
+		}
+		if err := insertSpecServers(ctx, tx, p.TenantID, id, sp); err != nil {
 			return err
 		}
 		created = true
@@ -714,7 +777,12 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 			u.QueueSeconds = &q
 		}
 		run.Usage = u
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		servers, err := s.listServersTx(ctx, tx, id)
+		run.Servers = nonNil(servers)
+		return err
 	})
 	return run, err
 }
@@ -1862,6 +1930,19 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	pl := in.Body
 	if pl.Name == "" || (pl.Provider != "static" && pl.Provider != "ec2") {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "name and provider (static | ec2) are required")
+	}
+	if ValidPoolName(pl.Name) != nil {
+		// A pool stored before the rule may keep its name.
+		var owner *string
+		if p.TenantID != "" {
+			owner = &p.TenantID
+		}
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return CheckPoolName(ctx, tx, owner, pl.Name) }); err != nil {
+			if pne := (*PoolNameError)(nil); errors.As(err, &pne) {
+				return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "%s", err.Error())
+			}
+			return nil, err
+		}
 	}
 	if pl.Shared {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "only platform pools can be shared (luxd admin create-pool --shared)")

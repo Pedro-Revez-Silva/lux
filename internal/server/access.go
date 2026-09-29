@@ -222,6 +222,12 @@ func (s *Server) consoleUser(r *http.Request, scope string) (Principal, error) {
 	if err != nil {
 		return Principal{}, err
 	}
+	return s.accessPrincipal(r.Context(), email, id, scope)
+}
+
+// accessPrincipal is who a verified Access user is: an allowlisted
+// operator, or an admin of the configured default tenant.
+func (s *Server) accessPrincipal(ctx context.Context, email string, id identity, scope string) (Principal, error) {
 	p := Principal{Email: email, Name: id.Name, Picture: id.Picture}
 	ref := s.cfg.ConsoleAuth.CFDefaultTenant
 	if ref == "" || len(s.cfg.ConsoleAuth.CFOperators) == 0 {
@@ -238,7 +244,7 @@ func (s *Server) consoleUser(r *http.Request, scope string) (Principal, error) {
 		if !p.Can(scope) {
 			return p, errf(http.StatusForbidden, "forbidden", "scope %q", scope)
 		}
-		id, err := s.accessTenant(r.Context())
+		id, err := s.accessTenant(ctx)
 		if err != nil {
 			return p, err
 		}

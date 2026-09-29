@@ -1,9 +1,43 @@
 // Small pieces shared by pages: error/loading blocks, links, the runs table
 // columns, chart series builders and lookups.
-import { useMemo, type ReactNode } from "react";
-import { Button, CostFigure, EmptyState, formatDuration, formatPercent, formatRelative, formatTimestamp, formatUnit, IdChip, KeyValue, Skeleton, SkeletonLines, StatePill, Tooltip, type ChartMark, type Column, type Unit } from "@lux/design-system";
-import { useNow, type Run, type Sample } from "../../api/index.ts";
+import { useMemo, useRef, type ReactNode } from "react";
+import { Button, CostFigure, EmptyState, formatDuration, formatPercent, formatRelative, formatTimestamp, formatUnit, IdChip, KeyValue, LinkButton, Skeleton, SkeletonLines, StatePill, Tooltip, type ChartMark, type Column, type LinkButtonProps, type Unit } from "@lux/design-system";
+import { api, isRunActive, useNow, useQuery, type QueryState, type Run, type Sample } from "../../api/index.ts";
 import { Link, linkTo, useSearch } from "../router.tsx";
+
+/** Polling cadence for a Run: while it is still changing, and once it has settled; each with the slower rate used while the event stream is live. */
+export interface RunCadence {
+  active: number;
+  settled: number;
+  liveActive: number;
+  liveSettled: number;
+}
+
+/**
+ * A Run by id under the `run:<id>` key, polled at the cadence its state
+ * calls for (the event stream refetches it on its events either way).
+ * `active` is what the last answer said, or true until one arrives; a
+ * caller that just changed the Run can ask for the fast cadence again
+ * with `setActive`.
+ */
+export function useRun(id: string, cadence: RunCadence): QueryState<Run> & { setActive: () => void } {
+  const active = useRef(true);
+  const q = useQuery(
+    `run:${id}`,
+    async (s) => {
+      const r = await api.run(id, s);
+      active.current = isRunActive(r.state);
+      return r;
+    },
+    { interval: active.current ? cadence.active : cadence.settled, live: active.current ? cadence.liveActive : cadence.liveSettled },
+  );
+  return { ...q, setActive: () => (active.current = true) };
+}
+
+/** A Button that navigates client-side (keeping the scope query): for actions that are links. */
+export function ButtonLink({ to, ...rest }: { to: string } & Omit<LinkButtonProps, "href" | "onClick">) {
+  return <LinkButton {...linkTo(to, useSearch())} {...rest} />;
+}
 
 export function ErrorBlock({ error, onRetry, compact }: { error: string; onRetry?: () => void; compact?: boolean }) {
   return (
