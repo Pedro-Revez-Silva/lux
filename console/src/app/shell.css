@@ -623,6 +623,10 @@
   max-height: 70vh;
   overflow: auto;
 }
+/* Cells clip (ellipsis); a live-run count ("N" or "N / M") is short, and its Tooltip must show. */
+.table td:has(> .tip-anchor > .live-runs) {
+  overflow: visible;
+}
 .table .json {
   padding: var(--sp-3) var(--sp-4);
   max-height: 320px;
