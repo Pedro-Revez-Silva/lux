@@ -6,7 +6,6 @@ system's Chrome, or Playwright's own Chromium if installed
 from __future__ import annotations
 
 import re
-import threading
 from decimal import ROUND_HALF_EVEN, Decimal
 
 import pytest
@@ -562,14 +561,12 @@ def test_rename_dialog_ignores_a_late_count_and_waits_for_the_name(page, lux, ru
                       headers={"Authorization": f"Bearer {lux.api_key}"})
     assert r.status_code == 409 and "confirm_required" in r.text, r.text
 
-    release_a, release_b = threading.Event(), threading.Event()
-
-    def delay(route):
-        # Held off the browser's thread: A's count until B's dialog is open,
-        # B's until the test has looked at the pending dialog.
-        gate = release_a if f"/pools/{a}/rename" in route.request.url else release_b
-        threading.Thread(target=lambda: (gate.wait(30), route.continue_()), daemon=True).start()
-    page.route(re.compile(r".*/v1/pools/[^/]+/rename\?dryRun=true.*"), delay)
+    # The counts (dry runs) are held, and let through from this thread
+    # (Playwright's is not to be used from another): A's once B's dialog is
+    # open, B's once the test has looked at the pending dialog.
+    held = {}
+    page.route(re.compile(r".*/v1/pools/[^/]+/rename\?dryRun=true.*"),
+               lambda route: held.__setitem__(a if f"/pools/{a}/rename" in route.request.url else b, route))
     page.sign_in(lux.api_key, "/pools")
     page.get_by_role("row").filter(has_text=a).get_by_role("button", name="Rename", exact=True).click()
     dialog = page.get_by_role("dialog")
@@ -583,11 +580,12 @@ def test_rename_dialog_ignores_a_late_count_and_waits_for_the_name(page, lux, ru
     expect(dialog.get_by_label(re.compile(f"Type {b} to confirm"))).to_be_visible()
     expect(confirm).to_be_disabled()
     # A's count (1 host) arrives late: B's dialog keeps waiting for its own.
-    release_a.set()
+    wait_until(lambda: page.wait_for_timeout(100) or (a in held and b in held), 15, 0.1, "the counts were never asked")
+    held[a].continue_()
     page.wait_for_timeout(1000)
     expect(dialog.get_by_text("1 host", exact=False)).to_have_count(0)
     expect(dialog.get_by_text("Counting what follows the rename")).to_be_visible()
-    release_b.set()
+    held[b].continue_()
     expect(dialog.get_by_text("0 hosts and 0 Runs not yet finished will follow the rename", exact=False)).to_be_visible(timeout=15_000)
     expect(dialog.get_by_label(re.compile(f"Type {b} to confirm"))).to_have_count(0)
     confirm.click()
