@@ -1593,6 +1593,8 @@ const (
 	causeManual    = "manual" // drainHost, deletePool
 	causeScaleDown = "scale-down"
 	causePreempt   = "preempt"
+
+	poolRemovedReason = "pool removed"
 )
 
 // drainHosts takes hosts out of service (no new placements), adds cause to
@@ -1882,8 +1884,11 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 				if tag.RowsAffected() == 0 {
 					return errNotFound
 				}
-				hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
-					"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
+				// Provisioned hosts, including those whose launch is in
+				// flight (no provider id yet): cordoned now, a launch
+				// that completes later lands on a draining host.
+				hosts, err = s.drainHosts(ctx, tx, poolRemovedReason, causeManual, stopReason,
+					"tenant_id = $1 AND pool = $2 AND (provider_id IS NOT NULL OR provision_requested_at IS NOT NULL)", p.TenantID, name)
 				return err
 			})
 		})

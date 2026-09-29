@@ -791,3 +791,124 @@ func TestPoolRetiredAndRestored(t *testing.T) {
 		t.Fatalf("restored changes %v", restored)
 	}
 }
+
+// heldLaunchProvider's Launch signals started, then answers once released.
+type heldLaunchProvider struct {
+	fakeLaunchProvider
+	started, release chan struct{}
+	calls            int
+}
+
+func (p *heldLaunchProvider) Launch(ctx context.Context, tmpl json.RawMessage, tags, env map[string]string) (Launched, error) {
+	p.calls++
+	if p.started != nil {
+		close(p.started)
+		<-p.release
+	}
+	return Launched{ProviderID: "i-held"}, nil
+}
+
+// A pool removed while a launch's provider call is in flight: the host it
+// launches is drained, whether the removal found it (its row committed as
+// provisioning) or the launch finds the pool retired when it records the
+// instance, and nothing is placed on it once its runner registers.
+func TestPoolRemovedDuringALaunchDrainsTheHost(t *testing.T) {
+	for _, how := range []string{"deletePool", "retired meanwhile"} {
+		t.Run(how, func(t *testing.T) {
+			s := testServer(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			infraFixture(t, s, ctx)
+			pl := poolRow{ID: "pool1", Name: "burst", Provider: "ec2", TenantID: new("t1")}
+			prov := &heldLaunchProvider{started: make(chan struct{}), release: make(chan struct{})}
+			launched := make(chan error, 1)
+			go func() { launched <- s.launch(ctx, prov, pl, nil) }()
+			select {
+			case <-prov.started:
+			case <-ctx.Done():
+				t.Fatal("the launch never reached its provider")
+			}
+			hostID := queryOne[string](t, s, `SELECT id FROM hosts WHERE id <> 'h1'`)
+			if how == "deletePool" {
+				admin := context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+				if _, err := s.deletePool(admin, &deletePoolInput{Name: "burst"}); err != nil {
+					t.Fatal(err)
+				}
+				if !queryOne[bool](t, s, `SELECT draining FROM hosts WHERE id = $1`, hostID) {
+					t.Fatal("the removal left the host being launched undrained")
+				}
+			} else {
+				execSQL(t, s, ctx, `UPDATE pools SET retired = true WHERE id = 'pool1'`)
+			}
+			close(prov.release)
+			if err := <-launched; err != nil {
+				t.Fatal(err)
+			}
+			if !queryOne[bool](t, s, `SELECT draining AND $2 = ANY(drain_causes) FROM hosts WHERE id = $1`, hostID, causeManual) {
+				t.Fatal("the launched host of a removed pool is not drained")
+			}
+			if n := queryOne[int](t, s, `SELECT count(*) FROM host_events WHERE host_id = $1 AND type = $2`, hostID, evDrainRequested); n != 1 {
+				t.Fatalf("%d host.drain_requested events, want 1", n)
+			}
+			w, err := s.registerHost(ctx, &hostToken{ID: "tok1", TenantID: new("t1"), Pool: "burst"},
+				proto.Hello{Name: "burst-new", ProtocolVersion: proto.Version, Arch: "arm64", ProviderID: "i-held", Capacity: proto.Capacity{Runs: 2}})
+			if err != nil || w.HostID != hostID {
+				t.Fatalf("registration: %v (host %s, want %s)", err, w.HostID, hostID)
+			}
+			s.hub.polled(hostID)
+			if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
+				t.Fatal(err)
+			}
+			if n := queryOne[int](t, s, `SELECT count(*) FROM placements WHERE host_id = $1`, hostID); n != 0 {
+				t.Fatalf("%d placements on a removed pool's host", n)
+			}
+		})
+	}
+}
+
+// A launch whose reply was lost, recovered after its pool was removed, is
+// drained when it is recovered.
+func TestRecoveredLaunchOfARemovedPoolIsDrained(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	infraFixture(t, s, ctx)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provision_requested_at, token_id, tagged)
+		VALUES ('h2', 't1', 'burst-h2', 'burst', 'provisioning', now(), 'tok1', true)`)
+	execSQL(t, s, ctx, `UPDATE pools SET retired = true WHERE id = 'pool1'`)
+	s.recordProviderID(ctx, "pool1", "h2", "i-lost")
+	if !queryOne[bool](t, s, `SELECT draining AND provider_id = 'i-lost' FROM hosts WHERE id = 'h2'`) {
+		t.Fatal("the recovered host of a removed pool is not drained")
+	}
+	if n := len(events(t, s, evDrainRequested)); n != 1 {
+		t.Fatalf("%d host.drain_requested events, want 1", n)
+	}
+	if n := len(events(t, s, evHostLaunched)); n != 1 {
+		t.Fatalf("%d host_launched events, want 1", n)
+	}
+}
+
+// A pool removed after the provisioner read it, before it asks for a host:
+// no provider call, no host.
+func TestLaunchSkipsAPoolRemovedSinceThePass(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	infraFixture(t, s, ctx)
+	pl := poolRow{ID: "pool1", Name: "burst", Provider: "ec2", TenantID: new("t1"), Max: 3}
+	admin := context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+	if _, err := s.deletePool(admin, &deletePoolInput{Name: "burst"}); err != nil {
+		t.Fatal(err)
+	}
+	prov := &heldLaunchProvider{}
+	if err := s.launch(ctx, prov, pl, map[string]any{"hosts": 1}); !errors.Is(err, errPoolRetired) {
+		t.Fatalf("launch: %v, want errPoolRetired", err)
+	}
+	if prov.calls != 0 {
+		t.Fatalf("%d provider calls for a removed pool", prov.calls)
+	}
+	if n := queryOne[int](t, s, `SELECT count(*) FROM hosts WHERE id <> 'h1'`); n != 0 {
+		t.Fatalf("%d hosts launched for a removed pool", n)
+	}
+	if n := queryOne[int](t, s, `SELECT count(*) FROM pool_events WHERE type IN ($1, $2)`, evScaleUp, evLaunchRequested); n != 0 {
+		t.Fatalf("%d scale_up/launch_requested events for a removed pool", n)
+	}
+}

@@ -37,9 +37,10 @@ import (
 //  0. the pool-name advisory lock, keyed by owner and name (ChangePool):
 //     serialises writes to one pool, including its creation, when there
 //     is no row yet to lock;
-//  1. pool rows, FOR NO KEY UPDATE (ChangePool, deletePool; an event's
-//     foreign key takes KEY SHARE on its pool, which NO KEY UPDATE does
-//     not conflict with, so appending to a pool never waits on its edit);
+//  1. pool rows, FOR NO KEY UPDATE (ChangePool, deletePool) or FOR SHARE
+//     (launch); an event's foreign key takes KEY SHARE on its pool, which
+//     neither conflicts with, so appending to a pool never waits on its
+//     edit;
 //  2. runs, FOR UPDATE in id order (lockReaperRuns, the scheduler);
 //  3. the cost-host advisory locks, in host id order (lockCostHost);
 //  4. host rows, FOR NO KEY UPDATE, in id order;
@@ -66,11 +67,14 @@ import (
 //     events are then written as it is placed, and the rest of the batch
 //     writes only rows of Runs it already holds (their placements,
 //     messages, cost rows), never a lock another writer takes first.
-//   - launch: pool.scale_up and pool.launch_requested (folds) after the
-//     host row it creates; pool.launch_failed (fold) after terminating that
-//     host; pool.host_launched after recording the instance id.
-//   - recordProviderID, terminateRequested, terminateTx, providerError:
-//     after their one host row (terminateTx: its copies and token too).
+//   - launch: its pool FOR SHARE first (a removal's FOR NO KEY UPDATE and
+//     it wait for each other); pool.scale_up and pool.launch_requested
+//     (folds) after the host row it creates; pool.launch_failed (fold)
+//     after terminating that host; pool.host_launched, and a drain of a
+//     host whose pool was removed meanwhile, after recording the instance
+//     id (recordProviderID alike).
+//   - terminateRequested, terminateTx, providerError: after their one host
+//     row (terminateTx: its copies and token too).
 //
 // A fold takes its stream exclusive after every other lock its transaction
 // takes (launch writes its host row, then folds; a failed launch
