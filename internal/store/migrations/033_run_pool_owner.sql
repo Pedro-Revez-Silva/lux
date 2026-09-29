@@ -1,4 +1,4 @@
--- 032_run_pool_owner.sql — which pool a Run resolved to, not only its
+-- 033_run_pool_owner.sql — which pool a Run resolved to, not only its
 -- name. Pool names are unique per owner (pools_name), so a tenant pool and
 -- a platform pool can share one: with only the name, a Run meant for the
 -- platform's `burst` could land on (or wait for) the tenant's `burst`.

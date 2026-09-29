@@ -1,4 +1,4 @@
--- 031_default_pool.sql — a pool marked as the default: where a Run that
+-- 032_default_pool.sql — a pool marked as the default: where a Run that
 -- names no pool goes. At most one per tenant, and one among platform pools
 -- (tenant_id NULL), which serves tenants without their own. No existing
 -- pool is marked: until one is, such Runs go to a pool named "default".

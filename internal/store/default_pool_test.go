@@ -12,12 +12,12 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// 031 adds pools.is_default and marks no existing pool, a pool named
+// 032 adds pools.is_default and marks no existing pool, a pool named
 // "default" included: Runs naming no pool keep going to it by name.
 func TestDefaultPoolMigration(t *testing.T) {
 	owner, _ := emptyDB(t)
 	ctx := context.Background()
-	if _, err := store.MigrateTo(ctx, owner, "lux_app", "030"); err != nil {
+	if _, err := store.MigrateTo(ctx, owner, "lux_app", "030_servers"); err != nil {
 		t.Fatal(err)
 	}
 	conn, err := pgx.Connect(ctx, owner)
@@ -49,13 +49,13 @@ func TestDefaultPoolMigration(t *testing.T) {
 	}
 }
 
-// 032 adds runs.pool_owner and leaves existing Runs' NULL: they keep
+// 033 adds runs.pool_owner and leaves existing Runs' NULL: they keep
 // matching hosts and pools by name alone. lux_pool_owner, like
 // lux_default_pool, is lux_app's only, and prefers the tenant's pool.
 func TestRunPoolOwnerMigration(t *testing.T) {
 	owner, appDSN := emptyDB(t)
 	ctx := context.Background()
-	if _, err := store.MigrateTo(ctx, owner, "lux_app", "031"); err != nil {
+	if _, err := store.MigrateTo(ctx, owner, "lux_app", "032_default_pool"); err != nil {
 		t.Fatal(err)
 	}
 	conn, err := pgx.Connect(ctx, owner)
@@ -76,7 +76,7 @@ func TestRunPoolOwnerMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if legacy != nil {
-		t.Fatalf("a Run from before 032 has pool_owner %q, want NULL", *legacy)
+		t.Fatalf("a Run from before 033 has pool_owner %q, want NULL", *legacy)
 	}
 	var public, app bool
 	if err := conn.QueryRow(ctx, `SELECT has_function_privilege('public', 'lux_pool_owner(text)', 'EXECUTE'),
