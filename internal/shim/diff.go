@@ -162,15 +162,12 @@ func (w *repoWork) trackedDiff(ctx context.Context, r proto.DiffRepo, base strin
 		return err
 	}
 	for p := range strings.SplitSeq(string(list), "\x00") {
-		// A nested repository is listed as its directory ("sub/") and has
-		// no patch to show. One gone since is none. Git lists no fifos or
-		// sockets, so like git status, the diff does not see them.
-		fi, err := os.Lstat(filepath.Join(r.Path, p))
-		switch {
-		case p == "" || err != nil:
-		case fi.Mode().IsRegular() || fi.Mode()&os.ModeSymlink != 0:
+		// Git lists nested repositories as "sub/", but no fifos or sockets.
+		if fi, err := os.Lstat(filepath.Join(r.Path, p)); p == "" || err != nil {
+			continue
+		} else if fi.Mode().IsRegular() || fi.Mode()&os.ModeSymlink != 0 {
 			w.untracked = append(w.untracked, p)
-		default:
+		} else {
 			w.omit(p)
 		}
 	}
