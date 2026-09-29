@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -16,8 +15,34 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-func tenantCtx(tenant string) context.Context {
-	return context.WithValue(context.Background(), principalKey, Principal{TenantID: tenant, KeyID: "k-" + tenant, Scopes: []string{"admin", "run", "read"}})
+func tenantCtx(tenant string) context.Context { return asTenant(context.Background(), tenant) }
+
+// asTenant is ctx (its deadline too) with tenant's admin principal.
+func asTenant(ctx context.Context, tenant string) context.Context {
+	return context.WithValue(ctx, principalKey, Principal{TenantID: tenant, KeyID: "k-" + tenant, Scopes: []string{"admin", "run", "read"}})
+}
+
+// testDeadline bounds a concurrency test: every blocking call takes the
+// context, so a regression that deadlocks fails at the deadline.
+func testDeadline(t *testing.T) context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// await receives n results from ch, failing the test at ctx's deadline.
+func await(t *testing.T, ctx context.Context, ch <-chan error, n int) []error {
+	t.Helper()
+	errs := make([]error, 0, n)
+	for range n {
+		select {
+		case err := <-ch:
+			errs = append(errs, err)
+		case <-ctx.Done():
+			t.Fatalf("%d of %d still running at the deadline: %v", n-len(errs), n, ctx.Err())
+		}
+	}
+	return errs
 }
 
 // submitPool submits a Run whose spec names pool ("" for none) as tenant,
@@ -262,24 +287,21 @@ func TestRetiringTheDefaultPoolClearsIt(t *testing.T) {
 // other, and the tenant is left with one default.
 func TestConcurrentMarks(t *testing.T) {
 	s := testServer(t)
-	ctx := context.Background()
+	ctx := testDeadline(t)
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
 	for _, n := range []string{"a", "b", "c"} {
 		mustPut(t, s, "t1", Pool{Name: n, Provider: "static"})
 	}
 	mustPut(t, s, "t1", Pool{Name: "c", IsDefault: mark(true)})
 	for range 10 {
-		var wg sync.WaitGroup
-		errs := make([]error, 2)
-		for i, n := range []string{"a", "b"} {
-			wg.Add(1)
+		done := make(chan error, 2)
+		for _, n := range []string{"a", "b"} {
 			go func() {
-				defer wg.Done()
-				_, errs[i] = s.putPool(tenantCtx("t1"), poolIn(Pool{Name: n, IsDefault: mark(true)}))
+				_, err := s.putPool(asTenant(ctx, "t1"), poolIn(Pool{Name: n, IsDefault: mark(true)}))
+				done <- err
 			}()
 		}
-		wg.Wait()
-		if errs[0] != nil || errs[1] != nil {
+		if errs := await(t, ctx, done, 2); errs[0] != nil || errs[1] != nil {
 			t.Fatalf("concurrent marks: %v, %v", errs[0], errs[1])
 		}
 		if got := defaultPools(t, s); got["t1"] != "a" && got["t1"] != "b" {
@@ -343,13 +365,20 @@ func TestOperatorMarksDefaultPools(t *testing.T) {
 }
 
 // holdDefaultLock takes tenantID's default-pool lock in a transaction of
-// its own, and returns its backend pid and a release that commits it.
+// its own, and returns its backend pid and a release that commits it (a
+// failed commit fails the test). Unreleased, it is rolled back at cleanup.
 func holdDefaultLock(t *testing.T, s *Server, ctx context.Context, tenantID string) (int, func()) {
 	t.Helper()
 	tx, err := s.db.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			tx.Rollback(context.Background())
+		}
+	})
 	if err := lockDefaultPool(ctx, tx, tenantID); err != nil {
 		t.Fatal(err)
 	}
@@ -357,25 +386,27 @@ func holdDefaultLock(t *testing.T, s *Server, ctx context.Context, tenantID stri
 	if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
 		t.Fatal(err)
 	}
-	released := false
-	release := func() {
-		if !released {
-			released = true
-			tx.Commit(ctx)
+	return pid, func() {
+		t.Helper()
+		released = true
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("committing the lock holder: %v", err)
 		}
 	}
-	t.Cleanup(release)
-	return pid, release
 }
 
 // waitBlockedBy returns once a backend waits on an advisory lock pid holds,
-// and fails if done delivers first.
+// and fails if done delivers first or ctx ends.
 func waitBlockedBy(t *testing.T, s *Server, ctx context.Context, pid int, done <-chan error) {
 	t.Helper()
 	for {
 		var waiting bool
-		systemScan(t, s, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
-			AND wait_event = 'advisory' AND $1 = ANY(pg_blocking_pids(pid)))`, []any{pid}, &waiting)
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+				AND wait_event = 'advisory' AND $1 = ANY(pg_blocking_pids(pid)))`, pid).Scan(&waiting)
+		}); err != nil {
+			t.Fatalf("waiting for a backend blocked by %d: %v", pid, err)
+		}
 		if waiting {
 			return
 		}
@@ -393,25 +424,19 @@ func waitBlockedBy(t *testing.T, s *Server, ctx context.Context, pid int, done <
 // does, before it touches the pool's row.
 func TestDeletePoolTakesTheDefaultLock(t *testing.T) {
 	s := testServer(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+	ctx := testDeadline(t)
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
 	mustPut(t, s, "t1", Pool{Name: "a", Provider: "static", IsDefault: mark(true)})
 	pid, release := holdDefaultLock(t, s, ctx, "t1")
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.deletePool(tenantCtx("t1"), &deletePoolInput{Name: "a"})
+		_, err := s.deletePool(asTenant(ctx, "t1"), &deletePoolInput{Name: "a"})
 		done <- err
 	}()
 	waitBlockedBy(t, s, ctx, pid, done)
 	release()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
+	if err := await(t, ctx, done, 1)[0]; err != nil {
+		t.Fatal(err)
 	}
 	if got := defaultPools(t, s); len(got) != 0 {
 		t.Fatalf("defaults %v after removing the default", got)
@@ -422,8 +447,7 @@ func TestDeletePoolTakesTheDefaultLock(t *testing.T) {
 // owner's lock before the upsert touches the pool's row, as putPool does.
 func TestSavePoolLocksBeforeTheUpsert(t *testing.T) {
 	s := testServer(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+	ctx := testDeadline(t)
 	pid, release := holdDefaultLock(t, s, ctx, "")
 	upserted := make(chan struct{}, 1)
 	done := make(chan error, 1)
@@ -443,7 +467,7 @@ func TestSavePoolLocksBeforeTheUpsert(t *testing.T) {
 	default:
 	}
 	release()
-	if err := <-done; err != nil {
+	if err := await(t, ctx, done, 1)[0]; err != nil {
 		t.Fatal(err)
 	}
 	if got := defaultPools(t, s); got[""] != "plat" {
@@ -482,18 +506,21 @@ func TestRetiredPoolIsNeverMarked(t *testing.T) {
 // retired pool is left marked and the tenant never has two defaults.
 func TestConcurrentMarkAndDelete(t *testing.T) {
 	s := testServer(t)
-	ctx := context.Background()
+	ctx := testDeadline(t)
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
 	for range 20 {
 		mustPut(t, s, "t1", Pool{Name: "a", Provider: "static"})
 		mustPut(t, s, "t1", Pool{Name: "b", Provider: "static", IsDefault: mark(true)})
-		var wg sync.WaitGroup
-		errs := make([]error, 2)
-		wg.Go(func() {
-			_, errs[0] = s.putPool(tenantCtx("t1"), poolIn(Pool{Name: "a", IsDefault: mark(true)}))
-		})
-		wg.Go(func() { _, errs[1] = s.deletePool(tenantCtx("t1"), &deletePoolInput{Name: "a"}) })
-		wg.Wait()
+		marked, removed := make(chan error, 1), make(chan error, 1)
+		go func() {
+			_, err := s.putPool(asTenant(ctx, "t1"), poolIn(Pool{Name: "a", IsDefault: mark(true)}))
+			marked <- err
+		}()
+		go func() {
+			_, err := s.deletePool(asTenant(ctx, "t1"), &deletePoolInput{Name: "a"})
+			removed <- err
+		}()
+		errs := []error{await(t, ctx, marked, 1)[0], await(t, ctx, removed, 1)[0]}
 		var he *HTTPError
 		if errs[0] != nil && !(errors.As(errs[0], &he) && he.Status == http.StatusNotFound) {
 			t.Fatalf("mark: %v", errs[0])

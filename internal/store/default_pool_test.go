@@ -162,55 +162,61 @@ func TestOneDefaultPool(t *testing.T) {
 	}
 
 	// Two transactions marking different pools at once: the second waits
-	// for the first and then fails; t1 never has two defaults.
+	// for the first and then fails; t1 never has two defaults. Every
+	// blocking call is bounded: were the constraint not to make it wait,
+	// or to wait on something else for good, the test fails instead of
+	// hanging.
+	deadline, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
 	if err := exec(store.Tenant("t1"), `UPDATE pools SET is_default = false`); err != nil {
 		t.Fatal(err)
 	}
-	first, err := db.Pool.Begin(ctx)
+	first, err := db.Pool.Begin(deadline)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Rollback(ctx)
-	if _, err := first.Exec(ctx, `SELECT set_config('lux.tenant_id', 't1', true)`); err != nil {
+	defer first.Rollback(context.Background())
+	if _, err := first.Exec(deadline, `SELECT set_config('lux.tenant_id', 't1', true)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := first.Exec(ctx, `UPDATE pools SET is_default = true WHERE name = 'a'`); err != nil {
+	if _, err := first.Exec(deadline, `UPDATE pools SET is_default = true WHERE name = 'a'`); err != nil {
 		t.Fatal(err)
 	}
 	var firstPID int
-	if err := first.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&firstPID); err != nil {
+	if err := first.QueryRow(deadline, `SELECT pg_backend_pid()`).Scan(&firstPID); err != nil {
 		t.Fatal(err)
 	}
-	// Bounded: were the constraint not to make it wait, or to wait on
-	// something else for good, the test fails instead of hanging.
-	deadline, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	executing := make(chan struct{})
+	secondPID := make(chan int, 1)
 	second := make(chan error, 1)
 	go func() {
 		second <- db.Tx(deadline, store.Tenant("t1"), func(tx pgx.Tx) error {
-			close(executing)
+			var pid int
+			if err := tx.QueryRow(deadline, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+				return err
+			}
+			secondPID <- pid
 			// Not the row first holds: only the constraint makes it wait.
 			_, err := tx.Exec(deadline, `UPDATE pools SET is_default = true WHERE name = 'b'`)
 			return err
 		})
 	}()
+	var pid int
 	select {
-	case <-executing:
+	case pid = <-secondPID:
 	case err := <-second:
 		t.Fatalf("the second mark ended before its UPDATE: %v", err)
 	case <-deadline.Done():
 		t.Fatal("the second mark never began")
 	}
-	// It waits on the first transaction, not merely has yet to run.
-	for waiting := false; !waiting; {
-		if err := db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-				WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid)))`, firstPID).Scan(&waiting)
+	// That backend waits on the first transaction, not merely has yet to run.
+	for {
+		var blocked bool
+		if err := db.Tx(deadline, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(deadline, `SELECT $2::int = ANY(pg_blocking_pids($1))`, pid, firstPID).Scan(&blocked)
 		}); err != nil {
-			t.Fatal(err)
+			t.Fatalf("reading what blocks the second mark: %v", err)
 		}
-		if waiting {
+		if blocked {
 			break
 		}
 		select {
@@ -221,20 +227,20 @@ func TestOneDefaultPool(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	if err := first.Commit(ctx); err != nil {
-		t.Fatal(err)
+	if err := first.Commit(deadline); err != nil {
+		t.Fatalf("committing the first mark: %v", err)
 	}
 	select {
 	case err := <-second:
 		if !isExclusion(err) {
 			t.Fatalf("the second mark, after the first committed: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-deadline.Done():
 		t.Fatal("the second mark still waits after the first committed")
 	}
 	var n int
-	if err := db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(*) FROM pools WHERE tenant_id = 't1' AND is_default`).Scan(&n)
+	if err := db.Tx(deadline, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(deadline, `SELECT count(*) FROM pools WHERE tenant_id = 't1' AND is_default`).Scan(&n)
 	}); err != nil || n != 1 {
 		t.Fatalf("t1 has %d defaults (%v)", n, err)
 	}
