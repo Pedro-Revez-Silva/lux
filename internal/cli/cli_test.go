@@ -111,13 +111,12 @@ func TestTenantRequiredHint(t *testing.T) {
 	}
 	var out, errOut bytes.Buffer
 	a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: &errOut}
-	if code := a.main([]string{"--url", srv.URL, "--api-key", "k", "run", "-f", spec}); code == 0 {
-		t.Fatalf("exit 0; stderr:\n%s", errOut.String())
+	if code := a.main([]string{"--url", srv.URL, "--api-key", "k", "run", "-f", spec}); code != 1 {
+		t.Fatalf("exit %d, want 1; stderr:\n%s", code, errOut.String())
 	}
-	got := errOut.String()
-	for _, want := range []string{"an operator key must name a tenant", "--tenant", "LUX_TENANT", "tenant in ~/.config/lux/config.toml"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("stderr lacks %q:\n%s", want, got)
-		}
+	want := "lux: an operator key must name a tenant: ?tenant=<id or name>\n" +
+		"lux: name one with --tenant, LUX_TENANT, or tenant in ~/.config/lux/config.toml\n"
+	if got := errOut.String(); got != want {
+		t.Errorf("stderr:\n%s\nwant:\n%s", got, want)
 	}
 }
