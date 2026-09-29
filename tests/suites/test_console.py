@@ -153,6 +153,34 @@ def test_run_output_tabs_separate_the_workloads_lines_from_luxs(page, env, opera
     lux.run("cancel", run_id)
 
 
+def test_hosts_live_runs_shows_the_count_and_the_cap_only_near_it(page, lux, runners, hosts):
+    runners.start(hosts[0], "--max-runs", "4")
+    host_id = wait_until(lambda: next((h["id"] for h in lux.json("hosts", "ls")
+                                       if h["name"] == hosts[0].name and h["state"] == "ready"), None),
+                         30, 1, "the host never registered")
+    page.sign_in(lux.api_key, "/hosts")
+    row = page.get_by_role("row").filter(has=page.locator(f'a[href^="/hosts/{host_id}"]'))
+    link = row.locator(f'a[href^="/runs?host={host_id}"]')
+    cell = row.locator("td", has=page.locator(f'a[href^="/runs?host={host_id}"]'))
+    # No Runs: just the count, and the cap on hover.
+    expect(cell).to_have_text(re.compile(r"^\s*0\s*$"), timeout=15_000)
+    expect(cell.locator(".badge-warn")).to_have_count(0)
+    link.hover()
+    expect(page.get_by_role("tooltip")).to_have_text("0 live · max 4 runs on this host")
+    page.mouse.move(0, 0)
+    # Half the cap is still just the count; three quarters is "N / M" in the warn tone.
+    runs = [lux.submit(generic(ALPINE_IMAGE, "sleep", "300")) for _ in range(2)]
+    for r in runs:
+        lux.wait_state(r, "running")
+    expect(cell).to_have_text(re.compile(r"^\s*2\s*$"), timeout=15_000)
+    runs.append(lux.submit(generic(ALPINE_IMAGE, "sleep", "300")))
+    lux.wait_state(runs[-1], "running")
+    expect(cell.locator(".badge-warn")).to_have_text("3 / 4", timeout=15_000)
+    assert not page.errors, page.errors
+    for r in runs:
+        lux.run("cancel", r)
+
+
 def test_pages_update_live_from_events(page, operator, tenant_factory):
     """A new Run shows up on the Runs page within a moment, pushed by its
     event: while the stream is live, the page's own poll is a minute."""

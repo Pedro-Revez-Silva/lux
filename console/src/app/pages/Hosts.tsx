@@ -1,9 +1,23 @@
 import { useMemo } from "react";
-import { Badge, Button, Card, formatBytes, formatCores, HOST_STATE_LIST, PageHeader, Select, Table, type Column } from "@lux/design-system";
+import { Badge, Button, Card, formatBytes, formatCores, HOST_STATE_LIST, PageHeader, Select, Table, Tooltip, type Column } from "@lux/design-system";
 import { api, type Host } from "../../api/index.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, HostLink, hostPath, hostRunsPath, IdLink, RelativeTime, StateCell, UsageBar } from "./common.tsx";
+
+/**
+ * A host's live Run count. The cap (lux-runner --max-runs) is rarely what
+ * limits a host, so it shows only once the count nears it.
+ */
+function LiveRuns({ host: h }: { host: Host }) {
+  const cap = h.capacity.runs;
+  const near = cap > 0 && h.liveRuns >= 0.75 * cap;
+  return (
+    <Tooltip content={`${h.liveRuns} live · max ${cap} runs on this host`}>
+      <Link to={hostRunsPath(h.id)}>{near ? <Badge tone="warn" mono>{`${h.liveRuns} / ${cap}`}</Badge> : h.liveRuns}</Link>
+    </Tooltip>
+  );
+}
 
 export function Hosts() {
   const { showTenant } = useScope();
@@ -41,7 +55,7 @@ export function Hosts() {
         ),
         sortValue: (h) => h.state,
       },
-      { key: "runs", header: "Live runs", cell: (h) => <Link to={hostRunsPath(h.id)} title="Runs placed on this host">{`${h.liveRuns} / ${h.capacity.runs}`}</Link>, sortValue: (h) => h.liveRuns, align: "right", mono: true, width: 96 },
+      { key: "runs", header: "Live runs", cell: (h) => <LiveRuns host={h} />, sortValue: (h) => h.liveRuns, align: "right", mono: true, width: 96 },
       { key: "cpu", header: "CPU", cell: (h) => <UsageBar used={h.allocated.cpus ?? 0} total={h.capacity.cpus} unit="cores" />, sortValue: (h) => (h.capacity.cpus ? (h.allocated.cpus ?? 0) / h.capacity.cpus : 0), width: 150 },
       { key: "mem", header: "Memory", cell: (h) => <UsageBar used={h.allocated.memory ?? 0} total={h.capacity.memory} unit="bytes" />, sortValue: (h) => (h.capacity.memory ? (h.allocated.memory ?? 0) / h.capacity.memory : 0), width: 150 },
       { key: "id", header: "Id", cell: (h) => <IdLink value={h.id} to={hostPath(h.id)} />, sortValue: (h) => h.id, mono: true, width: 210, optional: true },
