@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/marcioapm/lux/internal/passwd"
+	"github.com/marcioapm/lux/internal/podman"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -46,16 +48,13 @@ func TestNestedVolumes(t *testing.T) {
 		{"a state /workspace holding XDG_DATA_HOME", nested(map[string]string{"XDG_DATA_HOME": "/workspace/.data"}, state("/workspace")), agent,
 			[]string{"/workspace/.data/docker", "/workspace/.data/containers"}},
 		{"a passwd home with a trailing slash", nested(nil, state("/home/agent")), passwd.User{UID: 1000, Home: "/home/agent/"}, both},
-		// The image's ENV reaches the workload too (workloadEnv merges it in).
-		{"XDG_DATA_HOME from the image", nested(map[string]string{"XDG_DATA_HOME": "/data"}), agent,
-			[]string{"/data/docker", "/data/containers"}},
 		{"no home in passwd: nowhere to put them", nested(nil), passwd.User{UID: 1000, Home: ""}, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var got []string
 			for _, r := range nestedVolumes("r1", c.sp, c.user, c.sp.Env) {
-				if r.Kind != "ephemeral" || !r.Engine {
-					t.Errorf("%s: kind %q engine %v, want an ephemeral engine volume", r.Path, r.Kind, r.Engine)
+				if r.Kind != "ephemeral" {
+					t.Errorf("%s: kind %q, want ephemeral", r.Path, r.Kind)
 				}
 				got = append(got, r.Path)
 			}
@@ -63,6 +62,19 @@ func TestNestedVolumes(t *testing.T) {
 				t.Errorf("got %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// The image's XDG_DATA_HOME reaches the workload (its HOME never does), and
+// the spec's env wins over it.
+func TestWorkloadEnv(t *testing.T) {
+	info := podman.ImageInfo{Env: []string{"PATH=/bin", "HOME=/image-home", "XDG_DATA_HOME=/data"}}
+	if got := workloadEnv(spec.RunSpec{}, info); !maps.Equal(got, map[string]string{"XDG_DATA_HOME": "/data"}) {
+		t.Errorf("image only: %v", got)
+	}
+	sp := spec.RunSpec{Env: map[string]string{"HOME": "/w", "XDG_DATA_HOME": "/spec"}}
+	if got := workloadEnv(sp, info); !maps.Equal(got, map[string]string{"HOME": "/w", "XDG_DATA_HOME": "/spec"}) {
+		t.Errorf("spec over image: %v", got)
 	}
 }
 
@@ -135,8 +147,8 @@ func TestAppArmorRestrictsUserns(t *testing.T) {
 }
 
 // Only the parents neither the image nor a restored volume has count as made
-// by a store's mount; a data home outside HOME is walked from its parent.
-func TestParentsMissing(t *testing.T) {
+// by a store's mount; outside HOME, only the data home itself.
+func TestMadeParents(t *testing.T) {
 	img, homeVol := t.TempDir(), t.TempDir()
 	// The image has /home/agent and /workspace but nothing below.
 	for _, d := range []string{"home/agent", "workspace"} {
@@ -156,7 +168,7 @@ func TestParentsMissing(t *testing.T) {
 	defer root.Close()
 	mountpoint := func(v volumeRef) (string, error) { return homeVol, nil }
 	stores := func(share string) []volumeRef {
-		return []volumeRef{{Path: share + "/docker", Engine: true}, {Path: share + "/containers", Engine: true}}
+		return []volumeRef{{Path: share + "/docker"}, {Path: share + "/containers"}}
 	}
 	for _, c := range []struct {
 		name   string
@@ -173,9 +185,10 @@ func TestParentsMissing(t *testing.T) {
 		// workload's to have, even if the mount made it.
 		{"XDG_DATA_HOME outside HOME", stores("/workspace/.data/share"), nil,
 			[]string{"/workspace/.data/share"}},
+		{"XDG_DATA_HOME right under /", stores("/data"), nil, []string{"/data"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := parentsMissing(c.stores, "/home/agent", append(c.vols, c.stores...), root, mountpoint)
+			got, err := madeParents(c.stores, c.vols, "/home/agent", root, mountpoint)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -186,19 +199,20 @@ func TestParentsMissing(t *testing.T) {
 	}
 }
 
-// A container made without the runner's engine mounts (by an older runner),
-// or under another AppArmor mode, is not reused.
-func TestSpecHashCoversRunnerMounts(t *testing.T) {
-	sp := spec.RunSpec{Sandbox: spec.Sandbox{NestedContainers: true}}
-	engine := nestedVolumes("r1", sp, passwd.User{UID: 1000, Home: "/home/agent"}, nil)
-	own := []volumeRef{{Name: "home", Volume: "lux-r1-home", Path: "/home/agent", Kind: "state"}}
-	if specHash(sp, own, nil) == specHash(sp, append(own, engine...), nil) {
-		t.Error("the engine mounts do not change the hash")
+// A stopped container is reused only if it was made with the same
+// arguments: a runner's engine mounts or security options change them.
+func TestArgsHashCoversRunnerArgs(t *testing.T) {
+	base := []string{"--name", "lux-r1", "-v", "lux-r1-home:/home/agent:idmap", "img"}
+	withStore := []string{"--name", "lux-r1", "-v", "lux-r1-home:/home/agent:idmap",
+		"-v", "lux-r1--docker:/home/agent/.local/share/docker:idmap", "img"}
+	withAppArmor := append(slices.Clone(base[:len(base)-1]), "--security-opt=apparmor=unconfined", "img")
+	if argsHash(base) != argsHash(slices.Clone(base)) {
+		t.Error("the same arguments hash differently")
 	}
-	if specHash(sp, nil, nil) != specHash(sp, own, nil) {
-		t.Error("spec volumes counted twice (they are in the spec already)")
+	if argsHash(base) == argsHash(withStore) {
+		t.Error("an engine mount does not change the hash")
 	}
-	if specHash(sp, own, nil) == specHash(sp, own, []string{"--security-opt=apparmor=unconfined"}) {
+	if argsHash(base) == argsHash(withAppArmor) {
 		t.Error("the AppArmor mode does not change the hash")
 	}
 }

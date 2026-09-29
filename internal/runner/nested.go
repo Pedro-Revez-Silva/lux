@@ -33,12 +33,8 @@ import (
 //     nested containers do not get; inside the Run's user namespace they
 //     affect only namespaces the Run itself created;
 //   - on a host whose AppArmor restricts unprivileged user namespaces
-//     (Ubuntu 24.04 on), apparmor=unconfined: there a user namespace made
-//     under a profile without a userns rule, as containers-default is,
-//     loses its capabilities, and rootless Docker cannot even make its
-//     network namespace. That also lifts the profile's other rules;
-//     seccomp, the capability set and the Run's own user namespace still
-//     bound it.
+//     (Ubuntu 24.04 on), apparmor=unconfined, without which rootless Docker
+//     cannot make its network namespace (docs/podman.md).
 //
 // The container is still in its own user namespace (a unique unprivileged
 // host uid range), with its own network and egress rules: nested
@@ -81,12 +77,9 @@ func nestedHome(user passwd.User, env map[string]string) string {
 }
 
 // nestedStores are where container engines inside a nested Run keep their
-// images and layers: rootless Docker and Podman under $XDG_DATA_HOME
-// (default ~/.local/share), rootful ones under /var/lib. env is what the
-// workload gets (workloadEnv: the image's, then the spec's). None if the
-// workload has no absolute home to put them in. (An engine configured
-// elsewhere, say a Docker data-root, is not seen: its store stays on the
-// container's root.)
+// images and layers: rootless ones under $XDG_DATA_HOME (default
+// ~/.local/share), rootful ones under /var/lib. env is workloadEnv's. None
+// without an absolute home. An engine configured elsewhere is not seen.
 func nestedStores(user passwd.User, env map[string]string) []string {
 	if user.UID == 0 {
 		return []string{"/var/lib/docker", "/var/lib/containers"}
@@ -103,15 +96,10 @@ func nestedStores(user passwd.User, env map[string]string) []string {
 	return []string{path.Join(share, "docker"), path.Join(share, "containers")}
 }
 
-// nestedVolumes gives each engine store its own ephemeral volume. On the
-// container's own overlay root an engine cannot use native overlay (Linux
-// has no overlay on overlay) and falls back to fuse-overlayfs or vfs, at
-// a fraction of the speed; on a volume it gets overlay2. Ephemeral, so
-// images and layers are never snapshotted, even under a state volume (the
-// deeper mount wins). Only a spec volume at, inside, or around a store
-// strictly under the home (say ~/.local/share) leaves that store to the
-// spec: on purpose, then. One at the home or above it (/home, /workspace
-// holding XDG_DATA_HOME) is not about the store.
+// nestedVolumes gives each engine store its own ephemeral volume, where it
+// gets kernel overlay instead of fuse-overlayfs, and nothing of it is
+// snapshotted. A spec volume at, inside, or around a store strictly under
+// the home keeps that store (docs/podman.md).
 func nestedVolumes(runID string, sp spec.RunSpec, user passwd.User, env map[string]string) []volumeRef {
 	if !sp.Sandbox.NestedContainers {
 		return nil
@@ -128,7 +116,7 @@ func nestedVolumes(runID string, sp spec.RunSpec, user passwd.User, env map[stri
 		base := path.Base(store)
 		// "--" cannot collide with a spec volume's name (which cannot
 		// start with "-").
-		refs = append(refs, volumeRef{Name: "nested " + base, Volume: "lux-" + runID + "--" + base, Path: store, Kind: "ephemeral", Engine: true})
+		refs = append(refs, volumeRef{Name: "nested " + base, Volume: "lux-" + runID + "--" + base, Path: store, Kind: "ephemeral"})
 	}
 	return refs
 }

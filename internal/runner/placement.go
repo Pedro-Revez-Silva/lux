@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -57,8 +58,10 @@ type placement struct {
 	session     string      // latest session id the adapter reported
 	user        passwd.User // who the workload runs as
 	// env is what the runner places things by in the workload's
-	// environment (workloadEnv: HOME, XDG_DATA_HOME).
+	// environment (workloadEnv: HOME, XDG_DATA_HOME); made are the
+	// directories the engine stores' mounts make, for the shim to hand over.
 	env      map[string]string
+	made     []string
 	peakDisk int64
 	// diskReported: this placement was reported over its disk limit.
 	diskReported bool
@@ -260,18 +263,39 @@ func (p *placement) run(ctx context.Context) {
 	p.state.Image = image
 	p.mark("imageReady")
 
-	if p.user, err = p.workloadUser(startCtx, sp, image); err != nil {
+	info, err := p.r.pm.ImageInspect(startCtx, image)
+	if err != nil {
+		fail("image", err)
+		return
+	}
+	imageRoot, closeImage, err := p.openImage(startCtx, image)
+	if err != nil {
+		fail("image", err)
+		return
+	}
+	defer closeImage() // on any early return
+	if p.user, err = workloadUser(sp, info, imageRoot); err != nil {
 		fail("user", err)
 		return
 	}
-	if p.env, err = p.workloadEnv(startCtx, sp, image); err != nil {
-		fail("user", err)
-		return
+	if sp.Sandbox.NestedContainers {
+		p.env = workloadEnv(sp, info)
 	}
-	if err := p.prepareVolumes(startCtx, sp, image, a.Resume, p.env); err != nil {
+	prevCtr, err := p.stopPrevious(startCtx)
+	if err != nil {
 		fail("volumes", err)
 		return
 	}
+	if err := p.prepareVolumes(startCtx, sp, imageRoot, a.Resume); err != nil {
+		fail("volumes", err)
+		return
+	}
+	if p.made, err = madeParents(p.state.EngineVolumes, p.state.Volumes, nestedHome(p.user, p.env), imageRoot,
+		func(v volumeRef) (string, error) { return p.r.mountpoint(startCtx, v.Volume) }); err != nil {
+		fail("volumes", err)
+		return
+	}
+	closeImage()
 	p.mark("volumesRestored")
 	if err := p.materializeRepos(startCtx, sp, p.user); err != nil {
 		fail("git", err)
@@ -283,7 +307,7 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 
-	err = p.createContainer(ctx, sp, image, network, a)
+	err = p.createContainer(ctx, sp, image, info.ID, prevCtr, network, a)
 	unpin()
 	if err != nil {
 		fail("container", err)
@@ -454,35 +478,34 @@ func (p *placement) finishWithoutContainer(ctx context.Context, state, msg strin
 
 // ---- volumes ----------------------------------------------------------------
 
-func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, image string, resume *proto.ResumeInfo, env map[string]string) error {
+// stopPrevious stops an earlier placement's container if it still runs, so
+// nothing writes to the volumes while they are emptied or restored, and
+// returns its state for createContainer to weigh reusing it. A container
+// that cannot be stopped fails the placement.
+func (p *placement) stopPrevious(ctx context.Context) (podman.ContainerState, error) {
+	name := containerName(p.runID)
+	st, err := p.r.pm.Inspect(ctx, name)
+	if err != nil || !st.Running {
+		return st, err
+	}
+	if err := p.r.pm.Kill(ctx, name, "KILL"); err != nil {
+		return st, fmt.Errorf("stop previous container: %w", err)
+	}
+	if _, err := p.r.pm.Wait(ctx, name); err != nil {
+		return st, fmt.Errorf("wait for previous container: %w", err)
+	}
+	st.Running = false
+	return st, nil
+}
+
+func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, image *os.Root, resume *proto.ResumeInfo) error {
 	labels := map[string]string{LabelManaged: "true", LabelRun: p.runID, LabelTenant: p.tenantID}
 	var refs []volumeRef
 	for _, v := range sp.Volumes {
 		refs = append(refs, volumeRef{Name: v.Name, Volume: volumeName(p.runID, v.Name), Path: v.Path, Kind: v.Kind})
 	}
-	refs = append(refs, nestedVolumes(p.runID, sp, p.user, env)...)
 	p.state.Volumes = refs
-
-	// An earlier placement's container still running (createContainer
-	// expects it may be) would write to its volumes while they are emptied
-	// or restored: it is stopped first.
-	name := containerName(p.runID)
-	st, err := p.r.pm.Inspect(ctx, name)
-	if err != nil {
-		return fmt.Errorf("inspect previous container: %w", err)
-	}
-	if st.Running {
-		if err := p.r.pm.Kill(ctx, name, "KILL"); err != nil {
-			return fmt.Errorf("stop previous container: %w", err)
-		}
-		if _, err := p.r.pm.Wait(ctx, name); err != nil {
-			return fmt.Errorf("wait for previous container: %w", err)
-		}
-		st, err = p.r.pm.Inspect(ctx, name)
-		if err != nil || st.Running {
-			return fmt.Errorf("previous container still running after stop: %v", err)
-		}
-	}
+	p.state.EngineVolumes = nestedVolumes(p.runID, sp, p.user, p.env)
 
 	// The runtime volume holds the shim's socket, config and output files.
 	// A named volume, because an idmapped mount needs a filesystem that
@@ -509,28 +532,11 @@ func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, image s
 		p.event(ctx, "volumes.local", map[string]any{"snapshotId": manifest.SnapshotID})
 	}
 
-	for _, v := range refs {
+	for _, v := range append(slices.Clone(refs), p.state.EngineVolumes...) {
 		switch {
 		case v.Kind == "ephemeral" && p.r.pm.VolumeExists(ctx, v.Volume):
-			// Ephemeral volumes start as a fresh one would on every
-			// placement. Emptied in place: removing one (-f) also removes a
-			// stopped container that mounts it, which a same-host resume may
-			// reuse. Its root goes back to root, as a fresh volume's is, for
-			// the shim to hand to whoever the workload runs as now; what the
-			// image has at its path is copied in, as podman does into a new
-			// volume (an image that preloads images for its engine).
-			mp, err := p.r.mountpoint(ctx, v.Volume)
-			if err == nil {
-				err = emptyDir(mp)
-			}
-			if err == nil {
-				err = errors.Join(os.Lchown(mp, 0, 0), os.Chmod(mp, 0o755))
-			}
-			if err == nil {
-				err = p.copyUp(ctx, image, v.Path, mp)
-			}
-			if err != nil {
-				return fmt.Errorf("empty %s: %w", v.Volume, err)
+			if err := p.resetEphemeral(ctx, v, image); err != nil {
+				return fmt.Errorf("reset %s: %w", v.Volume, err)
 			}
 		case v.Kind == "ephemeral":
 			if err := p.r.pm.VolumeCreate(ctx, v.Volume, labels); err != nil {
@@ -640,19 +646,17 @@ func hardening(sp spec.RunSpec) []string {
 	)
 }
 
-func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image string, network podman.Network, a *proto.Assign) error {
+// createContainer makes the placement's container, or reuses prev (an
+// earlier placement's, stopped) for a same-host resume made the same way:
+// the same image and the same create arguments, which the lux.spec label
+// hashes. The shim config is rewritten either way.
+func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image, imageID string, prev podman.ContainerState, network podman.Network, a *proto.Assign) error {
 	name := containerName(p.runID)
-	// A container from an earlier placement: its writable layer is only
-	// worth keeping for a same-host resume with the same image; the shim
-	// config is rewritten either way.
-	if st, _ := p.r.pm.Inspect(ctx, name); st.Exists {
-		if st.Running {
-			_ = p.r.pm.Kill(ctx, name, "KILL")
-			_, _ = p.r.pm.Wait(ctx, name)
-		}
-		id, _ := p.r.pm.ImageID(ctx, image)
-		if a.Resume != nil && id != "" && id == st.ImageID && st.Labels["lux.spec"] == specHash(sp, p.state.Volumes, p.extraArgs(sp)) {
-			if err := p.writeShimConfig(ctx, sp, image); err != nil {
+	args := p.createArgs(sp, image, network)
+	hash := argsHash(args)
+	if prev.Exists {
+		if a.Resume != nil && imageID != "" && imageID == prev.ImageID && prev.Labels["lux.spec"] == hash {
+			if err := p.writeShimConfig(ctx, sp); err != nil {
 				return err
 			}
 			p.event(ctx, "container.reused", nil)
@@ -662,17 +666,26 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 			return err
 		}
 	}
-	if err := p.writeShimConfig(ctx, sp, image); err != nil {
+	if err := p.writeShimConfig(ctx, sp); err != nil {
 		return err
 	}
+	// The label goes before the image, the last argument.
+	args = append(args[:len(args)-1], "--label", "lux.spec="+hash, image)
+	if _, err := p.r.pm.Create(ctx, args); err != nil {
+		return err
+	}
+	return nil
+}
 
+// createArgs is how the placement's container is made, but for its lux.spec
+// label; the image is last.
+func (p *placement) createArgs(sp spec.RunSpec, image string, network podman.Network) []string {
 	args := hardening(sp)
 	args = append(args,
-		"--name", name,
+		"--name", containerName(p.runID),
 		"--label", LabelManaged+"=true",
 		"--label", LabelRun+"="+p.runID,
 		"--label", LabelTenant+"="+p.tenantID,
-		"--label", "lux.spec="+specHash(sp, p.state.Volumes, p.extraArgs(sp)),
 		"--network", networkName(p.runID),
 		"--user", "0:0",
 		"--entrypoint", proto.ShimBinary,
@@ -689,48 +702,30 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 	if sp.Sandbox.ReadOnlyRoot {
 		args = append(args, "--read-only", "--read-only-tmpfs")
 	}
-	for _, v := range p.state.Volumes {
+	for _, v := range p.mounts() {
 		args = append(args, "-v", v.Volume+":"+v.Path+":idmap")
 	}
 	args = append(args, dnsArgs(sp, network)...)
 	args = append(args, p.extraArgs(sp)...)
-	args = append(args, image)
-	if _, err := p.r.pm.Create(ctx, args); err != nil {
-		return err
-	}
-	return nil
+	return append(args, image)
 }
 
-// specHash identifies how a Run's container is made: a stopped one is
-// reused only if it matches. It covers what the runner adds for this host
-// (nested engines' stores, and the extra security options, AppArmor's
-// among them), so a container made before those changed is not.
-func specHash(sp spec.RunSpec, vols []volumeRef, extra []string) string {
-	b, _ := json.Marshal(struct {
-		Image     spec.Image
-		Volumes   []spec.Volume
-		Resources spec.Resources
-		Sandbox   spec.Sandbox
-		Network   spec.Network
-		Mounts    []volumeRef `json:",omitempty"`
-		Extra     []string    `json:",omitempty"`
-	}{sp.Image, sp.Volumes, sp.Resources, sp.Sandbox, sp.Network, runnerMounts(vols), extra})
+// argsHash identifies how a container is made: its create arguments. A
+// stopped container is reused only if they match, so anything that shapes
+// it (a runner's mounts, its security options) is covered.
+func argsHash(args []string) string {
+	b, _ := json.Marshal(args)
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:8])
 }
 
-// runnerMounts are the runner's own volumes among a placement's.
-func runnerMounts(vols []volumeRef) []volumeRef {
-	var out []volumeRef
-	for _, v := range vols {
-		if v.Engine {
-			out = append(out, v)
-		}
-	}
-	return out
+// mounts are every volume the container mounts: the spec's, then the
+// runner's engine stores.
+func (p *placement) mounts() []volumeRef {
+	return append(slices.Clone(p.state.Volumes), p.state.EngineVolumes...)
 }
 
-func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, image string) error {
+func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec) error {
 	rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID))
 	if err != nil {
 		return err
@@ -770,19 +765,10 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, image 
 			cfg.ResumeCommand = sp.Workload.Resume.Command
 		}
 	}
-	for _, v := range p.state.Volumes {
+	for _, v := range p.mounts() {
 		cfg.VolumePaths = append(cfg.VolumePaths, v.Path)
-		if v.Engine {
-			cfg.OwnParents = append(cfg.OwnParents, v.Path)
-		}
 	}
-	if len(cfg.OwnParents) > 0 {
-		cfg.Home = nestedHome(p.user, p.env)
-		cfg.MadeParents, err = p.madeParents(ctx, image, cfg.Home, runnerMounts(p.state.Volumes))
-		if err != nil {
-			return err
-		}
-	}
+	cfg.MadeParents = p.made
 	for i := range cfg.Secrets {
 		cfg.Secrets[i].Value = ""
 	}
@@ -1091,33 +1077,50 @@ func (p *placement) usage() *proto.Usage {
 	return u
 }
 
-// sampleSlow measures what costs real work: disk use (walking the state
-// volumes and the nested engines' stores, and podman sizing the writable
-// layer) and network counters. Run off the heartbeat path, on its own
-// schedule. An engine's store is measured every time, as the writable layer
-// it would otherwise be in is: a stale size would let a Run write past its
-// disk limit.
+// sampleSlow measures what costs real work: disk use (walking every mounted
+// volume, engine stores included, and podman sizing the writable layer) and
+// network counters, all at once. Run off the heartbeat path, on its own
+// schedule.
 func (p *placement) sampleSlow(ctx context.Context) {
 	p.mu.Lock()
-	vols := append([]volumeRef{}, p.stateVolumes()...)
+	var vols []volumeRef
+	if p.state != nil {
+		vols = p.mounts()
+	}
 	p.mu.Unlock()
-	var disk int64
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		disk    int64
+		st      podman.Stats
+		statsOK bool
+	)
+	add := func(n int64) { mu.Lock(); disk += n; mu.Unlock() }
 	for _, v := range vols {
-		if mp, err := p.r.mountpoint(ctx, v.Volume); err == nil {
-			disk += dirSize(mp)
+		wg.Go(func() {
+			if mp, err := p.r.mountpoint(ctx, v.Volume); err == nil {
+				add(dirSize(mp))
+			}
+		})
+	}
+	wg.Go(func() {
+		if out, err := p.r.pm.Run(ctx, "container", "inspect", "--size", "--format", "{{.SizeRw}}", containerName(p.runID)); err == nil {
+			var n int64
+			fmt.Sscan(strings.TrimSpace(string(out)), &n)
+			add(n)
 		}
-	}
-	if out, err := p.r.pm.Run(ctx, "container", "inspect", "--size", "--format", "{{.SizeRw}}", containerName(p.runID)); err == nil {
-		var n int64
-		fmt.Sscan(strings.TrimSpace(string(out)), &n)
-		disk += n
-	}
-	st, statsErr := p.r.pm.Stats(ctx, containerName(p.runID))
+	})
+	wg.Go(func() {
+		var err error
+		st, err = p.r.pm.Stats(ctx, containerName(p.runID))
+		statsOK = err == nil
+	})
+	wg.Wait()
 	p.checkDisk(ctx, disk)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.peakDisk = max(p.peakDisk, disk)
-	if statsErr == nil {
+	if statsOK {
 		p.netRx, p.netTx = max(p.netRx, st.NetInput), max(p.netTx, st.NetOutput)
 	}
 }
@@ -1157,29 +1160,36 @@ func emptyDir(dir string) error {
 	return nil
 }
 
-// copyUp copies what the image has at a container path into a volume, as
-// podman does into a new named volume the first time it is mounted. The
-// directory is opened through an os.Root of the image (a link in the image
-// cannot lead out of it) and copied from that open fd by `cp -a
-// --preserve=all`, which keeps what an engine store needs as it was: owners,
-// setuid bits, hardlinks, and xattrs (file capabilities among them).
-func (p *placement) copyUp(ctx context.Context, image, path, dst string) error {
-	mnt, err := p.r.pm.Run(ctx, "image", "mount", image)
+// resetEphemeral gives an existing ephemeral volume back as a fresh one would
+// be, in place: removing it (-f) would also remove a stopped container that
+// mounts it, which a same-host resume may reuse. Its root goes back to root
+// and what the image has at its path is copied in, as podman does into a new
+// volume.
+func (p *placement) resetEphemeral(ctx context.Context, v volumeRef, image *os.Root) error {
+	mp, err := p.r.mountpoint(ctx, v.Volume)
 	if err != nil {
 		return err
 	}
-	defer p.r.pm.Run(context.WithoutCancel(ctx), "image", "unmount", image)
-	root, err := os.OpenRoot(strings.TrimSpace(string(mnt)))
-	if err != nil {
+	if err := emptyDir(mp); err != nil {
 		return err
 	}
-	defer root.Close()
+	if err := errors.Join(os.Lchown(mp, 0, 0), os.Chmod(mp, 0o755)); err != nil {
+		return err
+	}
+	return copyUp(ctx, image, v.Path, mp)
+}
+
+// copyUp copies what the image has at a container path into a volume. The
+// directory is opened through the image's os.Root (a link in it cannot lead
+// out) and copied from that fd by `cp -a --preserve=all`, which keeps owners,
+// setuid bits, hardlinks and xattrs (file capabilities among them).
+func copyUp(ctx context.Context, image *os.Root, path, dst string) error {
 	src := strings.TrimPrefix(filepath.Clean(path), "/")
-	fi, err := root.Lstat(src)
+	fi, err := image.Lstat(src)
 	if err != nil || !fi.IsDir() {
 		return nil // the image has nothing there: the volume stays empty
 	}
-	dir, err := root.Open(src)
+	dir, err := image.Open(src)
 	if err != nil {
 		return err
 	}
@@ -1197,13 +1207,6 @@ func copyTree(ctx context.Context, from *os.File, dir string) error {
 		return fmt.Errorf("copy: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
-}
-
-func (p *placement) stateVolumes() []volumeRef {
-	if p.state == nil {
-		return nil
-	}
-	return p.state.Volumes
 }
 
 // dirSize is the bytes of the regular files under root, a hardlinked file

@@ -2,7 +2,6 @@ package runner
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -10,9 +9,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/marcioapm/lux/internal/gitws"
 	"github.com/marcioapm/lux/internal/passwd"
+	"github.com/marcioapm/lux/internal/podman"
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 )
@@ -157,16 +158,11 @@ func (p *placement) gitRepo(r spec.Repository) gitws.Repo {
 }
 
 // hostPath is where a container path on one of the Run's volumes is on the
-// host.
-// The most specific volume wins, as mounts nest.
+// host. The most specific volume wins, as mounts nest; a path under an
+// engine store is hidden by it.
 func (p *placement) hostPath(path string) (string, error) {
-	var best *volumeRef
-	for i, v := range p.state.Volumes {
-		if spec.Under(path, v.Path) && (best == nil || len(v.Path) > len(best.Path)) {
-			best = &p.state.Volumes[i]
-		}
-	}
-	if best != nil && best.Engine {
+	best := deepestVolume(p.state.Volumes, path)
+	if e := deepestVolume(p.state.EngineVolumes, path); e != nil && (best == nil || len(e.Path) > len(best.Path)) {
 		return "", fmt.Errorf("%s is hidden by the nested engine store", path)
 	}
 	if best == nil {
@@ -179,45 +175,54 @@ func (p *placement) hostPath(path string) (string, error) {
 	return filepath.Join(mp, strings.TrimPrefix(path, best.Path)), nil
 }
 
+// deepestVolume is the volume a container path is on: the most specific
+// one, as mounts nest. nil if none.
+func deepestVolume(vols []volumeRef, path string) *volumeRef {
+	var best *volumeRef
+	for i := range vols {
+		if spec.Under(path, vols[i].Path) && (best == nil || len(vols[i].Path) > len(best.Path)) {
+			best = &vols[i]
+		}
+	}
+	return best
+}
+
+// openImage mounts image once for a placement's setup: whoever needs to read
+// it (the workload's passwd, copy-up, the engine parents walk) goes through
+// the returned root. close unmounts it; calling it again does nothing.
+func (p *placement) openImage(ctx context.Context, image string) (root *os.Root, close func(), err error) {
+	mnt, err := p.r.pm.Run(ctx, "image", "mount", image)
+	if err != nil {
+		return nil, nil, fmt.Errorf("mount image: %w", err)
+	}
+	unmount := func() { p.r.pm.Run(context.WithoutCancel(ctx), "image", "unmount", image) }
+	if root, err = os.OpenRoot(strings.TrimSpace(string(mnt))); err != nil {
+		unmount()
+		return nil, nil, fmt.Errorf("open image: %w", err)
+	}
+	return root, sync.OnceFunc(func() { root.Close(); unmount() }), nil
+}
+
 // workloadUser resolves who the workload runs as: the spec's user or the
-// image's, against the image's /etc/passwd, read by mounting the image
-// (no container is started).
-func (p *placement) workloadUser(ctx context.Context, sp spec.RunSpec, image string) (passwd.User, error) {
+// image's, against the image's /etc/passwd.
+func workloadUser(sp spec.RunSpec, info podman.ImageInfo, image *os.Root) (passwd.User, error) {
 	name := sp.Workload.User
 	if name == "" {
-		out, _ := p.r.pm.Run(ctx, "image", "inspect", "--format", "{{.Config.User}}", image)
-		name = strings.TrimSpace(string(out))
+		name = strings.TrimSpace(info.User)
 	}
 	if name == "" || name == "root" || name == "0" {
 		return passwd.Lookup(name, nil)
 	}
-	mnt, err := p.r.pm.Run(ctx, "image", "mount", image)
-	if err != nil {
-		return passwd.User{}, err
-	}
-	defer p.r.pm.Run(context.WithoutCancel(ctx), "image", "unmount", image)
-	b, _ := os.ReadFile(filepath.Join(strings.TrimSpace(string(mnt)), "etc", "passwd"))
+	b, _ := image.ReadFile("etc/passwd")
 	return passwd.Lookup(name, b)
 }
 
-// workloadEnv is the part of the workload's environment the runner places
-// things by (HOME, XDG_DATA_HOME), as the shim builds it: the image's ENV,
-// then HOME set to the user's (the image's HOME never reaches the
-// workload), then the spec's env over both. Only for nested Runs.
-func (p *placement) workloadEnv(ctx context.Context, sp spec.RunSpec, image string) (map[string]string, error) {
+// workloadEnv is what the runner places things by in the workload's
+// environment (HOME, XDG_DATA_HOME), as the shim builds it: the image's
+// XDG_DATA_HOME (its HOME never reaches the workload), then the spec's env.
+func workloadEnv(sp spec.RunSpec, info podman.ImageInfo) map[string]string {
 	env := map[string]string{}
-	if !sp.Sandbox.NestedContainers {
-		return env, nil
-	}
-	out, err := p.r.pm.Run(ctx, "image", "inspect", "--format", "{{json .Config.Env}}", image)
-	if err != nil {
-		return nil, fmt.Errorf("inspect image env: %w", err)
-	}
-	var kvs []string
-	if err := json.Unmarshal(out, &kvs); err != nil {
-		return nil, fmt.Errorf("image env: %w", err)
-	}
-	for _, kv := range kvs {
+	for _, kv := range info.Env {
 		if k, v, _ := strings.Cut(kv, "="); k == "XDG_DATA_HOME" {
 			env[k] = v
 		}
@@ -227,79 +232,27 @@ func (p *placement) workloadEnv(ctx context.Context, sp spec.RunSpec, image stri
 			env[k] = v
 		}
 	}
-	return env, nil
+	return env
 }
 
-// madeParents returns the directories on the way to each engine store that
-// its mount makes, as root: those the image does not have and, where a spec
-// volume covers them, that volume (a restored state home, say) does not
-// have either. Only those are handed to the workload; anything that exists
-// stays as it is. Within the home that is every directory below it; for a
-// store outside it ($XDG_DATA_HOME elsewhere) only the data home itself,
-// the directory the workload was configured with. A failure to look fails
-// the placement rather than leave the workload unable to write there.
-func (p *placement) madeParents(ctx context.Context, image, home string, stores []volumeRef) ([]string, error) {
-	if len(stores) == 0 {
-		return nil, nil
-	}
-	mnt, err := p.r.pm.Run(ctx, "image", "mount", image)
-	if err != nil {
-		return nil, fmt.Errorf("mount image for engine parents: %w", err)
-	}
-	defer p.r.pm.Run(context.WithoutCancel(ctx), "image", "unmount", image)
-	imageRoot, err := os.OpenRoot(strings.TrimSpace(string(mnt)))
-	if err != nil {
-		return nil, fmt.Errorf("open image for engine parents: %w", err)
-	}
-	defer imageRoot.Close()
-	return parentsMissing(stores, home, p.state.Volumes, imageRoot, func(v volumeRef) (string, error) {
-		return p.r.mountpoint(ctx, v.Volume)
-	})
-}
-
-// parentsMissing is madeParents' walk, over an open image and the host
-// mountpoints of the spec's volumes.
-func parentsMissing(stores []volumeRef, home string, vols []volumeRef, imageRoot *os.Root, mountpoint func(volumeRef) (string, error)) ([]string, error) {
+// madeParents are the directories on the way to each engine store that its
+// mount makes, as root: missing from the image and from any spec volume
+// over them (a restored state home). Only those are the workload's to have.
+// Below the home that is every such directory; for a store outside it, only
+// the data home itself. The rules are in docs/podman.md.
+func madeParents(stores, vols []volumeRef, home string, image *os.Root, mountpoint func(volumeRef) (string, error)) ([]string, error) {
 	var made []string
 	for _, store := range stores {
 		boundary := home
 		if boundary == "" || boundary == "/" || !spec.Under(store.Path, boundary) {
-			boundary = filepath.Dir(filepath.Dir(store.Path)) // $XDG_DATA_HOME's parent
+			boundary = filepath.Dir(filepath.Dir(store.Path)) // the data home's parent
 		}
 		for d := filepath.Dir(store.Path); d != boundary && spec.Under(d, boundary); d = filepath.Dir(d) {
-			var selected *volumeRef
-			for i := range vols {
-				v := &vols[i]
-				if !v.Engine && spec.Under(d, v.Path) && (selected == nil || len(v.Path) > len(selected.Path)) {
-					selected = v
-				}
+			exists, err := existsIn(d, vols, image, mountpoint)
+			if err != nil {
+				return nil, fmt.Errorf("inspect engine parent %s: %w", d, err)
 			}
-			root := imageRoot
-			rel := strings.TrimPrefix(d, "/")
-			if selected != nil {
-				mp, err := mountpoint(*selected)
-				if err != nil {
-					return nil, err
-				}
-				if root, err = os.OpenRoot(mp); err != nil {
-					return nil, err
-				}
-				rel = strings.TrimPrefix(strings.TrimPrefix(d, selected.Path), "/")
-				if rel == "" {
-					rel = "."
-				}
-			}
-			_, statErr := root.Lstat(rel)
-			if selected != nil {
-				root.Close()
-			}
-			if statErr == nil {
-				continue
-			}
-			if !errors.Is(statErr, fs.ErrNotExist) {
-				return nil, fmt.Errorf("inspect engine parent %s: %w", d, statErr)
-			}
-			if !slices.Contains(made, d) {
+			if !exists && !slices.Contains(made, d) {
 				made = append(made, d)
 			}
 		}
@@ -307,15 +260,36 @@ func parentsMissing(stores []volumeRef, home string, vols []volumeRef, imageRoot
 	return made, nil
 }
 
-// volumeRoot is the container path of the volume a path is on.
-func (p *placement) volumeRoot(path string) string {
-	best := ""
-	for _, v := range p.state.Volumes {
-		if !v.Engine && spec.Under(path, v.Path) && len(v.Path) > len(best) {
-			best = v.Path
+// existsIn: container path d is in whatever provides it before the engine
+// mounts, the deepest spec volume over it, else the image.
+func existsIn(d string, vols []volumeRef, image *os.Root, mountpoint func(volumeRef) (string, error)) (bool, error) {
+	root, rel := image, strings.TrimPrefix(d, "/")
+	if v := deepestVolume(vols, d); v != nil {
+		mp, err := mountpoint(*v)
+		if err != nil {
+			return false, err
+		}
+		if root, err = os.OpenRoot(mp); err != nil {
+			return false, err
+		}
+		defer root.Close()
+		if rel = strings.TrimPrefix(strings.TrimPrefix(d, v.Path), "/"); rel == "" {
+			rel = "."
 		}
 	}
-	return best
+	_, err := root.Lstat(rel)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// volumeRoot is the container path of the volume a path is on.
+func (p *placement) volumeRoot(path string) string {
+	if v := deepestVolume(p.state.Volumes, path); v != nil {
+		return v.Path
+	}
+	return ""
 }
 
 func chownTree(root string, uid, gid int) error {

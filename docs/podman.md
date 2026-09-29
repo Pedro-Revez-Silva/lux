@@ -158,22 +158,29 @@ container. Under `--userns=auto` that needed more than the commonly cited
   measured 1.6 to 2.2 times faster than on `fuse-overlayfs`.
   `tests/suites/test_nested_docker.py::test_disk_speed_is_native` fails if
   that regresses.
-  - The shim hands the directories the mount created (`~/.local`,
-    `~/.local/share`) to the workload user: only those the image does not
-    have (the runner checks the image), walking down from the home through
-    directory file descriptors with `O_NOFOLLOW`, so a link the workload
-    planted (or swaps in meanwhile) is never followed.
+  - The runner keeps these volumes apart from the spec's (`EngineVolumes`
+    in the run state): they are mounted and count toward the Run's
+    `resources.disk` like any volume, hardlinked layer files once, but are
+    never snapshotted, never artifact sources, and never a repository's
+    home.
+  - The shim hands the directories the mount made (`~/.local`,
+    `~/.local/share`) to the workload user, and only those: the runner
+    lists what neither the image nor a volume over it has. Below the home
+    that is every such directory; for a store outside it, only the data
+    home itself. The shim walks to each from `/` through directory file
+    descriptors with `O_NOFOLLOW`, so a link the workload planted (or swaps
+    in meanwhile) is never followed.
   - The runner empties every existing ephemeral volume in place rather than
     removing it (`podman volume rm -f` would also remove the stopped
     container a same-host resume reuses), gives its root back to root, and
-    copies in what the image has at its path, as podman does into a new
-    volume. It stops a still-running earlier container first, so nothing
-    writes to the volume while it is emptied.
-  - These mounts are part of the container's `lux.spec` label, so a
-    container made without them (by an older runner) is not reused.
-  - They are not artifact sources. Their size counts toward the Run's
-    `resources.disk` on every usage sample, as the writable layer they
-    replace did, with hardlinked layer files counted once.
+    copies in what the image has at its path with `cp -a` (hardlinks,
+    setuid bits and file capabilities kept), as podman does into a new
+    volume. It stops a still-running earlier container first; one that
+    cannot be stopped fails the placement. The image is mounted once for
+    all of this.
+  - A stopped container is reused only if it was made with the same create
+    arguments (their hash is its `lux.spec` label), so one made without
+    these mounts or under another AppArmor mode is not.
 
 ## Exec, attach, ports
 

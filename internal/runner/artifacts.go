@@ -82,9 +82,6 @@ func (p *placement) collectArtifacts(ctx context.Context) ([]proto.Artifact, err
 		vols := slices.Clone(p.state.Volumes)
 		sort.Slice(vols, func(i, j int) bool { return vols[i].Path < vols[j].Path })
 		for _, v := range vols {
-			if v.Engine {
-				continue // images and layers: never artifacts
-			}
 			mp, err := p.r.mountpoint(ctx, v.Volume)
 			if err != nil {
 				c.errs = append(c.errs, err)
