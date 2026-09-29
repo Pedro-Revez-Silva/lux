@@ -1,8 +1,10 @@
 import { useMemo, useRef, useState } from "react";
 import { Badge, Button, Card, ConfirmDialog, PageHeader, Table, useToast, type Column } from "@lux/design-system";
 import { api, errorText, invalidate, isApiError, type Pool, type PoolRenamed } from "../../api/index.ts";
+import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip, labelsText } from "./common.tsx";
+import { DASH, ErrorBlock, ErrorStrip, labelsText, poolPath } from "./common.tsx";
+import { currentDefaultText } from "./defaultPool.ts";
 
 interface PoolRow extends Pool {
   key: string;
@@ -14,11 +16,12 @@ export function Pools() {
   const { showTenant, operator } = useScope();
   const toast = useToast();
   const pools = useScopedQuery("pools", api.pools, { interval: 15_000 });
+  const [marking, setMarking] = useState<PoolRow | null>(null);
+  const [busy, setBusy] = useState(false);
   const hosts = useScopedQuery("hosts", (t, s) => api.hosts(t, {}, s), { interval: 15_000 });
   const [renaming, setRenaming] = useState<PoolRow | null>(null);
   // What would follow the rename, counted by luxd when the dialog opens.
   const [preview, setPreview] = useState<PoolRenamed | null>(null);
-  const [busy, setBusy] = useState(false);
   // Which dialog is current: a count answered for one opened earlier (or
   // closed) is dropped.
   const dialog = useRef(0);
@@ -94,7 +97,20 @@ export function Pools() {
   };
 
   const cols = useMemo<Column<PoolRow>[]>(() => {
-    const c: Column<PoolRow>[] = [{ key: "name", header: "Pool", cell: (p) => p.name, sortValue: (p) => p.name, lead: true, width: 180 }];
+    const c: Column<PoolRow>[] = [
+      {
+        key: "name",
+        header: "Pool",
+        cell: (p) => (
+          <>
+            <Link to={poolLink(p, showTenant)}>{p.name}</Link> {p.isDefault && <Badge tone="accent">Default</Badge>}
+          </>
+        ),
+        sortValue: (p) => p.name,
+        lead: true,
+        width: 200,
+      },
+    ];
     if (showTenant) c.push({ key: "tenant", header: "Tenant", cell: (p) => (p.platform ? <span className="muted">platform</span> : p.tenant || DASH), sortValue: (p) => (p.platform ? "" : p.tenant), width: 130 });
     c.push(
       { key: "provider", header: "Provider", cell: (p) => <span className="secondary">{p.provider}</span>, sortValue: (p) => p.provider, width: 110 },
@@ -107,15 +123,39 @@ export function Pools() {
       {
         key: "actions",
         header: "",
-        // A platform pool is the operators' to rename.
+        // Operators act on any pool (mark a platform pool as the platform's
+        // default, rename it); a tenant, on its own pools. The row opens
+        // the pool's page: the buttons' click and Enter stay here.
         cell: (p) =>
           operator || !p.platform ? (
-            <Button size="sm" onClick={() => openRename(p)}>
-              Rename
-            </Button>
+            <>
+              {!p.isDefault && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMarking(p);
+                  }}
+                  onKeyDown={(e) => e.stopPropagation()}
+                >
+                  Make default
+                </Button>
+              )}{" "}
+              <Button
+                size="sm"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openRename(p);
+                }}
+                onKeyDown={(e) => e.stopPropagation()}
+              >
+                Rename
+              </Button>
+            </>
           ) : null,
         align: "right",
-        width: 100,
+        width: 220,
       },
     );
     return c;
@@ -132,6 +172,27 @@ export function Pools() {
       description += ` Its ${plural(preview.instances, "instance")} keep running; their name tag follows in the background.`;
   }
 
+  let whose = "your";
+  if (marking?.platform) {
+    whose = "the platform's";
+  } else if (operator) {
+    whose = `tenant ${marking?.tenant}'s`;
+  }
+  const makeDefault = async () => {
+    if (!marking) return;
+    setBusy(true);
+    try {
+      await api.makePoolDefault(marking.platform ? undefined : marking.tenant, marking.name);
+      toast({ title: `${marking.name} is ${whose} default pool`, tone: "success" });
+      setMarking(null);
+      await pools.refetch();
+    } catch (e) {
+      toast({ title: "Make default failed", description: errorText(e), tone: "danger" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="page page-list">
       <PageHeader title="Pools" description={`${rows.length} pools · host counts from the hosts list (terminated excluded)`} />
@@ -140,7 +201,7 @@ export function Pools() {
         {pools.error && rows.length === 0 && !pools.loading ? (
           <ErrorBlock error={pools.error} onRetry={pools.refetch} />
         ) : (
-          <Table columns={cols} rows={rows} rowKey={(p) => p.key} loading={pools.loading} defaultSort={{ key: "name", dir: "asc" }} empty="No pools." />
+          <Table columns={cols} rows={rows} rowKey={(p) => p.key} onRowClick={(p) => go(poolLink(p, showTenant))} loading={pools.loading} defaultSort={{ key: "name", dir: "asc" }} empty="No pools." />
         )}
       </Card>
       <ConfirmDialog
@@ -155,10 +216,32 @@ export function Pools() {
         onConfirm={(name) => r && void rename(r, name ?? "", mustType)}
         onCancel={closeRename}
       />
+      <ConfirmDialog
+        open={marking != null}
+        title={`Make ${marking?.name} ${whose} default pool?`}
+        description={
+          <>
+            {marking && currentDefaultText(rows, marking, whose)}{" "}
+            {marking?.platform
+              ? `From now on, Runs that name no pool go to ${marking?.name}, for tenants without a default pool of their own.`
+              : `From now on, Runs that name no pool go to ${marking?.name}.`}{" "}
+            Runs already submitted keep their pool.
+          </>
+        }
+        confirmLabel="Make default"
+        loading={busy}
+        onConfirm={() => void makeDefault()}
+        onCancel={() => setMarking(null)}
+      />
     </div>
   );
 }
 
 function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+/** A platform pool's page is the platform's; across tenants, a tenant's pool is linked in its tenant's scope (names repeat across tenants). */
+function poolLink(p: Pool, acrossTenants: boolean): string {
+  return poolPath(p.name, { platform: p.platform, tenant: acrossTenants ? p.tenant : undefined });
 }

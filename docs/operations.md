@@ -297,6 +297,52 @@ CoreOS enforces SELinux, and its default policy labels `/usr/local/bin`
 unlabeled, which fails with `203/EXEC`. This is unrelated to
 `runner_bin_dir` on luxd's own host, which is unchanged.
 
+## Pools and the default pool
+
+A Run goes to the pool its spec names (`placement.pool`). One that names
+none goes to its tenant's **default pool**, which a tenant (or an operator)
+chooses by marking one of its pools:
+
+```bash
+lux pools set arm64 --default          # the tenant's default from now on
+lux pools set arm64 --default=false    # no default: the platform's, else "default"
+luxd admin create-pool --name shared-x86 --provider static --shared --default   # the platform's default
+```
+
+luxd picks the pool when the Run is submitted, in this order:
+
+1. the tenant's default pool;
+2. else the platform's default pool (a platform pool, `tenant_id` NULL,
+   marked by an operator: `lux pools set <name> --default` without
+   `--tenant`, or `luxd admin create-pool --default`);
+3. else the pool named `default`, which is what every such Run got before
+   default pools existed. A deployment with a pool named `default` keeps
+   working without marking anything.
+
+The pool is written into the Run's spec, so its resumes, retries and
+migrations stay there even when the default changes later. The Run's
+`submitted` event says which pool and why: `{"pool": "arm64", "poolFrom":
+"tenant-default", "poolOwner": "tenant"}` (`platform-default`, `fallback`,
+or `spec` when the spec named it). A Run that names a pool, `default`
+included, is never redirected.
+
+A tenant pool and a platform pool may share a name, so luxd records whose
+pool it is too (`runs.pool_owner`; `poolOwner` in the event): the default's
+owner, or for a name, the tenant's own pool of that name, else the
+platform's. The Run then goes only to that owner's hosts, and only that
+pool provisions for it. A name no pool has (static hosts that joined by
+host token with a pool name no pool was created for) records no owner, and
+such Runs, like those submitted before this was recorded, match hosts by
+name as before. If the Run's pool is removed, it waits ("its pool burst
+was removed") rather than taking another owner's pool of that name, or
+that pool's static hosts, which `lux pools rm` leaves in service for Runs
+without an owner; re-creating the pool serves it again.
+
+A tenant has at most one default pool, and the platform one (Postgres
+refuses a second). Marking another pool moves the mark in one statement.
+`lux pools rm` clears the mark of the pool it removes; re-creating that
+pool does not bring it back. Upgrading marks no pool.
+
 ## EC2 pools
 
 Pool names follow the rule in [the CLI reference](cli.md#hosts-and-pools): 1-32
@@ -370,16 +416,23 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
 renames a pool with its hosts running: nothing is drained or terminated.
 In one transaction the pool, its hosts (terminated ones too, which cost
 lookups join by name), its host tokens, their `cost_hourly` rows and every
-Run naming it move to the new name; final Runs' specs move without a
-new Run event. Only Runs not yet final count in the rename response. A Run
+Run bound to it move to the new name; final Runs' specs move without a
+new Run event. A Run is bound to a pool's name and owner (`runs.pool_owner`,
+set at submit): renaming a tenant's `burst` leaves Runs bound to the
+platform's `burst` where they are, and the other way round. A Run bound
+to no pool row (submitted before owners were recorded, or to a name no
+pool had) follows as the provisioner counts it: a tenant pool's, its
+tenant's; a platform pool's, those of tenants with no pool of their own
+by that name. A pool marked as its owner's default stays the default
+under the new name; a platform rename changes no tenant's default. Only Runs not yet final count in the rename response. A Run
 waiting for the pool schedules under the new name at once. The new name follows the [pool-name rule](cli.md#hosts-and-pools)
 (422 `invalid_pool` otherwise; a name kept from before the rule is never
 given anew). Refused with 409:
 
 - `pool_exists`: the name is taken by a live or removed pool of the
   tenant, or by hosts or host tokens; for a platform pool, also when a
-  tenant whose Runs would follow owns a pool by the new name (its Runs
-  would then go to its own pool).
+  tenant whose Runs bound to no pool would follow owns a pool by the new
+  name (those Runs would then go to its own pool).
 - `pool_not_migrated`: an `ec2` pool with instances launched before
   `lux:pool-id` that luxd has not yet seen carrying it (see below).
 - `rename_unsupported_by_deployment`: an `ec2` pool, while some luxd that
@@ -489,8 +542,10 @@ luxd's role needs, besides `CreateTags` at launch (which now includes
 }
 ```
 
-A rename is logged at INFO (`pool renamed`, with the old and new names and
-how many hosts, Runs and instances followed); tags applied by a provider
+A rename is recorded as the pool's `pool.renamed` event (`from`, `to`,
+`hosts`, `runs`, `instances`, and `isDefault`, unchanged by the rename)
+and logged at INFO (`pool renamed`, with the old and new names and how
+many hosts, Runs and instances followed); tags applied by a provider
 check at INFO (`instances tagged`), and refused ones at WARN.
 
 ### Spot instances

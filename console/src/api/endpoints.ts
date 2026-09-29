@@ -1,6 +1,6 @@
 // Typed calls, one per endpoint. Lists are unwrapped from their envelope.
 import { download, request } from "./client.ts";
-import type { Artifact, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, MigrateRequest, Pool, PoolRenamed, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
+import type { Artifact, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, LifecycleEvent, MigrateRequest, Pool, PoolRenamed, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
 
 type Sig = AbortSignal | undefined;
 /** Tenant scope of a list call: a tenant id or name, or undefined for all the key sees. */
@@ -46,12 +46,31 @@ export const api = {
   hostCost: (id: string, since: string, signal?: Sig) => request<HostCost>(`/hosts/${enc(id)}/cost`, { query: { since }, signal }),
   drainHost: (id: string, forceEvict = false) => request<{ draining: boolean; host: string }>(`/hosts/${enc(id)}/drain`, { method: "POST", body: { forceEvict } }),
 
+  hostEvents: (id: string, tenant: Scope, page: EventRange, signal?: Sig) =>
+    request<{ events: LifecycleEvent[] }>(`/hosts/${enc(id)}/events`, { tenant, query: { ...page, limit: EVENTS_PAGE }, signal }).then((r) => r.events),
+
   pools: (tenant: Scope, signal?: Sig) => request<{ pools: Pool[] }>("/pools", { tenant, signal }).then((r) => r.pools),
   /** tenant: the pool's owner (id or name) for an operator key; undefined for a platform pool or a tenant key. confirm: the pool's name, typed; luxd requires it while the pool has hosts. */
   renamePool: (tenant: Scope, name: string, newName: string, confirm?: string, dryRun = false) =>
     request<PoolRenamed>(`/pools/${enc(name)}/rename`, { method: "POST", tenant, query: { dryRun }, body: { name: newName, confirm } }),
+  /** Marks one of a tenant's pools as its default (tenant: the pool's, for an operator). */
+  makePoolDefault: (tenant: Scope, name: string) => request<Pool>("/pools", { method: "POST", tenant, body: { name, isDefault: true } }),
+  /** owner: which pool of that name, where a tenant's and the platform's share it; undefined: the server's default. */
+  poolEvents: (name: string, tenant: Scope, owner: PoolOwner | undefined, page: EventRange, signal?: Sig) =>
+    request<{ events: LifecycleEvent[] }>(`/pools/${enc(name)}/events`, { tenant, query: { owner, ...page, limit: EVENTS_PAGE }, signal }).then((r) => r.events),
   tenants: (signal?: Sig) => request<{ tenants: Tenant[] }>("/tenants", { signal }).then((r) => r.tenants),
 };
+
+export type PoolOwner = "platform" | "tenant";
+
+/** Pool and host events per request: the server's maximum. */
+export const EVENTS_PAGE = 1000;
+
+/** Which pool or host events, newest first: older than before, newer than after (both exclusive); none: the newest. */
+export interface EventRange {
+  before?: number;
+  after?: number;
+}
 
 function enc(s: string): string {
   return encodeURIComponent(s);

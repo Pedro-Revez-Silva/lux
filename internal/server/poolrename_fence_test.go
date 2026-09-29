@@ -93,7 +93,7 @@ func TestProvisionLeaseFenceOutlivesTheRenamedPool(t *testing.T) {
 	f.rename(t, "burst", "burst-eu")
 	ctx := context.WithValue(f.ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
 	toStatic := func() error {
-		_, err := f.s.putPool(ctx, &poolBody{Body: Pool{Name: "burst-eu", Provider: "static"}})
+		_, err := f.s.putPool(ctx, poolIn(Pool{Name: "burst-eu", Provider: "static"}))
 		return err
 	}
 	if status, code, _ := httpErr(toStatic()); status != http.StatusConflict || code != "pool_has_hosts" {
@@ -331,7 +331,7 @@ func TestHostTokenForARenamedStaticPool(t *testing.T) {
 		t.Fatalf("a token for a pool with no row: %v", err)
 	}
 	pctx := context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
-	if _, err := f.s.putPool(pctx, &poolBody{Body: Pool{Name: "lab", Provider: "static"}}); err != nil {
+	if _, err := f.s.putPool(pctx, poolIn(Pool{Name: "lab", Provider: "static"})); err != nil {
 		t.Fatal(err)
 	}
 	if err := mint(&t1, "lab"); err != nil {

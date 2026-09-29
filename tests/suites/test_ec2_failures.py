@@ -9,7 +9,7 @@ import psycopg
 import pytest
 
 from conftest import fake_only, generic
-from ec2_helpers import _clean, ec2_hosts, pool  # noqa: F401 (_clean is an autouse fixture)
+from ec2_helpers import _clean, ec2_hosts, pool, pool_events  # noqa: F401 (_clean is an autouse fixture)
 from env import ALPINE_IMAGE, wait_until
 
 pytestmark = pytest.mark.ec2
@@ -47,7 +47,16 @@ def test_a_failed_launch_is_retried(lux, ec2):
     ec2.fail_launches = True
     pool(lux, ec2, max=1)
     run_id = lux.submit(generic(ALPINE_IMAGE, "true", placement={"pool": "burst"}))
-    wait_until(lambda: ec2.calls.count("RunInstances") >= 2, 30, 0.5, "not retried")
+    # Every attempt failed the same way: one event, counted, not one each.
+    def counted():
+        failed = [e for e in pool_events(lux) if e["type"] == "pool.launch_failed"]
+        return failed if failed and failed[0]["count"] >= 2 and failed[0].get("lastTime") else None
+    failed = wait_until(counted, 30, 0.5, "no repeated launch_failed")
+    assert len(failed) == 1, failed
+    assert failed[0]["lastTime"] > failed[0]["time"], failed
+    assert "InsufficientInstanceCapacity" in failed[0]["data"]["error"], failed
+    assert "RequestID" not in failed[0]["data"]["error"], failed
+    assert "(×" in lux.run("pools", "events", "burst").stdout
     ec2.fail_launches = False
     lux.wait_state(run_id, "succeeded", timeout=120)
 

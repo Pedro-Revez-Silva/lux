@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { Badge, Button, Card, formatBytes, formatTimestamp, IconButton, IdChip, Table, useToast, type Column } from "@lux/design-system";
+import { Badge, Button, Card, EventTable, formatBytes, formatTimestamp, IconButton, IdChip, Table, useToast, type Column } from "@lux/design-system";
 import { IconDownload, IconRefresh } from "@lux/design-system/icons";
 import { api, errorText, useQuery, type Artifact, type Event, type Run, type Snapshot } from "../../api/index.ts";
 import { DASH, ErrorBlock, ErrorStrip, JsonBlock } from "./common.tsx";
@@ -36,25 +36,16 @@ function useRunEvents(id: string, live: boolean) {
 
 export function RunEvents({ run, live }: { run: Run; live: boolean }) {
   const q = useRunEvents(run.id, live);
-  const [open, setOpen] = useState<number | null>(null);
-  const cols = useMemo<Column<Event>[]>(
-    () => [
-      { key: "id", header: "#", cell: (e) => e.id, sortValue: (e) => e.id, align: "right", mono: true, width: 76 },
-      { key: "time", header: "Time", cell: (e) => formatTimestamp(e.time), sortValue: (e) => Date.parse(e.time), mono: true, width: 180 },
-      { key: "epoch", header: "Epoch", cell: (e) => (e.epoch ? e.epoch : DASH), sortValue: (e) => e.epoch ?? 0, align: "right", mono: true, width: 72, optional: true },
-      { key: "type", header: "Type", cell: (e) => <span className="secondary">{e.type}</span>, sortValue: (e) => e.type, width: 150 },
-      { key: "summary", header: "Details", cell: (e) => (open === e.id ? <JsonBlock value={e.data} /> : eventSummary(e)), wrap: true },
-    ],
-    [open],
-  );
   if (q.error && !q.data) return <ErrorBlock error={q.error} onRetry={q.refetch} />;
   return (
     <Card flush title="Events" subtitle={`${q.data?.length ?? 0} events · click a row to expand its data`} actions={<IconButton size="sm" label="Refresh" onClick={() => void q.refetch()}><IconRefresh size={14} /></IconButton>}>
       <ErrorStrip error={q.error} />
-      <Table columns={cols} rows={q.data ?? []} rowKey={(e) => String(e.id)} loading={q.loading} defaultSort={{ key: "id", dir: "desc" }} onRowClick={(e) => setOpen((o) => (o === e.id ? null : e.id))} selected={open != null ? String(open) : null} empty="No events." dense minWidth={640} />
+      <EventTable events={q.data ?? []} summary={eventSummary} detail={eventData} epoch loading={q.loading} />
     </Card>
   );
 }
+
+const eventData = (e: { data: unknown }) => <JsonBlock value={e.data} />;
 
 export function RunSnapshots({ run, live }: { run: Run; live: boolean }) {
   const snaps = useQuery(`run-snapshots:${run.id}`, (s) => api.snapshots(run.id, s), { interval: live ? 10_000 : 0, live: 60_000 });

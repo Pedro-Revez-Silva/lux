@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -419,7 +420,8 @@ provider. Your own hosts; operators, any host.`,
 	priceCmd.Flags().StringVar(&price.HourlyPrice, "hourly-price", "", "price per hour, a decimal (e.g. 0.40)")
 	priceCmd.Flags().StringVar(&price.Currency, "currency", "", "ISO 4217 currency of --hourly-price (e.g. USD)")
 	priceCmd.Flags().BoolVar(&clearPrice, "clear", false, "remove the host's price")
-	cmd.AddCommand(ls, get, drain, priceCmd)
+	events := a.infraEventsCmd("events <host>", "What happened to a host (by id or name), newest first", "/v1/hosts/", nil)
+	cmd.AddCommand(ls, get, drain, priceCmd, events)
 	return cmd
 }
 
@@ -526,11 +528,18 @@ func counts(m map[string]int) string {
 	return strings.Join(parts, ", ")
 }
 
+// poolFields are pools set's flags that replace a pool's settings: without
+// any of them, --default only moves the mark.
+var poolFields = []string{"provider", "min", "max", "warm", "scale-down-after", "warm-while-active", "template", "hourly-price", "currency"}
+
 func (a *app) poolsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "pools", Short: "Host pools"}
 	ls := &cobra.Command{
 		Use:   "ls",
 		Short: "List pools",
+		Long: `List pools: your tenant's and the platform's. With an operator key and
+no --tenant, every tenant's, with an OWNER column (platform or the tenant's
+name): a tenant's pool and a platform pool may share a name.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var resp struct {
 				Pools []server.Pool `json:"pools"`
@@ -541,22 +550,74 @@ func (a *app) poolsCmd() *cobra.Command {
 			if a.output == "json" {
 				return a.json(resp.Pools)
 			}
+			var who server.Whoami
+			if a.c.Tenant == "" {
+				if err := a.c.Do(ctxOf(cmd), "GET", "/v1/whoami", nil, &who); err != nil {
+					return err
+				}
+			}
+			// A tenant-scoped listing can include a platform pool with the
+			// same name as the tenant's. Show the owner when names collide.
+			showOwner := who.Operator
+			if !showOwner {
+				seen := make(map[string]bool, len(resp.Pools))
+				for _, p := range resp.Pools {
+					if seen[p.Name] {
+						showOwner = true
+						break
+					}
+					seen[p.Name] = true
+				}
+			}
 			var rows [][]string
 			for _, p := range resp.Pools {
-				rows = append(rows, []string{p.Name, p.Provider, fmt.Sprintf("%d-%d", p.MinHosts, p.MaxHosts), fmt.Sprint(p.WarmHosts), fmt.Sprint(p.Shared)})
+				def := ""
+				if p.IsDefault != nil && *p.IsDefault {
+					def = "*"
+				}
+				row := []string{p.Name}
+				if showOwner {
+					owner := p.Tenant
+					if p.Platform {
+						owner = "platform"
+					}
+					row = append(row, owner)
+				}
+				row = append(row, def, p.Provider, fmt.Sprintf("%d-%d", p.MinHosts, p.MaxHosts), fmt.Sprint(p.WarmHosts), fmt.Sprint(p.Shared))
+				rows = append(rows, row)
 			}
-			a.table("NAME\tPROVIDER\tHOSTS\tWARM\tSHARED", rows)
+			header := "NAME\tDEFAULT\tPROVIDER\tHOSTS\tWARM\tSHARED"
+			if showOwner {
+				header = "NAME\tOWNER\tDEFAULT\tPROVIDER\tHOSTS\tWARM\tSHARED"
+			}
+			a.table(header, rows)
 			return nil
 		},
 	}
 	var p server.Pool
 	var template string
+	var isDefault bool
 	set := &cobra.Command{
 		Use:   "set <name>",
 		Short: "Create or update a pool",
-		Args:  cobra.ExactArgs(1),
+		Long: `Create or update a pool. Every flag but --default replaces the pool's
+setting, omitted ones included.
+
+--default marks the pool as the tenant's default: Runs whose spec names no
+pool go to it from now on (Runs already submitted keep theirs). It moves
+the mark from the previous default. --default=false clears it. Given
+alone, --default changes only the mark of an existing pool.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p.Name = args[0]
+			if cmd.Flags().Changed("default") {
+				p.IsDefault = &isDefault
+				if !slices.ContainsFunc(poolFields, cmd.Flags().Changed) {
+					// Exactly these two fields: server.Pool would send its
+					// zero settings too, which luxd refuses without provider.
+					return a.c.Do(ctxOf(cmd), "POST", "/v1/pools", map[string]any{"name": p.Name, "isDefault": isDefault}, nil)
+				}
+			}
 			if template != "" {
 				if err := json.Unmarshal([]byte(template), &p.Template); err != nil {
 					return fmt.Errorf("--template: %w", err)
@@ -622,7 +683,8 @@ name is free for another pool at once.`,
 	set.Flags().StringVar(&template, "template", "", "provider template (JSON)")
 	set.Flags().StringVar(&p.HourlyPrice, "hourly-price", "", "static pools: default hourly price of hosts registering into it, a decimal (with --currency); existing hosts keep theirs. Like every flag here, it replaces the pool's: omitted, the pool has no default price")
 	set.Flags().StringVar(&p.Currency, "currency", "", "ISO 4217 currency of --hourly-price (e.g. USD)")
-	cmd.AddCommand(ls, set)
+	set.Flags().BoolVar(&isDefault, "default", false, "mark it the tenant's default pool, for Runs that name none (--default=false clears it; omitted: unchanged)")
+	cmd.AddCommand(ls, set, a.poolEventsCmd())
 	return cmd
 }
 

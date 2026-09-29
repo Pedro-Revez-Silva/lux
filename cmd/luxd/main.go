@@ -5,7 +5,7 @@
 //	luxd admin create-key --tenant T [--scopes run,read]
 //	luxd admin create-operator-key [--name N]    → {"apiKey"}: every tenant
 //	luxd admin create-host-token [--tenant T] [--pool P] [--label k=v]  → {"token"}
-//	luxd admin create-pool --name N --provider static|ec2 [--tenant T] [--shared] ...
+//	luxd admin create-pool --name N --provider static|ec2 [--tenant T] [--shared] [--default] ...
 //	luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--retention-days N]
 //	luxd serve                                    run the API, scheduler and reapers
 //	luxd openapi                                  print the tenant API's OpenAPI spec (YAML)
@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -99,7 +100,7 @@ admin commands:
   create-key --tenant T [--name N] [--scopes read,run,admin]
   create-operator-key [--name N]
   create-host-token [--tenant T] [--pool P] [--label k=v ...]
-  create-pool --name N --provider static|ec2 [--tenant T] [--shared]
+  create-pool --name N --provider static|ec2 [--tenant T] [--shared] [--default[=false]]
               [--min N] [--max N] [--warm N] [--template JSON]
               [--hourly-price D --currency C]   (static pools: hosts' default price)
   set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BYTES] [--retention-days N]`)
@@ -225,6 +226,22 @@ func serve(ctx context.Context, c config) error {
 	}, db, blobs, log)
 	return srv.Run(ctx)
 }
+
+// optBool is a boolean flag that knows whether it was given.
+type optBool struct{ v *bool }
+
+func (b *optBool) String() string {
+	if b.v == nil {
+		return ""
+	}
+	return strconv.FormatBool(*b.v)
+}
+func (b *optBool) Set(s string) error {
+	v, err := strconv.ParseBool(s)
+	b.v = &v
+	return err
+}
+func (b *optBool) IsBoolFlag() bool { return true }
 
 type labelsFlag map[string]string
 
@@ -352,6 +369,8 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		template := fs.String("template", "{}", "provider template (JSON)")
 		price := fs.String("hourly-price", "", "static pools: default hourly price of hosts registering into it (a decimal; with --currency); replaces the pool's, like every flag here")
 		currency := fs.String("currency", "", "the currency of --hourly-price (ISO 4217, e.g. USD)")
+		var isDefault optBool
+		fs.Var(&isDefault, "default", "mark it its owner's default pool (the platform's, without --tenant); --default=false clears the mark; omitted leaves it")
 		fs.Parse(args[1:])
 		var tmpl map[string]any
 		if err := json.Unmarshal([]byte(*template), &tmpl); err != nil {
@@ -368,23 +387,25 @@ func admin(ctx context.Context, cfg config, args []string) error {
 			if err := server.CheckPoolName(ctx, tx, optional(*tenant), *name); err != nil {
 				return err
 			}
-			if err := server.LockPoolName(ctx, tx, *tenant, *name); err != nil {
+			// SavePool takes the pool's name for its owner and across owners,
+			// as a rename does, and records the change and any mark it moves
+			// as pool events, in this transaction.
+			return server.SavePool(ctx, tx, *tenant, *name, isDefault.v, func() error {
+				tag, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
+						scale_down_after_s, warm_while_active, hourly_price, price_currency, id_migrated_at)
+					VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11, nullif($12, '')::numeric, nullif($13, ''), now())
+					ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
+						min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts, shared = EXCLUDED.shared,
+						scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
+						hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
+						`+server.PoolRevive+`, retired_at = NULL, last_empty_listing_at = NULL
+					WHERE `+server.PoolProviderUnchangedOrEmpty,
+					id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive, *price, *currency)
+				if err == nil && tag.RowsAffected() == 0 {
+					return server.ErrPoolHasHosts(*name)
+				}
 				return err
-			}
-			tag, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
-					scale_down_after_s, warm_while_active, hourly_price, price_currency, id_migrated_at)
-				VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11, nullif($12, '')::numeric, nullif($13, ''), now())
-				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
-					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts, shared = EXCLUDED.shared,
-					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
-					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
-					retired = false, retired_at = NULL, last_empty_listing_at = NULL
-				WHERE `+server.PoolProviderUnchangedOrEmpty,
-				id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive, *price, *currency)
-			if err == nil && tag.RowsAffected() == 0 {
-				return server.ErrPoolHasHosts(*name)
-			}
-			return err
+			})
 		})
 		if err != nil {
 			return err

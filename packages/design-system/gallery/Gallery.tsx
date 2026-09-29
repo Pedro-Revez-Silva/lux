@@ -12,6 +12,7 @@ import {
   CostFigure,
   CostStatusBadge,
   EmptyState,
+  EventTable,
   familyColor,
   familySlot,
   FamilyKey,
@@ -82,7 +83,7 @@ function Section({ id, title, children, note }: { id: string; title: string; not
   );
 }
 
-const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "tabs", "selects", "charts", "costs", "timeline", "logs", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
+const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "tabs", "selects", "charts", "costs", "timeline", "events", "logs", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
 
 /** The gallery: a slim bar (brand, theme and density) over the sections. */
 export function Gallery() {
@@ -140,6 +141,7 @@ function Sections() {
         <Charts />
         <Costs />
         <TimelineDemo />
+        <EventsDemo />
         <Logs />
         <TerminalDemo />
         <Servers />
@@ -335,7 +337,7 @@ function Layout() {
             <td className="mono">768–1279</td>
             <td>icon rail (56px)</td>
             <td>full controls</td>
-            <td>charts 2 across; optional table columns (ids, adapter, epoch) drop out under ~1100px of content</td>
+            <td>charts 2 across; optional table columns (ids, adapter, placements) drop out under ~1100px of content</td>
           </tr>
           <tr>
             <td className="mono">1280–1919</td>
@@ -648,7 +650,7 @@ function RunsTable() {
     { key: "adapter", header: "Adapter", cell: (r) => <span className="secondary">{r.adapter}</span>, sortValue: (r) => r.adapter, width: 110, optional: true },
     { key: "image", header: "Image", cell: (r) => r.image, sortValue: (r) => r.image, mono: true },
     { key: "host", header: "Host", cell: (r) => r.host ?? <span className="muted">–</span>, sortValue: (r) => r.host, width: 170 },
-    { key: "epoch", header: "Epoch", cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 76, optional: true },
+    { key: "epoch", header: <span title="Times this Run has been placed on a host">Placements</span>, cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 116, optional: true },
     { key: "cpu", header: "CPU", cell: (r) => formatDuration(r.cpuSeconds), sortValue: (r) => r.cpuSeconds, align: "right", mono: true, width: 90 },
     { key: "mem", header: "Peak mem", cell: (r) => formatBytes(r.peakMemoryBytes), sortValue: (r) => r.peakMemoryBytes, align: "right", mono: true, width: 100 },
     { key: "age", header: "Created", cell: (r) => <Tooltip content={formatTimestamp(r.createdAt)}><span>{formatRelative(r.createdAt, NOW)}</span></Tooltip>, sortValue: (r) => r.createdAt, align: "right", width: 100 },
@@ -794,6 +796,27 @@ function TimelineDemo() {
       </Card>
       <Card title="Fresh placement" subtitle="only the first two stages have happened">
         <Timeline stages={fakePlacementStages.map((st, i) => (i < 2 ? st : i === 2 ? { ...st, end: null } : { ...st, start: null, end: null }))} now={fakePlacementStages[2]!.start! + 9_000} />
+      </Card>
+    </Section>
+  );
+}
+
+const fakeEvents = [
+  { id: 101, type: "pool.config_changed", time: new Date(NOW - 3_600_000).toISOString(), data: "maxHosts 2→4" },
+  { id: 102, type: "pool.scale_up", time: new Date(NOW - 600_000).toISOString(), data: "+1 host for waiting runs: 1 waiting, warm 0, min 0, max 4" },
+  { id: 103, type: "pool.launch_requested", time: new Date(NOW - 599_000).toISOString(), data: "launching burst-4f2a9c1d", count: 212, lastTime: new Date(NOW - 388_000).toISOString() },
+  { id: 104, type: "pool.launch_failed", time: new Date(NOW - 598_000).toISOString(), data: "InvalidParameterValue: duplicate tag lux:host", count: 212, lastTime: new Date(NOW - 387_000).toISOString() },
+  { id: 316, type: "pool.host_launched", time: new Date(NOW - 380_000).toISOString(), data: "burst-9d0e1a2b is i-0a1b2c3d4e5f60718 m7i.large on-demand" },
+  { id: 318, type: "pool.host_registered", time: new Date(NOW - 330_000).toISOString(), data: "burst-9d0e1a2b registered" },
+  { id: 319, type: "pool.placement", time: new Date(NOW - 329_000).toISOString(), data: "run_7xq2 epoch 1 on burst-9d0e1a2b" },
+  { id: 327, type: "pool.host_released", time: new Date(NOW - 20_000).toISOString(), data: "burst-9d0e1a2b released: idle for 600s" },
+];
+
+function EventsDemo() {
+  return (
+    <Section id="events" title="EventTable" note="A Run's, pool's or host's lifecycle events, newest first. The page supplies the one-line summary and, optionally, what a clicked row expands into. A failure repeated on every pass is one event with its count and when it last happened.">
+      <Card flush title="Events" subtitle="pool burst · click a row to expand">
+        <EventTable events={fakeEvents} summary={(e) => e.data} detail={(e) => <Code>{JSON.stringify(e, null, 2)}</Code>} />
       </Card>
     </Section>
   );

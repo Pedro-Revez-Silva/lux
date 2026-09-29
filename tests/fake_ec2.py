@@ -198,7 +198,11 @@ class FakeEC2:
         tags = {}
         i = 1
         while f"TagSpecification.1.Tag.{i}.Key" in q:
-            tags[q[f"TagSpecification.1.Tag.{i}.Key"]] = q.get(f"TagSpecification.1.Tag.{i}.Value", "")
+            key = q[f"TagSpecification.1.Tag.{i}.Key"]
+            if key in tags:
+                # As EC2: a key named twice fails the whole request.
+                raise FakeError("InvalidParameterValue", f"Duplicate tag key '{key}' specified.")
+            tags[key] = q.get(f"TagSpecification.1.Tag.{i}.Value", "")
             i += 1
         if self.untagged_launches:
             tags.pop("lux:pool-id", None)

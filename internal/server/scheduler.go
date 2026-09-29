@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"time"
@@ -46,6 +47,7 @@ type candidateHost struct {
 	UsedRuns  int
 	Tenants   []string // tenants with live placements here
 	Shared    bool
+	Retired   bool // its owner's pool row of its name is retired
 	Connected bool
 }
 
@@ -60,6 +62,9 @@ type pendingRun struct {
 	PendingInput  json.RawMessage
 	ImageResolved *proto.ImageResolution
 	HasSecrets    bool
+	// PoolOwner: runs.pool_owner, the owner of its pool ("" the platform);
+	// nil matches hosts by pool name alone.
+	PoolOwner *string
 	// An operator's say: the host it must go to, or one it must not.
 	PlaceOn   string
 	AvoidHost string
@@ -102,7 +107,7 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 	var n int
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, snapshot_id, session_id, current_epoch, pending_input, image_resolved,
-				jsonb_array_length(secrets) > 0, coalesce(place_on, ''), coalesce(avoid_host, ''), updated_at, updated_at < now() - $3::interval
+				jsonb_array_length(secrets) > 0, coalesce(place_on, ''), coalesce(avoid_host, ''), pool_owner, updated_at, updated_at < now() - $3::interval
 			FROM runs WHERE state IN `+queuedRunStates+` AND NOT cancel_requested
 			  AND (updated_at, id) > ($1, $2)
 			ORDER BY updated_at, id FOR UPDATE SKIP LOCKED LIMIT 20`,
@@ -120,7 +125,7 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 			var it item
 			r := &it.r
 			if err := rows.Scan(&r.ID, &r.TenantID, &r.State, &r.Spec, &r.SnapshotID, &r.SessionID, &r.Epoch, &r.PendingInput,
-				&r.ImageResolved, &r.HasSecrets, &r.PlaceOn, &r.AvoidHost, &it.updated, &it.graceful); err != nil {
+				&r.ImageResolved, &r.HasSecrets, &r.PlaceOn, &r.AvoidHost, &r.PoolOwner, &it.updated, &it.graceful); err != nil {
 				rows.Close()
 				return err
 			}
@@ -133,14 +138,16 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 		}
 		last = cursorPos{items[n-1].updated, items[n-1].r.ID}
 		pools, tenants, chosen := make([]string, 0, n), make([]string, 0, n), make([]string, 0, n)
+		owners := make([]*string, 0, n)
 		for _, it := range items {
 			pools = append(pools, it.r.Spec.Placement.Pool)
+			owners = append(owners, it.r.PoolOwner)
 			tenants = append(tenants, it.r.TenantID)
 			chosen = append(chosen, it.r.PlaceOn)
 		}
 		// Discovery is not a reservation; candidateHosts rechecks the same
 		// IDs after the advisory locks are acquired.
-		hostIDs, err := s.eligibleHostIDs(ctx, tx, pools, tenants, chosen)
+		hostIDs, err := s.eligibleHostIDs(ctx, tx, pools, owners, tenants, chosen)
 		if err != nil {
 			return err
 		}
@@ -194,15 +201,20 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 }
 
 // eligibleHostIDs finds hosts in the requested pools (or explicitly chosen
-// hosts) whose tenancy permits at least one Run in the batch. The result is
-// ordered so all schedulers acquire advisory locks in the same order.
-func (s *Server) eligibleHostIDs(ctx context.Context, tx pgx.Tx, pools, tenants, chosen []string) ([]string, error) {
+// hosts) whose tenancy permits at least one Run in the batch. A pool is
+// its name and, where the Run has one, its owner, whose pool row must not
+// be retired (pickHost's rule). The result is ordered so all schedulers
+// acquire advisory locks in the same order.
+func (s *Server) eligibleHostIDs(ctx context.Context, tx pgx.Tx, pools []string, owners []*string, tenants, chosen []string) ([]string, error) {
 	rows, err := tx.Query(ctx, `SELECT h.id FROM hosts h
 		WHERE h.state = 'ready' AND NOT h.draining AND h.last_heartbeat > now() - $1::interval
-		  AND EXISTS (SELECT 1 FROM unnest($2::text[], $3::text[], $4::text[]) AS run(pool, tenant, chosen)
+		  AND EXISTS (SELECT 1 FROM unnest($2::text[], $3::text[], $4::text[], $5::text[]) AS run(pool, owner, tenant, chosen)
 			WHERE (h.tenant_id IS NULL OR h.tenant_id = run.tenant)
-			  AND (h.pool = run.pool OR h.id = run.chosen))
-		ORDER BY h.id`, interval(s.cfg.LeaseDuration), pools, tenants, chosen)
+			  AND (h.pool = run.pool AND (run.owner IS NULL OR coalesce(h.tenant_id, '') = run.owner
+			           AND NOT EXISTS (SELECT 1 FROM pools p WHERE coalesce(p.tenant_id, '') = run.owner
+			                           AND p.name = h.pool AND p.retired))
+			       OR h.id = run.chosen))
+		ORDER BY h.id`, interval(s.cfg.LeaseDuration), pools, owners, tenants, chosen)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +228,8 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 	rows, err := tx.Query(ctx, `
 		SELECT h.id, h.tenant_id, h.pool, h.labels, h.capacity, coalesce(h.caches->'images', '[]'),
 			coalesce(h.caches->'gitMirrors', '[]'),
-			coalesce((SELECT bool_or(p.shared) FROM pools p WHERE p.tenant_id IS NULL AND p.name = h.pool), false)
+			coalesce((SELECT bool_or(p.shared) FROM pools p WHERE p.tenant_id IS NULL AND p.name = h.pool), false),
+			EXISTS (SELECT 1 FROM pools p WHERE coalesce(p.tenant_id, '') = coalesce(h.tenant_id, '') AND p.name = h.pool AND p.retired)
 		FROM hosts h
 		WHERE h.id = ANY($2) AND h.state = 'ready' AND NOT h.draining
 		  AND h.last_heartbeat > now() - $1::interval`,
@@ -229,7 +242,7 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 	for rows.Next() {
 		h := &candidateHost{}
 		var images []string
-		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.Labels, &h.Capacity, &images, &h.Mirrors, &h.Shared); err != nil {
+		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.Labels, &h.Capacity, &images, &h.Mirrors, &h.Shared, &h.Retired); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -320,6 +333,13 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 		if h.Pool != r.Spec.Placement.Pool && !chosen {
 			continue
 		}
+		// The pool's owner, when the Run resolved to a pool row: a tenant
+		// pool and a platform pool may share the name. A removed pool's
+		// static hosts stay in service for Runs without an owner, not for
+		// this Run, which waits for the pool to be re-created.
+		if r.PoolOwner != nil && !chosen && (hostOwner(h) != *r.PoolOwner || h.Retired) {
+			continue
+		}
 		// Tenancy: a tenant's own hosts; a shared platform pool; or a
 		// platform host no other tenant is using right now.
 		if h.TenantID != nil && *h.TenantID != r.TenantID {
@@ -400,6 +420,14 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 	return ok[0].h, "", nil
 }
 
+// hostOwner is the host's owner as runs.pool_owner says it: "" the platform.
+func hostOwner(h *candidateHost) string {
+	if h.TenantID == nil {
+		return ""
+	}
+	return *h.TenantID
+}
+
 func labelsMatch(have, want map[string]string) bool {
 	for k, v := range want {
 		if have[k] != v {
@@ -415,11 +443,19 @@ func (s *Server) noHost(ctx context.Context, tx pgx.Tx, r pendingRun, wait strin
 	if wait == "snapshot unavailable" {
 		return setRunState(ctx, tx, r.TenantID, r.ID, StateLost, "its snapshot is no longer available", r.Epoch)
 	}
+	// Its own pool when the Run knows the owner; by name otherwise, the
+	// tenant's shadowing the platform's.
 	var provider string
-	err := tx.QueryRow(ctx, `SELECT provider FROM pools WHERE name = $1 AND (tenant_id = $2 OR tenant_id IS NULL) AND NOT retired
-		ORDER BY tenant_id NULLS LAST LIMIT 1`, r.Spec.Placement.Pool, r.TenantID).Scan(&provider)
+	err := tx.QueryRow(ctx, `SELECT provider FROM pools WHERE name = $1 AND NOT retired
+		  AND CASE WHEN $3::text IS NULL THEN tenant_id = $2 OR tenant_id IS NULL ELSE coalesce(tenant_id, '') = $3 END
+		ORDER BY tenant_id NULLS LAST LIMIT 1`, r.Spec.Placement.Pool, r.TenantID, r.PoolOwner).Scan(&provider)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
+	}
+	// Its pool was removed: no other owner's pool of that name stands in.
+	// Re-creating it (the same row) serves the Run again.
+	if errors.Is(err, pgx.ErrNoRows) && r.PoolOwner != nil && wait == "no host matches" {
+		wait = fmt.Sprintf("its pool %s was removed", r.Spec.Placement.Pool)
 	}
 	if provider != "" && provider != "static" && wait != "waiting for snapshot upload" {
 		if r.State != StateProvisioning {
@@ -451,7 +487,17 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 		WHERE id = $1`, r.ID, epoch); err != nil {
 		return err
 	}
-	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID}); err != nil {
+	// The placement is on the Run, its host and its host's pool alike.
+	// TODO(pool-owner): name the pool by runs.pool_owner too, once it
+	// exists; by name alone a tenant pool and a platform pool are the same.
+	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID, "pool": h.Pool}); err != nil {
+		return err
+	}
+	placed := map[string]any{"run": r.ID, "epoch": epoch, "host": h.ID}
+	if err := hostEvent(ctx, tx, h.ID, evPlacementAssign, placed); err != nil {
+		return err
+	}
+	if err := hostPoolEvent(ctx, tx, h.ID, evPlacement, placed); err != nil {
 		return err
 	}
 

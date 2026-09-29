@@ -293,10 +293,10 @@ func (f *renameFixture) rename(t *testing.T, from, to string) PoolRenamed {
 
 func (f *renameFixture) pool(t *testing.T) poolRow {
 	t.Helper()
-	return readPool(t, f.ctx, f.s, "pool1")
+	return readPoolRow(t, f.ctx, f.s, "pool1")
 }
 
-func readPool(t *testing.T, ctx context.Context, s *Server, id string) poolRow {
+func readPoolRow(t *testing.T, ctx context.Context, s *Server, id string) poolRow {
 	t.Helper()
 	var pl poolRow
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -593,12 +593,12 @@ func TestRenameDiscoveryIgnoresTheNameTag(t *testing.T) {
 
 	// The old name is free at once.
 	ctx := context.WithValue(f.ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
-	if _, err := f.s.putPool(ctx, &poolBody{Body: Pool{Name: "burst", Provider: "ec2", Template: map[string]any{"region": "eu-west-1"}}}); err != nil {
+	if _, err := f.s.putPool(ctx, poolIn(Pool{Name: "burst", Provider: "ec2", Template: map[string]any{"region": "eu-west-1"}})); err != nil {
 		t.Fatalf("a new pool under the old name: %v", err)
 	}
 	newID := f.query(t, `SELECT id FROM pools WHERE name = 'burst'`)
 	for range 2 {
-		f.check(t, readPool(t, f.ctx, f.s, newID))
+		f.check(t, readPoolRow(t, f.ctx, f.s, newID))
 		f.check(t, f.pool(t))
 	}
 	f.noneTerminated(t)
@@ -677,7 +677,7 @@ func TestRenamePoolWithoutHosts(t *testing.T) {
 	if _, err := renameConfirmed(ctx, s, "", "lab2", "lab3", false); err != nil {
 		t.Fatalf("a static pool renamed again: %v", err)
 	}
-	if readPool(t, ctx, s, "ps").RenamedAt != nil {
+	if readPoolRow(t, ctx, s, "ps").RenamedAt != nil {
 		t.Error("a static pool's rename set renamed_at")
 	}
 	armed := func() string {
@@ -698,7 +698,7 @@ func TestRenamePoolWithoutHosts(t *testing.T) {
 	if _, err := renameConfirmed(ctx, s, "", "burst2", "burst3", false); err != nil {
 		t.Fatalf("ec2 again: %v", err)
 	}
-	if readPool(t, ctx, s, "pe").RenamedAt == nil {
+	if readPoolRow(t, ctx, s, "pe").RenamedAt == nil {
 		t.Error("an ec2 pool's rename left renamed_at unset")
 	}
 	if n := armed(); n != "1" {
@@ -732,7 +732,7 @@ func TestRenamePoolDryRun(t *testing.T) {
 func TestLaunchTagsThePoolID(t *testing.T) {
 	f := newRenameFixture(t, false)
 	f.cloud.launches = true
-	if err := f.s.launch(f.ctx, f.cloud, f.pool(t)); err != nil {
+	if err := f.s.launch(f.ctx, f.cloud, f.pool(t), nil); err != nil {
 		t.Fatal(err)
 	}
 	pids := f.cloud.launchedIDs()
@@ -760,7 +760,7 @@ func TestRenamePoolLaunchUnderTheOldNameIsSkipped(t *testing.T) {
 	before := f.pool(t)
 	f.rename(t, "burst", "burst-eu")
 	prov := &fakeLaunchProvider{}
-	if err := f.s.launch(f.ctx, prov, before); err != nil {
+	if err := f.s.launch(f.ctx, prov, before, nil); err != nil {
 		t.Fatal(err)
 	}
 	if prov.env != nil {
@@ -769,7 +769,7 @@ func TestRenamePoolLaunchUnderTheOldNameIsSkipped(t *testing.T) {
 	if n := f.query(t, `SELECT count(*)::text FROM hosts WHERE pool = 'burst'`); n != "0" {
 		t.Errorf("%s host rows under the old name", n)
 	}
-	if err := f.s.launch(f.ctx, prov, f.pool(t)); err != nil || prov.env == nil {
+	if err := f.s.launch(f.ctx, prov, f.pool(t), nil); err != nil || prov.env == nil {
 		t.Fatalf("launch under the new name: %v", err)
 	}
 }

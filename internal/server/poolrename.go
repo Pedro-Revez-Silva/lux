@@ -209,8 +209,9 @@ func (s *Server) rename(ctx context.Context, tenantID string, a renameArgs) (Poo
 		}
 	}
 	var err error
-	// Runs are locked before hosts, as drainHosts does; a deadlock with a
-	// path taking them the other way round is retried.
+	// Runs are locked before hosts, as drainHosts does (lock order:
+	// infraevents.go); a deadlock with a path taking them the other way
+	// round is retried.
 	for range 3 {
 		out, err = s.renamePoolTx(ctx, tenantID, a)
 		var pe *pgconn.PgError
@@ -225,9 +226,6 @@ func (s *Server) rename(ctx context.Context, tenantID string, a renameArgs) (Poo
 	if err != nil || dryRun {
 		return out, err
 	}
-	// TODO(pool-events): write a "renamed" pool event (from, to, hosts,
-	// runs, instances) in renamePoolTx's transaction once the pool events
-	// table exists.
 	s.log.Info("pool renamed", "tenant", tenantID, "from", from, "to", to,
 		"hosts", out.Hosts, "runs", out.Runs, "instances", out.Instances)
 	return out, nil
@@ -237,9 +235,16 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 	from, to, dryRun := a.From, a.To, a.DryRun
 	out := PoolRenamed{DryRun: dryRun}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// The owner's default lock first, as every writer of a default
+		// mark takes it: a Run naming no pool resolves its owner's default
+		// under it (submitRun), so it never resolves to a name this rename
+		// is moving away from.
+		if err := lockDefaultPool(ctx, tx, tenantID); err != nil {
+			return err
+		}
 		// Both names, the owner's then across owners, each in name order:
 		// a tenant creating a pool under either name would change which of
-		// its Runs a platform rename moves.
+		// its unbound Runs a platform rename moves.
 		for _, name := range []string{min(from, to), max(from, to)} {
 			if err := lockPoolName(ctx, tx, tenantID, name); err != nil {
 				return err
@@ -283,24 +288,28 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 			}
 		}
 
-		// A platform pool's Runs are those of every tenant that names it
-		// and has no live pool of its own by that name (as poolState's
-		// demand counts them). Final Runs move too, but are not counted
-		// among the Runs that will schedule under the new name.
+		// The pool's Runs are those bound to it: its name and its owner
+		// (runs.pool_owner), whoever submitted them. A Run bound to no
+		// pool row (pool_owner NULL: from before 033, or a name no pool had
+		// at submit) follows as poolState's demand counts it: a tenant
+		// pool's, its tenant's; a platform pool's, those of tenants with no
+		// live pool of their own by that name. Final Runs move too, but are
+		// not counted among the Runs that will schedule under the new name.
 		runs := `FROM runs r WHERE coalesce(r.spec->'placement'->>'pool', 'default') = $2
-			AND CASE WHEN $1 = '' THEN NOT EXISTS (SELECT 1 FROM pools o WHERE o.tenant_id = r.tenant_id AND o.name = $2 AND NOT o.retired)
+			AND CASE WHEN r.pool_owner IS NOT NULL THEN r.pool_owner = $1
+			         WHEN $1 = '' THEN NOT EXISTS (SELECT 1 FROM pools o WHERE o.tenant_id = r.tenant_id AND o.name = $2 AND NOT o.retired)
 			         ELSE r.tenant_id = $1 END`
 		if err := tx.QueryRow(ctx, `SELECT count(*) `+runs+` AND r.state NOT IN ('succeeded', 'failed', 'cancelled')`, tenantID, from).Scan(&out.Runs); err != nil {
 			return err
 		}
 		if checkName && tenantID == "" {
-			// A tenant whose Runs follow the platform pool, and who owns a
-			// pool by the new name, would find them resolved to its own.
-			// TODO(pool-owner): select these Runs by runs.pool_owner once it
-			// exists, rather than by "no pool of their own by that name".
+			// A tenant whose unbound Runs follow the platform pool, and who
+			// owns a pool by the new name, would find them resolved to its
+			// own. Bound Runs keep the platform as their owner.
 			var tenant string
 			err := tx.QueryRow(ctx, `SELECT coalesce(t.name, o.tenant_id) FROM pools o LEFT JOIN tenants t ON t.id = o.tenant_id
-				WHERE o.name = $3 AND NOT o.retired AND o.tenant_id IN (SELECT r.tenant_id `+runs+` AND r.state NOT IN ('succeeded', 'failed', 'cancelled'))
+				WHERE o.name = $3 AND NOT o.retired AND o.tenant_id IN (SELECT r.tenant_id `+runs+`
+					AND r.pool_owner IS NULL AND r.state NOT IN ('succeeded', 'failed', 'cancelled'))
 				ORDER BY 1 LIMIT 1`, tenantID, from, to).Scan(&tenant)
 			if err == nil {
 				return errf(http.StatusConflict, "pool_exists",
@@ -350,14 +359,19 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 				return err
 			}
 		}
+		// The default mark is the row's: it stays with the pool.
 		if _, err := tx.Exec(ctx, `UPDATE pools SET name = $2,
 				previous_names = array_append(array_remove(previous_names, $2), $3),
 				renamed_at = CASE WHEN provider <> 'static' THEN now() ELSE renamed_at END
 			WHERE id = $1`, id, to, from); err != nil {
 			return err
 		}
-		out.Pool, err = poolByID(ctx, tx, id)
-		return err
+		if out.Pool, err = poolByID(ctx, tx, id); err != nil {
+			return err
+		}
+		// Last: event streams come after every row lock (infraevents.go).
+		return poolEvent(ctx, tx, id, evRenamed, map[string]any{"from": from, "to": to,
+			"hosts": out.Hosts, "runs": out.Runs, "instances": out.Instances, "isDefault": *out.Pool.IsDefault})
 	})
 	return out, err
 }
@@ -517,13 +531,7 @@ func checkRenameTarget(ctx context.Context, tx pgx.Tx, tenantID, to string) erro
 }
 
 func poolByID(ctx context.Context, tx pgx.Tx, id string) (Pool, error) {
-	var pl Pool
-	var sda int
-	err := tx.QueryRow(ctx, `SELECT `+poolColumns+` FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id WHERE p.id = $1`, id).Scan(
-		&pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts,
-		&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency)
-	pl.ScaleDownAfter.Duration = time.Duration(sda) * time.Second
-	return pl, err
+	return scanPool(tx.QueryRow(ctx, `SELECT `+poolColumns+` FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id WHERE p.id = $1`, id))
 }
 
 // poolTagValue is a pool name as its instances' lux:pool tag has it.
