@@ -542,26 +542,10 @@ func (a *app) poolsCmd() *cobra.Command {
 				return a.json(resp.Pools)
 			}
 			var rows [][]string
-			renaming := false
 			for _, p := range resp.Pools {
-				renaming = renaming || p.RenamedFrom != nil
+				rows = append(rows, []string{p.Name, p.Provider, fmt.Sprintf("%d-%d", p.MinHosts, p.MaxHosts), fmt.Sprint(p.WarmHosts), fmt.Sprint(p.Shared)})
 			}
-			for _, p := range resp.Pools {
-				row := []string{p.Name, p.Provider, fmt.Sprintf("%d-%d", p.MinHosts, p.MaxHosts), fmt.Sprint(p.WarmHosts), fmt.Sprint(p.Shared)}
-				if renaming {
-					from := "-"
-					if p.RenamedFrom != nil {
-						from = *p.RenamedFrom
-					}
-					row = append(row, from)
-				}
-				rows = append(rows, row)
-			}
-			header := "NAME\tPROVIDER\tHOSTS\tWARM\tSHARED"
-			if renaming {
-				header += "\tRENAMED FROM"
-			}
-			a.table(header, rows)
+			a.table("NAME\tPROVIDER\tHOSTS\tWARM\tSHARED", rows)
 			return nil
 		},
 	}
@@ -607,10 +591,8 @@ terminated once idle; their live Runs finish where they are.
 		Long: `Rename a pool. Its hosts, host tokens and Runs not yet final follow at
 once: Runs waiting for it still schedule, under the new name. Finished
 Runs keep the spec they ran with. A provisioned pool's instances keep
-running and are re-tagged with the new name in the background; until
-that is done the pool cannot be renamed again (pools ls shows RENAMED
-FROM). The old name stays reserved, as one of the pool's aliases, until
-no instance has carried it for a while.`,
+running; their lux:pool name tag is updated in the background. The old
+name is free for another pool at once.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var out server.PoolRenamed
@@ -624,7 +606,7 @@ no instance has carried it for a while.`,
 			}
 			fmt.Fprintf(a.stdout, "renamed %s to %s: %d hosts, %d Runs not yet final", args[0], out.Pool.Name, out.Hosts, out.Runs)
 			if out.Instances > 0 {
-				fmt.Fprintf(a.stdout, "; %d instances to re-tag", out.Instances)
+				fmt.Fprintf(a.stdout, "; %d instances keep running", out.Instances)
 			}
 			fmt.Fprintln(a.stdout)
 			return nil

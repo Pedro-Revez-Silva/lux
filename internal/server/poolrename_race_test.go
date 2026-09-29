@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -94,28 +95,28 @@ func (f *renameFixture) pass(t *testing.T, s *Server, pl poolRow, lease *passLea
 	return done
 }
 
-func listing(tag string) func(string, map[string]string) bool {
-	return func(call string, tags map[string]string) bool { return call == "Instances" && tags[tagPool] == tag }
-}
-
-// A pass lists the pool under its old name; meanwhile the rename commits
-// and the instances' new tag lands. The listing, answered after that,
-// finds none of the pool's hosts: they are looked up by id, found running,
-// and kept.
-func TestRenameRaceStalePassAfterRetag(t *testing.T) {
+// A pass reads the pool before a rename and lists its instances while
+// the rename commits and a name tag changes: the listing is by
+// lux:pool-id, so the pass finds them all and keeps them.
+func TestRenameRaceStalePass(t *testing.T) {
 	f := newRenameFixture(t, true)
-	g := f.gate(t, false, listing("t1/burst"))
+	g := f.gate(t, false, func(call string, tags map[string]string) bool { return call == "Instances" })
 	done := f.pass(t, f.s, f.pool(t), takeLease(t, f.ctx, f.s))
 	g.waitEntered(t, "the pass's listing")
 
 	f.rename(t, "burst", "burst-eu")
-	if err := f.cloud.Retag(f.ctx, nil, []string{"i-1", "i-2"}, tagPool, "t1/burst-eu"); err != nil {
-		t.Fatal(err)
-	}
+	f.cloud.setTag("i-1", tagPool, "t1/elsewhere")
 	g.open()
 	if err := recv(t, f.ctx, done, "the pass"); err != nil {
 		t.Fatal(err)
 	}
+	f.noneTerminated(t)
+	// i-1's differed from the name the pass read: set to the name as of the
+	// call. i-2's matched it: the next check sets it.
+	if got := f.cloud.tag("i-1", tagPool); got != "t1/burst-eu" {
+		t.Errorf("i-1 lux:pool = %q", got)
+	}
+	f.check(t, f.pool(t))
 	f.noneTerminated(t)
 	for _, pid := range []string{"i-1", "i-2"} {
 		if got := f.cloud.tag(pid, tagPool); got != "t1/burst-eu" {
@@ -167,14 +168,14 @@ func TestRenameRaceLeaseHandoffFencesThePass(t *testing.T) {
 // terminating, its host row, now under the new name, claims it.
 func TestRenameRaceLaunchDuringListingIsNoOrphan(t *testing.T) {
 	f := newRenameFixture(t, false)
-	g := f.gate(t, false, listing("t1/burst"))
+	g := f.gate(t, false, func(call string, tags map[string]string) bool { return call == "Instances" })
 	done := f.pass(t, f.s, f.pool(t), takeLease(t, f.ctx, f.s))
 	g.waitEntered(t, "the pass's listing")
 
 	execSQL(t, f.s, f.ctx, `INSERT INTO host_tokens (id, tenant_id, pool, token_hash) VALUES ('tok3', 't1', 'burst', 'x3')`)
-	execSQL(t, f.s, f.ctx, `INSERT INTO hosts (id, tenant_id, name, pool, token_id, state, provision_requested_at, tagged, launch_template)
-		VALUES ('h3', 't1', 'burst-h3', 'burst', 'tok3', 'provisioning', now(), true, '{"region":"eu-west-1"}')`)
-	f.cloud.add("i-3", map[string]string{tagManaged: "true", tagDeployment: "d1", tagPool: "t1/burst", tagHost: "h3"})
+	execSQL(t, f.s, f.ctx, `INSERT INTO hosts (id, tenant_id, name, pool, token_id, state, provision_requested_at, tagged, pool_id_tagged, launch_template)
+		VALUES ('h3', 't1', 'burst-h3', 'burst', 'tok3', 'provisioning', now(), true, true, '{"region":"eu-west-1"}')`)
+	f.cloud.add("i-3", instanceTags("t1/burst", "h3"))
 	f.rename(t, "burst", "burst-eu")
 	g.open()
 	if err := recv(t, f.ctx, done, "the pass"); err != nil {
@@ -184,15 +185,17 @@ func TestRenameRaceLaunchDuringListingIsNoOrphan(t *testing.T) {
 	if got := f.query(t, `SELECT coalesce(provider_id, '') FROM hosts WHERE id = 'h3'`); got != "i-3" {
 		t.Errorf("h3 provider_id = %q, want i-3 recorded", got)
 	}
+	f.check(t, f.pool(t))
+	f.noneTerminated(t)
 	if got := f.cloud.tag("i-3", tagPool); got != "t1/burst-eu" {
-		t.Errorf("i-3 lux:pool = %q, want re-tagged to the pool's name", got)
+		t.Errorf("i-3 lux:pool = %q, want the pool's name", got)
 	}
 }
 
-// An expired provisioner's burst → burst-eu CreateTags lands after its
-// successor finished that rename and a second one, burst-eu → burst-us.
-// The instances then carry a name no pool lists: looked up by id, found
-// running, they are kept and re-tagged burst-us.
+// An expired provisioner's name re-tag (burst-eu) lands after its
+// successor re-tagged for a second rename (burst-us). The instances keep
+// being found by lux:pool-id, nothing is terminated, and the next check
+// puts the current name back.
 func TestRenameRaceLateRetagAfterSecondRename(t *testing.T) {
 	f := newRenameFixture(t, true)
 	f.rename(t, "burst", "burst-eu")
@@ -205,25 +208,10 @@ func TestRenameRaceLateRetagAfterSecondRename(t *testing.T) {
 	execSQL(t, f.s, f.ctx, `UPDATE leases SET expires_at = now() - interval '1 second' WHERE name = 'provisioner'`)
 	s2 := f.otherLuxd(t)
 	l2 := takeLease(t, f.ctx, s2)
-	converge := func(name string) {
-		t.Helper()
-		for range 2 {
-			if err := s2.reconcilePool(f.ctx, f.cloud, f.pool(t), true, l2); err != nil {
-				t.Fatal(err)
-			}
-			time.Sleep(f.s.cfg.ListingLag)
-		}
-		if err := s2.reconcilePool(f.ctx, f.cloud, f.pool(t), true, l2); err != nil {
-			t.Fatal(err)
-		}
-		if pl := f.pool(t); pl.Name != name || pl.RenamedFrom != nil {
-			t.Fatalf("pool %s renamed from %v, want %s finished", pl.Name, pl.RenamedFrom, name)
-		}
-	}
-	converge("burst-eu")
-	execSQL(t, f.s, f.ctx, `UPDATE pools SET rename_finished_at = now() - interval '1 hour'`)
 	f.rename(t, "burst-eu", "burst-us")
-	converge("burst-us")
+	if err := s2.reconcilePool(f.ctx, f.cloud, f.pool(t), true, l2); err != nil {
+		t.Fatal(err)
+	}
 	for _, pid := range []string{"i-1", "i-2"} {
 		if got := f.cloud.tag(pid, tagPool); got != "t1/burst-us" {
 			t.Fatalf("%s lux:pool = %q before the late re-tag", pid, got)
@@ -248,29 +236,23 @@ func TestRenameRaceLateRetagAfterSecondRename(t *testing.T) {
 	}
 }
 
-// A settled host missing from its pool's listing (its lux:pool is not the
-// pool's) is looked up by id: running, it is kept and re-tagged.
+// A settled host missing from its pool's listing (its lux:pool-id was
+// removed behind luxd's back) is looked up by id: running, it is kept and
+// tagged again. One the provider says is gone is written off.
 func TestRenameRaceUnlistedRunningHostIsKept(t *testing.T) {
 	f := newRenameFixture(t, true)
-	g := f.gate(t, false, listing("t1/burst"))
-	done := f.pass(t, f.s, f.pool(t), takeLease(t, f.ctx, f.s))
-	g.waitEntered(t, "the pass's listing")
-	if err := f.cloud.Retag(f.ctx, nil, []string{"i-1"}, tagPool, "t1/elsewhere"); err != nil {
-		t.Fatal(err)
-	}
-	g.open()
-	if err := recv(t, f.ctx, done, "the pass"); err != nil {
-		t.Fatal(err)
-	}
+	f.cloud.mu.Lock()
+	delete(f.cloud.insts["i-1"].tags, tagPoolID)
+	f.cloud.mu.Unlock()
+	f.check(t, f.pool(t))
 	f.noneTerminated(t)
-	if got := f.cloud.tag("i-1", tagPool); got != "t1/burst" {
-		t.Errorf("i-1 lux:pool = %q, want re-tagged t1/burst", got)
+	if got := f.cloud.tag("i-1", tagPoolID); got != "pool1" {
+		t.Errorf("i-1 lux:pool-id = %q, want tagged again", got)
 	}
-	// One the provider says is gone is written off.
-	f.cloud.before = nil
 	if err := f.cloud.Terminate(f.ctx, nil, "i-2"); err != nil {
 		t.Fatal(err)
 	}
+	f.cloud.terminated = nil
 	f.cloud.hidden = map[string]bool{"i-2": true}
 	f.check(t, f.pool(t))
 	if got := f.query(t, `SELECT state FROM hosts WHERE id = 'h2'`); got != "terminated" {
@@ -278,6 +260,9 @@ func TestRenameRaceUnlistedRunningHostIsKept(t *testing.T) {
 	}
 	if got := f.query(t, `SELECT state FROM hosts WHERE id = 'h1'`); got == "terminated" {
 		t.Error("h1 written off")
+	}
+	if got := f.cloud.terminatedIDs(); len(got) > 0 {
+		t.Errorf("terminated %v", got)
 	}
 }
 
@@ -343,48 +328,60 @@ func TestProvisionLeaseToken(t *testing.T) {
 	}
 }
 
-// A launch whose RunInstances, sent with the old tag, is answered only
-// after the rename committed and finished (its host row timed out
-// meanwhile): the instance is listed under the pool's alias and, claimed
-// by no live row, terminated as an orphan, never leaked.
-func TestRenameRaceLateLaunchUnderTheOldTag(t *testing.T) {
-	f := newRenameFixture(t, false)
-	f.cloud.launches = true
-	execSQL(t, f.s, f.ctx, `UPDATE pools SET min_hosts = 3`)
-	g := f.gate(t, true, func(call string, tags map[string]string) bool { return call == "Launch" })
-	launching := f.pass(t, f.s, f.pool(t), takeLease(t, f.ctx, f.s))
-	g.waitEntered(t, "the launch's RunInstances")
-	if got := f.query(t, `SELECT pool FROM hosts WHERE provider_id IS NULL`); got != "burst" {
-		t.Fatalf("the launching row is in pool %q", got)
-	}
-	execSQL(t, f.s, f.ctx, `UPDATE pools SET min_hosts = 0`)
+// A launch whose RunInstances, sent with the old name tag and the pool's
+// id, is held until after the rename. Answered while its host row still
+// waits, the row claims the instance; answered after the row timed out
+// (its reply lost), the instance is found by lux:pool-id and terminated
+// as an orphan. Either way it is never leaked, and no other host is
+// touched.
+func TestRenameRaceLateLaunchUnderTheOldName(t *testing.T) {
+	for _, timedOut := range []bool{false, true} {
+		t.Run(fmt.Sprintf("timedOut=%v", timedOut), func(t *testing.T) {
+			f := newRenameFixture(t, false)
+			f.cloud.launches = true
+			execSQL(t, f.s, f.ctx, `UPDATE pools SET min_hosts = 3`)
+			g := f.gate(t, true, func(call string, tags map[string]string) bool { return call == "Launch" })
+			launching := f.pass(t, f.s, f.pool(t), takeLease(t, f.ctx, f.s))
+			g.waitEntered(t, "the launch's RunInstances")
+			execSQL(t, f.s, f.ctx, `UPDATE pools SET min_hosts = 0`)
 
-	f.rename(t, "burst", "burst-eu")
-	// The launch outlives LaunchTimeout: its row is written off.
-	execSQL(t, f.s, f.ctx, `UPDATE hosts SET provision_requested_at = now() - interval '1 day' WHERE provider_id IS NULL`)
-	f.check(t, f.pool(t))
-	time.Sleep(f.s.cfg.ListingLag)
-	f.check(t, f.pool(t))
-	if pl := f.pool(t); pl.RenamedFrom != nil {
-		t.Fatalf("rename unfinished (from %v) with no launch in flight", *pl.RenamedFrom)
-	}
-
-	g.open()
-	if err := recv(t, f.ctx, launching, "the launching pass"); err != nil {
-		t.Fatal(err)
-	}
-	late := f.cloud.launchedIDs()
-	if len(late) != 1 || f.cloud.tag(late[0], tagPool) != "t1/burst" {
-		t.Fatalf("launched %v, want one instance tagged with the old name", late)
-	}
-	f.check(t, f.pool(t))
-	if got := f.cloud.terminatedIDs(); !slices.Equal(got, late) {
-		t.Fatalf("terminated %v, want the late launch %v", got, late)
-	}
-	for _, h := range []string{"h1", "h2"} {
-		if got := f.query(t, `SELECT state FROM hosts WHERE id = $1`, h); got == "terminated" {
-			t.Errorf("%s written off", h)
-		}
+			f.rename(t, "burst", "burst-eu")
+			if timedOut {
+				// The launch outlives LaunchTimeout: its row is written off.
+				execSQL(t, f.s, f.ctx, `UPDATE hosts SET provision_requested_at = now() - interval '1 day' WHERE provider_id IS NULL`)
+				f.check(t, f.pool(t))
+				if n := f.query(t, `SELECT count(*)::text FROM hosts WHERE state <> 'terminated'`); n != "2" {
+					t.Fatalf("%s live hosts after the launch timed out", n)
+				}
+			}
+			g.open()
+			recv(t, f.ctx, launching, "the launching pass")
+			late := f.cloud.launchedIDs()
+			if len(late) != 1 || f.cloud.tag(late[0], tagPool) != "t1/burst" || f.cloud.tag(late[0], tagPoolID) != "pool1" {
+				t.Fatalf("launched %v, want one instance tagged with the old name and the pool's id", late)
+			}
+			f.check(t, f.pool(t))
+			if timedOut {
+				if got := f.cloud.terminatedIDs(); !slices.Equal(got, late) {
+					t.Fatalf("terminated %v, want the late launch %v", got, late)
+				}
+			} else {
+				if got := f.cloud.terminatedIDs(); len(got) > 0 {
+					t.Fatalf("terminated %v", got)
+				}
+				if got := f.query(t, `SELECT pool FROM hosts WHERE provider_id = $1`, late[0]); got != "burst-eu" {
+					t.Fatalf("the late launch's host is in pool %q", got)
+				}
+				if got := f.cloud.tag(late[0], tagPool); got != "t1/burst-eu" {
+					t.Errorf("the late launch's lux:pool = %q", got)
+				}
+			}
+			for _, h := range []string{"h1", "h2"} {
+				if got := f.query(t, `SELECT state FROM hosts WHERE id = $1`, h); got == "terminated" {
+					t.Errorf("%s written off", h)
+				}
+			}
+		})
 	}
 }
 

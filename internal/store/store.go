@@ -187,11 +187,14 @@ func ensureAppRoleOnce(ctx context.Context, conn *pgx.Conn, password string) err
 		"REVOKE ALL ON schema_migrations FROM lux_app",
 		// Events are an audit trail: the app appends, never rewrites.
 		"REVOKE UPDATE, DELETE ON run_events FROM lux_app",
-		// Not PUBLIC's (migration 022); absent in a database migrated only
-		// part of the way (tests).
+		// Not PUBLIC's (migrations 022, 031); absent in a database migrated
+		// only part of the way (tests).
 		`DO $$ BEGIN
 			IF to_regprocedure('lux_cost_enqueue(text, text)') IS NOT NULL THEN
 				GRANT EXECUTE ON FUNCTION lux_cost_enqueue(text, text) TO lux_app;
+			END IF;
+			IF to_regprocedure('lux_pool_renamed_to(text)') IS NOT NULL THEN
+				GRANT EXECUTE ON FUNCTION lux_pool_renamed_to(text) TO lux_app;
 			END IF;
 		END $$`,
 	)

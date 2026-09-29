@@ -1,54 +1,29 @@
--- 031_pool_rename.sql — renaming a provisioned pool
--- (internal/server/poolrename.go). The database moves to the new name in
--- one transaction; the provider's instances are re-tagged afterwards, by
--- the provisioner.
---
--- pool_tag_aliases: lux:pool tag values a pool's instances may still
---   carry, one row per name the pool was renamed away from. The
---   provisioner lists the pool under its name and every live alias
---   (retired_at NULL), and a live alias is reserved: no pool of the owner
---   may take it, so no other pool lists these instances as its orphans.
---   An instance launched with the old tag after the rename (its
---   RunInstances in flight across it) is still listed, and claimed or
---   terminated as an orphan.
--- finished_at: the rename away from this name finished: a provider check
---   listed nothing under any alias and every live host under the pool's
---   name. At most one alias per pool is unfinished.
--- empty_since: since when every provider check found nothing under this
---   alias (NULL once one found something). An alias is retired once
---   finished and empty for twice the longest a launch can take to show in
---   the listings.
--- tenant_id: the pool's, copied so the reservation is one unique index.
-CREATE TABLE pool_tag_aliases (
-  id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  pool_id     text NOT NULL REFERENCES pools(id),
-  tenant_id   text REFERENCES tenants(id),
-  name        text NOT NULL,
-  added_at    timestamptz NOT NULL DEFAULT now(),
-  finished_at timestamptz,
-  empty_since timestamptz,
-  retired_at  timestamptz
-);
-CREATE UNIQUE INDEX pool_tag_aliases_live ON pool_tag_aliases (coalesce(tenant_id, ''), name) WHERE retired_at IS NULL;
-CREATE UNIQUE INDEX pool_tag_aliases_unfinished ON pool_tag_aliases (pool_id) WHERE retired_at IS NULL AND finished_at IS NULL;
-CREATE INDEX pool_tag_aliases_pool ON pool_tag_aliases (pool_id) WHERE retired_at IS NULL;
-ALTER TABLE pool_tag_aliases ENABLE ROW LEVEL SECURITY;
-CREATE POLICY tenant_rows ON pool_tag_aliases USING (tenant_id = lux_tenant() OR lux_system()) WITH CHECK (tenant_id = lux_tenant() OR lux_system());
+-- 031_pool_rename.sql — renaming a pool (internal/server/poolrename.go).
+-- The provisioner finds a pool's instances by an immutable tag,
+-- lux:pool-id (pools.id), not by its name (lux:pool), so a rename is a
+-- database change; the name tag is updated afterwards, for people only.
 
--- retagged_at: when the provisioner last re-tagged some of the pool's
---   instances; the rename does not finish until listing_lag after it.
--- rename_finished_at: when the last rename finished. A late re-tag from an
---   expired provisioner may still land for a while after it, so the pool
---   is not renamed again until the lease and listing_lag have passed.
-ALTER TABLE pools ADD COLUMN retagged_at timestamptz;
-ALTER TABLE pools ADD COLUMN rename_finished_at timestamptz;
-
--- not_found_since: when a provider check first found a provisioned host's
--- instance unknown to the provider (EC2's InvalidInstanceID.NotFound),
--- cleared on any sighting of it. The provider is eventually consistent:
--- a just-launched instance may be unknown for a while, so NotFound writes
--- a host off only when seen again listing_lag later, on an old host.
+-- pool_id_tagged: the host's instance carries lux:pool-id: launched with
+--   it, or seen carrying it by a provider check. Hosts from before this
+--   migration do not; while a pool has a live one, the provisioner also
+--   lists the pool by name, tags what it finds with lux:pool-id, and the
+--   pool cannot be renamed.
+-- not_found_since: when a provider check first found the host's instance
+--   unknown to the provider (EC2's InvalidInstanceID.NotFound), cleared on
+--   any sighting. EC2 is eventually consistent: a just-launched instance
+--   may be unknown for a while, so NotFound writes a host off only when
+--   seen again listing_lag later, on an old host.
+ALTER TABLE hosts ADD COLUMN pool_id_tagged boolean NOT NULL DEFAULT false;
 ALTER TABLE hosts ADD COLUMN not_found_since timestamptz;
+
+-- renamed_at: when the pool was last renamed; a provisioned pool having
+--   one fences older luxd out of the provisioner lease (below).
+-- previous_names: names the pool had, oldest first: a host token or Run
+--   naming one while nothing else does is refused, naming the pool's new
+--   name, rather than joining a pool that no longer exists. Any pool may
+--   take one.
+ALTER TABLE pools ADD COLUMN renamed_at timestamptz;
+ALTER TABLE pools ADD COLUMN previous_names text[] NOT NULL DEFAULT '{}';
 
 -- A fencing token: a new one each time a different holder takes the lease,
 -- so a provisioner pass can tell, before each destructive provider call,
@@ -57,11 +32,13 @@ ALTER TABLE hosts ADD COLUMN not_found_since timestamptz;
 -- out a token already used.
 CREATE SEQUENCE lease_tokens;
 ALTER TABLE leases ADD COLUMN token bigint NOT NULL DEFAULT 0;
+-- The lease is now a fence: luxd's own, as control_samples are; no
+-- tenant scope reads or moves it.
+ALTER TABLE leases ENABLE ROW LEVEL SECURITY;
+CREATE POLICY system_only ON leases USING (lux_system()) WITH CHECK (lux_system());
 
 -- Every luxd process on this database, as of its last check-in: its
--- version and what it can do. A pool rename refuses to start while a luxd
--- that cannot follow one (an older binary, seen only in control_samples)
--- may hold the provisioner lease. instance is control_samples.instance.
+-- version and what it can do. instance is control_samples.instance.
 CREATE TABLE luxd_instances (
   instance     text PRIMARY KEY,
   version      text NOT NULL,
@@ -71,24 +48,20 @@ CREATE TABLE luxd_instances (
 ALTER TABLE luxd_instances ENABLE ROW LEVEL SECURITY;
 CREATE POLICY system_only ON luxd_instances USING (lux_system()) WITH CHECK (lux_system());
 
--- The fence against an older luxd provisioning while a pool has a live
--- alias: it would list the pool under its current name only, and
--- terminate every instance still carrying an alias. Taking the
--- provisioner lease (an INSERT, or an UPDATE that changes its holder or
--- follows its expiry) is refused then unless the new holder checked in
--- with the pool-rename capability. A luxd checks in before its first
--- attempt at the lease, and its instance id is new with every process, so
--- the row's presence is enough; an older binary never writes one. Its
--- attempts fail, are logged and retried; with no live alias, anyone may
--- hold the lease.
+-- An older luxd lists a pool's instances by name: once a provisioned pool
+-- has been renamed, instances whose lux:pool still carries an old name
+-- (the re-tag is asynchronous) would be missed or taken for another
+-- pool's orphans. So once any such pool has a renamed_at, taking the provisioner lease (an INSERT, or an UPDATE that
+-- changes its holder or follows its expiry) is refused unless the new
+-- holder checked in with the pool-id-discovery capability. A luxd checks
+-- in before its first attempt at the lease, and its instance id is new
+-- with every process; an older binary never checks in. Before the first
+-- rename, a mixed fleet provisions as it always did.
 -- A rename makes sure the lease row exists (holder '', expired: a
 -- placeholder anyone may take) and locks it before it reads the holder and
--- adds an alias (poolrename.go). Taking the lease updates that row, so it
--- waits for the rename's commit and its check, run after the wait with a
--- fresh snapshot, sees the alias; or it committed first, and the rename
--- sees the new holder.
--- SECURITY DEFINER: the check sees every alias whatever the writer's
--- row-level scope.
+-- sets renamed_at, so a lease acquisition waits for the rename's commit and
+-- sees renamed_at, or commits first and the rename sees the new holder.
+-- SECURITY DEFINER: the check sees every pool whatever the writer's scope.
 CREATE FUNCTION lux_provisioner_lease_fence() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 BEGIN
@@ -98,9 +71,9 @@ BEGIN
   IF TG_OP = 'UPDATE' AND OLD.holder = NEW.holder AND OLD.expires_at > clock_timestamp() THEN
     RETURN NEW; -- a renewal
   END IF;
-  IF EXISTS (SELECT 1 FROM pool_tag_aliases WHERE retired_at IS NULL)
-     AND NOT EXISTS (SELECT 1 FROM luxd_instances WHERE instance = NEW.holder AND 'pool-rename' = ANY (capabilities)) THEN
-    RAISE EXCEPTION 'luxd % cannot follow a pool rename: it may not take the provisioner lease while a pool has a live alias (upgrade it)', NEW.holder
+  IF EXISTS (SELECT 1 FROM pools WHERE renamed_at IS NOT NULL AND provider <> 'static')
+     AND NOT EXISTS (SELECT 1 FROM luxd_instances WHERE instance = NEW.holder AND 'pool-id-discovery' = ANY (capabilities)) THEN
+    RAISE EXCEPTION 'luxd % discovers instances by pool name: it may not take the provisioner lease once a pool has been renamed (upgrade it)', NEW.holder
       USING ERRCODE = 'LX001';
   END IF;
   RETURN NEW;
@@ -108,3 +81,22 @@ END $$;
 REVOKE ALL ON FUNCTION lux_provisioner_lease_fence() FROM PUBLIC;
 CREATE TRIGGER leases_provisioner_fence BEFORE INSERT OR UPDATE ON leases
   FOR EACH ROW EXECUTE FUNCTION lux_provisioner_lease_fence();
+
+-- The name a Run's pool was renamed to, for the caller's tenant: a live
+-- pool of the tenant or the platform that was once named $1, when no live
+-- pool, live host or live host token of either answers to $1 now (the
+-- tenant's own first). NULL otherwise. submitRun runs in the tenant's
+-- scope, where platform pools are out of reach; this runs as the tables'
+-- owner and reveals only names of pools the tenant's Runs may use. Only
+-- lux_app may call it (store.ensureAppRole).
+CREATE FUNCTION lux_pool_renamed_to(text) RETURNS text
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT p.name FROM pools p
+  WHERE (p.tenant_id = lux_tenant() OR p.tenant_id IS NULL) AND NOT p.retired AND $1 = ANY (p.previous_names)
+    AND NOT EXISTS (SELECT 1 FROM pools o WHERE (o.tenant_id = lux_tenant() OR o.tenant_id IS NULL) AND o.name = $1 AND NOT o.retired)
+    AND NOT EXISTS (SELECT 1 FROM hosts h WHERE (h.tenant_id = lux_tenant() OR h.tenant_id IS NULL) AND h.pool = $1 AND h.state <> 'terminated')
+    AND NOT EXISTS (SELECT 1 FROM host_tokens k WHERE (k.tenant_id = lux_tenant() OR k.tenant_id IS NULL) AND k.pool = $1 AND k.revoked_at IS NULL)
+  ORDER BY p.tenant_id NULLS LAST, p.renamed_at DESC NULLS LAST
+  LIMIT 1
+$$;
+REVOKE ALL ON FUNCTION lux_pool_renamed_to(text) FROM PUBLIC;

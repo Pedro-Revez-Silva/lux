@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -29,7 +30,8 @@ type Provider interface {
 	// does not lag behind tag changes. An id the provider does not know is
 	// absent from the result, not an error; it may be one just launched.
 	Describe(ctx context.Context, template json.RawMessage, providerIDs []string) (map[string]Instance, error)
-	// Retag sets one tag on hosts it launched (a pool rename).
+	// Retag sets one tag on hosts it launched: lux:pool-id on instances
+	// launched without it, lux:pool after a pool rename.
 	Retag(ctx context.Context, template json.RawMessage, providerIDs []string, key, value string) error
 }
 
@@ -59,12 +61,15 @@ type Instance struct {
 
 // Tags lux puts on what it launches: how the provisioner finds a pool's
 // instances whatever its database knows (a launch whose reply was lost,
-// a row written off too early).
+// a row written off too early). They are listed by lux:pool-id, which
+// never changes; lux:pool, the pool's name, follows a rename afterwards
+// and is for people and cost tooling (poolrename.go).
 const (
 	tagManaged    = "lux:managed"
 	tagDeployment = "lux:deployment" // which lux database launched it
 	tagPool       = "lux:pool"
-	tagHost       = "lux:host" // the host row's id
+	tagPoolID     = "lux:pool-id" // pools.id
+	tagHost       = "lux:host"    // the host row's id
 )
 
 // provisionerLoop keeps provisioned pools the size their demand, minimum
@@ -118,23 +123,19 @@ type poolRow struct {
 	// ScaleDownAfterS: the pool's own idle seconds, or nil for luxd's.
 	ScaleDownAfterS *int
 	WarmWhileActive bool
-	// RenamedFrom: the old name while a rename is unfinished; RetaggedAt:
-	// when the provisioner last re-tagged some of its instances; Aliases:
-	// every name the pool's instances may still carry (poolrename.go).
-	// RenamedAt: when that rename committed.
-	RenamedFrom *string
-	RenamedAt   *time.Time
-	RetaggedAt  *time.Time
-	Aliases     []string
+	// RenamedAt: when the pool was last renamed; PreviousNames: the names
+	// it had.
+	RenamedAt     *time.Time
+	PreviousNames []string
+	// Legacy: some live host's instance is not confirmed to carry
+	// lux:pool-id; the pool is listed by name too (reconcileWithProvider).
+	Legacy bool
 }
 
 // poolRowColumns, selected FROM pools (not aliased).
 const poolRowColumns = `id, name, provider, tenant_id, template, min_hosts, max_hosts, warm_hosts, retired,
-	scale_down_after_s, warm_while_active,
-	(SELECT a.name FROM pool_tag_aliases a WHERE a.pool_id = pools.id AND a.retired_at IS NULL AND a.finished_at IS NULL),
-	(SELECT a.added_at FROM pool_tag_aliases a WHERE a.pool_id = pools.id AND a.retired_at IS NULL AND a.finished_at IS NULL),
-	retagged_at,
-	ARRAY(SELECT a.name FROM pool_tag_aliases a WHERE a.pool_id = pools.id AND a.retired_at IS NULL ORDER BY a.id)`
+	scale_down_after_s, warm_while_active, renamed_at, previous_names,
+	EXISTS (SELECT 1 FROM hosts h, pools p WHERE p.id = pools.id AND ` + legacyHost + `)`
 
 func (s *Server) provision(ctx context.Context) error {
 	// Leadership: a lease in the database, not a lock held on a connection
@@ -148,8 +149,7 @@ func (s *Server) provision(ctx context.Context) error {
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT `+poolRowColumns+`
 			FROM pools WHERE provider <> 'static'
-			  AND (NOT retired OR EXISTS (SELECT 1 FROM pool_tag_aliases a WHERE a.pool_id = pools.id AND a.retired_at IS NULL)
-			       OR EXISTS (SELECT 1 FROM hosts h WHERE h.pool = pools.name
+			  AND (NOT retired OR EXISTS (SELECT 1 FROM hosts h WHERE h.pool = pools.name
 			       AND coalesce(h.tenant_id, '') = coalesce(pools.tenant_id, '') AND h.state <> 'terminated'))`)
 		if err != nil {
 			return err
@@ -196,6 +196,8 @@ type poolState struct {
 	existing []hostRef
 	// Hosts launched whose instance id is not recorded yet, by id.
 	launching map[string]bool
+	// Tags the provider check found to add (applyTags).
+	tags pendingTags
 }
 
 // hostRef is a provisioned host, with the template it was launched with
@@ -213,6 +215,8 @@ type hostRef struct {
 	// set). NotFoundLong: listing_lag or longer ago, on a host created more
 	// than LaunchTimeout plus listing_lag ago: unknown again, it is gone.
 	NotFound, NotFoundLong bool
+	// PoolIDTagged: its instance is known to carry lux:pool-id.
+	PoolIDTagged bool
 }
 
 func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, checkAlive bool, lease *passLease) error {
@@ -236,6 +240,15 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 		}
 		if pl, err = pgx.CollectExactlyOneRow(rows, pgx.RowToStructByPos[poolRow]); err != nil {
 			return err
+		}
+		// Cost hours a cost pass wrote under an old name from a host row it
+		// read before the rename (poolrename.go).
+		if pl.RenamedAt != nil && time.Since(*pl.RenamedAt) < costRepairAfterRename {
+			for _, old := range pl.PreviousNames {
+				if err := renameCostHours(ctx, tx, ownerOf(pl), old, pl.Name); err != nil {
+					return err
+				}
+			}
 		}
 		return s.poolState(ctx, tx, pl, &st)
 	})
@@ -286,27 +299,28 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 
 	// Scale up: enough for what waits plus the warm hosts, at least the
 	// minimum, never past the maximum. A retired pool only winds down.
-	if pl.Retired {
-		return nil
-	}
-	want := max(pl.Min-st.total, s.warm(pl, &st)+st.demand-st.idle-st.provisioning)
-	if pl.Max > 0 {
-		want = min(want, pl.Max-st.total)
-	}
-	for i := range max(want, 0) {
-		if i > 0 {
-			if err := s.renewLease(ctx, lease); err != nil {
+	if !pl.Retired {
+		want := max(pl.Min-st.total, s.warm(pl, &st)+st.demand-st.idle-st.provisioning)
+		if pl.Max > 0 {
+			want = min(want, pl.Max-st.total)
+		}
+		for i := range max(want, 0) {
+			if i > 0 {
+				if err := s.renewLease(ctx, lease); err != nil {
+					return err
+				}
+			}
+			lctx, cancel := lease.bound(ctx)
+			err := s.launch(lctx, prov, pl)
+			cancel()
+			if err != nil {
 				return err
 			}
 		}
-		lctx, cancel := lease.bound(ctx)
-		err := s.launch(lctx, prov, pl)
-		cancel()
-		if err != nil {
-			return err
-		}
 	}
-	return nil
+
+	// Last, so a slow or refused CreateTags delays nothing else.
+	return s.applyTags(ctx, prov, pl, st.tags, lease)
 }
 
 func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl poolRow, st *poolState, lease *passLease) error {
@@ -318,19 +332,16 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 		templates[string(h.Template)] = h.Template
 		rows[h.ProviderID] = h
 	}
-	// A renamed pool is listed under every name its instances may still
-	// carry too (poolrename.go): its instances are its own whichever it is.
-	tagSets := []map[string]string{s.poolTags(pl)}
-	aliasOf := map[string]string{} // lux:pool value → alias
-	for _, a := range pl.Aliases {
-		tags := s.poolTags(pl)
-		tags[tagPool] = poolTagValue(pl.TenantID, a)
-		aliasOf[tags[tagPool]] = a
-		tagSets = append(tagSets, tags)
+	st.tags = pendingTags{templates: templates, poolID: map[string][]string{}, name: map[string][]string{}}
+	// By lux:pool-id, whatever lux:pool says. A legacy pool also by its
+	// name: instances launched before lux:pool-id carry only that.
+	tagSets := []map[string]string{s.poolIDTags(pl)}
+	if pl.Legacy {
+		tagSets = append(tagSets, s.poolNameTags(pl))
 	}
-	rc := renameCheck{stale: map[string][]string{}, templates: templates, liveUnder: map[string]bool{}, checkedAt: time.Now()}
+	name := poolTagValue(pl.TenantID, pl.Name)
 	listed := map[string]bool{}
-	listedNew := map[string]bool{} // under the pool's current name
+	var confirmed []string // host ids whose instance showed lux:pool-id
 	type orphan struct {
 		pid  string
 		tmpl json.RawMessage
@@ -339,7 +350,7 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 	var orphans []orphan
 	var gone []hostRef
 	for key, tmpl := range templates {
-		for i, tags := range tagSets {
+		for _, tags := range tagSets {
 			lctx, cancel := lease.bound(ctx)
 			insts, err := prov.Instances(lctx, tmpl, tags)
 			cancel()
@@ -348,24 +359,19 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 				return nil
 			}
 			for pid, inst := range insts {
-				if i == 0 {
-					listedNew[pid] = true
-				}
 				if listed[pid] {
-					continue // two templates in one region, or two names, list the same instances
+					continue // two templates in one region, or both tags, list the same instances
+				}
+				// Listed by name, but another pool's by id: not this pool's
+				// to claim or terminate.
+				if id := inst.Tags[tagPoolID]; id != "" && id != pl.ID {
+					continue
 				}
 				listed[pid] = true
 				isGone := instanceGone(inst)
 				h, known := rows[pid]
-				if alias, old := aliasOf[inst.Tags[tagPool]]; old && !isGone {
-					rc.liveUnder[alias] = true
-					if known {
-						rc.stale[key] = append(rc.stale[key], pid)
-					} else {
-						// A launch not recorded yet, or an orphan terminated
-						// below: the rename waits for either to settle.
-						rc.unlisted = true
-					}
+				if known && !isGone {
+					confirmed = append(confirmed, st.tags.follow(key, pid, h, inst, pl.ID, name)...)
 				}
 				switch {
 				case known && isGone:
@@ -396,21 +402,15 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 
 	// Terminated instances drop out of the provider's listings after a while
 	// (EC2 purges them): a settled host that is not listed may be gone. A
-	// tag listing alone never says so (it lags tag changes, a rename's or a
-	// late one's): each host missing from it is looked up by id
-	// (checkUnlisted). Not within listing_lag of a rename's re-tag, when an
-	// instance may briefly match no name.
-	retagging := pl.RetaggedAt != nil && time.Since(*pl.RetaggedAt) < s.cfg.ListingLag
+	// tag listing alone never says so (it lags launches and tag changes):
+	// each host missing from it is looked up by id (checkUnlisted).
 	unlisted := map[string][]hostRef{} // by template
 	var seen []string
 	for pid, h := range rows {
-		if !listedNew[pid] {
-			rc.unlisted = true
-		}
 		if listed[pid] && h.NotFound {
 			seen = append(seen, h.ID)
 		}
-		if listed[pid] || !h.Listable || retagging {
+		if listed[pid] || !h.Listable {
 			continue
 		}
 		unlisted[string(h.Template)] = append(unlisted[string(h.Template)], h)
@@ -418,13 +418,42 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 	if err := s.recordNotFound(ctx, lease, seen, nil); err != nil {
 		return err
 	}
-	for _, hosts := range unlisted {
-		if err := s.checkUnlisted(ctx, prov, pl, st, lease, hosts); err != nil {
+	for key, hosts := range unlisted {
+		ok, err := s.checkUnlisted(ctx, prov, pl, st, lease, key, hosts)
+		if err != nil {
 			return err
 		}
+		confirmed = append(confirmed, ok...)
 	}
-	if len(pl.Aliases) > 0 {
-		return s.followAliases(ctx, prov, pl, st, rc, lease)
+	return s.confirmPoolID(ctx, lease, confirmed)
+}
+
+// pendingTags: tags a provider check found missing or stale on the
+// pool's live instances, by template key, applied at the end of the pass
+// (applyTags).
+type pendingTags struct {
+	templates map[string]json.RawMessage
+	// poolID: instances without lux:pool-id (launched before it).
+	poolID map[string][]string
+	// name: instances whose lux:pool is not the pool's name (a rename).
+	name map[string][]string
+}
+
+// follow notes what a live instance of host h lacks, and returns h's id
+// if it is to be recorded as carrying lux:pool-id.
+func (t *pendingTags) follow(key, pid string, h hostRef, inst Instance, poolID, name string) []string {
+	if inst.Tags[tagPoolID] == poolID {
+		if inst.Tags[tagPool] != name && inst.Tags[tagHost] == h.ID {
+			t.name[key] = append(t.name[key], pid)
+		}
+		if !h.PoolIDTagged {
+			return []string{h.ID}
+		}
+		return nil
+	}
+	// IAM allows tagging only instances whose lux:host names a host.
+	if inst.Tags[tagHost] == h.ID {
+		t.poolID[key] = append(t.poolID[key], pid)
 	}
 	return nil
 }
@@ -435,12 +464,13 @@ func instanceGone(inst Instance) bool {
 
 // checkUnlisted looks up by id settled hosts (of one template) that no
 // listing showed, writes off the ones the provider says are gone, and
-// keeps the others, re-tagging any whose lux:pool is not the pool's. An id
-// the provider does not know is not proof: EC2 answers NotFound for a
-// while after a launch. It writes a host off only when found unknown on
-// two checks listing_lag apart, on a host older than a launch can take to
-// show (hostRef.NotFoundLong).
-func (s *Server) checkUnlisted(ctx context.Context, prov Provider, pl poolRow, st *poolState, lease *passLease, hosts []hostRef) error {
+// keeps the others, noting the tags they lack. An id the provider does
+// not know is not proof: EC2 answers NotFound for a while after a launch.
+// It writes a host off only when found unknown on two checks listing_lag
+// apart, on a host older than a launch can take to show
+// (hostRef.NotFoundLong). It returns the hosts whose instance carries
+// lux:pool-id.
+func (s *Server) checkUnlisted(ctx context.Context, prov Provider, pl poolRow, st *poolState, lease *passLease, key string, hosts []hostRef) ([]string, error) {
 	pids := make([]string, len(hosts))
 	for i, h := range hosts {
 		pids[i] = h.ProviderID
@@ -450,7 +480,7 @@ func (s *Server) checkUnlisted(ctx context.Context, prov Provider, pl poolRow, s
 	cancel()
 	if err != nil {
 		s.log.Warn("provider check: describing unlisted hosts; nothing done this pass", "pool", pl.Name, "err", err)
-		return nil
+		return nil, nil
 	}
 	var seen, unknown []string
 	for _, h := range hosts {
@@ -461,17 +491,15 @@ func (s *Server) checkUnlisted(ctx context.Context, prov Provider, pl poolRow, s
 		}
 	}
 	if err := s.recordNotFound(ctx, lease, seen, unknown); err != nil {
-		return err
+		return nil, err
 	}
-	// The pool's name as this pass read it, only to spot a tag that
-	// differs; retagOne re-tags with the name the host row has then.
-	want := poolTagValue(pl.TenantID, pl.Name)
+	var confirmed []string
 	for _, h := range hosts {
 		inst, known := insts[h.ProviderID]
 		if !known {
 			if h.Settled && h.NotFoundLong {
 				if err := s.writeOff(ctx, lease, h.ID, "the provider no longer knows this host"); err != nil {
-					return err
+					return nil, err
 				}
 				if !h.Draining {
 					st.total--
@@ -485,7 +513,7 @@ func (s *Server) checkUnlisted(ctx context.Context, prov Provider, pl poolRow, s
 		if instanceGone(inst) {
 			if h.Settled {
 				if err := s.writeOff(ctx, lease, h.ID, "the provider terminated this host"); err != nil {
-					return err
+					return nil, err
 				}
 				if !h.Draining {
 					st.total--
@@ -494,11 +522,88 @@ func (s *Server) checkUnlisted(ctx context.Context, prov Provider, pl poolRow, s
 			continue // otherwise its runner still heartbeats: the reaper decides
 		}
 		s.log.Warn("provider check: a host missing from its pool's listing is still up; kept",
-			"pool", pl.Name, "host", h.ID, "providerId", h.ProviderID, "state", inst.State, "lux:pool", inst.Tags[tagPool])
-		if inst.Tags[tagPool] == want || inst.Tags[tagHost] != h.ID {
-			continue
+			"pool", pl.Name, "host", h.ID, "providerId", h.ProviderID, "state", inst.State,
+			"lux:pool-id", inst.Tags[tagPoolID], "lux:pool", inst.Tags[tagPool])
+		confirmed = append(confirmed, st.tags.follow(key, h.ProviderID, h, inst, pl.ID, poolTagValue(pl.TenantID, pl.Name))...)
+	}
+	return confirmed, nil
+}
+
+// confirmPoolID records hosts whose instance a provider check showed
+// carrying lux:pool-id: once every live host of a pool is, the pool is no
+// longer listed by name.
+func (s *Server) confirmPoolID(ctx context.Context, lease *passLease, hostIDs []string) error {
+	if len(hostIDs) == 0 {
+		return nil
+	}
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if _, err := s.fenceTx(ctx, tx, lease); err != nil {
+			return err
 		}
-		if err := s.retagOne(ctx, prov, lease, h.Template, h.ProviderID, h.ID); err != nil {
+		_, err := tx.Exec(ctx, `UPDATE hosts SET pool_id_tagged = true WHERE id = ANY($1)`, hostIDs)
+		return err
+	})
+	if errors.Is(err, errFenced) {
+		return err
+	}
+	if err != nil {
+		s.log.Warn("provider check: recording hosts tagged lux:pool-id", "err", err)
+	}
+	return nil
+}
+
+// retagBatch: EC2's CreateTags takes at most 1000 resources per call.
+const retagBatch = 500
+
+// applyTags adds lux:pool-id to the pool's instances that lack it, and
+// sets lux:pool to the pool's current name where it differs. A refusal
+// (IAM) is logged, and retried by the next provider check: lux:pool-id
+// keeps a legacy pool listed by name until it lands; lux:pool is never
+// read by luxd.
+func (s *Server) applyTags(ctx context.Context, prov Provider, pl poolRow, t pendingTags, lease *passLease) error {
+	apply := func(key string, pids []string, tag string, value func(tx pgx.Tx) (string, error)) error {
+		n := 0
+		var failed error
+		for batch := range slices.Chunk(pids, retagBatch) {
+			var v string
+			err := s.fencedCall(ctx, lease, func(tx pgx.Tx) error {
+				var err error
+				v, err = value(tx)
+				return err
+			}, func(ctx context.Context) error {
+				return prov.Retag(ctx, t.templates[key], batch, tag, v)
+			})
+			if errors.Is(err, errFenced) {
+				return err
+			}
+			if err != nil {
+				failed = err
+				continue
+			}
+			n += len(batch)
+		}
+		if failed != nil {
+			s.log.Warn("provider check: tagging instances failed; retried on the next check",
+				"pool", pl.Name, "tag", tag, "tagged", n, "of", len(pids), "err", failed)
+		} else {
+			s.log.Info("provider check: instances tagged", "pool", pl.Name, "tag", tag, "instances", n)
+		}
+		return nil
+	}
+	for key, pids := range t.poolID {
+		if err := apply(key, pids, tagPoolID, func(pgx.Tx) (string, error) { return pl.ID, nil }); err != nil {
+			return err
+		}
+	}
+	for key, pids := range t.name {
+		// The name as of the call: a rename since the pass began is what
+		// the instances should carry.
+		err := apply(key, pids, tagPool, func(tx pgx.Tx) (string, error) {
+			var name string
+			err := tx.QueryRow(ctx, `SELECT name FROM pools WHERE id = $1`, pl.ID).Scan(&name)
+			return poolTagValue(pl.TenantID, name), err
+		})
+		if err != nil {
 			return err
 		}
 	}
@@ -533,8 +638,8 @@ func (s *Server) recordNotFound(ctx context.Context, lease *passLease, seen, unk
 // terminateOrphan ends an instance of the pool that no live host row read
 // by this pass claims (a launch whose reply was lost, or a host written
 // off) — unless, checked again at the last moment, a live host row of the
-// pool's owner does claim it, under whatever pool name: a rename or a
-// launch may have committed after the pass read its rows.
+// pool's owner does claim it: a launch may have committed after the pass
+// read its rows. A claimed instance's tags are the next check's to follow.
 func (s *Server) terminateOrphan(ctx context.Context, prov Provider, pl poolRow, lease *passLease, tmpl json.RawMessage, pid string, inst Instance) error {
 	hostID := inst.Tags[tagHost]
 	var claimed bool
@@ -553,7 +658,7 @@ func (s *Server) terminateOrphan(ctx context.Context, prov Provider, pl poolRow,
 		if claimed {
 			return nil
 		}
-		s.log.Warn("terminating an orphaned instance", "pool", pl.Name, "providerId", pid)
+		s.log.Warn("terminating an orphaned instance", "pool", pl.Name, "providerId", pid, "lux:pool", inst.Tags[tagPool])
 		return prov.Terminate(ctx, tmpl, pid)
 	})
 	if errors.Is(err, errFenced) {
@@ -563,47 +668,9 @@ func (s *Server) terminateOrphan(ctx context.Context, prov Provider, pl poolRow,
 		s.log.Warn("terminate orphan", "providerId", pid, "err", err)
 		return nil
 	}
-	if !claimed {
-		return nil
-	}
-	s.log.Warn("provider check: an instance no host row read by this pass claimed is its host's; kept",
-		"pool", pl.Name, "host", hostID, "providerId", pid, "hostPool", pool, "lux:pool", inst.Tags[tagPool])
-	if inst.Tags[tagPool] == poolTagValue(pl.TenantID, pool) {
-		return nil
-	}
-	return s.retagOne(ctx, prov, lease, tmpl, pid, hostID)
-}
-
-// retagOne sets an instance's lux:pool to its host row's pool, read at
-// the call (a rename may have moved it since the pass began); a refusal is
-// logged and retried by a later pass.
-func (s *Server) retagOne(ctx context.Context, prov Provider, lease *passLease, tmpl json.RawMessage, pid, hostID string) error {
-	var value string
-	err := s.fencedCall(ctx, lease, func(tx pgx.Tx) error {
-		var tenantID *string
-		var pool string
-		err := tx.QueryRow(ctx, `SELECT tenant_id, pool FROM hosts WHERE id = $1 AND provider_id = $2 AND state <> 'terminated'`,
-			hostID, pid).Scan(&tenantID, &pool)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		value = poolTagValue(tenantID, pool)
-		return err
-	}, func(ctx context.Context) error {
-		if value == "" {
-			return nil
-		}
-		return prov.Retag(ctx, tmpl, []string{pid}, tagPool, value)
-	})
-	if errors.Is(err, errFenced) {
-		return err
-	}
-	if err != nil {
-		s.log.Warn("re-tagging an instance", "providerId", pid, "lux:pool", value, "err", err)
-		return nil
-	}
-	if value != "" {
-		s.log.Warn("provider check: instance re-tagged with its pool's current name", "providerId", pid, "lux:pool", value)
+	if claimed {
+		s.log.Warn("provider check: an instance no host row read by this pass claimed is its host's; kept",
+			"pool", pl.Name, "host", hostID, "providerId", pid, "hostPool", pool)
 	}
 	return nil
 }
@@ -618,9 +685,16 @@ func (s *Server) recordProviderID(ctx context.Context, hostID, pid string) {
 	}
 }
 
-// poolTags are the tags every instance of a pool carries, and what its
-// instances are listed by. Tenant pools are named by tenant and name.
-func (s *Server) poolTags(pl poolRow) map[string]string {
+// poolIDTags are what a pool's instances are listed by: every instance
+// launched since lux:pool-id carries them, whatever the pool is called.
+func (s *Server) poolIDTags(pl poolRow) map[string]string {
+	return map[string]string{tagManaged: "true", tagDeployment: s.deployment, tagPoolID: pl.ID}
+}
+
+// poolNameTags list a legacy pool's instances launched before lux:pool-id,
+// by the name they were launched under: a pool with such instances is
+// never renamed (poolrename.go). Tenant pools are named by tenant and name.
+func (s *Server) poolNameTags(pl poolRow) map[string]string {
 	return map[string]string{tagManaged: "true", tagDeployment: s.deployment, tagPool: poolTagValue(pl.TenantID, pl.Name)}
 }
 
@@ -670,7 +744,7 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 			coalesce(h.lost_at < now() - $6::interval, false),
 			h.tagged AND h.provision_requested_at < now() - $8::interval,
 			coalesce(h.last_heartbeat < now() - $7::interval, true),
-			h.not_found_since IS NOT NULL,
+			h.not_found_since IS NOT NULL, h.pool_id_tagged,
 			coalesce(h.not_found_since <= now() - $8::interval AND h.created_at < now() - $4::interval - $8::interval, false)
 		FROM hosts h
 		WHERE h.pool = $1 AND coalesce(h.tenant_id, '') = coalesce($2, '') AND h.provision_requested_at IS NOT NULL
@@ -686,7 +760,7 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 		var h hostRef
 		var state string
 		var draining, busy, pending, idleLong, launchLong, lostLong, silent bool
-		if err := rows.Scan(&h.ID, &h.ProviderID, &h.Template, &state, &draining, &busy, &pending, &idleLong, &launchLong, &lostLong, &h.Listable, &silent, &h.NotFound, &h.NotFoundLong); err != nil {
+		if err := rows.Scan(&h.ID, &h.ProviderID, &h.Template, &state, &draining, &busy, &pending, &idleLong, &launchLong, &lostLong, &h.Listable, &silent, &h.NotFound, &h.PoolIDTagged, &h.NotFoundLong); err != nil {
 			return err
 		}
 		h.Settled = h.Listable && silent
@@ -763,7 +837,7 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow) error {
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		// Not under a name the pool has just left (a rename): the row
 		// would join no pool. Held until commit, so a rename after it
-		// moves this row too, and the provisioner re-tags its instance.
+		// moves this row too.
 		var current string
 		if err := tx.QueryRow(ctx, `SELECT name FROM pools WHERE id = $1 FOR SHARE`, pl.ID).Scan(&current); err != nil {
 			return err
@@ -780,8 +854,8 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow) error {
 			tokenID, pl.TenantID, pl.Name, ids.Hash(token)); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool, token_id, name, state, provision_requested_at, launch_template, tagged)
-			VALUES ($1, $2, $3, $4, $5, 'provisioning', now(), $6, true)`,
+		_, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool, token_id, name, state, provision_requested_at, launch_template, tagged, pool_id_tagged)
+			VALUES ($1, $2, $3, $4, $5, 'provisioning', now(), $6, true, true)`,
 			hostID, pl.TenantID, pl.Name, tokenID, name, pl.Template)
 		return err
 	})
@@ -793,8 +867,8 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow) error {
 		return err
 	}
 	env := map[string]string{"LUX_URL": s.cfg.RunnerURL, "LUX_HOST_TOKEN": token, "LUX_HOST_NAME": name}
-	tags := s.poolTags(pl)
-	tags["Name"], tags[tagHost] = name, hostID
+	tags := s.poolIDTags(pl)
+	tags[tagPool], tags["Name"], tags[tagHost] = poolTagValue(pl.TenantID, pl.Name), name, hostID
 	l, err := prov.Launch(ctx, pl.Template, tags, env)
 	if err != nil {
 		s.markTerminated(ctx, hostID, "launch failed: "+truncate(err.Error(), 200))

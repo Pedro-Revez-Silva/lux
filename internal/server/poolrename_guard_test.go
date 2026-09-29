@@ -1,18 +1,12 @@
 package server
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5"
-
-	"github.com/marcioapm/lux/internal/store"
 )
 
 func httpErr(err error) (int, string, string) {
@@ -23,44 +17,9 @@ func httpErr(err error) (int, string, string) {
 	return he.Status, he.Code, he.Error()
 }
 
-// A pool that just finished a rename is not renamed again until a late
-// re-tag from an expired provisioner can no longer land; the refusal
-// says how long remains.
-func TestRenamePoolCooldown(t *testing.T) {
-	f := newRenameFixture(t, false)
-	f.rename(t, "burst", "burst-eu")
-	execSQL(t, f.s, f.ctx, `UPDATE pool_tag_aliases SET finished_at = now()`)
-	execSQL(t, f.s, f.ctx, `UPDATE pools SET retagged_at = NULL, rename_finished_at = now()`)
-	_, err := renameConfirmed(f.ctx, f.s, "t1", "burst-eu", "burst-us", false)
-	if st, code, msg := httpErr(err); st != http.StatusConflict || code != "rename_cooldown" || !strings.Contains(msg, "renamed again in") {
-		t.Fatalf("rename right after the last finished: %v", err)
-	}
-	execSQL(t, f.s, f.ctx, `UPDATE pools SET rename_finished_at = now() - $1::interval`, interval(f.s.renameCooldown()))
-	if _, err := renameConfirmed(f.ctx, f.s, "t1", "burst-eu", "burst-us", false); err != nil {
-		t.Fatalf("rename after the cooldown: %v", err)
-	}
-}
-
-// The provisioner finishing a rename records when, which starts the
-// cooldown.
-func TestRenamePoolFinishStartsCooldown(t *testing.T) {
-	f := newRenameFixture(t, false)
-	f.s.cfg.ListingLag = 0
-	f.rename(t, "burst", "burst-eu")
-	f.check(t, f.pool(t))
-	f.check(t, f.pool(t))
-	if f.pool(t).RenamedFrom != nil {
-		t.Fatal("rename never finished")
-	}
-	_, err := renameConfirmed(f.ctx, f.s, "t1", "burst-eu", "burst-us", false)
-	if _, code, _ := httpErr(err); code != "rename_cooldown" {
-		t.Fatalf("rename right after the provisioner finished one: %v", err)
-	}
-}
-
-// A provisioned pool is not renamed while a luxd that cannot follow a
-// rename (it writes control samples, never checks in) is running; a
-// static pool is. The refusal names the luxd.
+// A provisioned pool is not renamed while a luxd that discovers by name
+// (it writes control samples, never checks in) is running; a static pool
+// is. The refusal names the luxd.
 func TestRenamePoolRefusedWithAnOlderLuxd(t *testing.T) {
 	f := newRenameFixture(t, false)
 	execSQL(t, f.s, f.ctx, `INSERT INTO control_samples (instance, hostname, res, at) VALUES ('luxd-old', 'old-host', 0, now())`)
@@ -135,38 +94,11 @@ func TestRenamePoolNeedsConfirmationWithHosts(t *testing.T) {
 	}
 }
 
-// A pool's provider does not change while its rename is unfinished, by
-// the API or luxd admin create-pool (CheckPoolProviderChange); its other
-// settings do.
-func TestPoolProviderFixedWhileRenaming(t *testing.T) {
-	f := newRenameFixture(t, false)
-	f.rename(t, "burst", "burst-eu")
-	ctx := context.WithValue(f.ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
-	_, err := f.s.putPool(ctx, &poolBody{Body: Pool{Name: "burst-eu", Provider: "static"}})
-	if st, code, _ := httpErr(err); st != http.StatusConflict || code != "rename_in_progress" {
-		t.Errorf("pools set --provider static mid-rename: %v", err)
-	}
-	if _, err := f.s.putPool(ctx, &poolBody{Body: Pool{Name: "burst-eu", Provider: "ec2", MaxHosts: 5}}); err != nil {
-		t.Errorf("pools set, same provider, mid-rename: %v", err)
-	}
-	err = f.s.db.Tx(f.ctx, store.System(), func(tx pgx.Tx) error {
-		return CheckPoolProviderChange(f.ctx, tx, "t1", "burst-eu", "static")
-	})
-	if _, code, _ := httpErr(err); code != "rename_in_progress" {
-		t.Errorf("create-pool --provider static mid-rename: %v", err)
-	}
-	if f.pool(t).Provider != "ec2" {
-		t.Fatal("provider changed")
-	}
-}
-
 // A cost hour written under the old name after the rename committed (its
-// writer read the host row before) is moved by the provisioner's rename
-// steps: the re-tagging pass, and the one that finishes the rename.
-// Another pool's hours under that name are not.
+// writer read the host row before) is moved by the provisioner's next
+// passes; another pool's hours under that name are not.
 func TestRenamePoolMovesLateCostHours(t *testing.T) {
 	f := newRenameFixture(t, false)
-	f.s.cfg.ListingLag = 0
 	f.rename(t, "burst", "burst-eu")
 	execSQL(t, f.s, f.ctx, `INSERT INTO hosts (id, name, pool, state) VALUES ('hx', 'x', 'burst', 'ready')`)
 	late := func(host string) {
@@ -178,82 +110,14 @@ func TestRenamePoolMovesLateCostHours(t *testing.T) {
 	}
 	late("h1")
 	late("hx")
-	f.check(t, f.pool(t)) // re-tags
+	f.check(t, f.pool(t))
 	if got := pools(); got != "h1=burst-eu,hx=burst" {
-		t.Errorf("after the re-tagging pass: %s, want h1=burst-eu,hx=burst", got)
+		t.Errorf("after a pass: %s, want h1=burst-eu,hx=burst", got)
 	}
 	late("h2")
-	f.check(t, f.pool(t)) // finishes
-	if f.pool(t).RenamedFrom != nil {
-		t.Fatal("rename never finished")
-	}
+	f.check(t, f.pool(t))
 	if got := pools(); got != "h1=burst-eu,h2=burst-eu,hx=burst" {
-		t.Errorf("after the finishing pass: %s, want h1=burst-eu,h2=burst-eu,hx=burst", got)
-	}
-}
-
-// A finished rename's alias is still listed and reserved; it is retired
-// only once every check found it empty for aliasRetireAfter, and a check
-// that finds an instance under it starts that wait again.
-func TestRenamePoolAliasRetires(t *testing.T) {
-	f := newRenameFixture(t, false)
-	f.s.cfg.ListingLag = 0
-	f.rename(t, "burst", "burst-eu")
-	f.check(t, f.pool(t))
-	f.check(t, f.pool(t))
-	pl := f.pool(t)
-	if pl.RenamedFrom != nil || !slices.Equal(pl.Aliases, []string{"burst"}) {
-		t.Fatalf("renamed from %v, aliases %v: want finished and still listed", pl.RenamedFrom, pl.Aliases)
-	}
-	ctx := context.WithValue(f.ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
-	if _, err := f.s.putPool(ctx, &poolBody{Body: Pool{Name: "burst", Provider: "static"}}); err == nil {
-		t.Fatal("a pool took a live alias")
-	}
-	// An instance turns up under the alias: the wait starts again.
-	execSQL(t, f.s, f.ctx, `UPDATE pool_tag_aliases SET empty_since = now() - $1::interval`, interval(2*f.s.aliasRetireAfter()))
-	f.cloud.add("i-late", map[string]string{tagManaged: "true", tagDeployment: "d1", tagPool: "t1/burst", tagHost: "gone"})
-	f.check(t, f.pool(t))
-	if got := f.cloud.terminatedIDs(); !slices.Equal(got, []string{"i-late"}) {
-		t.Fatalf("terminated %v, want the orphan under the alias", got)
-	}
-	if got := f.query(t, `SELECT coalesce(empty_since::text, 'null') FROM pool_tag_aliases`); got != "null" {
-		t.Fatalf("empty_since %s after an instance was listed under the alias", got)
-	}
-	f.cloud.mu.Lock()
-	delete(f.cloud.insts, "i-late")
-	f.cloud.mu.Unlock()
-	f.check(t, f.pool(t))
-	if pl := f.pool(t); len(pl.Aliases) != 1 {
-		t.Fatalf("aliases %v: retired right after it was found empty", pl.Aliases)
-	}
-	execSQL(t, f.s, f.ctx, `UPDATE pool_tag_aliases SET empty_since = now() - $1::interval`, interval(f.s.aliasRetireAfter()))
-	f.check(t, f.pool(t))
-	if pl := f.pool(t); len(pl.Aliases) != 0 {
-		t.Fatalf("aliases %v after aliasRetireAfter empty", pl.Aliases)
-	}
-	if _, err := f.s.putPool(ctx, &poolBody{Body: Pool{Name: "burst", Provider: "static"}}); err != nil {
-		t.Fatalf("the retired alias's name: %v", err)
-	}
-}
-
-// A pool keeps at most maxPoolAliases live aliases: one more rename is
-// refused, a rename back onto one of its own aliases is not (that alias
-// is its name again).
-func TestRenamePoolTooManyAliases(t *testing.T) {
-	f := newRenameFixture(t, false)
-	for i := range maxPoolAliases {
-		execSQL(t, f.s, f.ctx, `INSERT INTO pool_tag_aliases (pool_id, tenant_id, name, finished_at) VALUES ('pool1', 't1', $1, now())`, fmt.Sprintf("old%d", i))
-	}
-	_, err := renameConfirmed(f.ctx, f.s, "t1", "burst", "burst-eu", false)
-	if st, code, _ := httpErr(err); st != http.StatusConflict || code != "too_many_aliases" {
-		t.Fatalf("a ninth alias: %v", err)
-	}
-	if _, err := renameConfirmed(f.ctx, f.s, "t1", "burst", "old3", false); err != nil {
-		t.Fatalf("renamed back onto its own alias: %v", err)
-	}
-	pl := f.pool(t)
-	if pl.Name != "old3" || len(pl.Aliases) != maxPoolAliases || slices.Contains(pl.Aliases, "old3") || !slices.Contains(pl.Aliases, "burst") {
-		t.Fatalf("pool %s aliases %v", pl.Name, pl.Aliases)
+		t.Errorf("after the next pass: %s, want h1=burst-eu,h2=burst-eu,hx=burst", got)
 	}
 }
 
@@ -296,7 +160,7 @@ func TestNotFoundIsInconclusive(t *testing.T) {
 	if got := state("h2"); got == "terminated" {
 		t.Fatal("an old host written off on a first NotFound")
 	}
-	f.cloud.add("i-2", map[string]string{tagManaged: "true", tagDeployment: "d1", tagPool: "t1/burst", tagHost: "h2"})
+	f.cloud.add("i-2", instanceTags("t1/burst", "h2"))
 	f.cloud.hidden = map[string]bool{"i-2": true} // looked up by id again
 	f.check(t, f.pool(t))
 	if got := since("h2"); got != "null" {
@@ -328,9 +192,10 @@ func TestNotFoundIsInconclusive(t *testing.T) {
 	}
 }
 
-// A pool with more instances than one CreateTags takes (1000) is
-// re-tagged in several calls.
-func TestRenamePoolRetagsInBatches(t *testing.T) {
+// A pool with more instances than one CreateTags takes (1000) is tagged
+// in several calls: lux:pool-id while it is migrated, and lux:pool after
+// a rename.
+func TestPoolTagsInBatches(t *testing.T) {
 	f := newRenameFixture(t, false)
 	const n = 1200
 	execSQL(t, f.s, f.ctx, `INSERT INTO host_tokens (id, tenant_id, pool, token_hash)
@@ -341,18 +206,32 @@ func TestRenamePoolRetagsInBatches(t *testing.T) {
 	for i := 1; i <= n; i++ {
 		f.cloud.add(fmt.Sprintf("i-b%d", i), map[string]string{tagManaged: "true", tagDeployment: "d1", tagPool: "t1/burst", tagHost: fmt.Sprintf("hb%d", i)})
 	}
+	batches := func(key string, want int) {
+		t.Helper()
+		total, calls := 0, 0
+		for _, c := range f.cloud.retags {
+			if c.key != key {
+				continue
+			}
+			if c.n > retagBatch {
+				t.Errorf("a CreateTags of %s for %d instances", key, c.n)
+			}
+			total += c.n
+			calls++
+		}
+		if total != want || calls < 3 {
+			t.Fatalf("%s: %d calls for %d instances, want %d instances in batches", key, calls, total, want)
+		}
+	}
+	f.check(t, f.pool(t))
+	batches(tagPoolID, n)
+	f.check(t, f.pool(t))
+	if f.pool(t).Legacy {
+		t.Fatal("still legacy")
+	}
 	f.rename(t, "burst", "burst-eu")
 	f.check(t, f.pool(t))
-	total := 0
-	for _, size := range f.cloud.retagSizes {
-		if size > retagBatch {
-			t.Errorf("a CreateTags for %d instances", size)
-		}
-		total += size
-	}
-	if total != n+2 || len(f.cloud.retagSizes) < 3 {
-		t.Fatalf("re-tag calls %v, want %d instances in batches", f.cloud.retagSizes, n+2)
-	}
+	batches(tagPool, n+2)
 	for i := 1; i <= n; i += 97 {
 		if got := f.cloud.tag(fmt.Sprintf("i-b%d", i), tagPool); got != "t1/burst-eu" {
 			t.Fatalf("i-b%d lux:pool = %q", i, got)
