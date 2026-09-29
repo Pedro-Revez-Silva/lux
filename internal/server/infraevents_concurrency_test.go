@@ -148,3 +148,75 @@ func TestFailureDoesNotFoldAcrossAConcurrentLaunch(t *testing.T) {
 		t.Fatalf("pool events %v, want failure, launch, failure", order)
 	}
 }
+
+// A fold decides from the owner's latest events, whatever its history: on
+// a pool with 100k provider errors behind it (every one a retry-loop
+// event), recording a launch failure reads a handful of rows, not the
+// history (as Postgres counts them for this transaction).
+func TestFoldReadsABoundedNumberOfEvents(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	infraFixture(t, s, ctx)
+	ownerExec(t, s, `INSERT INTO pool_events (tenant_id, pool_id, type, data)
+		SELECT 't1', 'pool1', 'pool.provider_error', jsonb_build_object('op', 'list', 'error', 'error ' || i)
+		FROM generate_series(1, 100000) i`)
+	ownerExec(t, s, `ANALYZE pool_events`)
+	var read int64
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		tuples := func() (n int64, err error) {
+			err = tx.QueryRow(ctx, `SELECT coalesce(seq_tup_read, 0) + coalesce(idx_tup_fetch, 0)
+				FROM pg_stat_xact_user_tables WHERE relname = 'pool_events'`).Scan(&n)
+			return n, err
+		}
+		before, err := tuples()
+		if err != nil {
+			return err
+		}
+		if err := failure(ctx, tx); err != nil {
+			return err
+		}
+		after, err := tuples()
+		read = after - before
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read > 2*foldWindow {
+		t.Fatalf("recording a failure read %d pool events, want at most %d", read, 2*foldWindow)
+	}
+	// And the decision is still right: that failure was a new row; its
+	// repeats fold into it.
+	for range 2 {
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return failure(ctx, tx) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := queryOne[int](t, s, `SELECT count FROM pool_events WHERE pool_id = 'pool1' ORDER BY id DESC LIMIT 1`); n != 3 {
+		t.Fatalf("latest failure counted %d, want 3", n)
+	}
+}
+
+// Past the window, a repeat is a new row rather than a fold across
+// events the lookup does not read.
+func TestFoldLooksNoFurtherThanItsWindow(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	infraFixture(t, s, ctx)
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return failure(ctx, tx) }); err != nil {
+		t.Fatal(err)
+	}
+	for i := range foldWindow {
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return poolEvent(ctx, tx, "pool1", evPoolProviderErr, map[string]any{"op": "list", "error": i})
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return failure(ctx, tx) }); err != nil {
+		t.Fatal(err)
+	}
+	if evs := events(t, s, evLaunchFailed); len(evs) != 2 {
+		t.Fatalf("launch_failed events %+v, want two", evs)
+	}
+}

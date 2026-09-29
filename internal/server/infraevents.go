@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"time"
 
@@ -163,6 +164,25 @@ var (
 	hostEvents = eventTable{"host_events", "host_id"}
 )
 
+// foldWindow is how many of an owner's latest events a fold looks at: more
+// than one failing provisioner pass writes (a list error, a scale-up, a
+// launch request and its failure, for want hosts at most 2+2*want; one
+// pass rarely wants many). A repeat whose earlier event is further back
+// starts a new row: the history stays right, if less compact.
+const foldWindow = 8
+
+// foldLookup reads an owner's latest events, newest first, through its
+// (owner, id) index: $1 owner, $2 volatile keys, $3 the new data, $4 the
+// window. same: the data matches but for the volatile keys. The row bound
+// is always true; it is there because only that index can serve it, where
+// with the owner alone the planner may walk the primary key backwards and
+// filter every newer event of other owners.
+func foldLookup(t eventTable) string {
+	return `SELECT id, type, data - $2::text[] = $3::jsonb - $2::text[] AS same FROM ` + t.table + `
+		WHERE ` + t.owner + ` = $1 AND (` + t.owner + `, id) <= ($1, 9223372036854775807)
+		ORDER BY ` + t.owner + ` DESC, id DESC LIMIT $4`
+}
+
 // collapse bumps the count of the event typ would repeat, if any (see
 // poolRepeatEvent), and reports whether it did. It holds the owner's
 // stream exclusively from before its read (see the top of this file), so
@@ -171,22 +191,36 @@ func collapse(ctx context.Context, tx pgx.Tx, t eventTable, owner, typ string, d
 	if err := lockStream(ctx, tx, t, owner, true); err != nil {
 		return false, err
 	}
-	var id int64
-	err := tx.QueryRow(ctx, `SELECT e.id FROM `+t.table+` e
-		WHERE e.`+t.owner+` = $1 AND e.type = $2
-		  AND e.data - $4::text[] = $3::jsonb - $4::text[]
-		  AND NOT EXISTS (SELECT 1 FROM `+t.table+` x WHERE x.`+t.owner+` = $1 AND x.id > e.id AND x.type <> ALL($5))
-		  AND (NOT $6 OR EXISTS (SELECT 1 FROM `+t.table+` x WHERE x.`+t.owner+` = $1 AND x.id > e.id AND x.type = $7))
-		  AND e.id = (SELECT max(y.id) FROM `+t.table+` y WHERE y.`+t.owner+` = $1 AND y.type = $2)`,
-		owner, typ, nonNilData(data), nonNil(volatile), retry, afterFailure, evLaunchFailed).Scan(&id)
-	if err == pgx.ErrNoRows {
-		return false, nil
-	}
+	rows, err := tx.Query(ctx, foldLookup(t), owner, nonNil(volatile), nonNilData(data), foldWindow)
 	if err != nil {
 		return false, err
 	}
-	_, err = tx.Exec(ctx, `UPDATE `+t.table+` SET count = count + 1, last_at = now(), data = $2 WHERE id = $1`, id, nonNilData(data))
-	return err == nil, err
+	type latest struct {
+		ID   int64
+		Type string
+		Same bool
+	}
+	evs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[latest])
+	if err != nil {
+		return false, err
+	}
+	// Newest first: every event down to the latest of typ must be part of
+	// the retry loop, and for afterFailure one of them a launch failure.
+	failed := false
+	for _, e := range evs {
+		if e.Type == typ {
+			if !e.Same || (afterFailure && !failed) {
+				return false, nil
+			}
+			_, err = tx.Exec(ctx, `UPDATE `+t.table+` SET count = count + 1, last_at = now(), data = $2 WHERE id = $1`, e.ID, nonNilData(data))
+			return err == nil, err
+		}
+		if !slices.Contains(retry, e.Type) {
+			return false, nil
+		}
+		failed = failed || e.Type == evLaunchFailed
+	}
+	return false, nil
 }
 
 func nonNilData(d map[string]any) map[string]any {
