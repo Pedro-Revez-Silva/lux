@@ -410,19 +410,23 @@ def test_pools_page_makes_a_pool_the_default(page, lux):
     which names the current default; the badge moves with the mark."""
     tag = lux.tenant_id[-6:]
     old, new = f"old-{tag}", f"new-{tag}"
-    lux.run("pools", "set", old, "--provider", "static", "--default")
-    lux.run("pools", "set", new, "--provider", "static")
-    page.sign_in(lux.api_key, "/pools")
-    old_row = page.get_by_role("row").filter(has_text=old)
-    new_row = page.get_by_role("row").filter(has_text=new)
-    expect(old_row.get_by_text("Default", exact=True)).to_be_visible(timeout=15_000)
-    assert old_row.get_by_role("button", name="Make default").count() == 0
-    new_row.get_by_role("button", name="Make default").click()
-    dialog = page.get_by_role("dialog")
-    expect(dialog).to_contain_text(f"{old} is your default pool now")
-    expect(dialog).to_contain_text("Runs already submitted keep their pool")
-    dialog.get_by_role("button", name="Make default").click()
-    expect(new_row.get_by_text("Default", exact=True)).to_be_visible(timeout=15_000)
-    expect(old_row.get_by_text("Default", exact=True)).to_have_count(0)
-    assert [p["name"] for p in lux.json("pools", "ls") if p.get("isDefault")] == [new]
-    assert not page.errors, page.errors
+    try:
+        lux.run("pools", "set", old, "--provider", "static", "--default")
+        lux.run("pools", "set", new, "--provider", "static")
+        page.sign_in(lux.api_key, "/pools")
+        old_row = page.get_by_role("row").filter(has_text=old)
+        new_row = page.get_by_role("row").filter(has_text=new)
+        expect(old_row.get_by_text("Default", exact=True)).to_be_visible(timeout=15_000)
+        assert old_row.get_by_role("button", name="Make default").count() == 0
+        new_row.get_by_role("button", name="Make default").click()
+        dialog = page.get_by_role("dialog")
+        expect(dialog).to_contain_text(f"{old} is your default pool now")
+        expect(dialog).to_contain_text("Runs already submitted keep their pool")
+        dialog.get_by_role("button", name="Make default").click()
+        expect(new_row.get_by_text("Default", exact=True)).to_be_visible(timeout=15_000)
+        expect(old_row.get_by_text("Default", exact=True)).to_have_count(0)
+        assert [p["name"] for p in lux.json("pools", "ls") if p.get("isDefault")] == [new]
+        assert not page.errors, page.errors
+    finally:
+        for pool in (old, new):
+            lux.run("pools", "rm", pool, check=False)

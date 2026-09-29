@@ -253,3 +253,31 @@ func TestPoolOwnerRetiredPool(t *testing.T) {
 		t.Fatalf("state %q after the pool came back, want provisioning", state)
 	}
 }
+
+// A submit retried with the same idempotency key after the default moved
+// returns the first Run, with its pool and owner, and creates no other.
+func TestIdempotentResubmitKeepsItsPool(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider, is_default) VALUES ('pp', NULL, 'burst', 'static', true)`)
+	first := submitAs(t, s, "t1", "", "key-1")
+	mustPut(t, s, "t1", Pool{Name: "burst", Provider: "static", IsDefault: mark(true)})
+	out, err := s.submitRun(tenantCtx("t1"), &submitRunInput{IdempotencyKey: "key-1", Body: spec.RunSpec{
+		Image: spec.Image{Ref: "alpine"}, Workload: spec.Workload{Adapter: "generic", Command: []string{"true"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != 200 || out.Body.ID != first || out.Body.Spec.Placement.Pool != "burst" {
+		t.Fatalf("re-submit: %d %s pool %q, want 200 %s burst", out.Status, out.Body.ID, out.Body.Spec.Placement.Pool, first)
+	}
+	if pool, owner, ev := runPool(t, s, first); pool != "burst" || owner != "" || ev != "platform" {
+		t.Fatalf("after re-submit: pool %q owner %q event %q, want the platform's burst", pool, owner, ev)
+	}
+	var n int
+	systemScan(t, s, `SELECT count(*) FROM runs`, nil, &n)
+	if n != 1 {
+		t.Fatalf("%d Runs after a re-submit", n)
+	}
+}
