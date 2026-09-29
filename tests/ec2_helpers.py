@@ -13,10 +13,17 @@ from env import wait_until
 
 @pytest.fixture(autouse=True)
 def _clean(lux, ec2):
-    """Each test's pool is removed after it, and its instances with it."""
+    """Each test's ec2 pools are removed after it, under whatever name a
+    rename left them, and luxd has terminated their instances and written
+    off their host rows: a write-off cut short by the next test's luxd
+    restart would be retried against that test's fake EC2."""
     yield
-    lux.run("pools", "rm", "burst", check=False)
+    names = [p["name"] for p in lux.json("pools", "ls") if p["provider"] == "ec2"]
+    for name in names:
+        lux.run("pools", "rm", name, check=False)
     wait_until(lambda: not ec2.running(), 90, 0.3, "the removed pool's instances were not terminated")
+    wait_until(lambda: not any(ec2_hosts(lux, name, states=("provisioning", "ready", "draining", "lost")) for name in names),
+               90, 0.3, "the removed pool's hosts were never written off")
 
 
 def pool(lux, ec2, name="burst", spot=False, **kw):

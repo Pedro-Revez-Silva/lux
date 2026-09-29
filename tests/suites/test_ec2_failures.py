@@ -122,8 +122,6 @@ def test_a_rename_whose_retag_is_refused_terminates_nothing(lux, ec2):
         assert "TerminateInstances" not in ec2.calls, ec2.calls
     finally:
         ec2.deny_create_tags = False
-        lux.run("pools", "rm", "burst-eu", check=False)
-        _written_off(lux, "burst-eu")
 
 
 def test_a_pool_from_before_lux_pool_id_is_migrated(lux, ec2):
@@ -133,17 +131,19 @@ def test_a_pool_from_before_lux_pool_id_is_migrated(lux, ec2):
     running."""
     fake_only(ec2)
     ec2.untagged_launches = True
+    ec2.deny_create_tags = True
     try:
         pool(lux, ec2, min=1, max=1)
         [host] = wait_until(lambda: ec2_hosts(lux), 120, 0.3, "no host")
+        [inst] = ec2.running()
+        assert "lux:pool-id" not in inst["tags"], inst["tags"]
+        # The launch recorded it as tagged; an older luxd's would not have.
+        env_sql(lux.env, "UPDATE hosts SET pool_id_tagged = false WHERE name = %s", host["name"])
+        refused = lux.run("pools", "rename", "burst", "burst-eu", check=False)
+        assert refused.returncode == 4 and "not yet confirmed to carry" in refused.stderr, refused.stderr
     finally:
         ec2.untagged_launches = False
-    [inst] = ec2.running()
-    assert "lux:pool-id" not in inst["tags"], inst["tags"]
-    # The launch recorded it as tagged; an older luxd's would not have.
-    env_sql(lux.env, "UPDATE hosts SET pool_id_tagged = false WHERE name = %s", host["name"])
-    refused = lux.run("pools", "rename", "burst", "burst-eu", check=False)
-    assert refused.returncode == 4 and "not yet confirmed to carry" in refused.stderr, refused.stderr
+        ec2.deny_create_tags = False
     wait_until(lambda: ec2.running()[0]["tags"].get("lux:pool-id"), 60, 0.3, "never tagged with the pool's id")
     wait_until(lambda: lux.run("pools", "rename", "burst", "burst-eu", check=False).returncode == 0,
                60, 1, "never renamable")
@@ -151,16 +151,6 @@ def test_a_pool_from_before_lux_pool_id_is_migrated(lux, ec2):
     assert [h["name"] for h in ec2_hosts(lux, "burst-eu")] == [host["name"]]
     wait_until(lambda: ec2.running()[0]["tags"]["lux:pool"].endswith("/burst-eu"), 60, 0.3, "name tag never followed")
     assert "TerminateInstances" not in ec2.calls, ec2.calls
-    lux.run("pools", "rm", "burst-eu")
-    _written_off(lux, "burst-eu")
-
-
-def _written_off(lux, pool_name):
-    """Waits for the pool's host rows, not only its instances, to be gone:
-    luxd restarted between a TerminateInstances and its write-off would
-    retry it against the next test's fake EC2."""
-    wait_until(lambda: not ec2_hosts(lux, pool_name, states=("provisioning", "ready", "draining", "lost")),
-               90, 0.3, "the removed pool's hosts were never written off")
 
 
 def test_a_host_missing_from_its_listing_is_described_and_kept(lux, ec2):

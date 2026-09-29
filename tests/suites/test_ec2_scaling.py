@@ -143,22 +143,15 @@ def test_renaming_a_pool_keeps_its_running_host(lux, ec2):
     [inst] = ec2.running()
     pool_id = inst["tags"]["lux:pool-id"]
     launches = ec2.calls.count("RunInstances")
-    try:
-        out = lux.run("pools", "rename", "burst", "burst-eu").stdout
-        assert "1 hosts" in out, out
-        assert [h["name"] for h in ec2_hosts(lux, "burst-eu")] == [host["name"]]
-        run_id = lux.submit(generic(ALPINE_IMAGE, "echo", "renamed", placement={"pool": "burst-eu"}))
-        lux.wait_state(run_id, "succeeded", timeout=60)
-        assert lux.get(run_id)["placements"][0]["hostName"] == host["name"]
-        wait_until(lambda: ec2.running()[0]["tags"]["lux:pool"].endswith("/burst-eu"), 60, 0.3, "the instance was never re-tagged")
-        assert ec2.running()[0]["tags"]["lux:pool-id"] == pool_id
-        assert [i["id"] for i in ec2.running()] == [inst["id"]]
-        if not ec2.real:
-            assert "TerminateInstances" not in ec2.calls, ec2.calls
-            assert ec2.calls.count("RunInstances") == launches
-    finally:
-        lux.run("pools", "rm", "burst-eu", check=False)
-        # The host row too, not only the instance: a write-off cut short by
-        # the next test's luxd restart is retried against its fake EC2.
-        wait_until(lambda: not ec2_hosts(lux, "burst-eu", states=("provisioning", "ready", "draining", "lost")),
-                   90, 0.3, "the renamed pool's host was never written off")
+    out = lux.run("pools", "rename", "burst", "burst-eu").stdout
+    assert "1 hosts" in out, out
+    assert [h["name"] for h in ec2_hosts(lux, "burst-eu")] == [host["name"]]
+    run_id = lux.submit(generic(ALPINE_IMAGE, "echo", "renamed", placement={"pool": "burst-eu"}))
+    lux.wait_state(run_id, "succeeded", timeout=60)
+    assert lux.get(run_id)["placements"][0]["hostName"] == host["name"]
+    wait_until(lambda: ec2.running()[0]["tags"]["lux:pool"].endswith("/burst-eu"), 60, 0.3, "the instance was never re-tagged")
+    assert ec2.running()[0]["tags"]["lux:pool-id"] == pool_id
+    assert [i["id"] for i in ec2.running()] == [inst["id"]]
+    if not ec2.real:
+        assert "TerminateInstances" not in ec2.calls, ec2.calls
+        assert ec2.calls.count("RunInstances") == launches
