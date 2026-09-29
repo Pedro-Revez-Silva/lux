@@ -376,19 +376,18 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		}
 		id := ids.New(ids.Pool)
 		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
-					scale_down_after_s, warm_while_active, hourly_price, price_currency)
-				VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11, nullif($12, '')::numeric, nullif($13, ''))
-				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
-					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts, shared = EXCLUDED.shared,
-					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
-					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
-					retired = false`,
-				id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive, *price, *currency)
-			if err != nil || isDefault.v == nil {
+			return server.SavePool(ctx, tx, *tenant, *name, isDefault.v, func() error {
+				_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
+						scale_down_after_s, warm_while_active, hourly_price, price_currency)
+					VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11, nullif($12, '')::numeric, nullif($13, ''))
+					ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
+						min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts, shared = EXCLUDED.shared,
+						scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
+						hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
+						`+server.PoolRevive,
+					id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive, *price, *currency)
 				return err
-			}
-			return server.SetDefaultPool(ctx, tx, *tenant, *name, *isDefault.v)
+			})
 		})
 		if err != nil {
 			return err

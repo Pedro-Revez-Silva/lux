@@ -1830,6 +1830,11 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 	var hosts []string
 	err := retryHostPlacements(ctx, func() error {
 		return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			// Before the row, as a mark takes it: a mark checking the pool
+			// exists never sees it before this retires it and clears its mark.
+			if err := lockDefaultPool(ctx, tx, p.TenantID); err != nil {
+				return err
+			}
 			if stopReason != "" {
 				var exists bool
 				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pools WHERE tenant_id = $1 AND name = $2 AND NOT retired)`, p.TenantID, name).Scan(&exists); err != nil {
@@ -1964,30 +1969,21 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	}
 	var out Pool
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
-		// Before the upsert locks the pool's row: SetDefaultPool takes
-		// this lock and then the rows, so the other order could deadlock.
-		if pl.IsDefault != nil {
-			if err := lockDefaultPool(ctx, tx, p.TenantID); err != nil {
-				return err
-			}
-		}
-		_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
-				scale_down_after_s, warm_while_active, hourly_price, price_currency)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''))
-			ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
-				min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
-				scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
-				hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
-				retired = false`,
-			ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
-			sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency)
+		err := SavePool(ctx, tx, p.TenantID, pl.Name, pl.IsDefault, func() error {
+			_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
+					scale_down_after_s, warm_while_active, hourly_price, price_currency)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''))
+				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
+					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
+					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
+					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
+					`+PoolRevive,
+				ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
+				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency)
+			return err
+		})
 		if err != nil {
 			return err
-		}
-		if pl.IsDefault != nil {
-			if err := SetDefaultPool(ctx, tx, p.TenantID, pl.Name, *pl.IsDefault); err != nil {
-				return err
-			}
 		}
 		out, err = readPool(ctx, tx, p.TenantID, pl.Name)
 		return err
@@ -2031,6 +2027,27 @@ func lockDefaultPool(ctx context.Context, tx pgx.Tx, tenantID string) error {
 	return err
 }
 
+// PoolRevive ends a pool upsert's DO UPDATE SET: re-creating a retired
+// pool brings it back without the default mark it had.
+const PoolRevive = `is_default = pools.is_default AND NOT pools.retired, retired = false`
+
+// SavePool runs upsert, which creates or replaces the pool name of
+// tenantID's ("" a platform pool), and then sets its default mark unless
+// mark is nil, all under the owner's lock. The lock comes before the
+// upsert locks the pool's row, as in SetDefaultPool and deletePool: the
+// other order could deadlock against them.
+func SavePool(ctx context.Context, tx pgx.Tx, tenantID, name string, mark *bool, upsert func() error) error {
+	if mark != nil {
+		if err := lockDefaultPool(ctx, tx, tenantID); err != nil {
+			return err
+		}
+	}
+	if err := upsert(); err != nil || mark == nil {
+		return err
+	}
+	return SetDefaultPool(ctx, tx, tenantID, name, *mark)
+}
+
 // SetDefaultPool marks the pool name as its owner's default (tenantID ""
 // for the platform's), clearing the previous one in the same statement
 // (pools_one_default is checked at its end), or clears it. A retired pool,
@@ -2052,7 +2069,10 @@ func SetDefaultPool(ctx context.Context, tx pgx.Tx, tenantID, name string, mark 
 		_, err := tx.Exec(ctx, `UPDATE pools SET is_default = false WHERE `+owner+` AND name = $2`, tenantID, name)
 		return err
 	}
-	_, err := tx.Exec(ctx, `UPDATE pools SET is_default = (name = $2) WHERE `+owner+` AND (name = $2 OR is_default)`, tenantID, name)
+	// A retired pool is never marked, and loses a mark it kept (a removal
+	// that raced a mark before both took the lock), which would otherwise
+	// hold pools_one_default against every later mark.
+	_, err := tx.Exec(ctx, `UPDATE pools SET is_default = (name = $2 AND NOT retired) WHERE `+owner+` AND (name = $2 OR is_default)`, tenantID, name)
 	return err
 }
 

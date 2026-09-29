@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -336,5 +337,176 @@ func TestOperatorMarksDefaultPools(t *testing.T) {
 	var he *HTTPError
 	if _, err := s.putPool(op, &poolBody{Body: Pool{Name: "x", Provider: "static"}}); !errors.As(err, &he) || he.Code != "tenant_required" {
 		t.Fatalf("an operator creating a pool without a tenant: %v", err)
+	}
+}
+
+// holdDefaultLock takes tenantID's default-pool lock in a transaction of
+// its own, and returns its backend pid and a release that commits it.
+func holdDefaultLock(t *testing.T, s *Server, ctx context.Context, tenantID string) (int, func()) {
+	t.Helper()
+	tx, err := s.db.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lockDefaultPool(ctx, tx, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	var pid int
+	if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			tx.Commit(ctx)
+		}
+	}
+	t.Cleanup(release)
+	return pid, release
+}
+
+// waitBlockedBy returns once a backend waits on an advisory lock pid holds,
+// and fails if done delivers first.
+func waitBlockedBy(t *testing.T, s *Server, ctx context.Context, pid int, done <-chan error) {
+	t.Helper()
+	for {
+		var waiting bool
+		systemScan(t, s, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+			AND wait_event = 'advisory' AND $1 = ANY(pg_blocking_pids(pid)))`, []any{pid}, &waiting)
+		if waiting {
+			return
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("finished without waiting for the default-pool lock: %v", err)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// Removing a pool waits for its owner's default-pool lock, as a mark
+// does, before it touches the pool's row.
+func TestDeletePoolTakesTheDefaultLock(t *testing.T) {
+	s := testServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	mustPut(t, s, "t1", Pool{Name: "a", Provider: "static", IsDefault: mark(true)})
+	pid, release := holdDefaultLock(t, s, ctx, "t1")
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.deletePool(tenantCtx("t1"), &deletePoolInput{Name: "a"})
+		done <- err
+	}()
+	waitBlockedBy(t, s, ctx, pid, done)
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if got := defaultPools(t, s); len(got) != 0 {
+		t.Fatalf("defaults %v after removing the default", got)
+	}
+}
+
+// Creating a pool with a mark (luxd admin create-pool --default) takes the
+// owner's lock before the upsert touches the pool's row, as putPool does.
+func TestSavePoolLocksBeforeTheUpsert(t *testing.T) {
+	s := testServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pid, release := holdDefaultLock(t, s, ctx, "")
+	upserted := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return SavePool(ctx, tx, "", "plat", mark(true), func() error {
+				upserted <- struct{}{}
+				_, err := tx.Exec(ctx, `INSERT INTO pools (id, name, provider) VALUES ('pp', 'plat', 'static')`)
+				return err
+			})
+		})
+	}()
+	waitBlockedBy(t, s, ctx, pid, done)
+	select {
+	case <-upserted:
+		t.Fatal("the upsert ran before the default-pool lock was held")
+	default:
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := defaultPools(t, s); got[""] != "plat" {
+		t.Fatalf("defaults %v", got)
+	}
+}
+
+// A pool retired while still marked (a mark racing a removal could leave
+// one before both took the lock) comes back unmarked when re-created, and
+// the next mark clears any such leftover.
+func TestRetiredPoolIsNeverMarked(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider, retired, is_default) VALUES ('pa', 't1', 'a', 'static', true, true)`)
+	mustPut(t, s, "t1", Pool{Name: "a", Provider: "static"})
+	if got := defaultPools(t, s); len(got) != 0 {
+		t.Fatalf("re-creating a retired pool kept its mark: %v", got)
+	}
+
+	// Another left marked, beside a live default: the next mark moves the
+	// mark past both and leaves neither retired pool marked.
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider, retired, is_default) VALUES ('px', 't1', 'x', 'static', true, true)`)
+	mustPut(t, s, "t1", Pool{Name: "b", Provider: "static", IsDefault: mark(true)})
+	var retiredMarked int
+	systemScan(t, s, `SELECT count(*) FROM pools WHERE retired AND is_default`, nil, &retiredMarked)
+	if retiredMarked != 0 {
+		t.Fatalf("%d retired pools still marked", retiredMarked)
+	}
+	if got := defaultPools(t, s); got["t1"] != "b" {
+		t.Fatalf("defaults %v, want b", got)
+	}
+}
+
+// Marks and removals of the same pools at once: whatever the order, no
+// retired pool is left marked and the tenant never has two defaults.
+func TestConcurrentMarkAndDelete(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	for range 20 {
+		mustPut(t, s, "t1", Pool{Name: "a", Provider: "static"})
+		mustPut(t, s, "t1", Pool{Name: "b", Provider: "static", IsDefault: mark(true)})
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		wg.Go(func() {
+			_, errs[0] = s.putPool(tenantCtx("t1"), &poolBody{Body: Pool{Name: "a", IsDefault: mark(true)}})
+		})
+		wg.Go(func() { _, errs[1] = s.deletePool(tenantCtx("t1"), &deletePoolInput{Name: "a"}) })
+		wg.Wait()
+		var he *HTTPError
+		if errs[0] != nil && !(errors.As(errs[0], &he) && he.Status == http.StatusNotFound) {
+			t.Fatalf("mark: %v", errs[0])
+		}
+		if errs[1] != nil {
+			t.Fatalf("delete: %v", errs[1])
+		}
+		var retiredMarked int
+		systemScan(t, s, `SELECT count(*) FROM pools WHERE retired AND is_default`, nil, &retiredMarked)
+		if retiredMarked != 0 {
+			t.Fatal("a retired pool is marked")
+		}
+		// The mark lost to the removal (404) or won and was cleared by it.
+		if got := defaultPools(t, s); errs[0] != nil && got["t1"] != "b" || errs[0] == nil && len(got) != 0 {
+			t.Fatalf("mark err %v, defaults %v", errs[0], got)
+		}
 	}
 }
