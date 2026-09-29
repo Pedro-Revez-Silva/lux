@@ -1914,10 +1914,9 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 
 // Where a Run's pool came from, in its submitted event's poolFrom.
 const (
-	poolFromSpec     = "spec"             // the spec named it
-	poolFromTenant   = "tenant-default"   // the tenant's default pool
-	poolFromPlatform = "platform-default" // the platform's default pool
-	poolFromFallback = "fallback"         // neither is marked: the pool named "default"
+	poolFromSpec     = "spec"           // the spec named it
+	poolFromTenant   = "tenant-default" // the tenant's default pool
+	poolFromFallback = "fallback"       // neither is marked: the pool named "default"
 )
 
 // resolvedPool is the pool a Run was submitted to. Owner is runs.pool_owner:

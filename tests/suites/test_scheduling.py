@@ -170,7 +170,7 @@ def test_a_run_naming_no_pool_goes_to_the_tenants_default(lux, runners, hosts):
         run = lux.wait_state(run_id, "running")
         assert run["host"] == hosts[0].name and run["spec"]["placement"]["pool"] == "arm64", run
         data = lux.events(run_id, "submitted")[0]["data"]
-        assert data == {**data, "pool": "arm64", "poolFrom": "tenant-default", "poolOwner": "tenant"}, data
+        assert (data["pool"], data["poolFrom"], data["poolOwner"]) == ("arm64", "tenant-default", "tenant"), data
 
         # Moving the default leaves the submitted Run where it is.
         lux.run("pools", "set", "other", "--default")

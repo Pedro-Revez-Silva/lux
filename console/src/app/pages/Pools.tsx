@@ -77,7 +77,12 @@ export function Pools() {
     return c;
   }, [showTenant, operator]);
 
-  const whose = marking?.platform ? "the platform's" : showTenant || operator ? `tenant ${marking?.tenant}'s` : "your";
+  let whose = "your";
+  if (marking?.platform) {
+    whose = "the platform's";
+  } else if (operator) {
+    whose = `tenant ${marking?.tenant}'s`;
+  }
   const makeDefault = async () => {
     if (!marking) return;
     setBusy(true);

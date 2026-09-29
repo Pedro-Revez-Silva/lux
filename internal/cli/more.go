@@ -561,14 +561,15 @@ name): a tenant's pool and a platform pool may share a name.`,
 				if p.IsDefault != nil && *p.IsDefault {
 					def = "*"
 				}
-				row := []string{p.Name, def, p.Provider, fmt.Sprintf("%d-%d", p.MinHosts, p.MaxHosts), fmt.Sprint(p.WarmHosts), fmt.Sprint(p.Shared)}
+				row := []string{p.Name}
 				if who.Operator {
 					owner := p.Tenant
 					if p.Platform {
 						owner = "platform"
 					}
-					row = append([]string{p.Name, owner}, row[1:]...)
+					row = append(row, owner)
 				}
+				row = append(row, def, p.Provider, fmt.Sprintf("%d-%d", p.MinHosts, p.MaxHosts), fmt.Sprint(p.WarmHosts), fmt.Sprint(p.Shared))
 				rows = append(rows, row)
 			}
 			header := "NAME\tDEFAULT\tPROVIDER\tHOSTS\tWARM\tSHARED"
