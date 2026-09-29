@@ -6,6 +6,8 @@ import (
 	"regexp"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/ids"
 )
 
 // MaxPoolName is the longest pool name. A pool's name reaches AWS twice:
@@ -37,8 +39,8 @@ func ValidPoolName(name string) error {
 
 // CheckPoolName is ValidPoolName for a name about to be written, except
 // that a name the same owner already uses may be kept: a pool stored
-// under it (live or retired), or, for a static pool that has no pool row,
-// a host token or host that joined it. Updating such a pool or minting a
+// under it (live or retired; a static pool known only by its host tokens
+// became a row in migration 038). Updating such a pool or minting a
 // replacement token must not start failing on upgrade. A *PoolNameError
 // is the rule; any other error is the database's.
 func CheckPoolName(ctx context.Context, tx pgx.Tx, tenantID *string, name string) error {
@@ -48,9 +50,7 @@ func CheckPoolName(ctx context.Context, tx pgx.Tx, tenantID *string, name string
 	}
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT
-			EXISTS (SELECT 1 FROM pools WHERE coalesce(tenant_id, '') = coalesce($1, '') AND name = $2)
-			OR EXISTS (SELECT 1 FROM host_tokens WHERE coalesce(tenant_id, '') = coalesce($1, '') AND pool = $2)
-			OR EXISTS (SELECT 1 FROM hosts WHERE coalesce(tenant_id, '') = coalesce($1, '') AND pool = $2)`,
+			EXISTS (SELECT 1 FROM pools WHERE coalesce(tenant_id, '') = coalesce($1, '') AND name = $2)`,
 		tenantID, name).Scan(&exists); err != nil {
 		return err
 	}
@@ -58,4 +58,18 @@ func CheckPoolName(ctx context.Context, tx pgx.Tx, tenantID *string, name string
 		return nil
 	}
 	return validationErr
+}
+
+// EnsureStaticPool is the id of tenantID's ("" the platform's) pool name,
+// created as an empty static pool when it has no row (a host token for a
+// static pool no one has set). A retired pool keeps its id: its hosts
+// join it and wait, as its Runs do, for it to be set again.
+func EnsureStaticPool(ctx context.Context, tx pgx.Tx, tenantID, name string) (string, error) {
+	var id string
+	err := tx.QueryRow(ctx, `WITH ins AS (
+			INSERT INTO pools (id, tenant_id, name, provider) VALUES ($1, nullif($2, ''), $3, 'static')
+			ON CONFLICT (coalesce(tenant_id, ''), name) DO NOTHING RETURNING id)
+		SELECT id FROM ins UNION ALL SELECT id FROM pools WHERE coalesce(tenant_id, '') = $2 AND name = $3`,
+		ids.New(ids.Pool), tenantID, name).Scan(&id)
+	return id, err
 }

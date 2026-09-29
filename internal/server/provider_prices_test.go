@@ -70,11 +70,11 @@ func insertProviderHost(t *testing.T, s *Server, tenant, pool, provider, id, mar
 	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider)
 		VALUES ($1, $2, $3, $4)`, "pool-"+tenant+"-"+provider+"-"+pool, tenant, pool, provider)
 	execSQL(t, s, ctx, `INSERT INTO hosts
-		(id, tenant_id, name, pool, state, provider_id, provision_requested_at, registered_at,
+		(id, tenant_id, name, pool_id, state, provider_id, provision_requested_at, registered_at,
 		 instance_type, market, zone, launch_template, capacity)
 		VALUES ($1, $2, $1, $3, 'ready', 'i-' || $1::text, $4, $4, 'm7i.large', $5, 'us-east-1a',
 		        '{"region":"us-east-1"}', jsonb_build_object('cpus', 4, 'memory', $6::int8))`,
-		id, tenant, pool, from, market, int64(16)<<30)
+		id, tenant, "pool-"+tenant+"-"+provider+"-"+pool, from, market, int64(16)<<30)
 }
 
 type storedProviderRate struct {
@@ -200,9 +200,9 @@ func TestProviderPricesSpotLatestRateAndRetry(t *testing.T) {
 	execSQL(t, s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
 	insertProviderHost(t, s, "t1", "spot", "ec2", "spot-a", MarketSpot, from)
 	execSQL(t, s, context.Background(), `INSERT INTO hosts
-		(id, tenant_id, name, pool, state, provider_id, provision_requested_at, registered_at,
+		(id, tenant_id, name, pool_id, state, provider_id, provision_requested_at, registered_at,
 		 instance_type, market, zone, launch_template, capacity)
-		SELECT 'spot-b', tenant_id, 'spot-b', pool, state, 'i-spot-b', provision_requested_at, registered_at,
+		SELECT 'spot-b', tenant_id, 'spot-b', pool_id, state, 'i-spot-b', provision_requested_at, registered_at,
 		 instance_type, market, zone, launch_template, capacity FROM hosts WHERE id = 'spot-a'`)
 	s.refreshPrices(context.Background())
 	if len(p.spotCalls) != 1 || p.onDemandCalls != 0 || p.spotCalls[0].zone != "us-east-1a" || p.spotCalls[0].kind != "m7i.large" {

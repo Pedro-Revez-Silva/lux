@@ -223,13 +223,13 @@ an estimate, or a cost source has not answered yet.`,
 				if r.Activity == "idle" && r.State == "running" {
 					state += " (waiting for input)"
 				}
-				row := []string{r.ID, orDash(r.Name), state, orDash(r.Host), r.Spec.Workload.Adapter, runtimeCell(r), runCostCell(r.Cost), ago(&r.CreatedAt)}
+				row := []string{r.ID, orDash(r.Name), state, orDash(r.Host), orDash(r.Pool), r.Spec.Workload.Adapter, runtimeCell(r), runCostCell(r.Cost), ago(&r.CreatedAt)}
 				if len(tenants) > 1 {
 					row = append([]string{r.Tenant}, row...)
 				}
 				rows = append(rows, row)
 			}
-			header := "ID\tNAME\tSTATE\tHOST\tADAPTER\tRUNTIME\tCOST\tCREATED"
+			header := "ID\tNAME\tSTATE\tHOST\tPOOL\tADAPTER\tRUNTIME\tCOST\tCREATED"
 			if len(tenants) > 1 {
 				header = "TENANT\t" + header
 			}

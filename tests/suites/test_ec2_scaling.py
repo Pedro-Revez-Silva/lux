@@ -24,7 +24,11 @@ def test_a_waiting_run_gets_a_host_launched(lux, ec2):
     assert "on-ec2" in lux.logs(run_id)
     [inst] = ec2.running()
     assert inst["launchTemplate"] == ec2.template["launchTemplate"]
-    assert inst["tags"]["lux:pool"].endswith("/burst")  # tenant pools: <tenant>/<name>
+    # Listed by the pool's id; the name at launch is informational.
+    [row] = [p for p in lux.json("pools", "ls") if p["name"] == "burst"]
+    assert inst["tags"]["lux:pool"] == "burst", inst["tags"]
+    assert inst["tags"]["lux:pool-id"] == row["id"], (inst["tags"], row)
+    assert [h["poolId"] for h in ec2_hosts(lux)] == [inst["tags"]["lux:pool-id"]], row
     host = lux.get(run_id)["placements"][0]["hostName"]
     assert host == inst["tags"]["Name"], (host, inst["tags"])
     # Idle past the scale-down delay: drained, then terminated.
@@ -73,7 +77,7 @@ def test_template_tags_are_kept_and_lux_tags_are_reserved(lux, ec2):
     lux.wait_state(run_id, "succeeded", timeout=120)
     [inst] = ec2.running()
     assert inst["tags"]["team"] == "platform", inst["tags"]
-    assert inst["tags"]["lux:pool"].endswith("/burst"), inst["tags"]
+    assert inst["tags"]["lux:pool"] == "burst" and inst["tags"]["lux:pool-id"].startswith("pool_"), inst["tags"]
     # The pool as listed saves back unchanged (no stored lux:* tag).
     [stored] = [p for p in lux.json("pools", "ls") if p["name"] == "burst"]
     assert stored["template"]["tags"] == {"team": "platform"}, stored["template"]
@@ -179,3 +183,42 @@ def test_warm_while_active_scales_an_idle_pool_to_zero(lux, ec2):
     assert lux.get(again)["placements"][0]["hostName"] in ready, "the next Run waited for a new host"
     # Quiet past the scale-down time: back to zero.
     wait_until(lambda: not ec2.running(), 120, 0.3, "the idle pool never scaled to zero")
+
+
+def test_a_renamed_pool_keeps_its_hosts_and_runs(lux, ec2):
+    """Renaming an EC2 pool changes only its name: the running Run keeps
+    running on its host, the host stays in the pool (and its instance up),
+    a new Run naming the new name lands on the same host, and the old name
+    no longer finds the pool."""
+    pool(lux, ec2, max=1)
+    first = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "echo up; sleep 300", placement={"pool": "burst"}))
+    lux.wait_state(first, "running", timeout=120)
+    [inst] = ec2.running()
+    host = lux.get(first)["host"]
+    try:
+        lux.run("pools", "rename", "burst", "burst2")
+        assert [p["name"] for p in lux.json("pools", "ls") if p["name"].startswith("burst")] == ["burst2"]
+        run = lux.get(first)
+        assert run["state"] == "running" and run["host"] == host and run["pool"] == "burst2", run
+        assert run["spec"]["placement"]["pool"] == "burst", run["spec"]
+        assert [h["name"] for h in ec2_hosts(lux, "burst2")] == [host]
+
+        second = lux.submit(generic(ALPINE_IMAGE, "echo", "renamed", placement={"pool": "burst2"}))
+        lux.wait_state(second, "succeeded", timeout=60)
+        assert lux.get(second)["host"] == host
+        # Past a provider check: the instance is still the pool's, and no
+        # other was launched (max 1).
+        time.sleep(3)
+        assert [i["id"] for i in ec2.running()] == [inst["id"]]
+        assert lux.get(first)["state"] == "running"
+
+        stale = lux.submit(generic(ALPINE_IMAGE, "true", placement={"pool": "burst"}))
+        time.sleep(2)
+        run = lux.get(stale)
+        assert run["state"] == "submitted" and not run.get("host") and not run.get("poolId"), run
+        lux.run("cancel", stale)
+        evs = list(reversed(lux.json("pools", "events", "burst2", "--all")))
+        assert [e["data"] for e in evs if e["type"] == "pool.renamed"] == [{"from": "burst", "to": "burst2"}], evs
+        lux.run("cancel", first)
+    finally:
+        lux.run("pools", "rename", "burst2", "burst", check=False)

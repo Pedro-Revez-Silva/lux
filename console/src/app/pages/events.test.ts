@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { eventSummary } from "./events.ts";
+import { eventSummary, infraEventSummary } from "./events.ts";
 
 function submitted(data: Record<string, unknown>): string {
   return eventSummary({ id: 1, type: "submitted", data: { by: "k1", ...data }, time: "" });
@@ -16,4 +16,8 @@ test("without an owner, as for a name no pool has, only why", () => {
   expect(submitted({ pool: "default", poolFrom: "fallback" })).toBe("by k1 · pool default (no default pool marked)");
   expect(submitted({ pool: "gpu", poolFrom: "spec" })).toBe("by k1 · pool gpu");
   expect(submitted({})).toBe("by k1");
+});
+
+test("a rename says from and to", () => {
+  expect(infraEventSummary({ id: 1, type: "pool.renamed", data: { from: "burst", to: "burst2" }, count: 1, time: "" })).toBe("burst → burst2");
 });

@@ -85,10 +85,10 @@ func TestCheckPoolNameKeepsNamesInUse(t *testing.T) {
 		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1'), ('t2', 't2')`); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO host_tokens (id, tenant_id, pool, token_hash) VALUES ('ht1', 't1', 'Old_Static', 'x1')`); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state) VALUES ('h1', NULL, 'h1', 'Plat_Static', 'ready')`)
+		// Static pools known by their tokens and hosts alone, as migration
+		// 038 makes them rows.
+		_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES
+			('p-old', 't1', 'Old_Static', 'static'), ('p-plat', NULL, 'Plat_Static', 'static')`)
 		return err
 	})
 	if err != nil {

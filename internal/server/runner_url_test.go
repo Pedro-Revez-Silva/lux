@@ -84,7 +84,7 @@ func TestLaunchStoresHostFacts(t *testing.T) {
 			}
 			var got Launched
 			err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-				return tx.QueryRow(ctx, `SELECT provider_id, instance_type, zone, market FROM hosts WHERE pool = 'burst'`).
+				return tx.QueryRow(ctx, `SELECT provider_id, instance_type, zone, market FROM hosts WHERE pool_id = 'pool1'`).
 					Scan(&got.ProviderID, &got.InstanceType, &got.Zone, &got.Market)
 			})
 			if err != nil {
@@ -109,7 +109,7 @@ func TestLaunchMissingHostFactsAreNull(t *testing.T) {
 	var providerID string
 	var instanceType, zone, market *string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT provider_id, instance_type, zone, market FROM hosts WHERE pool = 'burst'`).
+		return tx.QueryRow(ctx, `SELECT provider_id, instance_type, zone, market FROM hosts WHERE pool_id = 'pool1'`).
 			Scan(&providerID, &instanceType, &zone, &market)
 	})
 	if err != nil {
