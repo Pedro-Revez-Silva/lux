@@ -4,7 +4,8 @@
 // as the workload user (`lux-shim diff`), never as the runner on the host.
 //
 // It never changes the checkout: untracked files are marked intent-to-add
-// in a copy of the index, in a temporary directory, and the working tree
+// in a copy of the index, in a scratch directory under /tmp (never the
+// workload's $TMPDIR, never inside the checkout), and the working tree
 // is diffed against the base through that copy. Nothing is written to the
 // repository: not its index, HEAD, refs or object store (the one object
 // the copy needs, the empty blob, goes to a temporary object directory).
@@ -67,9 +68,10 @@ func (r *repo) gitIn(ctx context.Context, stdin io.Reader, stdout io.Writer, arg
 	cmd := exec.CommandContext(ctx, "git", append(append(append([]string{}, safeConfig...), r.conf...), args...)...)
 	cmd.Dir = r.dir
 	// The container's environment is the Run's: a GIT_DIR, GIT_INDEX_FILE
-	// or GIT_EXTERNAL_DIFF there must not redirect or reshape the diff.
+	// or GIT_EXTERNAL_DIFF there must not redirect or reshape the diff,
+	// nor a TMPDIR inside the checkout receive git's temporary files.
 	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "GIT_") {
+		if !strings.HasPrefix(kv, "GIT_") && !strings.HasPrefix(kv, "TMPDIR=") {
 			cmd.Env = append(cmd.Env, kv)
 		}
 	}
@@ -155,7 +157,7 @@ func Compute(ctx context.Context, dir, base string, kinds []string, statOnly boo
 	if err != nil {
 		return nil, err
 	}
-	tmp, err := os.MkdirTemp("", "lux-diff-")
+	tmp, err := r.scratch(ctx, top)
 	if err != nil {
 		return nil, err
 	}
@@ -207,6 +209,53 @@ func Compute(ctx context.Context, dir, base string, kinds []string, statOnly boo
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// scratchRoot is where the copy of the index and the empty blob go. Not
+// $TMPDIR: that is the workload's, and may be inside the checkout, whose
+// untracked files the copy would then list (and whose working tree it
+// would change).
+var scratchRoot = "/tmp"
+
+// scratch creates the diff's scratch directory under scratchRoot, and
+// refuses one that resolves (through symlinks) inside the checkout or its
+// git directories.
+func (r *repo) scratch(ctx context.Context, top string) (string, error) {
+	gitDirs, err := r.out(ctx, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	repoPaths := append([]string{top}, strings.Split(gitDirs, "\n")...)
+	for i, p := range repoPaths {
+		if rp, err := filepath.EvalSymlinks(p); err == nil {
+			repoPaths[i] = rp
+		}
+	}
+	outside := func(p string) error {
+		rp, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			return err
+		}
+		for _, repo := range repoPaths {
+			if rel, err := filepath.Rel(repo, rp); err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
+				return fmt.Errorf("the diff's scratch directory %s is inside the repository (%s): refusing to write there", p, repo)
+			}
+		}
+		return nil
+	}
+	if err := outside(scratchRoot); err != nil {
+		return "", err
+	}
+	tmp, err := os.MkdirTemp(scratchRoot, "lux-diff-")
+	if err != nil {
+		return "", err
+	}
+	// Checked again once made: scratchRoot may have been swapped since.
+	if err := outside(tmp); err != nil {
+		os.RemoveAll(tmp)
+		return "", err
+	}
+	return tmp, nil
 }
 
 // head is the checkout's HEAD commit: "" for an unborn branch (HEAD names

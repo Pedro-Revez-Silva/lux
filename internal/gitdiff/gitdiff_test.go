@@ -486,6 +486,57 @@ func TestNoChangeAndErrors(t *testing.T) {
 	}
 }
 
+// A TMPDIR inside the checkout (the workload's environment) receives none
+// of the diff's scratch files: the patch is what it is without it, and
+// the checkout, .git included, is byte for byte unchanged.
+func TestTMPDIRInsideTheCheckout(t *testing.T) {
+	dir, base := checkout(t)
+	want, err := Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, proto.DiffLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tmp := range []string{filepath.Join(dir, "tmp"), filepath.Join(dir, ".git")} {
+		os.MkdirAll(tmp, 0o755)
+		t.Setenv("TMPDIR", tmp)
+		before := digest(t, dir)
+		got, err := Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, proto.DiffLimit)
+		if err != nil || got[0].Stat.Error != "" {
+			t.Fatal(err, got)
+		}
+		if !bytes.Equal(got[0].Patch, want[0].Patch) || got[0].Stat.Files != want[0].Stat.Files {
+			t.Errorf("TMPDIR=%s: the patch changed:\n%s", tmp, got[0].Patch)
+		}
+		if digest(t, dir) != before {
+			t.Errorf("TMPDIR=%s: the checkout changed", tmp)
+		}
+	}
+}
+
+// A scratch root that resolves inside the checkout (a /tmp symlinked into
+// it) is refused: an error, nothing written.
+func TestScratchRootInsideTheCheckoutIsRefused(t *testing.T) {
+	dir, base := checkout(t)
+	os.MkdirAll(filepath.Join(dir, "scratch"), 0o755)
+	link := filepath.Join(t.TempDir(), "tmp")
+	for _, target := range []string{filepath.Join(dir, "scratch"), filepath.Join(dir, ".git")} {
+		os.Remove(link)
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		old := scratchRoot
+		scratchRoot = link
+		before := digest(t, dir)
+		_, err := Compute(context.Background(), dir, base, []string{proto.DiffBaseClone}, false, proto.DiffLimit)
+		scratchRoot = old
+		if err == nil || !strings.Contains(err.Error(), "inside the repository") {
+			t.Errorf("scratch root %s -> %s: %v", link, target, err)
+		}
+		if digest(t, dir) != before {
+			t.Errorf("scratch root -> %s: the checkout changed", target)
+		}
+	}
+}
+
 // Run's stream reads back record by record, patches intact; a repository
 // that fails is a record with its error and the rest go on.
 func TestStreamRoundTrip(t *testing.T) {
