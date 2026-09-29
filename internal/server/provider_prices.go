@@ -35,7 +35,7 @@ func (s *Server) pricedHosts(ctx context.Context) ([]pricedHost, error) {
 		rows, err := tx.Query(ctx, `SELECT h.id, p.provider, coalesce(h.launch_template->>'region',''), coalesce(h.instance_type,''),
     coalesce(h.zone,''), coalesce(h.market,''),
     coalesce((h.capacity->>'cpus')::float8,0), coalesce((h.capacity->>'memory')::int8,0)
-    FROM hosts h JOIN pools p ON p.name = h.pool AND p.tenant_id IS NOT DISTINCT FROM h.tenant_id
+    FROM hosts h JOIN pools p ON p.id = h.pool_id
     WHERE h.provision_requested_at IS NOT NULL AND h.provider_id IS NOT NULL AND p.provider <> 'static'
       AND (h.terminated_at IS NULL OR (
        NOT EXISTS (SELECT 1 FROM host_rates hr WHERE hr.host_id = h.id)

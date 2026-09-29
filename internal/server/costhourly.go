@@ -65,8 +65,8 @@ func replaceComputeHours(ctx context.Context, tx pgx.Tx, tenant, run string, hou
 	}
 	for k, v := range amounts {
 		// The aggregation key includes the host to keep host and pool groups accurate.
-		_, err := tx.Exec(ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, pool, amount)
-			SELECT $1, $2, $3, 'compute', 'compute', $4, h.id, h.pool, $5::numeric FROM hosts h WHERE h.id = $6`,
+		_, err := tx.Exec(ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, pool_id, amount)
+			SELECT $1, $2, $3, 'compute', 'compute', $4, h.id, h.pool_id, $5::numeric FROM hosts h WHERE h.id = $6`,
 			k.hour, tenant, run, k.currency, moneyString(v), k.host)
 		if err != nil {
 			return err
@@ -403,8 +403,8 @@ func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, 
 		billed := mustRat(moneyString(total[k]))
 		charged := mustRat(moneyString(v))
 		idle := new(big.Rat).Sub(billed, charged)
-		_, err := tx.Exec(ctx, `INSERT INTO cost_hourly (hour, source, family, currency, host_id, pool, allocated, unallocated)
-				SELECT $1, 'compute', 'compute', $2, id, pool, $3::numeric, $4::numeric FROM hosts WHERE id = $5`,
+		_, err := tx.Exec(ctx, `INSERT INTO cost_hourly (hour, source, family, currency, host_id, pool_id, allocated, unallocated)
+				SELECT $1, 'compute', 'compute', $2, id, pool_id, $3::numeric, $4::numeric FROM hosts WHERE id = $5`,
 			k.hour, k.currency, moneyString(charged), moneyString(idle), id)
 		if err != nil {
 			return err

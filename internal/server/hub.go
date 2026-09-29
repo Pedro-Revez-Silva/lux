@@ -408,7 +408,7 @@ func enqueue(ctx context.Context, tx pgx.Tx, hostID, runID string, epoch int, ty
 type hostToken struct {
 	ID       string
 	TenantID *string
-	Pool     string
+	PoolID   *string // the pool its hosts join, whatever it is called
 	Labels   map[string]string
 }
 
@@ -419,8 +419,8 @@ func (s *Server) authHostToken(r *http.Request) (*hostToken, error) {
 	}
 	var t hostToken
 	err := s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(), `SELECT id, tenant_id, pool, labels FROM host_tokens
-			WHERE token_hash = $1 AND revoked_at IS NULL`, ids.Hash(raw)).Scan(&t.ID, &t.TenantID, &t.Pool, &t.Labels)
+		return tx.QueryRow(r.Context(), `SELECT id, tenant_id, pool_id, labels FROM host_tokens
+			WHERE token_hash = $1 AND revoked_at IS NULL`, ids.Hash(raw)).Scan(&t.ID, &t.TenantID, &t.PoolID, &t.Labels)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errf(http.StatusUnauthorized, "unauthorized", "invalid host token")

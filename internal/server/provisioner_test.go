@@ -19,8 +19,8 @@ func TestPoolStateHoldsBackADrainingHostWithALivePlacement(t *testing.T) {
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
 	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, draining, provider_id, provision_requested_at)
-		VALUES ('h1', 't1', 'h1', 'burst', 'draining', true, 'i-123', now())`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, draining, provider_id, provision_requested_at)
+		VALUES ('h1', 't1', 'h1', 'pool1', 'draining', true, 'i-123', now())`)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', '{}', 'running', 1)`)
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
 

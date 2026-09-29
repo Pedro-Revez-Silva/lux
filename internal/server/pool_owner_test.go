@@ -27,14 +27,31 @@ func submitAs(t *testing.T, s *Server, tenant, pool, key string) string {
 	return out.Body.ID
 }
 
-// runPool is a Run's stored pool, its pool_owner ("<nil>" for NULL), and
-// its submitted event's poolOwner.
+// runPool is a Run's stored pool, the owner of the pool its pool_id binds
+// it to ("" the platform, "<nil>" for none), and its submitted event's
+// poolOwner.
 func runPool(t *testing.T, s *Server, id string) (pool, owner, eventOwner string) {
 	t.Helper()
-	systemScan(t, s, `SELECT r.spec->'placement'->>'pool', coalesce(r.pool_owner, '<nil>'), coalesce(e.data->>'poolOwner', '')
+	systemScan(t, s, `SELECT r.spec->'placement'->>'pool', coalesce((SELECT coalesce(p.tenant_id, '') FROM pools p WHERE p.id = r.pool_id), '<nil>'),
+			coalesce(e.data->>'poolOwner', '')
 		FROM runs r JOIN run_events e ON e.run_id = r.id AND e.type = 'submitted' WHERE r.id = $1`,
 		[]any{id}, &pool, &owner, &eventOwner)
 	return pool, owner, eventOwner
+}
+
+// poolID is the id of tenant's ("" the platform's) pool name, created as
+// a static pool if it has no row.
+func poolID(t *testing.T, s *Server, pool, tenant string) string {
+	t.Helper()
+	var id string
+	if err := s.db.Tx(context.Background(), store.System(), func(tx pgx.Tx) error {
+		var err error
+		id, err = EnsureStaticPool(context.Background(), tx, tenant, pool)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 // readyHost adds a connected, ready host in pool, tenant's ("" for a
@@ -50,8 +67,8 @@ func readyHost(t *testing.T, s *Server, id, pool, tenant string, cached bool) {
 	if cached {
 		caches = `{"images":["alpine"]}`
 	}
-	execSQL(t, s, context.Background(), `INSERT INTO hosts (id, name, pool, tenant_id, state, capacity, caches, last_heartbeat)
-		VALUES ($1, $1, $2, $3, 'ready', '{"runs":10}', $4, now())`, id, pool, tenantArg, caches)
+	execSQL(t, s, context.Background(), `INSERT INTO hosts (id, name, pool_id, tenant_id, state, capacity, caches, last_heartbeat)
+		VALUES ($1, $1, $2, $3, 'ready', '{"runs":10}', $4, now())`, id, poolID(t, s, pool, tenant), tenantArg, caches)
 	s.hub.polled(id)
 }
 
@@ -69,12 +86,14 @@ func schedule(t *testing.T, s *Server) {
 	}
 }
 
+// eligible: hosts discovered for a Run of tenant bound to owner's pool name.
 func eligible(t *testing.T, s *Server, pool string, owner *string, tenant string) []string {
 	t.Helper()
+	id := poolID(t, s, pool, *owner)
 	var ids []string
 	if err := s.db.Tx(context.Background(), store.System(), func(tx pgx.Tx) error {
 		var err error
-		ids, err = s.eligibleHostIDs(context.Background(), tx, []string{pool}, []*string{owner}, []string{tenant}, []string{""})
+		ids, err = s.eligibleHostIDs(context.Background(), tx, []*string{&id}, []string{tenant}, []string{""})
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -173,32 +192,35 @@ func TestPoolOwnerDemand(t *testing.T) {
 		}
 		return st.demand
 	}
-	if d := demand(poolRow{Name: "burst", Provider: "ec2"}); d != 1 {
+	t1Burst := poolID(t, s, "burst", "t1")
+	if d := demand(poolRow{ID: "pp", Name: "burst", Provider: "ec2"}); d != 1 {
 		t.Errorf("platform burst demand %d, want 1", d)
 	}
-	if d := demand(poolRow{Name: "burst", Provider: "ec2", TenantID: new("t1")}); d != 0 {
+	if d := demand(poolRow{ID: t1Burst, Name: "burst", Provider: "ec2", TenantID: new("t1")}); d != 0 {
 		t.Errorf("t1's burst demand %d, want 0", d)
 	}
 
-	// A legacy Run (no owner) keeps the name rule: the tenant's shadows.
-	execSQL(t, s, ctx, `UPDATE runs SET pool_owner = NULL WHERE id = $1`, id)
-	if d := demand(poolRow{Name: "burst", Provider: "ec2", TenantID: new("t1")}); d != 1 {
-		t.Errorf("legacy Run: t1's burst demand %d, want 1", d)
+	// A Run bound to no pool is bound by the scheduler by name, the
+	// tenant's shadowing the platform's, and counts there.
+	execSQL(t, s, ctx, `UPDATE runs SET pool_id = NULL WHERE id = $1`, id)
+	schedule(t, s)
+	if d := demand(poolRow{ID: t1Burst, Name: "burst", Provider: "ec2", TenantID: new("t1")}); d != 1 {
+		t.Errorf("unbound Run: t1's burst demand %d, want 1", d)
 	}
 }
 
-// A name no pool row has: no owner, and a static host that joined with
-// that pool name still takes the Run.
+// A name no pool row has: no pool yet; once a static host joins a pool of
+// that name, the scheduler binds the Run to it and places it there.
 func TestPoolOwnerUnknownName(t *testing.T) {
 	s := testServer(t)
 	s.cfg.LeaseDuration = time.Minute
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
-	readyHost(t, s, "h-gpu", "gpu", "", false)
 	id := submitAs(t, s, "t1", "gpu", "")
 	if pool, owner, ev := runPool(t, s, id); pool != "gpu" || owner != "<nil>" || ev != "" {
 		t.Fatalf("pool %q owner %q event %q, want gpu, no owner", pool, owner, ev)
 	}
+	readyHost(t, s, "h-gpu", "gpu", "", false)
 	schedule(t, s)
 	if host, _, _ := placedOn(t, s, id); host != "h-gpu" {
 		t.Fatalf("placed on %q, want h-gpu", host)
@@ -282,7 +304,7 @@ func TestPoolOwnerRemovedStaticPool(t *testing.T) {
 		if err != nil || len(hosts) != 1 {
 			t.Fatalf("candidates %v: %v", hosts, err)
 		}
-		h, _, err := s.pickHost(ctx, tx, pendingRun{ID: id, TenantID: "t1", PoolOwner: new("t1"),
+		h, _, err := s.pickHost(ctx, tx, pendingRun{ID: id, TenantID: "t1", PoolID: new(poolID(t, s, "burst", "t1")),
 			Spec: spec.RunSpec{Placement: spec.Placement{Pool: "burst"}}}, hosts)
 		if h != nil {
 			t.Errorf("pickHost chose %s for a Run of the removed pool", h.ID)
@@ -298,13 +320,15 @@ func TestPoolOwnerRemovedStaticPool(t *testing.T) {
 		t.Fatalf("host %q state %q reason %q, want waiting for its removed pool", host, state, reason)
 	}
 
-	legacy := submitAs(t, s, "t1", "burst", "")
-	if _, owner, _ := runPool(t, s, legacy); owner != "<nil>" {
+	// A Run naming the removed pool finds no pool, and its hosts (the
+	// removed pool's) are not another pool's to take it.
+	later := submitAs(t, s, "t1", "burst", "")
+	if _, owner, _ := runPool(t, s, later); owner != "<nil>" {
 		t.Fatalf("a Run after the removal: owner %q, want none", owner)
 	}
 	schedule(t, s)
-	if host, _, _ := placedOn(t, s, legacy); host != "h-t1" {
-		t.Fatalf("the ownerless Run went to %q, want h-t1", host)
+	if host, _, _ := placedOn(t, s, later); host != "" {
+		t.Fatalf("the unbound Run went to %q, want no host", host)
 	}
 }
 
@@ -333,5 +357,14 @@ func TestIdempotentResubmitKeepsItsPool(t *testing.T) {
 	systemScan(t, s, `SELECT count(*) FROM runs`, nil, &n)
 	if n != 1 {
 		t.Fatalf("%d Runs after a re-submit", n)
+	}
+}
+
+// namedPools adds platform static pools whose ids are their names, for
+// fixtures that put hosts and tokens in a pool by a literal id.
+func namedPools(t *testing.T, s *Server, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		execSQL(t, s, context.Background(), `INSERT INTO pools (id, name, provider) VALUES ($1, $1, 'static') ON CONFLICT (id) DO NOTHING`, n)
 	}
 }

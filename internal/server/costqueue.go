@@ -757,7 +757,7 @@ func resolvePlacementRate(ctx context.Context, tx pgx.Tx, hostID string, start t
 				coalesce(h.zone, '') AS zone, coalesce(h.launch_template->>'region', '') AS region,
 				coalesce((h.capacity->>'cpus')::float8, 0) AS cpus,
 				coalesce((h.capacity->>'memory')::int8, 0) AS memory
-			FROM hosts h LEFT JOIN pools p ON p.name = h.pool AND p.tenant_id IS NOT DISTINCT FROM h.tenant_id
+			FROM hosts h LEFT JOIN pools p ON p.id = h.pool_id
 			WHERE h.id = $1
 		), own_capacity AS (
 			SELECT r.cap_cpus, r.cap_memory FROM host_rates r JOIN target t ON r.host_id = t.id
@@ -769,7 +769,7 @@ func resolvePlacementRate(ctx context.Context, tx pgx.Tx, hostID string, start t
 				CASE WHEN h.id = t.id THEN r.cap_memory ELSE coalesce(c.cap_memory, t.memory) END AS cap_memory,
 				h.id = t.id AS own, r.valid_from <= $2 AND (r.valid_to IS NULL OR r.valid_to > $2) AS covering
 			FROM target t JOIN hosts h ON true
-			LEFT JOIN pools p ON p.name = h.pool AND p.tenant_id IS NOT DISTINCT FROM h.tenant_id
+			LEFT JOIN pools p ON p.id = h.pool_id
 			JOIN host_rates r ON r.host_id = h.id
 			LEFT JOIN own_capacity c ON true
 			WHERE (h.id = t.id AND t.provider = 'static' AND r.source = 'static')

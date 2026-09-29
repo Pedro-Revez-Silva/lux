@@ -22,10 +22,11 @@ import (
 func reportFixture(t *testing.T) (*Server, context.Context) {
 	t.Helper()
 	s := testServer(t)
+	namedPools(t, s, "default")
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1'), ('t2', 't2')`)
 	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, token_hash) VALUES ('tok', $1)`, ids.Hash("host-secret"))
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, token_id, last_heartbeat) VALUES
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, token_id, last_heartbeat) VALUES
 		('ha', 'ha', 'default', 'ready', 'tok', now()), ('hb', 'hb', 'default', 'ready', 'tok', now())`)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES
 		('ra', 't1', '{"placement":{"pool":"default"}}', 'stopping', 1),

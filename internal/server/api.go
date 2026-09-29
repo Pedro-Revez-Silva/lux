@@ -17,6 +17,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/marcioapm/lux/internal/hostboot"
 	"github.com/marcioapm/lux/internal/ids"
@@ -349,6 +350,16 @@ func (s *Server) routes(api huma.API) {
 			"forceEvict also stops its hosts' live Runs so they resume elsewhere.",
 		Errors: []int{http.StatusNotFound},
 	}, "admin", forTenant(s.deletePool))
+	register(s, api, huma.Operation{
+		OperationID: "renamePool", Method: http.MethodPost, Path: "/v1/pools/{name}/rename", Tags: []string{"pools"},
+		Summary: "Rename a pool",
+		Description: "Changes the pool's name and nothing else: a pool is its id, which hosts, host tokens, Runs, costs and instances refer to, so they all stay with it. " +
+			"A default pool stays the default. Runs keep the name they were submitted with in their spec; lists show the pool's current name. " +
+			"The old name is free at once: a Run naming it no longer finds this pool. " +
+			"409 pool_exists if the owner has a pool (live or removed) of the new name; 422 invalid_pool for a name outside the pool-name rule. " +
+			"A tenant's own pools; with an operator key and no tenant, or with `owner=platform`, a platform pool.",
+		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
+	}, "admin", s.renamePool)
 }
 
 type statusBody struct {
@@ -404,6 +415,8 @@ type Run struct {
 	SnapshotID  *string           `json:"snapshotId,omitempty"`
 	Host        string            `json:"host,omitempty" doc:"The name of the host of its current placement."`
 	HostID      string            `json:"hostId,omitempty" doc:"That host's id."`
+	Pool        string            `json:"pool,omitempty" doc:"The current name of the pool the Run is bound to (spec.placement.pool is the name it was submitted with)."`
+	PoolID      string            `json:"poolId,omitempty" doc:"That pool's id."`
 	Spec        spec.RunSpec      `json:"spec"`
 	// Image is how a built image was resolved on its first build.
 	Image          *ImageResolution `json:"image,omitempty"`
@@ -486,7 +499,7 @@ type RunUsage struct {
 // Select runColumns FROM runsFrom.
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
-	coalesce(rh.name, ''), coalesce(rp.host_id, ''), rr.seconds, rr.since`
+	coalesce(rh.name, ''), coalesce(rp.host_id, ''), coalesce(rpool.name, ''), coalesce(r.pool_id, ''), rr.seconds, rr.since`
 
 // runsFrom: a Run with its tenant, its current placement's host, and its
 // runtime (rr). Runtime is the sum over its placements of started_at
@@ -498,6 +511,7 @@ const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.
 const runsFrom = `runs r JOIN tenants rt ON rt.id = r.tenant_id
 	LEFT JOIN placements rp ON rp.run_id = r.id AND rp.epoch = r.current_epoch
 	LEFT JOIN hosts rh ON rh.id = rp.host_id
+	LEFT JOIN pools rpool ON rpool.id = r.pool_id
 	CROSS JOIN LATERAL (SELECT
 			coalesce(sum(extract(epoch FROM coalesce(p.ended_at, CASE WHEN p.state IN ` + livePlacementStates + ` THEN now() ELSE p.started_at END) - p.started_at)), 0)::float8 AS seconds,
 			max(p.started_at) FILTER (WHERE p.ended_at IS NULL AND p.state IN ` + livePlacementStates + `) AS since
@@ -507,7 +521,7 @@ func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
 		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
-		&r.RuntimeSeconds, &r.RuntimeSince)
+		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince)
 	return &r, err
 }
 
@@ -566,17 +580,17 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		if idem != "" {
 			idemArg = &idem
 		}
-		// Stored in the spec, so every later placement of the Run stays
-		// in this pool whatever the default becomes.
-		// pool_owner too: another owner's pool of the same name is not it.
+		// The Run is bound to its pool's id: every later placement stays
+		// in that pool whatever the default becomes or the pool is called.
+		// The spec keeps the name as resolved now.
 		rp, err := resolvePool(ctx, tx, p.TenantID, stored.Placement.Pool)
 		if err != nil {
 			return err
 		}
 		stored.Placement.Pool = rp.Name
-		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_owner)
+		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_id)
 			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8)`,
-			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.Owner)
+			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID)
 		if err != nil {
 			return err
 		}
@@ -1476,7 +1490,8 @@ type Host struct {
 	ID          string            `json:"id"`
 	Name        string            `json:"name"`
 	Tenant      string            `json:"tenant,omitempty" doc:"The owning tenant's name; empty for a platform host."`
-	Pool        string            `json:"pool"`
+	Pool        string            `json:"pool" doc:"Its pool's current name."`
+	PoolID      string            `json:"poolId,omitempty" doc:"Its pool's id."`
 	State       string            `json:"state"`
 	StateReason string            `json:"stateReason,omitempty"`
 	Draining    bool              `json:"draining"`
@@ -1527,14 +1542,14 @@ const visiblePlacements = "($1 = '' OR pl.tenant_id = $1)"
 
 // Select hostColumns FROM hostsFrom ($1: the principal's tenant id, for
 // which of its placements count).
-const hostColumns = `h.id, h.name, coalesce(ht.name, ''), h.pool, h.state, h.state_reason,
+const hostColumns = `h.id, h.name, coalesce(ht.name, ''), coalesce(hp.name, ''), coalesce(h.pool_id, ''), h.state, h.state_reason,
 	h.draining, h.labels, h.capacity, h.versions, h.tenant_id IS NULL,
 	hl.n, jsonb_build_object('cpus', hl.cpus, 'memory', hl.mem, 'disk', hl.disk),
 	h.provider_id, h.instance_type, h.zone, h.market, h.last_heartbeat,
 	h.provision_requested_at, h.provisioned_at, h.registered_at, h.first_placement_at, h.last_placement_ended_at,
 	h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at`
 
-const hostsFrom = `hosts h LEFT JOIN tenants ht ON ht.id = h.tenant_id
+const hostsFrom = `hosts h LEFT JOIN tenants ht ON ht.id = h.tenant_id LEFT JOIN pools hp ON hp.id = h.pool_id
 	CROSS JOIN LATERAL (SELECT count(*) AS n, coalesce(sum((pl.resources->>'cpus')::float8), 0) AS cpus,
 		coalesce(sum((pl.resources->>'memory')::int8), 0) AS mem, coalesce(sum((pl.resources->>'disk')::int8), 0) AS disk
 		FROM placements pl WHERE pl.host_id = h.id AND pl.state IN ` + livePlacementStates + ` AND ` + visiblePlacements + `) hl`
@@ -1542,7 +1557,7 @@ const hostsFrom = `hosts h LEFT JOIN tenants ht ON ht.id = h.tenant_id
 func scanHost(row pgx.Row) (Host, error) {
 	var h Host
 	var t [10]*time.Time
-	if err := row.Scan(&h.ID, &h.Name, &h.Tenant, &h.Pool, &h.State, &h.StateReason, &h.Draining, &h.Labels, &h.Capacity, &h.Versions,
+	if err := row.Scan(&h.ID, &h.Name, &h.Tenant, &h.Pool, &h.PoolID, &h.State, &h.StateReason, &h.Draining, &h.Labels, &h.Capacity, &h.Versions,
 		&h.Platform, &h.LiveRuns, &h.Allocated, &h.ProviderID, &h.InstanceType, &h.Zone, &h.Market, &h.LastHeartbeat,
 		&t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7], &t[8], &t[9]); err != nil {
 		return h, err
@@ -1575,7 +1590,7 @@ func (s *Server) listHosts(ctx context.Context, in *listHostsInput) (*listHostsO
 	hosts := []Host{}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT `+hostColumns+` FROM `+hostsFrom+`
-			WHERE `+visibleHosts+` AND ($2 OR h.state <> 'terminated') AND ($3 = '' OR h.pool = $3) AND ($4 = '' OR h.state = $4)
+			WHERE `+visibleHosts+` AND ($2 OR h.state <> 'terminated') AND ($3 = '' OR hp.name = $3) AND ($4 = '' OR h.state = $4)
 			ORDER BY h.name, h.id`, p.TenantID, in.All == "true" || in.State == "terminated", in.Pool, in.State)
 		if err != nil {
 			return err
@@ -2063,7 +2078,7 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 				// flight (no provider id yet): cordoned now, a launch
 				// that completes later lands on a draining host.
 				hosts, err = s.drainHosts(ctx, tx, poolRemovedReason, causeManual, stopReason,
-					"tenant_id = $1 AND pool = $2 AND (provider_id IS NOT NULL OR provision_requested_at IS NOT NULL)", p.TenantID, name)
+					"tenant_id = $1 AND pool_id = (SELECT id FROM pools WHERE tenant_id = $1 AND name = $2) AND (provider_id IS NOT NULL OR provision_requested_at IS NOT NULL)", p.TenantID, name)
 				return err
 			})
 		})
@@ -2083,20 +2098,21 @@ const (
 	poolFromFallback = "fallback"         // neither is marked: the pool named "default"
 )
 
-// resolvedPool is the pool a Run was submitted to. Owner is runs.pool_owner:
-// "" for a platform pool, the tenant id for the tenant's, nil when no
-// active pool has the name (hosts then match by name alone).
+// resolvedPool is the pool a Run was submitted to. ID is runs.pool_id:
+// nil when no active pool has the name (the scheduler binds the Run once
+// one does).
 type resolvedPool struct {
 	Name, From string
-	Owner      *string
+	ID         *string
+	Platform   bool
 }
 
 // ownerLabel is the owner as the submitted event's poolOwner says it.
 func (rp resolvedPool) ownerLabel() string {
 	switch {
-	case rp.Owner == nil:
+	case rp.ID == nil:
 		return ""
-	case *rp.Owner == "":
+	case rp.Platform:
 		return "platform"
 	default:
 		return "tenant"
@@ -2111,21 +2127,21 @@ func (rp resolvedPool) ownerLabel() string {
 func resolvePool(ctx context.Context, tx pgx.Tx, tenantID, pool string) (resolvedPool, error) {
 	rp := resolvedPool{Name: pool, From: poolFromSpec}
 	if pool == "" {
-		var name, from *string
-		if err := tx.QueryRow(ctx, `SELECT pool, pool_from FROM lux_default_pool()`).Scan(&name, &from); err != nil {
+		var id, name, from *string
+		if err := tx.QueryRow(ctx, `SELECT pool_id, pool, pool_from FROM lux_default_pool()`).Scan(&id, &name, &from); err != nil {
 			return rp, err
 		}
-		if name != nil {
-			owner := ""
-			if *from == poolFromTenant {
-				owner = tenantID
-			}
-			return resolvedPool{Name: *name, From: *from, Owner: &owner}, nil
+		if id != nil {
+			return resolvedPool{Name: *name, From: *from, ID: id, Platform: *from == poolFromPlatform}, nil
 		}
 		rp = resolvedPool{Name: "default", From: poolFromFallback}
 	}
-	err := tx.QueryRow(ctx, `SELECT lux_pool_owner($1)`, rp.Name).Scan(&rp.Owner)
-	return rp, err
+	var platform *bool
+	if err := tx.QueryRow(ctx, `SELECT pool_id, platform FROM lux_pool_id($1)`, rp.Name).Scan(&rp.ID, &platform); err != nil {
+		return rp, err
+	}
+	rp.Platform = platform != nil && *platform
+	return rp, nil
 }
 
 // checkTemplateTags refuses an EC2 template's tags that are not a string
@@ -2369,4 +2385,60 @@ func markPools(ctx context.Context, tx pgx.Tx, tenantID, name string, mark bool)
 func readPool(ctx context.Context, tx pgx.Tx, tenantID, name string) (Pool, error) {
 	return scanPool(tx.QueryRow(ctx, `SELECT `+poolColumns+` FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id
 		WHERE p.tenant_id IS NOT DISTINCT FROM nullif($1, '') AND p.name = $2`, tenantID, name))
+}
+
+type renamePoolInput struct {
+	TenantQuery
+	Name  string `path:"name" doc:"The pool's current name."`
+	Owner string `query:"owner" enum:"platform" doc:"platform: the platform's pool of that name (operators)."`
+	Body  struct {
+		Name string `json:"name" doc:"The new name."`
+	}
+}
+
+// renamePool is UPDATE pools SET name for one pool id; nothing refers to
+// a pool by name, so nothing else changes.
+func (s *Server) renamePool(ctx context.Context, in *renamePoolInput) (*poolBody, error) {
+	p := principal(ctx)
+	tenantID := p.TenantID
+	if in.Owner == "platform" {
+		if !p.Operator {
+			return nil, errf(http.StatusForbidden, "forbidden", "platform pools are the operators'")
+		}
+		tenantID = ""
+	}
+	to := in.Body.Name
+	if err := ValidPoolName(to); err != nil {
+		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "%s", err.Error())
+	}
+	var out Pool
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// ChangePool's pool-name locks, both names in one order.
+		for _, n := range slices.Sorted(slices.Values([]string{in.Name, to})) {
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('pool-name:' || $1 || '/' || $2, 0))`, tenantID, n); err != nil {
+				return err
+			}
+		}
+		var id string
+		err := tx.QueryRow(ctx, `UPDATE pools SET name = $3
+			WHERE coalesce(tenant_id, '') = $1 AND name = $2 AND NOT retired RETURNING id`, tenantID, in.Name, to).Scan(&id)
+		var pe *pgconn.PgError
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return errNotFound
+		case errors.As(err, &pe) && pe.Code == "23505":
+			return errf(http.StatusConflict, "pool_exists", "a pool named %s exists", to)
+		case err != nil:
+			return err
+		}
+		if err := poolEvent(ctx, tx, id, evRenamed, map[string]any{"from": in.Name, "to": to}); err != nil {
+			return err
+		}
+		out, err = readPool(ctx, tx, tenantID, to)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &poolBody{Body: poolInput(out)}, nil
 }

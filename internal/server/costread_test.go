@@ -20,11 +20,11 @@ func costReadFixture(t *testing.T) (*Server, map[string]string) {
 	t.Helper()
 	s, keys := costFixture(t)
 	ctx := context.Background()
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, tenant_id, pool, state) VALUES
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, tenant_id, pool_id, state) VALUES
 		('h1', 'h1', 't1', 'blue', 'ready'), ('h2', 'h2', 't2', 'red', 'ready'),
 		('hp', 'hp', NULL, 'shared', 'ready')`)
 	execSQL(t, s, ctx, `UPDATE runs SET labels = '{"team":"alpha"}' WHERE id = 'r1'`)
-	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, pool, amount, allocated, unallocated) VALUES
+	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, pool_id, amount, allocated, unallocated) VALUES
 		($1, 't1', 'r1', 'compute', 'compute', 'USD', 'h1', 'blue', 1.250000000, 0, 0),
 		($1, 't1', 'r1', 'plugin', 'ai', 'EUR', NULL, NULL, 2.500000000, 0, 0),
 		($1, 't2', 'r2', 'compute', 'compute', 'USD', 'h2', 'red', 7, 0, 0),
