@@ -181,11 +181,20 @@ def test_a_failed_diff_does_not_fail_the_stop(lux, runners, hosts, fake_image, g
 
 def test_a_hanging_diff_holds_up_nothing(lux, runners, hosts, fake_image, git_server):
     """The workload makes its checkout's index a FIFO, on which git blocks.
-    The Run still stops at once; its container has exited but its snapshot
-    has no diff yet, so lux diff says no_diff (exit 3); after the diff's
-    one-minute budget, diff.failed, and the repository's error."""
+    The Run still stops as fast as one whose diff is quick; while its
+    snapshot's diff hangs, lux diff says it is pending (exit 4); after the
+    diff's one-minute budget, diff.failed, and the diff is unavailable
+    (exit 3), never an older one's."""
     git_server.create("dhang", {"a.txt": "one\n"})
     runners.start(hosts[0])
+    # A baseline: the same Run whose diff is quick, stopped on this host.
+    quick = lux.submit(diff_spec(fake_image, git_server, "write a.txt changed", "dhang"))
+    lux.wait_output(quick, "wrote a.txt")
+    lux.wait_activity(quick, "idle")
+    start = time.time()
+    lux.run("stop", quick, "--wait")
+    baseline = time.time() - start
+
     run_id = lux.submit(diff_spec(fake_image, git_server, "write a.txt changed", "dhang"))
     lux.wait_output(run_id, "wrote a.txt")
     lux.wait_activity(run_id, "idle")
@@ -193,13 +202,23 @@ def test_a_hanging_diff_holds_up_nothing(lux, runners, hosts, fake_image, git_se
                   "cd /workspace/repos/dhang && rm .git/index && mkfifo .git/index")
     start = time.time()
     lux.run("stop", run_id, "--wait")
-    assert time.time() - start < 30, "the stop waited for the diff"
+    took = time.time() - start
+    assert took < baseline + 15, f"the stop took {took:.1f}s, a quick one {baseline:.1f}s: it waited for the diff"
     assert lux.get(run_id)["state"] == "stopped"
-    lux.wait_uploaded(run_id)
+    # The diff's helper is up (and hanging on the FIFO).
+    wait_until(lambda: f"lux-diff-{run_id}" in hosts[0].podman("ps", "--filter", f"name=lux-diff-{run_id}", "--format", "{{.Names}}"),
+               30, 0.5, "no diff helper container")
     with pytest.raises(CLIError) as e:
         lux.run("diff", run_id)
-    assert e.value.code == 3 and "still being computed" in e.value.stderr, e.value.stderr
+    if e.value.code == 4:
+        assert "is still being computed; try again in" in e.value.stderr, e.value.stderr
+    else:
+        # Its budget ran out already: failed, and so unavailable.
+        assert e.value.code == 3 and "has no diff" in e.value.stderr, e.value.stderr
     failed = wait_until(lambda: lux.events(run_id, "diff.failed"), 120, 1, "no diff.failed event")
     assert "did not finish" in failed[0]["data"]["error"], failed
-    p = lux.run("diff", run_id, check=False)
-    assert p.returncode == 1 and "dhang" in p.stderr, (p.stdout, p.stderr)
+    with pytest.raises(CLIError) as e:
+        lux.run("diff", run_id)
+    assert e.value.code == 3 and "did not finish" in e.value.stderr, e.value.stderr
+    wait_until(lambda: f"lux-diff-{run_id}" not in hosts[0].podman("ps", "-a", "--format", "{{.Names}}"),
+               30, 0.5, "the diff helper container is still there")
