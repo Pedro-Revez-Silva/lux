@@ -137,7 +137,7 @@ func (s *Server) routes(api huma.API) {
 			"computed now in the Run's container. Only while the Run is running: otherwise 409 `run_not_running`, whose message says whether " +
 			"its container is not up yet or it has stopped (to keep a stopped Run's changes, save a patch into `$LUX_ARTIFACTS` with `workload.beforeStop`). " +
 			"One live diff runs per Run at a time: identical requests share it, and a different one meanwhile is 429 `diff_busy`. " +
-			"A host whose runner predates diffs is 503 `diff_unsupported`. " +
+			"A host whose runner predates diffs is 503 `diff_unsupported`; one whose runner reconnects during the diff, 503 `runner_reconnected`. " +
 			"`base=clone` (default) diffs from the commit the repository was cloned at (kept across resumes; for one added on resume, that clone's); " +
 			"`base=head` from its HEAD, uncommitted work only. 404 `no_diff` when the Run has no repositories. " +
 			"Patches are git binary patches (they apply with `git apply`; see the RunSpec's Diffs section for what they cannot carry). " +

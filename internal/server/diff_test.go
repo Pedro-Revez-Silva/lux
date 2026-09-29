@@ -75,10 +75,16 @@ func decodeDiff(t *testing.T, b []byte) RunDiff {
 // requests seen so far, when called.
 func fakeConn(t *testing.T, s *Server, answer func(proto.DiffRequest) []proto.Frame, cancels chan<- string) func() []proto.DiffRequest {
 	t.Helper()
-	c := &runnerConn{hostID: "h1", send: make(chan proto.Frame, 16), notify: make(chan struct{}, 1), done: make(chan struct{}), caps: []string{proto.CapDiff}}
-	s.hub.mu.Lock()
-	s.hub.conns["h1"] = c
-	s.hub.mu.Unlock()
+	_, reqs := fakeConnWith(t, s, []string{proto.CapDiff}, answer, cancels)
+	return reqs
+}
+
+// fakeConnWith is fakeConn with the given capabilities; it replaces h1's
+// connection, and returns the new one too.
+func fakeConnWith(t *testing.T, s *Server, caps []string, answer func(proto.DiffRequest) []proto.Frame, cancels chan<- string) (*runnerConn, func() []proto.DiffRequest) {
+	t.Helper()
+	c := newRunnerConn("h1", nil, caps)
+	s.hub.install(c)
 	var mu sync.Mutex
 	var reqs []proto.DiffRequest
 	stop := make(chan struct{})
@@ -103,12 +109,12 @@ func fakeConn(t *testing.T, s *Server, answer func(proto.DiffRequest) []proto.Fr
 				reqs = append(reqs, req)
 				mu.Unlock()
 				for _, a := range answer(req) {
-					s.hub.route(req.SubID, a)
+					s.hub.route(c, req.SubID, a)
 				}
 			}
 		}
 	}()
-	return func() []proto.DiffRequest {
+	return c, func() []proto.DiffRequest {
 		mu.Lock()
 		defer mu.Unlock()
 		return slices.Clone(reqs)
@@ -319,5 +325,90 @@ func TestAssignCarriesGitBases(t *testing.T) {
 	}
 	if a.Epoch != 3 || a.GitBases["app"] != "base-app" || a.GitBases["lib"] != "base-lib" || len(a.GitBases) != 2 {
 		t.Errorf("assign: epoch %d, bases %v", a.Epoch, a.GitBases)
+	}
+}
+
+// A request is on one connection throughout. The host's runner
+// reconnecting (without diffs, here) before the request could be sent:
+// 503 runner_reconnected, nothing sent to the new connection.
+func TestDiffConnectionReplacedBeforeTheRequestIsSent(t *testing.T) {
+	s, keys := diffFixture(t)
+	// A capable connection whose writer is stuck: the request waits to go.
+	old := newRunnerConn("h1", nil, []string{proto.CapDiff})
+	old.send = make(chan proto.Frame)
+	s.hub.install(old)
+	done := make(chan struct{})
+	var code int
+	var body []byte
+	go func() { defer close(done); code, _, body = getDiff(t, s, keys["t1"], "/v1/runs/r1/diff", "") }()
+	time.Sleep(200 * time.Millisecond)
+	start := time.Now()
+	_, reqs := fakeConnWith(t, s, nil, liveFrames, nil)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request still waits after its connection was replaced")
+	}
+	if code != http.StatusServiceUnavailable || !strings.Contains(string(body), "runner_reconnected") || time.Since(start) > 2*time.Second {
+		t.Errorf("replaced before send: %d %s after %v", code, body, time.Since(start))
+	}
+	if len(reqs()) != 0 {
+		t.Errorf("the new connection, without diffs, was sent %d requests", len(reqs()))
+	}
+}
+
+// A connection replaced while its diff is pending fails the request at
+// once (not at the deadline), and the cancel goes to the connection the
+// request went to, never the new one.
+func TestDiffConnectionReplacedWhileTheDiffIsPending(t *testing.T) {
+	s, keys := diffFixture(t)
+	oldCancels := make(chan string, 4)
+	_, oldReqs := fakeConnWith(t, s, []string{proto.CapDiff}, func(proto.DiffRequest) []proto.Frame { return nil }, oldCancels)
+	done := make(chan struct{})
+	var code int
+	var body []byte
+	go func() { defer close(done); code, _, body = getDiff(t, s, keys["t1"], "/v1/runs/r1/diff", "") }()
+	for deadline := time.Now().Add(5 * time.Second); len(oldReqs()) == 0 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	newCancels := make(chan string, 4)
+	start := time.Now()
+	_, newReqs := fakeConnWith(t, s, []string{proto.CapDiff}, liveFrames, newCancels)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request still waits after its connection was replaced")
+	}
+	if code != http.StatusServiceUnavailable || !strings.Contains(string(body), "runner_reconnected") || time.Since(start) > 2*time.Second {
+		t.Errorf("replaced while pending: %d %s after %v", code, body, time.Since(start))
+	}
+	select {
+	case sub := <-oldCancels:
+		if sub != oldReqs()[0].SubID {
+			t.Errorf("cancelled %s, requested %s", sub, oldReqs()[0].SubID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("the original connection was not told to cancel")
+	}
+	select {
+	case sub := <-newCancels:
+		t.Errorf("the new connection was sent a cancel for %s", sub)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if len(newReqs()) != 0 {
+		t.Errorf("the new connection was sent %d requests", len(newReqs()))
+	}
+}
+
+// Frames for a subscription on one connection are taken from it alone.
+func TestSubscriptionTakesFramesFromItsConnectionOnly(t *testing.T) {
+	s, _ := diffFixture(t)
+	a, b := newRunnerConn("h1", nil, nil), newRunnerConn("h1", nil, nil)
+	ch, cancel := s.hub.subscribeOn(a, "sub")
+	defer cancel()
+	s.hub.route(b, "sub", proto.Frame{Type: "from-b"})
+	s.hub.route(a, "sub", proto.Frame{Type: "from-a"})
+	if f := <-ch; f.Type != "from-a" {
+		t.Errorf("got %s", f.Type)
 	}
 }

@@ -133,7 +133,8 @@ container, now (`GET /v1/runs/{id}/diff`).
   changes to tracked files.
 - One live diff at a time per Run: an identical `lux diff` meanwhile shares
   it, and a different one fails with `diff_busy` (retry). A host whose
-  runner predates diffs answers `diff_unsupported`. A Run without
+  runner predates diffs answers `diff_unsupported`; one whose runner
+  reconnects during the diff, `runner_reconnected` (retry). A Run without
   repositories has none: `no_diff`, exit code 3.
 - Each repository's section starts with a comment line, which `git apply`
   skips, so the output applies as it is at the base, and gives the

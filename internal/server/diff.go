@@ -222,30 +222,34 @@ func gitBases(ctx context.Context, tx pgx.Tx, runID string) (map[string]string, 
 // gives a diff a minute, and a little more for the relay.
 var liveDiffWait = 75 * time.Second
 
-// liveDiff asks the Run's runner to compute the diff in its container.
+// liveDiff asks the Run's runner to compute the diff in its container. The
+// whole request is on the one connection the host has when it starts: its
+// capability, the request, the results and any cancel. A runner that
+// reconnects meanwhile forgets the diff, so the request fails at once.
 func (s *Server) liveDiff(ctx context.Context, t diffTarget, kind string, statOnly bool) ([]RepoDiff, error) {
-	if !s.hub.Streaming(t.hostID) {
+	c := s.hub.conn(t.hostID)
+	if c == nil {
 		return nil, errf(http.StatusServiceUnavailable, "host_unreachable", "the Run's host has no live connection to this luxd")
 	}
-	if !s.hub.Can(t.hostID, proto.CapDiff) {
+	if !c.can(proto.CapDiff) {
 		return nil, errf(http.StatusServiceUnavailable, "diff_unsupported", "the Run's host runs a lux-runner without diffs; its diff is available once the host is upgraded")
 	}
 	req := proto.DiffRequest{SubID: ids.New("diff"), Kind: kind, StatOnly: statOnly}
 	for _, r := range t.repos {
 		req.Repos = append(req.Repos, proto.DiffRepo{Name: r.Name, Path: r.Path, Base: t.bases[r.Name]})
 	}
-	ch, cancel := s.hub.Subscribe(req.SubID)
+	ch, cancel := s.hub.subscribeOn(c, req.SubID)
 	defer cancel()
-	if err := s.hub.SendLive(t.hostID, proto.Frame{Type: proto.MsgDiffRequest, RunID: t.runID, Epoch: t.epoch, Data: proto.Marshal(req)}); err != nil {
-		return nil, errf(http.StatusServiceUnavailable, "host_unreachable", "%v", err)
+	if err := c.sendLive(proto.Frame{Type: proto.MsgDiffRequest, RunID: t.runID, Epoch: t.epoch, Data: proto.Marshal(req)}, c.replaced); err != nil {
+		return nil, connError(err)
 	}
 	// Gone before the end (the client left, or the deadline): the runner
 	// stops the diff (for this request; a shared one when its last goes).
 	ended := false
 	defer func() {
 		if !ended {
-			_ = s.hub.SendLive(t.hostID, proto.Frame{Type: proto.MsgDiffCancel, RunID: t.runID, Epoch: t.epoch,
-				Data: proto.Marshal(proto.DiffEnd{SubID: req.SubID})})
+			_ = c.sendLive(proto.Frame{Type: proto.MsgDiffCancel, RunID: t.runID, Epoch: t.epoch,
+				Data: proto.Marshal(proto.DiffEnd{SubID: req.SubID})}, nil)
 		}
 	}()
 	deadline := time.NewTimer(liveDiffWait)
@@ -256,8 +260,10 @@ func (s *Server) liveDiff(ctx context.Context, t diffTarget, kind string, statOn
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-s.hub.Gone(t.hostID):
-			return nil, errf(http.StatusServiceUnavailable, "host_unreachable", "the Run's host disconnected")
+		case <-c.done:
+			return nil, connError(errHostDisconnected)
+		case <-c.replaced:
+			return nil, connError(errRunnerReconnected)
 		case <-deadline.C:
 			return nil, errf(http.StatusGatewayTimeout, "diff_timeout", "the Run's host did not answer in time")
 		case f, ok := <-ch:
@@ -289,6 +295,16 @@ func (s *Server) liveDiff(ctx context.Context, t diffTarget, kind string, statOn
 			}
 		}
 	}
+}
+
+func connError(err error) error {
+	switch err {
+	case errRunnerReconnected:
+		return errf(http.StatusServiceUnavailable, "runner_reconnected", "the Run's runner reconnected during the diff, which it does not carry over; retry")
+	case errHostDisconnected:
+		return errf(http.StatusServiceUnavailable, "host_unreachable", "the Run's host disconnected")
+	}
+	return errf(http.StatusServiceUnavailable, "host_unreachable", "%v", err)
 }
 
 // ordered lists the diffs in the spec's order; a repository the runner

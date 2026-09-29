@@ -482,7 +482,8 @@ committed changes, staged, unstaged and untracked (not ignored) files.
   repository, or `stat`) is 429 `diff_busy`. A request whose client goes
   away stops the diff (the last one of those sharing it). A diff has one
   minute. A host whose runner predates diffs answers 503
-  `diff_unsupported`.
+  `diff_unsupported`; one whose runner reconnects during the diff, 503
+  `runner_reconnected` (retry).
 - **The runner never runs git in the checkout**, as for a push: `lux-shim
   diff` runs git inside the container, as the workload user, with the
   checkout's hooks, `core.fsmonitor`, `diff.external`, textconv and

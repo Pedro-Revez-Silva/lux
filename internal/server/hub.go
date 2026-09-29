@@ -29,13 +29,13 @@ type Hub struct {
 	s     *Server
 	mu    sync.Mutex
 	conns map[string]*runnerConn // by host id
-	subs  map[string]chan proto.Frame
+	subs  map[string]*subscription
 	// polls: hosts on the HTTP polling fallback, by last poll.
 	polls map[string]time.Time
 }
 
 func newHub(s *Server) *Hub {
-	return &Hub{s: s, conns: map[string]*runnerConn{}, subs: map[string]chan proto.Frame{}, polls: map[string]time.Time{}}
+	return &Hub{s: s, conns: map[string]*runnerConn{}, subs: map[string]*subscription{}, polls: map[string]time.Time{}}
 }
 
 type runnerConn struct {
@@ -44,8 +44,54 @@ type runnerConn struct {
 	send   chan proto.Frame
 	notify chan struct{}
 	done   chan struct{}
+	// replaced is closed when a newer connection takes over its host:
+	// what was under way on this one will not continue on that one.
+	replaced     chan struct{}
+	replacedOnce sync.Once
 	// caps: the runner's capabilities, from its hello.
 	caps []string
+}
+
+func newRunnerConn(hostID string, ws *websocket.Conn, caps []string) *runnerConn {
+	return &runnerConn{hostID: hostID, ws: ws, send: make(chan proto.Frame, 256), notify: make(chan struct{}, 1),
+		done: make(chan struct{}), replaced: make(chan struct{}), caps: caps}
+}
+
+// can reports whether the runner said, in this connection's hello, it has
+// capability c.
+func (c *runnerConn) can(capability string) bool { return slices.Contains(c.caps, capability) }
+
+var (
+	errHostDisconnected  = errors.New("host disconnected")
+	errRunnerReconnected = errors.New("the host's runner reconnected")
+)
+
+// sendLive sends a non-durable frame on this connection. It gives up when
+// the connection ends, when stop is closed, or after 10 seconds.
+func (c *runnerConn) sendLive(f proto.Frame, stop <-chan struct{}) error {
+	select {
+	case c.send <- f:
+		return nil
+	case <-c.done:
+		return errHostDisconnected
+	case <-stop:
+		return errRunnerReconnected
+	case <-time.After(10 * time.Second):
+		return errors.New("host connection is congested")
+	}
+}
+
+// install makes c its host's connection, ending the one it replaces.
+func (h *Hub) install(c *runnerConn) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if old := h.conns[c.hostID]; old != nil {
+		old.replacedOnce.Do(func() { close(old.replaced) })
+		if old.ws != nil {
+			old.ws.Close(websocket.StatusPolicyViolation, "replaced by a new connection")
+		}
+	}
+	h.conns[c.hostID] = c
 }
 
 func (h *Hub) conn(hostID string) *runnerConn {
@@ -68,12 +114,6 @@ func (h *Hub) Reachable(hostID string) bool {
 // Streaming reports whether a host has a WebSocket here: live output and
 // interactive streams need one; a polling host cannot relay them.
 func (h *Hub) Streaming(hostID string) bool { return h.conn(hostID) != nil }
-
-// Can reports whether a host's connected runner said it has capability c.
-func (h *Hub) Can(hostID, c string) bool {
-	conn := h.conn(hostID)
-	return conn != nil && slices.Contains(conn.caps, c)
-}
 
 // Disconnect closes a host's WebSocket, if it has one here (the host was
 // terminated).
@@ -117,47 +157,59 @@ func (h *Hub) SendLive(hostID string, f proto.Frame) error {
 	if c == nil {
 		return errors.New("host is not connected")
 	}
-	select {
-	case c.send <- f:
-		return nil
-	case <-c.done:
-		return errors.New("host disconnected")
-	case <-time.After(10 * time.Second):
-		return errors.New("host connection is congested")
-	}
+	return c.sendLive(f, nil)
+}
+
+// subscription routes the frames carrying one id to ch.
+type subscription struct {
+	ch chan proto.Frame
+	// from: only frames read from this connection (nil: any).
+	from *runnerConn
 }
 
 // Subscribe routes frames carrying id (subId/streamId) to the returned
 // channel until cancel is called.
 func (h *Hub) Subscribe(id string) (<-chan proto.Frame, func()) {
-	ch := make(chan proto.Frame, 256)
+	return h.subscribe(id, nil)
+}
+
+// subscribeOn is Subscribe for the frames read from connection c only.
+func (h *Hub) subscribeOn(c *runnerConn, id string) (<-chan proto.Frame, func()) {
+	return h.subscribe(id, c)
+}
+
+func (h *Hub) subscribe(id string, from *runnerConn) (<-chan proto.Frame, func()) {
+	sub := &subscription{ch: make(chan proto.Frame, 256), from: from}
 	h.mu.Lock()
-	h.subs[id] = ch
+	h.subs[id] = sub
 	h.mu.Unlock()
-	return ch, func() {
+	return sub.ch, func() {
 		h.mu.Lock()
-		delete(h.subs, id)
+		if h.subs[id] == sub {
+			delete(h.subs, id)
+		}
 		h.mu.Unlock()
 	}
 }
 
-func (h *Hub) route(id string, f proto.Frame) {
+// route passes a frame read from connection from to id's subscriber.
+func (h *Hub) route(from *runnerConn, id string, f proto.Frame) {
 	h.mu.Lock()
-	ch := h.subs[id]
+	sub := h.subs[id]
 	h.mu.Unlock()
-	if ch == nil {
+	if sub == nil || (sub.from != nil && sub.from != from) {
 		return
 	}
 	select {
-	case ch <- f:
+	case sub.ch <- f:
 	default:
 		// Never block: this runs on the runner's read loop, and a stall here
 		// delays every ack and report from that host. A client that cannot
 		// keep up loses its stream (it reconnects from its cursor).
 		h.mu.Lock()
-		if h.subs[id] == ch {
+		if h.subs[id] == sub {
 			delete(h.subs, id)
-			close(ch)
+			close(sub.ch)
 		}
 		h.mu.Unlock()
 	}
@@ -228,24 +280,12 @@ func (s *Server) serveRunnerWS(w http.ResponseWriter, r *http.Request) error {
 		ws.Close(websocket.StatusInternalError, "luxd error")
 		return nil
 	}
-	c := &runnerConn{
-		hostID: welcome.HostID,
-		ws:     ws,
-		send:   make(chan proto.Frame, 256),
-		notify: make(chan struct{}, 1),
-		done:   make(chan struct{}),
-		caps:   hello.Capabilities,
-	}
+	c := newRunnerConn(welcome.HostID, ws, hello.Capabilities)
 	if err := writeFrame(ctx, ws, proto.Frame{Type: proto.MsgWelcome, Data: proto.Marshal(welcome)}); err != nil {
 		return nil
 	}
 
-	s.hub.mu.Lock()
-	if old := s.hub.conns[c.hostID]; old != nil {
-		old.ws.Close(websocket.StatusPolicyViolation, "replaced by a new connection")
-	}
-	s.hub.conns[c.hostID] = c
-	s.hub.mu.Unlock()
+	s.hub.install(c)
 	s.log.Info("runner connected", "host", c.hostID, "name", hello.Labels["name"])
 	defer func() {
 		s.hub.mu.Lock()
@@ -295,13 +335,13 @@ func (s *Server) serveRunnerWS(w http.ResponseWriter, r *http.Request) error {
 				s.log.Warn("ack", "err", err)
 			}
 		case proto.MsgStreamData, proto.MsgStreamClose:
-			s.hub.route(f.Stream, f)
+			s.hub.route(c, f.Stream, f)
 		case proto.MsgOutputRecords, proto.MsgOutputEnd, proto.MsgDiffResult, proto.MsgDiffEnd:
 			var ref struct {
 				SubID string `json:"subId"`
 			}
 			_ = json.Unmarshal(f.Data, &ref)
-			s.hub.route(ref.SubID, f)
+			s.hub.route(c, ref.SubID, f)
 		default:
 			reply := s.handleReport(ctx, c.hostID, f)
 			select {
