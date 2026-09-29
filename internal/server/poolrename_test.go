@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"maps"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"sync"
 	"testing"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -473,5 +476,61 @@ func TestRenamePoolLaunchUnderTheOldNameIsSkipped(t *testing.T) {
 	}
 	if err := f.s.launch(f.ctx, prov, f.pool(t)); err != nil || prov.env == nil {
 		t.Fatalf("launch under the new name: %v", err)
+	}
+}
+
+// Who may rename what, through the API: a tenant's admin key its own
+// pools (a platform pool is not one: 404); a read key nothing; an operator
+// a platform pool, or a tenant's with ?tenant=.
+func TestRenamePoolAPIPermissions(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('mine', 't1', 'lab', 'static'), ('plat', NULL, 'shared', 'static')`)
+	keys := map[string]string{"admin": ids.Secret("luxk"), "read": ids.Secret("luxk"), "operator": ids.Secret("luxk")}
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES
+		('ka', 't1', 'a', $1, ARRAY['admin']), ('kr', 't1', 'r', $2, ARRAY['read']), ('ko', NULL, 'o', $3, ARRAY['operator'])`,
+		ids.Hash(keys["admin"]), ids.Hash(keys["read"]), ids.Hash(keys["operator"]))
+	post := func(key, path, name string) (int, string) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]string{"name": name})
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, req)
+		return w.Code, w.Body.String()
+	}
+	for _, c := range []struct {
+		who, path, name string
+		want            int
+	}{
+		{"read", "/v1/pools/lab/rename", "lab2", http.StatusForbidden},
+		{"admin", "/v1/pools/shared/rename", "shared2", http.StatusNotFound},
+		{"admin", "/v1/pools/lab/rename", "", http.StatusUnprocessableEntity},
+		{"admin", "/v1/pools/lab/rename", "lab2", http.StatusOK},
+		{"admin", "/v1/pools/lab2/rename?dryRun=true", "", http.StatusOK},
+		{"operator", "/v1/pools/lab2/rename", "lab3", http.StatusNotFound},
+		{"operator", "/v1/pools/lab2/rename?tenant=t1", "lab3", http.StatusOK},
+		{"operator", "/v1/pools/shared/rename", "shared2", http.StatusOK},
+		{"operator", "/v1/pools/shared2/rename?tenant=t1", "lab3", http.StatusNotFound},
+	} {
+		if code, body := post(keys[c.who], c.path, c.name); code != c.want {
+			t.Errorf("%s POST %s %q: %d %s, want %d", c.who, c.path, c.name, code, body, c.want)
+		}
+	}
+	var got []string
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT name FROM pools ORDER BY id`)
+		if err != nil {
+			return err
+		}
+		got, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []string{"lab3", "shared2"}) {
+		t.Errorf("pools %v, want [lab3 shared2]", got)
 	}
 }
