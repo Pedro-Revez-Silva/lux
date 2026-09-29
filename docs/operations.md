@@ -415,15 +415,27 @@ found by id, claimed by its host row or, with none (its reply lost),
 terminated as an orphan.
 
 **Pools from before `lux:pool-id`.** Instances launched by an earlier luxd
-carry only `lux:pool`. A pool is *legacy* while any of its live hosts has
-an instance not yet seen carrying `lux:pool-id` (`hosts.pool_id_tagged`;
-hosts launched since carry it from launch). luxd lists a legacy pool by
-its name as well as by id, adds `lux:pool-id` to every instance it finds
-by name without it, and marks the host once a listing shows the tag. Once
-no live host is unmarked, the pool is listed by id alone. A legacy pool
+carry only `lux:pool`. A pool created before this version stays *legacy*
+(`pools.id_migrated_at` is NULL) until one provider check establishes all
+three conditions: no live provisioned host has an instance unconfirmed to
+carry `lux:pool-id` (`hosts.pool_id_tagged`), no provisioned host written
+off without a provider id within the last `LUX_LAUNCH_TIMEOUT` plus a
+**10-minute listing lag**, and that check's name listing returns no
+instance without the id tag. The lag is deliberately longer than
+`LUX_LISTING_LAG`: it covers a lost `RunInstances` reply whose instance
+appears only after its host row was written off. luxd lists such pools by
+both id and name and adds `lux:pool-id` to every name-only instance,
+including orphans, **before** trying to terminate an orphan; if termination
+fails, id discovery retries it. The transition is recorded only once and
+never reversed. New pools carry `id_migrated_at` at creation. A legacy pool
 cannot be renamed (`pool_not_migrated`): wait for the next provider checks
-(normally two), or scale the pool to zero. Without the IAM permission
-below a pool stays legacy, and keeps working, listed by name as before.
+and the lost-launch window if necessary. Without `ec2:CreateTags` the
+pool remains legacy and keeps working by name.
+
+A retired `ec2` pool remains discoverable by id until
+`retired_at + LUX_LAUNCH_TIMEOUT + 10 minutes`, no live host row remains,
+and a provider check has found no instances since retirement. An instance
+that appears only after its host row is written off is still terminated.
 
 **Every luxd must be of this version or later before an `ec2` pool is
 renamed.** An older luxd finds instances by `lux:pool`: after a rename it

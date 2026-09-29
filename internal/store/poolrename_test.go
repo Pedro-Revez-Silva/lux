@@ -53,10 +53,10 @@ func TestPoolRenameMigration(t *testing.T) {
 		t.Errorf("a host from before 036 confirmed to carry lux:pool-id: %v (%v)", tagged, err)
 	}
 	var name string
-	var renamed bool
+	var renamed, migrated bool
 	var previous []string
-	if err := conn.QueryRow(ctx, `SELECT name, renamed_at IS NOT NULL, previous_names FROM pools WHERE id = 'p1'`).Scan(&name, &renamed, &previous); err != nil ||
-		name != "burst" || renamed || len(previous) != 0 {
+	if err := conn.QueryRow(ctx, `SELECT name, renamed_at IS NOT NULL, id_migrated_at IS NOT NULL, previous_names FROM pools WHERE id = 'p1'`).Scan(&name, &renamed, &migrated, &previous); err != nil ||
+		name != "burst" || renamed || migrated || len(previous) != 0 {
 		t.Errorf("pool %s renamed %v previous %v (%v)", name, renamed, previous, err)
 	}
 }

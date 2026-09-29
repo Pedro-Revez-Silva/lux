@@ -329,7 +329,7 @@ func (s *Server) routes(api huma.API) {
 		Description: "Its hosts, host tokens and every Run naming it follow in one step: they name the new pool from then on, Runs waiting for it still schedule, and a final Run resumed later resumes on it. " +
 			"A provisioned pool's instances stay up: luxd finds them by their lux:pool-id tag, which a rename does not change, " +
 			"and updates their lux:pool name tag afterwards, in the background. The old name is free for any pool at once; until one takes it, a Run or host token naming it is refused with 409 pool_renamed, naming the new name. " +
-			"409 pool_not_migrated for a provisioned pool with instances not yet confirmed to carry lux:pool-id (launched before it): wait for the next provider checks to tag them, or scale the pool to zero. " +
+			"409 pool_not_migrated until a provider check confirms every live host's instance, no recent lost launch reply remains, and a name listing finds no untagged instance: wait for a clean provider check after the launch window. " +
 			"409 pool_exists if the new name is taken, by a live or retired pool of the tenant, or by hosts or host tokens, or, for a platform pool, by a pool of a tenant whose Runs would follow the rename; 422 invalid_pool for a name outside the pool-name rule (a name kept from before the rule is never given anew). " +
 			"While the pool has hosts, `confirm` must be its current name (409 confirm_required). " +
 			"409 rename_unsupported_by_deployment for a provisioned pool while a luxd that finds instances by pool name (an older version) is running. " +
@@ -1903,7 +1903,8 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 					return err
 				}
 			}
-			tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0
+			tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, retired_at = now(), last_empty_listing_at = NULL,
+				min_hosts = 0, warm_hosts = 0, max_hosts = 0
 				WHERE tenant_id = $1 AND name = $2 AND NOT retired`, p.TenantID, name)
 			if err != nil {
 				return err
@@ -1993,13 +1994,13 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 			return err
 		}
 		tag, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
-				scale_down_after_s, warm_while_active, hourly_price, price_currency)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''))
+				scale_down_after_s, warm_while_active, hourly_price, price_currency, id_migrated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''), now())
 			ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 				min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
 				scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
 				hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
-				retired = false
+				retired = false, retired_at = NULL, last_empty_listing_at = NULL
 			WHERE `+PoolProviderUnchangedOrEmpty,
 			ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
 			sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency)

@@ -24,6 +24,12 @@ ALTER TABLE hosts ADD COLUMN not_found_since timestamptz;
 --   take one.
 ALTER TABLE pools ADD COLUMN renamed_at timestamptz;
 ALTER TABLE pools ADD COLUMN previous_names text[] NOT NULL DEFAULT '{}';
+-- Existing pools may have name-only instances even with no live host row.
+-- A migration is recorded only after an id-and-name provider check.
+ALTER TABLE pools ADD COLUMN id_migrated_at timestamptz;
+ALTER TABLE pools ADD COLUMN retired_at timestamptz;
+ALTER TABLE pools ADD COLUMN last_empty_listing_at timestamptz;
+UPDATE pools SET retired_at = now() WHERE retired;
 
 -- A fencing token: a new one each time a different holder takes the lease,
 -- so a provisioner pass can tell, before each destructive provider call,

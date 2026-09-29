@@ -243,7 +243,7 @@ func newRenameFixture(t *testing.T, settled bool) *renameFixture {
 	cloud := newFakeCloud()
 	s.cfg.Providers = map[string]Provider{"ec2": cloud}
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
-	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider, template) VALUES ('pool1', 't1', 'burst', 'ec2', '{"region":"eu-west-1"}')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, id_migrated_at) VALUES ('pool1', 't1', 'burst', 'ec2', '{"region":"eu-west-1"}', now())`)
 	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, tenant_id, pool, token_hash) VALUES ('tok1', 't1', 'burst', 'x1'), ('tok2', 't1', 'burst', 'x2')`)
 	// Settled: launched long ago, runner silent: a host its listing misses
 	// is looked up by id. Otherwise heartbeating, as a live host is.
@@ -274,6 +274,7 @@ func newRenameFixture(t *testing.T, settled bool) *renameFixture {
 func (f *renameFixture) legacy(t *testing.T) {
 	t.Helper()
 	execSQL(t, f.s, f.ctx, `UPDATE hosts SET pool_id_tagged = false`)
+	execSQL(t, f.s, f.ctx, `UPDATE pools SET id_migrated_at = NULL WHERE id = 'pool1'`)
 	f.cloud.mu.Lock()
 	defer f.cloud.mu.Unlock()
 	for _, i := range f.cloud.insts {
@@ -401,48 +402,144 @@ func TestRenamePoolWithLiveHosts(t *testing.T) {
 	}
 }
 
-// A pool launched before lux:pool-id is migrated by its provider checks,
-// with no downtime: listed by name too, its instances are tagged with the
-// pool's id, confirmed by the next listing, and from then on listed by id
-// alone. Meanwhile it cannot be renamed; after, it can. An instance of
-// the pool nobody claims is still terminated as an orphan while listed by
-// name.
+// A name-only orphan is tagged before its first termination attempt, so a
+// refusal is retried by id even after migration ends name discovery.
 func TestLegacyPoolIsMigrated(t *testing.T) {
 	f := newRenameFixture(t, true)
 	f.legacy(t)
 	f.cloud.add("i-orphan", map[string]string{tagManaged: "true", tagDeployment: "d1", tagPool: "t1/burst", tagHost: "gone"})
+	refuse := true
+	f.cloud.before = func(_ context.Context, call string, _ map[string]string) error {
+		if call == "Terminate" && refuse {
+			refuse = false
+			return errors.New("termination refused")
+		}
+		return nil
+	}
 	if !f.pool(t).Legacy {
-		t.Fatal("a pool with unconfirmed hosts is not legacy")
+		t.Fatal("pool from before id tags is already migrated")
 	}
 	for _, dry := range []bool{true, false} {
 		_, err := renameConfirmed(f.ctx, f.s, "t1", "burst", "burst-eu", dry)
-		if st, code, msg := httpErr(err); st != http.StatusConflict || code != "pool_not_migrated" || !strings.Contains(msg, "scale the pool to zero") {
+		if st, code, _ := httpErr(err); st != http.StatusConflict || code != "pool_not_migrated" {
 			t.Fatalf("rename (dry run %v) of a legacy pool: %v", dry, err)
 		}
 	}
-
+	f.check(t, f.pool(t))
+	f.noneTerminated(t)
+	if got := f.cloud.tag("i-orphan", tagPoolID); got != "pool1" {
+		t.Fatalf("orphan still missing id tag after termination refusal: %q", got)
+	}
+	if !f.pool(t).Legacy {
+		t.Fatal("migrated before a clean name listing")
+	}
 	f.check(t, f.pool(t))
 	f.noneTerminatedBut(t, "i-orphan")
-	for _, pid := range []string{"i-1", "i-2"} {
-		if got := f.cloud.tag(pid, tagPoolID); got != "pool1" {
-			t.Fatalf("%s lux:pool-id = %q after a check", pid, got)
-		}
-	}
-	// Tagged, but no listing has shown it yet.
-	if !f.pool(t).Legacy {
-		t.Fatal("confirmed before a listing showed the tag")
-	}
-	f.check(t, f.pool(t))
 	if f.pool(t).Legacy {
-		t.Fatal("still legacy once a listing showed every instance tagged")
+		t.Fatal("still legacy after a clean name listing")
 	}
 	byName := f.cloud.listedByName()
 	f.check(t, f.pool(t))
 	if f.cloud.listedByName() != byName {
 		t.Fatal("a migrated pool is still listed by name")
 	}
-	f.noneTerminatedBut(t, "i-orphan")
 	f.rename(t, "burst", "burst-eu")
+}
+
+// A lost launch reply may be written off before an untagged instance
+// becomes listable. Migration must wait through the launch and listing
+// window, then require a clean name listing; retirement must keep id
+// discovery alive long enough to terminate one appearing later.
+func TestLegacyLostLaunchAndRetiredLateInstance(t *testing.T) {
+	f := newRenameFixture(t, false)
+	f.legacy(t)
+	execSQL(t, f.s, f.ctx, `UPDATE hosts SET pool_id_tagged = true`)
+	execSQL(t, f.s, f.ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provision_requested_at, tagged)
+		VALUES ('h-lost', 't1', 'burst-lost', 'burst', 'provisioning', now() - interval '1 hour', true)`)
+	f.check(t, f.pool(t))
+	if got := f.query(t, `SELECT state FROM hosts WHERE id = 'h-lost'`); got != "terminated" {
+		t.Fatalf("lost launch row: %s", got)
+	}
+	if !f.pool(t).Legacy {
+		t.Fatal("written-off launch ended name discovery too early")
+	}
+	if _, err := renameConfirmed(f.ctx, f.s, "t1", "burst", "burst-eu", false); err == nil {
+		t.Fatal("renamed a pool with a recent lost launch reply")
+	}
+	// Simulate time passing, while the provider has yet to list the instance.
+	execSQL(t, f.s, f.ctx, `UPDATE hosts SET terminated_at = now() - interval '2 hours' WHERE id = 'h-lost'`)
+	f.check(t, f.pool(t))
+	if f.pool(t).Legacy {
+		t.Fatal("no migration after the window passed and name listing was clean")
+	}
+	// Retire before a late id-tagged instance appears. No host row claims it.
+	execSQL(t, f.s, f.ctx, `UPDATE pools SET retired = true, retired_at = now(), last_empty_listing_at = NULL WHERE id = 'pool1'`)
+	f.cloud.add("i-late", instanceTags("t1/burst", "h-lost"))
+	f.s.lastAliveCheck = time.Time{}
+	if err := f.s.provision(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(f.cloud.terminatedIDs(), "i-late") {
+		t.Fatal("late instance of a retired pool was not terminated")
+	}
+}
+
+// An instance whose RunInstances reply was lost can become visible only
+// after its row was written off and its pool retired. Retirement retains
+// id discovery until that instance has been found and terminated.
+func TestRetiredPoolFindsLostLaunchAfterWriteOff(t *testing.T) {
+	f := newRenameFixture(t, false)
+	execSQL(t, f.s, f.ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provision_requested_at, tagged, pool_id_tagged)
+		VALUES ('h-lost', 't1', 'burst-lost', 'burst', 'provisioning', now() - interval '1 hour', true, true)`)
+	execSQL(t, f.s, f.ctx, `UPDATE pools SET retired = true, retired_at = now(), last_empty_listing_at = NULL WHERE id = 'pool1'`)
+	// No live rows remain: only the retirement discovery window selects it.
+	execSQL(t, f.s, f.ctx, `UPDATE hosts SET state = 'terminated' WHERE id IN ('h1', 'h2')`)
+	f.s.lastAliveCheck = time.Time{}
+	if err := f.s.provision(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.query(t, `SELECT state FROM hosts WHERE id = 'h-lost'`); got != "terminated" {
+		t.Fatalf("lost launch row: %s", got)
+	}
+	f.cloud.add("i-late", instanceTags("t1/burst", "h-lost"))
+	f.s.lastAliveCheck = time.Time{}
+	if err := f.s.provision(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(f.cloud.terminatedIDs(), "i-late") {
+		t.Fatal("a late instance of a retired pool was not terminated")
+	}
+	// The time window alone is not enough: a last listing must have
+	// found no instances after retirement.
+	execSQL(t, f.s, f.ctx, `UPDATE pools SET retired_at = now() - interval '2 hours', last_empty_listing_at = NULL WHERE id = 'pool1'`)
+	f.cloud.add("i-later", instanceTags("t1/burst", "h-lost"))
+	f.s.lastAliveCheck = time.Time{}
+	if err := f.s.provision(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(f.cloud.terminatedIDs(), "i-later") {
+		t.Fatal("retired pool dropped discovery without a clean final listing")
+	}
+	// EC2 eventually purges terminated instances from its listings.
+	f.cloud.forget("i-late")
+	f.cloud.forget("i-later")
+	f.cloud.forget("i-1")
+	f.cloud.forget("i-2")
+	f.s.lastAliveCheck = time.Time{}
+	if err := f.s.provision(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.query(t, `SELECT (last_empty_listing_at IS NOT NULL)::text FROM pools WHERE id = 'pool1'`); got != "true" {
+		t.Fatalf("last empty listing not recorded: %s", got)
+	}
+	listed := len(f.cloud.listings)
+	f.s.lastAliveCheck = time.Time{}
+	if err := f.s.provision(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.cloud.listings) != listed {
+		t.Fatal("retired pool still checked after the window and an empty listing")
+	}
 }
 
 // noneTerminatedBut: only the given instances were terminated, and no
@@ -572,7 +669,7 @@ func TestRenamePoolWithoutHosts(t *testing.T) {
 	if err := s.checkIn(ctx); err != nil {
 		t.Fatal(err)
 	}
-	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('ps', 'lab', 'static'), ('pe', 'burst', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider, id_migrated_at) VALUES ('ps', 'lab', 'static', now()), ('pe', 'burst', 'ec2', now())`)
 	out, err := renameConfirmed(ctx, s, "", "lab", "lab2", false)
 	if err != nil || out.Pool.Name != "lab2" || out.Hosts != 0 || !out.Pool.Platform {
 		t.Fatalf("static: %+v, %v", out, err)

@@ -139,6 +139,7 @@ def test_a_pool_from_before_lux_pool_id_is_migrated(lux, ec2):
         assert "lux:pool-id" not in inst["tags"], inst["tags"]
         # The launch recorded it as tagged; an older luxd's would not have.
         env_sql(lux.env, "UPDATE hosts SET pool_id_tagged = false WHERE name = %s", host["name"])
+        env_sql(lux.env, "UPDATE pools SET id_migrated_at = NULL WHERE name = %s", "burst")
         refused = lux.run("pools", "rename", "burst", "burst-eu", check=False)
         assert refused.returncode == 4 and "not yet confirmed to carry" in refused.stderr, refused.stderr
     finally:

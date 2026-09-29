@@ -15,11 +15,11 @@ package server
 // Two things make that hold:
 //
 //   - Instances launched before lux:pool-id existed carry only the name.
-//     Their pool is "legacy" (poolRow.Legacy) until a provider check has
-//     seen lux:pool-id on every one: meanwhile the provisioner also lists
-//     it by name and adds the tag, and a rename is refused
-//     (pool_not_migrated): renamed, those instances would be listed by
-//     nothing.
+//     The pool is legacy until a provider check records id_migrated_at:
+//     its live hosts are confirmed, no recent written-off launch lacks an
+//     id, and that check's name listing finds no untagged instance. Until
+//     then name discovery and pool_not_migrated prevent losing an orphan
+//     whose launch reply was lost.
 //   - A luxd of an earlier version lists by name. Once any provisioned
 //     pool has been renamed (pool_rename_fence, never cleared), the
 //     database refuses it the provisioner lease (migration 036's trigger),
@@ -362,19 +362,17 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 	return out, err
 }
 
-// checkPoolMigrated refuses a rename while some live host of the pool may
-// run an instance without lux:pool-id: the provisioner finds those by
-// name only, and would lose them.
+// checkPoolMigrated requires a completed provider check, not only the
+// current host rows: a lost launch reply can be written off before its
+// instance appears in a name listing.
 func checkPoolMigrated(ctx context.Context, tx pgx.Tx, poolID, name string) error {
-	var unconfirmed int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM hosts h JOIN pools p ON p.id = $1
-		WHERE `+legacyHost, poolID).Scan(&unconfirmed); err != nil {
+	var migrated bool
+	if err := tx.QueryRow(ctx, `SELECT id_migrated_at IS NOT NULL FROM pools WHERE id = $1`, poolID).Scan(&migrated); err != nil {
 		return err
 	}
-	if unconfirmed > 0 {
+	if !migrated {
 		return errf(http.StatusConflict, "pool_not_migrated",
-			"pool %q has %d hosts whose instances were launched before lux:pool-id and are not yet confirmed to carry it: "+
-				"wait for the next provider checks to tag them (luxd needs ec2:CreateTags of lux:pool-id), or scale the pool to zero", name, unconfirmed)
+			"pool %q has not completed name-based instance discovery: wait for a clean provider check after its launch window, or scale the pool to zero", name)
 	}
 	return nil
 }
