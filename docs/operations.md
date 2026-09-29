@@ -159,10 +159,13 @@ reach S3 in the background:
    A copy is never deleted before its upload finished.
 3. A runner downloads a snapshot through a presigned S3 URL, valid for 15
    minutes: it asks `GET /runner/v1/blobs/{id}`, and luxd redirects it only
-   for blobs of a Run placed on that host. Artifacts are downloaded through
-   luxd, which decompresses them (blobs are stored zstd) and sends the file
-   with its length and sha256 (`X-Lux-SHA256`), so a download cut short is
-   detected.
+   for the volumes of the snapshot a Run placed on that host is restoring
+   (recorded by the placement that took that snapshot).
+   The assignment carries each volume's size and sha256 as luxd recorded
+   them, and the runner checks what it restores against them. Artifacts are
+   downloaded through luxd, which decompresses them (blobs are stored zstd)
+   and sends the file with its length and sha256 (`X-Lux-SHA256`), so a
+   download cut short is detected.
 4. Retention deletes a finished Run's blobs from S3 after the tenant's
    `retention_days`.
 
