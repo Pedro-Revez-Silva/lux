@@ -369,7 +369,7 @@ func (s *Server) applySnapshotDone(ctx context.Context, tx pgx.Tx, tenantID, hos
 		}
 		return false, sp.Commit(ctx)
 	}
-	err = s.recordSnapshot(ctx, sp, tenantID, hostID, runID, placementID, epoch, current, sd)
+	recorded, err := s.recordSnapshot(ctx, sp, tenantID, hostID, runID, placementID, epoch, current, sd)
 	var foreign *foreignBlobError
 	if errors.As(err, &foreign) {
 		if err := sp.Rollback(ctx); err != nil {
@@ -388,29 +388,38 @@ func (s *Server) applySnapshotDone(ctx context.Context, tx pgx.Tx, tenantID, hos
 	if err != nil {
 		return false, err
 	}
-	// A report recorded after a refused one (a restarted runner snapshots
-	// again): the placement's snapshot is the Run's after all.
-	if _, err := sp.Exec(ctx, `UPDATE placements SET snapshot_refused = false WHERE id = $1 AND snapshot_refused`, placementID); err != nil {
-		return false, err
+	// A new report recorded after a refused one (a restarted runner
+	// snapshots again): the placement's snapshot is the Run's after all. A
+	// redelivered older report changes nothing, so a later refusal stands.
+	if recorded {
+		if _, err := sp.Exec(ctx, `UPDATE placements SET snapshot_refused = false WHERE id = $1 AND snapshot_refused`, placementID); err != nil {
+			return false, err
+		}
 	}
 	return false, sp.Commit(ctx)
 }
 
-func (s *Server) recordSnapshot(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID, placementID string, epoch, current int, sd proto.SnapshotDone) error {
+// recordSnapshot stores a report. recorded: it was a new snapshot, rather
+// than a redelivery of one already recorded (which stores nothing).
+func (s *Server) recordSnapshot(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID, placementID string, epoch, current int, sd proto.SnapshotDone) (recorded bool, err error) {
 	var snapRun, snapPlacement string
 	var snapEpoch int
 	var stored proto.Manifest
-	err := tx.QueryRow(ctx, `SELECT run_id, placement_id, epoch, manifest FROM snapshots WHERE id = $1`,
+	err = tx.QueryRow(ctx, `SELECT run_id, placement_id, epoch, manifest FROM snapshots WHERE id = $1`,
 		sd.Manifest.SnapshotID).Scan(&snapRun, &snapPlacement, &snapEpoch, &stored)
 	switch {
 	case err == nil && snapRun == runID && snapPlacement == placementID && snapEpoch == epoch && reflect.DeepEqual(stored, sd.Manifest):
 		// Redelivered, if its output and artifacts are the recorded ones too.
-		return recordedBlobsMatch(ctx, tx, runID, epoch, sd)
+		return false, recordedBlobsMatch(ctx, tx, runID, epoch, sd)
 	case err == nil:
-		return &foreignBlobError{sd.Manifest.SnapshotID}
+		return false, &foreignBlobError{sd.Manifest.SnapshotID}
 	case !errors.Is(err, pgx.ErrNoRows):
-		return err
+		return false, err
 	}
+	return true, insertSnapshot(ctx, tx, tenantID, hostID, runID, placementID, epoch, current, sd)
+}
+
+func insertSnapshot(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID, placementID string, epoch, current int, sd proto.SnapshotDone) error {
 	var total int64
 	for _, v := range sd.Manifest.Volumes {
 		total += v.Size

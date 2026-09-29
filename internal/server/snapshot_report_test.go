@@ -424,18 +424,20 @@ func exitPlacement(t *testing.T, s *Server, epoch int) {
 }
 
 // A moving placement that reported snapshot A, then a refused report B,
-// stays stopped rather than resuming from A. A later accepted report C
-// clears the refusal, and the move then resumes from C.
+// stays stopped rather than resuming from A, A redelivered unchanged
+// included: a redelivery changes nothing. A later new report C clears the
+// refusal, and the move then resumes from C.
 func TestSnapshotReportRefusedAfterAcceptedInSamePlacement(t *testing.T) {
 	for _, c := range []struct {
 		name         string
-		laterReport  bool
+		later        string // a report after the refused B: "", "snapB-A" again, or a new "snapB-C"
 		state, snap  string
 		reason       string
 		wantResuming bool
 	}{
-		{"refused last", false, StateStopped, "snapB-A", "migrate; " + refusedSnapshotReason, false},
-		{"accepted after refused", true, StateResuming, "snapB-C", "auto-resume after migrate", true},
+		{"refused last", "", StateStopped, "snapB-A", "migrate; " + refusedSnapshotReason, false},
+		{"A redelivered after refused", "snapB-A", StateStopped, "snapB-A", "migrate; " + refusedSnapshotReason, false},
+		{"new accepted after refused", "snapB-C", StateResuming, "snapB-C", "auto-resume after migrate", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, ctx := reportFixture(t)
@@ -449,9 +451,19 @@ func TestSnapshotReportRefusedAfterAcceptedInSamePlacement(t *testing.T) {
 			if f := reportSnapshot(t, s, "hb", "rb", 1, refusedB); f.Type != proto.MsgAck || !ackRefused(t, f) {
 				t.Fatalf("report B: %s %s, want an ack with refused", f.Type, f.Data)
 			}
-			if c.laterReport {
-				if f := reportSnapshot(t, s, "hb", "rb", 1, snapshotB("snapB-C", 1)); f.Type != proto.MsgAck || ackRefused(t, f) {
-					t.Fatalf("report C: %s %s", f.Type, f.Data)
+			before := recordsOf(t, s, "rb")
+			snapshotEvents := len(eventErrors(t, s, "rb", "snapshot"))
+			if c.later != "" {
+				if f := reportSnapshot(t, s, "hb", "rb", 1, snapshotB(c.later, 1)); f.Type != proto.MsgAck || ackRefused(t, f) {
+					t.Fatalf("report %s: %s %s", c.later, f.Type, f.Data)
+				}
+			}
+			if c.later == "snapB-A" {
+				if got := recordsOf(t, s, "rb"); !reflect.DeepEqual(got, before) {
+					t.Errorf("redelivery stored\nbefore %+v\nafter  %+v", before, got)
+				}
+				if n := len(eventErrors(t, s, "rb", "snapshot")); n != snapshotEvents {
+					t.Errorf("redelivery added snapshot events: %d, want %d", n, snapshotEvents)
 				}
 			}
 			exitPlacement(t, s, 1)
@@ -460,9 +472,9 @@ func TestSnapshotReportRefusedAfterAcceptedInSamePlacement(t *testing.T) {
 			var refused bool
 			systemScan(t, s, `SELECT r.state, r.state_reason, coalesce(r.snapshot_id, ''), p.snapshot_refused
 				FROM runs r JOIN placements p ON p.id = 'pb1' WHERE r.id = 'rb'`, nil, &state, &reason, &snap, &refused)
-			if state != c.state || reason != c.reason || snap != c.snap || refused == c.laterReport {
+			if state != c.state || reason != c.reason || snap != c.snap || refused == c.wantResuming {
 				t.Errorf("rb: state %q reason %q snapshot %q refused %v; want %q %q %q %v",
-					state, reason, snap, refused, c.state, c.reason, c.snap, !c.laterReport)
+					state, reason, snap, refused, c.state, c.reason, c.snap, !c.wantResuming)
 			}
 			if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
 				t.Fatal(err)
