@@ -1,14 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
-import { ToastProvider, type Tenant as PickerTenant } from "@lux/design-system";
+import { IdChip, ToastProvider, type Tenant as PickerTenant } from "@lux/design-system";
+import { IconExternal, IconTerminal } from "@lux/design-system/icons";
 import { api, errorText, getSession, isApiError, setRole, signInAs, useQuery, useSession } from "../api/index.ts";
-import { matchPath, usePath } from "./router.tsx";
+import { matchPath, usePath, useSearchParams } from "./router.tsx";
 import { ScopeProvider, useScope } from "./scope.tsx";
 import { useLiveUpdates } from "./live.ts";
 import { Shell } from "./Shell.tsx";
-import { SignIn } from "./SignIn.tsx";
+import { SignIn, type SignInProps } from "./SignIn.tsx";
 import { Overview } from "./pages/Overview.tsx";
 import { Runs } from "./pages/Runs.tsx";
 import { RunPage } from "./pages/RunPage.tsx";
+import { TerminalPage } from "./pages/TerminalPage.tsx";
+import { PreviewAuth } from "./pages/PreviewAuth.tsx";
+import { parsePreviewUrl } from "./pages/previewTarget.ts";
 import { Hosts } from "./pages/Hosts.tsx";
 import { HostPage } from "./pages/HostPage.tsx";
 import { Pools } from "./pages/Pools.tsx";
@@ -16,20 +20,50 @@ import { Tenants } from "./pages/Tenants.tsx";
 import { NotFound } from "./pages/NotFound.tsx";
 import { ErrorBlock } from "./pages/common.tsx";
 
+/** What the sign-in screen says about the page it continues to. */
+type SignInNote = Pick<SignInProps, "next" | "reason">;
+
 interface Route {
   pattern: string;
   title: string;
   render: (params: Record<string, string>) => React.ReactNode;
+  /** Rendered without the shell (its own full-window layout). */
+  bare?: boolean;
+  /** A deep link people arrive at signed out: how the sign-in screen frames it. */
+  signIn?: (params: Record<string, string>, search: URLSearchParams) => SignInNote;
 }
 
 const ROUTES: Route[] = [
   { pattern: "/", title: "Overview", render: () => <Overview /> },
   { pattern: "/runs", title: "Runs", render: () => <Runs /> },
   { pattern: "/runs/:id", title: "Run", render: (p) => <RunPage id={p.id!} /> },
+  {
+    pattern: "/runs/:id/terminal",
+    title: "Runs",
+    render: (p) => <TerminalPage id={p.id!} />,
+    signIn: (p) => ({
+      next: { icon: <IconTerminal size={15} />, text: <>Then you will continue to the terminal for <IdChip value={p.id!} /></> },
+      reason: "Your session has expired or this tab has no key yet. A terminal needs a key with the run scope for this run's tenant.",
+    }),
+  },
   { pattern: "/hosts", title: "Hosts", render: () => <Hosts /> },
   { pattern: "/hosts/:id", title: "Host", render: (p) => <HostPage id={p.id!} /> },
   { pattern: "/pools", title: "Pools", render: () => <Pools /> },
   { pattern: "/tenants", title: "Tenants", render: () => <Tenants /> },
+  {
+    pattern: "/preview-auth",
+    title: "Preview",
+    render: () => <PreviewAuth />,
+    bare: true,
+    signIn: (_p, search) => {
+      const t = parsePreviewUrl(search.get("to"));
+      if ("error" in t) return {};
+      return {
+        next: { icon: <IconExternal size={15} />, text: <>Then you will continue to the preview of <span className="mono">{t.server}</span> on <IdChip value={t.runId} /></> },
+        reason: "A preview needs a key that can read its run.",
+      };
+    },
+  },
 ];
 
 /**
@@ -47,7 +81,7 @@ function useRole(): { error: string | null; retrying: boolean; retry: () => void
     const probe = async () => {
       try {
         const me = await api.whoami(ctrl.signal);
-        setRole(me.operator ? "operator" : "tenant");
+        setRole(me.operator ? "operator" : "tenant", me.consoleAuth);
         setFailure(null);
       } catch (e) {
         if (ctrl.signal.aborted) return;
@@ -102,6 +136,7 @@ function Router() {
     const m = matchPath(r.pattern, path);
     if (!m) continue;
     if (r.pattern === "/tenants" && session.role === "tenant") break;
+    if (r.bare) return <>{r.render(m.params)}</>;
     return (
       <Shell tenants={picker} operator={operator} title={r.title}>
         {r.render(m.params)}
@@ -121,9 +156,29 @@ export function App() {
   const signedIn = session.key ?? session.user?.email;
   return (
     <ScopeProvider>
-      <ToastProvider>{signedIn ? <Router key={signedIn} /> : probe === "checking" ? null : <SignIn />}</ToastProvider>
+      <ToastProvider>{signedIn ? <Router key={signedIn} /> : probe === "checking" ? null : <SignInFor />}</ToastProvider>
     </ScopeProvider>
   );
+}
+
+/**
+ * The sign-in screen, saying where it continues to. The URL is kept across
+ * the sign-in, so a deep link (a terminal, a preview) lands on its page
+ * once there is a session; routes that expect to be arrived at signed out
+ * say what for.
+ */
+function SignInFor() {
+  const path = usePath();
+  const params = useSearchParams();
+  const session = useSession();
+  const props: SignInProps = { access: session.consoleAuth === "cloudflare-access" };
+  for (const r of ROUTES) {
+    const m = matchPath(r.pattern, path);
+    if (!m) continue;
+    Object.assign(props, r.signIn?.(m.params, params) ?? (path !== "/" ? { next: { text: <>Then you will continue to <span className="mono">{path}</span></> } } : {}));
+    break;
+  }
+  return <SignIn {...props} />;
 }
 
 /**

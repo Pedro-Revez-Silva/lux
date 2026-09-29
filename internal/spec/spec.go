@@ -74,6 +74,70 @@ type Workload struct {
 	BeforeStop *BeforeStop `json:"beforeStop,omitempty" yaml:"beforeStop,omitempty" doc:"A command run in the container on every stop, before the workload is signalled: a stop asked for, a cancel, a timeout, a drain. Its output is the Run's; what it writes into $LUX_ARTIFACTS is collected. It cannot run when the container dies or its host is lost."`
 	MCPServers []MCPServer `json:"mcpServers,omitempty" yaml:"mcpServers,omitempty" doc:"MCP servers (streamable HTTP) the agent connects to, through its adapter. Each URL's host must be allowed by network.egress (unless unrestricted), and may not be the control plane's."`
 	Services   []Service   `json:"services,omitempty" yaml:"services,omitempty" doc:"HTTP services the workload calls through a local socket (/.lux/services/<name>.sock, named in LUX_SERVICE_<NAME>), which adds their headers: the workload never holds the credentials. Same URL rules as mcpServers."`
+	Servers    []Server    `json:"servers,omitempty" yaml:"servers,omitempty" doc:"Servers: named ports of the Run, each optionally with a command lux starts in the container, as the workload's user with its environment. Started on every start of the Run (a resume, a migration). More can be added while it runs (POST /v1/runs/{id}/servers)."`
+}
+
+// Server is a named port of a Run, with an optional command that serves
+// it. Its output is the Run's, as records with ch "server".
+type Server struct {
+	Name    string            `json:"name" yaml:"name" doc:"Unique: 1-30 lowercase letters, digits and -, starting with a letter, not ending in -. Its preview URL is <name>-<run suffix>.<preview domain>."`
+	Port    int               `json:"port" yaml:"port" doc:"The TCP port it listens on in the container, 1-65535 (not a service's loopback port)."`
+	Command []string          `json:"command,omitempty" yaml:"command,omitempty" doc:"argv, run with the workload's PATH, user and environment. None: only the port is exposed (something else starts the server)."`
+	Workdir string            `json:"workdir,omitempty" yaml:"workdir,omitempty" doc:"Where the command runs; a relative path is against the workload's workdir (default: the workload's workdir)."`
+	Env     map[string]string `json:"env,omitempty" yaml:"env,omitempty" doc:"More environment for the command (not secret: it is stored with the Run)."`
+}
+
+// serverNameRe: a DNS label's worth of a preview host name, which also
+// carries the Run's suffix: 1-30 characters, a letter first, no - last.
+var serverNameRe = regexp.MustCompile(`^[a-z]([a-z0-9-]{0,28}[a-z0-9])?$`)
+
+// ValidServerName reports whether name is a valid server name.
+func ValidServerName(name string) bool { return serverNameRe.MatchString(name) }
+
+// ValidateServer lists what is wrong with a server (at names it in the
+// messages), given the spec it belongs to: its name, port, command,
+// workdir and environment. Uniqueness is the caller's.
+func (s *RunSpec) ValidateServer(at string, sv Server) []string {
+	var errs []string
+	if !ValidServerName(sv.Name) {
+		errs = append(errs, fmt.Sprintf("%s: invalid name %q (1-30 of a-z, 0-9 and -, starting with a letter, not ending in -)", at, sv.Name))
+	}
+	if slices.ContainsFunc(s.Network.Ports, func(p Port) bool { return p.Name == sv.Name }) {
+		errs = append(errs, fmt.Sprintf("%s: %q is a network.ports name: a port-forward by name would be ambiguous", at, sv.Name))
+	}
+	if sv.Port < 1 || sv.Port > 65535 {
+		errs = append(errs, fmt.Sprintf("%s.port: need 1-65535", at))
+	} else if j := sv.Port - ServiceBasePort; j >= 0 && j < len(s.Workload.Services) && s.Workload.Services[j].Loopback {
+		errs = append(errs, fmt.Sprintf("%s.port: %d is service %q's loopback port", at, sv.Port, s.Workload.Services[j].Name))
+	}
+	if sv.Command != nil && (len(sv.Command) == 0 || sv.Command[0] == "") {
+		errs = append(errs, fmt.Sprintf("%s.command: an empty command (leave it out for a port only)", at))
+	}
+	if strings.ContainsRune(sv.Workdir, 0) || slices.Contains(strings.Split(sv.Workdir, "/"), "..") {
+		errs = append(errs, fmt.Sprintf("%s.workdir: no .. and no NUL", at))
+	}
+	for k := range sv.Env {
+		if !envRe.MatchString(k) {
+			errs = append(errs, fmt.Sprintf("%s.env: invalid name %q", at, k))
+		} else if strings.HasPrefix(k, "LUX_") {
+			errs = append(errs, fmt.Sprintf("%s.env: %q: the LUX_ prefix is reserved", at, k))
+		}
+	}
+	return errs
+}
+
+// ServerWorkdir is where a server's command runs: its workdir, against
+// the workload's when relative; "" leaves it to the workload's.
+func ServerWorkdir(workload, dir string) string {
+	switch {
+	case dir == "":
+		return workload
+	case path.IsAbs(dir):
+		return path.Clean(dir)
+	case workload == "":
+		return dir // against the user's home, where the workload runs then
+	}
+	return path.Join(workload, dir)
 }
 
 // BeforeStop is what the workload leaves behind as it stops: a command run
@@ -582,6 +646,16 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		if j := p.Port - ServiceBasePort; j >= 0 && j < len(s.Workload.Services) && s.Workload.Services[j].Loopback {
 			fail("network.ports[%d]: %d is service %q's loopback port", i, p.Port, s.Workload.Services[j].Name)
 		}
+	}
+	servers := map[string]bool{}
+	for i, sv := range s.Workload.Servers {
+		for _, e := range s.ValidateServer(fmt.Sprintf("workload.servers[%d]", i), sv) {
+			fail("%s", e)
+		}
+		if servers[sv.Name] {
+			fail("workload.servers: duplicate name %q", sv.Name)
+		}
+		servers[sv.Name] = true
 	}
 	for i, p := range s.Artifacts.Paths {
 		if !path.IsAbs(p) {

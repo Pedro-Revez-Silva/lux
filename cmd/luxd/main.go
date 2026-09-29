@@ -214,6 +214,14 @@ func serve(ctx context.Context, c config) error {
 			CFOperators:     c.Console.CloudflareAccess.Operators,
 			CFDefaultTenant: c.Console.CloudflareAccess.DefaultTenant,
 		},
+		AllowedOrigins: c.Console.AllowedOrigins,
+		Preview: server.PreviewConfig{
+			Domain:  c.Preview.Domain,
+			Listen:  c.Preview.Listen,
+			Auth:    c.Preview.Auth,
+			HoldFor: c.Preview.HoldFor.Duration,
+			CFAud:   c.Preview.CloudflareAccess.AUD,
+		},
 	}, db, blobs, log)
 	return srv.Run(ctx)
 }
