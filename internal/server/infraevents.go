@@ -1,0 +1,350 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"reflect"
+	"regexp"
+	"strconv"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/store"
+)
+
+// Pool and host events (migration 031): what happened to a pool or a host,
+// written in the transaction of the change each records. Type names carry
+// their table's prefix.
+const (
+	evScaleUp          = "pool.scale_up"
+	evLaunchRequested  = "pool.launch_requested"
+	evLaunchFailed     = "pool.launch_failed"
+	evHostLaunched     = "pool.host_launched"
+	evHostRegistered   = "pool.host_registered"
+	evHostReleased     = "pool.host_released"
+	evSpotInterrupted  = "pool.spot_interrupted"
+	evConfigChanged    = "pool.config_changed"
+	evPlacement        = "pool.placement"
+	evPoolProviderErr  = "pool.provider_error"
+	evRegistered       = "host.registered"
+	evReady            = "host.ready"
+	evPlacementAssign  = "host.placement_assigned"
+	evPlacementEnded   = "host.placement_ended"
+	evDrainRequested   = "host.drain_requested"
+	evLost             = "host.lost"
+	evTerminateRequest = "host.terminate_requested"
+	evTerminated       = "host.terminated"
+	evHostProviderErr  = "host.provider_error"
+)
+
+// poolRetry: the events a pool writes on every provisioner tick while a
+// launch keeps failing. A repeat within an unbroken run of them is folded
+// into the earlier row (see collapse) instead of adding one.
+var poolRetry = []string{evScaleUp, evLaunchRequested, evLaunchFailed, evPoolProviderErr}
+
+// hostRetry: a terminate the provider keeps refusing.
+var hostRetry = []string{evHostProviderErr}
+
+func poolEvent(ctx context.Context, tx pgx.Tx, poolID, typ string, data map[string]any) error {
+	_, err := tx.Exec(ctx, `INSERT INTO pool_events (tenant_id, pool_id, type, data)
+		SELECT tenant_id, id, $2, $3 FROM pools WHERE id = $1`, poolID, typ, nonNilData(data))
+	return err
+}
+
+// hostPoolEvent records an event on the pool a host belongs to; none when
+// that pool has no row (a static pool only its host tokens name).
+func hostPoolEvent(ctx context.Context, tx pgx.Tx, hostID, typ string, data map[string]any) error {
+	_, err := tx.Exec(ctx, `INSERT INTO pool_events (tenant_id, pool_id, type, data)
+		SELECT p.tenant_id, p.id, $2, $3 FROM hosts h
+		JOIN pools p ON p.name = h.pool AND p.tenant_id IS NOT DISTINCT FROM h.tenant_id
+		WHERE h.id = $1`, hostID, typ, nonNilData(data))
+	return err
+}
+
+func hostEvent(ctx context.Context, tx pgx.Tx, hostID, typ string, data map[string]any) error {
+	_, err := tx.Exec(ctx, `INSERT INTO host_events (tenant_id, host_id, type, data)
+		SELECT tenant_id, id, $2, $3 FROM hosts WHERE id = $1`, hostID, typ, nonNilData(data))
+	return err
+}
+
+// poolRepeatEvent records a pool event that a stuck pool repeats every
+// tick. It folds into the latest event of its type when that one has the
+// same data (but for the keys in volatile, which take the new values) and
+// every pool event since is one of poolRetry; for a scale-up or a launch
+// request, only once a launch has failed since (two launches in one pass
+// are two rows).
+func poolRepeatEvent(ctx context.Context, tx pgx.Tx, poolID, typ string, data map[string]any, volatile ...string) error {
+	folded, err := collapse(ctx, tx, poolEvents, poolID, typ, data, volatile, poolRetry, typ == evScaleUp || typ == evLaunchRequested)
+	if err != nil || folded {
+		return err
+	}
+	return poolEvent(ctx, tx, poolID, typ, data)
+}
+
+// hostRepeatEvent is poolRepeatEvent for a host's provider errors.
+func hostRepeatEvent(ctx context.Context, tx pgx.Tx, hostID, typ string, data map[string]any) error {
+	folded, err := collapse(ctx, tx, hostEvents, hostID, typ, data, nil, hostRetry, false)
+	if err != nil || folded {
+		return err
+	}
+	return hostEvent(ctx, tx, hostID, typ, data)
+}
+
+// eventTable names one of the two event tables and its owner column.
+type eventTable struct{ table, owner string }
+
+var (
+	poolEvents = eventTable{"pool_events", "pool_id"}
+	hostEvents = eventTable{"host_events", "host_id"}
+)
+
+// collapse bumps the count of the event typ would repeat, if any (see
+// poolRepeatEvent), and reports whether it did. The row is locked, so two
+// writers cannot both fold into it and lose a count.
+func collapse(ctx context.Context, tx pgx.Tx, t eventTable, owner, typ string, data map[string]any, volatile, retry []string, afterFailure bool) (bool, error) {
+	var id int64
+	err := tx.QueryRow(ctx, `SELECT e.id FROM `+t.table+` e
+		WHERE e.`+t.owner+` = $1 AND e.type = $2
+		  AND e.data - $4::text[] = $3::jsonb - $4::text[]
+		  AND NOT EXISTS (SELECT 1 FROM `+t.table+` x WHERE x.`+t.owner+` = $1 AND x.id > e.id AND x.type <> ALL($5))
+		  AND (NOT $6 OR EXISTS (SELECT 1 FROM `+t.table+` x WHERE x.`+t.owner+` = $1 AND x.id > e.id AND x.type = $7))
+		  AND e.id = (SELECT max(y.id) FROM `+t.table+` y WHERE y.`+t.owner+` = $1 AND y.type = $2)
+		FOR UPDATE`, owner, typ, nonNilData(data), nonNil(volatile), retry, afterFailure, evLaunchFailed).Scan(&id)
+	if err == pgx.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	_, err = tx.Exec(ctx, `UPDATE `+t.table+` SET count = count + 1, last_at = now(), data = $2 WHERE id = $1`, id, nonNilData(data))
+	return err == nil, err
+}
+
+func nonNilData(d map[string]any) map[string]any {
+	if d == nil {
+		return map[string]any{}
+	}
+	return d
+}
+
+// ChangePool runs change, which creates, updates or retires the pool
+// tenantID/name in tx, and records what it changed as pool.config_changed
+// (nothing when nothing did).
+func ChangePool(ctx context.Context, tx pgx.Tx, tenantID *string, name string, change func() error) error {
+	before, err := poolSettings(ctx, tx, tenantID, name)
+	if err != nil {
+		return err
+	}
+	if err := change(); err != nil {
+		return err
+	}
+	after, err := poolSettings(ctx, tx, tenantID, name)
+	if err != nil || after == nil {
+		return err
+	}
+	changes := map[string]any{}
+	for k, v := range after.fields {
+		var old any
+		if before != nil {
+			old = before.fields[k]
+		}
+		if !reflect.DeepEqual(old, v) {
+			changes[k] = map[string]any{"old": old, "new": v}
+		}
+	}
+	if len(changes) == 0 {
+		return nil
+	}
+	return poolEvent(ctx, tx, after.id, evConfigChanged, map[string]any{"created": before == nil, "changes": changes})
+}
+
+type poolSnapshot struct {
+	id     string
+	fields map[string]any
+}
+
+// poolSettings is a pool's settings as config_changed reports them, one
+// value per field, template keys each on their own (template.region, ...).
+// A pool holds no secrets: a template is where and what to launch (region,
+// launch template, subnets, tags), and credentials are luxd's own.
+func poolSettings(ctx context.Context, tx pgx.Tx, tenantID *string, name string) (*poolSnapshot, error) {
+	var p poolSnapshot
+	var provider, price, currency string
+	var tmpl map[string]any
+	var minH, maxH, warm, sda int
+	var wwa, shared, retired bool
+	err := tx.QueryRow(ctx, `SELECT id, provider, template, min_hosts, max_hosts, warm_hosts, coalesce(scale_down_after_s, 0),
+			warm_while_active, shared, retired, coalesce(trim_scale(hourly_price)::text, ''), coalesce(price_currency, '')
+		FROM pools WHERE tenant_id IS NOT DISTINCT FROM $1 AND name = $2 FOR UPDATE`, tenantID, name).
+		Scan(&p.id, &provider, &tmpl, &minH, &maxH, &warm, &sda, &wwa, &shared, &retired, &price, &currency)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	p.fields = map[string]any{"provider": provider, "minHosts": minH, "maxHosts": maxH, "warmHosts": warm,
+		"scaleDownAfterSeconds": sda, "warmWhileActive": wwa, "shared": shared, "retired": retired,
+		"hourlyPrice": price, "currency": currency}
+	for k, v := range tmpl {
+		// Through JSON, as the event stores it: 1 and 1.0 compare equal.
+		b, _ := json.Marshal(v)
+		var norm any
+		_ = json.Unmarshal(b, &norm)
+		p.fields["template."+k] = norm
+	}
+	return &p, nil
+}
+
+// providerErrorText is a provider's error with what differs between two
+// otherwise identical failures (AWS's request id) taken out, so that
+// repeats compare equal.
+func providerErrorText(err error) string {
+	return truncate(requestID.ReplaceAllString(err.Error(), ""), 500)
+}
+
+var requestID = regexp.MustCompile(`(?i),?\s*request ?id: [0-9a-f-]+,?`)
+
+// LifecycleEvent is one of a pool's or a host's events.
+type LifecycleEvent struct {
+	ID    int64          `json:"id"`
+	Type  string         `json:"type"`
+	Data  map[string]any `json:"data"`
+	Count int            `json:"count" doc:"How many times it happened in a row (a failure repeated on every provisioner pass); 1 for most."`
+	Time  time.Time      `json:"time" doc:"When it (first) happened."`
+	// LastTime: only for a repeated event.
+	LastTime *time.Time `json:"lastTime,omitempty" doc:"When it last happened, if more than once."`
+}
+
+// EventPage is a page of events, newest first.
+type EventPage struct {
+	Before string `query:"before" doc:"Only events older than this id: the next page after a page's last event." example:"0"`
+	Limit  string `query:"limit" doc:"At most this many events: 1 to 1000, default 100." example:"100"`
+}
+
+type lifecycleEventsOutput struct {
+	Body struct {
+		Events []LifecycleEvent `json:"events"`
+	} `nameHint:"LifecycleEventList"`
+}
+
+type listPoolEventsInput struct {
+	TenantQuery
+	EventPage
+	Name string `path:"name" doc:"The pool's name."`
+}
+
+type listHostEventsInput struct {
+	HostPath
+	TenantQuery
+	EventPage
+}
+
+func (s *Server) listPoolEvents(ctx context.Context, in *listPoolEventsInput) (*lifecycleEventsOutput, error) {
+	p := principal(ctx)
+	var poolID string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// A tenant's own pool shadows the platform's of the same name, as
+		// for its Runs. An operator not narrowed to a tenant sees every
+		// pool: a name two of them share is ambiguous.
+		rows, err := tx.Query(ctx, `SELECT id, tenant_id IS NULL FROM pools
+			WHERE name = $2 AND ($1 = '' OR tenant_id = $1 OR tenant_id IS NULL)
+			ORDER BY tenant_id NULLS LAST, retired LIMIT 2`, p.TenantID, in.Name)
+		if err != nil {
+			return err
+		}
+		type found struct {
+			ID       string
+			Platform bool
+		}
+		pools, err := pgx.CollectRows(rows, pgx.RowToStructByPos[found])
+		switch {
+		case err != nil:
+			return err
+		case len(pools) == 0:
+			return errNotFound
+		case len(pools) > 1 && p.TenantID == "":
+			return errf(http.StatusConflict, "ambiguous", "more than one pool is named %s: use ?tenant=", in.Name)
+		case pools[0].Platform && !p.Operator:
+			return errf(http.StatusForbidden, "forbidden", "a platform pool's events are the operators'")
+		}
+		poolID = pools[0].ID
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.lifecycleEvents(ctx, p, poolEvents, poolID, in.EventPage)
+}
+
+func (s *Server) listHostEvents(ctx context.Context, in *listHostEventsInput) (*lifecycleEventsOutput, error) {
+	p := principal(ctx)
+	var hostID string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		id, err := s.resolveHost(ctx, tx, p, in.ID, true)
+		if err != nil {
+			return err
+		}
+		if !p.Operator {
+			var own bool
+			if err := tx.QueryRow(ctx, `SELECT tenant_id IS NOT DISTINCT FROM $2 FROM hosts WHERE id = $1`, id, p.TenantID).Scan(&own); err != nil {
+				return err
+			}
+			if !own {
+				return errf(http.StatusForbidden, "forbidden", "a platform host's events are the operators'")
+			}
+		}
+		hostID = id
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.lifecycleEvents(ctx, p, hostEvents, hostID, in.EventPage)
+}
+
+// lifecycleEvents reads a page of an owner's events, newest first. A
+// tenant reads under its own scope: row-level security holds even if the
+// checks before are wrong.
+func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable, owner string, page EventPage) (*lifecycleEventsOutput, error) {
+	limit := 100
+	if n, err := strconv.Atoi(page.Limit); err == nil && n > 0 && n <= 1000 {
+		limit = n
+	}
+	var before *int64
+	if page.Before != "" {
+		n, err := strconv.ParseInt(page.Before, 10, 64)
+		if err != nil {
+			return nil, errf(http.StatusBadRequest, "bad_request", "before: an event id")
+		}
+		before = &n
+	}
+	sc := store.System()
+	if !p.Operator {
+		sc = store.Tenant(p.TenantID)
+	}
+	out := &lifecycleEventsOutput{}
+	out.Body.Events = []LifecycleEvent{}
+	err := s.db.Tx(ctx, sc, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT id, type, data, count, created_at, last_at FROM `+t.table+`
+			WHERE `+t.owner+` = $1 AND ($2::bigint IS NULL OR id < $2) ORDER BY id DESC LIMIT $3`, owner, before, limit)
+		if err != nil {
+			return err
+		}
+		var e LifecycleEvent
+		var last time.Time
+		_, err = pgx.ForEachRow(rows, []any{&e.ID, &e.Type, &e.Data, &e.Count, &e.Time, &last}, func() error {
+			ev := e
+			if ev.Count > 1 {
+				ev.LastTime = &last
+			}
+			out.Body.Events = append(out.Body.Events, ev)
+			return nil
+		})
+		return err
+	})
+	return out, err
+}

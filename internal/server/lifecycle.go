@@ -249,6 +249,16 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	if err := setRunState(ctx, tx, tenantID, runID, next, reason, epoch); err != nil {
 		return err
 	}
+	ended := map[string]any{"run": runID, "epoch": epoch, "outcome": next}
+	if st.ExitCode != nil {
+		ended["exitCode"] = *st.ExitCode
+	}
+	if stopReason != "" {
+		ended["stopReason"] = stopReason
+	}
+	if err := hostEvent(ctx, tx, hostID, evPlacementEnded, ended); err != nil {
+		return err
+	}
 	if slices.Contains(movedStops, stopReason) {
 		// Moved, not stopped by a person: resume elsewhere automatically
 		// (with the input a migration left, if any).
@@ -279,6 +289,9 @@ func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epo
 	tag, err := tx.Exec(ctx, `UPDATE placements SET state = 'lost', ended_at = now(), exit_reason = $3, lease_expires_at = NULL
 		WHERE run_id = $1 AND epoch = $2 AND state IN `+livePlacementStates+``, runID, epoch, why)
 	if err != nil || tag.RowsAffected() == 0 {
+		return err
+	}
+	if err := hostEvent(ctx, tx, hostID, evPlacementEnded, map[string]any{"run": runID, "epoch": epoch, "outcome": "lost", "reason": why}); err != nil {
 		return err
 	}
 	if epoch != current || terminal(runState) {

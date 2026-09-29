@@ -151,6 +151,9 @@ func (s *Server) reapHosts(ctx context.Context) error {
 				return err
 			}
 			lost = append(lost, host)
+			if err := hostEvent(ctx, tx, host, evLost, map[string]any{"reason": "missed heartbeats"}); err != nil {
+				return err
+			}
 		}
 		if len(lost) == 0 {
 			return nil

@@ -451,7 +451,15 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 		WHERE id = $1`, r.ID, epoch); err != nil {
 		return err
 	}
-	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID}); err != nil {
+	// The placement is on the Run, its host and its host's pool alike.
+	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID, "pool": h.Pool}); err != nil {
+		return err
+	}
+	placed := map[string]any{"run": r.ID, "epoch": epoch, "host": h.ID}
+	if err := hostEvent(ctx, tx, h.ID, evPlacementAssign, placed); err != nil {
+		return err
+	}
+	if err := hostPoolEvent(ctx, tx, h.ID, evPlacement, placed); err != nil {
 		return err
 	}
 
