@@ -110,6 +110,9 @@ export interface Run {
   host?: string;
   /** Id of that host: link with this, names can be reused. */
   hostId?: string;
+  /** The current name (and id) of the pool it is bound to; spec.placement.pool keeps the submitted name. */
+  pool?: string;
+  poolId?: string;
   spec: RunSpec;
   image?: { containerfile: string; imageId: string };
   secrets: SecretRef[];
@@ -407,7 +410,9 @@ export interface Host {
   name: string;
   /** Owning tenant's name; empty for a platform host. */
   tenant?: string;
+  /** Its pool's current name, and id. */
   pool: string;
+  poolId?: string;
   state: string;
   stateReason?: string;
   draining: boolean;

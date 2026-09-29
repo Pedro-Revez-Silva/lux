@@ -50,6 +50,9 @@ export const api = {
     request<{ events: LifecycleEvent[] }>(`/hosts/${enc(id)}/events`, { tenant, query: { ...page, limit: EVENTS_PAGE }, signal }).then((r) => r.events),
 
   pools: (tenant: Scope, signal?: Sig) => request<{ pools: Pool[] }>("/pools", { tenant, signal }).then((r) => r.pools),
+  /** Renames a pool; only its name changes. tenant: the pool's (an operator's tenant pool); platform: the platform's pool of that name. */
+  renamePool: (tenant: Scope, name: string, newName: string, platform = false) =>
+    request<Pool>(`/pools/${enc(name)}/rename`, { method: "POST", tenant, query: platform ? { owner: "platform" } : {}, body: { name: newName } }),
   /** Marks one of a tenant's pools as its default (tenant: the pool's, for an operator). */
   makePoolDefault: (tenant: Scope, name: string) => request<Pool>("/pools", { method: "POST", tenant, body: { name, isDefault: true } }),
   /** owner: which pool of that name, where a tenant's and the platform's share it; undefined: the server's default. */

@@ -185,6 +185,10 @@ resource "aws_iam_role_policy" "control_luxd" {
         }
       },
       {
+        # Every lux tag is set here, at launch, and only here: lux:pool-id
+        # (what luxd lists a pool's instances by), lux:pool (the name at
+        # launch), lux:host, lux:managed, lux:deployment. A pool rename
+        # changes no tag, so luxd needs no tagging after launch.
         Sid      = "TagOnCreate"
         Effect   = "Allow"
         Action   = "ec2:CreateTags"
