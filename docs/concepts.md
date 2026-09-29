@@ -16,6 +16,17 @@ anything from an epoch that is not the Run's current one. This is
 given up on it: the host is told its placement is stale and stops it, and
 nothing it says can overwrite the newer placement's state.
 
+A Run's `epoch` is therefore also how many times it has been placed on a
+host (first start, retries, resumes, migrations): the Runs list shows it
+as **Placements**. Its **runtime** (`runtimeSeconds` on `GET /v1/runs` and
+`GET /v1/runs/{id}`) is the sum over its placements of the time each
+spent running, from reaching running (`started_at`) to exiting or being
+lost (`ended_at`). A placement still running counts up to the time of the
+response, and `runtimeSince` then says when it started, so a client can
+keep counting; a placement that never reached running adds nothing.
+Queueing, pulling images and restoring volumes before that are not
+runtime.
+
 ## States
 
 ```

@@ -319,9 +319,37 @@ func TestLsCostColumn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lineWith(t, out, "ID", "NAME", "STATE", "HOST", "ADAPTER", "COST", "CREATED")
+	lineWith(t, out, "ID", "NAME", "STATE", "HOST", "ADAPTER", "RUNTIME", "COST", "CREATED")
 	lineWith(t, out, "run_one", "running", "0.15", "USD")
 	lineWith(t, out, "run_est", "running", "~1.2843", "USD")
 	lineWith(t, out, "run_multi", "running", "multi")
 	lineWith(t, out, "run_pending", "running", "—")
+}
+
+func TestLsRuntimeColumn(t *testing.T) {
+	since := time.Now().Add(-time.Minute)
+	run := func(id string, secs float64, since *time.Time) server.Run {
+		return server.Run{ID: id, Tenant: "t", State: "running", Labels: map[string]string{}, CreatedAt: time.Now(), RuntimeSeconds: secs, RuntimeSince: since}
+	}
+	f := &fakeLuxd{bodies: map[string]any{"/v1/runs": map[string]any{"runs": []server.Run{
+		run("run_never", 0, nil),
+		run("run_short", 45.9, nil),
+		run("run_min", 200, nil),
+		run("run_hour", 2*3600+5*60+59, nil),
+		run("run_day", 86400+3*3600, nil),
+		run("run_even", 3600, nil),
+		run("run_live", 0.4, &since),
+	}}}}
+	out, err := runCLI(t, f, "ls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineWith(t, out, "ID", "NAME", "STATE", "HOST", "ADAPTER", "RUNTIME", "COST", "CREATED")
+	lineWith(t, out, "run_never", "running", "-", "-", "—")
+	lineWith(t, out, "run_short", "running", "45s", "—")
+	lineWith(t, out, "run_min", "running", "3m20s", "—")
+	lineWith(t, out, "run_hour", "running", "2h5m", "—")
+	lineWith(t, out, "run_day", "running", "1d3h", "—")
+	lineWith(t, out, "run_even", "running", "1h", "—")
+	lineWith(t, out, "run_live", "running", "0s", "—")
 }

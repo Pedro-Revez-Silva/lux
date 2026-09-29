@@ -31,7 +31,7 @@ was reached; `1` anything else.
 lux run -f spec.yaml [--follow | --wait] [--name N] [-l k=v] [--pool P] [--idempotency-key K] [--secrets-from .env]
 lux run --image alpine -- echo hello           # a quick generic Run
 lux run --image alpine --pool arm64 -- uname -m
-lux ls [--state running,stopped] [-l team=x] [--resumable] [--host H] [--limit N]   # with a COST column
+lux ls [--state running,stopped] [-l team=x] [--resumable] [--host H] [--limit N]   # with RUNTIME and COST columns
 lux get <run>                                  # state, placements, usage
 lux logs <run> [-f] [--since <cursor>] [--events] [--stderr=false] [--server NAME | --servers]
 lux events <run>                               # lifecycle events
@@ -172,6 +172,9 @@ the same way. A value lux does not have is `—`, never `0`.
   unallocated is its billed cost for those hours and need not equal the sum
   of its Runs' lines: host hours refresh on their own schedule and include
   idle time.
+- `lux ls` has a RUNTIME column: the time the Run's placements have spent
+  running, summed (`runtimeSeconds`, see [Concepts](concepts.md#placement-and-epoch));
+  `-` for a Run that never ran.
 - `lux ls` has a COST column: the Run's total when it has one currency,
   `multi` when it has several, `—` while nothing has been reported. A
   leading `~` (`~0.0421 USD`) marks a total that may still change.
