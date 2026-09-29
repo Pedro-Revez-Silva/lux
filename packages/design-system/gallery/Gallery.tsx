@@ -69,7 +69,7 @@ import {
   type TimeRange,
 } from "../src/index.ts";
 import { IconDots, IconInfo, IconMinus, IconMoon, IconPlus, IconRefresh, IconRows, IconRowsLoose, IconSun, IconTerminal, IconWarning } from "../src/icons.tsx";
-import { fakeCostLines, fakeCostSeries, fakeHosts, fakeLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeShellScript, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
+import { fakeCostLines, fakeCostSeries, fakeHosts, fakeLogs, fakeMultilineLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeShellScript, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
 
 function Section({ id, title, children, note }: { id: string; title: string; note?: ReactNode; children: ReactNode }) {
   return (
@@ -824,10 +824,12 @@ function EventsDemo() {
 
 function Logs() {
   const lines = useMemo(() => fakeLogs(50_000), []);
+  const multiline = useMemo(() => fakeMultilineLogs(), []);
   return (
-    <Section id="logs" title="LogView" note="50,000 fake lines, windowed rendering with fixed 18px rows. stderr lines are tinted, system lines are italic. Follow-tail sticks to the bottom and switches off when you scroll up.">
+    <Section id="logs" title="LogView" note="50,000 fake lines, windowed rendering with fixed 18px rows. stderr lines are tinted, system lines are italic. Follow-tail sticks to the bottom and switches off when you scroll up. One row is one line: a multi-line record is split into lines by the page; a newline that reaches the view anyway is clipped to its row.">
       <LogView lines={lines} height={320} lineNumbers />
       <LogView lines={lines.slice(0, 6)} height={160} timestamps={false} follow={false} />
+      <LogView lines={multiline} height={180} lineNumbers follow={false} />
       <LogView lines={[]} height={100} />
     </Section>
   );

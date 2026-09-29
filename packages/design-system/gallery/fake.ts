@@ -183,6 +183,18 @@ export function fakeLogs(n = 50_000): LogLine[] {
   return out;
 }
 
+/** A multi-line prompt as the console splits it (one LogLine per line), then a line that still holds a newline: LogView clips it to its row. */
+export function fakeMultilineLogs(): LogLine[] {
+  const t = NOW - 5 * 60_000;
+  const prompt = ["lux: input (epoch 1) input: Fix the flaky scheduler test.", "", "Steps:", "1. run go test ./internal/server -run TestSchedule -count=20", "2. fix the race, keep the test"];
+  return [
+    ...prompt.map((text): LogLine => ({ ts: t, stream: "system", text })),
+    { ts: t + 900, stream: "stdout", text: "[acp] session/prompt → turn 1" },
+    { ts: t + 1200, stream: "system", text: "unsplit record: first line\nsecond line (clipped, never over the row below)" },
+    { ts: t + 1300, stream: "stdout", text: "the next row reads clean" },
+  ];
+}
+
 /* ---------- Servers ---------- */
 
 const PREVIEW = "k3jq7x2mfa9vbn4z.lux.example.dev";

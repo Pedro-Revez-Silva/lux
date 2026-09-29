@@ -1372,6 +1372,10 @@ a.idchip-text:hover {
   padding: 0 var(--sp-5);
   white-space: pre;
   color: var(--fg);
+  /* Rows are windowed at a fixed height: text that would be taller (a stray
+     newline) is clipped to its row, never painted over the next. Horizontal
+     overflow stays visible: it is what scrolls a long line into view. */
+  overflow-y: clip;
 }
 .logline:hover {
   background: var(--log-line-hover);
