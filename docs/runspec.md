@@ -502,9 +502,11 @@ committed changes, staged, unstaged and untracked (not ignored) files.
   cut at 10 MiB (binary content counts), after the last whole file's diff
   that fits, and marked `truncated`: what is kept still applies, and is
   empty when the first file's diff alone is over the limit. The stats
-  cover the whole diff.
+  cover the whole diff: `files`, `insertions` and `deletions` count every
+  file; `fileStats` lists the first 10,000 files, fewer when their paths
+  would pass 4 MiB.
 - What a patch cannot carry, each listed per repository (at most 100
-  paths) and named on `lux diff`'s stderr:
+  paths, and 256 KiB of them) and named on `lux diff`'s stderr:
   - **Submodules.** A submodule moved to another commit is in the patch
     (its gitlink); `git apply --index` records it. Uncommitted changes and
     untracked files *inside* a submodule are its own repository's, and the

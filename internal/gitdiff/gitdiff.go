@@ -406,6 +406,7 @@ func (r *repo) filtered(ctx context.Context, st *proto.DiffStat) error {
 	if err := w.end(); err != nil || len(fields) != 0 {
 		return errors.New("git check-attr: malformed output")
 	}
+	st.FilteredPaths = boundList(st.FilteredPaths)
 	return nil
 }
 
@@ -448,16 +449,21 @@ func (r *repo) unfaithful(ctx context.Context, st *proto.DiffStat) error {
 			subs = append(subs, p)
 		}
 	}
-	var err error
-	if st.NormalizedPaths, err = r.normalized(ctx, files); err != nil {
+	normalized, err := r.normalized(ctx, files)
+	if err != nil {
 		return err
 	}
-	st.DirtySubmodules, err = r.dirtySubmodules(ctx, subs)
+	dirty, err := r.dirtySubmodules(ctx, subs)
+	st.NormalizedPaths, st.DirtySubmodules = boundList(normalized), boundList(dirty)
 	return err
 }
 
-// maxListed bounds NormalizedPaths and DirtySubmodules.
-const maxListed = 100
+// maxListed bounds NormalizedPaths and DirtySubmodules (and
+// maxFilteredPaths FilteredPaths), maxListedBytes each one's JSON.
+const (
+	maxListed      = 100
+	maxListedBytes = 256 << 10
+)
 
 // normalized lists the files (of paths, regular files in the working
 // tree) whose content git converts on its way in: those it hashes
@@ -540,7 +546,7 @@ func (r *repo) dirtySubmodules(ctx context.Context, paths []string) ([]string, e
 const maxSubmodules = 1000
 
 func (r *repo) diff(ctx context.Context, d *Diff, from string, statOnly bool, limit int64) error {
-	num := &numstat{}
+	num := &numstat{maxBytes: maxStatBytes}
 	w0 := &nulFields{fn: num.field}
 	if err := r.git(ctx, w0, append(append([]string{"diff", "--numstat", "-z"}, diffFlags...), from, "--")...); err != nil {
 		return err
@@ -647,14 +653,18 @@ func (s *nulFields) end() error {
 
 // numstat reads the fields of `git diff --numstat -z`: "ins\tdel\tpath", or
 // for a rename "ins\tdel\t", "old", "new"; "-" counts for a binary file.
-// It keeps the first maxFileStats files and totals all of them.
+// It keeps the first files, up to maxFileStats of them and maxBytes of
+// their JSON, and totals all of them.
 type numstat struct {
-	cur   proto.DiffFile
-	need  int // paths still owed to cur (a rename's two)
-	files []proto.DiffFile
-	n     int
-	ins   int
-	del   int
+	cur      proto.DiffFile
+	need     int // paths still owed to cur (a rename's two)
+	files    []proto.DiffFile
+	maxBytes int
+	bytes    int // of files, as JSON
+	full     bool
+	n        int
+	ins      int
+	del      int
 }
 
 var errNumstat = errors.New("git diff --numstat: malformed output")
@@ -696,9 +706,34 @@ func (s *numstat) add() {
 	s.n++
 	s.ins += s.cur.Insertions
 	s.del += s.cur.Deletions
-	if len(s.files) < maxFileStats {
-		s.files = append(s.files, s.cur)
+	if s.full || len(s.files) >= maxFileStats {
+		return
 	}
+	// Kept in order: once one does not fit, none after it is kept.
+	if n := jsonSize(s.cur) + 1; s.bytes+n <= s.maxBytes {
+		s.files = append(s.files, s.cur)
+		s.bytes += n
+	} else {
+		s.full = true
+	}
+}
+
+// jsonSize is v's length as JSON.
+func jsonSize(v any) int {
+	b, _ := json.Marshal(v)
+	return len(b)
+}
+
+// boundList keeps the first of paths (at most maxListed) whose JSON fits
+// in maxListedBytes.
+func boundList(paths []string) []string {
+	n := 0
+	for i, p := range paths {
+		if n += jsonSize(p) + 1; i >= maxListed || n > maxListedBytes {
+			return paths[:i]
+		}
+	}
+	return paths
 }
 
 // end checks no rename was left without its paths.
@@ -871,12 +906,17 @@ func (e *exact) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// maxLine bounds one record's JSON: maxFileStats entries of long paths.
+// maxLine bounds one record's JSON. What the shim writes stays well
+// within it: maxStatBytes of per-file stats, three lists of at most
+// maxListedBytes, and a few short fields.
 const maxLine = 16 << 20
 
-// maxFileStats bounds the per-file stats of one diff; the totals still
-// count every file.
-const maxFileStats = 10000
+// maxFileStats and maxStatBytes (their JSON) bound the per-file stats of
+// one diff; the totals still count every file.
+const (
+	maxFileStats = 10000
+	maxStatBytes = 4 << 20
+)
 
 func readLine(br *bufio.Reader, max int) ([]byte, error) {
 	var line []byte

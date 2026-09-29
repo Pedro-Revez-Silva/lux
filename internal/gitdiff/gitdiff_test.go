@@ -649,7 +649,7 @@ func TestNumstatOverTheEntryCap(t *testing.T) {
 			fmt.Fprintf(&in, "3\t1\tf%d\x00", i)
 		}
 	}
-	s := &numstat{}
+	s := &numstat{maxBytes: maxStatBytes}
 	w := &nulFields{fn: s.field}
 	for b := in.Bytes(); len(b) > 0; {
 		k := min(len(b), 7)
@@ -687,6 +687,73 @@ func TestNumstatOverTheEntryCap(t *testing.T) {
 	// A field over the bound is refused as it arrives.
 	if _, err := (&nulFields{fn: (&numstat{}).field}).Write(bytes.Repeat([]byte("x"), maxPath+1)); err == nil {
 		t.Error("an unbounded field was buffered")
+	}
+}
+
+// A legal diff's record always fits the reader's line limit: 10,000 files
+// with paths near PATH_MAX would be ~40 MB of per-file stats, so the stats
+// stop at maxStatBytes of JSON while the totals count every file.
+func TestStatRecordIsBounded(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	dir := t.TempDir()
+	run(t, dir, "init", "-q")
+	run(t, dir, "commit", "-q", "--allow-empty", "-m", "base")
+	base := run(t, dir, "rev-parse", "HEAD")
+	deep := dir
+	for i := range 14 {
+		deep = filepath.Join(deep, fmt.Sprintf("%02d%s", i, strings.Repeat("d", 240)))
+	}
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const n = 10000
+	for i := range n {
+		if err := os.WriteFile(filepath.Join(deep, fmt.Sprintf("%05d%s", i, strings.Repeat("f", 200))), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var buf bytes.Buffer
+	if err := Run(context.Background(), proto.DiffArgs{Repos: []proto.DiffRepo{{Name: "app", Path: dir, Base: base}},
+		Kinds: []string{proto.DiffBaseClone}, StatOnly: true}, &buf); err != nil {
+		t.Fatal(err)
+	}
+	line, _, _ := bytes.Cut(buf.Bytes(), []byte("\n"))
+	var st proto.DiffStat
+	inc, err := ReadStream(&buf, []string{"app"}, []string{proto.DiffBaseClone}, proto.DiffLimit, func(s proto.DiffStat, _ io.Reader) error { st = s; return nil })
+	if err != nil || len(inc) != 0 {
+		t.Fatal(err, inc)
+	}
+	if st.Error != "" || st.Files != n || len(st.FileStats) == 0 || len(st.FileStats) >= n {
+		t.Fatalf("files %d, %d stats, error %q", st.Files, len(st.FileStats), st.Error)
+	}
+	if len(line) > maxStatBytes+64<<10 {
+		t.Errorf("a %d-byte record", len(line))
+	}
+	// The stats kept are the first ones, whole.
+	if !strings.HasSuffix(st.FileStats[0].Path, "00000"+strings.Repeat("f", 200)) {
+		t.Errorf("first stat: %.80s…", st.FileStats[0].Path)
+	}
+}
+
+// The lists of paths a stat carries are bounded in bytes as well as count.
+func TestBoundList(t *testing.T) {
+	long := strings.Repeat("\x01", maxPath/2) // escaped 6 bytes each in JSON
+	var paths []string
+	for range maxListed {
+		paths = append(paths, long)
+	}
+	got := boundList(paths)
+	if len(got) == 0 || len(got) >= maxListed || jsonSize(got) > maxListedBytes+len(got) {
+		t.Errorf("kept %d paths, %d bytes", len(got), jsonSize(got))
+	}
+	short := []string{"a", "b"}
+	if got := boundList(short); len(got) != 2 {
+		t.Errorf("short list cut: %v", got)
+	}
+	many := make([]string, maxListed+5)
+	if got := boundList(many); len(got) != maxListed {
+		t.Errorf("%d kept of %d", len(got), len(many))
 	}
 }
 
