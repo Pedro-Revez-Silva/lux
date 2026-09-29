@@ -548,18 +548,20 @@ func recordSession(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch
 // artifact blob ("" for a volume); a blob recorded before keeps its owner.
 func insertBlob(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, hostID, blobID, kind, name string, size int64, sha, snapshotID string) error {
 	var gotTenant, gotRun, gotKind, gotSHA string
+	var gotSnapshotID *string
 	var gotEpoch int
 	var gotSize int64
 	// DO UPDATE (a no-op) rather than DO NOTHING, so the existing row is
 	// returned, locked, to compare.
 	err := tx.QueryRow(ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, size, sha256, location, host_id, snapshot_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'host', $9, nullif($10, '')) ON CONFLICT (id) DO UPDATE SET id = blobs.id
-		RETURNING tenant_id, run_id, epoch, kind, size, sha256`,
-		blobID, tenantID, runID, epoch, kind, name, size, sha, hostID, snapshotID).Scan(&gotTenant, &gotRun, &gotEpoch, &gotKind, &gotSize, &gotSHA)
+		RETURNING tenant_id, run_id, epoch, kind, size, sha256, snapshot_id`,
+		blobID, tenantID, runID, epoch, kind, name, size, sha, hostID, snapshotID).Scan(&gotTenant, &gotRun, &gotEpoch, &gotKind, &gotSize, &gotSHA, &gotSnapshotID)
 	if err != nil {
 		return err
 	}
-	if gotTenant != tenantID || gotRun != runID || gotEpoch != epoch || gotKind != kind || gotSize != size || gotSHA != sha {
+	if gotTenant != tenantID || gotRun != runID || gotEpoch != epoch || gotKind != kind || gotSize != size || gotSHA != sha ||
+		(snapshotID != "" && gotSnapshotID != nil && *gotSnapshotID != snapshotID) {
 		return &foreignBlobError{blobID}
 	}
 	return nil

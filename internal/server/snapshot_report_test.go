@@ -212,6 +212,48 @@ func TestSnapshotReportOwnBlobReuse(t *testing.T) {
 	}
 }
 
+// A new report cannot claim an output or artifact blob owned by an earlier
+// snapshot of the same placement, even when its content is identical.
+func TestSnapshotReportRefusesAnotherSnapshotsBlob(t *testing.T) {
+	for _, kind := range []string{"output", "artifact"} {
+		t.Run(kind, func(t *testing.T) {
+			s, _ := reportFixture(t)
+			a := snapshotB("snapB-A", 1)
+			if f := reportSnapshot(t, s, "hb", "rb", 1, a); f.Type != proto.MsgAck || ackRefused(t, f) {
+				t.Fatalf("A: %s %s", f.Type, f.Data)
+			}
+			before := recordsOf(t, s, "rb")
+			b := snapshotB("snapB-B", 1)
+			if kind == "output" {
+				b.Output = a.Output
+			} else {
+				b.Artifacts = a.Artifacts
+			}
+			if f := reportSnapshot(t, s, "hb", "rb", 1, b); f.Type != proto.MsgAck || !ackRefused(t, f) {
+				t.Fatalf("B reusing %s: %s %s, want refused ack", kind, f.Type, f.Data)
+			}
+			if got := recordsOf(t, s, "rb"); !reflect.DeepEqual(got, before) {
+				t.Fatalf("refused B changed A's records:\nbefore %+v\nafter  %+v", before, got)
+			}
+			if got := eventErrors(t, s, "rb", "snapshot.failed"); !slices.Equal(got, []string{foreignBlobsReason}) {
+				t.Errorf("snapshot.failed events %q", got)
+			}
+			b = snapshotB("snapB-B", 1)
+			for i := range 2 {
+				if f := reportSnapshot(t, s, "hb", "rb", 1, b); f.Type != proto.MsgAck || ackRefused(t, f) {
+					t.Fatalf("normal B delivery %d: %s %s", i, f.Type, f.Data)
+				}
+			}
+			if got := recordsOf(t, s, "rb"); got.RunSnapshot != "snapB-B" || len(got.Snapshots) != 2 || len(got.Blobs) != 6 || len(got.Artifacts) != 2 {
+				t.Errorf("A and B records: %+v", got)
+			}
+			if got := eventErrors(t, s, "rb", "snapshot"); len(got) != 2 {
+				t.Errorf("snapshot events: %q", got)
+			}
+		})
+	}
+}
+
 // A report delivered twice is recorded once and acknowledged both times.
 func TestSnapshotReportRedelivered(t *testing.T) {
 	s, _ := reportFixture(t)
