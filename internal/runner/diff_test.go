@@ -412,3 +412,63 @@ func TestBusyDiffSpawnsNothing(t *testing.T) {
 		t.Errorf("a busy request ran podman:\n%s", l)
 	}
 }
+
+// When the last request cancels, the exec's stdin closes at once and
+// podman is signalled diffExecGrace later if the shim has not ended (this
+// one ignores its stdin). The slot is held until the exec has exited.
+func TestCancelledDiffIsSignalledAfterAGrace(t *testing.T) {
+	r, dir := diffRunner(t)
+	old := diffExecGrace
+	diffExecGrace = 500 * time.Millisecond
+	t.Cleanup(func() { diffExecGrace = old })
+	touch(t, dir, "exec-ignore-eof")
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(filepath.Join(dir, "sleep.pid")); err == nil {
+			var pid int
+			fmt.Sscan(string(b), &pid)
+			if proc, err := os.FindProcess(pid); err == nil && pid > 0 {
+				proc.Kill()
+			}
+		}
+	})
+	p := runningPlacement(t, r)
+	req := proto.DiffRequest{SubID: "a", Kind: "clone", Repos: []proto.DiffRepo{{Name: "app", Path: "/workspace/repos/app"}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() {
+		_, err := p.serveLiveDiff(ctx, req, func(proto.DiffResult) error { return nil })
+		errc <- err
+	}()
+	for deadline := time.Now().Add(5 * time.Second); !strings.Contains(logOf(t, dir), " exec started") && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	pid, _ := os.ReadFile(filepath.Join(dir, "exec.pid"))
+	cancel()
+	cancelled := time.Now()
+	<-errc
+	time.Sleep(diffExecGrace / 2)
+	if _, err := os.Stat("/proc/" + strings.TrimSpace(string(pid))); err != nil {
+		t.Error("the exec was signalled before its grace ran out")
+	}
+	other := req
+	other.Kind = "head"
+	if busy, _ := p.serveLiveDiff(context.Background(), other, func(proto.DiffResult) error { return nil }); !busy {
+		t.Error("the slot was released while the exec still ran")
+	}
+	var gone time.Time
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		p.mu.Lock()
+		live := p.live
+		p.mu.Unlock()
+		if live == nil {
+			gone = time.Now()
+			break
+		}
+	}
+	if gone.IsZero() || gone.Sub(cancelled) > diffExecGrace+3*time.Second {
+		t.Fatalf("the slot was not released after the grace (cancelled %v, released %v)", cancelled, gone)
+	}
+	if _, err := os.Stat("/proc/" + strings.TrimSpace(string(pid))); err == nil {
+		t.Error("the slot was released while the exec runs")
+	}
+}

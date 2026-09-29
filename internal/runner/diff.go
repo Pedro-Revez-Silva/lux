@@ -23,8 +23,9 @@ var (
 	// diffTimeout bounds one live diff.
 	diffTimeout = 60 * time.Second
 	// diffExecGrace is how long podman exec may outlive the diff's end
-	// (the shim stops when its stdin closes) before it is signalled.
-	diffExecGrace = 10 * time.Second
+	// (its last request cancelled, or its timeout) once its stdin is
+	// closed, which stops the shim, before it is signalled.
+	diffExecGrace = 5 * time.Second
 )
 
 // A diff request and its cancel are two frames that must take effect in
@@ -273,10 +274,15 @@ func (p *placement) liveDiff(ctx context.Context, req proto.DiffRequest, send fu
 	}
 	defer stdinR.Close()
 	defer stdinW.Close()
-	defer context.AfterFunc(ctx, func() { stdinW.Close() })()
-	// podman itself is signalled only if the shim has not ended by then.
-	execCtx, cancelExec := context.WithTimeout(context.WithoutCancel(ctx), diffTimeout+diffExecGrace)
+	// When the diff ends early, its stdin is closed at once, and podman
+	// signalled only if it has not ended diffExecGrace later. The slot is
+	// held until it has (see serveLiveDiff).
+	execCtx, cancelExec := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelExec()
+	defer context.AfterFunc(ctx, func() {
+		stdinW.Close()
+		time.AfterFunc(diffExecGrace, cancelExec)
+	})()
 	pr, pw := io.Pipe()
 	// The reading ends with ctx, not only once podman does.
 	defer context.AfterFunc(ctx, func() { pr.CloseWithError(context.Cause(ctx)) })()
