@@ -131,6 +131,22 @@ func (s *Server) routes(api huma.API) {
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "run", s.pushRun)
 	register(s, api, huma.Operation{
+		OperationID: "runDiff", Method: http.MethodGet, Path: "/v1/runs/{id}/diff", Tags: []string{"runs"},
+		Summary: "What a Run changed in its repositories",
+		Description: "Per repository, from its base to its working tree: committed changes, staged, unstaged and untracked (not ignored) files. " +
+			"`base=clone` (default) diffs from the commit the repository was cloned at (for one added on resume, that clone's); `base=head` from its HEAD, " +
+			"uncommitted work only. While the Run's container runs the diff is computed there, now (`source: live`); otherwise it is the one stored " +
+			"with the latest snapshot that has one (`source: snapshot`, with its id and time), which holds both bases. " +
+			"404 `no_diff` when no snapshot has one (the Run never stopped since it started, or its snapshots predate diffs). " +
+			"Each patch is cut at 10 MiB (`truncated`); the stats cover the whole diff. Binary files are git's \"Binary files differ\".\n\n" +
+			"With `Accept: text/x-diff`, the patches alone, one after the other.",
+		Responses: map[string]*huma.Response{"200": {Description: "OK", Content: map[string]*huma.MediaType{
+			"application/json": {Schema: schemaRef[RunDiff](api)},
+			"text/x-diff":      {Schema: &huma.Schema{Type: huma.TypeString, Description: "The patches, concatenated (git diff format)."}},
+		}}},
+		Errors: []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusGone, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout},
+	}, "read", streamed(s, s.serveDiff))
+	register(s, api, huma.Operation{
 		OperationID: "listSnapshots", Method: http.MethodGet, Path: "/v1/runs/{id}/snapshots", Tags: []string{"runs"},
 		Summary: "List a Run's snapshots",
 		Errors:  []int{http.StatusNotFound},

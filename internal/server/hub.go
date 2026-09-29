@@ -286,7 +286,7 @@ func (s *Server) serveRunnerWS(w http.ResponseWriter, r *http.Request) error {
 			}
 		case proto.MsgStreamData, proto.MsgStreamClose:
 			s.hub.route(f.Stream, f)
-		case proto.MsgOutputRecords, proto.MsgOutputEnd:
+		case proto.MsgOutputRecords, proto.MsgOutputEnd, proto.MsgDiffResult, proto.MsgDiffEnd:
 			var ref struct {
 				SubID string `json:"subId"`
 			}

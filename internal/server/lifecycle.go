@@ -342,6 +342,9 @@ func (s *Server) applySnapshotDone(ctx context.Context, tx pgx.Tx, tenantID, hos
 		VALUES ($1, $2, $3, $4, $5, $6, $7)`, sd.Manifest.SnapshotID, tenantID, runID, placementID, epoch, sd.Manifest, hostID); err != nil {
 		return err
 	}
+	if err := recordSnapshotDiffs(ctx, tx, tenantID, hostID, runID, epoch, sd.Manifest.SnapshotID, sd.Diffs); err != nil {
+		return err
+	}
 	// Recorded for any epoch, late ones too: the session ran in that
 	// placement even when it no longer becomes the Run's.
 	if sd.Manifest.SessionID != "" {
