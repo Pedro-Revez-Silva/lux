@@ -103,7 +103,7 @@ lux hosts get <host>            # lifecycle, capacity, allocation, live Runs
 lux hosts drain <host> [--force-evict]   # admin: no new Runs; without --force-evict its live Runs finish where they are
 lux hosts price <host> --hourly-price 0.40 --currency USD   # admin: a static host's flat price, from now on
 lux hosts price <host> --clear           # admin: no price, so its Runs get no compute cost from now on
-lux pools ls                             # DEFAULT: * on the pool Runs naming no pool go to
+lux pools ls                             # DEFAULT: * on the pool Runs naming no pool go to; operators without --tenant: every tenant's, OWNER platform or the tenant
 lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON] [--default]
 lux pools set <name> --default           # admin: make it the tenant's default pool (moves the mark); changes nothing else
 lux pools set <name> --default=false     # admin: clear it

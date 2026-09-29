@@ -83,3 +83,48 @@ func TestPoolsSetDefaultSendsOnlyTheMark(t *testing.T) {
 		t.Errorf("a full set sent %v", got[2])
 	}
 }
+
+// pools ls shows an OWNER column to an unscoped operator, whose list has
+// every tenant's pools and the platform's, alike-named ones included; a
+// tenant, or an operator narrowed with --tenant, sees no such column.
+func TestPoolsLsOwner(t *testing.T) {
+	operator := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/whoami":
+			_ = json.NewEncoder(w).Encode(map[string]any{"operator": operator})
+		case "/v1/pools":
+			_, _ = w.Write([]byte(`{"pools":[{"name":"burst","provider":"ec2","platform":true,"isDefault":true},
+				{"name":"burst","tenant":"acme","provider":"static","isDefault":false}]}`))
+		default:
+			t.Errorf("unexpected %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	ls := func(extra ...string) []string {
+		t.Helper()
+		var out strings.Builder
+		a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: io.Discard}
+		root := a.root()
+		root.SetArgs(append(append([]string{"--url", srv.URL, "--api-key", "k"}, extra...), "pools", "ls"))
+		if err := root.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Split(strings.TrimSpace(out.String()), "\n")
+	}
+	lines := ls()
+	if got := strings.Fields(lines[0]); !reflect.DeepEqual(got[:3], []string{"NAME", "OWNER", "DEFAULT"}) {
+		t.Fatalf("operator header %v", got)
+	}
+	if a, b := strings.Fields(lines[1]), strings.Fields(lines[2]); a[1] != "platform" || a[2] != "*" || b[1] != "acme" || b[2] != "static" {
+		t.Fatalf("operator rows %q", lines[1:])
+	}
+	if got := strings.Fields(ls("--tenant", "acme")[0]); got[1] != "DEFAULT" {
+		t.Fatalf("operator with --tenant: header %v", got)
+	}
+	operator = false
+	if got := strings.Fields(ls()[0]); got[1] != "DEFAULT" {
+		t.Fatalf("tenant header %v", got)
+	}
+}

@@ -536,6 +536,9 @@ func (a *app) poolsCmd() *cobra.Command {
 	ls := &cobra.Command{
 		Use:   "ls",
 		Short: "List pools",
+		Long: `List pools: your tenant's and the platform's. With an operator key and
+no --tenant, every tenant's, with an OWNER column (platform or the tenant's
+name): a tenant's pool and a platform pool may share a name.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var resp struct {
 				Pools []server.Pool `json:"pools"`
@@ -546,15 +549,33 @@ func (a *app) poolsCmd() *cobra.Command {
 			if a.output == "json" {
 				return a.json(resp.Pools)
 			}
+			var who server.Whoami
+			if a.c.Tenant == "" {
+				if err := a.c.Do(ctxOf(cmd), "GET", "/v1/whoami", nil, &who); err != nil {
+					return err
+				}
+			}
 			var rows [][]string
 			for _, p := range resp.Pools {
 				def := ""
 				if p.IsDefault != nil && *p.IsDefault {
 					def = "*"
 				}
-				rows = append(rows, []string{p.Name, def, p.Provider, fmt.Sprintf("%d-%d", p.MinHosts, p.MaxHosts), fmt.Sprint(p.WarmHosts), fmt.Sprint(p.Shared)})
+				row := []string{p.Name, def, p.Provider, fmt.Sprintf("%d-%d", p.MinHosts, p.MaxHosts), fmt.Sprint(p.WarmHosts), fmt.Sprint(p.Shared)}
+				if who.Operator {
+					owner := p.Tenant
+					if p.Platform {
+						owner = "platform"
+					}
+					row = append([]string{p.Name, owner}, row[1:]...)
+				}
+				rows = append(rows, row)
 			}
-			a.table("NAME\tDEFAULT\tPROVIDER\tHOSTS\tWARM\tSHARED", rows)
+			header := "NAME\tDEFAULT\tPROVIDER\tHOSTS\tWARM\tSHARED"
+			if who.Operator {
+				header = "NAME\tOWNER\tDEFAULT\tPROVIDER\tHOSTS\tWARM\tSHARED"
+			}
+			a.table(header, rows)
 			return nil
 		},
 	}
