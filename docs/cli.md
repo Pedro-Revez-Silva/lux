@@ -112,6 +112,12 @@ lux pools set <name> --provider static --hourly-price 0.40 --currency USD   # de
 lux pools rm <name> [--force-evict]      # admin: cordons its hosts, terminated once idle; --force-evict stops their live Runs too
 ```
 
+A pool name is 1-32 characters: lowercase letters, digits and `-`,
+starting and ending with a letter or digit (`arm64`, `gpu-a100`). The name
+reaches AWS in each instance's `lux:pool` tag and in its host name
+(`<pool>-xxxxxxxx`, which must fit a hostname). A pool created before this
+rule keeps its name and can still be updated; a new one cannot take it.
+
 A static pool's `--hourly-price` is copied to each host when it first
 registers. Changing it later does not reprice the pool's existing hosts:
 use `lux hosts price` for those. `lux pools set` replaces the whole pool,
