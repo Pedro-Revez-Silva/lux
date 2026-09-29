@@ -42,10 +42,13 @@ func (c *Client) url(path string) string {
 
 // APIError is an error response from luxd.
 type APIError struct {
-	Status  int
-	Code    string   `json:"code"`
-	Message string   `json:"message"`
-	Details []string `json:"details"`
+	Status     int
+	Code       string   `json:"code"`
+	Message    string   `json:"message"`
+	Details    []string `json:"details"`
+	RetryAfter int      `json:"retryAfter"`
+	Reason     string   `json:"reason"`
+	SnapshotID string   `json:"snapshotId"`
 }
 
 func (e *APIError) Error() string {

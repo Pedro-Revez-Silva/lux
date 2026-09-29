@@ -474,14 +474,28 @@ committed changes, staged, unstaged and untracked (not ignored) files.
   The runner reports the diffs on their own (`snapshot.diffs`), and
   uploads their patches like the snapshot's blobs; each has its base and
   head commits, byte size, sha256, `truncated`, and files, insertions and
-  deletions. A stopped Run's diff is its latest snapshot's.
+  deletions. luxd accepts a report only whole (one diff per repository the
+  placement had and base kind), and only with patch blobs new to it; it
+  checks each patch's sha256 when it reads it. A stopped Run's diff is its
+  latest snapshot's (the highest epoch's, then the newest).
 - A snapshot's diff has one minute, container start and removal included.
   On a host being evicted (a spot interruption) it gets the time left less
   30 seconds for uploads, and is skipped when that is under 10 seconds.
   When the Run resumes on the same host meanwhile, the diff is cancelled
-  before the new placement touches the volumes. A skipped diff is a
-  `diff.skipped` event (`{snapshotId, reason}`), and each repository's
-  entry says it was not computed.
+  (or, not yet started, never starts), and the new placement touches the
+  volumes only once its container is confirmed gone. If it cannot be
+  removed (a `diff.cleanup_failed` event), the runner keeps trying; the
+  resume, or the discard of the host's copy, waits up to two minutes for
+  it, then fails with the reason. A skipped diff is a `diff.skipped` event
+  (`{snapshotId, reason}`).
+- Each snapshot's diff has a state: `pending` from its snapshot until its
+  report, then `complete`, `skipped` or `failed`; `unsupported` when its
+  host's runner predates diffs. A report that never arrives (the runner
+  gives up after 10 minutes) is `failed` (`report_lost`) after 15. The
+  latest snapshot alone answers `GET /v1/runs/{id}/diff`: `pending` is 409
+  `diff_pending` (with `retryAfter`), the others but `complete` are 404
+  `diff_unavailable` (with `reason`); never an older snapshot's diff.
+  `?snapshot=<id>` asks for a given snapshot's.
 - **The runner never runs git in the checkout**, as for a push: `lux-shim
   diff` runs git inside the container, as the workload user, with the
   checkout's hooks, `core.fsmonitor`, `diff.external`, textconv and
@@ -514,10 +528,8 @@ committed changes, staged, unstaged and untracked (not ignored) files.
 - A diff that cannot be computed never fails the snapshot or the exit: a
   `diff.failed` event says why (`{snapshotId, error, repo?, kind?,
   errorCode?}`), and the repository's entry carries the error.
-- A Run with no snapshot that has a diff (it never stopped since it
-  started, or its snapshots predate diffs) answers 404 `no_diff`; so does
-  one whose latest snapshot's diff is still being computed (for up to 12
-  minutes after it), rather than answer an older snapshot's.
+- A Run with no repositories, or no snapshot yet (it never stopped since
+  it started), answers 404 `no_diff`.
 
 ## MCP servers
 

@@ -26,15 +26,17 @@ import (
 
 // A Run's diff: per repository, from its base (the commit it was cloned
 // at, or its HEAD) to its working tree. Computed live in the Run's
-// container while it runs; otherwise read from the latest snapshot that
-// has one (every snapshot stores both kinds).
+// container while it runs; otherwise read from its latest snapshot, whose
+// diff state (snapshot_diff_state) decides the answer: an older
+// snapshot's diff is given only when asked for by id.
 
 type diffInput struct {
 	RunPath
-	Repo   string `query:"repo" doc:"Only this repository."`
-	Base   string `query:"base" enum:"clone,head" doc:"clone (default): from the commit each repository was cloned at. head: from its HEAD (uncommitted work only)."`
-	Stat   string `query:"stat" doc:"true for only the stats, no patches." example:"true"`
-	Accept string `header:"Accept" doc:"text/x-diff for the patches alone, concatenated."`
+	Snapshot string `query:"snapshot" doc:"This snapshot's diff, not the latest one's (nor a live one)."`
+	Repo     string `query:"repo" doc:"Only this repository."`
+	Base     string `query:"base" enum:"clone,head" doc:"clone (default): from the commit each repository was cloned at. head: from its HEAD (uncommitted work only)."`
+	Stat     string `query:"stat" doc:"true for only the stats, no patches." example:"true"`
+	Accept   string `header:"Accept" doc:"text/x-diff for the patches alone, concatenated."`
 }
 
 // RepoDiff is one repository's diff.
@@ -88,7 +90,7 @@ func (s *Server) serveDiff(w http.ResponseWriter, r *http.Request, in *diffInput
 		return err
 	}
 	var repos []RepoDiff
-	if t.live {
+	if t.live && in.Snapshot == "" {
 		repos, err = s.liveDiff(ctx, t, kind, statOnly)
 		if errors.Is(err, errNotRunning) {
 			t.live = false
@@ -96,8 +98,8 @@ func (s *Server) serveDiff(w http.ResponseWriter, r *http.Request, in *diffInput
 			return err
 		}
 	}
-	if !t.live {
-		if repos, err = s.snapshotDiff(ctx, p.TenantID, t, kind, statOnly); err != nil {
+	if !t.live || in.Snapshot != "" {
+		if repos, err = s.snapshotDiff(ctx, p.TenantID, t, in.Snapshot, kind, statOnly); err != nil {
 			return err
 		}
 	}
@@ -324,12 +326,29 @@ func setPatch(d *RepoDiff, patch []byte) {
 	}
 }
 
-// diffPendingFor is how long after a snapshot its diffs may still arrive:
-// the runner's diff budget and its bounded reporting, with some slack.
-const diffPendingFor = 12 * time.Minute
+// Snapshot diff states (snapshot_diff_state).
+const (
+	diffPending     = "pending"
+	diffComplete    = "complete"
+	diffSkipped     = "skipped"
+	diffFailed      = "failed"
+	diffUnsupported = "unsupported"
+)
 
-// snapshotDiff reads the diff stored with the latest snapshot that has one.
-func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget, kind string, statOnly bool) ([]RepoDiff, error) {
+const (
+	// diffRetryAfter is what a diff_pending answer says to wait.
+	diffRetryAfter = 5
+	// diffReportLostAfter: a snapshot still pending this long has lost its
+	// report (the runner gives up after 10 minutes); the sweep fails it.
+	diffReportLostAfter = 15 * time.Minute
+	// diffReportLost is the reason it is failed with.
+	diffReportLost = "report_lost"
+)
+
+// snapshotDiff reads a snapshot's stored diff: snapID's, or the Run's
+// latest snapshot's. That snapshot alone answers, whatever its state: an
+// older one's diff would be stale.
+func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget, snapID, kind string, statOnly bool) ([]RepoDiff, error) {
 	type row struct {
 		d                  RepoDiff
 		key, location, sum string
@@ -337,36 +356,43 @@ func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget
 		foreign            bool
 	}
 	var rows []row
-	var snapID string
 	var at time.Time
 	err := s.db.Tx(ctx, store.Tenant(tenantID), func(tx pgx.Tx) error {
-		// A snapshot's diffs follow its report: while the newest snapshot
-		// may still get them, an older snapshot's would be stale.
-		var pending string
-		err := tx.QueryRow(ctx, `SELECT s.id FROM snapshots s
-			WHERE s.run_id = $1 AND s.created_at > now() - $2::interval
-			  AND NOT EXISTS (SELECT 1 FROM snapshot_diffs d WHERE d.snapshot_id = s.id)
-			  AND s.created_at >= ALL (SELECT created_at FROM snapshots WHERE run_id = $1)`,
-			t.runID, interval(diffPendingFor)).Scan(&pending)
-		if err == nil {
-			return errf(http.StatusNotFound, "no_diff", "the diff of the latest snapshot (%s) is still being computed", pending)
+		var err error
+		if snapID == "" {
+			err = tx.QueryRow(ctx, `SELECT id, created_at FROM snapshots WHERE run_id = $1
+				ORDER BY epoch DESC, created_at DESC, id DESC LIMIT 1`, t.runID).Scan(&snapID, &at)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errf(http.StatusNotFound, "no_diff", "the Run has no snapshot yet (it has not stopped since it started)")
+			}
+		} else {
+			err = tx.QueryRow(ctx, `SELECT created_at FROM snapshots WHERE id = $1 AND run_id = $2`, snapID, t.runID).Scan(&at)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errf(http.StatusNotFound, "not_found", "the Run has no snapshot %s", snapID)
+			}
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
+		if err != nil {
 			return err
+		}
+		var state, reason string
+		err = tx.QueryRow(ctx, `SELECT state, reason FROM snapshot_diff_state WHERE snapshot_id = $1`, snapID).Scan(&state, &reason)
+		if errors.Is(err, pgx.ErrNoRows) {
+			state, reason = diffUnsupported, "no diff was recorded with it (it predates diffs, or the Run had no repositories then)"
+		} else if err != nil {
+			return err
+		}
+		switch state {
+		case diffComplete:
+		case diffPending:
+			return &HTTPError{Status: http.StatusConflict, Code: "diff_pending", RetryAfter: diffRetryAfter, SnapshotID: snapID,
+				Message: fmt.Sprintf("the diff of snapshot %s is still being computed; try again in %ds", snapID, diffRetryAfter)}
+		default:
+			return &HTTPError{Status: http.StatusNotFound, Code: "diff_unavailable", Reason: reason, SnapshotID: snapID,
+				Message: fmt.Sprintf("snapshot %s has no diff (%s): %s", snapID, state, reason)}
 		}
 		names := make([]string, len(t.repos))
 		for i, r := range t.repos {
 			names[i] = r.Name
-		}
-		// The newest snapshot with this kind of diff for these repositories.
-		err = tx.QueryRow(ctx, `SELECT s.id, s.created_at FROM snapshots s
-			WHERE s.run_id = $1 AND EXISTS (SELECT 1 FROM snapshot_diffs d WHERE d.snapshot_id = s.id AND d.kind = $2 AND d.repo = ANY($3))
-			ORDER BY s.epoch DESC, s.created_at DESC LIMIT 1`, t.runID, kind, names).Scan(&snapID, &at)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return errf(http.StatusNotFound, "no_diff", "no snapshot of this Run has a diff (it has not stopped since it started, or its snapshots predate diffs)")
-		}
-		if err != nil {
-			return err
 		}
 		// The blob must be this Run's own (its tenant's): a row naming
 		// another's is refused on report, and never read here either.
@@ -421,6 +447,9 @@ func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget
 		if out[i].SnapshotID == "" {
 			out[i].SnapshotID = snapID
 		}
+		if _, ok := got[out[i].Repo]; !ok {
+			out[i].Error = "the Run did not have this repository at this snapshot"
+		}
 	}
 	return out, nil
 }
@@ -460,9 +489,55 @@ func (s *Server) readDiffBlob(ctx context.Context, key, location string, size in
 	return b, nil
 }
 
+// expectDiffs records, with a snapshot luxd has just accepted, the diff
+// it expects for it: pending, for the repositories its placement had (the
+// Run's own, and those a resume added and cloned by then), when its runner
+// computes diffs; unsupported when it does not; nothing for a Run without
+// repositories.
+func expectDiffs(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID string, epoch int, snapID string) error {
+	var sp spec.RunSpec
+	var capable bool
+	if err := tx.QueryRow(ctx, `SELECT r.spec, coalesce('diff' = ANY(h.capabilities), false)
+		FROM runs r LEFT JOIN hosts h ON h.id = $2 WHERE r.id = $1`, runID, hostID).Scan(&sp, &capable); err != nil {
+		return err
+	}
+	if sp.Git == nil || len(sp.Git.Repositories) == 0 {
+		return nil
+	}
+	rows, err := tx.Query(ctx, `SELECT DISTINCT data->>'repo' FROM run_events
+		WHERE run_id = $1 AND type = $2 AND data->>'status' = 'cloned' AND epoch <= $3`, runID, proto.EvGitClone, epoch)
+	if err != nil {
+		return err
+	}
+	cloned, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	repos := []string{}
+	for _, r := range sp.Git.Repositories {
+		if r.AddedBy == "" || slices.Contains(cloned, r.Name) {
+			repos = append(repos, r.Name)
+		}
+	}
+	state, reason := diffPending, ""
+	if !capable {
+		state, reason = diffUnsupported, "the host's lux-runner does not compute diffs"
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO snapshot_diff_state (snapshot_id, tenant_id, run_id, state, reason, repos)
+		VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`, snapID, tenantID, runID, state, reason, repos)
+	return err
+}
+
+// errDiffReport: a snapshot.diffs report luxd will not store (nacked,
+// not stale: the runner tries again, then gives up).
+type errDiffReport struct{ msg string }
+
+func (e *errDiffReport) Error() string { return e.msg }
+
 // applySnapshotDiffs stores a snapshot's diffs, reported after the
 // snapshot itself: each patch a blob of its placement, each repository and
-// kind a row, and a diff.failed or diff.skipped event for what is missing.
+// kind a row, the snapshot's diff state, and a diff.failed or diff.skipped
+// event for what is missing. A report is taken whole or not at all.
 func applySnapshotDiffs(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID string, epoch int, sd proto.SnapshotDiffs) error {
 	var snapEpoch int
 	var snapHost string
@@ -476,11 +551,46 @@ func applySnapshotDiffs(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID 
 	if snapEpoch != epoch || snapHost != hostID {
 		return fmt.Errorf("snapshot.diffs for %s from epoch %d on %s: it is epoch %d's on %s", sd.SnapshotID, epoch, hostID, snapEpoch, snapHost)
 	}
-	var done bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM snapshot_diffs WHERE snapshot_id = $1)`, sd.SnapshotID).Scan(&done); err != nil || done {
-		return err // done: redelivered
+	sum := sha256.Sum256(proto.Marshal(sd))
+	digest := hex.EncodeToString(sum[:])
+	var state, reason, applied string
+	var repos []string
+	err = tx.QueryRow(ctx, `SELECT state, reason, repos, report_sha256 FROM snapshot_diff_state WHERE snapshot_id = $1 FOR UPDATE`,
+		sd.SnapshotID).Scan(&state, &reason, &repos, &applied)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return &errDiffReport{fmt.Sprintf("snapshot.diffs for %s: no diff is expected for it", sd.SnapshotID)}
+	}
+	if err != nil {
+		return err
+	}
+	if sd.Lost != "" {
+		return diffsLost(ctx, tx, tenantID, runID, epoch, sd, state)
+	}
+	// A redelivery is the same report; any other for a snapshot whose diff
+	// is settled is refused.
+	switch {
+	case applied == digest:
+		return nil
+	case state == diffPending, state == diffUnsupported, state == diffFailed && reason == diffReportLost:
+	default:
+		return &errDiffReport{fmt.Sprintf("snapshot.diffs for %s: its diff is %s already", sd.SnapshotID, state)}
+	}
+	next, why := diffComplete, ""
+	switch {
+	case sd.Skipped != "":
+		next, why = diffSkipped, sd.Skipped
+	case sd.Error != "":
+		next, why = diffFailed, sd.Error
+	default:
+		if err := wholeReport(sd, repos); err != nil {
+			return err
+		}
 	}
 	if err := recordSnapshotDiffs(ctx, tx, tenantID, hostID, runID, epoch, sd.SnapshotID, sd.Diffs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE snapshot_diff_state SET state = $2, reason = $3, report_sha256 = $4, updated_at = now()
+		WHERE snapshot_id = $1`, sd.SnapshotID, next, why, digest); err != nil {
 		return err
 	}
 	if sd.CleanupFailed != "" {
@@ -488,10 +598,10 @@ func applySnapshotDiffs(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID 
 			return err
 		}
 	}
-	switch {
-	case sd.Skipped != "":
+	switch next {
+	case diffSkipped:
 		return addEvent(ctx, tx, tenantID, runID, epoch, proto.EvDiffSkipped, map[string]any{"snapshotId": sd.SnapshotID, "reason": sd.Skipped})
-	case sd.Error != "":
+	case diffFailed:
 		return addEvent(ctx, tx, tenantID, runID, epoch, proto.EvDiffFailed, map[string]any{"snapshotId": sd.SnapshotID, "error": sd.Error})
 	}
 	failed := map[string]bool{}
@@ -509,6 +619,74 @@ func applySnapshotDiffs(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID 
 		}
 	}
 	return nil
+}
+
+// wholeReport checks a report has exactly one diff per expected
+// repository and kind, and nothing else.
+func wholeReport(sd proto.SnapshotDiffs, repos []string) error {
+	type key struct{ repo, kind string }
+	want := map[key]bool{}
+	for _, r := range repos {
+		for _, k := range []string{proto.DiffBaseClone, proto.DiffBaseHead} {
+			want[key{r, k}] = true
+		}
+	}
+	got := map[key]bool{}
+	for _, d := range sd.Diffs {
+		k := key{d.Repo, d.Kind}
+		if !want[k] || got[k] {
+			return &errDiffReport{fmt.Sprintf("snapshot.diffs for %s: an unexpected or repeated diff for %q (%s)", sd.SnapshotID, d.Repo, d.Kind)}
+		}
+		got[k] = true
+	}
+	if len(got) != len(want) {
+		return &errDiffReport{fmt.Sprintf("snapshot.diffs for %s: %d of the %d expected diffs", sd.SnapshotID, len(got), len(want))}
+	}
+	return nil
+}
+
+// diffsLost records that a snapshot's patches never reached luxd (the
+// runner lost their files before uploading them): its diff has failed.
+// Only a complete diff has patches; anything else (a redelivery) stays.
+func diffsLost(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, sd proto.SnapshotDiffs, state string) error {
+	if state != diffComplete {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `UPDATE snapshot_diff_state SET state = 'failed', reason = $2, updated_at = now()
+		WHERE snapshot_id = $1`, sd.SnapshotID, "patches lost before upload: "+sd.Lost); err != nil {
+		return err
+	}
+	return addEvent(ctx, tx, tenantID, runID, epoch, proto.EvDiffFailed, map[string]any{"snapshotId": sd.SnapshotID, "error": "patches lost before upload: " + sd.Lost})
+}
+
+// reapLostDiffReports fails the diffs whose report never came: their
+// runner gave up (it tries for 10 minutes), or its host is gone.
+func (s *Server) reapLostDiffReports(ctx context.Context) error {
+	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `UPDATE snapshot_diff_state ds SET state = 'failed', reason = $2, updated_at = now()
+			FROM snapshots sn
+			WHERE ds.state = 'pending' AND ds.updated_at < now() - $1::interval AND sn.id = ds.snapshot_id
+			RETURNING ds.tenant_id, ds.run_id, sn.epoch, ds.snapshot_id`, interval(diffReportLostAfter), diffReportLost)
+		if err != nil {
+			return err
+		}
+		type lost struct {
+			Tenant, Run string
+			Epoch       int
+			Snap        string
+		}
+		gone, err := pgx.CollectRows(rows, pgx.RowToStructByPos[lost])
+		if err != nil {
+			return err
+		}
+		for _, l := range gone {
+			if err := addEvent(ctx, tx, l.Tenant, l.Run, l.Epoch, proto.EvDiffFailed,
+				map[string]any{"snapshotId": l.Snap, "error": "its diff report never arrived"}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // refusedBlobError: a report names a blob id that is not a new one of its

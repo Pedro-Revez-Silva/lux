@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,6 +67,11 @@ type HTTPError struct {
 	Code    string
 	Message string
 	Details []string
+	// RetryAfter (seconds), Reason and SnapshotID qualify diff_pending and
+	// diff_unavailable.
+	RetryAfter int
+	Reason     string
+	SnapshotID string
 }
 
 func (e *HTTPError) Error() string { return e.Message }
@@ -80,13 +86,17 @@ type errorBody struct {
 }
 
 type errorInfo struct {
-	Code    string   `json:"code" doc:"Stable error code, e.g. not_found, invalid_spec, quota_exceeded."`
-	Details []string `json:"details,omitempty" doc:"Every problem, when there are several (invalid_spec, secrets_required, validation)."`
-	Message string   `json:"message"`
+	Code       string   `json:"code" doc:"Stable error code, e.g. not_found, invalid_spec, quota_exceeded."`
+	Details    []string `json:"details,omitempty" doc:"Every problem, when there are several (invalid_spec, secrets_required, validation)."`
+	Message    string   `json:"message"`
+	RetryAfter int      `json:"retryAfter,omitempty" doc:"diff_pending: seconds to wait before asking again."`
+	Reason     string   `json:"reason,omitempty" doc:"diff_unavailable: why the snapshot has no diff."`
+	SnapshotID string   `json:"snapshotId,omitempty" doc:"diff_pending, diff_unavailable: the snapshot concerned."`
 }
 
 func (e *HTTPError) MarshalJSON() ([]byte, error) {
-	return json.Marshal(errorBody{errorInfo{Code: e.Code, Details: e.Details, Message: e.Message}})
+	return json.Marshal(errorBody{errorInfo{Code: e.Code, Details: e.Details, Message: e.Message,
+		RetryAfter: e.RetryAfter, Reason: e.Reason, SnapshotID: e.SnapshotID}})
 }
 
 func (e *HTTPError) Schema(r huma.Registry) *huma.Schema {
@@ -111,6 +121,9 @@ func (s *Server) wrap(h handler) http.HandlerFunc {
 
 func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	if he := s.httpError(err, r.Method, r.URL.Path); he != nil {
+		if he.RetryAfter > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(he.RetryAfter))
+		}
 		writeJSON(w, he.Status, he)
 	}
 }

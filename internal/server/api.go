@@ -136,10 +136,13 @@ func (s *Server) routes(api huma.API) {
 		Description: "Per repository, from its base to its working tree: committed changes, staged, unstaged and untracked (not ignored) files. " +
 			"One live diff runs per Run at a time: identical requests share it, and a different one meanwhile is 429 `diff_busy`. " +
 			"`base=clone` (default) diffs from the commit the repository was cloned at (for one added on resume, that clone's); `base=head` from its HEAD, " +
-			"uncommitted work only. While the Run's container runs the diff is computed there, now (`source: live`); otherwise it is the one stored " +
-			"with the latest snapshot that has one (`source: snapshot`, with its id and time), which holds both bases. " +
-			"404 `no_diff` when no snapshot has one (the Run never stopped since it started, or its snapshots predate diffs), or while the latest snapshot's diff is still being computed. " +
-			"Patches are git binary patches (they apply with `git apply`). Each is cut at 10 MiB after the last whole file's diff that fits, possibly none (`truncated`); the stats cover the whole diff.\n\n" +
+			"uncommitted work only. While the Run's container runs the diff is computed there, now (`source: live`); a host whose runner predates diffs is 503 `diff_unsupported`. " +
+			"Otherwise it is the one stored with the Run's latest snapshot (`source: snapshot`, with its id and time; the highest epoch's, then the newest), which holds both bases, " +
+			"and that snapshot alone answers: while its diff is still being computed, 409 `diff_pending` (with `retryAfter`, seconds, and `snapshotId`); " +
+			"when it has none (skipped, failed, its runner does not compute diffs, or it predates them), 404 `diff_unavailable` with `reason` and `snapshotId`, never an older snapshot's diff. " +
+			"`snapshot=<id>` asks for that snapshot's diff instead (the only way to an older one). 404 `no_diff` when the Run has no repositories or no snapshot yet. " +
+			"Patches are git binary patches (they apply with `git apply`; see the RunSpec's Diffs section for what they cannot carry). " +
+			"Each is cut at 10 MiB after the last whole file's diff that fits, possibly none (`truncated`); the stats cover the whole diff.\n\n" +
 			"With `Accept: text/x-diff`, the patches alone, one after the other.",
 		Responses: map[string]*huma.Response{"200": {Description: "OK", Content: map[string]*huma.MediaType{
 			"application/json": {Schema: schemaRef[RunDiff](api)},

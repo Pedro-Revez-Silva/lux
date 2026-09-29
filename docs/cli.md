@@ -92,7 +92,7 @@ lux push <run> [--wait]         # push each repository to git.push.branch (lease
 ## Diff
 
 ```bash
-lux diff <run> [--repo NAME] [--base clone|head] [--stat] [--color never|always|auto] [-o json]
+lux diff <run> [--repo NAME] [--base clone|head] [--stat] [--snapshot ID] [--wait [--timeout 2m]] [--color never|always|auto] [-o json]
 ```
 
 What a Run changed in its repositories, while it runs and after it stops
@@ -106,11 +106,21 @@ ignored) files alike.
   checkout's `HEAD`: uncommitted work only.
 - While the Run's container runs, the diff is computed there, now
   (`live`); one at a time per Run (another, different `lux diff` meanwhile
-  fails with `diff_busy`; retry). Otherwise it is the one saved with the latest snapshot
-  (`snapshot`) that has the base asked for. A Run that has never stopped
-  since it started (or whose snapshots predate this) has none, nor has one
-  whose latest snapshot's diff is still being computed: `no_diff`, exit
-  code 3.
+  fails with `diff_busy`; retry). A host whose runner predates diffs
+  answers `diff_unsupported`. Otherwise it is the one saved with the Run's
+  latest snapshot (`snapshot`), and only that one:
+  - still being computed (for a minute or so after the Run stops): `diff
+    for snapshot <id> is still being computed; try again in Ns`, exit code
+    4. `--wait` asks again until it is ready, for up to `--timeout`
+    (default 2m), then exits 4 the same way;
+  - skipped, failed, or never computed (the host's runner predates diffs,
+    or the snapshot does): `snapshot <id> has no diff: <reason>`, exit
+    code 3. An older snapshot's diff is never shown in its place;
+    `--snapshot ID` asks for that snapshot's (`lux snapshots <run>` lists
+    them).
+
+  A Run without repositories, or that has never stopped since it started,
+  has none: `no_diff`, exit code 3.
 - Each repository's section starts with a comment line, which `git apply`
   skips, so the output applies as it is:
 

@@ -134,6 +134,9 @@ type SnapshotDiffs struct {
 	// CleanupFailed: the diff's helper container could not be confirmed
 	// removed (why); the runner keeps the Run's volumes fenced until it is.
 	CleanupFailed string `json:"cleanupFailed,omitempty"`
+	// Lost: sent after the report, when patches it listed were lost before
+	// their upload (why). The snapshot's diff has failed.
+	Lost string `json:"lost,omitempty"`
 }
 
 // SnapshotDiff is a diff computed at a snapshot: Blob holds the patch

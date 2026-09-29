@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -12,12 +14,14 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/marcioapm/lux/internal/client"
 	"github.com/marcioapm/lux/internal/server"
 )
 
 func (a *app) diffCmd() *cobra.Command {
-	var repo, base, color string
-	var stat bool
+	var repo, base, color, snapshot string
+	var stat, wait bool
+	var timeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "diff <run>",
 		Short: "Show what a Run changed in its repositories",
@@ -25,7 +29,11 @@ func (a *app) diffCmd() *cobra.Command {
 the default) or from its HEAD (--base head: uncommitted work only), to its
 working tree: commits, staged, unstaged and untracked files. While the Run
 runs, the diff is computed in its container now; once it has stopped, it is
-the one saved with its latest snapshot.
+the one saved with its latest snapshot (--snapshot: with that one).
+
+The latest snapshot's diff is computed after the Run stops: until it is,
+lux diff says so and exits 4 (--wait: waits for it, up to --timeout). A
+snapshot without a diff (skipped, failed) exits 3, with why.
 
 Each repository's patch is headed by a "# repo" comment line, which git apply
 skips. Prints nothing when nothing changed.`,
@@ -45,9 +53,12 @@ skips. Prints nothing when nothing changed.`,
 			if stat {
 				q.Set("stat", "true")
 			}
-			var d server.RunDiff
-			if err := a.c.Do(ctxOf(cmd), "GET", "/v1/runs/"+args[0]+"/diff?"+q.Encode(), nil, &d); err != nil {
-				return err // no_diff is a 404: exit 3
+			if snapshot != "" {
+				q.Set("snapshot", snapshot)
+			}
+			d, err := a.getDiff(ctxOf(cmd), "/v1/runs/"+args[0]+"/diff?"+q.Encode(), wait, timeout)
+			if err != nil {
+				return err
 			}
 			if a.output == "json" {
 				if err := a.json(d); err != nil {
@@ -67,7 +78,46 @@ skips. Prints nothing when nothing changed.`,
 	cmd.Flags().StringVar(&base, "base", "clone", "clone: from the commit each repository was cloned at; head: from its HEAD")
 	cmd.Flags().BoolVar(&stat, "stat", false, "only the files changed, as git diff --stat")
 	cmd.Flags().StringVar(&color, "color", "auto", "never | always | auto (when stdout is a terminal)")
+	cmd.Flags().StringVar(&snapshot, "snapshot", "", "the diff saved with this snapshot (lux snapshots <run>), not the latest")
+	cmd.Flags().BoolVar(&wait, "wait", false, "wait while the snapshot's diff is still being computed")
+	cmd.Flags().DurationVar(&timeout, "timeout", 2*time.Minute, "with --wait: give up after this long")
 	return cmd
+}
+
+// getDiff GETs a diff; with wait, again after each diff_pending (as it
+// says), until timeout. diff_pending is exit 4, diff_unavailable exit 3.
+func (a *app) getDiff(ctx context.Context, path string, wait bool, timeout time.Duration) (server.RunDiff, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		var d server.RunDiff
+		err := a.c.Do(ctx, "GET", path, nil, &d)
+		var ae *client.APIError
+		if !errors.As(err, &ae) {
+			return d, err
+		}
+		switch ae.Code {
+		case "diff_pending":
+			retry := time.Duration(max(ae.RetryAfter, 1)) * time.Second
+			if wait && time.Now().Add(retry).Before(deadline) {
+				select {
+				case <-ctx.Done():
+					return d, ctx.Err()
+				case <-time.After(retry):
+				}
+				continue
+			}
+			msg := fmt.Sprintf("diff for snapshot %s is still being computed; try again in %ds", ae.SnapshotID, max(ae.RetryAfter, 1))
+			if wait {
+				msg = fmt.Sprintf("diff for snapshot %s is still being computed after %s", ae.SnapshotID, timeout)
+			}
+			fmt.Fprintln(a.stderr, "lux:", msg)
+			return d, exitCode(4)
+		case "diff_unavailable":
+			fmt.Fprintf(a.stderr, "lux: snapshot %s has no diff: %s\n", ae.SnapshotID, ae.Reason)
+			return d, exitCode(3)
+		}
+		return d, err
+	}
 }
 
 func (a *app) colorOn(mode string) (bool, error) {

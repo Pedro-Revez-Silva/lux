@@ -43,3 +43,25 @@ CREATE INDEX snapshot_diffs_run ON snapshot_diffs (run_id, epoch DESC);
 ALTER TABLE snapshot_diffs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tenant_rows ON snapshot_diffs USING (tenant_id = lux_tenant() OR lux_system())
   WITH CHECK (tenant_id = lux_tenant() OR lux_system());
+
+-- Where each snapshot's diff is: pending (its snapshot is recorded, its
+-- report not yet), complete (one row per expected repository and kind in
+-- snapshot_diffs), skipped or failed (the report says why; or failed,
+-- report_lost, when none came), unsupported (its runner computes none).
+CREATE TABLE snapshot_diff_state (
+  snapshot_id  text PRIMARY KEY REFERENCES snapshots(id),
+  tenant_id    text NOT NULL REFERENCES tenants(id),
+  run_id       text NOT NULL REFERENCES runs(id),
+  state        text NOT NULL CHECK (state IN ('pending', 'complete', 'skipped', 'failed', 'unsupported')),
+  reason       text NOT NULL DEFAULT '',
+  -- The repositories whose diffs the report must carry (both kinds each).
+  repos        text[] NOT NULL DEFAULT '{}',
+  -- sha256 of the report applied: a redelivery must be the same report.
+  report_sha256 text NOT NULL DEFAULT '',
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX snapshot_diff_state_pending ON snapshot_diff_state (updated_at) WHERE state = 'pending';
+
+ALTER TABLE snapshot_diff_state ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_rows ON snapshot_diff_state USING (tenant_id = lux_tenant() OR lux_system())
+  WITH CHECK (tenant_id = lux_tenant() OR lux_system());
