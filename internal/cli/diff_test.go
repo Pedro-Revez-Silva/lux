@@ -93,7 +93,7 @@ func mainCLI(t *testing.T, h http.Handler, args ...string) (string, string, int)
 func TestDiffCommand(t *testing.T) {
 	ok := server.RunDiff{Base: "clone", Repos: []server.RepoDiff{{Repo: "app", Files: 1, Patch: "diff --git a/x b/x\n"}}}
 	failed := server.RunDiff{Base: "clone", Repos: []server.RepoDiff{{Repo: "app", Files: 1, Patch: "p\n"}, {Repo: "lib", Error: "gone", ErrorCode: "base_unreachable"}}}
-	stopped := "the Run is stopped: its diff is available only while the Run is running; resume it, or save a patch at stop with workload.beforeStop (git diff > $LUX_ARTIFACTS/final.patch) and fetch it with lux artifacts"
+	stopped := "the Run is stopped: its diff is available only while the Run is running; resume it, or save a patch at stop with workload.beforeStop (git add -N . && git diff --binary <base> > $LUX_ARTIFACTS/final.patch) and fetch it with lux artifacts"
 	f := &fakeLuxd{
 		bodies: map[string]any{"/v1/runs/r_ok/diff": ok, "/v1/runs/r_bad/diff": failed},
 		status: map[string]int{"/v1/runs/r_none/diff": http.StatusNotFound, "/v1/runs/r_stopped/diff": http.StatusConflict},

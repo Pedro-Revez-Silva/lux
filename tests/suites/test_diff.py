@@ -13,7 +13,7 @@ from conftest import CLIError, fake_agent
 
 # The message of a stopped Run's lux diff (after "lux: ").
 STOPPED = ("the Run is stopped: its diff is available only while the Run is running; resume it, or save a patch at stop "
-           "with workload.beforeStop (git diff > $LUX_ARTIFACTS/final.patch) and fetch it with lux artifacts")
+           "with workload.beforeStop (git add -N . && git diff --binary <base> > $LUX_ARTIFACTS/final.patch) and fetch it with lux artifacts")
 
 
 def diff_spec(image: str, git_server, prompt: str, repo: str) -> dict:

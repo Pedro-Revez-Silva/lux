@@ -109,7 +109,7 @@ container, now (`GET /v1/runs/{id}/diff`).
   keep one, and exits 4:
 
   ```
-  lux: the Run is stopped: its diff is available only while the Run is running; resume it, or save a patch at stop with workload.beforeStop (git diff > $LUX_ARTIFACTS/final.patch) and fetch it with lux artifacts
+  lux: the Run is stopped: its diff is available only while the Run is running; resume it, or save a patch at stop with workload.beforeStop (git add -N . && git diff --binary <base> > $LUX_ARTIFACTS/final.patch) and fetch it with lux artifacts
   ```
 
   A Run still starting (its container not up yet) exits 4 too, saying so.

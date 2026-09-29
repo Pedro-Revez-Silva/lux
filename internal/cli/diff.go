@@ -26,7 +26,7 @@ working tree: commits, staged, unstaged and untracked files. The diff is
 computed in the Run's container, now, so only while the Run is running;
 otherwise lux diff says so and exits 4. To keep a Run's changes past a
 stop, save a patch with workload.beforeStop
-(git diff > $LUX_ARTIFACTS/final.patch) and fetch it with lux artifacts.
+(git add -N . && git diff --binary <base> > $LUX_ARTIFACTS/final.patch) and fetch it with lux artifacts.
 
 Each repository's patch is headed by a "# repo" comment line, which git apply
 skips. Prints nothing when nothing changed.`,
