@@ -89,6 +89,82 @@ lux resume run_x --add-repo docs=git@github.com:o/docs.git,ref=v2,push=false --r
 lux push <run> [--wait]         # push each repository to git.push.branch (leased)
 ```
 
+## Diff
+
+```bash
+lux diff <run> [--repo NAME] [--base clone|head] [--stat] [--color never|always|auto] [-o json]
+```
+
+What a **running** Run changed in its repositories: per repository, from
+its base to its working tree, committed changes, staged, unstaged and
+untracked (not ignored) files alike. The diff is computed in the Run's
+container, now (`GET /v1/runs/{id}/diff`).
+
+- `--base clone` (the default) diffs from the commit the repository was
+  cloned at; a resumed Run keeps its original base, and a repository added
+  on resume diffs from its own clone. `--base head` diffs from the
+  checkout's `HEAD`: uncommitted work only.
+- **Only while the Run is running.** A Run that has stopped (or failed,
+  succeeded, been cancelled or lost) has no diff: lux diff says so, how to
+  keep one, and exits 4:
+
+  ```
+  lux: the Run is stopped: its diff is available only while the Run is running; resume it, or save a patch at stop with workload.beforeStop (git diff > $LUX_ARTIFACTS/final.patch) and fetch it with lux artifacts
+  ```
+
+  A Run still starting (its container not up yet) exits 4 too, saying so.
+  To keep a Run's changes past every stop, save a patch at stop and fetch
+  it afterwards (see [Before stop](runspec.md#before-stop)). For a
+  repository cloned at branch `main`, `origin/main` is where its clone
+  started (until the workload fetches), and `git add -N .` makes untracked
+  files show:
+
+  ```yaml
+  workload:
+    beforeStop:
+      command: [sh, -c, "cd /workspace/repos/app && git add -N . && git diff --binary origin/main > $LUX_ARTIFACTS/final.patch"]
+  ```
+
+  ```bash
+  lux artifacts <run> --download ./out   # ./out/…/final.patch
+  ```
+
+  A plain `git diff > $LUX_ARTIFACTS/final.patch` keeps only unstaged
+  changes to tracked files.
+- One live diff at a time per Run: an identical `lux diff` meanwhile shares
+  it, and a different one fails with `diff_busy` (retry). A host whose
+  runner predates diffs answers `diff_unsupported`. A Run without
+  repositories has none: `no_diff`, exit code 3.
+- Each repository's section starts with a comment line, which `git apply`
+  skips, so the output applies as it is at the base, and gives the
+  working tree but for what a patch cannot carry (named on stderr, see
+  below):
+
+  ```
+  # repo app: 1a2b3c4d5e6f..9f8e7d6c5b4a
+  diff --git a/src/x.go b/src/x.go
+  …
+  ```
+
+  `, TRUNCATED` ends it when the patch was cut at its limit (10 MiB per
+  repository, binary files' content included): it then holds only the
+  whole files' diffs that fit, possibly none, so it still applies. `--stat`
+  prints `git diff --stat`'s lines instead, for the whole diff even when
+  its patch was cut.
+- Colour follows `git diff`: on when stdout is a terminal (`--color auto`,
+  and `NO_COLOR` unset). Nothing is printed, and the exit code is 0, when
+  nothing changed. A repository whose diff failed is reported on stderr and
+  the exit code is 1, with `-o json` too (`base_unreachable`: its base is
+  no longer in its history; `--base head` still works). Files with
+  clean/smudge filters, which are never run, are compared raw, and named on
+  stderr; so are the files whose line endings or encoding git converts, and
+  submodules with uncommitted changes of their own, which the patch cannot
+  carry (see [Diffs](runspec.md#diffs)).
+- `-o json` prints the API's response: per repository `repo`, `push`,
+  `base`, `head`, `at`, `truncated`, `files`, `insertions`, `deletions`,
+  `fileStats` and `patch` (`patchBase64` when it is not UTF-8). The API
+  also answers `Accept: text/x-diff` with the patches alone.
+
 ## Files
 
 ```bash

@@ -449,6 +449,85 @@ POST /v1/runs/{id}/resume
 The workload commits as it likes. The checkout is a normal git repository
 owned by the workload user.
 
+### Diffs
+
+`lux diff <run>` (`GET /v1/runs/{id}/diff`) shows what a **running** Run
+changed in each of its repositories, `push: false` ones included (their
+`push` is false in the response), from its **base** to its working tree:
+committed changes, staged, unstaged and untracked (not ignored) files.
+
+- The base is the commit of the repository's latest successful
+  `git.clone` event: the one it was cloned at. A resumed Run keeps it
+  (luxd sends it with every assignment); a repository added on resume has
+  its own clone's. `base=head` diffs from the checkout's `HEAD` instead.
+- **Only while the Run is running.** luxd asks the Run's runner, which
+  runs the diff in the Run's container, now. A Run that is not running
+  answers 409 `run_not_running`: one whose container is not up yet (it is
+  scheduled, starting or resuming) says so; one that has stopped, ended or
+  been lost says its diff is available only while it runs. Nothing of a
+  diff is kept with a snapshot. To keep a Run's changes past a stop, write
+  a patch in `workload.beforeStop` (see [Before stop](#before-stop)) and
+  fetch it with `lux artifacts`:
+
+  ```yaml
+  workload:
+    beforeStop:
+      command: [sh, -c, "cd /workspace/repos/app && git add -N . && git diff --binary origin/main > $LUX_ARTIFACTS/final.patch"]
+  ```
+
+  (`origin/main`: where a clone of branch `main` started, until the
+  workload fetches; `git add -N .` makes untracked files show.)
+- One live diff runs per Run at a time: an identical request meanwhile
+  shares the diff under way, and a different one (another base,
+  repository, or `stat`) is 429 `diff_busy`. A request whose client goes
+  away stops the diff (the last one of those sharing it). A diff has one
+  minute. A host whose runner predates diffs answers 503
+  `diff_unsupported`.
+- **The runner never runs git in the checkout**, as for a push: `lux-shim
+  diff` runs git inside the container, as the workload user, with the
+  checkout's hooks, `core.fsmonitor`, `diff.external`, textconv and
+  clean/smudge filters, and pager disabled, and `GIT_*` from the Run's
+  environment ignored.
+- **The checkout is never changed.** Untracked files are marked
+  intent-to-add in a copy of the index in a temporary directory, and the
+  working tree is diffed through that copy. Nothing is written to the
+  repository: not its index, `HEAD`, refs, or object store (the one object
+  the copy needs, the empty blob, goes to a temporary object directory).
+- Patches are git's binary patches (`--binary`): applied with `git apply`
+  at the base, a patch reproduces the working tree, binary files, symlinks
+  and executable bits included, with the exceptions below. Each patch is
+  cut at 10 MiB (binary content counts), after the last whole file's diff
+  that fits, and marked `truncated`: what is kept still applies, and is
+  empty when the first file's diff alone is over the limit. The stats
+  cover the whole diff.
+- What a patch cannot carry, each listed per repository (at most 100
+  paths) and named on `lux diff`'s stderr:
+  - **Submodules.** A submodule moved to another commit is in the patch
+    (its gitlink); `git apply --index` records it. Uncommitted changes and
+    untracked files *inside* a submodule are its own repository's, and the
+    parent's patch cannot hold them: the submodule is listed in
+    `dirtySubmodules`, and the patch still applies.
+  - **Line endings and encodings.** Where git converts files on their way
+    in (`text`, `eol`, `core.autocrlf`, `working-tree-encoding`), the diff
+    compares their converted form: a change of line endings alone does not
+    show, and an applied patch gives git's stored form (LF endings), not
+    the bytes on disk. Such files are listed in `normalizedPaths`.
+  - **Clean/smudge filters are never run** (their programs are the
+    workload's choice). A file with a `filter` attribute is compared raw,
+    as it is on disk, so it may show as changed when its filter would have
+    made it identical (Git LFS pointers, for one). The response then has
+    `filtersIgnored: true` and lists those files (`filteredPaths`).
+- `export-ignore` (and the rest of `git archive`'s attributes) has no
+  effect on a diff: such files are in it like any other.
+- A sparse checkout's untracked files outside its cone are in the diff;
+  tracked files it did not check out are not deletions.
+- `base=clone` needs the base in the checkout's history. After a history
+  rewrite, a reset to unrelated history, a shallow clone without it, or a
+  new `.git`, the repository's entry has `errorCode: base_unreachable`;
+  `base=head` still works. A checkout whose `.git` is gone, or replaced by
+  a file, is an error for that repository only.
+- A Run with no repositories answers 404 `no_diff`.
+
 ## MCP servers
 
 `workload.mcpServers` gives an agent remote MCP servers (streamable HTTP),

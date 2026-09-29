@@ -37,7 +37,10 @@ type app struct {
 
 // Main runs the CLI and returns the process exit code.
 func Main(args []string) int {
-	a := &app{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr}
+	return (&app{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr}).main(args)
+}
+
+func (a *app) main(args []string) int {
 	root := a.root()
 	root.SetArgs(args)
 	err := root.Execute()
@@ -123,7 +126,7 @@ func (a *app) root() *cobra.Command {
 	root.PersistentFlags().StringVarP(&a.output, "output", "o", "text", "output format: text | json")
 	root.AddCommand(
 		a.runCmd(), a.lsCmd(), a.getCmd(), a.logsCmd(), a.eventsCmd(), a.steerCmd(), a.interruptCmd(),
-		a.stopCmd(), a.resumeCmd(), a.cancelCmd(), a.waitCmd(), a.pushCmd(), a.snapshotsCmd(),
+		a.stopCmd(), a.resumeCmd(), a.cancelCmd(), a.waitCmd(), a.pushCmd(), a.diffCmd(), a.snapshotsCmd(),
 		a.artifactsCmd(), a.execCmd(), a.attachCmd(), a.portForwardCmd(), a.hostsCmd(), a.poolsCmd(),
 		a.tenantsCmd(), a.statusCmd(), a.historyCmd(), a.costCmd(), a.costsCmd(), a.migrateCmd(),
 	)
