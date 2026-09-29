@@ -86,9 +86,8 @@ func TestPoolsSetDefaultSendsOnlyTheMark(t *testing.T) {
 	}
 }
 
-// pools ls shows an OWNER column to an unscoped operator, whose list has
-// every tenant's pools and the platform's, alike-named ones included; a
-// tenant, or an operator narrowed with --tenant, sees no such column.
+// pools ls shows an OWNER column to an unscoped operator, and in any
+// listing where the same name belongs to more than one owner.
 func TestPoolsLsOwner(t *testing.T) {
 	operator := true
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -122,12 +121,12 @@ func TestPoolsLsOwner(t *testing.T) {
 	if a, b := strings.Fields(lines[1]), strings.Fields(lines[2]); a[1] != "platform" || a[2] != "*" || b[1] != "acme" || b[2] != "static" {
 		t.Fatalf("operator rows %q", lines[1:])
 	}
-	if got := strings.Fields(ls("--tenant", "acme")[0]); got[1] != "DEFAULT" {
-		t.Fatalf("operator with --tenant: header %v", got)
+	if got := strings.Fields(ls("--tenant", "acme")[0]); got[1] != "OWNER" {
+		t.Fatalf("narrowed listing with duplicate names: header %v", got)
 	}
 	operator = false
-	if got := strings.Fields(ls()[0]); got[1] != "DEFAULT" {
-		t.Fatalf("tenant header %v", got)
+	if got := strings.Fields(ls()[0]); got[1] != "OWNER" {
+		t.Fatalf("tenant with duplicate names: header %v", got)
 	}
 }
 

@@ -556,6 +556,19 @@ name): a tenant's pool and a platform pool may share a name.`,
 					return err
 				}
 			}
+			// A tenant-scoped listing can include a platform pool with the
+			// same name as the tenant's. Show the owner when names collide.
+			showOwner := who.Operator
+			if !showOwner {
+				seen := make(map[string]bool, len(resp.Pools))
+				for _, p := range resp.Pools {
+					if seen[p.Name] {
+						showOwner = true
+						break
+					}
+					seen[p.Name] = true
+				}
+			}
 			var rows [][]string
 			for _, p := range resp.Pools {
 				def := ""
@@ -563,7 +576,7 @@ name): a tenant's pool and a platform pool may share a name.`,
 					def = "*"
 				}
 				row := []string{p.Name}
-				if who.Operator {
+				if showOwner {
 					owner := p.Tenant
 					if p.Platform {
 						owner = "platform"
@@ -574,7 +587,7 @@ name): a tenant's pool and a platform pool may share a name.`,
 				rows = append(rows, row)
 			}
 			header := "NAME\tDEFAULT\tPROVIDER\tHOSTS\tWARM\tSHARED"
-			if who.Operator {
+			if showOwner {
 				header = "NAME\tOWNER\tDEFAULT\tPROVIDER\tHOSTS\tWARM\tSHARED"
 			}
 			a.table(header, rows)
