@@ -139,3 +139,37 @@ def test_resume_retry_keeps_secrets(lux, runners, hosts):
     runners.start(hosts[0])
     lux.wait_output(run_id, "len=12")
     lux.run("cancel", run_id)
+
+
+def test_a_run_naming_no_pool_goes_to_the_tenants_default(lux, runners, hosts):
+    """The tenant marks a pool not named "default" as its default: a Run
+    naming no pool is placed there, its spec and submitted event say so,
+    and it stays there after the default moves."""
+    lux.run("pools", "set", "arm64", "--provider", "static")
+    lux.run("pools", "set", "other", "--provider", "static")
+    runners.start(hosts[0], token=runners.token("--pool", "arm64"))
+    # Nothing marked: the pool named "default", where no host is.
+    before = lux.submit(generic(ALPINE_IMAGE, "true"))
+    assert lux.get(before)["spec"]["placement"]["pool"] == "default"
+    assert lux.events(before, "submitted")[0]["data"]["poolFrom"] == "fallback"
+    lux.run("cancel", before)
+
+    lux.run("pools", "set", "arm64", "--default")
+    rows = {line.split()[0]: line.split() for line in lux.run("pools", "ls").stdout.splitlines()[1:]}
+    assert rows["arm64"][1] == "*" and rows["other"][1] != "*", rows
+    assert [p["name"] for p in lux.json("pools", "ls") if p.get("isDefault")] == ["arm64"]
+
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "echo on-default; sleep 300"))
+    run = lux.wait_state(run_id, "running")
+    assert run["host"] == hosts[0].name and run["spec"]["placement"]["pool"] == "arm64", run
+    data = lux.events(run_id, "submitted")[0]["data"]
+    assert data["pool"] == "arm64" and data["poolFrom"] == "tenant-default", data
+
+    # Moving the default leaves the submitted Run where it is.
+    lux.run("pools", "set", "other", "--default")
+    assert [p["name"] for p in lux.json("pools", "ls") if p.get("isDefault")] == ["other"]
+    assert lux.get(run_id)["spec"]["placement"]["pool"] == "arm64"
+    moved = lux.submit(generic(ALPINE_IMAGE, "true"))
+    assert lux.get(moved)["spec"]["placement"]["pool"] == "other"
+    lux.run("cancel", moved)
+    lux.run("cancel", run_id)
