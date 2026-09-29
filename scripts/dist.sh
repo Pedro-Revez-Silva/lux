@@ -50,12 +50,13 @@ done
 for arch in arm64 amd64; do
   wanted "linux_$arch" || continue
   work="$DIST/work-linux-$arch"
-  mkdir -p "$work/bin"
+  mkdir -p "$work/bin" "$work/share/lux"
+  cp "$ROOT/LICENSE" "$work/share/lux/LICENSE"
   cp -r "$DIST/lib" "$work/lib"
   build linux "$arch" luxd "$work/bin/luxd"
   build linux "$arch" lux "$work/bin/lux"
   chmod +x "$work/bin/"* "$work/lib/lux/runner"/*/*
-  tar "${TAR_REPRO_FLAGS[@]}" -C "$work" -czf "$DIST/lux_${VERSION}_linux_${arch}.tar.gz" bin lib
+  tar "${TAR_REPRO_FLAGS[@]}" -C "$work" -czf "$DIST/lux_${VERSION}_linux_${arch}.tar.gz" bin lib share
   rm -rf "$work"
 done
 rm -rf "${DIST:?}/lib"
@@ -64,10 +65,11 @@ rm -rf "${DIST:?}/lib"
 for arch in arm64 amd64; do
   wanted "darwin_$arch" || continue
   work="$DIST/work-darwin-$arch"
-  mkdir -p "$work/bin"
+  mkdir -p "$work/bin" "$work/share/lux"
+  cp "$ROOT/LICENSE" "$work/share/lux/LICENSE"
   build darwin "$arch" lux "$work/bin/lux"
   chmod +x "$work/bin/lux"
-  tar "${TAR_REPRO_FLAGS[@]}" -C "$work" -czf "$DIST/lux_${VERSION}_darwin_${arch}.tar.gz" bin
+  tar "${TAR_REPRO_FLAGS[@]}" -C "$work" -czf "$DIST/lux_${VERSION}_darwin_${arch}.tar.gz" bin share
   rm -rf "$work"
 done
 
