@@ -110,6 +110,9 @@ type Runner struct {
 	// hashed once at startup (a self-update replaces the file, not this
 	// process, so the hash is stable for the process's life).
 	runnerSHA256, shimSHA256 string
+	// diffCancels: diff cancels that came before their request, by subId
+	// (under mu).
+	diffCancels map[string]time.Time
 }
 
 // mountpoint is where a volume's data is on this host. It never changes for
@@ -259,6 +262,7 @@ func (r *Runner) hello(ctx context.Context) proto.Hello {
 		LocalSnapshots:  r.localSnapshots(),
 		RunnerSHA256:    r.runnerSHA256,
 		ShimSHA256:      r.shimSHA256,
+		Capabilities:    []string{proto.CapDiff},
 	}
 	r.mu.Lock()
 	for _, p := range r.placements {
