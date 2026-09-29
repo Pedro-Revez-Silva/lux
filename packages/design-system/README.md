@@ -10,7 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
-bun run test           # bun test: money rounding, y scale, family colours, CostFigure, Table columns (src/*.test.ts*)
+bun run test           # bun test: money rounding, y scale, family colours, CostFigure, Table columns, EventTable (src/*.test.ts*)
 ```
 
 ## Using it
@@ -196,7 +196,7 @@ Logo (the star, 16–32px; the detailed mark is `docs/brand/lux.svg`),
 Button, IconButton, Badge, StatePill, StatTile, Sparkline, Card, Table, Tabs,
 Tooltip, Select, TenantPicker, TimeRangePicker, TimeSeriesChart (uPlot, with
 optional vertical `marks`; height from `--chart-h` unless given), Timeline
-(placement waterfall), LogView, KeyValue, IdChip, Code, PageHeader,
+(placement waterfall), EventTable (a lifecycle event log: Run, pool, host), LogView, KeyValue, IdChip, Code, PageHeader,
 SectionHeader, ConfirmDialog, Dialog (a form modal), Toast (`useToast`),
 EmptyState, Spinner, Skeleton. Hooks: `useTheme`, `useDensity`. All exported
 from `src/index.ts` with typed props; icons from `@lux/design-system/icons`.

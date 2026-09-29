@@ -1,6 +1,6 @@
 // One-line summaries of lifecycle events, from their data payloads.
-import type { Event } from "../../api/index.ts";
-import { formatBytes } from "@lux/design-system";
+import type { Event, LifecycleEvent } from "../../api/index.ts";
+import { formatBytes, formatDuration } from "@lux/design-system";
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v !== "" ? v : undefined;
@@ -13,6 +13,7 @@ export function eventSummary(e: Event): string {
       const parts = [str(d.state) ?? "?"];
       if (str(d.reason)) parts.push(`(${str(d.reason)})`);
       if (str(d.host)) parts.push(`on ${str(d.host)}`);
+      if (str(d.pool)) parts.push(`from pool ${str(d.pool)}`);
       return parts.join(" ");
     }
     case "submitted":
@@ -60,5 +61,54 @@ export function eventSummary(e: Event): string {
         .map((k) => `${k}=${typeof d[k] === "object" ? JSON.stringify(d[k]) : String(d[k])}`)
         .join(" ");
     }
+  }
+}
+
+function val(v: unknown): string {
+  return v == null || v === "" ? "–" : typeof v === "object" ? JSON.stringify(v) : String(v);
+}
+
+/** One line for a pool's or a host's event (as lux pools/hosts events prints it). */
+export function infraEventSummary(e: LifecycleEvent): string {
+  const d = e.data ?? {};
+  const s = (k: string) => (d[k] == null || d[k] === "" ? "" : String(d[k]));
+  switch (e.type) {
+    case "pool.scale_up":
+      return `+${s("hosts")} host${d.hosts === 1 ? "" : "s"} for ${s("reason")}: ${s("waiting")} waiting, warm ${s("warm")}, min ${s("min")}, max ${s("max")}; had ${s("total")} (${s("idle")} idle, ${s("provisioning")} provisioning)`;
+    case "pool.launch_requested":
+      return `launching ${s("name")}`;
+    case "pool.host_launched":
+      return [`${s("name")} is ${s("providerId")}`, s("instanceType"), s("market"), s("zone")].filter(Boolean).join(" ");
+    case "pool.launch_failed":
+      return `launch failed: ${s("error")}`;
+    case "pool.host_registered":
+      return `${s("name")} registered`;
+    case "pool.host_released":
+      return `${s("name")} released: ${s("reason")}${s("idleSeconds") ? ` for ${formatDuration(Number(d.idleSeconds))}` : ""}`;
+    case "pool.spot_interrupted":
+      return `${s("host")} interrupted: ${s("reason")}`;
+    case "pool.placement":
+    case "host.placement_assigned":
+      return `${s("run")} epoch ${s("epoch")} on ${s("host")}`;
+    case "pool.config_changed": {
+      const changes = (d.changes ?? {}) as Record<string, { old?: unknown; new?: unknown }>;
+      const parts = Object.keys(changes)
+        .sort()
+        .map((k) => `${k} ${val(changes[k]?.old)}→${val(changes[k]?.new)}`);
+      return (d.created === true ? "created: " : "") + parts.join(", ");
+    }
+    case "pool.provider_error":
+    case "host.provider_error":
+      return `${s("op")}: ${s("error")}`;
+    case "host.registered":
+      return [s("name"), s("arch"), s("runner") && `runner ${s("runner")}`, s("providerId")].filter(Boolean).join(" ");
+    case "host.ready":
+      return `from ${s("from")}`;
+    case "host.placement_ended":
+      return `${s("run")} epoch ${s("epoch")}: ${s("outcome")}${s("reason") ? ` (${s("reason")})` : ""}`;
+    case "host.drain_requested":
+      return `${s("cause")}: ${s("reason")}${d.evict === true ? ", evicting its runs" : ""}`;
+    default:
+      return s("reason");
   }
 }

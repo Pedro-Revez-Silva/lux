@@ -43,6 +43,8 @@ export function PageSkeleton() {
 export const runPath = (id: string) => `/runs/${encodeURIComponent(id)}`;
 export const hostPath = (id: string) => `/hosts/${encodeURIComponent(id)}`;
 /** The runs list filtered to runs placed (any epoch) on a host. */
+/** A pool's page; a tenant's pool names its tenant, so an operator's link finds that one. */
+export const poolPath = (name: string, tenant?: string) => `/pools/${encodeURIComponent(name)}${tenant ? `?tenant=${encodeURIComponent(tenant)}` : ""}`;
 export const hostRunsPath = (hostId: string) => `/runs?host=${encodeURIComponent(hostId)}`;
 
 /** Quiet, copyable id that links to `to` (client-side, keeping the scope). */

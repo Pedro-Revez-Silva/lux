@@ -11,6 +11,7 @@ import {
   CostFigure,
   CostStatusBadge,
   EmptyState,
+  EventTable,
   familyColor,
   familySlot,
   FamilyKey,
@@ -72,7 +73,7 @@ function Section({ id, title, children, note }: { id: string; title: string; not
   );
 }
 
-const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "tabs", "selects", "charts", "costs", "timeline", "logs", "keyvalue", "dialogs", "feedback", "format"];
+const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "tabs", "selects", "charts", "costs", "timeline", "events", "logs", "keyvalue", "dialogs", "feedback", "format"];
 
 /** The gallery: a slim bar (brand, theme and density) over the sections. */
 export function Gallery() {
@@ -130,6 +131,7 @@ function Sections() {
         <Charts />
         <Costs />
         <TimelineDemo />
+        <EventsDemo />
         <Logs />
         <KeyValueDemo />
         <Dialogs />
@@ -766,6 +768,27 @@ function TimelineDemo() {
       </Card>
       <Card title="Fresh placement" subtitle="only the first two stages have happened">
         <Timeline stages={fakePlacementStages.map((st, i) => (i < 2 ? st : i === 2 ? { ...st, end: null } : { ...st, start: null, end: null }))} now={fakePlacementStages[2]!.start! + 9_000} />
+      </Card>
+    </Section>
+  );
+}
+
+const fakeEvents = [
+  { id: 101, type: "pool.config_changed", time: new Date(NOW - 3_600_000).toISOString(), data: "maxHosts 2→4" },
+  { id: 102, type: "pool.scale_up", time: new Date(NOW - 600_000).toISOString(), data: "+1 host for waiting runs: 1 waiting, warm 0, min 0, max 4" },
+  { id: 103, type: "pool.launch_requested", time: new Date(NOW - 599_000).toISOString(), data: "launching burst-4f2a9c1d", count: 212, lastTime: new Date(NOW - 388_000).toISOString() },
+  { id: 104, type: "pool.launch_failed", time: new Date(NOW - 598_000).toISOString(), data: "InvalidParameterValue: duplicate tag lux:host", count: 212, lastTime: new Date(NOW - 387_000).toISOString() },
+  { id: 316, type: "pool.host_launched", time: new Date(NOW - 380_000).toISOString(), data: "burst-9d0e1a2b is i-0a1b2c3d4e5f60718 m7i.large on-demand" },
+  { id: 318, type: "pool.host_registered", time: new Date(NOW - 330_000).toISOString(), data: "burst-9d0e1a2b registered" },
+  { id: 319, type: "pool.placement", time: new Date(NOW - 329_000).toISOString(), data: "run_7xq2 epoch 1 on burst-9d0e1a2b" },
+  { id: 327, type: "pool.host_released", time: new Date(NOW - 20_000).toISOString(), data: "burst-9d0e1a2b released: idle for 600s" },
+];
+
+function EventsDemo() {
+  return (
+    <Section id="events" title="EventTable" note="A Run's, pool's or host's lifecycle events, newest first. The page supplies the one-line summary and, optionally, what a clicked row expands into. A failure repeated on every pass is one event with its count and when it last happened.">
+      <Card flush title="Events" subtitle="pool burst · click a row to expand">
+        <EventTable events={fakeEvents} summary={(e) => e.data} detail={(e) => <Code>{JSON.stringify(e, null, 2)}</Code>} />
       </Card>
     </Section>
   );

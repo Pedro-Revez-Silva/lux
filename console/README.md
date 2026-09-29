@@ -73,8 +73,9 @@ Run-scoped calls (`/runs/{id}/…`, `/hosts/{id}/…`, `/artifacts/…`) do not 
 | `/runs` | Runs table with state presets and chips, resumable/host/label filters, "Load more" (`before=`) | `/runs` (5s) |
 | `/runs/:id` | Header + actions (Stop, Cancel, Resume, Migrate), tabs: Output (SSE), Timeline (per-epoch waterfall), Resources (charts, epoch marks), Events, Snapshots & artifacts, Spec | `/runs/{id}` (3s while active), `/runs/{id}/output`, `/history`, `/events`, `/snapshots`, `/artifacts` |
 | `/hosts` | Hosts table (pool/state filters, include terminated) with allocation bars | `/hosts` (5s), `/pools` |
-| `/hosts/:id` | Details, Drain, lifecycle timeline, live placements, usage charts, recent runs | `/hosts/{id}` (5s), `/hosts/{id}/history`, `/runs?host=` |
-| `/pools` | Pools with host counts | `/pools`, `/hosts` |
+| `/hosts/:id` | Details, Drain, lifecycle timeline, live placements, usage charts, events (own and operators), recent runs | `/hosts/{id}` (5s), `/hosts/{id}/history`, `/hosts/{id}/events` (5s), `/runs?host=` |
+| `/pools` | Pools with host counts; a row opens its pool | `/pools`, `/hosts` |
+| `/pools/:name` | Settings, its hosts, events (scale-ups, launches, placements, releases) | `/pools` (15s), `/hosts?pool=` (15s), `/pools/{name}/events` (15s) |
 | `/tenants` | Tenants (operators); a row sets the tenant scope and opens Overview | `/tenants` |
 
 Pages live in `src/app/pages/`; `common.tsx` holds the shared bits (error

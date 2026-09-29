@@ -1,6 +1,6 @@
 // Typed calls, one per endpoint. Lists are unwrapped from their envelope.
 import { download, request } from "./client.ts";
-import type { Artifact, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, MigrateRequest, Pool, ResumeRequest, Run, RunCost, RunListParams, Snapshot, Status, Tenant, WhoAmI } from "./types.ts";
+import type { Artifact, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, LifecycleEvent, MigrateRequest, Pool, ResumeRequest, Run, RunCost, RunListParams, Snapshot, Status, Tenant, WhoAmI } from "./types.ts";
 
 type Sig = AbortSignal | undefined;
 /** Tenant scope of a list call: a tenant id or name, or undefined for all the key sees. */
@@ -36,9 +36,17 @@ export const api = {
   hostCost: (id: string, since: string, signal?: Sig) => request<HostCost>(`/hosts/${enc(id)}/cost`, { query: { since }, signal }),
   drainHost: (id: string, forceEvict = false) => request<{ draining: boolean; host: string }>(`/hosts/${enc(id)}/drain`, { method: "POST", body: { forceEvict } }),
 
+  hostEvents: (id: string, before: number | undefined, signal?: Sig) =>
+    request<{ events: LifecycleEvent[] }>(`/hosts/${enc(id)}/events`, { query: { before, limit: EVENTS_PAGE }, signal }).then((r) => r.events),
+
   pools: (tenant: Scope, signal?: Sig) => request<{ pools: Pool[] }>("/pools", { tenant, signal }).then((r) => r.pools),
+  poolEvents: (name: string, tenant: Scope, before: number | undefined, signal?: Sig) =>
+    request<{ events: LifecycleEvent[] }>(`/pools/${enc(name)}/events`, { tenant, query: { before, limit: EVENTS_PAGE }, signal }).then((r) => r.events),
   tenants: (signal?: Sig) => request<{ tenants: Tenant[] }>("/tenants", { signal }).then((r) => r.tenants),
 };
+
+/** Pool and host events per request: the server's maximum. */
+export const EVENTS_PAGE = 1000;
 
 function enc(s: string): string {
   return encodeURIComponent(s);
