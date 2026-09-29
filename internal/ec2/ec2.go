@@ -214,11 +214,46 @@ func (p *Provider) Instances(ctx context.Context, template json.RawMessage, tags
 		filters = append(filters, types.Filter{Name: aws.String("tag:" + k), Values: []string{v}})
 	}
 	out := map[string]server.Instance{}
-	pages := awsec2.NewDescribeInstancesPaginator(c, &awsec2.DescribeInstancesInput{Filters: filters})
+	return out, describe(ctx, c, &awsec2.DescribeInstancesInput{Filters: filters}, out)
+}
+
+// Describe looks instances up by id. EC2 fails the whole call when one id
+// is unknown (InvalidInstanceID.NotFound), so then each is asked alone,
+// and one EC2 does not know is left out.
+func (p *Provider) Describe(ctx context.Context, template json.RawMessage, ids []string) (map[string]server.Instance, error) {
+	t, err := parse(template)
+	if err != nil {
+		return nil, err
+	}
+	c, err := p.client(ctx, t.Region)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]server.Instance{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	err = describe(ctx, c, &awsec2.DescribeInstancesInput{InstanceIds: ids}, out)
+	if !isNotFound(err) || len(ids) == 1 {
+		if isNotFound(err) {
+			err = nil
+		}
+		return out, err
+	}
+	for _, id := range ids {
+		if err := describe(ctx, c, &awsec2.DescribeInstancesInput{InstanceIds: []string{id}}, out); err != nil && !isNotFound(err) {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func describe(ctx context.Context, c *awsec2.Client, in *awsec2.DescribeInstancesInput, out map[string]server.Instance) error {
+	pages := awsec2.NewDescribeInstancesPaginator(c, in)
 	for pages.HasMorePages() {
 		page, err := pages.NextPage(ctx)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for _, r := range page.Reservations {
 			for _, i := range r.Instances {
@@ -233,7 +268,7 @@ func (p *Provider) Instances(ctx context.Context, template json.RawMessage, tags
 			}
 		}
 	}
-	return out, nil
+	return nil
 }
 
 func isNotFound(err error) bool {

@@ -143,3 +143,53 @@ func TestRetagSendsCreateTags(t *testing.T) {
 		t.Errorf("a refused CreateTags: err = %v", err)
 	}
 }
+
+// Describe asks for the instances by id, and when EC2 refuses the call
+// for an id it does not know, asks for each alone and leaves that one out.
+func TestDescribeByID(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_PROFILE", "")
+	known := map[string]string{"i-1": "running", "i-2": "terminated"}
+	var calls [][]string
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		var ids []string
+		for i := 1; r.PostForm.Get(fmt.Sprintf("InstanceId.%d", i)) != ""; i++ {
+			ids = append(ids, r.PostForm.Get(fmt.Sprintf("InstanceId.%d", i)))
+		}
+		calls = append(calls, ids)
+		w.Header().Set("Content-Type", "text/xml")
+		items := ""
+		for _, id := range ids {
+			state, ok := known[id]
+			if !ok {
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprintf(w, `<Response><Errors><Error><Code>InvalidInstanceID.NotFound</Code><Message>%s</Message></Error></Errors><RequestID>x</RequestID></Response>`, id)
+				return
+			}
+			items += `<item><instanceId>` + id + `</instanceId><instanceState><code>16</code><name>` + state + `</name></instanceState>` +
+				`<tagSet><item><key>lux:pool</key><value>t1/a</value></item></tagSet></item>`
+		}
+		fmt.Fprint(w, `<DescribeInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><reservationSet><item><reservationId>r-0</reservationId>`+
+			`<instancesSet>`+items+`</instancesSet></item></reservationSet></DescribeInstancesResponse>`)
+	}))
+	defer fake.Close()
+	p := New(fake.URL)
+	got, err := p.Describe(context.Background(), json.RawMessage(`{"region":"eu-west-1"}`), []string{"i-1", "i-2", "i-gone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got["i-1"].State != "running" || got["i-2"].State != "terminated" || got["i-1"].Tags["lux:pool"] != "t1/a" {
+		t.Errorf("got %+v", got)
+	}
+	if _, ok := got["i-gone"]; ok {
+		t.Error("an id EC2 does not know was answered")
+	}
+	if fmt.Sprint(calls) != "[[i-1 i-2 i-gone] [i-1] [i-2] [i-gone]]" {
+		t.Errorf("calls %v", calls)
+	}
+}
