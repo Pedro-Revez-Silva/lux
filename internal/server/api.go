@@ -260,9 +260,11 @@ func (s *Server) routes(api huma.API) {
 		Summary: "Create or update a pool",
 		Description: "`isDefault: true` makes it the tenant's default pool, where Runs whose spec names no pool go from then on " +
 			"(Runs already submitted keep theirs); the tenant's previous default loses the mark. `false` clears it. " +
-			"A body of only `name` and `isDefault` marks an existing pool and changes nothing else.",
-		Errors: []int{http.StatusNotFound, http.StatusUnprocessableEntity},
-	}, "admin", forTenant(s.putPool))
+			"A body of only `name` and `isDefault` marks an existing pool and changes nothing else; " +
+			"from an operator key naming no tenant, it marks a platform pool as the platform's default, " +
+			"for tenants without one of their own.",
+		Errors: []int{http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity},
+	}, "admin", s.putPool)
 	register(s, api, huma.Operation{
 		OperationID: "deletePool", Method: http.MethodDelete, Path: "/v1/pools/{name}", Tags: []string{"pools"},
 		Summary: "Remove a pool",
@@ -1895,8 +1897,11 @@ type poolBody struct {
 func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	p := principal(ctx)
 	pl := in.Body
-	if pl.Name != "" && pl.Provider == "" && pl.IsDefault != nil {
+	if pl.Name != "" && pl.Provider == "" && pl.IsDefault != nil && (p.TenantID != "" || p.Operator) {
 		return s.markDefaultPool(ctx, p.TenantID, pl.Name, *pl.IsDefault)
+	}
+	if p.TenantID == "" {
+		return nil, errf(http.StatusBadRequest, "tenant_required", "an operator key must name a tenant: ?tenant=<id or name>")
 	}
 	if pl.Name == "" || (pl.Provider != "static" && pl.Provider != "ec2") {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "name and provider (static | ec2) are required")
@@ -1963,10 +1968,15 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 }
 
 // markDefaultPool marks (or clears) one of the tenant's pools as its
-// default and changes nothing else about it.
+// default, or, tenantID "" (an operator), a platform pool as the
+// platform's, and changes nothing else about it.
 func (s *Server) markDefaultPool(ctx context.Context, tenantID, name string, mark bool) (*poolBody, error) {
 	var out Pool
-	err := s.db.Tx(ctx, store.Tenant(tenantID), func(tx pgx.Tx) error {
+	scope := store.Tenant(tenantID)
+	if tenantID == "" {
+		scope = store.System()
+	}
+	err := s.db.Tx(ctx, scope, func(tx pgx.Tx) error {
 		if err := SetDefaultPool(ctx, tx, tenantID, name, mark); err != nil {
 			return err
 		}
@@ -2016,5 +2026,5 @@ func SetDefaultPool(ctx context.Context, tx pgx.Tx, tenantID, name string, mark 
 
 func readPool(ctx context.Context, tx pgx.Tx, tenantID, name string) (Pool, error) {
 	return scanPool(tx.QueryRow(ctx, `SELECT `+poolColumns+` FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id
-		WHERE p.tenant_id = $1 AND p.name = $2`, tenantID, name))
+		WHERE p.tenant_id IS NOT DISTINCT FROM nullif($1, '') AND p.name = $2`, tenantID, name))
 }

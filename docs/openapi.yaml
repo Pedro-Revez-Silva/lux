@@ -2915,7 +2915,7 @@ paths:
         - pools
     post:
       description: |-
-        `isDefault: true` makes it the tenant's default pool, where Runs whose spec names no pool go from then on (Runs already submitted keep theirs); the tenant's previous default loses the mark. `false` clears it. A body of only `name` and `isDefault` marks an existing pool and changes nothing else.
+        `isDefault: true` makes it the tenant's default pool, where Runs whose spec names no pool go from then on (Runs already submitted keep theirs); the tenant's previous default loses the mark. `false` clears it. A body of only `name` and `isDefault` marks an existing pool and changes nothing else; from an operator key naming no tenant, it marks a platform pool as the platform's default, for tenants without one of their own.
 
         Needs the `admin` scope.
       operationId: putPool
@@ -2945,6 +2945,12 @@ paths:
               schema:
                 description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
                 type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Request
         "401":
           content:
             application/json:

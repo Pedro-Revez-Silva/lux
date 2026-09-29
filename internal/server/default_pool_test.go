@@ -306,3 +306,35 @@ func TestDefaultPoolIsTenantScoped(t *testing.T) {
 		t.Fatalf("defaults %v", got)
 	}
 }
+
+// An operator marks a platform pool as the platform's default (no tenant
+// named), and a tenant's pool with ?tenant=; anything else from an
+// operator still needs a tenant.
+func TestOperatorMarksDefaultPools(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pp', NULL, 'plat', 'static'), ('p1', 't1', 'plat', 'static')`)
+	op := context.WithValue(ctx, principalKey, Principal{Operator: true, Scopes: []string{"admin"}})
+	out, err := s.putPool(op, &poolBody{Body: Pool{Name: "plat", IsDefault: mark(true)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Body.Platform || !*out.Body.IsDefault {
+		t.Fatalf("operator marked %+v, want the platform pool", out.Body)
+	}
+	if got := defaultPools(t, s); len(got) != 1 || got[""] != "plat" {
+		t.Fatalf("defaults %v, want only the platform's", got)
+	}
+	opT1 := context.WithValue(ctx, principalKey, Principal{Operator: true, TenantID: "t1", Scopes: []string{"admin"}})
+	if _, err := s.putPool(opT1, &poolBody{Body: Pool{Name: "plat", IsDefault: mark(true)}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := defaultPools(t, s); got[""] != "plat" || got["t1"] != "plat" {
+		t.Fatalf("defaults %v", got)
+	}
+	var he *HTTPError
+	if _, err := s.putPool(op, &poolBody{Body: Pool{Name: "x", Provider: "static"}}); !errors.As(err, &he) || he.Code != "tenant_required" {
+		t.Fatalf("an operator creating a pool without a tenant: %v", err)
+	}
+}
