@@ -19,7 +19,7 @@ console:
 	rm -rf console/node_modules packages/*/node_modules
 	bun install --frozen-lockfile
 	bun run typecheck
-	cd console && bun run build
+	cd console && bun run test && bun run build
 
 unit:
 	LUX_TEST_PG=$${LUX_TEST_PG:-postgres://lux:lux@127.0.0.1:55432/postgres?sslmode=disable} go test ./...

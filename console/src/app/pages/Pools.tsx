@@ -3,16 +3,12 @@ import { Badge, Button, Card, ConfirmDialog, PageHeader, Table, useToast, type C
 import { api, errorText, type Pool } from "../../api/index.ts";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, labelsText } from "./common.tsx";
+import { currentDefaultText } from "./defaultPool.ts";
 
 interface PoolRow extends Pool {
   key: string;
   hostCount: number;
   readyCount: number;
-}
-
-/** The owner a pool's default mark is among: its tenant's name, or "" for the platform. */
-function owner(p: Pool): string {
-  return p.platform ? "" : p.tenant ?? "";
 }
 
 export function Pools() {
@@ -81,8 +77,6 @@ export function Pools() {
     return c;
   }, [showTenant, operator]);
 
-  // The pool whose mark the new one takes: the same tenant's, or the platform's.
-  const current = marking ? rows.find((p) => p.isDefault && p.platform === marking.platform && owner(p) === owner(marking)) : undefined;
   const whose = marking?.platform ? "the platform's" : showTenant || operator ? `tenant ${marking?.tenant}'s` : "your";
   const makeDefault = async () => {
     if (!marking) return;
@@ -115,7 +109,7 @@ export function Pools() {
         title={`Make ${marking?.name} ${whose} default pool?`}
         description={
           <>
-            {current ? `${current.name} is ${whose} default pool now.` : `There is no default pool now: Runs naming no pool go to a pool named "default".`}{" "}
+            {marking && currentDefaultText(rows, marking, whose)}{" "}
             {marking?.platform
               ? `From now on, Runs that name no pool go to ${marking?.name}, for tenants without a default pool of their own.`
               : `From now on, Runs that name no pool go to ${marking?.name}.`}{" "}
