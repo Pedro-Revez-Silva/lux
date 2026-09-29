@@ -40,9 +40,8 @@ def test_template_tags_are_kept_and_lux_tags_are_reserved(lux, ec2):
     bad = {**ec2.template, "tags": {"lux:pool": "burst"}}
     r = lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps(bad), check=False)
     assert r.returncode != 0 and "lux:* tags are set by lux" in r.stderr, r.stderr
-    pool_args = ["pools", "set", "burst", "--provider", "ec2", "--max", "1",
-                 "--template", json.dumps({**ec2.template, "tags": {"team": "platform"}})]
-    lux.run(*pool_args)
+    lux.run("pools", "set", "burst", "--provider", "ec2", "--max", "1",
+            "--template", json.dumps({**ec2.template, "tags": {"team": "platform"}}))
     run_id = lux.submit(generic(ALPINE_IMAGE, "echo", "tagged", placement={"pool": "burst"}))
     lux.wait_state(run_id, "succeeded", timeout=120)
     [inst] = ec2.running()
