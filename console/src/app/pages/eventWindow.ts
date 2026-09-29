@@ -34,10 +34,14 @@ function merge(a: LifecycleEvent[], b: LifecycleEvent[]): LifecycleEvent[] {
   return [...a, ...b.filter((e) => !ids.has(e.id))].sort((x, y) => y.id - x.id);
 }
 
-/** Joins run i with the runs below it while they overlap: nothing lies between them. */
+// No id lies between n and n + 1, so a run ending at the next run's
+// newest + 1 has nothing between them to read.
+const meets = (above: LifecycleEvent[], below: LifecycleEvent[]) => oldest(above) <= newest(below) + 1;
+
+/** Joins run i with the runs below it while they meet: nothing lies between them. */
 function joinFrom(runs: LifecycleEvent[][], i: number): LifecycleEvent[][] {
   const out = runs.slice();
-  while (i + 1 < out.length && oldest(out[i]!) <= newest(out[i + 1]!)) out.splice(i, 2, merge(out[i]!, out[i + 1]!));
+  while (i + 1 < out.length && meets(out[i]!, out[i + 1]!)) out.splice(i, 2, merge(out[i]!, out[i + 1]!));
   return out;
 }
 
@@ -58,7 +62,7 @@ function capped(w: EventWindow, cap: number): EventWindow {
 
 /**
  * The owner's newest page, read at a refresh (pageSize: the size asked
- * for). Joined to the newest run when they overlap; a short page holds
+ * for). Joined to the newest run when they meet; a short page holds
  * every event there is, so it closes every gap; otherwise it is a new run
  * above a gap.
  */
@@ -67,7 +71,7 @@ export function withNewest(w: EventWindow, page: LifecycleEvent[], pageSize: num
   const limit = Math.max(cap, size(w));
   if (page.length < pageSize) return capped({ runs: [w.runs.reduce(merge, page)], done: true }, limit);
   if (w.runs.length === 0) return capped({ runs: [page], done: false }, limit);
-  if (oldest(page) <= newest(w.runs[0]!)) return capped({ ...w, runs: joinFrom([merge(page, w.runs[0]!), ...w.runs.slice(1)], 0) }, limit);
+  if (meets(page, w.runs[0]!)) return capped({ ...w, runs: joinFrom([merge(page, w.runs[0]!), ...w.runs.slice(1)], 0) }, limit);
   return capped({ ...w, runs: [page, ...w.runs] }, limit);
 }
 
@@ -102,7 +106,7 @@ export function withGap(w: EventWindow, gap: Gap, page: LifecycleEvent[], pageSi
   const runs = w.runs.slice();
   runs[i] = merge(runs[i]!, page);
   if (page.length < pageSize) runs.splice(i, 2, merge(runs[i]!, below));
-  return capped({ ...w, runs }, limit);
+  return capped({ ...w, runs: joinFrom(runs, i) }, limit);
 }
 
 /** Where "load older" reads from: below the oldest event kept, if there are older ones. */

@@ -74,6 +74,33 @@ describe("eventWindow", () => {
     expect(ids(w)).toEqual(range(39, 16));
   });
 
+  test("a full newest page ending just above what is kept joins it: no gap, no read", () => {
+    const s = new Stream();
+    s.add(25);
+    let w = refresh(s, emptyWindow);
+    s.add(PAGE);
+    s.requests = 0;
+    w = withNewest(w, s.page(), PAGE);
+    expect(nextGap(w)).toBeNull();
+    expect(ids(w)).toEqual(range(35, 16));
+    expect(s.requests).toBe(1);
+  });
+
+  test("a full gap page ending just above the run below joins it: no empty read after", () => {
+    const s = new Stream();
+    s.add(25);
+    let w = refresh(s, emptyWindow);
+    s.add(2 * PAGE);
+    w = withNewest(w, s.page(), PAGE);
+    const gap = nextGap(w)!;
+    expect(gap).toEqual({ after: 25, before: 36 });
+    s.requests = 0;
+    w = withGap(w, gap, s.page(gap), PAGE);
+    expect(nextGap(w)).toBeNull();
+    expect(ids(w)).toEqual(range(45, 16));
+    expect(s.requests).toBe(1);
+  });
+
   test("a gap larger than a page is read a page at a time, each kept as it arrives", () => {
     const s = new Stream();
     s.add(25);
