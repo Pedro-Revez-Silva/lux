@@ -48,6 +48,17 @@ test("stderr from opencode: plain visible text, and a colour opened in one recor
   expect(second[1]!.spans).toEqual([{ text: "}", fg: 6 }]);
 });
 
+test("partial flush preserves fragmented ESC, CSI and OSC without printing their tails", () => {
+  for (const [prefix, suffix, fg] of [["\x1b", "[31mred\x1b[0m\n", 1], ["\x1b[3", "1mred\x1b[0m\n", 1], ["\x1b", "]0;title\x07red\n", undefined], ["\x1b]0;ti", "tle\x07red\n", undefined]] as const) {
+    const ch = new ChannelLines("stdout");
+    ch.push(1, `before${prefix}`);
+    expect(ch.flush()).toEqual([{ ts: 1, stream: "stdout", text: "before" }]);
+    const next = ch.push(2, suffix);
+    expect(next[0]!.text).toBe("red");
+    expect(next[0]!.spans).toEqual(fg === undefined ? undefined : [{ text: "red", fg }]);
+  }
+});
+
 test("a system line's escapes never reach its text", () => {
   const lines = systemLines(T, "\x1b]0;title\x07\x1b[1mbold\nstill bold\x1b[22m plain");
   expect(lines.map((l) => l.text)).toEqual(["bold", "still bold plain"]);

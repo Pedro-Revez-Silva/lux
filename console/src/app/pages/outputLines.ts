@@ -8,8 +8,8 @@ import { AnsiDecoder, type LogLine } from "@lux/design-system";
 import type { Event } from "../../api/index.ts";
 import { eventSummary } from "./events.ts";
 
-function decodedLine(d: AnsiDecoder, ts: number, stream: LogLine["stream"], raw: string): LogLine {
-  const { text, spans } = d.line(raw);
+function decodedLine(d: AnsiDecoder, ts: number, stream: LogLine["stream"], raw: string, complete = true): LogLine {
+  const { text, spans } = d.line(raw, complete);
   return spans ? { ts, stream, text, spans } : { ts, stream, text };
 }
 
@@ -56,6 +56,6 @@ export class ChannelLines {
   flush(): LogLine[] {
     const p = this.partial;
     this.partial = null;
-    return p ? [decodedLine(this.ansi, p.ts, this.stream, p.text)] : [];
+    return p ? [decodedLine(this.ansi, p.ts, this.stream, p.text, false)] : [];
   }
 }

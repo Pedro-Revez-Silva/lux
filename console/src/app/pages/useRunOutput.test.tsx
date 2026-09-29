@@ -44,6 +44,37 @@ async function harness(run: (h: { send: (messages: Message[]) => Promise<void>; 
   }
 }
 
+test("lifecycle flush preserves fragmented ESC for SGR and OSC", async () => {
+  await harness(async ({ send, state }) => {
+    await send([record("stdout", "before\x1b"), record("stderr", "err\x1b"), ["lux", { id: 1, type: "activity", time: new Date(1).toISOString(), data: {} }], record("stdout", "[31mred\x1b[0m\n", 2), record("stderr", "]0;title\x07visible\n", 2), ["end", {}]]);
+    const out = state().lines.filter((l) => l.stream === "stdout");
+    expect(out.map((l) => l.text)).toEqual(["before", "red"]);
+    expect(out[1]!.spans).toEqual([{ text: "red", fg: 1 }]);
+    expect(state().lines.filter((l) => l.stream === "stderr").map((l) => l.text)).toEqual(["err", "visible"]);
+  });
+});
+
+test("transport reconnect preserves fragmented CSI, timestamp and cursor", async () => {
+  await harness(async ({ send, state, disconnect, urls }) => {
+    await send([record("stdout", "\x1b[3", 11, "resume-here")]);
+    await disconnect();
+    expect(urls[1]).toContain("since=resume-here");
+    await send([record("stdout", "1mred\x1b[0m\n", 22, "next"), ["end", {}]]);
+    expect(state().lines).toEqual([{ ts: 11, stream: "stdout", text: "red", spans: [{ text: "red", fg: 1 }] }]);
+    expect(state().cursor).toBe("next");
+  });
+});
+
+test("switching run ID clears decoder style and cursor", async () => {
+  await harness(async ({ send, state, switchRun, urls }) => {
+    await send([record("stdout", "\x1b[31mold\n", 1, "old-cursor")]);
+    await switchRun();
+    await send([record("stdout", "new\n", 2, "new-cursor"), ["end", {}]]);
+    expect(urls[1]).not.toContain("since=");
+    expect(state().lines).toEqual([{ ts: 2, stream: "stdout", text: "new" }]);
+  });
+});
+
 test("gap flushes pre-gap partials and resets string, CSI and style state", async () => {
   await harness(async ({ send, state }) => {
     await send([record("stdout", "\x1b]0;unfinished-title"), record("stderr", "\x1b[31mbefore\x1b[3"), ["gap", { reason: "lost-host" }], record("stdout", "new workload output\n", 2), record("stderr", "plain stderr\n", 2), ["end", {}]]);

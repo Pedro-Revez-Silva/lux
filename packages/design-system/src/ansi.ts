@@ -46,7 +46,7 @@ export class AnsiDecoder {
   private stringEsc = false;
 
   /** Decodes one line (no "\n"). Text after a "\r" replaces what came before it, as a terminal's progress line reads once redrawn. */
-  line(raw: string): AnsiLine {
+  line(raw: string, complete = true): AnsiLine {
     const s = this.carry ? this.carry + raw : raw;
     this.carry = "";
     const spans: AnsiSpan[] = [];
@@ -94,10 +94,10 @@ export class AnsiDecoder {
       else if (c === ESC) {
         const end = this.escape(s, i, close);
         if (end < 0) {
-          // Cut by the line break: an unfinished CSI completes on the next line (a
-          // terminal runs the LF inside it); anything else is dropped, never printed.
+          // A partial flush is not a newline: even a lone ESC can continue.
+          // At a real newline only unfinished CSI keeps the existing continuation policy.
           const rest = s.slice(i);
-          if (rest.length <= MAX_CARRY && CSI_PREFIX.test(rest)) this.carry = rest;
+          if (rest.length <= MAX_CARRY && (!complete || CSI_PREFIX.test(rest))) this.carry = rest;
           run = i = n;
           break;
         }
