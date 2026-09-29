@@ -263,6 +263,7 @@ func (r *Runner) hello(ctx context.Context) proto.Hello {
 		LocalSnapshots:  r.localSnapshots(),
 		RunnerSHA256:    r.runnerSHA256,
 		ShimSHA256:      r.shimSHA256,
+		Capabilities:    []string{proto.CapDiff},
 	}
 	r.mu.Lock()
 	for _, p := range r.placements {

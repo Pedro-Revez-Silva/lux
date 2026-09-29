@@ -29,7 +29,7 @@ func TestRenamePoolKeepsHostsAndRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Body.Name != "new" || out.Body.IsDefault == nil || !*out.Body.IsDefault {
+	if out.Body.ID != id || out.Body.Name != "new" || out.Body.IsDefault == nil || !*out.Body.IsDefault {
 		t.Fatalf("renamed pool %+v, want new and still the default", out.Body)
 	}
 	if got := poolID(t, s, "new", "t1"); got != id {

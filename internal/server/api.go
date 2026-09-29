@@ -138,6 +138,17 @@ func (s *Server) routes(api huma.API) {
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "run", s.pushRun)
 	register(s, api, huma.Operation{
+		OperationID: "runDiff", Method: http.MethodGet, Path: "/v1/runs/{id}/diff", Tags: []string{"runs"},
+		Summary: "What a running Run changed in its repositories",
+		Description: "Per repository, from its base to its working tree: committed, staged, unstaged and untracked (not ignored) changes, " +
+			"computed now in the Run's container. `base=clone` (default) diffs from the commit the repository was cloned at, `base=head` from its HEAD. " +
+			"Untracked files are cut at 32 KiB each, or 8 KiB each if the whole diff would pass 1 MiB, and binary ones are named only: " +
+			"such a patch is `truncated` and does not apply as it is. A diff over 16 MiB is refused (502 `diff_failed`).\n\n" +
+			"Only while the Run is running: otherwise 409 `run_not_running`. 404 `no_diff` when the Run has no repositories. " +
+			"One diff per Run at a time (409 `diff_busy`). 503 `diff_unsupported` when the Run's runner predates diffs.",
+		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout},
+	}, "read", s.runDiff)
+	register(s, api, huma.Operation{
 		OperationID: "listSnapshots", Method: http.MethodGet, Path: "/v1/runs/{id}/snapshots", Tags: []string{"runs"},
 		Summary: "List a Run's snapshots",
 		Errors:  []int{http.StatusNotFound},
@@ -1933,6 +1944,7 @@ func evictReason(force bool) string {
 }
 
 type Pool struct {
+	ID        string         `json:"id" readOnly:"true" doc:"The pool's immutable identity; unchanged by rename."`
 	Name      string         `json:"name"`
 	Tenant    string         `json:"tenant,omitempty" readOnly:"true" doc:"The owning tenant's name; empty for a platform pool."`
 	Provider  string         `json:"provider"`
@@ -1998,7 +2010,7 @@ type listPoolsOutput struct {
 }
 
 // poolColumns: Select poolColumns FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id.
-const poolColumns = `p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
+const poolColumns = `p.id, p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
 	coalesce(p.scale_down_after_s, 0), p.warm_while_active,
 	p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, ''), p.is_default`
 
@@ -2006,7 +2018,7 @@ func scanPool(row pgx.Row) (Pool, error) {
 	var pl Pool
 	var sda int
 	var isDefault bool
-	err := row.Scan(&pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts,
+	err := row.Scan(&pl.ID, &pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts,
 		&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &isDefault)
 	pl.ScaleDownAfter.Duration = time.Duration(sda) * time.Second
 	pl.IsDefault = &isDefault

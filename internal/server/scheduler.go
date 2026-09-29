@@ -515,7 +515,9 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 		return err
 	}
 	// The placement is on the Run, its host and its host's pool alike.
-	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID, "pool": h.Pool, "poolId": h.PoolID}); err != nil {
+	// snapshotId: what its volumes start from (null: empty), the lineage
+	// its repositories' clone commits follow (gitBases).
+	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID, "pool": h.Pool, "poolId": h.PoolID, "snapshotId": r.SnapshotID}); err != nil {
 		return err
 	}
 	placed := map[string]any{"run": r.ID, "epoch": epoch, "host": h.ID}
@@ -527,6 +529,11 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	}
 
 	a := proto.Assign{RunID: r.ID, TenantID: r.TenantID, Epoch: epoch, Spec: r.Spec, ImageResolved: r.ImageResolved}
+	if r.SnapshotID != nil {
+		if a.GitBases, err = gitBases(ctx, tx, r.ID, epoch); err != nil {
+			return err
+		}
+	}
 	if r.SnapshotID != nil || r.SessionID != "" {
 		a.Resume = &proto.ResumeInfo{SessionID: r.SessionID, Snapshot: snap}
 	}
