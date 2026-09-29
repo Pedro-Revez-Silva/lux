@@ -44,7 +44,7 @@ export function EventTable<E extends LifecycleEventRow>({ events, summary, detai
   const cols = useMemo<Column<E>[]>(() => {
     const c: Column<E>[] = [
       { key: "id", header: "#", cell: (e) => e.id, sortValue: (e) => e.id, align: "right", mono: true, width: 76, optional: true },
-      { key: "time", header: "Time", cell: (e) => formatTimestamp(e.time), sortValue: (e) => e.id, mono: true, width: 180 },
+      { key: "time", header: "Time", cell: (e) => formatTimestamp(e.time), sortValue: (e) => Date.parse(e.time), mono: true, width: 180 },
     ];
     if (epoch) c.push({ key: "epoch", header: "Epoch", cell: (e) => e.epoch ?? "–", sortValue: (e) => e.epoch ?? 0, align: "right", mono: true, width: 72, optional: true });
     c.push(

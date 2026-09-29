@@ -1,4 +1,7 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { EventTable, repeatNote, type LifecycleEventRow } from "./EventTable.tsx";
 
@@ -39,4 +42,44 @@ test("repeatNote: only for more than once", () => {
 
 test("EventTable: no events reads the empty text", () => {
   expect(renderToStaticMarkup(<EventTable events={[]} summary={() => ""} empty="Nothing happened yet." />)).toContain("Nothing happened yet.");
+});
+
+/** Renders into a DOM whose containers are `width` px wide, and returns the rows' types, top to bottom, and the container. */
+async function mount(events: LifecycleEventRow[], width: number) {
+  Object.defineProperty(HTMLElement.prototype, "clientWidth", { configurable: true, get: () => width });
+  const el = document.createElement("div");
+  document.body.appendChild(el);
+  const root = createRoot(el);
+  await act(async () => root.render(<EventTable events={events} summary={(e) => e.type} />));
+  const types = () => [...el.querySelectorAll("tbody tr")].map((tr) => tr.querySelector("td .secondary")?.textContent);
+  const headers = () => [...el.querySelectorAll("thead th")].map((th) => th.textContent);
+  return { el, root, types, headers };
+}
+
+describe("EventTable in a DOM", () => {
+  beforeAll(() => {
+    GlobalRegistrator.register();
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  });
+  afterAll(async () => {
+    await GlobalRegistrator.unregister();
+  });
+
+  test("narrow, without its # column, newest first all the same", async () => {
+    const { root, types, headers } = await mount(events, 700);
+    expect(headers()).not.toContain("#");
+    expect(types()).toEqual(["pool.launch_failed", "pool.scale_up", "pool.placement"]);
+    await act(async () => root.unmount());
+  });
+
+  test("Time sorts by when each happened, not by id", async () => {
+    // Ids and times in different orders: 7 is newest by id, oldest by time.
+    const { el, root, types } = await mount(events, 1400);
+    const time = [...el.querySelectorAll("thead th")].find((th) => th.textContent === "Time") as HTMLElement;
+    await act(async () => time.click());
+    expect(types()).toEqual(["pool.launch_failed", "pool.scale_up", "pool.placement"]);
+    await act(async () => time.click());
+    expect(types()).toEqual(["pool.placement", "pool.scale_up", "pool.launch_failed"]);
+    await act(async () => root.unmount());
+  });
 });
