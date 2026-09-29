@@ -90,7 +90,7 @@ func (f *fakeLuxd) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // runCLI runs lux with args against f, returning stdout and the error.
-func runCLI(t *testing.T, f *fakeLuxd, args ...string) (string, error) {
+func runCLI(t *testing.T, f http.Handler, args ...string) (string, error) {
 	t.Helper()
 	srv := httptest.NewServer(f)
 	defer srv.Close()

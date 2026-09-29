@@ -23,6 +23,11 @@ func (a *app) infraEventsCmd(use, short, base string, query func(url.Values)) *c
 		Short: short,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// The server's bounds: out of them it would use its default,
+			// and --all would page by the wrong size.
+			if limit < 1 || limit > 1000 {
+				return fmt.Errorf("--limit must be 1 to 1000")
+			}
 			var evs []server.LifecycleEvent
 			for next := before; ; {
 				q := url.Values{"limit": {fmt.Sprint(limit)}}
