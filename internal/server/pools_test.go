@@ -48,6 +48,39 @@ func TestPutPoolRejectsUnknownUserData(t *testing.T) {
 	}
 }
 
+// putPool refuses an EC2 template's lux:* tags: lux sets them on every
+// instance and lists a pool's instances by them. Other tags still pass,
+// and must be strings.
+func TestPutPoolRejectsReservedTemplateTags(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+	for _, tags := range []any{
+		map[string]any{"lux:pool": "arm64"},
+		map[string]any{"LUX:Host": "h"},
+		map[string]any{"team": 1},
+		"lux:pool=arm64",
+		nil, // an explicit "tags": null; an absent key is fine
+	} {
+		pool := poolIn(Pool{Name: "burst", Provider: "ec2", Template: map[string]any{"tags": tags}})
+		_, err := s.putPool(ctx, pool)
+		var he *HTTPError
+		if !errors.As(err, &he) || he.Status != http.StatusUnprocessableEntity {
+			t.Errorf("tags %#v: err = %v, want a 422 HTTPError", tags, err)
+		}
+	}
+	ok := poolIn(Pool{Name: "burst", Provider: "ec2", Template: map[string]any{"tags": map[string]any{"team": "platform"}}})
+	if _, err := s.putPool(ctx, ok); err != nil {
+		t.Fatalf("ordinary template tags were refused: %v", err)
+	}
+}
+
 // A template.userData that isn't a string (a number or a bool, both valid
 // JSON that unmarshal into map[string]any) is refused with 422, not
 // stored: JSON later fails to decode it into hostboot's string field on

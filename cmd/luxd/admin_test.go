@@ -164,3 +164,64 @@ func TestAdminPoolDefault(t *testing.T) {
 		}
 	}
 }
+
+// create-pool --default writes the pool, its mark and their events in one
+// transaction: each pool the mark moves between records it, and when an
+// event cannot be written neither the settings nor the mark change.
+func TestAdminPoolDefaultEvents(t *testing.T) {
+	cfg, db := adminDB(t)
+	ctx := context.Background()
+	stdout := os.Stdout
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = devnull
+	t.Cleanup(func() { os.Stdout = stdout; devnull.Close() })
+
+	for _, args := range [][]string{
+		{"create-pool", "--name", "a", "--default"},
+		{"create-pool", "--name", "b", "--max", "2", "--default"},
+	} {
+		if err := admin(ctx, cfg, args); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	var got []string
+	rows, err := db.Query(ctx, `SELECT p.name || ' ' || e.type || ' ' || coalesce(e.data->'changes'->'isDefault'->>'old', 'null') || '→' || (e.data->'changes'->'isDefault'->>'new')
+		FROM pool_events e JOIN pools p ON p.id = e.pool_id ORDER BY e.id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, s)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"a pool.config_changed null→true", "b pool.config_changed null→true", "a pool.config_changed true→false"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("events %v, want %v", got, want)
+	}
+
+	if _, err := db.Exec(ctx, `CREATE FUNCTION refuse_event() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN RAISE EXCEPTION 'event refused'; END $$;
+		CREATE TRIGGER refuse BEFORE INSERT ON pool_events FOR EACH ROW EXECUTE FUNCTION refuse_event()`); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin(ctx, cfg, []string{"create-pool", "--name", "a", "--max", "5", "--default"}); err == nil {
+		t.Fatal("create-pool succeeded with its events refused")
+	}
+	var marked string
+	var maxA int
+	if err := db.QueryRow(ctx, `SELECT (SELECT name FROM pools WHERE is_default), (SELECT max_hosts FROM pools WHERE name = 'a')`).Scan(&marked, &maxA); err != nil {
+		t.Fatal(err)
+	}
+	if marked != "b" || maxA != 0 {
+		t.Fatalf("after a refused create-pool: default %q, a's max_hosts %d; want b and 0", marked, maxA)
+	}
+}

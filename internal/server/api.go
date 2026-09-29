@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"reflect"
 	"slices"
@@ -257,6 +258,13 @@ func (s *Server) routes(api huma.API) {
 		Errors:  []int{http.StatusNotFound, http.StatusForbidden, http.StatusConflict},
 	}, "read", s.hostCost)
 	register(s, api, huma.Operation{
+		OperationID: "listHostEvents", Method: http.MethodGet, Path: "/v1/hosts/{id}/events", Tags: []string{"hosts"},
+		Summary: "List a host's events",
+		Description: "What happened to the host, newest first: registered, ready, placements assigned and ended, drains and their cause, lost, termination, provider errors. " +
+			"A tenant sees its own hosts' events only, and so does an operator narrowed to it with `?tenant=`.",
+		Errors: []int{http.StatusNotFound, http.StatusForbidden, http.StatusConflict},
+	}, "read", s.listHostEvents)
+	register(s, api, huma.Operation{
 		OperationID: "drainHost", Method: http.MethodPost, Path: "/v1/hosts/{id}/drain", Tags: []string{"hosts"},
 		Summary: "Drain a host",
 		Description: "No new placements; its live Runs finish where they are. With forceEvict, they are also stopped and resumed elsewhere " +
@@ -282,6 +290,14 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "listPools", Method: http.MethodGet, Path: "/v1/pools", Tags: []string{"pools"},
 		Summary: "List pools", Description: "The tenant's pools and the platform pools it can use. Operators: every pool.",
 	}, "read", s.listPools)
+	register(s, api, huma.Operation{
+		OperationID: "listPoolEvents", Method: http.MethodGet, Path: "/v1/pools/{name}/events", Tags: []string{"pools"},
+		Summary: "List a pool's events",
+		Description: "What happened to the pool, newest first: scale-ups and why, launches and their failures, placements on its hosts, hosts released and why, spot interruptions, configuration changes, removal (retired) and being set again (restored). " +
+			"A failure repeated on every provisioner pass is one event, its `count` and `lastTime` updated in place. " +
+			"A tenant's own pool of that name, else the platform's (`?owner=` picks one); a platform pool's events are the operators' (they name other tenants' Runs), and not shown to an operator narrowed with `?tenant=`.",
+		Errors: []int{http.StatusNotFound, http.StatusForbidden, http.StatusConflict},
+	}, "read", s.listPoolEvents)
 
 	// Operators and the system.
 	register(s, api, huma.Operation{
@@ -389,14 +405,16 @@ type Run struct {
 	HostID      string            `json:"hostId,omitempty" doc:"That host's id."`
 	Spec        spec.RunSpec      `json:"spec"`
 	// Image is how a built image was resolved on its first build.
-	Image       *ImageResolution `json:"image,omitempty"`
-	Secrets     []spec.SecretRef `json:"secrets"`
-	CreatedAt   time.Time        `json:"createdAt"`
-	ScheduledAt *time.Time       `json:"firstScheduledAt,omitempty"`
-	StartedAt   *time.Time       `json:"firstStartedAt,omitempty"`
-	FinishedAt  *time.Time       `json:"finishedAt,omitempty"`
-	Placements  []Placement      `json:"placements,omitempty"`
-	Usage       *RunUsage        `json:"usage,omitempty"`
+	Image          *ImageResolution `json:"image,omitempty"`
+	Secrets        []spec.SecretRef `json:"secrets"`
+	CreatedAt      time.Time        `json:"createdAt"`
+	ScheduledAt    *time.Time       `json:"firstScheduledAt,omitempty"`
+	StartedAt      *time.Time       `json:"firstStartedAt,omitempty"`
+	FinishedAt     *time.Time       `json:"finishedAt,omitempty"`
+	RuntimeSeconds float64          `json:"runtimeSeconds" doc:"Seconds its placements have spent running, summed: each from reaching running to exiting or being lost; one still running counts up to the time of the response."`
+	RuntimeSince   *time.Time       `json:"runtimeSince,omitempty" doc:"When the placement still running started, if one is: runtimeSeconds grows from the response's time on."`
+	Placements     []Placement      `json:"placements,omitempty"`
+	Usage          *RunUsage        `json:"usage,omitempty"`
 	// Resume: on GET /v1/runs/{id} of a stopped, lost or failed Run, what
 	// a resume would take.
 	Resume *Resumability `json:"resume,omitempty"`
@@ -467,17 +485,28 @@ type RunUsage struct {
 // Select runColumns FROM runsFrom.
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
-	coalesce(rh.name, ''), coalesce(rp.host_id, '')`
+	coalesce(rh.name, ''), coalesce(rp.host_id, ''), rr.seconds, rr.since`
 
-// runsFrom: a Run with its tenant and its current placement's host.
+// runsFrom: a Run with its tenant, its current placement's host, and its
+// runtime (rr). Runtime is the sum over its placements of started_at
+// (reached running) to ended_at (exited or lost), or to now() for one still
+// live (stopping included); a placement that never reached running adds 0,
+// and so does a terminal one missing ended_at, rather than growing forever.
+// since is when the live one started. Per Run, one scan of placements
+// (run_id, epoch).
 const runsFrom = `runs r JOIN tenants rt ON rt.id = r.tenant_id
 	LEFT JOIN placements rp ON rp.run_id = r.id AND rp.epoch = r.current_epoch
-	LEFT JOIN hosts rh ON rh.id = rp.host_id`
+	LEFT JOIN hosts rh ON rh.id = rp.host_id
+	CROSS JOIN LATERAL (SELECT
+			coalesce(sum(extract(epoch FROM coalesce(p.ended_at, CASE WHEN p.state IN ` + livePlacementStates + ` THEN now() ELSE p.started_at END) - p.started_at)), 0)::float8 AS seconds,
+			max(p.started_at) FILTER (WHERE p.ended_at IS NULL AND p.state IN ` + livePlacementStates + `) AS since
+		FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) rr`
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
-		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID)
+		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
+		&r.RuntimeSeconds, &r.RuntimeSince)
 	return &r, err
 }
 
@@ -706,8 +735,10 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 	}
 	runs := []*Run{}
 	err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE `+strings.Join(where, " AND ")+
-			` ORDER BY r.created_at DESC LIMIT `+strconv.Itoa(limit), args...)
+		// The page is chosen first, so runsFrom's joins and runtime
+		// aggregate run for its rows only, not for every Run matched.
+		rows, err := tx.Query(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.id IN (SELECT r.id FROM runs r WHERE `+
+			strings.Join(where, " AND ")+` ORDER BY r.created_at DESC, r.id DESC LIMIT `+strconv.Itoa(limit)+`) ORDER BY r.created_at DESC, r.id DESC`, args...)
 		if err != nil {
 			return err
 		}
@@ -1644,6 +1675,7 @@ func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostO
 			if err != nil {
 				return err
 			}
+			// drainHosts writes its events last: lock nothing after it here.
 			hosts, err = s.drainHosts(ctx, tx, "drain requested", causeManual, stopReason, "id = $1 AND (tenant_id = $2 OR $3)", id, p.TenantID, p.Operator)
 			if err == nil && len(hosts) == 0 {
 				return errNotFound
@@ -1668,6 +1700,8 @@ const (
 	causeManual    = "manual" // drainHost, deletePool
 	causeScaleDown = "scale-down"
 	causePreempt   = "preempt"
+
+	poolRemovedReason = "pool removed"
 )
 
 // drainHosts takes hosts out of service (no new placements), adds cause to
@@ -1679,6 +1713,17 @@ const (
 // (provisioned) takes it once idle. Returns their ids, to notify once the
 // transaction commits.
 func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, cause, stopReason, where string, args ...any) ([]string, error) {
+	var later laterEvents
+	hosts, err := s.drainHostsLater(ctx, tx, &later, reason, cause, stopReason, where, args...)
+	if err != nil {
+		return nil, err
+	}
+	return hosts, later.write()
+}
+
+// drainHostsLater is drainHosts leaving its events in later, for a caller
+// that locks more rows after it.
+func (s *Server) drainHostsLater(ctx context.Context, tx pgx.Tx, later *laterEvents, reason, cause, stopReason, where string, args ...any) ([]string, error) {
 	var candidates []string
 	if stopReason != "" {
 		rows, err := tx.Query(ctx, `SELECT id FROM hosts WHERE state <> 'terminated' AND `+where+` ORDER BY id`, args...)
@@ -1762,28 +1807,73 @@ func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, cause, stopR
 		updateWhere = where + fmt.Sprintf(" AND id = ANY($%d)", len(args)+1)
 		updateArgs = append(append([]any{}, args...), candidates)
 	}
-	rows, err := tx.Query(ctx, fmt.Sprintf(`UPDATE hosts SET draining = true,
+	// fresh: the hosts this cause is new on (locked in id order first, so
+	// two drains for one cause cannot both see it new).
+	n := len(updateArgs)
+	rows, err := tx.Query(ctx, fmt.Sprintf(`WITH old AS (
+			SELECT id, $%d = ANY(drain_causes) AS had FROM hosts
+			WHERE state <> 'terminated' AND %s ORDER BY id FOR NO KEY UPDATE)
+		UPDATE hosts SET draining = true,
 			state = CASE WHEN state = 'ready' THEN 'draining' ELSE state END,
 			state_reason = $%d,
-			drain_causes = CASE WHEN $%d = ANY(drain_causes) THEN drain_causes ELSE array_append(drain_causes, $%d) END,
+			drain_causes = CASE WHEN old.had THEN drain_causes ELSE array_append(drain_causes, $%d) END,
 			drain_requested_at = coalesce(drain_requested_at, now())
-		WHERE state <> 'terminated' AND %s
-		RETURNING id`, len(updateArgs)+1, len(updateArgs)+2, len(updateArgs)+2, updateWhere), append(updateArgs, reason, cause)...)
+		FROM old WHERE hosts.id = old.id
+		RETURNING hosts.id, NOT old.had`, n+2, updateWhere, n+1, n+2), append(updateArgs, reason, cause)...)
 	if err != nil {
 		return nil, err
 	}
-	hosts, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil || len(hosts) == 0 || stopReason == "" {
-		return hosts, err
+	type drained struct {
+		ID    string
+		Fresh bool
 	}
-	live, err := livePlacements(ctx, tx, "p.host_id = ANY($1)", hosts)
+	got, err := pgx.CollectRows(rows, pgx.RowToStructByPos[drained])
 	if err != nil {
 		return nil, err
 	}
-	for _, p := range live {
-		if _, err := s.requestStop(ctx, tx, p.TenantID, p.RunID, stopReason); err != nil {
+	hosts := make([]string, 0, len(got))
+	for _, h := range got {
+		hosts = append(hosts, h.ID)
+	}
+	// An eviction is news where it stops a placement not already stopping.
+	evicting := map[string]bool{}
+	if stopReason != "" && len(hosts) > 0 {
+		rows, err := tx.Query(ctx, `SELECT DISTINCT host_id FROM placements
+			WHERE host_id = ANY($1) AND state IN `+livePlacementStates+` AND stop_requested_at IS NULL`, hosts)
+		if err != nil {
 			return nil, err
 		}
+		ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			evicting[id] = true
+		}
+	}
+	// One event per new cause or new eviction: draining a drained host
+	// again for the same cause says nothing new. Left to later, after the
+	// stops, which lock placements: event streams come last (infraevents.go).
+	if len(hosts) > 0 && stopReason != "" {
+		live, err := livePlacements(ctx, tx, "p.host_id = ANY($1)", hosts)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range live {
+			if _, err := s.requestStop(ctx, tx, p.TenantID, p.RunID, stopReason); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, h := range got {
+		if !h.Fresh && !evicting[h.ID] {
+			continue
+		}
+		d := map[string]any{"cause": cause, "reason": reason}
+		if evicting[h.ID] {
+			d["evict"] = true
+		}
+		later.host(ctx, tx, h.ID, evDrainRequested, d)
 	}
 	return hosts, nil
 }
@@ -1938,39 +2028,29 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 	var hosts []string
 	err := retryHostPlacements(ctx, func() error {
 		return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			// Before the row, as a mark takes it: a mark checking the pool
-			// exists never sees it before this retires it and clears its mark.
+			// The owner's default lock, then (ChangePool) the pool-name lock
+			// and the pool row, then its Runs and hosts (drainHosts), and its
+			// pool.retired event last, after the drain: the lock order of
+			// infraevents.go puts event streams after every row lock.
 			if err := lockDefaultPool(ctx, tx, p.TenantID); err != nil {
 				return err
 			}
-			if stopReason != "" {
-				var exists bool
-				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pools WHERE tenant_id = $1 AND name = $2 AND NOT retired)`, p.TenantID, name).Scan(&exists); err != nil {
-					return err
-				}
-				if !exists {
-					return errNotFound
-				}
-				var err error
-				hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
-					"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
+			return ChangePool(ctx, tx, &p.TenantID, name, func() error {
+				tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0, is_default = false
+					WHERE tenant_id = $1 AND name = $2 AND NOT retired`, p.TenantID, name)
 				if err != nil {
 					return err
 				}
-			}
-			tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0, is_default = false
-				WHERE tenant_id = $1 AND name = $2 AND NOT retired`, p.TenantID, name)
-			if err != nil {
+				if tag.RowsAffected() == 0 {
+					return errNotFound
+				}
+				// Provisioned hosts, including those whose launch is in
+				// flight (no provider id yet): cordoned now, a launch
+				// that completes later lands on a draining host.
+				hosts, err = s.drainHosts(ctx, tx, poolRemovedReason, causeManual, stopReason,
+					"tenant_id = $1 AND pool = $2 AND (provider_id IS NOT NULL OR provision_requested_at IS NOT NULL)", p.TenantID, name)
 				return err
-			}
-			if tag.RowsAffected() == 0 {
-				return errNotFound
-			}
-			if stopReason == "" {
-				hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
-					"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
-			}
-			return err
+			})
 		})
 	})
 	if err != nil {
@@ -2033,6 +2113,25 @@ func resolvePool(ctx context.Context, tx pgx.Tx, tenantID, pool string) (resolve
 	return rp, err
 }
 
+// checkTemplateTags refuses an EC2 template's tags that are not a string
+// map (null included), or that set a lux:* key: lux tags every instance itself (lux:pool,
+// lux:host, …) and finds a pool's instances by those tags.
+func checkTemplateTags(raw any) error {
+	tags, isMap := raw.(map[string]any)
+	if !isMap {
+		return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.tags must be an object of strings, got %T", raw)
+	}
+	for _, k := range slices.Sorted(maps.Keys(tags)) {
+		if _, isString := tags[k].(string); !isString {
+			return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.tags.%s must be a string, got %T", k, tags[k])
+		}
+		if strings.HasPrefix(strings.ToLower(k), "lux:") {
+			return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.tags.%s: lux:* tags are set by lux", k)
+		}
+	}
+	return nil
+}
+
 // putPool creates or updates one of the tenant's pools.
 type poolBody struct {
 	TenantQuery
@@ -2079,6 +2178,11 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "only platform pools can be shared (luxd admin create-pool --shared)")
 	}
 	if pl.Provider == "ec2" {
+		if raw, present := pl.Template["tags"]; present {
+			if err := checkTemplateTags(raw); err != nil {
+				return nil, err
+			}
+		}
 		if raw, present := pl.Template["userData"]; present {
 			ud, isString := raw.(string)
 			if !isString {
@@ -2165,47 +2269,86 @@ const PoolRevive = `is_default = pools.is_default AND NOT pools.retired, retired
 
 // SavePool runs upsert, which creates or replaces the pool name of
 // tenantID's ("" a platform pool), and then sets its default mark unless
-// mark is nil, all under the owner's lock. The lock comes before the
-// upsert locks the pool's row, as in SetDefaultPool and deletePool: the
-// other order could deadlock against them.
+// mark is nil, in ChangePool, so the pool's event records both. A mark
+// taken off another pool is that pool's config_changed event. Lock order:
+// the owner's default lock (only with a mark) before ChangePool's
+// pool-name lock and row, as in deletePool; then the other pool's row,
+// in the marking statement; event streams last.
 func SavePool(ctx context.Context, tx pgx.Tx, tenantID, name string, mark *bool, upsert func() error) error {
 	if mark != nil {
 		if err := lockDefaultPool(ctx, tx, tenantID); err != nil {
 			return err
 		}
 	}
-	if err := upsert(); err != nil || mark == nil {
+	var owner *string
+	if tenantID != "" {
+		owner = &tenantID
+	}
+	var unmarked []string
+	err := ChangePool(ctx, tx, owner, name, func() error {
+		if err := upsert(); err != nil || mark == nil {
+			return err
+		}
+		var err error
+		unmarked, err = markPools(ctx, tx, tenantID, name, *mark)
+		return err
+	})
+	if err != nil {
 		return err
 	}
-	return SetDefaultPool(ctx, tx, tenantID, name, *mark)
+	for _, id := range unmarked {
+		if err := poolEvent(ctx, tx, id, evConfigChanged, map[string]any{"created": false,
+			"changes": map[string]any{"isDefault": map[string]any{"old": true, "new": false}}}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // SetDefaultPool marks the pool name as its owner's default (tenantID ""
-// for the platform's), clearing the previous one in the same statement
-// (pools_one_default is checked at its end), or clears it. A retired pool,
-// or none of that name, is a 404.
+// for the platform's), or clears it, changing nothing else: SavePool with
+// no upsert.
 func SetDefaultPool(ctx context.Context, tx pgx.Tx, tenantID, name string, mark bool) error {
-	if err := lockDefaultPool(ctx, tx, tenantID); err != nil {
-		return err
-	}
+	return SavePool(ctx, tx, tenantID, name, &mark, func() error { return nil })
+}
+
+// markPools sets name's mark, clearing the previous one in the same
+// statement (pools_one_default is checked at its end), and returns the ids
+// of the other pools it took a mark off. A retired pool, or none of that
+// name, is a 404. The caller holds the owner's default lock.
+func markPools(ctx context.Context, tx pgx.Tx, tenantID, name string, mark bool) ([]string, error) {
 	const owner = `tenant_id IS NOT DISTINCT FROM nullif($1, '')`
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pools WHERE `+owner+` AND name = $2 AND NOT retired)`,
 		tenantID, name).Scan(&exists); err != nil {
-		return err
+		return nil, err
 	}
 	if !exists {
-		return errf(http.StatusNotFound, "not_found", "no pool %q", name)
+		return nil, errf(http.StatusNotFound, "not_found", "no pool %q", name)
 	}
 	if !mark {
 		_, err := tx.Exec(ctx, `UPDATE pools SET is_default = false WHERE `+owner+` AND name = $2`, tenantID, name)
-		return err
+		return nil, err
 	}
 	// A retired pool is never marked, and loses a mark it kept (a removal
 	// that raced a mark before both took the lock), which would otherwise
 	// hold pools_one_default against every later mark.
-	_, err := tx.Exec(ctx, `UPDATE pools SET is_default = (name = $2 AND NOT retired) WHERE `+owner+` AND (name = $2 OR is_default)`, tenantID, name)
-	return err
+	rows, err := tx.Query(ctx, `UPDATE pools SET is_default = (name = $2 AND NOT retired)
+		WHERE `+owner+` AND (name = $2 OR is_default)
+		RETURNING id, name <> $2 AND NOT is_default`, tenantID, name)
+	if err != nil {
+		return nil, err
+	}
+	var unmarked []string
+	var id string
+	var cleared bool
+	_, err = pgx.ForEachRow(rows, []any{&id, &cleared}, func() error {
+		if cleared {
+			unmarked = append(unmarked, id)
+		}
+		return nil
+	})
+	return unmarked, err
 }
 
 func readPool(ctx context.Context, tx pgx.Tx, tenantID, name string) (Pool, error) {

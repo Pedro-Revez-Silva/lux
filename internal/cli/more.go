@@ -420,7 +420,8 @@ provider. Your own hosts; operators, any host.`,
 	priceCmd.Flags().StringVar(&price.HourlyPrice, "hourly-price", "", "price per hour, a decimal (e.g. 0.40)")
 	priceCmd.Flags().StringVar(&price.Currency, "currency", "", "ISO 4217 currency of --hourly-price (e.g. USD)")
 	priceCmd.Flags().BoolVar(&clearPrice, "clear", false, "remove the host's price")
-	cmd.AddCommand(ls, get, drain, priceCmd)
+	events := a.infraEventsCmd("events <host>", "What happened to a host (by id or name), newest first", "/v1/hosts/", nil)
+	cmd.AddCommand(ls, get, drain, priceCmd, events)
 	return cmd
 }
 
@@ -642,7 +643,7 @@ terminated once idle; their live Runs finish where they are.
 	set.Flags().StringVar(&p.HourlyPrice, "hourly-price", "", "static pools: default hourly price of hosts registering into it, a decimal (with --currency); existing hosts keep theirs. Like every flag here, it replaces the pool's: omitted, the pool has no default price")
 	set.Flags().StringVar(&p.Currency, "currency", "", "ISO 4217 currency of --hourly-price (e.g. USD)")
 	set.Flags().BoolVar(&isDefault, "default", false, "mark it the tenant's default pool, for Runs that name none (--default=false clears it; omitted: unchanged)")
-	cmd.AddCommand(ls, set)
+	cmd.AddCommand(ls, set, a.poolEventsCmd())
 	return cmd
 }
 

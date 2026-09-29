@@ -6,6 +6,7 @@ environment, then `~/.config/lux/config.toml`:
 ```toml
 url = "https://luxd.example.com"
 api_key = "lux_…"
+tenant = "acme"   # optional: the default --tenant
 ```
 
 | Flag | Env | |
@@ -15,6 +16,10 @@ api_key = "lux_…"
 | `--tenant` | `LUX_TENANT` | with an operator key: one tenant only (id or name) |
 | `-o json` | | machine-readable output, for every command that prints data |
 
+For the tenant, a flag or variable set to the empty string still counts:
+`--tenant ""` or `LUX_TENANT=` means all tenants, even with `tenant` in the
+config file. A tenant key ignores it, wherever it comes from.
+
 **Exit codes:** `0` success; the Run's own exit code for `run --follow`,
 `run --wait`, `resume --follow` and `wait`; `3` not found; `4` conflict or
 invalid spec (for example, steering a stopped Run); `5` a tenant quota
@@ -23,9 +28,10 @@ was reached; `1` anything else.
 ## Runs
 
 ```bash
-lux run -f spec.yaml [--follow | --wait] [--name N] [-l k=v] [--idempotency-key K] [--secrets-from .env]
+lux run -f spec.yaml [--follow | --wait] [--name N] [-l k=v] [--pool P] [--idempotency-key K] [--secrets-from .env]
 lux run --image alpine -- echo hello           # a quick generic Run
-lux ls [--state running,stopped] [-l team=x] [--resumable] [--host H] [--limit N]   # with a COST column
+lux run --image alpine --pool arm64 -- uname -m
+lux ls [--state running,stopped] [-l team=x] [--resumable] [--host H] [--limit N]   # with RUNTIME and COST columns
 lux get <run>                                  # state, placements, usage
 lux logs <run> [-f] [--since <cursor>] [--events] [--stderr=false] [--server NAME | --servers]
 lux events <run>                               # lifecycle events
@@ -36,6 +42,10 @@ Specs are YAML or JSON (`-f -` reads stdin). A secret's value can come from
 the environment (`value: ${GITHUB_TOKEN}`), from a `.env` file
 (`--secrets-from`), or, when the spec omits the value, from an environment
 variable of the same name.
+
+Flags win over the spec file: `--pool` replaces `placement.pool`, as
+`--image` and `--name` replace theirs. Without `--pool` or
+`placement.pool`, the server picks the pool.
 
 `lux logs -o json` prints one JSON record per line:
 `{"cursor","epoch","seq","t","ch","data"|"event"}`. Pass a record's
@@ -112,6 +122,8 @@ lux pools set <name> --default           # admin: make it the tenant's default p
 lux pools set <name> --default=false     # admin: clear it
 lux pools set <name> --provider static --hourly-price 0.40 --currency USD   # default price of hosts registering into it
 lux pools rm <name> [--force-evict]      # admin: cordons its provisioned hosts, terminated once idle; --force-evict stops their live Runs too
+lux pools events <name> [--platform] [--limit N] [--before ID] [--all]   # what happened to it, newest first
+lux hosts events <host> [--limit N] [--before ID] [--all]
 ```
 
 A pool name is 1-32 characters: lowercase letters, digits and `-`,
@@ -119,6 +131,32 @@ starting and ending with a letter or digit (`arm64`, `gpu-a100`). The name
 reaches AWS in each instance's `lux:pool` tag and in its host name
 (`<pool>-xxxxxxxx`, which must fit a hostname). A pool created before this
 rule keeps its name and can still be updated; a new one cannot take it.
+
+`lux pools events` and `lux hosts events` print one line per event: its
+time, type and what it says (`-o json`: the events as the API has them).
+A pool's are `pool.scale_up` (how many hosts and why: `waiting runs`,
+`warm` or `minimum`, with the counts), `pool.launch_requested`,
+`pool.host_launched` (`recovered` when luxd found the instance by its tag
+after losing the provider's reply), `pool.launch_failed` (the provider's error),
+`pool.host_registered`, `pool.placement` (a Run placed on one of its
+hosts), `pool.host_released` (why: `idle` for how long, `pool removed`,
+`outdated`, `manual`, `evicted`, or why it was terminated),
+`pool.spot_interrupted`, `pool.config_changed` (each field, old→new;
+the default mark is `isDefault`: marking a pool records it on that pool,
+and on the pool that was the default before, which loses it),
+`pool.retired` (removed: `lux pools rm`) and `pool.restored` (set again
+after it was removed; a pool keeps its events across both), and
+`pool.provider_error`. A host's are `host.registered`, `host.ready`,
+`host.placement_assigned`, `host.placement_ended` (with the Run's
+outcome), `host.drain_requested` (its cause), `host.lost`,
+`host.terminate_requested`, `host.terminated` and `host.provider_error`.
+A failure that repeats on every provisioner pass is one event, shown with
+`(×N, last <time>)`. A tenant sees its own pools' and hosts' events; a
+platform pool's or host's are the operators' (not shown with `--tenant`,
+which shows what that tenant would see). A tenant's pool and the
+platform's may share a name: `lux pools events <name>` is the tenant's
+(for an operator without `--tenant`, an error when two pools share the
+name), `--platform` the platform's.
 
 A static pool's `--hourly-price` is copied to each host when it first
 registers. Changing it later does not reprice the pool's existing hosts:
@@ -173,6 +211,9 @@ the same way. A value lux does not have is `—`, never `0`.
   unallocated is its billed cost for those hours and need not equal the sum
   of its Runs' lines: host hours refresh on their own schedule and include
   idle time.
+- `lux ls` has a RUNTIME column: the time the Run's placements have spent
+  running, summed (`runtimeSeconds`, see [Concepts](concepts.md#placement-and-epoch));
+  `-` for a Run that never ran.
 - `lux ls` has a COST column: the Run's total when it has one currency,
   `multi` when it has several, `—` while nothing has been reported. A
   leading `~` (`~0.0421 USD`) marks a total that may still change.

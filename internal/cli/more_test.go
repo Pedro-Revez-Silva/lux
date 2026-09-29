@@ -9,7 +9,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/marcioapm/lux/internal/server"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -126,5 +128,30 @@ func TestPoolsLsOwner(t *testing.T) {
 	operator = false
 	if got := strings.Fields(ls()[0]); got[1] != "DEFAULT" {
 		t.Fatalf("tenant header %v", got)
+	}
+}
+
+func TestEventLine(t *testing.T) {
+	last := time.Date(2026, 9, 29, 10, 0, 5, 0, time.Local)
+	for _, c := range []struct {
+		e    server.LifecycleEvent
+		want string
+	}{
+		{server.LifecycleEvent{Type: "pool.launch_failed", Count: 3, LastTime: &last, Data: map[string]any{"error": "duplicate tag"}},
+			"launch failed: duplicate tag (×3, last 2026-09-29 10:00:05)"},
+		{server.LifecycleEvent{Type: "pool.host_released", Count: 1, Data: map[string]any{"name": "burst-1", "reason": "idle", "idleSeconds": 600.0}},
+			"burst-1 released: idle for 600s"},
+		{server.LifecycleEvent{Type: "pool.config_changed", Count: 1, Data: map[string]any{"created": false, "changes": map[string]any{
+			"maxHosts": map[string]any{"old": 2.0, "new": 4.0}, "template.region": map[string]any{"old": nil, "new": "eu-west-1"}}}},
+			"maxHosts 2→4, template.region -→eu-west-1"},
+		{server.LifecycleEvent{Type: "pool.retired", Count: 1, Data: map[string]any{"created": false, "changes": map[string]any{
+			"retired": map[string]any{"old": false, "new": true}}}},
+			"retired false→true"},
+		{server.LifecycleEvent{Type: "host.placement_ended", Count: 1, Data: map[string]any{"run": "run_1", "epoch": 2.0, "outcome": "lost", "reason": "host lost"}},
+			"run_1 epoch 2: lost (host lost)"},
+	} {
+		if got := eventLine(c.e); got != c.want {
+			t.Errorf("%s: %q, want %q", c.e.Type, got, c.want)
+		}
 	}
 }

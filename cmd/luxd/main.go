@@ -390,6 +390,7 @@ func admin(ctx context.Context, cfg config, args []string) error {
 			if err := server.CheckPoolName(ctx, tx, optional(*tenant), *name); err != nil {
 				return err
 			}
+			// SavePool records the change and any mark it moves as pool events, in this transaction.
 			return server.SavePool(ctx, tx, *tenant, *name, isDefault.v, func() error {
 				_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
 						scale_down_after_s, warm_while_active, hourly_price, price_currency)

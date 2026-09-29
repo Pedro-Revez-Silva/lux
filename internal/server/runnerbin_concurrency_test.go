@@ -15,8 +15,11 @@ import (
 // arm64 binaries, in its own transaction.
 func drainIfOutdatedTx(s *Server, ctx context.Context, hostID string) error {
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		_, err := s.drainIfOutdated(ctx, tx, hostID, "arm64", "old-r", "old-s")
-		return err
+		var later laterEvents
+		if _, err := s.drainIfOutdated(ctx, tx, &later, hostID, "arm64", "old-r", "old-s"); err != nil {
+			return err
+		}
+		return later.write()
 	})
 }
 

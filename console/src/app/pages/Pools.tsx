@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
 import { Badge, Button, Card, ConfirmDialog, PageHeader, Table, useToast, type Column } from "@lux/design-system";
 import { api, errorText, type Pool } from "../../api/index.ts";
+import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip, labelsText } from "./common.tsx";
+import { DASH, ErrorBlock, ErrorStrip, labelsText, poolPath } from "./common.tsx";
 import { currentDefaultText } from "./defaultPool.ts";
 
 interface PoolRow extends Pool {
@@ -43,7 +44,7 @@ export function Pools() {
         header: "Pool",
         cell: (p) => (
           <>
-            {p.name} {p.isDefault && <Badge tone="accent">Default</Badge>}
+            <Link to={poolLink(p, showTenant)}>{p.name}</Link> {p.isDefault && <Badge tone="accent">Default</Badge>}
           </>
         ),
         sortValue: (p) => p.name,
@@ -66,7 +67,16 @@ export function Pools() {
         // Operators mark any pool (a platform pool as the platform's default); a tenant, its own pools.
         cell: (p) =>
           !p.isDefault && (operator || !p.platform) ? (
-            <Button size="sm" variant="ghost" onClick={() => setMarking(p)}>
+            // The row opens the pool's page: the button's click and Enter stay here.
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={(e) => {
+                e.stopPropagation();
+                setMarking(p);
+              }}
+              onKeyDown={(e) => e.stopPropagation()}
+            >
               Make default
             </Button>
           ) : null,
@@ -106,7 +116,7 @@ export function Pools() {
         {pools.error && rows.length === 0 && !pools.loading ? (
           <ErrorBlock error={pools.error} onRetry={pools.refetch} />
         ) : (
-          <Table columns={cols} rows={rows} rowKey={(p) => p.key} loading={pools.loading} defaultSort={{ key: "name", dir: "asc" }} empty="No pools." />
+          <Table columns={cols} rows={rows} rowKey={(p) => p.key} onRowClick={(p) => go(poolLink(p, showTenant))} loading={pools.loading} defaultSort={{ key: "name", dir: "asc" }} empty="No pools." />
         )}
       </Card>
       <ConfirmDialog
@@ -128,4 +138,9 @@ export function Pools() {
       />
     </div>
   );
+}
+
+/** A platform pool's page is the platform's; across tenants, a tenant's pool is linked in its tenant's scope (names repeat across tenants). */
+function poolLink(p: Pool, acrossTenants: boolean): string {
+  return poolPath(p.name, { platform: p.platform, tenant: acrossTenants ? p.tenant : undefined });
 }

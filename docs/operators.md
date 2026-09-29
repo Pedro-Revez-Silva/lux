@@ -18,10 +18,13 @@ operator's request on a Run runs in that Run's tenant's scope.
 
 ## One tenant, or all of them
 
-Without `--tenant`, an operator sees every tenant, and lists show a TENANT
-column. `--tenant <id or name>` (env `LUX_TENANT`, `?tenant=` in the API)
+With no tenant from the flag, the environment or the config file, an
+operator sees every tenant, and lists show a TENANT column.
+`--tenant <id or name>` (env `LUX_TENANT`, `tenant` in
+`~/.config/lux/config.toml`, `?tenant=` in the API)
 narrows every command to one tenant and shows what that tenant would see.
-Tenant keys ignore it.
+Tenant keys ignore it. With a default tenant in the config file,
+`--tenant ""` (or `LUX_TENANT=`) reaches all tenants again.
 
 A Run's own commands (`get`, `logs`, `stop`, `resume`…) need no `--tenant`:
 luxd finds the Run's tenant. Commands that create something for a tenant
@@ -127,9 +130,10 @@ filter at the top; a tenant key, that tenant.
   tracked path), its Postgres (size, connections), and luxd itself (CPU,
   memory, goroutines), a line per luxd process. A host page charts its
   runner the same way, a line per runner process.
-- **Runs**: filterable, with a Run page per Run: output (live), placement
-  timeline, resource charts, events, snapshots and artifacts, and the
-  actions above.
+- **Runs**: filterable, with each Run's runtime (live while it runs) and
+  placements (see [Concepts](concepts.md#placement-and-epoch)), and a Run
+  page per Run: output (live), placement timeline, resource charts,
+  events, snapshots and artifacts, and the actions above.
 - **Hosts**: capacity and allocation, and a host page with its history
   (the runner process's too), lifecycle and the Runs on it.
 - **Pools** and **Tenants**.

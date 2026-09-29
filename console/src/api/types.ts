@@ -117,6 +117,10 @@ export interface Run {
   firstScheduledAt?: string;
   firstStartedAt?: string;
   finishedAt?: string;
+  /** Seconds its placements spent running (started to ended; a live one up to the response), summed. */
+  runtimeSeconds: number;
+  /** When the placement still running started; set while one is. */
+  runtimeSince?: string;
   placements?: Placement[];
   usage?: RunUsage;
   resume?: Resumability;
@@ -337,6 +341,18 @@ export interface Event {
   time: string;
 }
 
+/** A pool's or a host's event (GET /v1/pools/{name}/events, /v1/hosts/{id}/events). */
+export interface LifecycleEvent {
+  id: number;
+  type: string;
+  data: Record<string, unknown>;
+  /** How many times in a row it happened; 1 for most. */
+  count: number;
+  time: string;
+  /** When it last happened, if more than once. */
+  lastTime?: string;
+}
+
 export interface FeedEvent extends Event {
   runId: string;
   tenant: string;
@@ -418,10 +434,15 @@ export interface Pool {
   minHosts: number;
   maxHosts: number;
   warmHosts: number;
+  /** e.g. "600s"; absent: luxd's default. */
+  scaleDownAfter?: string;
+  warmWhileActive?: boolean;
   shared: boolean;
   platform: boolean;
   /** Where Runs naming no pool go: the tenant's default, or (platform pool) the platform's. */
   isDefault?: boolean;
+  hourlyPrice?: string;
+  currency?: string;
 }
 
 /** GET /v1/whoami: who the key belongs to. */
