@@ -177,24 +177,60 @@ func TestOneDefaultPool(t *testing.T) {
 	if _, err := first.Exec(ctx, `UPDATE pools SET is_default = true WHERE name = 'a'`); err != nil {
 		t.Fatal(err)
 	}
+	var firstPID int
+	if err := first.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&firstPID); err != nil {
+		t.Fatal(err)
+	}
+	// Bounded: were the constraint not to make it wait, or to wait on
+	// something else for good, the test fails instead of hanging.
+	deadline, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	executing := make(chan struct{})
 	second := make(chan error, 1)
 	go func() {
-		second <- db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
+		second <- db.Tx(deadline, store.Tenant("t1"), func(tx pgx.Tx) error {
+			close(executing)
 			// Not the row first holds: only the constraint makes it wait.
-			_, err := tx.Exec(ctx, `UPDATE pools SET is_default = true WHERE name = 'b'`)
+			_, err := tx.Exec(deadline, `UPDATE pools SET is_default = true WHERE name = 'b'`)
 			return err
 		})
 	}()
 	select {
+	case <-executing:
 	case err := <-second:
-		t.Fatalf("the second mark did not wait for the first: %v", err)
-	case <-time.After(300 * time.Millisecond):
+		t.Fatalf("the second mark ended before its UPDATE: %v", err)
+	case <-deadline.Done():
+		t.Fatal("the second mark never began")
+	}
+	// It waits on the first transaction, not merely has yet to run.
+	for waiting := false; !waiting; {
+		if err := db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+				WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid)))`, firstPID).Scan(&waiting)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case err := <-second:
+			t.Fatalf("the second mark did not wait for the first: %v", err)
+		case <-deadline.Done():
+			t.Fatal("the second mark never waited for the first")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 	if err := first.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-second; !isExclusion(err) {
-		t.Fatalf("the second mark, after the first committed: %v", err)
+	select {
+	case err := <-second:
+		if !isExclusion(err) {
+			t.Fatalf("the second mark, after the first committed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second mark still waits after the first committed")
 	}
 	var n int
 	if err := db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
