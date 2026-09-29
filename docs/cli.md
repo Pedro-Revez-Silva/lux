@@ -120,6 +120,7 @@ lux pools ls
 lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON]
 lux pools set <name> --provider static --hourly-price 0.40 --currency USD   # default price of hosts registering into it
 lux pools rm <name> [--force-evict]      # admin: cordons its hosts, terminated once idle; --force-evict stops their live Runs too
+lux pools rename <name> <new-name>       # admin: hosts and Runs not yet final follow; instances keep running
 ```
 
 A pool name is 1-32 characters: lowercase letters, digits and `-`,
@@ -127,6 +128,18 @@ starting and ending with a letter or digit (`arm64`, `gpu-a100`). The name
 reaches AWS in each instance's `lux:pool` tag and in its host name
 (`<pool>-xxxxxxxx`, which must fit a hostname). A pool created before this
 rule keeps its name and can still be updated; a new one cannot take it.
+
+`lux pools rename` moves the pool's hosts, host tokens and Runs not yet
+final to the new name at once, so a Run waiting for the pool still
+schedules. Finished Runs keep the spec they ran with. An `ec2` pool's
+instances keep running and are re-tagged with the new name by luxd
+shortly after ([operations](operations.md#renaming-a-pool)); until then
+`pools ls` shows the old name under RENAMED FROM, no pool can take that
+name, and the pool cannot be renamed again (exit 4, `rename_in_progress`).
+A name taken by a live or removed pool is refused too (exit 4,
+`pool_exists`), and the new name must follow the rule above (exit 4,
+`invalid_pool`): an old name is kept, but never given anew. With an
+operator key and no `--tenant`, it renames a platform pool.
 
 A static pool's `--hourly-price` is copied to each host when it first
 registers. Changing it later does not reprice the pool's existing hosts:

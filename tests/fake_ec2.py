@@ -1,6 +1,6 @@
-"""A fake EC2 for the test suite: an HTTP server speaking the three EC2
-Query API calls lux uses (RunInstances, TerminateInstances,
-DescribeInstances), where an instance is a simulated host container that
+"""A fake EC2 for the test suite: an HTTP server speaking the EC2 Query API
+calls lux uses (RunInstances, TerminateInstances, DescribeInstances and
+CreateTags), where an instance is a simulated host container that
 boots lux-runner from its user data, as a real instance's AMI would.
 
 luxd's EC2 provider is pointed at it with LUX_EC2_ENDPOINT, so the real
@@ -78,6 +78,7 @@ class FakeEC2:
         self.fail_launches = False
         self.no_boot = False  # launched instances never start a runner
         self.lose_reply = False
+        self.deny_create_tags = False  # CreateTags refused, as without IAM's ec2:CreateTags
         self.notices: dict[str, dict] = {}  # id → spot instance-action
         self.server = ThreadingHTTPServer((env.gateway, 0), self._handler())
         self.url = f"http://{env.gateway}:{self.server.server_address[1]}"
@@ -252,6 +253,23 @@ class FakeEC2:
             host = inst["host"]
         if host is not None:
             _remove(host)
+
+    def _CreateTags(self, q):
+        if self.deny_create_tags:
+            raise FakeError("UnauthorizedOperation", "You are not authorized to perform this operation. (fake: ec2:CreateTags)")
+        ids = _list(q, "ResourceId")
+        tags = {}
+        i = 1
+        while f"Tag.{i}.Key" in q:
+            tags[q[f"Tag.{i}.Key"]] = q.get(f"Tag.{i}.Value", "")
+            i += 1
+        with self.lock:
+            missing = [r for r in ids if r not in self.instances]
+            if missing:
+                raise FakeError("InvalidInstanceID.NotFound", f"The instance IDs '{', '.join(missing)}' do not exist")
+            for r in ids:
+                self.instances[r]["tags"].update(tags)
+        return f'<CreateTagsResponse xmlns="{NS}"><return>true</return></CreateTagsResponse>'
 
     def _DescribeInstances(self, q):
         ids = _list(q, "InstanceId")

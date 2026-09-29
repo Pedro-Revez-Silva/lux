@@ -194,8 +194,24 @@ resource "aws_iam_role_policy" "control_luxd" {
         }
       },
       {
+        # A pool rename re-tags its running instances (internal/server/
+        # poolrename.go): lux:pool only (every key in the request must be
+        # it), and only on instances luxd launched, as TerminateManaged-
+        # Instances below. lux:managed and lux:host themselves cannot be
+        # set or changed after launch.
+        Sid      = "RetagManagedInstancePool"
+        Effect   = "Allow"
+        Action   = "ec2:CreateTags"
+        Resource = "${local.ec2_arn}:instance/*"
+        Condition = {
+          StringEquals                = { "ec2:ResourceTag/lux:managed" = "true" }
+          Null                        = { "ec2:ResourceTag/lux:host" = "false" }
+          "ForAllValues:StringEquals" = { "aws:TagKeys" = ["lux:pool"] }
+        }
+      },
+      {
         # lux:host is set only by luxd, at launch (internal/server/
-        # provisioner.go), and TagOnCreate allows no tagging after launch,
+        # provisioner.go), and no statement allows tagging it after launch,
         # so only instances luxd itself launched carry it. The control
         # host is refused it (the postcondition on aws_instance.control),
         # so luxd cannot terminate its own host.

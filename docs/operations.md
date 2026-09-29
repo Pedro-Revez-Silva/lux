@@ -347,6 +347,72 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   terminated.
 - One luxd instance does all this at a time (a lease in Postgres).
 
+### Renaming a pool
+
+`lux pools rename burst burst-eu` (`POST /v1/pools/{name}/rename`)
+renames a pool with its hosts running: nothing is drained or terminated.
+In one transaction the pool, its hosts (terminated ones too, which cost
+lookups join by name), its host tokens, their `cost_hourly` rows and every
+Run not yet final that names it move to the new name; finished Runs keep
+the spec they ran with. A Run waiting for the pool schedules under the new
+name at once. Refused with 409 if the name is taken by a live or removed
+pool of the tenant, or by hosts or host tokens, or while the pool's
+previous rename is unfinished; 422 for an invalid name. `cost_hourly` is
+rewritten rather than kept under the old name because it is recomputed
+from `hosts.pool`: history kept under the old name would split one host's
+hours between both names as they are recomputed.
+
+An `ec2` pool's instances carry its name in the `lux:pool` tag, which is
+how luxd lists them, and an instance listed with no host row to claim it
+is terminated as an orphan. So the tags are changed after the database,
+and the pool is listed under both names meanwhile:
+
+1. The transaction above keeps the old name in `pools.renamed_from`. From
+   its commit, the provisioner lists the pool under both names: every
+   instance, whichever tag it carries, is claimed by its host row. The old
+   name stays reserved, so no other pool can take it and see these
+   instances as its orphans. Nothing is tagged before this commit, so no
+   instance ever carries a name no pool answers to.
+2. On each provider check (`LUX_PROVIDER_CHECK_EVERY`) the provisioner
+   re-tags the instances still carrying the old name (`ec2:CreateTags`,
+   `lux:pool` only). EC2's tag filters lag behind tags, so for
+   `LUX_LISTING_LAG` after a re-tag a host missing from both listings is
+   not written off. The rename finishes (`renamed_from` cleared) on a
+   check that lists nothing under the old name, every host under the new
+   one, has no launch in flight, and comes `LUX_LISTING_LAG` after the
+   last re-tag.
+
+A luxd that stops before the commit leaves nothing renamed; after it,
+whichever luxd holds the provisioner lease carries on with step 2, which
+is idempotent. A refused `CreateTags` (the IAM statement below missing) is
+logged as a warning and retried on every check; the pool keeps working
+under its new name and nothing is terminated, but it stays listed under
+both names, `lux pools ls` shows RENAMED FROM, and it cannot be renamed
+again until the tags are fixed. A static pool has no tags: the
+transaction is the whole rename.
+
+The re-tag needs this IAM statement on luxd's role (the Terraform module
+has it as `RetagManagedInstancePool`): `ec2:CreateTags` on instances
+tagged `lux:managed=true` and carrying `lux:host`, for the `lux:pool` key
+only:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": "ec2:CreateTags",
+  "Resource": "arn:aws:ec2:<region>:<account>:instance/*",
+  "Condition": {
+    "StringEquals": { "ec2:ResourceTag/lux:managed": "true" },
+    "Null": { "ec2:ResourceTag/lux:host": "false" },
+    "ForAllValues:StringEquals": { "aws:TagKeys": ["lux:pool"] }
+  }
+}
+```
+
+A rename is logged at INFO (`pool renamed`, with the old and new names and
+how many hosts, Runs and instances followed) and again when its instances
+all carry the new name (`pool rename finished`).
+
 ### Spot instances
 
 Add `"spot": true` to the template to launch one-time spot instances:
@@ -394,7 +460,9 @@ What an instance needs:
   wherever images, git remotes and model APIs live, and an instance
   profile if the runner needs one (it doesn't hold S3 credentials).
 - luxd needs EC2 permissions for `RunInstances` (with the launch template
-  and `CreateTags`), `TerminateInstances` and `DescribeInstances`, plus
+  and `CreateTags`), `TerminateInstances` and `DescribeInstances`,
+  `CreateTags` of `lux:pool` on its own instances to rename a pool
+  ([above](#renaming-a-pool)), plus
   `pricing:GetProducts` for on-demand prices and
   `ec2:DescribeSpotPriceHistory` for spot prices, from its standard AWS
   configuration (environment or instance role). Both pricing actions are
