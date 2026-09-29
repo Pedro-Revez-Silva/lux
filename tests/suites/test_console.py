@@ -403,3 +403,38 @@ def test_host_page_shows_cost_to_its_owner_and_rates_to_operators(page, env, lux
         expect(rates.get_by_text(re.compile(r"static price|\(static\)"))).to_have_count(0)
         expect(page.get_by_text(re.compile(r"^allocated to Runs vs unallocated, per hour"))).to_have_count(1)
     _both_themes(page, env, f"/hosts/{host_id}", check)
+
+
+def test_pool_page_shows_its_settings_and_events(page, tenant_factory):
+    """The Pools list links each pool to its page: its settings, its hosts
+    and what happened to it, newest first."""
+    a = tenant_factory()
+    name = f"evpool-{a.tenant_id[-6:]}"
+    a.run("pools", "set", name, "--provider", "static", "--max", "2")
+    a.run("pools", "set", name, "--provider", "static", "--max", "3")
+    page.sign_in(a.api_key, "/pools")
+    page.get_by_role("link", name=name, exact=True).click()
+    page.wait_for_url(re.compile(rf"/pools/{name}$"), timeout=10_000)
+    expect(page.get_by_role("heading", name="Settings", exact=True)).to_have_count(1, timeout=15_000)
+    expect(page.get_by_text("min 0 · warm 0 · max 3")).to_have_count(1, timeout=15_000)
+    rows = page.locator("tr", has_text="pool.config_changed")
+    expect(rows).to_have_count(2, timeout=15_000)
+    # Newest first: the second change leads.
+    expect(rows.first).to_contain_text("maxHosts 2→3")
+    expect(rows.last).to_contain_text("created:")
+    # Live: a change made now appears without a reload (the page polls).
+    a.run("pools", "set", name, "--provider", "static", "--max", "4")
+    expect(rows).to_have_count(3, timeout=30_000)
+    expect(rows.first).to_contain_text("maxHosts 3→4")
+    assert not page.errors, page.errors
+
+
+def test_host_page_shows_its_events(page, lux, runners, hosts):
+    runners.start(hosts[0])
+    host_id = wait_until(lambda: next((h["id"] for h in lux.json("hosts", "ls")
+                                       if h["name"] == hosts[0].name and h["state"] == "ready"), None),
+                         30, 1, "the host never registered")
+    page.sign_in(lux.api_key, f"/hosts/{host_id}")
+    expect(page.get_by_role("heading", name="Events", exact=True)).to_have_count(1, timeout=15_000)
+    expect(page.locator("tr", has_text="host.registered")).to_have_count(1, timeout=15_000)
+    assert not page.errors, page.errors

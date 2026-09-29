@@ -339,7 +339,8 @@ func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable,
 		_, err = pgx.ForEachRow(rows, []any{&e.ID, &e.Type, &e.Data, &e.Count, &e.Time, &last}, func() error {
 			ev := e
 			if ev.Count > 1 {
-				ev.LastTime = &last
+				at := last
+				ev.LastTime = &at
 			}
 			out.Body.Events = append(out.Body.Events, ev)
 			return nil

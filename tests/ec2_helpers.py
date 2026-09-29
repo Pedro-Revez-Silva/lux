@@ -29,3 +29,11 @@ def pool(lux, ec2, name="burst", spot=False, **kw):
 
 def ec2_hosts(lux, pool_name="burst", states=("ready",)):
     return [h for h in lux.json("hosts", "ls") if h["pool"] == pool_name and h["state"] in states]
+
+
+def pool_events(lux, pool_name="burst"):
+    """The pool's events since it was last set (each test sets it; a pool
+    removed and set again keeps its events), oldest first."""
+    evs = list(reversed(lux.json("pools", "events", pool_name, "--all")))
+    last_set = max((i for i, e in enumerate(evs) if e["type"] == "pool.config_changed"), default=-1)
+    return evs[last_set + 1:]

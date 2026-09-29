@@ -524,6 +524,16 @@ func TestInfraEventsPagination(t *testing.T) {
 		execSQL(t, s, ctx, `INSERT INTO host_events (tenant_id, host_id, type, data) VALUES ('t1', 'h1', 'host.x', $1)`, map[string]any{"i": i})
 	}
 	key := apiKey(t, s, new("t1"), "read")
+	// Two repeated events, each with its own last time.
+	execSQL(t, s, ctx, `INSERT INTO host_events (tenant_id, host_id, type, count, created_at, last_at) VALUES
+		('t1', 'h1', 'host.old', 2, now() - interval '2 hours', now() - interval '1 hour'),
+		('t1', 'h1', 'host.new', 3, now() - interval '30 minutes', now() - interval '1 minute')`)
+	_, repeated := getEvents(t, s, key, "/v1/hosts/h1/events?limit=2")
+	if len(repeated) != 2 || repeated[0].LastTime == nil || repeated[1].LastTime == nil ||
+		!repeated[0].LastTime.After(repeated[0].Time) || !repeated[0].LastTime.After(*repeated[1].LastTime) {
+		t.Fatalf("repeated events %+v: each wants its own lastTime", repeated)
+	}
+	ownerExec(t, s, `DELETE FROM host_events WHERE type IN ('host.old', 'host.new')`)
 	var seen []float64
 	before := ""
 	for page := 0; ; page++ {

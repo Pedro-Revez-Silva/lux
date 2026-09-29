@@ -5,12 +5,13 @@ and drains and terminates idle ones."""
 from __future__ import annotations
 
 import json
+import re
 import time
 
 import pytest
 
 from conftest import fake_only, generic
-from ec2_helpers import _clean, ec2_hosts, pool  # noqa: F401 (_clean is an autouse fixture)
+from ec2_helpers import _clean, ec2_hosts, pool, pool_events  # noqa: F401 (_clean is an autouse fixture)
 from env import ALPINE_IMAGE, wait_until
 
 pytestmark = pytest.mark.ec2
@@ -29,6 +30,32 @@ def test_a_waiting_run_gets_a_host_launched(lux, ec2):
     # Idle past the scale-down delay: drained, then terminated.
     wait_until(lambda: not ec2.running(), 60, 0.3, "the idle host was never terminated")
     wait_until(lambda: not ec2_hosts(lux, states=("ready", "draining")), 30, 0.3, "the host is still listed")
+
+    # The pool's log tells the story, in order: why it scaled up, the
+    # launch, the host registering, the Run placed on it, and its release.
+    host_id = lux.get(run_id)["placements"][0]["host"]
+    evs = wait_until(lambda: (e := pool_events(lux)) and e[-1]["type"] == "pool.host_released" and e, 30, 0.5,
+                     "no pool.host_released")
+    types = [e["type"] for e in evs]
+    story = ["pool.scale_up", "pool.launch_requested", "pool.host_launched", "pool.host_registered", "pool.placement", "pool.host_released"]
+    assert [t for t in types if t in story] == story, types
+    by = {e["type"]: e for e in evs}
+    assert by["pool.scale_up"]["data"]["reason"] == "waiting runs" and by["pool.scale_up"]["data"]["waiting"] == 1, by["pool.scale_up"]
+    assert by["pool.placement"]["data"] == {"run": run_id, "epoch": 1, "host": host_id}, by["pool.placement"]
+    assert by["pool.host_registered"]["data"]["host"] == host_id
+    released = by["pool.host_released"]["data"]
+    assert released["host"] == host_id and released["reason"] == "idle" and released["idleSeconds"] >= 3, released
+    # The Run's own log names the pool it was placed from.
+    scheduled = [e for e in lux.json("events", run_id) if e["type"] == "state" and e["data"]["state"] == "scheduled"]
+    assert scheduled[0]["data"]["pool"] == "burst" and scheduled[0]["data"]["host"] == host_id, scheduled
+    # And the host's own log, from registration to termination.
+    htypes = [e["type"] for e in reversed(lux.json("hosts", "events", host_id))]
+    hstory = ["host.registered", "host.ready", "host.placement_assigned", "host.placement_ended", "host.drain_requested",
+              "host.terminate_requested", "host.terminated"]
+    assert [t for t in htypes if t in hstory] == hstory, htypes
+    # The text form: one line each.
+    text = lux.run("pools", "events", "burst", "--limit", "20").stdout
+    assert re.search(r"pool\.host_released\s+\S+ released: idle for \d+s", text), text
 
 
 def test_max_hosts_is_respected(lux, ec2):
