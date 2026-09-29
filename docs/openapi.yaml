@@ -918,6 +918,7 @@ components:
       additionalProperties: false
       properties:
         pool:
+          description: "The pool to run in. Empty: the tenant's default pool, else the platform's, else the pool named default; resolved at submit and stored."
           type: string
         prefers:
           additionalProperties:
@@ -941,6 +942,9 @@ components:
           examples:
             - "0.40"
           type: string
+        isDefault:
+          description: "Runs whose spec names no pool go to this pool (the tenant's; a platform default serves tenants without one). At most one per tenant: marking one clears the tenant's previous default. On create or update, omitted leaves the mark as it is. A body with only name and isDefault changes only the mark of an existing pool."
+          type: boolean
         maxHosts:
           format: int64
           type: integer
@@ -2910,7 +2914,10 @@ paths:
       tags:
         - pools
     post:
-      description: Needs the `admin` scope.
+      description: |-
+        `isDefault: true` makes it the tenant's default pool, where Runs whose spec names no pool go from then on (Runs already submitted keep theirs); the tenant's previous default loses the mark. `false` clears it. A body of only `name` and `isDefault` marks an existing pool and changes nothing else.
+
+        Needs the `admin` scope.
       operationId: putPool
       parameters:
         - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
@@ -2950,6 +2957,12 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
           description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
         "422":
           content:
             application/json:
@@ -2970,7 +2983,7 @@ paths:
   /v1/pools/{name}:
     delete:
       description: |-
-        Its provisioned hosts are cordoned and terminated once idle; its Runs wait for a pool of that name again. forceEvict also stops its hosts' live Runs so they resume elsewhere.
+        Its provisioned hosts are cordoned and terminated once idle; its Runs wait for a pool of that name again. If it was the tenant's default pool, the tenant has none until another is marked. forceEvict also stops its hosts' live Runs so they resume elsewhere.
 
         Needs the `admin` scope.
       operationId: deletePool

@@ -188,7 +188,7 @@ type Resources struct {
 }
 
 type Placement struct {
-	Pool     string            `json:"pool,omitempty" yaml:"pool,omitempty"`
+	Pool     string            `json:"pool,omitempty" yaml:"pool,omitempty" doc:"The pool to run in. Empty: the tenant's default pool, else the platform's, else the pool named default; resolved at submit and stored."`
 	Requires map[string]string `json:"requires,omitempty" yaml:"requires,omitempty"`
 	Prefers  map[string]string `json:"prefers,omitempty" yaml:"prefers,omitempty"`
 }
@@ -561,10 +561,6 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	if s.Timeout.Duration < 0 {
 		fail("timeout must not be negative")
 	}
-	if s.Placement.Pool == "" {
-		s.Placement.Pool = "default"
-	}
-
 	for i, e := range s.Network.Egress {
 		if (e.Host == "") == (e.CIDR == "") {
 			fail("network.egress[%d]: exactly one of host or cidr", i)
