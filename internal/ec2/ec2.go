@@ -38,6 +38,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -217,9 +218,13 @@ func (p *Provider) Instances(ctx context.Context, template json.RawMessage, tags
 	return out, describe(ctx, c, &awsec2.DescribeInstancesInput{Filters: filters}, out)
 }
 
-// Describe looks instances up by id. EC2 fails the whole call when one id
-// is unknown (InvalidInstanceID.NotFound), so then each is asked alone,
-// and one EC2 does not know is left out.
+// describeBatch caps the ids asked for in one DescribeInstances.
+const describeBatch = 100
+
+// Describe looks instances up by id, describeBatch at a time. EC2 fails a
+// whole call when one id is unknown (InvalidInstanceID.NotFound): such a
+// batch is split in halves until the unknown ids are alone, and those are
+// left out. k unknown ids in a batch of n cost at most 2·k·log2(n) calls.
 func (p *Provider) Describe(ctx context.Context, template json.RawMessage, ids []string) (map[string]server.Instance, error) {
 	t, err := parse(template)
 	if err != nil {
@@ -230,22 +235,27 @@ func (p *Provider) Describe(ctx context.Context, template json.RawMessage, ids [
 		return nil, err
 	}
 	out := map[string]server.Instance{}
-	if len(ids) == 0 {
-		return out, nil
-	}
-	err = describe(ctx, c, &awsec2.DescribeInstancesInput{InstanceIds: ids}, out)
-	if !isNotFound(err) || len(ids) == 1 {
-		if isNotFound(err) {
-			err = nil
-		}
-		return out, err
-	}
-	for _, id := range ids {
-		if err := describe(ctx, c, &awsec2.DescribeInstancesInput{InstanceIds: []string{id}}, out); err != nil && !isNotFound(err) {
+	for batch := range slices.Chunk(ids, describeBatch) {
+		if err := describeBisect(ctx, c, batch, out); err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
+}
+
+func describeBisect(ctx context.Context, c *awsec2.Client, ids []string, out map[string]server.Instance) error {
+	err := describe(ctx, c, &awsec2.DescribeInstancesInput{InstanceIds: ids}, out)
+	if !isNotFound(err) {
+		return err
+	}
+	if len(ids) == 1 {
+		return nil
+	}
+	half := len(ids) / 2
+	if err := describeBisect(ctx, c, ids[:half], out); err != nil {
+		return err
+	}
+	return describeBisect(ctx, c, ids[half:], out)
 }
 
 func describe(ctx context.Context, c *awsec2.Client, in *awsec2.DescribeInstancesInput, out map[string]server.Instance) error {

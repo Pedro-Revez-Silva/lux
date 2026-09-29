@@ -144,16 +144,16 @@ func TestRetagSendsCreateTags(t *testing.T) {
 	}
 }
 
-// Describe asks for the instances by id, and when EC2 refuses the call
-// for an id it does not know, asks for each alone and leaves that one out.
-func TestDescribeByID(t *testing.T) {
+// describeFake is an EC2 answering DescribeInstances by id for the known
+// ones, and refusing a whole call that names an unknown one, as EC2 does.
+// It records the ids of each call.
+func describeFake(t *testing.T, known map[string]string) (*Provider, *[][]string) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
 	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
 	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
 	t.Setenv("AWS_PROFILE", "")
-	known := map[string]string{"i-1": "running", "i-2": "terminated"}
 	var calls [][]string
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -177,8 +177,15 @@ func TestDescribeByID(t *testing.T) {
 		fmt.Fprint(w, `<DescribeInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><reservationSet><item><reservationId>r-0</reservationId>`+
 			`<instancesSet>`+items+`</instancesSet></item></reservationSet></DescribeInstancesResponse>`)
 	}))
-	defer fake.Close()
-	p := New(fake.URL)
+	t.Cleanup(fake.Close)
+	return New(fake.URL), &calls
+}
+
+// Describe asks for the instances by id, and when EC2 refuses the call
+// for an id it does not know, splits the call until that id is alone and
+// leaves it out.
+func TestDescribeByID(t *testing.T) {
+	p, calls := describeFake(t, map[string]string{"i-1": "running", "i-2": "terminated"})
 	got, err := p.Describe(context.Background(), json.RawMessage(`{"region":"eu-west-1"}`), []string{"i-1", "i-2", "i-gone"})
 	if err != nil {
 		t.Fatal(err)
@@ -189,7 +196,38 @@ func TestDescribeByID(t *testing.T) {
 	if _, ok := got["i-gone"]; ok {
 		t.Error("an id EC2 does not know was answered")
 	}
-	if fmt.Sprint(calls) != "[[i-1 i-2 i-gone] [i-1] [i-2] [i-gone]]" {
-		t.Errorf("calls %v", calls)
+	if fmt.Sprint(*calls) != "[[i-1 i-2 i-gone] [i-1] [i-2 i-gone] [i-2] [i-gone]]" {
+		t.Errorf("calls %v", *calls)
+	}
+}
+
+// Many ids: at most describeBatch per call, and one unknown id costs a
+// bisection of its batch, not a call per id.
+func TestDescribeManyIDsIsBounded(t *testing.T) {
+	known := map[string]string{}
+	var ids []string
+	for i := range 250 {
+		id := fmt.Sprintf("i-%03d", i)
+		ids = append(ids, id)
+		if i != 137 {
+			known[id] = "running"
+		}
+	}
+	p, calls := describeFake(t, known)
+	got, err := p.Describe(context.Background(), json.RawMessage(`{"region":"eu-west-1"}`), ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 249 {
+		t.Errorf("%d answered, want 249", len(got))
+	}
+	for _, c := range *calls {
+		if len(c) > 100 {
+			t.Errorf("a call with %d ids, want at most 100", len(c))
+		}
+	}
+	// Three batches, and one bisection of the second: 2·log2(100) + 1.
+	if n := len(*calls); n > 3+2*7 {
+		t.Errorf("%d calls for 250 ids with one unknown", n)
 	}
 }
