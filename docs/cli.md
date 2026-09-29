@@ -108,7 +108,7 @@ lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--tem
 lux pools set <name> --default           # admin: make it the tenant's default pool (moves the mark); changes nothing else
 lux pools set <name> --default=false     # admin: clear it
 lux pools set <name> --provider static --hourly-price 0.40 --currency USD   # default price of hosts registering into it
-lux pools rm <name> [--force-evict]      # admin: cordons its hosts, terminated once idle; --force-evict stops their live Runs too
+lux pools rm <name> [--force-evict]      # admin: cordons its provisioned hosts, terminated once idle; --force-evict stops their live Runs too
 ```
 
 A static pool's `--hourly-price` is copied to each host when it first

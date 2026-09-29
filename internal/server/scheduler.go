@@ -47,6 +47,7 @@ type candidateHost struct {
 	UsedRuns  int
 	Tenants   []string // tenants with live placements here
 	Shared    bool
+	Retired   bool // its owner's pool row of its name is retired
 	Connected bool
 }
 
@@ -201,15 +202,17 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 
 // eligibleHostIDs finds hosts in the requested pools (or explicitly chosen
 // hosts) whose tenancy permits at least one Run in the batch. A pool is
-// its name and, where the Run has one, its owner (pickHost's rule). The
-// result is ordered so all schedulers acquire advisory locks in the same
-// order.
+// its name and, where the Run has one, its owner, whose pool row must not
+// be retired (pickHost's rule). The result is ordered so all schedulers
+// acquire advisory locks in the same order.
 func (s *Server) eligibleHostIDs(ctx context.Context, tx pgx.Tx, pools []string, owners []*string, tenants, chosen []string) ([]string, error) {
 	rows, err := tx.Query(ctx, `SELECT h.id FROM hosts h
 		WHERE h.state = 'ready' AND NOT h.draining AND h.last_heartbeat > now() - $1::interval
 		  AND EXISTS (SELECT 1 FROM unnest($2::text[], $3::text[], $4::text[], $5::text[]) AS run(pool, owner, tenant, chosen)
 			WHERE (h.tenant_id IS NULL OR h.tenant_id = run.tenant)
-			  AND (h.pool = run.pool AND (run.owner IS NULL OR coalesce(h.tenant_id, '') = run.owner)
+			  AND (h.pool = run.pool AND (run.owner IS NULL OR coalesce(h.tenant_id, '') = run.owner
+			           AND NOT EXISTS (SELECT 1 FROM pools p WHERE coalesce(p.tenant_id, '') = run.owner
+			                           AND p.name = h.pool AND p.retired))
 			       OR h.id = run.chosen))
 		ORDER BY h.id`, interval(s.cfg.LeaseDuration), pools, owners, tenants, chosen)
 	if err != nil {
@@ -225,7 +228,8 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 	rows, err := tx.Query(ctx, `
 		SELECT h.id, h.tenant_id, h.pool, h.labels, h.capacity, coalesce(h.caches->'images', '[]'),
 			coalesce(h.caches->'gitMirrors', '[]'),
-			coalesce((SELECT bool_or(p.shared) FROM pools p WHERE p.tenant_id IS NULL AND p.name = h.pool), false)
+			coalesce((SELECT bool_or(p.shared) FROM pools p WHERE p.tenant_id IS NULL AND p.name = h.pool), false),
+			EXISTS (SELECT 1 FROM pools p WHERE coalesce(p.tenant_id, '') = coalesce(h.tenant_id, '') AND p.name = h.pool AND p.retired)
 		FROM hosts h
 		WHERE h.id = ANY($2) AND h.state = 'ready' AND NOT h.draining
 		  AND h.last_heartbeat > now() - $1::interval`,
@@ -238,7 +242,7 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 	for rows.Next() {
 		h := &candidateHost{}
 		var images []string
-		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.Labels, &h.Capacity, &images, &h.Mirrors, &h.Shared); err != nil {
+		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.Labels, &h.Capacity, &images, &h.Mirrors, &h.Shared, &h.Retired); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -330,8 +334,10 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 			continue
 		}
 		// The pool's owner, when the Run resolved to a pool row: a tenant
-		// pool and a platform pool may share the name.
-		if r.PoolOwner != nil && !chosen && hostOwner(h) != *r.PoolOwner {
+		// pool and a platform pool may share the name. A removed pool's
+		// static hosts stay in service for Runs without an owner, not for
+		// this Run, which waits for the pool to be re-created.
+		if r.PoolOwner != nil && !chosen && (hostOwner(h) != *r.PoolOwner || h.Retired) {
 			continue
 		}
 		// Tenancy: a tenant's own hosts; a shared platform pool; or a

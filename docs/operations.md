@@ -334,8 +334,9 @@ pool provisions for it. A name no pool has (static hosts that joined by
 host token with a pool name no pool was created for) records no owner, and
 such Runs, like those submitted before this was recorded, match hosts by
 name as before. If the Run's pool is removed, it waits ("its pool burst
-was removed") rather than taking another owner's pool of that name;
-re-creating the pool serves it again.
+was removed") rather than taking another owner's pool of that name, or
+that pool's static hosts, which `lux pools rm` leaves in service for Runs
+without an owner; re-creating the pool serves it again.
 
 A tenant has at most one default pool, and the platform one (Postgres
 refuses a second). Marking another pool moves the mark in one statement.

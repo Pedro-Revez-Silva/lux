@@ -254,6 +254,60 @@ func TestPoolOwnerRetiredPool(t *testing.T) {
 	}
 }
 
+// Removing a static pool leaves its hosts in service (only provisioned
+// hosts are cordoned), but a Run bound to that pool waits, saying so,
+// rather than taking one of them; a Run submitted after the removal
+// resolves to no pool row and keeps the by-name rule.
+func TestPoolOwnerRemovedStaticPool(t *testing.T) {
+	s := testServer(t)
+	s.cfg.LeaseDuration = time.Minute
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	mustPut(t, s, "t1", Pool{Name: "burst", Provider: "static"})
+	id := submitAs(t, s, "t1", "burst", "")
+	if _, owner, _ := runPool(t, s, id); owner != "t1" {
+		t.Fatalf("owner %q, want t1", owner)
+	}
+	if _, err := s.deletePool(tenantCtx("t1"), &deletePoolInput{Name: "burst"}); err != nil {
+		t.Fatal(err)
+	}
+	readyHost(t, s, "h-t1", "burst", "t1", false)
+
+	// Each filter on its own: discovery, then pickHost over the host.
+	if got := eligible(t, s, "burst", new("t1"), "t1"); len(got) != 0 {
+		t.Fatalf("hosts eligible for the removed pool: %v", got)
+	}
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		hosts, err := s.candidateHosts(ctx, tx, []string{"h-t1"})
+		if err != nil || len(hosts) != 1 {
+			t.Fatalf("candidates %v: %v", hosts, err)
+		}
+		h, _, err := s.pickHost(ctx, tx, pendingRun{ID: id, TenantID: "t1", PoolOwner: new("t1"),
+			Spec: spec.RunSpec{Placement: spec.Placement{Pool: "burst"}}}, hosts)
+		if h != nil {
+			t.Errorf("pickHost chose %s for a Run of the removed pool", h.ID)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	schedule(t, s)
+	host, state, reason := placedOn(t, s, id)
+	if host != "" || state != StateSubmitted || reason != "its pool burst was removed" {
+		t.Fatalf("host %q state %q reason %q, want waiting for its removed pool", host, state, reason)
+	}
+
+	legacy := submitAs(t, s, "t1", "burst", "")
+	if _, owner, _ := runPool(t, s, legacy); owner != "<nil>" {
+		t.Fatalf("a Run after the removal: owner %q, want none", owner)
+	}
+	schedule(t, s)
+	if host, _, _ := placedOn(t, s, legacy); host != "h-t1" {
+		t.Fatalf("the ownerless Run went to %q, want h-t1", host)
+	}
+}
+
 // A submit retried with the same idempotency key after the default moved
 // returns the first Run, with its pool and owner, and creates no other.
 func TestIdempotentResubmitKeepsItsPool(t *testing.T) {
