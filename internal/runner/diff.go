@@ -123,10 +123,13 @@ type liveRun struct {
 	exited  chan struct{} // closed once its exec has ended
 	mu      sync.Mutex
 	results []proto.DiffResult
-	done    bool
-	err     error
-	changed chan struct{} // closed, and replaced, on every change
-	waiters int
+	// retained: the bytes results hold (proto.DiffStat.Size), within
+	// proto.DiffBudget: liveDiff keeps to it.
+	retained int64
+	done     bool
+	err      error
+	changed  chan struct{} // closed, and replaced, on every change
+	waiters  int
 	// abandoned: its last request went; it is being stopped.
 	abandoned bool
 }
@@ -135,6 +138,7 @@ func (l *liveRun) add(res proto.DiffResult) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.results = append(l.results, res)
+	l.retained += res.Stat.Size(res.Patch)
 	close(l.changed)
 	l.changed = make(chan struct{})
 	return nil
@@ -273,11 +277,18 @@ func (p *placement) liveDiff(ctx context.Context, req proto.DiffRequest, send fu
 	for i, rp := range req.Repos {
 		names[i] = rp.Name
 	}
+	// The shim keeps to the diff's budget; what it sends is held to it
+	// again here, as it comes, since it is the workload's process.
+	budget := gitdiff.Budget{Max: proto.DiffBudget}
 	incomplete, err := gitdiff.ReadStream(pr, names, []string{req.Kind}, proto.DiffLimit, func(st proto.DiffStat, body io.Reader) error {
-		patch, err := io.ReadAll(body)
-		if err != nil {
-			return err
+		var patch []byte
+		if budget.Fits(st) {
+			var err error
+			if patch, err = io.ReadAll(body); err != nil {
+				return err
+			}
 		}
+		st, patch = budget.Take(st, patch)
 		return send(proto.DiffResult{Stat: st, Patch: patch})
 	})
 	pr.CloseWithError(errors.New("diff read ended"))

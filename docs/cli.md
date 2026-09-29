@@ -132,7 +132,9 @@ container, now (`GET /v1/runs/{id}/diff`).
   A plain `git diff > $LUX_ARTIFACTS/final.patch` keeps only unstaged
   changes to tracked files.
 - One live diff at a time per Run: an identical `lux diff` meanwhile shares
-  it, and a different one fails with `diff_busy` (retry). A host whose
+  it (up to 4 callers), and a different one fails with `diff_busy`
+  (retry); a luxd runs at most 16 live diffs at once (`too_many_diffs`,
+  retry). A host whose
   runner predates diffs answers `diff_unsupported`; one whose runner
   reconnects during the diff, `runner_reconnected` (retry). A Run without
   repositories has none: `no_diff`, exit code 3.
@@ -149,9 +151,11 @@ container, now (`GET /v1/runs/{id}/diff`).
 
   `, TRUNCATED` ends it when the patch was cut at its limit (10 MiB per
   repository, binary files' content included): it then holds only the
-  whole files' diffs that fit, possibly none, so it still applies. `--stat`
-  prints `git diff --stat`'s lines instead, for the whole diff even when
-  its patch was cut.
+  whole files' diffs that fit, possibly none, so it still applies. A
+  diff's repositories share 32 MiB in all: once that is used, the rest
+  have their totals only and fail with `response budget exceeded` (diff
+  them one at a time with `--repo`). `--stat` prints `git diff --stat`'s
+  lines instead, for the whole diff even when its patch was cut.
 - Colour follows `git diff`: on when stdout is a terminal (`--color auto`,
   and `NO_COLOR` unset). Nothing is printed, and the exit code is 0, when
   nothing changed. A repository whose diff failed is reported on stderr and

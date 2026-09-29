@@ -478,8 +478,10 @@ committed changes, staged, unstaged and untracked (not ignored) files.
   (`origin/main`: where a clone of branch `main` started, until the
   workload fetches; `git add -N .` makes untracked files show.)
 - One live diff runs per Run at a time: an identical request meanwhile
-  shares the diff under way, and a different one (another base,
-  repository, or `stat`) is 429 `diff_busy`. A request whose client goes
+  shares the diff under way (up to 4 requests), and a different one
+  (another base, repository, or `stat`), or a fifth, is 429 `diff_busy`.
+  A luxd serves at most 16 live diffs at once; past that, 429
+  `too_many_diffs`. A request whose client goes
   away stops the diff (the last one of those sharing it). A diff has one
   minute. A host whose runner predates diffs answers 503
   `diff_unsupported`; one whose runner reconnects during the diff, 503
@@ -505,6 +507,11 @@ committed changes, staged, unstaged and untracked (not ignored) files.
   cover the whole diff: `files`, `insertions` and `deletions` count every
   file; `fileStats` lists the first 10,000 files, fewer when their paths
   would pass 4 MiB.
+- A diff's repositories share one budget of 32 MiB (patches and
+  per-file stats). The repository that reaches it keeps the part of its
+  patch that fits, cut as above; each one after it has its totals only,
+  `truncated`, with `error: "response budget exceeded"`. Ask for such a
+  repository alone (`repo=`).
 - What a patch cannot carry, each listed per repository (at most 100
   paths, and 256 KiB of them) and named on `lux diff`'s stderr:
   - **Submodules.** A submodule moved to another commit is in the patch

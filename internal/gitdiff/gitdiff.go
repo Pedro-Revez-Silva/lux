@@ -779,13 +779,20 @@ func copyFile(src, dst string) error {
 
 // Run computes every repository's diffs and writes them to w as a stream.
 // A repository that fails is a record with its error; the others go on.
+// The records keep to proto.DiffBudget together: once a repository's
+// would pass it, it and every one after it have their totals only.
 func Run(ctx context.Context, args proto.DiffArgs, w io.Writer) error {
 	limit := args.Limit
 	if limit <= 0 {
 		limit = proto.DiffLimit
 	}
+	b := Budget{Max: proto.DiffBudget}
 	for _, rp := range args.Repos {
-		diffs, err := Compute(ctx, rp.Path, rp.Base, args.Kinds, args.StatOnly, limit)
+		// The repository that reaches the budget keeps the part of its
+		// patch that fits (cut between files, as at limit); the rest are
+		// totals only.
+		left := b.Left()
+		diffs, err := Compute(ctx, rp.Path, rp.Base, args.Kinds, args.StatOnly || b.Exhausted(), min(limit, left))
 		if err != nil {
 			for _, k := range args.Kinds {
 				diffs = append(diffs, Diff{Stat: proto.DiffStat{Kind: k, Error: err.Error()}})
@@ -793,12 +800,50 @@ func Run(ctx context.Context, args proto.DiffArgs, w io.Writer) error {
 		}
 		for _, d := range diffs {
 			d.Stat.Repo = rp.Name
+			d.Stat, d.Patch = b.Take(d.Stat, d.Patch)
+			if d.Stat.Truncated && left < limit {
+				b.over = true
+			}
 			if err := WriteRecord(w, d); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// Budget is what is left of a diff's response budget (proto.DiffBudget)
+// as its records go by.
+type Budget struct {
+	Max  int64
+	Used int64
+	over bool
+}
+
+func (b *Budget) Left() int64 { return max(b.Max-b.Used, 0) }
+
+// Exhausted: a record has been reduced to its totals; all later ones are.
+func (b *Budget) Exhausted() bool { return b.over }
+
+// Fits reports whether a record with st's stats and a st.PatchBytes patch
+// would be kept whole.
+func (b *Budget) Fits(st proto.DiffStat) bool {
+	return !b.over && b.Used+st.Size(nil)+st.PatchBytes <= b.Max
+}
+
+// Take accounts for one record, reducing it to its totals (see
+// proto.DiffStat.OverBudget) when it does not fit or an earlier one did
+// not. Used counts only what is kept whole: a reduced record is a few
+// fixed fields. A patch is counted at st.PatchBytes if that is more (one
+// not read because it would not fit).
+func (b *Budget) Take(st proto.DiffStat, patch []byte) (proto.DiffStat, []byte) {
+	n := st.Size(nil) + max(int64(len(patch)), st.PatchBytes)
+	if !b.over && b.Used+n <= b.Max {
+		b.Used += n
+		return st, patch
+	}
+	b.over = true
+	return st.OverBudget(), nil
 }
 
 func WriteRecord(w io.Writer, d Diff) error {

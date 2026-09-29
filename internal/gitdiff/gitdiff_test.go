@@ -757,6 +757,76 @@ func TestBoundList(t *testing.T) {
 	}
 }
 
+// A diff's repositories share one budget: with five repositories of ~9
+// MiB of patch each, the first three are whole, the fourth keeps what fits
+// (one of its files, cut between files), and the fifth has its totals
+// only, truncated, with the budget's error. Nothing passes the budget.
+func TestResponseBudgetAcrossRepositories(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	line := strings.Repeat("x", 1023) + "\n"
+	var repos []proto.DiffRepo
+	for i := range 5 {
+		dir := t.TempDir()
+		run(t, dir, "init", "-q")
+		run(t, dir, "commit", "-q", "--allow-empty", "-m", "base")
+		for _, f := range []string{"a.txt", "b.txt"} {
+			write(t, dir, f, strings.Repeat(line, 4600)) // ~4.5 MiB each
+		}
+		repos = append(repos, proto.DiffRepo{Name: fmt.Sprint("r", i), Path: dir, Base: run(t, dir, "rev-parse", "HEAD")})
+	}
+	var buf bytes.Buffer
+	if err := Run(context.Background(), proto.DiffArgs{Repos: repos, Kinds: []string{proto.DiffBaseClone}}, &buf); err != nil {
+		t.Fatal(err)
+	}
+	names := []string{"r0", "r1", "r2", "r3", "r4"}
+	var stats []proto.DiffStat
+	var total int64
+	inc, err := ReadStream(&buf, names, []string{proto.DiffBaseClone}, proto.DiffLimit, func(st proto.DiffStat, r io.Reader) error {
+		b, err := io.ReadAll(r)
+		stats, total = append(stats, st), total+st.Size(b)
+		return err
+	})
+	if err != nil || len(inc) != 0 {
+		t.Fatal(err, inc)
+	}
+	if total > proto.DiffBudget {
+		t.Errorf("%d bytes, over the %d budget", total, proto.DiffBudget)
+	}
+	for i, st := range stats[:3] {
+		if st.Truncated || st.Error != "" || st.PatchBytes < 9_000_000 {
+			t.Errorf("repository %d: %+v", i, st)
+		}
+	}
+	if st := stats[3]; !st.Truncated || st.Error != "" || st.PatchBytes < 4<<20 || st.PatchBytes > 5<<20 {
+		t.Errorf("the repository reaching the budget: truncated %v, %d bytes, %q", st.Truncated, st.PatchBytes, st.Error)
+	}
+	if st := stats[4]; !st.Truncated || st.Error != proto.DiffBudgetExceeded || st.PatchBytes != 0 || st.Files != 2 ||
+		st.Insertions != 9200 || len(st.FileStats) != 0 {
+		t.Errorf("the repository past the budget: %+v", st)
+	}
+}
+
+// Budget.Take enforces the budget on records from anywhere: a record that
+// would pass it, and every later one, is reduced to its totals.
+func TestBudgetTake(t *testing.T) {
+	b := Budget{Max: 100}
+	st := proto.DiffStat{Repo: "a", Files: 3, Insertions: 5, FileStats: []proto.DiffFile{{Path: "f"}}}
+	if got, p := b.Take(st, make([]byte, 50)); got.Truncated || len(p) != 50 || len(got.FileStats) != 1 {
+		t.Errorf("within: %+v", got)
+	}
+	got, p := b.Take(st, make([]byte, 50))
+	if !got.Truncated || got.Error != proto.DiffBudgetExceeded || p != nil || got.Files != 3 || got.Insertions != 5 || got.FileStats != nil {
+		t.Errorf("over: %+v %d", got, len(p))
+	}
+	if got, p := b.Take(st, make([]byte, 1)); got.Error != proto.DiffBudgetExceeded || p != nil {
+		t.Errorf("after: %+v", got)
+	}
+	if b.Used > b.Max {
+		t.Errorf("used %d of %d", b.Used, b.Max)
+	}
+}
+
 // git's stderr is held only up to its cap, however much it writes.
 func TestGitStderrIsBounded(t *testing.T) {
 	h := &head{max: 10}

@@ -3,16 +3,20 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/marcioapm/lux/internal/gitdiff"
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
@@ -38,7 +42,7 @@ type RepoDiff struct {
 	Base       string           `json:"base" doc:"The commit diffed from."`
 	Head       string           `json:"head" doc:"The checkout's HEAD commit."`
 	At         time.Time        `json:"at" doc:"When it was computed."`
-	Truncated  bool             `json:"truncated" doc:"The patch was cut at the limit (10 MiB); the stat is still the whole diff's."`
+	Truncated  bool             `json:"truncated" doc:"The patch was cut at the limit (10 MiB), or left out past the response budget (32 MiB for all repositories; error says so); the totals are still the whole diff's."`
 	Files      int              `json:"files"`
 	Insertions int              `json:"insertions"`
 	Deletions  int              `json:"deletions"`
@@ -85,6 +89,11 @@ func (s *Server) serveDiff(w http.ResponseWriter, r *http.Request, in *diffInput
 	if !t.live {
 		return notRunning(t)
 	}
+	release, err := s.diffs.acquire(t.runID, fmt.Sprint(kind, statOnly, in.Repo))
+	if err != nil {
+		return err
+	}
+	defer release()
 	repos, err := s.liveDiff(ctx, t, kind, statOnly)
 	if err != nil {
 		return err
@@ -218,6 +227,70 @@ func gitBases(ctx context.Context, tx pgx.Tx, runID string) (map[string]string, 
 	return m, nil
 }
 
+// Live diffs in flight in this luxd: at most maxLiveDiffs, and per Run
+// only identical ones (which the runner computes once), at most
+// maxDiffSharers of them. Each holds at most proto.DiffBudget of results
+// and maxDiffQueue of frames not yet read.
+const (
+	maxLiveDiffs   = 16
+	maxDiffSharers = 4
+	// maxDiffQueue holds a whole budget's frames (a patch travels as
+	// base64, 4/3 its size), stats included.
+	maxDiffQueue = 48 << 20
+)
+
+type diffLimiter struct {
+	mu    sync.Mutex
+	total int
+	runs  map[string]*runDiffs
+	// retained: the result bytes live diffs hold now.
+	retained atomic.Int64
+}
+
+type runDiffs struct {
+	key string
+	n   int
+}
+
+// acquire admits one live diff of runID (key: what it asks for), or says
+// why not: 429 diff_busy for a different diff of the Run under way, or
+// too many sharing it; 429 too_many_diffs for this luxd's limit.
+func (l *diffLimiter) acquire(runID, key string) (func(), error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.runs == nil {
+		l.runs = map[string]*runDiffs{}
+	}
+	r := l.runs[runID]
+	switch {
+	case r != nil && r.key != key:
+		return nil, errBusy
+	case r != nil && r.n >= maxDiffSharers:
+		return nil, errf(http.StatusTooManyRequests, "diff_busy", "%d identical live diffs of this Run are under way; retry when they are done", r.n)
+	case l.total >= maxLiveDiffs:
+		return nil, errf(http.StatusTooManyRequests, "too_many_diffs", "this luxd has %d live diffs under way; retry", l.total)
+	}
+	if r == nil {
+		r = &runDiffs{key: key}
+		l.runs[runID] = r
+	}
+	r.n++
+	l.total++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			l.total--
+			if r.n--; r.n == 0 {
+				delete(l.runs, runID)
+			}
+		})
+	}, nil
+}
+
+var errBusy = errf(http.StatusTooManyRequests, "diff_busy", "another live diff of this Run is under way (a different base, repository or stat); retry when it is done")
+
 // liveDiffWait is how long luxd waits for the runner's answer: the runner
 // gives a diff a minute, and a little more for the relay.
 var liveDiffWait = 75 * time.Second
@@ -238,7 +311,7 @@ func (s *Server) liveDiff(ctx context.Context, t diffTarget, kind string, statOn
 	for _, r := range t.repos {
 		req.Repos = append(req.Repos, proto.DiffRepo{Name: r.Name, Path: r.Path, Base: t.bases[r.Name]})
 	}
-	ch, cancel := s.hub.subscribeOn(c, req.SubID)
+	sub, cancel := s.hub.subscribeOn(c, req.SubID, maxDiffQueue)
 	defer cancel()
 	if err := c.sendLive(proto.Frame{Type: proto.MsgDiffRequest, RunID: t.runID, Epoch: t.epoch, Data: proto.Marshal(req)}, c.replaced); err != nil {
 		return nil, connError(err)
@@ -256,6 +329,10 @@ func (s *Server) liveDiff(ctx context.Context, t diffTarget, kind string, statOn
 	defer deadline.Stop()
 	at := time.Now().UTC()
 	got := map[string]RepoDiff{}
+	// What got holds is held to the diff's budget, whatever the runner
+	// sends, and counted in s.diffs.retained while it is held.
+	budget := gitdiff.Budget{Max: proto.DiffBudget}
+	defer func() { s.diffs.retained.Add(-budget.Used) }()
 	for {
 		select {
 		case <-ctx.Done():
@@ -266,16 +343,20 @@ func (s *Server) liveDiff(ctx context.Context, t diffTarget, kind string, statOn
 			return nil, connError(errRunnerReconnected)
 		case <-deadline.C:
 			return nil, errf(http.StatusGatewayTimeout, "diff_timeout", "the Run's host did not answer in time")
-		case f, ok := <-ch:
+		case f, ok := <-sub.ch:
 			if !ok {
-				return nil, errf(http.StatusBadGateway, "diff_failed", "the diff stream from the host was dropped")
+				return nil, errf(http.StatusBadGateway, "diff_failed", "the diff stream from the host was dropped: more than %d bytes were waiting", maxDiffQueue)
 			}
+			sub.took(f)
 			switch f.Type {
 			case proto.MsgDiffResult:
 				var res proto.DiffResult
 				if err := json.Unmarshal(f.Data, &res); err != nil {
 					return nil, err
 				}
+				used := budget.Used
+				res.Stat, res.Patch = budget.Take(res.Stat, res.Patch)
+				s.diffs.retained.Add(budget.Used - used)
 				d := repoDiff(res.Stat, res.Patch)
 				d.At = at
 				got[d.Repo] = d
@@ -287,7 +368,7 @@ func (s *Server) liveDiff(ctx context.Context, t diffTarget, kind string, statOn
 				case end.NotRunning:
 					return nil, notRunning(t)
 				case end.Busy:
-					return nil, errf(http.StatusTooManyRequests, "diff_busy", "another live diff of this Run is under way (a different base, repository or stat); retry when it is done")
+					return nil, errBusy
 				case end.Error != "":
 					return nil, errf(http.StatusBadGateway, "diff_failed", "computing the diff in the Run's container: %s", end.Error)
 				}

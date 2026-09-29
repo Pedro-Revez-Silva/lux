@@ -29,6 +29,44 @@ const DiffBaseUnreachable = "base_unreachable"
 // stat always covers the whole diff.
 const DiffLimit = 10 << 20
 
+// DiffBudget bounds one diff's response across all its repositories:
+// patches and per-file stats, as DiffStat.Size counts them. Once a diff
+// has used it, each further repository has its totals only (OverBudget).
+// The shim keeps to it; the runner and luxd enforce it again on what they
+// hold (gitdiff.Budget).
+const DiffBudget = 32 << 20
+
+// DiffBudgetExceeded is DiffStat.Error for a repository over DiffBudget.
+const DiffBudgetExceeded = "response budget exceeded"
+
+// Size is what a repository's diff holds beyond its fixed fields: its
+// patch, per-file stats and path lists.
+func (s *DiffStat) Size(patch []byte) int64 {
+	n := int64(len(patch))
+	for _, f := range s.FileStats {
+		n += int64(len(f.Path)+len(f.OldPath)) + 32
+	}
+	for _, l := range [][]string{s.FilteredPaths, s.NormalizedPaths, s.DirtySubmodules} {
+		for _, p := range l {
+			n += int64(len(p)) + 4
+		}
+	}
+	return n + int64(len(s.Error))
+}
+
+// OverBudget reduces s to its totals, marked truncated with
+// DiffBudgetExceeded: a repository past the diff's budget. One that failed
+// on its own keeps its error code, and its error up to 1 KiB.
+func (s DiffStat) OverBudget() DiffStat {
+	out := DiffStat{Repo: s.Repo, Kind: s.Kind, Base: s.Base, Head: s.Head, Truncated: true,
+		Files: s.Files, Insertions: s.Insertions, Deletions: s.Deletions, FiltersIgnored: s.FiltersIgnored,
+		Error: DiffBudgetExceeded}
+	if s.Error != "" && s.Error != DiffBudgetExceeded {
+		out.Truncated, out.Error, out.ErrorCode = false, s.Error[:min(len(s.Error), 1<<10)], s.ErrorCode
+	}
+	return out
+}
+
 // DiffRepo is one repository to diff: its checkout path in the container
 // and the commit it was cloned at ("" if unknown).
 type DiffRepo struct {

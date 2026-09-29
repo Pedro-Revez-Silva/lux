@@ -327,3 +327,60 @@ func TestDiffRequestNotRunningAndBases(t *testing.T) {
 		t.Errorf("another epoch: %+v", e)
 	}
 }
+
+// What a live diff keeps for its sharers is bounded by the diff's budget,
+// whatever the shim prints: three identical requests share one exec, and
+// the records past the budget reach them as totals only.
+func TestLiveDiffRetainsAtMostTheBudget(t *testing.T) {
+	r, dir := diffRunner(t)
+	t.Setenv("FAKE_DIFF_SLEEP", "1")
+	var diffs []gitdiff.Diff
+	var repos []proto.DiffRepo
+	for i := range 4 {
+		name := fmt.Sprint("r", i)
+		diffs = append(diffs, gitdiff.Diff{Stat: proto.DiffStat{Repo: name, Kind: "clone", Files: 1, Insertions: 3}, Patch: bytes.Repeat([]byte("p"), 10<<20)})
+		repos = append(repos, proto.DiffRepo{Name: name, Path: "/workspace/repos/" + name})
+	}
+	writeOut(t, dir, diffs...)
+	p := runningPlacement(t, r)
+	req := proto.DiffRequest{Kind: "clone", Repos: repos}
+	var mu sync.Mutex
+	var peak int64
+	got := make([][]proto.DiffResult, 3)
+	var wg sync.WaitGroup
+	for i := range got {
+		wg.Go(func() {
+			rq := req
+			rq.SubID = fmt.Sprint("sub", i)
+			if _, err := p.serveLiveDiff(context.Background(), rq, func(res proto.DiffResult) error {
+				p.mu.Lock()
+				l := p.live
+				p.mu.Unlock()
+				if l != nil {
+					l.mu.Lock()
+					mu.Lock()
+					peak = max(peak, l.retained)
+					mu.Unlock()
+					l.mu.Unlock()
+				}
+				got[i] = append(got[i], res)
+				return nil
+			}); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	if n := strings.Count(logOf(t, dir), " exec started"); n != 1 {
+		t.Errorf("%d execs for identical requests", n)
+	}
+	if peak == 0 || peak > proto.DiffBudget {
+		t.Errorf("retained %d bytes (budget %d)", peak, proto.DiffBudget)
+	}
+	for i, g := range got {
+		if len(g) != 4 || len(g[2].Patch) != 10<<20 || g[3].Patch != nil || g[3].Stat.Error != proto.DiffBudgetExceeded ||
+			!g[3].Stat.Truncated || g[3].Stat.Files != 1 || g[3].Stat.Insertions != 3 {
+			t.Errorf("request %d: %d results", i, len(g))
+		}
+	}
+}

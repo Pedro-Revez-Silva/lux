@@ -97,6 +97,8 @@ type Server struct {
 	blobs *blob.Store
 	log   *slog.Logger
 	hub   *Hub
+	// diffs: the live diffs in flight (diff.go).
+	diffs diffLimiter
 	// secrets holds submitted secret values in memory, by run id, until
 	// the placement that needs them has been assigned. Never persisted.
 	secrets *secretCache

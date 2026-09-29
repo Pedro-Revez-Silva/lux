@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -404,11 +406,140 @@ func TestDiffConnectionReplacedWhileTheDiffIsPending(t *testing.T) {
 func TestSubscriptionTakesFramesFromItsConnectionOnly(t *testing.T) {
 	s, _ := diffFixture(t)
 	a, b := newRunnerConn("h1", nil, nil), newRunnerConn("h1", nil, nil)
-	ch, cancel := s.hub.subscribeOn(a, "sub")
+	sub, cancel := s.hub.subscribeOn(a, "sub", 0)
 	defer cancel()
 	s.hub.route(b, "sub", proto.Frame{Type: "from-b"})
 	s.hub.route(a, "sub", proto.Frame{Type: "from-a"})
-	if f := <-ch; f.Type != "from-a" {
+	if f := <-sub.ch; f.Type != "from-a" {
 		t.Errorf("got %s", f.Type)
+	}
+}
+
+// Live diffs in flight are limited: per Run, only identical ones, at most
+// maxDiffSharers; in all, maxLiveDiffs.
+func TestLiveDiffLimits(t *testing.T) {
+	var l diffLimiter
+	var releases []func()
+	for range maxDiffSharers {
+		rel, err := l.acquire("r1", "clone")
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, rel)
+	}
+	if _, err := l.acquire("r1", "clone"); err == nil || err.(*HTTPError).Code != "diff_busy" {
+		t.Errorf("a sharer too many: %v", err)
+	}
+	if _, err := l.acquire("r1", "head"); err == nil || err.(*HTTPError).Code != "diff_busy" {
+		t.Errorf("a different diff of the Run: %v", err)
+	}
+	for i := range maxLiveDiffs - maxDiffSharers {
+		rel, err := l.acquire(fmt.Sprint("run", i), "clone")
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, rel)
+	}
+	if _, err := l.acquire("another", "clone"); err == nil || err.(*HTTPError).Status != http.StatusTooManyRequests {
+		t.Errorf("over the luxd's limit: %v", err)
+	}
+	releases[0]()
+	releases[0]() // idempotent
+	if rel, err := l.acquire("another", "clone"); err != nil {
+		t.Errorf("after a release: %v", err)
+	} else {
+		rel()
+	}
+	for _, rel := range releases[1:] {
+		rel()
+	}
+	if l.total != 0 || len(l.runs) != 0 {
+		t.Errorf("left: %d, %v", l.total, l.runs)
+	}
+}
+
+// Several identical callers: each holds at most the diff's budget of
+// results however much the runner sends (lib's 15 MiB is past app's 20
+// MiB: stats only), one more is refused, and nothing is retained after.
+func TestConcurrentIdenticalDiffsAreBounded(t *testing.T) {
+	s, keys := diffFixture(t)
+	c, reqs := fakeConnWith(t, s, []string{proto.CapDiff}, func(proto.DiffRequest) []proto.Frame { return nil }, nil)
+	type resp struct {
+		code int
+		body []byte
+	}
+	out := make(chan resp, maxDiffSharers)
+	for range maxDiffSharers {
+		go func() {
+			code, _, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff", "")
+			out <- resp{code, body}
+		}()
+	}
+	for deadline := time.Now().Add(5 * time.Second); len(reqs()) < maxDiffSharers && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if code, _, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff", ""); code != http.StatusTooManyRequests || !strings.Contains(string(body), "diff_busy") {
+		t.Errorf("one caller too many: %d %s", code, body)
+	}
+	big := func(repo string, n int) proto.DiffStat {
+		return proto.DiffStat{Repo: repo, Kind: "clone", Files: 1, Insertions: 7, FileStats: []proto.DiffFile{{Path: "f", Insertions: 7}}, PatchBytes: int64(n)}
+	}
+	app := proto.DiffResult{Stat: big("app", 20<<20), Patch: bytes.Repeat([]byte("a"), 20<<20)}
+	lib := proto.DiffResult{Stat: big("lib", 15<<20), Patch: bytes.Repeat([]byte("l"), 15<<20)}
+	appF, libF := proto.Frame{Type: proto.MsgDiffResult, Data: proto.Marshal(app)}, proto.Frame{Type: proto.MsgDiffResult, Data: proto.Marshal(lib)}
+	for _, r := range reqs() {
+		s.hub.route(c, r.SubID, appF)
+		s.hub.route(c, r.SubID, libF)
+	}
+	var peak int64
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if peak = s.diffs.retained.Load(); peak >= maxDiffSharers*(20<<20) {
+			break
+		}
+	}
+	if peak < maxDiffSharers*(20<<20) || peak > maxDiffSharers*proto.DiffBudget {
+		t.Errorf("retained %d bytes for %d callers (budget %d each)", peak, maxDiffSharers, proto.DiffBudget)
+	}
+	for _, r := range reqs() {
+		s.hub.route(c, r.SubID, proto.Frame{Type: proto.MsgDiffEnd, Data: proto.Marshal(proto.DiffEnd{SubID: r.SubID})})
+	}
+	for range maxDiffSharers {
+		r := <-out
+		if r.code != http.StatusOK {
+			t.Fatalf("%d %.200s", r.code, r.body)
+		}
+		d := decodeDiff(t, r.body)
+		if len(d.Repos[0].Patch) != 20<<20 || d.Repos[0].Truncated {
+			t.Errorf("app: %d bytes", len(d.Repos[0].Patch))
+		}
+		if l := d.Repos[1]; !l.Truncated || l.Error != proto.DiffBudgetExceeded || l.Patch != "" || l.Files != 1 || l.Insertions != 7 || len(l.FileStats) != 0 {
+			t.Errorf("lib: %+v", l)
+		}
+	}
+	if n := s.diffs.retained.Load(); n != 0 {
+		t.Errorf("%d bytes still retained", n)
+	}
+}
+
+// A subscription whose reader falls behind by more than its byte bound
+// is dropped (its request fails), not queued without bound.
+func TestSubscriptionQueueIsByteBounded(t *testing.T) {
+	s, _ := diffFixture(t)
+	c := newRunnerConn("h1", nil, nil)
+	sub, cancel := s.hub.subscribeOn(c, "sub", 100)
+	defer cancel()
+	f := proto.Frame{Type: proto.MsgDiffResult, Data: make([]byte, 60)}
+	s.hub.route(c, "sub", f)
+	if got := <-sub.ch; len(got.Data) != 60 {
+		t.Fatal("first frame")
+	}
+	sub.took(f)
+	s.hub.route(c, "sub", f) // 60 queued
+	s.hub.route(c, "sub", f) // 120: over
+	if _, ok := <-sub.ch; !ok {
+		t.Fatal("the frame within the bound was lost")
+	}
+	if _, ok := <-sub.ch; ok {
+		t.Error("a frame past the bound was queued")
 	}
 }

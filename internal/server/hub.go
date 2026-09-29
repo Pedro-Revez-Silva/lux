@@ -165,25 +165,39 @@ type subscription struct {
 	ch chan proto.Frame
 	// from: only frames read from this connection (nil: any).
 	from *runnerConn
+	// maxBytes bounds the frame data queued in ch (0: only its 256
+	// frames); queued is what is there now, under Hub.mu.
+	maxBytes int64
+	queued   int64
+	h        *Hub
+}
+
+// took marks f, received from ch, as no longer queued.
+func (s *subscription) took(f proto.Frame) {
+	s.h.mu.Lock()
+	s.queued -= int64(len(f.Data))
+	s.h.mu.Unlock()
 }
 
 // Subscribe routes frames carrying id (subId/streamId) to the returned
 // channel until cancel is called.
 func (h *Hub) Subscribe(id string) (<-chan proto.Frame, func()) {
-	return h.subscribe(id, nil)
+	sub, cancel := h.subscribe(id, nil, 0)
+	return sub.ch, cancel
 }
 
-// subscribeOn is Subscribe for the frames read from connection c only.
-func (h *Hub) subscribeOn(c *runnerConn, id string) (<-chan proto.Frame, func()) {
-	return h.subscribe(id, c)
+// subscribeOn is Subscribe for the frames read from connection c only,
+// with at most maxBytes of them queued: the reader calls took for each.
+func (h *Hub) subscribeOn(c *runnerConn, id string, maxBytes int64) (*subscription, func()) {
+	return h.subscribe(id, c, maxBytes)
 }
 
-func (h *Hub) subscribe(id string, from *runnerConn) (<-chan proto.Frame, func()) {
-	sub := &subscription{ch: make(chan proto.Frame, 256), from: from}
+func (h *Hub) subscribe(id string, from *runnerConn, maxBytes int64) (*subscription, func()) {
+	sub := &subscription{ch: make(chan proto.Frame, 256), from: from, maxBytes: maxBytes, h: h}
 	h.mu.Lock()
 	h.subs[id] = sub
 	h.mu.Unlock()
-	return sub.ch, func() {
+	return sub, func() {
 		h.mu.Lock()
 		if h.subs[id] == sub {
 			delete(h.subs, id)
@@ -195,24 +209,25 @@ func (h *Hub) subscribe(id string, from *runnerConn) (<-chan proto.Frame, func()
 // route passes a frame read from connection from to id's subscriber.
 func (h *Hub) route(from *runnerConn, id string, f proto.Frame) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	sub := h.subs[id]
-	h.mu.Unlock()
 	if sub == nil || (sub.from != nil && sub.from != from) {
 		return
 	}
-	select {
-	case sub.ch <- f:
-	default:
-		// Never block: this runs on the runner's read loop, and a stall here
-		// delays every ack and report from that host. A client that cannot
-		// keep up loses its stream (it reconnects from its cursor).
-		h.mu.Lock()
-		if h.subs[id] == sub {
-			delete(h.subs, id)
-			close(sub.ch)
+	n := int64(len(f.Data))
+	if sub.maxBytes == 0 || sub.queued+n <= sub.maxBytes {
+		select {
+		case sub.ch <- f:
+			sub.queued += n
+			return
+		default:
 		}
-		h.mu.Unlock()
 	}
+	// Never block: this runs on the runner's read loop, and a stall here
+	// delays every ack and report from that host. A client that cannot
+	// keep up loses its stream (it reconnects from its cursor).
+	delete(h.subs, id)
+	close(sub.ch)
 }
 
 func (h *Hub) closeAll() {
