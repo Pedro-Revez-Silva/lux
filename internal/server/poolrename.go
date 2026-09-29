@@ -341,12 +341,16 @@ func (s *Server) checkDeploymentCanRename(ctx context.Context, tx pgx.Tx) error 
 }
 
 // checkIn records this luxd in luxd_instances: its version and what it
-// can do.
+// can do. Each process start is a new instance: rows long unseen go.
 func (s *Server) checkIn(ctx context.Context) error {
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO luxd_instances (instance, version, capabilities, seen_at) VALUES ($1, $2, $3, now())
 			ON CONFLICT (instance) DO UPDATE SET version = EXCLUDED.version, capabilities = EXCLUDED.capabilities, seen_at = now()`,
 			s.id, version.Version, []string{capPoolRename})
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `DELETE FROM luxd_instances WHERE seen_at < now() - interval '7 days'`)
 		return err
 	})
 }
