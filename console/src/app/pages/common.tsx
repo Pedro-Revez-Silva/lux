@@ -129,9 +129,8 @@ export function runColumns({ tenant, host = true, adapter = true, cost = false }
   return c;
 }
 
-// When each Run object (one per response) was first rendered: runtimeSeconds
-// is as of the response, so a live Run adds the local time since then,
-// which no clock skew between browser and luxd can distort.
+// Extrapolate from the first render of each response object, not from
+// runtimeSince: browser and server clocks may differ.
 const runSeenAt = new WeakMap<Run, number>();
 
 // How far past its response a live row keeps counting. Polled rows are
@@ -139,18 +138,16 @@ const runSeenAt = new WeakMap<Run, number>();
 // its Run may have finished, so it stops rather than growing forever.
 const RUNTIME_EXTRAPOLATE_MS = 60_000;
 
-/**
- * Time the Run's placements have spent running, summed (runtimeSeconds);
- * ticks on the shared clock while a placement runs (runtimeSince). An en
- * dash for a Run that has never run.
- */
 function RuntimeCell({ run }: { run: Run }) {
   useNow(); // re-render on the shared clock
-  const t = Date.now();
+  const now = Date.now();
   let seen = runSeenAt.get(run);
-  if (seen === undefined) runSeenAt.set(run, (seen = t));
+  if (seen === undefined) {
+    seen = now;
+    runSeenAt.set(run, now);
+  }
   if (!run.runtimeSince && !run.runtimeSeconds) return DASH;
-  const secs = run.runtimeSeconds + (run.runtimeSince ? Math.min(t - seen, RUNTIME_EXTRAPOLATE_MS) / 1000 : 0);
+  const secs = run.runtimeSeconds + (run.runtimeSince ? Math.min(now - seen, RUNTIME_EXTRAPOLATE_MS) / 1000 : 0);
   return <span>{formatDuration(secs >= 1 ? Math.floor(secs) : secs)}</span>;
 }
 

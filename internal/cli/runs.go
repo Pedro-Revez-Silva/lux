@@ -236,8 +236,6 @@ an estimate, or a cost source has not answered yet.`,
 	return cmd
 }
 
-// runtimeCell is the Runs list's RUNTIME column: runtimeSeconds in its two
-// largest units ("45s", "3m20s", "2h5m", "1d3h"), "-" for a Run that never ran.
 func runtimeCell(r Run) string {
 	if r.RuntimeSince == nil && r.RuntimeSeconds == 0 {
 		return "-"

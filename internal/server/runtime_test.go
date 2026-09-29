@@ -6,28 +6,25 @@ import (
 	"time"
 )
 
-// A Run's runtime sums its placements from started_at to ended_at, a live
-// one up to the response; a placement that never reached running adds 0.
 func TestRunRuntime(t *testing.T) {
 	s, keys := costFixture(t)
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state) VALUES ('h1', 't1', 'h1', 'ready')`)
-	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r3', 't1', '{}', 'failed', 1)`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES
+		('r3', 't1', '{}', 'failed', 1),
+		('r4', 't1', '{}', 'stopping', 1),
+		('r5', 't1', '{}', 'lost', 1)`)
 	execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 4 WHERE id = 'r1'`)
 	live := time.Now().Add(-30 * time.Second).Truncate(time.Microsecond)
+	// A stopping placement accrues; a lost one missing ended_at does not.
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, created_at, started_at, ended_at) VALUES
 		('p1', 't1', 'r1', 'h1', 1, 'exited', $1, $1, $1::timestamptz + interval '100 seconds'),
 		('p2', 't1', 'r1', 'h1', 2, 'lost', $1, $1::timestamptz + interval '200 seconds', $1::timestamptz + interval '260.5 seconds'),
 		('p3', 't1', 'r1', 'h1', 3, 'exited', $1, NULL, $1::timestamptz + interval '300 seconds'),
 		('p4', 't1', 'r1', 'h1', 4, 'running', $2, $2, NULL),
-		('p5', 't1', 'r3', 'h1', 1, 'exited', $1, NULL, $1::timestamptz + interval '10 seconds')`, t0, live)
-	// r4: a stopping placement still accrues; r5: a lost one missing
-	// ended_at (inconsistent) adds nothing and is not live.
-	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES
-		('r4', 't1', '{}', 'stopping', 1), ('r5', 't1', '{}', 'lost', 1)`)
-	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, created_at, started_at, ended_at) VALUES
-		('p6', 't1', 'r4', 'h1', 1, 'stopping', $1, $1, NULL),
-		('p7', 't1', 'r5', 'h1', 1, 'lost', $2, $2, NULL)`, live, t0)
+		('p5', 't1', 'r3', 'h1', 1, 'exited', $1, NULL, $1::timestamptz + interval '10 seconds'),
+		('p6', 't1', 'r4', 'h1', 1, 'stopping', $2, $2, NULL),
+		('p7', 't1', 'r5', 'h1', 1, 'lost', $1, $1, NULL)`, t0, live)
 
 	check := func(name string, r *Run, before, after time.Time) {
 		t.Helper()

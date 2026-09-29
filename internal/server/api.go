@@ -401,13 +401,8 @@ const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
 	coalesce(rh.name, ''), coalesce(rp.host_id, ''), rr.seconds, rr.since`
 
-// runsFrom: a Run with its tenant, its current placement's host, and its
-// runtime (rr). Runtime is the sum over its placements of started_at
-// (reached running) to ended_at (exited or lost), or to now() for one still
-// live (stopping included); a placement that never reached running adds 0,
-// and so does a terminal one missing ended_at, rather than growing forever.
-// since is when the live one started. Per Run, one scan of placements
-// (run_id, epoch).
+// A terminal placement missing ended_at must not accrue runtime forever.
+// The lateral aggregate scans placements once per Run for both runtime fields.
 const runsFrom = `runs r JOIN tenants rt ON rt.id = r.tenant_id
 	LEFT JOIN placements rp ON rp.run_id = r.id AND rp.epoch = r.current_epoch
 	LEFT JOIN hosts rh ON rh.id = rp.host_id

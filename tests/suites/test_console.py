@@ -193,7 +193,8 @@ def test_runs_list_shows_runtime_and_placements(page, env, lux, runners, hosts):
     lux.wait_state(run_id, "succeeded")
     listed = next(r for r in lux.json("ls") if r["id"] == run_id)
     assert listed["runtimeSeconds"] >= 1 and "runtimeSince" not in listed, listed
-    never = _parked(lux, f"runtime-never-{lux.tenant_id[-6:]}")
+    never_name = f"runtime-never-{lux.tenant_id[-6:]}"
+    never = _parked(lux, never_name)
     # Wide enough that the optional Placements column is shown.
     page.set_viewport_size({"width": 1800, "height": 900})
     page.sign_in(lux.api_key, "/runs")
@@ -212,8 +213,8 @@ def test_runs_list_shows_runtime_and_placements(page, env, lux, runners, hosts):
     expect(cell(name, runtime_col)).to_have_text(re.compile(r"^\d+(\.\d+)?(ms|s)$|^\d+[mhd]( \d+[smh])?$"))
     expect(cell(name, placements_col)).to_have_text("1")
     # Never placed: no runtime, no placement.
-    expect(cell(f"runtime-never-{lux.tenant_id[-6:]}", runtime_col)).to_have_text("–")
-    expect(cell(f"runtime-never-{lux.tenant_id[-6:]}", placements_col)).to_have_text("0")
+    expect(cell(never_name, runtime_col)).to_have_text("–")
+    expect(cell(never_name, placements_col)).to_have_text("0")
     assert not page.errors, page.errors
     lux.run("cancel", never)
 
