@@ -209,9 +209,11 @@ func ensureAppRoleOnce(ctx context.Context, conn *pgx.Conn, password string) err
 				GRANT EXECUTE ON FUNCTION lux_default_pool() TO lux_app;
 			END IF;
 		END $$`,
-		// Nor this (migration 033).
+		// Nor this (migration 038; 033's lux_pool_owner before it).
 		`DO $$ BEGIN
-			IF to_regprocedure('lux_pool_owner(text)') IS NOT NULL THEN
+			IF to_regprocedure('lux_pool_id(text)') IS NOT NULL THEN
+				GRANT EXECUTE ON FUNCTION lux_pool_id(text) TO lux_app;
+			ELSIF to_regprocedure('lux_pool_owner(text)') IS NOT NULL THEN
 				GRANT EXECUTE ON FUNCTION lux_pool_owner(text) TO lux_app;
 			END IF;
 		END $$`,
