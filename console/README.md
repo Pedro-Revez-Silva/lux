@@ -90,8 +90,9 @@ Run-scoped calls (`/runs/{id}/…`, `/hosts/{id}/…`, `/artifacts/…`) do not 
 | `/runs/:id` | Header + actions (Terminal, Stop, Cancel, Resume, Migrate), tabs (`?tab=`): Output (SSE), Servers (the run's `servers`; Add server, start/stop/restart/remove, a log per server), Timeline (per-epoch waterfall), Resources (charts, epoch marks), Events, Snapshots & artifacts, Spec | `/runs/{id}` (3s while active), `/runs/{id}/output`, `/runs/{id}/servers/{name}/log`, `/history`, `/events`, `/snapshots`, `/artifacts` |
 | `/runs/:id/terminal` | A shell in the run's container: xterm.js over the exec WebSocket, font size (persisted), Reconnect, Open in new tab; exited / lost overlays; an empty state while the run is not running | `/runs/{id}` (5s), `GET /runs/{id}/exec` (WebSocket; `POST /runs/{id}/tickets` first with a key) |
 | `/hosts` | Hosts table (pool/state filters, include terminated) with allocation bars | `/hosts` (5s), `/pools` |
-| `/hosts/:id` | Details, Drain, lifecycle timeline, live placements, usage charts, recent runs | `/hosts/{id}` (5s), `/hosts/{id}/history`, `/runs?host=` |
-| `/pools` | Pools with host counts | `/pools`, `/hosts` |
+| `/hosts/:id` | Details, Drain, lifecycle timeline, live placements, usage charts, events (own and operators), recent runs | `/hosts/{id}` (5s), `/hosts/{id}/history`, `/hosts/{id}/events` (5s), `/runs?host=` |
+| `/pools` | Pools with host counts; a row opens its pool | `/pools`, `/hosts` |
+| `/pools/:name` | Settings, its hosts, events (scale-ups, launches, placements, releases) | `/pools` (15s), `/hosts?pool=` (15s), `/pools/{name}/events` (15s) |
 | `/tenants` | Tenants (operators); a row sets the tenant scope and opens Overview | `/tenants` |
 | `/preview-auth?to=` | No shell: the preview listener sends a browser here without a cookie. Mints a `preview` ticket for the run in `to`'s host (`<server>-<runsuffix>.<domain>`) and redirects to `https://<host>/.lux/auth?ticket=…&to=<path>` | `POST /runs/{id}/tickets` |
 

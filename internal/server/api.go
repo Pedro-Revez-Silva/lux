@@ -255,6 +255,13 @@ func (s *Server) routes(api huma.API) {
 		Errors:  []int{http.StatusNotFound, http.StatusForbidden, http.StatusConflict},
 	}, "read", s.hostCost)
 	register(s, api, huma.Operation{
+		OperationID: "listHostEvents", Method: http.MethodGet, Path: "/v1/hosts/{id}/events", Tags: []string{"hosts"},
+		Summary: "List a host's events",
+		Description: "What happened to the host, newest first: registered, ready, placements assigned and ended, drains and their cause, lost, termination, provider errors. " +
+			"A tenant sees its own hosts' events only, and so does an operator narrowed to it with `?tenant=`.",
+		Errors: []int{http.StatusNotFound, http.StatusForbidden, http.StatusConflict},
+	}, "read", s.listHostEvents)
+	register(s, api, huma.Operation{
 		OperationID: "drainHost", Method: http.MethodPost, Path: "/v1/hosts/{id}/drain", Tags: []string{"hosts"},
 		Summary: "Drain a host",
 		Description: "No new placements; its live Runs finish where they are. With forceEvict, they are also stopped and resumed elsewhere " +
@@ -280,6 +287,14 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "listPools", Method: http.MethodGet, Path: "/v1/pools", Tags: []string{"pools"},
 		Summary: "List pools", Description: "The tenant's pools and the platform pools it can use. Operators: every pool.",
 	}, "read", s.listPools)
+	register(s, api, huma.Operation{
+		OperationID: "listPoolEvents", Method: http.MethodGet, Path: "/v1/pools/{name}/events", Tags: []string{"pools"},
+		Summary: "List a pool's events",
+		Description: "What happened to the pool, newest first: scale-ups and why, launches and their failures, placements on its hosts, hosts released and why, spot interruptions, configuration changes, removal (retired) and being set again (restored). " +
+			"A failure repeated on every provisioner pass is one event, its `count` and `lastTime` updated in place. " +
+			"A tenant's own pool of that name, else the platform's (`?owner=` picks one); a platform pool's events are the operators' (they name other tenants' Runs), and not shown to an operator narrowed with `?tenant=`.",
+		Errors: []int{http.StatusNotFound, http.StatusForbidden, http.StatusConflict},
+	}, "read", s.listPoolEvents)
 
 	// Operators and the system.
 	register(s, api, huma.Operation{
@@ -1638,6 +1653,7 @@ func (s *Server) drainHost(ctx context.Context, in *drainHostInput) (*drainHostO
 			if err != nil {
 				return err
 			}
+			// drainHosts writes its events last: lock nothing after it here.
 			hosts, err = s.drainHosts(ctx, tx, "drain requested", causeManual, stopReason, "id = $1 AND (tenant_id = $2 OR $3)", id, p.TenantID, p.Operator)
 			if err == nil && len(hosts) == 0 {
 				return errNotFound
@@ -1662,6 +1678,8 @@ const (
 	causeManual    = "manual" // drainHost, deletePool
 	causeScaleDown = "scale-down"
 	causePreempt   = "preempt"
+
+	poolRemovedReason = "pool removed"
 )
 
 // drainHosts takes hosts out of service (no new placements), adds cause to
@@ -1673,6 +1691,17 @@ const (
 // (provisioned) takes it once idle. Returns their ids, to notify once the
 // transaction commits.
 func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, cause, stopReason, where string, args ...any) ([]string, error) {
+	var later laterEvents
+	hosts, err := s.drainHostsLater(ctx, tx, &later, reason, cause, stopReason, where, args...)
+	if err != nil {
+		return nil, err
+	}
+	return hosts, later.write()
+}
+
+// drainHostsLater is drainHosts leaving its events in later, for a caller
+// that locks more rows after it.
+func (s *Server) drainHostsLater(ctx context.Context, tx pgx.Tx, later *laterEvents, reason, cause, stopReason, where string, args ...any) ([]string, error) {
 	var candidates []string
 	if stopReason != "" {
 		rows, err := tx.Query(ctx, `SELECT id FROM hosts WHERE state <> 'terminated' AND `+where+` ORDER BY id`, args...)
@@ -1756,28 +1785,73 @@ func (s *Server) drainHosts(ctx context.Context, tx pgx.Tx, reason, cause, stopR
 		updateWhere = where + fmt.Sprintf(" AND id = ANY($%d)", len(args)+1)
 		updateArgs = append(append([]any{}, args...), candidates)
 	}
-	rows, err := tx.Query(ctx, fmt.Sprintf(`UPDATE hosts SET draining = true,
+	// fresh: the hosts this cause is new on (locked in id order first, so
+	// two drains for one cause cannot both see it new).
+	n := len(updateArgs)
+	rows, err := tx.Query(ctx, fmt.Sprintf(`WITH old AS (
+			SELECT id, $%d = ANY(drain_causes) AS had FROM hosts
+			WHERE state <> 'terminated' AND %s ORDER BY id FOR NO KEY UPDATE)
+		UPDATE hosts SET draining = true,
 			state = CASE WHEN state = 'ready' THEN 'draining' ELSE state END,
 			state_reason = $%d,
-			drain_causes = CASE WHEN $%d = ANY(drain_causes) THEN drain_causes ELSE array_append(drain_causes, $%d) END,
+			drain_causes = CASE WHEN old.had THEN drain_causes ELSE array_append(drain_causes, $%d) END,
 			drain_requested_at = coalesce(drain_requested_at, now())
-		WHERE state <> 'terminated' AND %s
-		RETURNING id`, len(updateArgs)+1, len(updateArgs)+2, len(updateArgs)+2, updateWhere), append(updateArgs, reason, cause)...)
+		FROM old WHERE hosts.id = old.id
+		RETURNING hosts.id, NOT old.had`, n+2, updateWhere, n+1, n+2), append(updateArgs, reason, cause)...)
 	if err != nil {
 		return nil, err
 	}
-	hosts, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil || len(hosts) == 0 || stopReason == "" {
-		return hosts, err
+	type drained struct {
+		ID    string
+		Fresh bool
 	}
-	live, err := livePlacements(ctx, tx, "p.host_id = ANY($1)", hosts)
+	got, err := pgx.CollectRows(rows, pgx.RowToStructByPos[drained])
 	if err != nil {
 		return nil, err
 	}
-	for _, p := range live {
-		if _, err := s.requestStop(ctx, tx, p.TenantID, p.RunID, stopReason); err != nil {
+	hosts := make([]string, 0, len(got))
+	for _, h := range got {
+		hosts = append(hosts, h.ID)
+	}
+	// An eviction is news where it stops a placement not already stopping.
+	evicting := map[string]bool{}
+	if stopReason != "" && len(hosts) > 0 {
+		rows, err := tx.Query(ctx, `SELECT DISTINCT host_id FROM placements
+			WHERE host_id = ANY($1) AND state IN `+livePlacementStates+` AND stop_requested_at IS NULL`, hosts)
+		if err != nil {
 			return nil, err
 		}
+		ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			evicting[id] = true
+		}
+	}
+	// One event per new cause or new eviction: draining a drained host
+	// again for the same cause says nothing new. Left to later, after the
+	// stops, which lock placements: event streams come last (infraevents.go).
+	if len(hosts) > 0 && stopReason != "" {
+		live, err := livePlacements(ctx, tx, "p.host_id = ANY($1)", hosts)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range live {
+			if _, err := s.requestStop(ctx, tx, p.TenantID, p.RunID, stopReason); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, h := range got {
+		if !h.Fresh && !evicting[h.ID] {
+			continue
+		}
+		d := map[string]any{"cause": cause, "reason": reason}
+		if evicting[h.ID] {
+			d["evict"] = true
+		}
+		later.host(ctx, tx, h.ID, evDrainRequested, d)
 	}
 	return hosts, nil
 }
@@ -1883,34 +1957,25 @@ func (s *Server) deletePool(ctx context.Context, in *deletePoolInput) (*struct{}
 	var hosts []string
 	err := retryHostPlacements(ctx, func() error {
 		return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			if stopReason != "" {
-				var exists bool
-				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pools WHERE tenant_id = $1 AND name = $2 AND NOT retired)`, p.TenantID, name).Scan(&exists); err != nil {
-					return err
-				}
-				if !exists {
-					return errNotFound
-				}
-				var err error
-				hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
-					"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
+			// The pool row, then its Runs and hosts (drainHosts), and its
+			// pool.retired event last, after the drain: the lock order of
+			// infraevents.go puts event streams after every row lock.
+			return ChangePool(ctx, tx, &p.TenantID, name, func() error {
+				tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0
+					WHERE tenant_id = $1 AND name = $2 AND NOT retired`, p.TenantID, name)
 				if err != nil {
 					return err
 				}
-			}
-			tag, err := tx.Exec(ctx, `UPDATE pools SET retired = true, min_hosts = 0, warm_hosts = 0, max_hosts = 0
-				WHERE tenant_id = $1 AND name = $2 AND NOT retired`, p.TenantID, name)
-			if err != nil {
+				if tag.RowsAffected() == 0 {
+					return errNotFound
+				}
+				// Provisioned hosts, including those whose launch is in
+				// flight (no provider id yet): cordoned now, a launch
+				// that completes later lands on a draining host.
+				hosts, err = s.drainHosts(ctx, tx, poolRemovedReason, causeManual, stopReason,
+					"tenant_id = $1 AND pool = $2 AND (provider_id IS NOT NULL OR provision_requested_at IS NOT NULL)", p.TenantID, name)
 				return err
-			}
-			if tag.RowsAffected() == 0 {
-				return errNotFound
-			}
-			if stopReason == "" {
-				hosts, err = s.drainHosts(ctx, tx, "pool removed", causeManual, stopReason,
-					"tenant_id = $1 AND pool = $2 AND provider_id IS NOT NULL", p.TenantID, name)
-			}
-			return err
+			})
 		})
 	})
 	if err != nil {
@@ -1994,17 +2059,19 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "scaleDownAfter must be at least 1s")
 	}
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
-				scale_down_after_s, warm_while_active, hourly_price, price_currency)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''))
-			ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
-				min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
-				scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
-				hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
-				retired = false`,
-			ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
-			sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency)
-		return err
+		return ChangePool(ctx, tx, &p.TenantID, pl.Name, func() error {
+			_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
+					scale_down_after_s, warm_while_active, hourly_price, price_currency)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''))
+				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
+					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
+					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
+					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
+					retired = false`,
+				ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
+				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency)
+			return err
+		})
 	})
 	if err != nil {
 		return nil, err
