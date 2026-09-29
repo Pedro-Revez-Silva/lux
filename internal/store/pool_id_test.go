@@ -26,13 +26,20 @@ func TestPoolIDMigration(t *testing.T) {
 	defer conn.Close(ctx)
 	if _, err := conn.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1');
 		INSERT INTO pools (id, tenant_id, name, provider) VALUES ('p-t1', 't1', 'burst', 'ec2'), ('p-plat', NULL, 'burst', 'static');
-		INSERT INTO host_tokens (id, tenant_id, pool, token_hash) VALUES ('tk1', 't1', 'burst', 'a'), ('tk2', NULL, 'gpu', 'b');
+		INSERT INTO pools (id, tenant_id, name, provider, retired) VALUES
+            ('p-retired', 't1', 'old', 'static', true),
+            ('p-active', NULL, 'old', 'static', false),
+            ('p-retired-only', 't1', 'removed', 'static', true);
+        INSERT INTO host_tokens (id, tenant_id, pool, token_hash) VALUES ('tk1', 't1', 'burst', 'a'), ('tk2', NULL, 'gpu', 'b');
 		INSERT INTO hosts (id, tenant_id, pool, name, state) VALUES ('h1', 't1', 'burst', 'h1', 'ready'), ('h2', NULL, 'burst', 'h2', 'ready'), ('h3', NULL, 'gpu', 'h3', 'ready');
 		INSERT INTO runs (id, tenant_id, spec, state, pool_owner) VALUES
 			('r-plat', 't1', '{"placement":{"pool":"burst"}}', 'submitted', ''),
 			('r-t1', 't1', '{"placement":{"pool":"burst"}}', 'submitted', 't1'),
 			('r-legacy', 't1', '{"placement":{"pool":"burst"}}', 'submitted', NULL),
-			('r-none', 't1', '{"placement":{"pool":"nowhere"}}', 'submitted', NULL);
+			('r-none', 't1', '{"placement":{"pool":"nowhere"}}', 'submitted', NULL),
+            ('r-unbound-retired', 't1', '{"placement":{"pool":"old"}}', 'submitted', NULL),
+            ('r-unbound-only-retired', 't1', '{"placement":{"pool":"removed"}}', 'submitted', NULL),
+            ('r-bound-retired', 't1', '{"placement":{"pool":"old"}}', 'submitted', 't1');
 		INSERT INTO cost_hourly (hour, host_id, pool, source, family, currency) VALUES (date_trunc('hour', now()), 'h2', 'burst', 'compute', 'compute', 'USD')`); err != nil {
 		t.Fatal(err)
 	}
@@ -47,6 +54,9 @@ func TestPoolIDMigration(t *testing.T) {
 		"host_tokens/tk1": "p-t1", "host_tokens/tk2": gpu,
 		"hosts/h1": "p-t1", "hosts/h2": "p-plat", "hosts/h3": gpu,
 		"runs/r-plat": "p-plat", "runs/r-t1": "p-t1", "runs/r-legacy": "p-t1", "runs/r-none": "<nil>",
+		"runs/r-unbound-retired":      "p-active",
+		"runs/r-unbound-only-retired": "<nil>",
+		"runs/r-bound-retired":        "p-retired",
 	}
 	for key, w := range want {
 		table, id, _ := cut(key)

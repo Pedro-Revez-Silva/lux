@@ -27,7 +27,7 @@ def test_a_waiting_run_gets_a_host_launched(lux, ec2):
     # Listed by the pool's id; the name at launch is informational.
     [row] = [p for p in lux.json("pools", "ls") if p["name"] == "burst"]
     assert inst["tags"]["lux:pool"] == "burst", inst["tags"]
-    assert inst["tags"]["lux:pool-id"].startswith("pool_"), inst["tags"]
+    assert inst["tags"]["lux:pool-id"] == row["id"], (inst["tags"], row)
     assert [h["poolId"] for h in ec2_hosts(lux)] == [inst["tags"]["lux:pool-id"]], row
     host = lux.get(run_id)["placements"][0]["hostName"]
     assert host == inst["tags"]["Name"], (host, inst["tags"])

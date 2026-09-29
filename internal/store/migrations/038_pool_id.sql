@@ -28,6 +28,7 @@ ALTER TABLE runs ADD COLUMN pool_id text REFERENCES pools(id);
 UPDATE runs r SET pool_id = (
   SELECT p.id FROM pools p
   WHERE p.name = coalesce(r.spec->'placement'->>'pool', 'default')
+    AND (r.pool_owner IS NOT NULL OR NOT p.retired)
     AND CASE WHEN r.pool_owner IS NOT NULL THEN coalesce(p.tenant_id, '') = r.pool_owner
              ELSE (p.tenant_id = r.tenant_id OR p.tenant_id IS NULL) END
   ORDER BY p.tenant_id NULLS LAST, p.retired LIMIT 1);
