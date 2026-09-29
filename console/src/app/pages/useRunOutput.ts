@@ -25,11 +25,13 @@ export function useRunOutput(id: string, restartKey: number): OutputState {
   const cursor = useRef("");
   const afterEvent = useRef(0);
   const channels = useRef(newChannels());
+  const partialOrder = useRef(new Set<"stdout" | "stderr">());
 
   useEffect(() => {
     cursor.current = "";
     afterEvent.current = 0;
     channels.current = newChannels();
+    partialOrder.current.clear();
     setState({ lines: [], status: "connecting", error: null, cursor: "" });
   }, [id]);
 
@@ -64,8 +66,8 @@ export function useRunOutput(id: string, restartKey: number): OutputState {
       if (flushTimer == null) flushTimer = setTimeout(flush, 50);
     };
     const flushPartials = () => {
-      push(channels.current.stdout.flush());
-      push(channels.current.stderr.flush());
+      for (const ch of partialOrder.current) push(channels.current[ch].flush());
+      partialOrder.current.clear();
     };
 
     setState((s) => ({ ...s, status: "connecting", error: null }));
@@ -86,7 +88,15 @@ export function useRunOutput(id: string, restartKey: number): OutputState {
             const r = body as OutputRecord;
             cursor.current = r.cursor;
             if (r.ch === "event") push(systemLines(r.t, eventLine(r.event)));
-            else push(channels.current[r.ch === "stderr" ? "stderr" : "stdout"].push(r.t, r.data ?? ""));
+            else {
+              const ch = r.ch === "stderr" ? "stderr" : "stdout";
+              const lines = channels.current[ch].push(r.t, r.data ?? "");
+              // Completing a line also completes its arrival-order slot; a new
+              // trailing partial starts after the other outstanding channel.
+              if (lines.length > 0 || !channels.current[ch].hasPartial) partialOrder.current.delete(ch);
+              if (channels.current[ch].hasPartial) partialOrder.current.add(ch);
+              push(lines);
+            }
             break;
           }
           case "lux": {

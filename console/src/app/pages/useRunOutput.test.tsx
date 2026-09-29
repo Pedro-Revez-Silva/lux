@@ -44,6 +44,23 @@ async function harness(run: (h: { send: (messages: Message[]) => Promise<void>; 
   }
 }
 
+test("tied timestamp partials flush in arrival order, in either channel order", async () => {
+  for (const order of [["stderr", "stdout"], ["stdout", "stderr"]] as const) {
+    await harness(async ({ send, state }) => {
+      await send([...order.map((ch) => record(ch, ch, 10)), ["end", {}]]);
+      expect(state().lines.map((l) => l.stream)).toEqual([...order]);
+      expect(state().lines.map((l) => l.text)).toEqual([...order]);
+    });
+  }
+});
+
+test("a completed partial rejoins arrival order behind outstanding channels", async () => {
+  await harness(async ({ send, state }) => {
+    await send([record("stdout", "one", 10), record("stderr", "err", 10), record("stdout", "\ntwo", 10), ["end", {}]]);
+    expect(state().lines.map((l) => l.text)).toEqual(["one", "err", "two"]);
+  });
+});
+
 test("lifecycle flush preserves fragmented ESC for SGR and OSC", async () => {
   await harness(async ({ send, state }) => {
     await send([record("stdout", "before\x1b"), record("stderr", "err\x1b"), ["lux", { id: 1, type: "activity", time: new Date(1).toISOString(), data: {} }], record("stdout", "[31mred\x1b[0m\n", 2), record("stderr", "]0;title\x07visible\n", 2), ["end", {}]]);

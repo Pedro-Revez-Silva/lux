@@ -52,6 +52,10 @@ export class ChannelLines {
     return out;
   }
 
+  get hasPartial(): boolean {
+    return this.partial !== null;
+  }
+
   /** The held-back line, if any, as a line of its own. */
   flush(): LogLine[] {
     const p = this.partial;
