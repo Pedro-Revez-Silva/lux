@@ -69,6 +69,14 @@ func (a *app) printDiff(d server.RunDiff, stat bool) {
 			fmt.Fprintf(a.stderr, "lux: repo %s: %s\n", r.Repo, r.Error)
 			continue
 		}
+		if r.OmittedCount > 0 {
+			more := ""
+			if n := r.OmittedCount - len(r.Omitted); n > 0 {
+				more = fmt.Sprintf(" and %d more", n)
+			}
+			fmt.Fprintf(a.stderr, "lux: repo %s: not in the diff, marked assume-unchanged or skip-worktree: %s%s; the patch does not reproduce the checkout\n",
+				r.Repo, strings.Join(r.Omitted, ", "), more)
+		}
 		if r.Files == 0 {
 			continue
 		}
@@ -82,7 +90,7 @@ func (a *app) printDiff(d server.RunDiff, stat bool) {
 		} else {
 			a.stdout.Write(patch)
 		}
-		if r.Truncated {
+		if r.Truncated && r.OmittedCount == 0 {
 			fmt.Fprintf(a.stderr, "lux: repo %s: untracked files were cut or are binary; the patch will not apply cleanly\n", r.Repo)
 		}
 	}

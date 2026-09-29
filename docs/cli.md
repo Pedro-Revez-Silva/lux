@@ -111,7 +111,7 @@ cloned at (`--base clone`, kept across resumes) or from its `HEAD`
 `# repo <name>: <base12>..<head12>`, a line `git apply` skips; `--stat`
 prints git-style stat lines instead, and `-o json` the whole result
 (`repos[]`: `repo`, `base`, `head`, `patch`, `files`, `insertions`,
-`deletions`, `truncated`, `error`).
+`deletions`, `truncated`, `omitted`, `omittedCount`, `error`).
 
 - An untracked file over 32 KiB carries only its first 32 KiB, then
   `\ lux: truncated at 32768 of <size> bytes`; if the whole diff would pass
@@ -119,6 +119,9 @@ prints git-style stat lines instead, and `-o json` the whole result
   (`Binary files /dev/null and b/<path> differ`). Either marks the
   repository `truncated`, said on stderr: its patch does not apply cleanly.
 - Tracked changes are never cut. A diff over 16 MiB in all is refused.
+- Tracked files marked assume-unchanged or skip-worktree are not diffed:
+  they are listed in `omitted` (at most 50, `omittedCount` all of them),
+  named on stderr, and mark the repository `truncated`.
 - One diff per Run at a time (`diff_busy`); a runner too old for diffs is
   `diff_unsupported`.
 - Exit 4 when the Run is not running (keep a patch with

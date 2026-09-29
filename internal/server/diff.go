@@ -28,17 +28,19 @@ type diffInput struct {
 
 // RepoDiff is one repository's diff.
 type RepoDiff struct {
-	Repo        string               `json:"repo"`
-	Base        string               `json:"base" doc:"The commit diffed from."`
-	Head        string               `json:"head" doc:"The checkout's HEAD commit (empty before its first commit)."`
-	Patch       string               `json:"patch,omitempty" doc:"The patch (git diff format), when it is valid UTF-8."`
-	PatchBase64 []byte               `json:"patchBase64,omitempty" doc:"The patch, base64, when it is not valid UTF-8 (patch is then absent)."`
-	Files       int                  `json:"files"`
-	Insertions  int                  `json:"insertions"`
-	Deletions   int                  `json:"deletions"`
-	FileStats   []proto.DiffFileStat `json:"fileStats,omitempty"`
-	Truncated   bool                 `json:"truncated" doc:"Untracked files were cut (at 32 KiB each, or 8 KiB past 1 MiB in all) or are binary: the patch does not recreate them."`
-	Error       string               `json:"error,omitempty" doc:"Why this repository's diff could not be computed."`
+	Repo         string               `json:"repo"`
+	Base         string               `json:"base" doc:"The commit diffed from."`
+	Head         string               `json:"head" doc:"The checkout's HEAD commit (empty before its first commit)."`
+	Patch        string               `json:"patch,omitempty" doc:"The patch (git diff format), when it is valid UTF-8."`
+	PatchBase64  []byte               `json:"patchBase64,omitempty" doc:"The patch, base64, when it is not valid UTF-8 (patch is then absent)."`
+	Files        int                  `json:"files"`
+	Insertions   int                  `json:"insertions"`
+	Deletions    int                  `json:"deletions"`
+	FileStats    []proto.DiffFileStat `json:"fileStats,omitempty"`
+	Truncated    bool                 `json:"truncated" doc:"Untracked files were cut (at 32 KiB each, or 8 KiB past 1 MiB in all) or are binary, or paths were omitted: the patch does not recreate them."`
+	Omitted      []string             `json:"omitted,omitempty" doc:"Up to 50 paths the diff cannot show: tracked files marked assume-unchanged or skip-worktree."`
+	OmittedCount int                  `json:"omittedCount,omitempty" doc:"How many paths were omitted, all of them."`
+	Error        string               `json:"error,omitempty" doc:"Why this repository's diff could not be computed."`
 }
 
 // RunDiff is a Run's diff, per repository.
@@ -95,7 +97,7 @@ func (s *Server) runDiff(ctx context.Context, in *diffInput) (*runDiffOutput, er
 	out := &runDiffOutput{Body: RunDiff{Base: base, Repos: []RepoDiff{}}}
 	for _, r := range res.Repos {
 		d := RepoDiff{Repo: r.Repo, Base: r.Base, Head: r.Head, Files: r.Files, Insertions: r.Insertions,
-			Deletions: r.Deletions, FileStats: r.FileStats, Truncated: r.Truncated, Error: r.Error}
+			Deletions: r.Deletions, FileStats: r.FileStats, Truncated: r.Truncated, Omitted: r.Omitted, OmittedCount: r.OmittedCount, Error: r.Error}
 		switch {
 		case in.Stat:
 		case utf8.Valid(r.Patch):

@@ -43,19 +43,24 @@ type DiffFileStat struct {
 }
 
 // RepoDiff is one repository's diff. Patch is bytes, not a string: a text
-// file in another encoding is not valid UTF-8.
+// file in another encoding is not valid UTF-8. Omitted: up to OmitCap of
+// the OmittedCount paths the diff cannot show (Truncated then).
 type RepoDiff struct {
-	Repo       string         `json:"repo"`
-	Base       string         `json:"base"`
-	Head       string         `json:"head"`
-	Patch      []byte         `json:"patch,omitempty"`
-	Files      int            `json:"files"`
-	Insertions int            `json:"insertions"`
-	Deletions  int            `json:"deletions"`
-	FileStats  []DiffFileStat `json:"fileStats,omitempty"`
-	Truncated  bool           `json:"truncated,omitempty"`
-	Error      string         `json:"error,omitempty"`
+	Repo         string         `json:"repo"`
+	Base         string         `json:"base"`
+	Head         string         `json:"head"`
+	Patch        []byte         `json:"patch,omitempty"`
+	Files        int            `json:"files"`
+	Insertions   int            `json:"insertions"`
+	Deletions    int            `json:"deletions"`
+	FileStats    []DiffFileStat `json:"fileStats,omitempty"`
+	Truncated    bool           `json:"truncated,omitempty"`
+	Omitted      []string       `json:"omitted,omitempty"`
+	OmittedCount int            `json:"omittedCount,omitempty"`
+	Error        string         `json:"error,omitempty"`
 }
+
+const OmitCap = 50
 
 // DiffResult is the shim's output and the runner's answer. Busy: another
 // diff of the placement is under way. NotRunning: its container is not.

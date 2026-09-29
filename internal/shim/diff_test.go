@@ -287,6 +287,20 @@ func TestDiffUnbornHead(t *testing.T) {
 	}
 }
 
+// Changes to files marked assume-unchanged or skip-worktree are not in
+// diff-index's output: the diff names them and is truncated.
+func TestDiffFlaggedEntriesOmitted(t *testing.T) {
+	dir, base := newRepo(t, map[string]string{"a.txt": "one\n", "assumed.txt": "a\n", "skipped.txt": "s\n"})
+	gitT(t, dir, "update-index", "--assume-unchanged", "assumed.txt")
+	gitT(t, dir, "update-index", "--skip-worktree", "skipped.txt")
+	write(t, dir, "assumed.txt", "changed\n", 0o644)
+	write(t, dir, "skipped.txt", "changed\n", 0o644)
+	d := diffOne(t, dir, base, proto.DiffBaseClone)
+	if !d.Truncated || d.OmittedCount != 2 || strings.Join(d.Omitted, ",") != "assumed.txt,skipped.txt" || d.Files != 0 {
+		t.Fatalf("%+v", d)
+	}
+}
+
 // A repository that fails does not fail the others.
 func TestDiffOneRepoFails(t *testing.T) {
 	dir, base := newRepo(t, map[string]string{"a.txt": "one\n"})

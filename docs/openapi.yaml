@@ -1152,6 +1152,17 @@ components:
         insertions:
           format: int64
           type: integer
+        omitted:
+          description: "Up to 50 paths the diff cannot show: tracked files marked assume-unchanged or skip-worktree."
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        omittedCount:
+          description: How many paths were omitted, all of them.
+          format: int64
+          type: integer
         patch:
           description: The patch (git diff format), when it is valid UTF-8.
           type: string
@@ -1162,7 +1173,7 @@ components:
         repo:
           type: string
         truncated:
-          description: "Untracked files were cut (at 32 KiB each, or 8 KiB past 1 MiB in all) or are binary: the patch does not recreate them."
+          description: "Untracked files were cut (at 32 KiB each, or 8 KiB past 1 MiB in all) or are binary, or paths were omitted: the patch does not recreate them."
           type: boolean
       type: object
     Repository:

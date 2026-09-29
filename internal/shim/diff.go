@@ -98,7 +98,7 @@ func diffRepos(ctx context.Context, a proto.DiffArgs) proto.DiffResult {
 			w.d.Files += len(w.untracked)
 			w.d.Insertions += w.extraIns
 			w.d.FileStats = append(w.d.FileStats, w.extraStats...)
-			w.d.Truncated = w.cut
+			w.d.Truncated = w.cut || w.d.OmittedCount > 0
 		}
 		res.Repos = append(res.Repos, w.d)
 	}
@@ -145,6 +145,18 @@ func (w *repoWork) trackedDiff(ctx context.Context, r proto.DiffRepo, base strin
 			w.d.Files, w.d.Insertions, w.d.Deletions = w.d.Files+1, w.d.Insertions+ins, w.d.Deletions+del
 		}
 	}
+	// diff-index does not look at the working tree copy of an entry marked
+	// assume-unchanged (lowercase tag) or skip-worktree (S): its changes
+	// are not in the patch.
+	flagged, err := git(ctx, r.Path, diffHardLimit, "ls-files", "-v", "-z")
+	if err != nil {
+		return err
+	}
+	for rec := range strings.SplitSeq(string(flagged), "\x00") {
+		if len(rec) > 2 && (rec[0] == 'S' || (rec[0] >= 'a' && rec[0] <= 'z')) {
+			w.omit(rec[2:])
+		}
+	}
 	list, err := git(ctx, r.Path, diffHardLimit, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return err
@@ -157,6 +169,13 @@ func (w *repoWork) trackedDiff(ctx context.Context, r proto.DiffRepo, base strin
 		}
 	}
 	return nil
+}
+
+func (w *repoWork) omit(p string) {
+	if w.d.OmittedCount < proto.OmitCap {
+		w.d.Omitted = append(w.d.Omitted, quoteName(p))
+	}
+	w.d.OmittedCount++
 }
 
 func (w *repoWork) untrackedDiff(limit int64) error {

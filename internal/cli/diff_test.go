@@ -40,6 +40,11 @@ func TestDiffText(t *testing.T) {
 	if out != want {
 		t.Fatalf("stat:\n%q\nwant:\n%q", out, want)
 	}
+	// Omitted paths are named on stderr, past the list as a count.
+	d.Repos[1].Omitted, d.Repos[1].OmittedCount, d.Repos[1].Truncated = []string{"x.txt", "y.txt"}, 3, true
+	if _, _, errOut := diffCLI(t, d); !strings.Contains(errOut, "lux: repo same: not in the diff, marked assume-unchanged or skip-worktree: x.txt, y.txt and 1 more;") {
+		t.Fatal(errOut)
+	}
 	// A repository that failed: exit 1, in JSON too.
 	d.Repos[1].Error = "the checkout: gone"
 	if code, _, errOut := diffCLI(t, d); code != 1 || !strings.Contains(errOut, "lux: repo same: the checkout: gone") {
