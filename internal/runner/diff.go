@@ -24,9 +24,6 @@ import (
 // container from the Run's image with its state volumes mounted, without a
 // network. Its output is read as untrusted (gitdiff.ReadStream bounds it).
 
-// diffTimeout bounds one diff: live, and each snapshot's.
-const diffTimeout = 60 * time.Second
-
 // diffKinds are what a snapshot stores: against the clone and against HEAD.
 var diffKinds = []string{proto.DiffBaseClone, proto.DiffBaseHead}
 
@@ -57,6 +54,8 @@ func (p *placement) liveDiff(ctx context.Context, req proto.DiffRequest, send fu
 		return errors.New("the workload's user is not known yet")
 	}
 	pr, pw := io.Pipe()
+	// The reading ends with ctx, not only once podman does.
+	defer context.AfterFunc(ctx, func() { pr.CloseWithError(context.Cause(ctx)) })()
 	done := make(chan error, 1)
 	go func() {
 		args := append([]string{"exec", "--user", user, "--workdir", "/", containerName(p.runID), proto.ShimBinary},
@@ -137,41 +136,181 @@ func (p *placement) setGitBase(repo, commit string) {
 	_ = writeRunState(p.dir, p.state)
 }
 
-// snapshotDiffs computes every repository's diffs from the exited
-// placement's state volumes, each patch a blob for the snapshot. It never
-// fails the snapshot: whatever goes wrong is a diff.failed event, and each
-// repository it could not diff is recorded with its error.
-func (p *placement) snapshotDiffs(ctx context.Context) []proto.SnapshotDiff {
+// A snapshot's diffs are computed after it is reported and its uploads
+// started: they never hold up a stop, a drain or a resume. They are
+// reported on their own (snapshot.diffs), their patches uploaded like the
+// snapshot's blobs.
+
+var (
+	// diffTimeout bounds one diff, live or a snapshot's: creating,
+	// running, killing and removing its container.
+	diffTimeout = 60 * time.Second
+	// diffCleanupTimeout bounds removing the helper container once the
+	// diff's own time is up.
+	diffCleanupTimeout = 10 * time.Second
+)
+
+const (
+	// diffEvictMargin is what an evicted host keeps back from a snapshot's
+	// diff for its uploads; diffMinBudget the least time worth starting one.
+	diffEvictMargin = 30 * time.Second
+	diffMinBudget   = 10 * time.Second
+)
+
+// errSuperseded cancels a snapshot's diff: the Run resumed on this host,
+// and its volumes are about to change.
+var errSuperseded = errors.New("superseded: the Run resumed on this host")
+
+// diffBudget is how long a snapshot's diff may take: diffTimeout, or while
+// the host is being evicted, the time left before it goes less a margin
+// for the uploads. skip says why no diff should be tried at all.
+func (r *Runner) diffBudget() (budget time.Duration, skip string) {
+	ev := r.evictBy.Load()
+	if ev == nil {
+		return diffTimeout, ""
+	}
+	left := time.Until(ev.at)
+	if budget = min(diffTimeout, left-diffEvictMargin); budget < diffMinBudget {
+		return 0, fmt.Sprintf("the host is going away in %s: its uploads come first", left.Round(time.Second))
+	}
+	return budget, ""
+}
+
+// startSnapshotDiffs computes snapshot snapID's diffs in the background
+// and reports them. stopDiffs cancels them.
+func (p *placement) startSnapshotDiffs(ctx context.Context, snapID string) {
 	repos := p.diffRepos()
 	if len(repos) == 0 {
-		return nil
+		p.setDiffsFor("")
+		return
 	}
-	out, err := p.computeSnapshotDiffs(ctx, repos)
-	failed := map[string]bool{}
-	for _, d := range out {
-		if d.Error != "" && !failed[d.Repo] {
-			failed[d.Repo] = true
-			p.event(ctx, proto.EvDiffFailed, map[string]any{"repo": d.Repo, "kind": d.Kind, "error": d.Error})
+	// A runner that restarted mid-way: luxd has them already, or what was
+	// written for it never reached luxd.
+	if rec := p.r.snapshotRecords()[diffsRecord(snapID)]; rec != nil {
+		if rec.Reported {
+			p.setDiffsFor("")
+			return
+		}
+		removeSnapshotFiles(p.r, diffsRecord(snapID), rec)
+	}
+	dctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	released := make(chan struct{})
+	p.mu.Lock()
+	p.diffCancel, p.diffReleased = cancel, released
+	p.mu.Unlock()
+	go func() {
+		defer cancel(nil)
+		p.snapshotDiffs(dctx, snapID, repos, released)
+	}()
+}
+
+// stopDiffs cancels a snapshot's diff under way for why (nil: lets it
+// finish), and waits until its container no longer has the state volumes
+// mounted.
+func (p *placement) stopDiffs(why error) {
+	p.mu.Lock()
+	cancel, released := p.diffCancel, p.diffReleased
+	p.mu.Unlock()
+	if cancel == nil {
+		return
+	}
+	if why != nil {
+		cancel(why)
+	}
+	<-released
+}
+
+// setDiffsFor records the snapshot whose diffs are owed, while this is
+// still the Run's placement here (a later one owns the Run's state file).
+func (p *placement) setDiffsFor(snapID string) {
+	if p.r.placement(p.runID, 0) != p {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.state != nil && p.state.DiffsFor != snapID {
+		p.state.DiffsFor = snapID
+		_ = writeRunState(p.dir, p.state)
+	}
+}
+
+// snapshotDiffs computes every repository's diffs from the exited
+// placement's state volumes, stores each patch as a blob, and reports them
+// (snapshot.diffs). A repository it could not diff is reported with its
+// error; nothing here affects the snapshot. released is closed once the
+// helper container is gone.
+func (p *placement) snapshotDiffs(ctx context.Context, snapID string, repos []proto.DiffRepo, released chan struct{}) {
+	rep := proto.SnapshotDiffs{SnapshotID: snapID}
+	budget, skip := p.r.diffBudget()
+	if skip == "" {
+		out, err := p.computeSnapshotDiffs(ctx, repos, budget)
+		switch {
+		case context.Cause(ctx) != nil:
+			skip = context.Cause(ctx).Error()
+		case err != nil:
+			rep.Error = err.Error()
+		default:
+			rep.Diffs = out
 		}
 	}
-	if err != nil {
-		p.logf("diff failed", "err", err)
-		p.event(ctx, proto.EvDiffFailed, map[string]any{"error": err.Error()})
-		// Each repository without a result is recorded with the error, so
-		// this snapshot is not taken for one without a diff.
-		have := map[string]bool{}
-		for _, d := range out {
-			have[d.Repo+"\x00"+d.Kind] = true
+	close(released)
+	if skip != "" || rep.Error != "" {
+		rep.Skipped = skip
+		why := rep.Error
+		if skip != "" {
+			why = "not computed: " + skip
 		}
+		p.logf("snapshot diff", "skipped", skip, "err", rep.Error)
 		for _, r := range repos {
 			for _, k := range diffKinds {
-				if !have[r.Name+"\x00"+k] {
-					out = append(out, proto.SnapshotDiff{DiffStat: proto.DiffStat{Repo: r.Name, Kind: k, Base: baseOf(r, k), Error: err.Error()}})
-				}
+				rep.Diffs = append(rep.Diffs, proto.SnapshotDiff{DiffStat: proto.DiffStat{Repo: r.Name, Kind: k, Base: baseOf(r, k), Error: why}})
 			}
 		}
 	}
-	return out
+	p.reportDiffs(ctx, rep)
+}
+
+// diffsRecord names the snapshot record of a snapshot's diff blobs.
+func diffsRecord(snapID string) string { return snapID + "-diffs" }
+
+// reportDiffs reports a snapshot's diffs until luxd has them (or fences
+// the placement off), then uploads their patches as it does a snapshot's
+// blobs. The patches go if luxd never learns of them.
+func (p *placement) reportDiffs(ctx context.Context, rep proto.SnapshotDiffs) {
+	rec := &snapshotRecord{RunID: p.runID, Epoch: p.epoch, Created: time.Now().UnixMilli(), Diffs: true}
+	for _, d := range rep.Diffs {
+		if d.Blob != nil {
+			rec.Uploads = append(rec.Uploads, pendingUpload{BlobID: d.Blob.BlobID, Path: p.r.blobPath(d.Blob.BlobID), Size: d.Blob.Size})
+		}
+	}
+	id := diffsRecord(rep.SnapshotID)
+	if err := p.r.saveSnapshotRecord(id, rec); err != nil {
+		p.logf("snapshot diff: saving its record", "err", err)
+		removeSnapshotFiles(p.r, id, rec)
+		p.setDiffsFor("")
+		return
+	}
+	// Bounded: a snapshot's diff is worth less than a runner that keeps
+	// retrying forever for a luxd that refuses it.
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
+	defer cancel()
+	for {
+		// Not p.report: a stale nack here must not kill the container,
+		// which may be a later placement's by now.
+		err := p.r.conn.Report(rctx, proto.Frame{Type: proto.MsgSnapshotDiffs, RunID: p.runID, Epoch: p.epoch, Data: proto.Marshal(rep)})
+		if err == nil {
+			p.r.updateRecord(id, func(rec *snapshotRecord) { rec.Reported = true })
+			p.r.uploads.kick()
+			break
+		}
+		if errors.Is(err, errStale) || rctx.Err() != nil {
+			p.logf("snapshot diff not reported", "err", err)
+			removeSnapshotFiles(p.r, id, rec)
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	p.setDiffsFor("")
 }
 
 func baseOf(r proto.DiffRepo, kind string) string {
@@ -182,24 +321,37 @@ func baseOf(r proto.DiffRepo, kind string) string {
 }
 
 // computeSnapshotDiffs runs the throwaway container: the Run's image, its
-// state volumes at their paths, the workload user, the Run's limits, no
-// network, no capabilities, and a deadline.
-func (p *placement) computeSnapshotDiffs(ctx context.Context, repos []proto.DiffRepo) ([]proto.SnapshotDiff, error) {
+// state volumes read-only at their paths (a tmpfs for git's scratch
+// files), the workload user, the Run's limits, no network, no
+// capabilities. budget bounds it all; removing the container once it is
+// up has its own short timeout.
+func (p *placement) computeSnapshotDiffs(ctx context.Context, repos []proto.DiffRepo, budget time.Duration) ([]proto.SnapshotDiff, error) {
 	user := p.userSpec()
 	if user == "" || p.state.Image == "" {
 		return nil, errors.New("the Run's image or user is not known (it never started here)")
 	}
-	ctx, cancel := context.WithTimeout(ctx, diffTimeout)
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	name := containerName(p.runID) + "-diff"
+	remove := func() {
+		c, cancel := context.WithTimeout(context.Background(), diffCleanupTimeout)
+		defer cancel()
+		_ = p.r.pm.Remove(c, name)
+	}
 	// One a crashed runner left behind.
-	_ = p.r.pm.Remove(context.WithoutCancel(ctx), name)
-	defer p.r.pm.Remove(context.WithoutCancel(ctx), name)
+	_ = p.r.pm.Remove(ctx, name)
+	defer remove()
+	// The moment the budget ends (or the diff is cancelled), the container
+	// goes: podman run then returns.
+	defer context.AfterFunc(ctx, remove)()
 	args := []string{"run", "--rm", "--name", name,
 		"--label", LabelManaged + "=true", "--label", LabelRun + "=" + p.runID, "--label", LabelTenant + "=" + p.tenantID,
 		"--userns=auto:size=65536", "--cap-drop=ALL", "--security-opt=no-new-privileges",
 		"--network=none", "--cgroups=enabled", "--cgroupns=private", "--ipc=private", "--uts=private", "--pid=private",
 		"--restart=no", "--hostname=lux", "--init=false", "--log-driver=none", "--pull=never",
+		// Nothing it runs can change the checkout: the volumes are
+		// read-only, the root too; git's copy of the index goes to /tmp.
+		"--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777", "-e", "TMPDIR=/tmp",
 		"--user", user, "--workdir", "/", "--entrypoint", proto.ShimBinary,
 		"-v", p.r.cfg.Shim + ":" + proto.ShimBinary + ":ro",
 	}
@@ -214,13 +366,15 @@ func (p *placement) computeSnapshotDiffs(ctx context.Context, repos []proto.Diff
 	for _, v := range p.state.Volumes {
 		if v.Kind == "state" {
 			// nocopy: nothing from the image is copied into a volume.
-			args = append(args, "-v", v.Volume+":"+v.Path+":idmap,nocopy")
+			args = append(args, "-v", v.Volume+":"+v.Path+":ro,idmap,nocopy")
 		}
 	}
 	args = append(args, p.state.Image)
 	args = append(args, diffArgs(repos, diffKinds, false)...)
 
 	pr, pw := io.Pipe()
+	// The reading ends with ctx, not only once podman does.
+	defer context.AfterFunc(ctx, func() { pr.CloseWithError(context.Cause(ctx)) })()
 	done := make(chan error, 1)
 	go func() {
 		err := p.r.pm.RunTo(ctx, pw, args...)
@@ -237,8 +391,26 @@ func (p *placement) computeSnapshotDiffs(ctx context.Context, repos []proto.Diff
 		return nil
 	})
 	pr.CloseWithError(errors.New("diff read ended"))
-	if perr := <-done; err == nil && perr != nil {
+	if err != nil {
+		cancel() // an unreadable stream: its container goes now
+	}
+	// podman run ends once its container is removed; it is not waited on
+	// past the cleanup's own time.
+	var perr error
+	select {
+	case perr = <-done:
+	case <-ctx.Done():
+		select {
+		case perr = <-done:
+		case <-time.After(diffCleanupTimeout):
+			perr = errors.New("podman run did not end after its container was removed")
+		}
+	}
+	if err == nil {
 		err = perr
+	}
+	if err == nil && ctx.Err() != nil {
+		err = fmt.Errorf("the diff did not finish in %s", budget)
 	}
 	// Only whole repositories are kept: every kind, once each.
 	kept := out[:0]

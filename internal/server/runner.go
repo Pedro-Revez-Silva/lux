@@ -387,7 +387,7 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 		// Snapshots and uploads from an older placement on this host are
 		// still wanted: they are that placement's final state. Status and
 		// adapter events are not.
-		if f.Epoch != current && f.Type != proto.MsgSnapshotDone {
+		if f.Epoch != current && f.Type != proto.MsgSnapshotDone && f.Type != proto.MsgSnapshotDiffs {
 			return &staleError{f.RunID, f.Epoch, current}
 		}
 		switch f.Type {
@@ -411,6 +411,12 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 			}
 			kicked = true
 			return s.applySnapshotDone(ctx, tx, tenantID, hostID, f.RunID, f.Epoch, current, sd)
+		case proto.MsgSnapshotDiffs:
+			var sd proto.SnapshotDiffs
+			if err := json.Unmarshal(f.Data, &sd); err != nil {
+				return err
+			}
+			return applySnapshotDiffs(ctx, tx, tenantID, hostID, f.RunID, f.Epoch, sd)
 		case proto.MsgRunEvent:
 			var ev proto.RunEvent
 			if err := json.Unmarshal(f.Data, &ev); err != nil {

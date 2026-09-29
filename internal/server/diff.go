@@ -307,6 +307,10 @@ func setPatch(d *RepoDiff, patch []byte) {
 	}
 }
 
+// diffPendingFor is how long after a snapshot its diffs may still arrive:
+// the runner's diff budget and its bounded reporting, with some slack.
+const diffPendingFor = 12 * time.Minute
+
 // snapshotDiff reads the diff stored with the latest snapshot that has one.
 func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget, kind string, statOnly bool) ([]RepoDiff, error) {
 	type row struct {
@@ -318,7 +322,21 @@ func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget
 	var snapID string
 	var at time.Time
 	err := s.db.Tx(ctx, store.Tenant(tenantID), func(tx pgx.Tx) error {
-		err := tx.QueryRow(ctx, `SELECT s.id, s.created_at FROM snapshots s
+		// A snapshot's diffs follow its report: while the newest snapshot
+		// may still get them, an older snapshot's would be stale.
+		var pending string
+		err := tx.QueryRow(ctx, `SELECT s.id FROM snapshots s
+			WHERE s.run_id = $1 AND s.created_at > now() - $2::interval
+			  AND NOT EXISTS (SELECT 1 FROM snapshot_diffs d WHERE d.snapshot_id = s.id)
+			  AND s.created_at >= ALL (SELECT created_at FROM snapshots WHERE run_id = $1)`,
+			t.runID, interval(diffPendingFor)).Scan(&pending)
+		if err == nil {
+			return errf(http.StatusNotFound, "no_diff", "the diff of the latest snapshot (%s) is still being computed", pending)
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		err = tx.QueryRow(ctx, `SELECT s.id, s.created_at FROM snapshots s
 			WHERE s.run_id = $1 AND EXISTS (SELECT 1 FROM snapshot_diffs d WHERE d.snapshot_id = s.id)
 			ORDER BY s.epoch DESC, s.created_at DESC LIMIT 1`, t.runID).Scan(&snapID, &at)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -394,6 +412,52 @@ func (s *Server) readDiffBlob(ctx context.Context, key, location string, size in
 		return nil, fmt.Errorf("diff blob %s: %d bytes, expected %d", key, len(b), size)
 	}
 	return b, nil
+}
+
+// applySnapshotDiffs stores a snapshot's diffs, reported after the
+// snapshot itself: each patch a blob of its placement, each repository and
+// kind a row, and a diff.failed or diff.skipped event for what is missing.
+func applySnapshotDiffs(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID string, epoch int, sd proto.SnapshotDiffs) error {
+	var snapEpoch int
+	var snapHost string
+	err := tx.QueryRow(ctx, `SELECT epoch, coalesce(host_id, '') FROM snapshots WHERE id = $1 AND run_id = $2`, sd.SnapshotID, runID).Scan(&snapEpoch, &snapHost)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("snapshot.diffs for unknown snapshot %s of %s", sd.SnapshotID, runID)
+	}
+	if err != nil {
+		return err
+	}
+	if snapEpoch != epoch || snapHost != hostID {
+		return fmt.Errorf("snapshot.diffs for %s from epoch %d on %s: it is epoch %d's on %s", sd.SnapshotID, epoch, hostID, snapEpoch, snapHost)
+	}
+	var done bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM snapshot_diffs WHERE snapshot_id = $1)`, sd.SnapshotID).Scan(&done); err != nil || done {
+		return err // done: redelivered
+	}
+	if err := recordSnapshotDiffs(ctx, tx, tenantID, hostID, runID, epoch, sd.SnapshotID, sd.Diffs); err != nil {
+		return err
+	}
+	switch {
+	case sd.Skipped != "":
+		return addEvent(ctx, tx, tenantID, runID, epoch, proto.EvDiffSkipped, map[string]any{"snapshotId": sd.SnapshotID, "reason": sd.Skipped})
+	case sd.Error != "":
+		return addEvent(ctx, tx, tenantID, runID, epoch, proto.EvDiffFailed, map[string]any{"snapshotId": sd.SnapshotID, "error": sd.Error})
+	}
+	failed := map[string]bool{}
+	for _, d := range sd.Diffs {
+		if d.Error == "" || failed[d.Repo] {
+			continue
+		}
+		failed[d.Repo] = true
+		data := map[string]any{"snapshotId": sd.SnapshotID, "repo": d.Repo, "kind": d.Kind, "error": d.Error}
+		if d.ErrorCode != "" {
+			data["errorCode"] = d.ErrorCode
+		}
+		if err := addEvent(ctx, tx, tenantID, runID, epoch, proto.EvDiffFailed, data); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // recordSnapshotDiffs stores a snapshot's diffs: each patch a blob of its

@@ -462,14 +462,23 @@ committed changes, staged, unstaged and untracked (not ignored) files.
   checkout's `HEAD` instead.
 - **While the Run runs**, luxd asks the runner, which runs the diff in the
   Run's container. **On every exit** (stop, cancel, failure, success, a
-  drain), once the state volumes are saved, the runner starts a throwaway
-  container from the Run's image with its state volumes mounted, with no
-  network, the Run's resource limits and a one-minute deadline, and
-  computes each repository's diff there, against the clone and against
-  `HEAD`. The patches are stored as blobs of the snapshot, uploaded
-  before its volumes; each has its base and head commits, byte size,
-  sha256, `truncated`, and files, insertions and deletions. A stopped Run's
-  diff is its latest snapshot's.
+  drain), once the snapshot is saved, reported and its uploads started,
+  the runner starts a throwaway container from the Run's image with its
+  state volumes mounted **read-only** (the container's root too; git's
+  scratch files go to a tmpfs), with no network and the Run's resource
+  limits, and computes each repository's diff there, against the clone
+  and against `HEAD`. So a diff never delays a stop, a drain or a resume.
+  The runner reports the diffs on their own (`snapshot.diffs`), and
+  uploads their patches like the snapshot's blobs; each has its base and
+  head commits, byte size, sha256, `truncated`, and files, insertions and
+  deletions. A stopped Run's diff is its latest snapshot's.
+- A snapshot's diff has one minute, container start and removal included.
+  On a host being evicted (a spot interruption) it gets the time left less
+  30 seconds for uploads, and is skipped when that is under 10 seconds.
+  When the Run resumes on the same host meanwhile, the diff is cancelled
+  before the new placement touches the volumes. A skipped diff is a
+  `diff.skipped` event (`{snapshotId, reason}`), and each repository's
+  entry says it was not computed.
 - **The runner never runs git in the checkout**, as for a push: `lux-shim
   diff` runs git inside the container, as the workload user, with the
   checkout's hooks, `core.fsmonitor`, `diff.external`, textconv and
@@ -500,10 +509,12 @@ committed changes, staged, unstaged and untracked (not ignored) files.
   `base=head` still works. A checkout whose `.git` is gone, or replaced by
   a file, is an error for that repository only.
 - A diff that cannot be computed never fails the snapshot or the exit: a
-  `diff.failed` event says why (`{error, repo?, kind?}`), and the
-  repository's entry carries the error.
+  `diff.failed` event says why (`{snapshotId, error, repo?, kind?,
+  errorCode?}`), and the repository's entry carries the error.
 - A Run with no snapshot that has a diff (it never stopped since it
-  started, or its snapshots predate diffs) answers 404 `no_diff`.
+  started, or its snapshots predate diffs) answers 404 `no_diff`; so does
+  one whose latest snapshot's diff is still being computed (for up to 12
+  minutes after it), rather than answer an older snapshot's.
 
 ## MCP servers
 

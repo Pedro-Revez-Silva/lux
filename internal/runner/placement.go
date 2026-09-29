@@ -62,6 +62,10 @@ type placement struct {
 	netTx        int64
 	cgroup       string
 	ip           string // the container's address, once looked up
+	// diffCancel cancels a snapshot's diff under way; diffReleased is
+	// closed once its container is gone (see stopDiffs).
+	diffCancel   context.CancelCauseFunc
+	diffReleased chan struct{}
 }
 
 func newPlacement(r *Runner, a proto.Assign) *placement {
@@ -389,6 +393,10 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	}
 	p.clearPublished(ctx)
 	p.r.uploads.kick()
+	// Only now the diffs: they hold up nothing above.
+	if sd.Manifest.SnapshotID != "" {
+		p.startSnapshotDiffs(ctx, sd.Manifest.SnapshotID)
+	}
 
 	st := proto.Status{State: "exited", ExitCode: &exit.Code, Reason: exit.Reason, Message: exit.Message,
 		OutputSeq: exit.OutputSeq, Times: p.times(), Usage: usage}
@@ -401,10 +409,11 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 		}
 		time.Sleep(time.Second)
 	}
+	// Under the lock: the snapshot's diff, running by now, writes it too.
 	p.mu.Lock()
 	p.state.Phase = "reported"
-	p.mu.Unlock()
 	_ = writeRunState(p.dir, p.state)
+	p.mu.Unlock()
 	p.setPhase("done")
 	p.logf("placement ended", "exit", exit.Code, "reason", exit.Reason)
 }
@@ -1103,17 +1112,6 @@ func (p *placement) snapshot(ctx context.Context) (*proto.SnapshotDone, error) {
 			}
 		}
 	}
-	// After the volumes are saved (a diff that takes its full minute must
-	// not hold up a host being taken away), but uploaded first: small, and
-	// what a person looks at.
-	sd.Diffs = p.snapshotDiffs(ctx)
-	var diffUploads []pendingUpload
-	for _, d := range sd.Diffs {
-		if d.Blob != nil {
-			diffUploads = append(diffUploads, pendingUpload{BlobID: d.Blob.BlobID, Path: p.r.blobPath(d.Blob.BlobID), Size: d.Blob.Size})
-		}
-	}
-	rec.Uploads = append(diffUploads, rec.Uploads...)
 	arts, err := p.collectArtifacts(ctx)
 	if err != nil {
 		p.event(ctx, "artifacts.failed", map[string]any{"error": err.Error()})
@@ -1130,6 +1128,8 @@ func (p *placement) snapshot(ctx context.Context) (*proto.SnapshotDone, error) {
 	}
 	p.mu.Lock()
 	p.state.VolumesSnapshot, p.state.VolumesEpoch = snapID, p.epoch
+	// Its diffs are owed (after the report): a restart computes them then.
+	p.state.DiffsFor = snapID
 	p.mu.Unlock()
 	_ = writeRunState(p.dir, p.state)
 	return sd, nil

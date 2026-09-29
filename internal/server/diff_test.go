@@ -83,6 +83,7 @@ func snapshotWithDiffs(t *testing.T, s *Server, mem *memS3, id string, epoch int
 	t.Helper()
 	ctx := context.Background()
 	sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: id, RunID: "r1", Epoch: epoch, Volumes: []proto.VolumeSnapshot{}}}
+	diffs := proto.SnapshotDiffs{SnapshotID: id}
 	for _, repo := range []string{"app", "lib"} {
 		for _, kind := range []string{proto.DiffBaseClone, proto.DiffBaseHead} {
 			p := patch(repo, kind)
@@ -97,16 +98,20 @@ func snapshotWithDiffs(t *testing.T, s *Server, mem *memS3, id string, epoch int
 			mem.mu.Lock()
 			mem.objs["/b/"+blob.Key("t1", "r1", blobID)] = z.Bytes()
 			mem.mu.Unlock()
-			sd.Diffs = append(sd.Diffs, d)
+			diffs.Diffs = append(diffs.Diffs, d)
 		}
 	}
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return s.applySnapshotDone(ctx, tx, "t1", "h1", "r1", epoch, 2, sd)
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	runnerReport(t, s, "r1", epoch, proto.MsgSnapshotDone, sd)
+	runnerReport(t, s, "r1", epoch, proto.MsgSnapshotDiffs, diffs)
 	execSQL(t, s, ctx, `UPDATE blobs SET location = 's3', s3_key = 'tenants/t1/runs/r1/' || id WHERE kind = 'diff' AND location = 'host'`)
+}
+
+// runnerReport applies a runner report from host h1, as its connection would.
+func runnerReport(t *testing.T, s *Server, runID string, epoch int, typ string, v any) {
+	t.Helper()
+	if err := s.applyReport(context.Background(), "h1", proto.Frame{Type: typ, RunID: runID, Epoch: epoch, Data: proto.Marshal(v)}); err != nil {
+		t.Fatalf("%s: %v", typ, err)
+	}
 }
 
 func getDiff(t *testing.T, s *Server, key, path, accept string) (int, http.Header, []byte) {
@@ -338,22 +343,62 @@ func TestDiffFallsBackWhenTheContainerHasExited(t *testing.T) {
 // code) is stored and answered.
 func TestSnapshotDiffKeepsFiltersAndErrorCode(t *testing.T) {
 	s, keys, _ := diffFixture(t)
-	ctx := context.Background()
-	sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "s1", RunID: "r1", Epoch: 2, Volumes: []proto.VolumeSnapshot{}}}
+	runnerReport(t, s, "r1", 2, proto.MsgSnapshotDone, proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "s1", RunID: "r1", Epoch: 2, Volumes: []proto.VolumeSnapshot{}}})
+	sd := proto.SnapshotDiffs{SnapshotID: "s1"}
 	for _, kind := range []string{proto.DiffBaseClone, proto.DiffBaseHead} {
 		sd.Diffs = append(sd.Diffs,
 			proto.SnapshotDiff{DiffStat: proto.DiffStat{Repo: "app", Kind: kind, Files: 1, FiltersIgnored: true, FilteredPaths: []string{"big.psd"},
 				FileStats: []proto.DiffFile{{Path: "big.psd", Binary: true}}}},
 			proto.SnapshotDiff{DiffStat: proto.DiffStat{Repo: "lib", Kind: kind, Error: "gone", ErrorCode: proto.DiffBaseUnreachable}})
 	}
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return s.applySnapshotDone(ctx, tx, "t1", "h1", "r1", 2, 2, sd)
-	}); err != nil {
-		t.Fatal(err)
-	}
+	runnerReport(t, s, "r1", 2, proto.MsgSnapshotDiffs, sd)
 	code, _, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff?stat=true", "")
 	d := decodeDiff(t, body)
 	if code != http.StatusOK || !d.Repos[0].FiltersIgnored || len(d.Repos[0].FilteredPaths) != 1 || d.Repos[1].ErrorCode != "base_unreachable" {
 		t.Errorf("%d %s", code, body)
+	}
+}
+
+// snapshot.diffs follows its snapshot.done: accepted from the snapshot's
+// own placement even once the Run moved on, once only, never for another
+// host's snapshot; a skipped or failed diff is an event and each
+// repository's error. Until they arrive, the latest snapshot has no diff.
+func TestSnapshotDiffsReport(t *testing.T) {
+	s, keys, _ := diffFixture(t)
+	ctx := context.Background()
+	runnerReport(t, s, "r1", 2, proto.MsgSnapshotDone, proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "s1", RunID: "r1", Epoch: 2, Volumes: []proto.VolumeSnapshot{}}})
+	if code, _, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff", ""); code != http.StatusNotFound || !strings.Contains(string(body), "still being computed") {
+		t.Errorf("before its diffs: %d %s", code, body)
+	}
+	// The Run has a newer placement by now: the old one's diffs still count.
+	execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 3 WHERE id = 'r1'`)
+	skipped := proto.SnapshotDiffs{SnapshotID: "s1", Skipped: "superseded: the Run resumed on this host"}
+	for _, repo := range []string{"app", "lib"} {
+		for _, k := range []string{"clone", "head"} {
+			skipped.Diffs = append(skipped.Diffs, proto.SnapshotDiff{DiffStat: proto.DiffStat{Repo: repo, Kind: k, Error: "not computed: " + skipped.Skipped}})
+		}
+	}
+	runnerReport(t, s, "r1", 2, proto.MsgSnapshotDiffs, skipped)
+	// Redelivered: nothing changes, no second event.
+	runnerReport(t, s, "r1", 2, proto.MsgSnapshotDiffs, skipped)
+	var n int
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM run_events WHERE run_id = 'r1' AND type = 'diff.skipped' AND data->>'snapshotId' = 's1'`).Scan(&n)
+	}); err != nil || n != 1 {
+		t.Errorf("%d diff.skipped events (%v)", n, err)
+	}
+	code, _, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff", "")
+	if d := decodeDiff(t, body); code != http.StatusOK || !strings.Contains(d.Repos[0].Error, "superseded") {
+		t.Errorf("skipped: %d %s", code, body)
+	}
+	// Another host, or a snapshot not the placement's: refused.
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state) VALUES ('h2', 'h2', 'ready')`)
+	err := s.applyReport(ctx, "h2", proto.Frame{Type: proto.MsgSnapshotDiffs, RunID: "r1", Epoch: 2, Data: proto.Marshal(proto.SnapshotDiffs{SnapshotID: "s1"})})
+	if err == nil {
+		t.Error("another host's snapshot.diffs was accepted")
+	}
+	err = s.applyReport(ctx, "h1", proto.Frame{Type: proto.MsgSnapshotDiffs, RunID: "r1", Epoch: 1, Data: proto.Marshal(proto.SnapshotDiffs{SnapshotID: "s1"})})
+	if err == nil {
+		t.Error("snapshot.diffs from the wrong epoch was accepted")
 	}
 }

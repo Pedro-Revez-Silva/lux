@@ -386,6 +386,11 @@ func (r *Runner) assign(ctx context.Context, a proto.Assign) {
 	p := newPlacement(r, a)
 	r.placements[a.RunID] = p
 	r.mu.Unlock()
+	// The Run resumes here, on these volumes: a diff of its last snapshot
+	// still reading them stops first.
+	if old != nil {
+		old.stopDiffs(errSuperseded)
+	}
 	if old != nil && old.liveState() != "" {
 		// The same Run again with a newer epoch while the old one still
 		// runs here: luxd gave up on the old one.

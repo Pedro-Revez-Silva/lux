@@ -301,8 +301,6 @@ type SnapshotDone struct {
 	Output    *BlobInfo  `json:"output,omitempty"`
 	Artifacts []Artifact `json:"artifacts,omitempty"`
 	OutputSeq int64      `json:"outputSeq"`
-	// Diffs: each repository's diff as of this snapshot, per base kind.
-	Diffs []SnapshotDiff `json:"diffs,omitempty"`
 }
 
 type BlobInfo struct {

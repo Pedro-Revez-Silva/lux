@@ -3,7 +3,8 @@ package proto
 // Diffs: what a Run changed in its repositories, from each repository's
 // base to its working tree. The runner never runs git in a checkout
 // itself: `lux-shim diff` does, as the workload user, inside the Run's
-// container (live) or a throwaway container on its volumes (at snapshot).
+// container (live) or, once a snapshot is reported, in a throwaway
+// container with its state volumes mounted read-only.
 
 // luxd → runner (live, not durable) and back.
 const (
@@ -12,9 +13,17 @@ const (
 	MsgDiffEnd     = "diff.end"
 )
 
-// EvDiffFailed: a diff could not be computed at a snapshot (the snapshot
-// and the exit go on): {error, repo?}.
-const EvDiffFailed = "diff.failed"
+// runner → luxd: a snapshot's diffs, after its snapshot.done (durable,
+// acked; accepted for an older epoch of the host, as snapshot.done is).
+const MsgSnapshotDiffs = "snapshot.diffs"
+
+// EvDiffFailed: a snapshot's diff could not be computed, for one
+// repository or all ({snapshotId, error, repo?, kind?}). EvDiffSkipped: it
+// was not attempted ({snapshotId, reason}). Neither affects the snapshot.
+const (
+	EvDiffFailed  = "diff.failed"
+	EvDiffSkipped = "diff.skipped"
+)
 
 // Base kinds: from the commit the repository was cloned at, or from the
 // checkout's current HEAD (uncommitted work only).
@@ -105,6 +114,16 @@ type DiffEnd struct {
 	SubID      string `json:"subId"`
 	Error      string `json:"error,omitempty"`
 	NotRunning bool   `json:"notRunning,omitempty"`
+}
+
+// SnapshotDiffs reports a snapshot's diffs: one per repository and kind,
+// each with its error if it has none. Skipped says why none were computed
+// (the host is going, the Run resumed here); Error, why they all failed.
+type SnapshotDiffs struct {
+	SnapshotID string         `json:"snapshotId"`
+	Diffs      []SnapshotDiff `json:"diffs"`
+	Skipped    string         `json:"skipped,omitempty"`
+	Error      string         `json:"error,omitempty"`
 }
 
 // SnapshotDiff is a diff computed at a snapshot: Blob holds the patch

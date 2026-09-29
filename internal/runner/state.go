@@ -43,6 +43,9 @@ type runState struct {
 	User string `json:"user,omitempty"`
 	// GitBases: per repository, the commit it was cloned at.
 	GitBases map[string]string `json:"gitBases,omitempty"`
+	// DiffsFor is the snapshot whose diffs are still to be computed and
+	// reported: a restarted runner does it then.
+	DiffsFor string `json:"diffsFor,omitempty"`
 	// LastExitAt, unix ms, for host-local TTL.
 	LastExitAt int64 `json:"lastExitAt,omitempty"`
 }
@@ -115,6 +118,9 @@ type snapshotRecord struct {
 	// that, luxd answers an upload with 404 (it does not know the blob
 	// yet), which must not count as done.
 	Reported bool `json:"reported,omitempty"`
+	// Diffs: the blobs of a snapshot's diffs, reported on their own
+	// (snapshot.diffs), not with the snapshot.
+	Diffs bool `json:"diffs,omitempty"`
 }
 
 type egressState struct {

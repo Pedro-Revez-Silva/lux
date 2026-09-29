@@ -137,7 +137,7 @@ func (s *Server) routes(api huma.API) {
 			"`base=clone` (default) diffs from the commit the repository was cloned at (for one added on resume, that clone's); `base=head` from its HEAD, " +
 			"uncommitted work only. While the Run's container runs the diff is computed there, now (`source: live`); otherwise it is the one stored " +
 			"with the latest snapshot that has one (`source: snapshot`, with its id and time), which holds both bases. " +
-			"404 `no_diff` when no snapshot has one (the Run never stopped since it started, or its snapshots predate diffs). " +
+			"404 `no_diff` when no snapshot has one (the Run never stopped since it started, or its snapshots predate diffs), or while the latest snapshot's diff is still being computed. " +
 			"Patches are git binary patches (they apply with `git apply`). Each is cut at 10 MiB after the last whole file's diff that fits, possibly none (`truncated`); the stats cover the whole diff.\n\n" +
 			"With `Accept: text/x-diff`, the patches alone, one after the other.",
 		Responses: map[string]*huma.Response{"200": {Description: "OK", Content: map[string]*huma.MediaType{
