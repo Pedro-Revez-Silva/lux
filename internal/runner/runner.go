@@ -400,7 +400,7 @@ func (r *Runner) assign(ctx context.Context, a proto.Assign) {
 	}
 }
 
-// handleLive handles non-durable frames: output subscriptions, streams.
+// handleLive handles non-durable frames: output subscriptions, diffs.
 func (r *Runner) handleLive(ctx context.Context, f proto.Frame) {
 	switch f.Type {
 	case proto.MsgOutputSubscribe:
@@ -424,6 +424,19 @@ func (r *Runner) handleLive(ctx context.Context, f proto.Frame) {
 		if sctx.Err() == nil {
 			_ = r.conn.Send(ctx, proto.Frame{Type: proto.MsgOutputEnd, RunID: f.RunID, Epoch: f.Epoch, Data: proto.Marshal(end)})
 		}
+	case proto.MsgDiffRequest:
+		var req proto.DiffRequest
+		_ = json.Unmarshal(f.Data, &req)
+		send := func(typ string, v any) error {
+			return r.conn.Send(ctx, proto.Frame{Type: typ, RunID: f.RunID, Epoch: f.Epoch, Data: proto.Marshal(v)})
+		}
+		end := proto.DiffEnd{SubID: req.SubID}
+		if p := r.placement(f.RunID, f.Epoch); p == nil || !p.running(ctx) {
+			end.NotRunning = true
+		} else if err := p.liveDiff(ctx, req, func(res proto.DiffResult) error { return send(proto.MsgDiffResult, res) }); err != nil {
+			end.Error = err.Error()
+		}
+		_ = send(proto.MsgDiffEnd, end)
 	case proto.MsgOutputCancel:
 		var s proto.OutputSubscribe
 		_ = json.Unmarshal(f.Data, &s)

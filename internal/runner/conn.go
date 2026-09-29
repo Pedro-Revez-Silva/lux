@@ -153,7 +153,7 @@ func (c *conn) dispatch(ctx context.Context, f proto.Frame) {
 		// Live, not durable: no ack. Handled here, in the order read, so
 		// a stream's input stays in order (see stream.go).
 		c.r.handleStreamFrame(ctx, f)
-	case proto.MsgOutputSubscribe, proto.MsgOutputCancel:
+	case proto.MsgOutputSubscribe, proto.MsgOutputCancel, proto.MsgDiffRequest:
 		// Live, not durable: no ack.
 		go c.r.handleLive(ctx, f)
 	default:

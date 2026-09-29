@@ -252,6 +252,24 @@ func (p *Podman) VolumeList(ctx context.Context, label string) ([]string, error)
 	return fields(out), nil
 }
 
+// RunTo runs podman with its stdout written to w (not buffered). Errors
+// include the end of stderr.
+func (p *Podman) RunTo(ctx context.Context, w io.Writer, args ...string) error {
+	var stderr bytes.Buffer
+	c := p.cmd(ctx, args...)
+	c.Cancel = func() error { return c.Process.Signal(syscall.SIGTERM) }
+	c.WaitDelay = 30 * time.Second
+	c.Stdout, c.Stderr = w, &stderr
+	if err := c.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if len(msg) > 4096 {
+			msg = msg[len(msg)-4096:]
+		}
+		return fmt.Errorf("podman %s: %v: %s", args[0], err, msg)
+	}
+	return nil
+}
+
 // VolumeExport writes a tar of the volume to w.
 func (p *Podman) VolumeExport(ctx context.Context, name string, w io.Writer) error {
 	var stderr bytes.Buffer

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -199,6 +200,8 @@ func (p *placement) run(ctx context.Context) {
 	if prev != nil {
 		p.state.VolumesSnapshot, p.state.VolumesEpoch = prev.VolumesSnapshot, prev.VolumesEpoch
 	}
+	// Where luxd says each repository was cloned; a clone now replaces it.
+	p.state.GitBases = maps.Clone(a.GitBases)
 	_ = writeRunState(p.dir, p.state)
 	p.setPhase("starting")
 	go p.report(ctx, proto.MsgStatus, proto.Status{State: "starting"})
@@ -252,6 +255,9 @@ func (p *placement) run(ctx context.Context) {
 		fail("user", err)
 		return
 	}
+	p.mu.Lock()
+	p.state.User = fmt.Sprintf("%d:%d", p.user.UID, p.user.GID)
+	p.mu.Unlock()
 	if err := p.prepareVolumes(startCtx, sp, a.Resume); err != nil {
 		fail("volumes", err)
 		return
@@ -1097,6 +1103,17 @@ func (p *placement) snapshot(ctx context.Context) (*proto.SnapshotDone, error) {
 			}
 		}
 	}
+	// After the volumes are saved (a diff that takes its full minute must
+	// not hold up a host being taken away), but uploaded first: small, and
+	// what a person looks at.
+	sd.Diffs = p.snapshotDiffs(ctx)
+	var diffUploads []pendingUpload
+	for _, d := range sd.Diffs {
+		if d.Blob != nil {
+			diffUploads = append(diffUploads, pendingUpload{BlobID: d.Blob.BlobID, Path: p.r.blobPath(d.Blob.BlobID), Size: d.Blob.Size})
+		}
+	}
+	rec.Uploads = append(diffUploads, rec.Uploads...)
 	arts, err := p.collectArtifacts(ctx)
 	if err != nil {
 		p.event(ctx, "artifacts.failed", map[string]any{"error": err.Error()})

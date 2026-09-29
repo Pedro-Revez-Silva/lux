@@ -192,6 +192,9 @@ type Assign struct {
 	// Image build resolution from an earlier placement, so rebuilds use the
 	// same pinned FROMs.
 	ImageResolved *ImageResolution `json:"imageResolved,omitempty"`
+	// GitBases: per repository, the commit it was cloned at (its latest
+	// git.clone), the base of its diff at snapshot time.
+	GitBases map[string]string `json:"gitBases,omitempty"`
 }
 
 // ImageResolution is a built image as its Run's first build made it: the
@@ -298,6 +301,8 @@ type SnapshotDone struct {
 	Output    *BlobInfo  `json:"output,omitempty"`
 	Artifacts []Artifact `json:"artifacts,omitempty"`
 	OutputSeq int64      `json:"outputSeq"`
+	// Diffs: each repository's diff as of this snapshot, per base kind.
+	Diffs []SnapshotDiff `json:"diffs,omitempty"`
 }
 
 type BlobInfo struct {
