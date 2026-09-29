@@ -99,6 +99,7 @@ export function useRunOutput(id: string, restartKey: number): OutputState {
           case "gap": {
             const g = body as { epoch?: number; reason?: string };
             flushPartials();
+            channels.current = newChannels();
             push(systemLines(Date.now(), `--- gap in epoch ${g.epoch ?? "?"}: ${g.reason ?? "unknown"} ---`));
             break;
           }
