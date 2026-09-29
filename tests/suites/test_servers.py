@@ -261,8 +261,9 @@ def test_lux_shell_without_bash(lux, runners, hosts):
     runners.start(hosts[0])
     run_id = lux.submit(idle(ALPINE_IMAGE))
     lux.wait_state(run_id, "running")
-    out = lux.run("shell", run_id, input="echo shell-$((20+22)) $0; exit\n", timeout=60).stdout
-    assert "shell-42" in out and "bash" not in out, out
+    lux.run("exec", run_id, "-T", "--", "/bin/sh", "-c", "! command -v bash", input="")
+    out = lux.run("shell", run_id, input="echo shell-$((20+22)); exit\n", timeout=60).stdout
+    assert "shell-42" in out.splitlines(), out
     lux.run("cancel", run_id)
 
 

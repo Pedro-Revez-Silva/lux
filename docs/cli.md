@@ -287,9 +287,9 @@ lux port-forward <run> <port-name> <local-port> [--address 127.0.0.1]
   `workload.tty: true`: its output from now on, and your typing. Ctrl-]
   detaches; the workload keeps running. What the workload prints on its
   terminal is also the Run's output, as always.
-- **shell** opens a login shell on a terminal: `bash -l` where the image
-  has bash, `sh -l` otherwise (`lux exec -t <run> -- /bin/sh -c 'command -v
-  bash >/dev/null && exec bash -l; exec sh -l'`).
+- **shell** opens a login shell on a terminal: `bash -l` where bash is
+  on the workload's PATH, `sh -l` otherwise (`lux exec -t <run> --
+  /bin/sh -c 'command -v bash >/dev/null && exec bash -l; exec /bin/sh -l'`).
 - **port-forward** listens locally and tunnels each connection to a port
   the Run declares in `network.ports`, or to one of its servers, by name.
   No other port can be reached.
