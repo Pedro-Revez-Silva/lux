@@ -281,7 +281,7 @@ func (s *Server) providerError(ctx context.Context, t eventTable, owner, op, pro
 	}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		if t == hostEvents {
-			return hostRepeatEvent(ctx, tx, owner, evHostProviderErr, data)
+			return hostRepeatEvent(ctx, tx, owner, data)
 		}
 		return poolRepeatEvent(ctx, tx, owner, evPoolProviderErr, data)
 	})
@@ -607,14 +607,13 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 			WHERE id = $1`, hostID, l.ProviderID, l.InstanceType, l.Zone, l.Market); err != nil {
 			return err
 		}
-		var later laterEvents
+		later := laterEvents{func() error {
+			return poolEvent(ctx, tx, pl.ID, evHostLaunched, map[string]any{"host": hostID, "name": name, "providerId": l.ProviderID,
+				"instanceType": l.InstanceType, "zone": l.Zone, "market": l.Market})
+		}}
 		if drained, err = s.cordonIfRetired(ctx, tx, &later, retired, hostID); err != nil {
 			return err
 		}
-		later = append(laterEvents{func() error {
-			return poolEvent(ctx, tx, pl.ID, evHostLaunched, map[string]any{"host": hostID, "name": name, "providerId": l.ProviderID,
-				"instanceType": l.InstanceType, "zone": l.Zone, "market": l.Market})
-		}}, later...)
 		return later.write()
 	}); err != nil {
 		return err

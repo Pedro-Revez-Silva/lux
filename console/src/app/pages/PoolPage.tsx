@@ -24,7 +24,7 @@ export function PoolPage({ name }: { name: string }) {
     .sort((a, b) => Number(a.platform) - Number(b.platform));
   const pool: Pool | undefined = matches[0];
   const ambiguous = scope.showTenant && matches.length > 1;
-  const own = useMemo(() => (hosts.data ?? []).filter((h) => pool && h.platform === pool.platform && (pool.platform || h.tenant === pool.tenant)), [hosts.data, pool]);
+  const own = (hosts.data ?? []).filter((h) => pool && h.platform === pool.platform && (pool.platform || h.tenant === pool.tenant));
 
   if (pools.error && !pools.data) {
     return (

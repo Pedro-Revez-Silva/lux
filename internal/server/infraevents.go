@@ -207,12 +207,12 @@ func poolRepeatEvent(ctx context.Context, tx pgx.Tx, poolID, typ string, data ma
 }
 
 // hostRepeatEvent is poolRepeatEvent for a host's provider errors.
-func hostRepeatEvent(ctx context.Context, tx pgx.Tx, hostID, typ string, data map[string]any) error {
-	folded, err := collapse(ctx, tx, hostEvents, hostID, typ, data, nil, hostRetry, false)
+func hostRepeatEvent(ctx context.Context, tx pgx.Tx, hostID string, data map[string]any) error {
+	folded, err := collapse(ctx, tx, hostEvents, hostID, evHostProviderErr, data, nil, hostRetry, false)
 	if err != nil || folded {
 		return err
 	}
-	return hostEvent(ctx, tx, hostID, typ, data)
+	return hostEvent(ctx, tx, hostID, evHostProviderErr, data)
 }
 
 // eventTable names one of the two event tables and its owner column.
