@@ -516,3 +516,30 @@ def test_host_page_shows_cost_to_its_owner_and_rates_to_operators(page, env, lux
         expect(rates.get_by_text(re.compile(r"static price|\(static\)"))).to_have_count(0)
         expect(page.get_by_text(re.compile(r"^allocated to Runs vs unallocated, per hour"))).to_have_count(1)
     _both_themes(page, env, f"/hosts/{host_id}", check)
+
+
+def test_rename_a_pool_through_the_dialog(page, lux, runners, hosts):
+    """The Pools page's Rename: the dialog says how many hosts and Runs
+    follow, a pool with a live host needs its current name typed, and the
+    host and a waiting Run take the new name."""
+    old, new = f"lab-{lux.tenant_id[-6:]}", f"lab2-{lux.tenant_id[-6:]}"
+    lux.run("pools", "set", old, "--provider", "static")
+    runners.start(hosts[0], token=runners.token("--pool", old))
+    waiting = lux.submit(generic(ALPINE_IMAGE, "true", placement={"pool": old, "requires": {"nowhere": "yes"}}))
+    page.sign_in(lux.api_key, "/pools")
+    row = page.get_by_role("row").filter(has_text=old)
+    row.get_by_role("button", name="Rename", exact=True).click()
+    dialog = page.get_by_role("dialog")
+    expect(dialog.get_by_text("1 host and 1 Run not yet finished will follow the rename", exact=False)).to_be_visible(timeout=15_000)
+    dialog.get_by_label("New name").fill(new)
+    confirm = dialog.get_by_role("button", name="Rename pool", exact=True)
+    # A pool with a live host: the current name must be typed first.
+    expect(confirm).to_be_disabled()
+    dialog.get_by_label(re.compile(f"Type {old} to confirm")).fill(old)
+    confirm.click()
+    page.get_by_text(f"Renamed {old} to {new}").wait_for(timeout=15_000)
+    expect(page.get_by_role("row").filter(has_text=new)).to_have_count(1, timeout=15_000)
+    assert [h["pool"] for h in lux.json("hosts", "ls") if h["name"] == hosts[0].name] == [new]
+    assert lux.get(waiting)["spec"]["placement"]["pool"] == new
+    assert not page.errors, page.errors
+    lux.run("cancel", waiting)

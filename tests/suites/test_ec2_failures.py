@@ -73,3 +73,37 @@ def test_an_instance_whose_launch_reply_was_lost_is_terminated(lux, ec2):
     ec2.no_boot = False
     lux.wait_state(run_id, "succeeded", timeout=240)
     wait_until(lambda: orphan not in {i["id"] for i in ec2.running()}, 120, 0.3, "the orphan was never terminated")
+
+
+def test_a_rename_whose_retag_is_refused_terminates_nothing(lux, ec2):
+    """Without IAM's ec2:CreateTags the rename still stands (the pool, its
+    host and Runs take the new name) and luxd keeps trying to re-tag; the
+    instance, still carrying the old name, is never taken for an orphan.
+    Once CreateTags is allowed, the rename finishes."""
+    fake_only(ec2)
+    pool(lux, ec2, min=1, max=1)
+    [host] = wait_until(lambda: ec2_hosts(lux), 120, 0.3, "no host")
+    ec2.deny_create_tags = True
+    try:
+        lux.run("pools", "rename", "burst", "burst-eu")
+        # Several provider checks (LUX_PROVIDER_CHECK_EVERY is 2s), each refused.
+        wait_until(lambda: ec2.calls.count("CreateTags") >= 3, 60, 0.3, "the re-tag was not retried")
+        [inst] = ec2.running()
+        assert inst["tags"]["lux:pool"].endswith("/burst"), inst["tags"]
+        assert "TerminateInstances" not in ec2.calls, ec2.calls
+        assert [h["name"] for h in ec2_hosts(lux, "burst-eu")] == [host["name"]]
+        pl = next(p for p in lux.json("pools", "ls") if p["name"] == "burst-eu")
+        assert pl["renamedFrom"] == "burst", pl
+        # Refused meanwhile: the old name, and a second rename.
+        assert lux.run("pools", "rename", "burst-eu", "burst-us", check=False).returncode == 4
+        assert lux.run("pools", "set", "burst", "--provider", "static", check=False).returncode == 4
+        run_id = lux.submit(generic(ALPINE_IMAGE, "echo", "ok", placement={"pool": "burst-eu"}))
+        lux.wait_state(run_id, "succeeded", timeout=60)
+        ec2.deny_create_tags = False
+        wait_until(lambda: ec2.running()[0]["tags"]["lux:pool"].endswith("/burst-eu"), 60, 0.3, "never re-tagged")
+        wait_until(lambda: "renamedFrom" not in next(p for p in lux.json("pools", "ls") if p["name"] == "burst-eu"),
+                   60, 0.5, "the rename never finished")
+        assert "TerminateInstances" not in ec2.calls, ec2.calls
+    finally:
+        ec2.deny_create_tags = False
+        lux.run("pools", "rm", "burst-eu", check=False)
