@@ -39,7 +39,7 @@ func TestProviderHelloCapacitySplitsRunCost(t *testing.T) {
 	tok := testHostToken(t, s, ctx)
 	tenant := "t1"
 	tok.TenantID = &tenant
-	tok.Pool = "burst"
+	tok.PoolID = new("pool-t1-ec2-burst")
 	hello := proto.Hello{Name: "capacity-host", ProviderID: "i-capacity-host", ProtocolVersion: proto.Version,
 		Capacity: proto.Capacity{CPUs: 8, Memory: 32 * gib}}
 	if _, err := s.registerHost(ctx, tok, hello); err != nil {
@@ -121,7 +121,7 @@ func TestProviderFirstHelloUsesOnlyPreRegistrationCache(t *testing.T) {
 	tok := testHostToken(t, s, ctx)
 	tenant := "t1"
 	tok.TenantID = &tenant
-	tok.Pool = "burst"
+	tok.PoolID = new("pool-t1-ec2-burst")
 	insertProviderHost(t, s, "t1", "burst", "ec2", "cached", MarketOnDemand, time.Now().Add(-time.Hour))
 	for _, tc := range []struct {
 		id, market string
@@ -132,8 +132,8 @@ func TestProviderFirstHelloUsesOnlyPreRegistrationCache(t *testing.T) {
 	} {
 		t.Run(tc.id, func(t *testing.T) {
 			if tc.id != "cached" {
-				execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provider_id, provision_requested_at,
-					instance_type, market, launch_template) VALUES ($1, 't1', $1, 'burst', 'provisioning', 'i-' || $1::text,
+				execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provider_id, provision_requested_at,
+					instance_type, market, launch_template) VALUES ($1, 't1', $1, 'pool-t1-ec2-burst', 'provisioning', 'i-' || $1::text,
 					now() - interval '1 hour', 'm7i.large', $2, '{"region":"us-east-1"}')`, tc.id, tc.market)
 			}
 			execSQL(t, s, ctx, `UPDATE hosts SET registered_at = NULL WHERE id = $1`, tc.id)

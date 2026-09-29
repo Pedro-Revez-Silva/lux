@@ -477,11 +477,16 @@ terminated. A static host (outside any pool) uses the same script as
 LUX_HOST_TOKEN=luxh_… LUX_URL=https://luxd.example bash` (no auth on that
 endpoint: it carries no secret, only how to reach luxd).
 
-Instances are tagged `Name=<host>`, `lux:pool=<pool>` (`<tenant>/<pool>`
-for a tenant's pool), `lux:managed=true`, `lux:deployment=<id>` (which lux
-database launched it: deployments sharing an account never touch each
-other's instances) and `lux:host=<host id>`, plus the
-template's `tags`. luxd also needs `DescribeInstances` filtered by tag.
+Instances are tagged `Name=<host>`, `lux:pool-id=<pool id>`,
+`lux:pool=<pool name at launch>`, `lux:managed=true`,
+`lux:deployment=<id>` (which lux database launched it: deployments sharing
+an account never touch each other's instances) and `lux:host=<host id>`,
+plus the template's `tags`. luxd lists a pool's instances by
+`lux:pool-id`, `lux:managed` and `lux:deployment` (`DescribeInstances`
+filtered by tag), never by name: renaming a pool (`lux pools rename`) is a
+database change, and its instances keep running and stay its own.
+`lux:pool` is informational and not updated by a rename. All tags are set
+at launch; luxd tags nothing afterwards.
 
 Reusable Terraform for running all of this on AWS — control host, S3,
 runner launch templates, Cloudflare Tunnel — is under

@@ -68,7 +68,8 @@ func TestRunPoolOwnerMigration(t *testing.T) {
 		INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r1', 't1', '{"placement":{"pool":"burst"}}', 'submitted')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Migrate(ctx, owner, "lux_app"); err != nil {
+	// 038 replaces pool_owner and lux_pool_owner with pool ids.
+	if _, err := store.MigrateTo(ctx, owner, "lux_app", "033_run_pool_owner"); err != nil {
 		t.Fatal(err)
 	}
 	var legacy *string

@@ -1727,10 +1727,10 @@ func TestResolvePlacementRateProviderSource(t *testing.T) {
 			execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES
 				('rate-pool-t1', 't1', 'burst', 'ec2'), ('rate-pool-t2', 't2', 'burst', 'ec2')`)
 			execSQL(t, s, ctx, `INSERT INTO hosts
-				(id, tenant_id, name, pool, state, provision_requested_at, instance_type, market, zone, launch_template, capacity)
-				VALUES ('rate-target', 't1', 'rate-target', 'burst', 'ready', $1, 'm7i.large', $2,
+				(id, tenant_id, name, pool_id, state, provision_requested_at, instance_type, market, zone, launch_template, capacity)
+				VALUES ('rate-target', 't1', 'rate-target', 'rate-pool-t1', 'ready', $1, 'm7i.large', $2,
 				'us-east-1a', '{"region":"us-east-1"}', '{"cpus":4,"memory":17179869184}'),
-				('rate-peer', 't2', 'rate-peer', 'burst', 'ready', $1, 'm7i.large', $2,
+				('rate-peer', 't2', 'rate-peer', 'rate-pool-t2', 'ready', $1, 'm7i.large', $2,
 				'us-east-1a', '{"region":"us-east-1"}', '{"cpus":8,"memory":34359738368}')`, at("10:00"), tc.market)
 			execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
 				VALUES ('rate-peer', $1, 0.40, 'USD', 8, $3, $4),
@@ -1753,7 +1753,7 @@ func TestResolvePlacementRateProviderSource(t *testing.T) {
 			check("rate-target", "0.400000000", "ec2"+tc.suffix)
 
 			// Without a pool, a legacy host's own suffix-matching observation remains usable.
-			execSQL(t, s, ctx, `UPDATE hosts SET pool = 'legacy' WHERE id = 'rate-target'`)
+			execSQL(t, s, ctx, `UPDATE hosts SET pool_id = NULL WHERE id = 'rate-target'`)
 			check("rate-target", "9.000000000", "other"+tc.suffix)
 		})
 	}

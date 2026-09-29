@@ -91,9 +91,9 @@ func infraFixture(t *testing.T, s *Server, ctx context.Context) {
 	t.Helper()
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
 	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
-	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, tenant_id, pool, token_hash) VALUES ('tok1', 't1', 'burst', 'hash1')`)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, capacity, last_heartbeat, provision_requested_at, provider_id, registered_at, token_id)
-		VALUES ('h1', 't1', 'h1', 'burst', 'ready', '{"runs": 2}', now(), now(), 'i-1', now() - interval '1 hour', 'tok1')`)
+	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, tenant_id, pool_id, token_hash) VALUES ('tok1', 't1', 'pool1', 'hash1')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, capacity, last_heartbeat, provision_requested_at, provider_id, registered_at, token_id)
+		VALUES ('h1', 't1', 'h1', 'pool1', 'ready', '{"runs": 2}', now(), now(), 'i-1', now() - interval '1 hour', 'tok1')`)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r1', 't1', '{"placement": {"pool": "burst"}}', 'provisioning')`)
 }
 
@@ -299,11 +299,11 @@ func TestInfraEventsAreWrittenWithTheirChange(t *testing.T) {
 		{
 			typ: evRegistered,
 			setup: func(t *testing.T, s *Server, ctx context.Context) {
-				execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provision_requested_at, provider_id, token_id)
-					VALUES ('h2', 't1', 'burst-h2', 'burst', 'provisioning', now(), 'i-2', 'tok1')`)
+				execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, provider_id, token_id)
+					VALUES ('h2', 't1', 'burst-h2', 'pool1', 'provisioning', now(), 'i-2', 'tok1')`)
 			},
 			act: func(s *Server, ctx context.Context) error {
-				_, err := s.registerHost(ctx, &hostToken{ID: "tok1", TenantID: new("t1"), Pool: "burst"},
+				_, err := s.registerHost(ctx, &hostToken{ID: "tok1", TenantID: new("t1"), PoolID: new("pool1")},
 					proto.Hello{Name: "burst-h2", ProtocolVersion: proto.Version, Arch: "arm64", ProviderID: "i-2"})
 				return err
 			},
@@ -314,11 +314,11 @@ func TestInfraEventsAreWrittenWithTheirChange(t *testing.T) {
 		{
 			typ: evHostRegistered,
 			setup: func(t *testing.T, s *Server, ctx context.Context) {
-				execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provision_requested_at, provider_id, token_id)
-					VALUES ('h2', 't1', 'burst-h2', 'burst', 'provisioning', now(), 'i-2', 'tok1')`)
+				execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, provider_id, token_id)
+					VALUES ('h2', 't1', 'burst-h2', 'pool1', 'provisioning', now(), 'i-2', 'tok1')`)
 			},
 			act: func(s *Server, ctx context.Context) error {
-				_, err := s.registerHost(ctx, &hostToken{ID: "tok1", TenantID: new("t1"), Pool: "burst"},
+				_, err := s.registerHost(ctx, &hostToken{ID: "tok1", TenantID: new("t1"), PoolID: new("pool1")},
 					proto.Hello{Name: "burst-h2", ProtocolVersion: proto.Version, Arch: "arm64", ProviderID: "i-2"})
 				return err
 			},
@@ -592,7 +592,7 @@ func TestInfraEventsVisibility(t *testing.T) {
 	// "burst" is t1's, t2's and the platform's; "shared" only the platform's.
 	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool2', 't2', 'burst', 'ec2'),
 		('pool0', NULL, 'shared', 'ec2'), ('poolP', NULL, 'burst', 'ec2')`)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state) VALUES ('h2', 't2', 'h2', 'burst', 'ready'), ('h0', NULL, 'h0', 'shared', 'ready')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state) VALUES ('h2', 't2', 'h2', 'pool2', 'ready'), ('h0', NULL, 'h0', 'pool0', 'ready')`)
 	for _, q := range []string{
 		`INSERT INTO pool_events (tenant_id, pool_id, type) VALUES ('t1', 'pool1', 'pool.t1'), ('t2', 'pool2', 'pool.t2'),
 			(NULL, 'pool0', 'pool.platform'), (NULL, 'poolP', 'pool.platform-burst')`,
@@ -650,7 +650,7 @@ func TestHostPoolEventsGoToItsOwnersPool(t *testing.T) {
 	ctx := context.Background()
 	infraFixture(t, s, ctx)
 	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('poolP', NULL, 'burst', 'ec2')`)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state) VALUES ('hP', NULL, 'hP', 'burst', 'ready')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state) VALUES ('hP', NULL, 'hP', 'poolP', 'ready')`)
 	for _, h := range []string{"h1", "hP"} {
 		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 			return hostPoolEvent(ctx, tx, h, evHostRegistered, map[string]any{"host": h})
@@ -681,8 +681,8 @@ func TestRecoveredLaunchIsRecorded(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
 	infraFixture(t, s, ctx)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provision_requested_at, token_id, tagged)
-		VALUES ('h2', 't1', 'burst-h2', 'burst', 'provisioning', now(), 'tok1', true)`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, token_id, tagged)
+		VALUES ('h2', 't1', 'burst-h2', 'pool1', 'provisioning', now(), 'tok1', true)`)
 	pl := poolRow{ID: "pool1", Name: "burst", Provider: "ec2", TenantID: new("t1")}
 	prov := &listingProvider{instances: map[string]Instance{"i-lost": {State: "running", Tags: map[string]string{tagHost: "h2"}}}}
 	for range 2 {
@@ -778,7 +778,7 @@ func TestStaticHostFirstRegistrationIsReady(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
 	infraFixture(t, s, ctx)
-	w, err := s.registerHost(ctx, &hostToken{ID: "tok1", TenantID: new("t1"), Pool: "burst"},
+	w, err := s.registerHost(ctx, &hostToken{ID: "tok1", TenantID: new("t1"), PoolID: new("pool1")},
 		proto.Hello{Name: "static-1", ProtocolVersion: proto.Version, Arch: "arm64"})
 	if err != nil {
 		t.Fatal(err)
@@ -876,7 +876,7 @@ func TestPoolRemovedDuringALaunchDrainsTheHost(t *testing.T) {
 			if n := queryOne[int](t, s, `SELECT count(*) FROM host_events WHERE host_id = $1 AND type = $2`, hostID, evDrainRequested); n != 1 {
 				t.Fatalf("%d host.drain_requested events, want 1", n)
 			}
-			w, err := s.registerHost(ctx, &hostToken{ID: "tok1", TenantID: new("t1"), Pool: "burst"},
+			w, err := s.registerHost(ctx, &hostToken{ID: "tok1", TenantID: new("t1"), PoolID: new("pool1")},
 				proto.Hello{Name: "burst-new", ProtocolVersion: proto.Version, Arch: "arm64", ProviderID: "i-held", Capacity: proto.Capacity{Runs: 2}})
 			if err != nil || w.HostID != hostID {
 				t.Fatalf("registration: %v (host %s, want %s)", err, w.HostID, hostID)
@@ -898,8 +898,8 @@ func TestRecoveredLaunchOfARemovedPoolIsDrained(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
 	infraFixture(t, s, ctx)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provision_requested_at, token_id, tagged)
-		VALUES ('h2', 't1', 'burst-h2', 'burst', 'provisioning', now(), 'tok1', true)`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, token_id, tagged)
+		VALUES ('h2', 't1', 'burst-h2', 'pool1', 'provisioning', now(), 'tok1', true)`)
 	execSQL(t, s, ctx, `UPDATE pools SET retired = true WHERE id = 'pool1'`)
 	s.recordProviderID(ctx, "pool1", "h2", "i-lost")
 	if !queryOne[bool](t, s, `SELECT draining AND provider_id = 'i-lost' FROM hosts WHERE id = 'h2'`) {
@@ -919,8 +919,8 @@ func TestRecoveredLaunchOfARemovedPoolKeepsItsRunningPlacement(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
 	infraFixture(t, s, ctx)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, capacity, last_heartbeat, provision_requested_at, registered_at, token_id, tagged)
-		VALUES ('h2', 't1', 'burst-h2', 'burst', 'ready', '{"runs": 2}', now(), now(), now(), 'tok1', true)`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, capacity, last_heartbeat, provision_requested_at, registered_at, token_id, tagged)
+		VALUES ('h2', 't1', 'burst-h2', 'pool1', 'ready', '{"runs": 2}', now(), now(), now(), 'tok1', true)`)
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'running', current_epoch = 1 WHERE id = 'r1'`)
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, lease_expires_at)
 		VALUES ('p2', 't1', 'r1', 'h2', 1, 'running', now() + interval '1 hour')`)

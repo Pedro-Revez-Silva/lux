@@ -161,6 +161,7 @@ export function runColumns({ tenant, host = true, adapter = true, cost = false }
   if (tenant) c.push({ key: "tenant", header: "Tenant", cell: (r) => r.tenant, sortValue: (r) => r.tenant, width: 120 });
   c.push({ key: "state", header: "State", cell: (r) => <StateCell kind="run" state={r.state} activity={r.activity} reason={r.stateReason} />, sortValue: (r) => r.state });
   if (host) c.push({ key: "host", header: "Host", cell: (r) => (r.hostId ? <HostLink id={r.hostId} name={r.host} /> : DASH), sortValue: (r) => r.host, width: 150 });
+  c.push({ key: "pool", header: "Pool", cell: (r) => r.pool || DASH, sortValue: (r) => r.pool });
   if (adapter) c.push({ key: "adapter", header: "Adapter", cell: (r) => <span className="secondary">{r.spec.workload.adapter}</span>, sortValue: (r) => r.spec.workload.adapter, width: 110, optional: true });
   c.push(
     { key: "runtime", header: "Runtime", cell: (r) => <RuntimeCell run={r} />, sortValue: (r) => r.runtimeSeconds, align: "right", mono: true, width: 90 },

@@ -59,8 +59,8 @@ func TestAdminPoolNames(t *testing.T) {
 	cfg, db := adminDB(t)
 	ctx := context.Background()
 	if _, err := db.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1');
-		INSERT INTO pools (id, tenant_id, name, provider) VALUES ('p_old', 't1', 'Legacy_Pool', 'static');
-		INSERT INTO host_tokens (id, tenant_id, pool, token_hash) VALUES ('ht_old', 't1', 'Old_Static', 'x')`); err != nil {
+		INSERT INTO pools (id, tenant_id, name, provider) VALUES ('p_old', 't1', 'Legacy_Pool', 'static'), ('p_static', 't1', 'Old_Static', 'static');
+		INSERT INTO host_tokens (id, tenant_id, pool_id, token_hash) VALUES ('ht_old', 't1', 'p_static', 'x')`); err != nil {
 		t.Fatal(err)
 	}
 	stdout := os.Stdout
@@ -103,13 +103,13 @@ func TestAdminPoolNames(t *testing.T) {
 	if n := count(`SELECT count(*) FROM pools WHERE name IN ('Bad_Name', 'bad-') OR length(name) > 32`); n != 0 {
 		t.Errorf("refused pools were stored: %d", n)
 	}
-	if n := count(`SELECT count(*) FROM host_tokens WHERE pool = 'Bad_Name'`); n != 0 {
+	if n := count(`SELECT count(*) FROM host_tokens t JOIN pools p ON p.id = t.pool_id WHERE p.name = 'Bad_Name'`); n != 0 {
 		t.Errorf("a refused token was stored: %d", n)
 	}
 	if n := count(`SELECT max_hosts FROM pools WHERE tenant_id = 't1' AND name = 'Legacy_Pool'`); n != 4 {
 		t.Errorf("legacy pool not updated: max_hosts %d", n)
 	}
-	if n := count(`SELECT count(*) FROM host_tokens WHERE tenant_id = 't1' AND pool = 'Old_Static'`); n != 2 {
+	if n := count(`SELECT count(*) FROM host_tokens WHERE tenant_id = 't1' AND pool_id = 'p_static'`); n != 2 {
 		t.Errorf("no replacement token for the legacy static pool: %d tokens", n)
 	}
 }

@@ -36,7 +36,7 @@ func TestHostHourOnceRoundedAndMissingRateRetry(t *testing.T) {
 	s.cfg.Costs.Batch = 1
 	s.cfg.Costs.Hourly = 48 * time.Hour
 	hour := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, provision_requested_at, registered_at, terminated_at, capacity)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, provision_requested_at, registered_at, terminated_at, capacity)
 		VALUES ('h-round','h-round','p','terminated',$1,$1,$2,'{"cpus":2,"memory":2}')`, hour, hour.Add(time.Hour))
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('h-round',$1,$2,0.000000001,'USD',2,2,'aws-pricing')`, hour, hour.Add(30*time.Minute))
@@ -82,7 +82,7 @@ func TestHostHourRefreshWaitsForPlacementEnd(t *testing.T) {
 	s.cfg.Costs.Batch = 1
 	s.cfg.Costs.Hourly = 48 * time.Hour
 	hour := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at, terminated_at)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, registered_at, terminated_at)
 		VALUES ('h-end','h-end','p','terminated',$1,$2)`, hour, hour.Add(time.Hour))
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('h-end',$1,4,'USD',4,400,'static')`, hour)
@@ -150,7 +150,7 @@ func TestHostHoursSkipUnpricedStaticHourAndPriceLaterHour(t *testing.T) {
 	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
 	priceAt := hour.Add(time.Hour)
 	end := priceAt.Add(time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at, terminated_at)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, registered_at, terminated_at)
 		VALUES ('h-static-gap', 'h-static-gap', 'p', 'terminated', $1, $2)`, hour, end)
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('h-static-gap', $1, $2, 6, 'USD', 1, 1, 'static')`, priceAt, end)
@@ -192,7 +192,7 @@ func TestHostHoursSkipTerminatedProviderProvisioningGap(t *testing.T) {
 	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
 	registered := hour.Add(30 * time.Minute)
 	end := hour.Add(2 * time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, provision_requested_at, registered_at, terminated_at)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, provision_requested_at, registered_at, terminated_at)
 		VALUES ('h-provider-gap', 'h-provider-gap', 'p', 'terminated', $1, $2, $3)`, hour, registered, end)
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('h-provider-gap', $1, $2, 8, 'USD', 1, 1, 'aws-pricing')`, registered, end)
@@ -230,7 +230,7 @@ func TestHostHoursRetryProviderGapAfterRegistration(t *testing.T) {
 	s.cfg.Costs.Hourly = 48 * time.Hour
 	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
 	end := hour.Add(2 * time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, provision_requested_at, registered_at, terminated_at)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, provision_requested_at, registered_at, terminated_at)
 		VALUES ('h-provider-retry', 'h-provider-retry', 'p', 'terminated', $1, $1, $2)`, hour, end)
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('h-provider-retry', $1, $2, 8, 'USD', 1, 1, 'aws-pricing')`, hour.Add(time.Hour), end)
@@ -299,7 +299,7 @@ func TestHostHoursRetryPartiallyPricedProviderAfterRegistration(t *testing.T) {
 	registered := hour.Add(15 * time.Minute)
 	priceAt := hour.Add(30 * time.Minute)
 	end := hour.Add(2 * time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, provision_requested_at, registered_at, terminated_at)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, provision_requested_at, registered_at, terminated_at)
 		VALUES ('h-provider-partial', 'h-provider-partial', 'p', 'terminated', $1, $2, $3)`, hour, registered, end)
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('h-provider-partial', $1, $2, 8, 'USD', 1, 1, 'aws-pricing')`, priceAt, end)
@@ -358,7 +358,7 @@ func TestHostHoursPendingRetryDoesNotStarveForwardCursor(t *testing.T) {
 	s.cfg.Costs.Hourly = 48 * time.Hour
 	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
 	end := hour.Add(2 * time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, provision_requested_at, registered_at, terminated_at)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, provision_requested_at, registered_at, terminated_at)
 		VALUES ('h-pending-forward', 'h-pending-forward', 'p', 'terminated', $1, $1, $2)`, hour, end)
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('h-pending-forward', $1, $2, 8, 'USD', 1, 1, 'aws-pricing')`, hour.Add(time.Hour), end)
@@ -392,7 +392,7 @@ func TestHostHoursPendingGapExpiresWithRetention(t *testing.T) {
 	s.cfg.Costs.Batch = 1
 	s.cfg.Costs.Hourly = 48 * time.Hour
 	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, provision_requested_at, registered_at, terminated_at)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, provision_requested_at, registered_at, terminated_at)
 		VALUES ('h-expiring-gap', 'h-expiring-gap', 'p', 'terminated', $1, $1, $2)`, hour, hour.Add(time.Hour))
 	if err := s.updateHostHours(ctx); err != nil {
 		t.Fatal(err)
@@ -419,7 +419,7 @@ func TestHostHoursBatchTwoRetriesSameHostOlderGap(t *testing.T) {
 	s.cfg.Costs.Hourly = 48 * time.Hour
 	current := time.Now().UTC().Truncate(time.Hour)
 	old := current.Add(-3 * time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, registered_at)
 		VALUES ('h-same-host', 'h-same-host', 'p', 'ready', $1)`, old)
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('h-same-host', $1, 4, 'USD', 1, 1, 'static')`, old)
@@ -448,7 +448,7 @@ func TestHostHoursPartialStaticTerminatedGapIsNotRetried(t *testing.T) {
 	hour := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
 	registered := hour.Add(10 * time.Minute)
 	priced := hour.Add(30 * time.Minute)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at, terminated_at)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, registered_at, terminated_at)
 		VALUES ('h-static-partial', 'h-static-partial', 'p', 'terminated', $1, $2)`, registered, hour.Add(time.Hour))
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('h-static-partial', $1, $2, 4, 'USD', 1, 1, 'static')`, priced, hour.Add(time.Hour))
@@ -486,7 +486,7 @@ func TestHostHoursLastRetainedGapRetriesBeforeExpiry(t *testing.T) {
 	hour := time.Now().UTC().Truncate(time.Hour).Add(-time.Hour)
 	// Put the retention cutoff near the end of the oldest hour (HH:59).
 	s.cfg.Costs.Hourly = time.Since(hour) + 8*time.Second
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, provision_requested_at, registered_at, terminated_at)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, provision_requested_at, registered_at, terminated_at)
 		VALUES ('h-boundary', 'h-boundary', 'p', 'terminated', $1, $1, $2)`, hour, hour.Add(time.Hour))
 	if err := s.updateHostHours(ctx); err != nil {
 		t.Fatal(err)
@@ -606,7 +606,7 @@ func TestPluginHourlyReplacementAndRLS(t *testing.T) {
 		t.Fatal("tenant wrote another tenant's hourly cost")
 	}
 	// Host rows cannot be read or written in a tenant transaction.
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, tenant_id, pool, state) VALUES ('h1', 'h1', 't1', 'p', 'ready')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, tenant_id, pool_id, state) VALUES ('h1', 'h1', 't1', 'p', 'ready')`)
 	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, source, family, currency, host_id, allocated, unallocated)
 		VALUES ($1, 'compute', 'compute', 'USD', 'h1', 1, 2)`, t0)
 	var n int
@@ -628,7 +628,7 @@ func TestPluginHourlyReplacementAndRLS(t *testing.T) {
 func TestComputeHourlyPiecesAndHostIdle(t *testing.T) {
 	s, keys := costFixture(t)
 	ctx := context.Background()
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, tenant_id, pool, state, registered_at, capacity)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, tenant_id, pool_id, state, registered_at, capacity)
 		VALUES ('h1','h1','t1','p','ready',$1,'{"cpus":4,"memory":400}')`, t0)
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('h1',$1,4,'USD',4,400,'static')`, t0)
@@ -720,7 +720,7 @@ func TestHostHoursBackfillBoundedAndIsolated(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Hour)
 	start := now.Add(-3 * time.Hour)
 	stop := now.Add(-90 * time.Minute)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at, terminated_at) VALUES
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, registered_at, terminated_at) VALUES
 		('a-bad','bad','p','terminated',$1,$2), ('b-good','good','p','terminated',$1,$2)`, start, stop)
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source) VALUES
 		('a-bad',$1,$2,1,'USD',1,1,'static'), ('a-bad',$1 + interval '30 minutes',NULL,2,'USD',1,1,'static'),
@@ -770,7 +770,7 @@ func TestHostHoursBackfillRespectsRetention(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Hour)
 	start := now.Add(-12 * time.Hour)
 	stop := time.Now().UTC().Add(-15 * time.Minute)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at, terminated_at)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, registered_at, terminated_at)
 		VALUES ('old-host','old-host','p','terminated',$1,$2)`, start, stop)
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('old-host',$1,2,'USD',1,1,'static')`, start)
@@ -792,13 +792,13 @@ func TestHostHoursRefreshesCurrentHourWithBacklog(t *testing.T) {
 	s.cfg.Costs.Hourly = 48 * time.Hour
 	current := time.Now().UTC().Truncate(time.Hour)
 	old := current.Add(-5 * time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at) VALUES
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, registered_at) VALUES
 		('a-old', 'a-old', 'p', 'ready', $1), ('b-old', 'b-old', 'p', 'ready', $1),
 		('c-old', 'c-old', 'p', 'ready', $1), ('z-current', 'z-current', 'p', 'ready', $2)`, old, current)
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source) VALUES
 		('a-old', $1, 4, 'USD', 1, 1, 'static'), ('b-old', $1, 4, 'USD', 1, 1, 'static'),
 		('c-old', $1, 4, 'USD', 1, 1, 'static'), ('z-current', $2, 4, 'USD', 1, 1, 'static')`, old, current)
-	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, source, family, currency, host_id, pool, allocated, unallocated)
+	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, source, family, currency, host_id, pool_id, allocated, unallocated)
 		VALUES ($1, 'compute', 'compute', 'USD', 'z-current', 'p', 0, 0)`, current)
 	if err := s.updateHostHours(ctx); err != nil {
 		t.Fatal(err)
@@ -823,7 +823,7 @@ func TestHostHoursBatchOneAlternatesAcrossRestarts(t *testing.T) {
 	s.cfg.Costs.Hourly = 48 * time.Hour
 	current := time.Now().UTC().Truncate(time.Hour)
 	old := current.Add(-4 * time.Hour)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, registered_at) VALUES
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, registered_at) VALUES
 		('a-old', 'a-old', 'p', 'ready', $1), ('b-old', 'b-old', 'p', 'ready', $1),
 		('z-current', 'z-current', 'p', 'ready', $2)`, old, current)
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source) VALUES

@@ -59,8 +59,9 @@ type Instance struct {
 const (
 	tagManaged    = "lux:managed"
 	tagDeployment = "lux:deployment" // which lux database launched it
-	tagPool       = "lux:pool"
-	tagHost       = "lux:host" // the host row's id
+	tagPool       = "lux:pool"       // its name at launch; informational, not updated on rename
+	tagPoolID     = "lux:pool-id"    // what a pool's instances are listed by
+	tagHost       = "lux:host"       // the host row's id
 )
 
 // provisionerLoop keeps provisioned pools the size their demand, minimum
@@ -122,8 +123,7 @@ func (s *Server) provision(ctx context.Context) error {
 		rows, err := tx.Query(ctx, `SELECT id, name, provider, tenant_id, template, min_hosts, max_hosts, warm_hosts, retired,
 				scale_down_after_s, warm_while_active
 			FROM pools WHERE provider <> 'static'
-			  AND (NOT retired OR EXISTS (SELECT 1 FROM hosts h WHERE h.pool = pools.name
-			       AND coalesce(h.tenant_id, '') = coalesce(pools.tenant_id, '') AND h.state <> 'terminated'))`)
+			  AND (NOT retired OR EXISTS (SELECT 1 FROM hosts h WHERE h.pool_id = pools.id AND h.state <> 'terminated'))`)
 		if err != nil {
 			return err
 		}
@@ -408,14 +408,10 @@ func (s *Server) providerGone(ctx context.Context, h hostRef, st *poolState) {
 	}
 }
 
-// poolTags are the tags every instance of a pool carries, and what its
-// instances are listed by. Tenant pools are named by tenant and name.
+// poolTags are what a pool's instances are listed by: its id, never its
+// name, which a rename changes.
 func (s *Server) poolTags(pl poolRow) map[string]string {
-	pool := pl.Name
-	if pl.TenantID != nil {
-		pool = *pl.TenantID + "/" + pl.Name
-	}
-	return map[string]string{tagManaged: "true", tagDeployment: s.deployment, tagPool: pool}
+	return map[string]string{tagManaged: "true", tagDeployment: s.deployment, tagPoolID: pl.ID}
 }
 
 // warm is how many idle hosts the pool keeps ready: its warm count, or
@@ -439,23 +435,15 @@ func (s *Server) scaleDownAfter(pl poolRow) time.Duration {
 }
 
 func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolState) error {
-	// Runs waiting for a host in this pool. A Run that resolved to a pool
-	// row (pool_owner set) counts toward exactly that one. Otherwise a
-	// tenant pool serves its tenant; a platform pool anyone whose Runs name
-	// it (and who has no pool of their own by that name).
+	// Runs waiting for a host in this pool: those bound to it.
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM runs r
-		WHERE r.state = 'provisioning' AND NOT r.cancel_requested
-		  AND coalesce(r.spec->'placement'->>'pool', 'default') = $1
-		  AND CASE WHEN r.pool_owner IS NOT NULL THEN r.pool_owner = coalesce($2, '')
-		           WHEN $2::text IS NULL
-		           THEN NOT EXISTS (SELECT 1 FROM pools o WHERE o.tenant_id = r.tenant_id AND o.name = $1 AND NOT o.retired)
-		           ELSE r.tenant_id = $2 END`, pl.Name, pl.TenantID).Scan(&st.demand); err != nil {
+		WHERE r.state = 'provisioning' AND NOT r.cancel_requested AND r.pool_id = $1`, pl.ID).Scan(&st.demand); err != nil {
 		return err
 	}
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM placements p JOIN hosts h ON h.id = p.host_id
-			WHERE h.pool = $1 AND coalesce(h.tenant_id, '') = coalesce($2, '')
-			  AND (p.state IN `+livePlacementStates+` OR coalesce(p.ended_at, p.created_at) > now() - $3::interval))`,
-		pl.Name, pl.TenantID, interval(s.scaleDownAfter(pl))).Scan(&st.active); err != nil {
+			WHERE h.pool_id = $1
+			  AND (p.state IN `+livePlacementStates+` OR coalesce(p.ended_at, p.created_at) > now() - $2::interval))`,
+		pl.ID, interval(s.scaleDownAfter(pl))).Scan(&st.active); err != nil {
 		return err
 	}
 	rows, err := tx.Query(ctx, `SELECT h.id, coalesce(h.provider_id, ''), coalesce(h.launch_template, $5), h.state, h.draining,
@@ -467,10 +455,10 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 			h.tagged AND h.provision_requested_at < now() - $8::interval
 			  AND coalesce(h.last_heartbeat < now() - $7::interval, true)
 		FROM hosts h
-		WHERE h.pool = $1 AND coalesce(h.tenant_id, '') = coalesce($2, '') AND h.provision_requested_at IS NOT NULL
+		WHERE h.pool_id = $1 AND $2::text IS NOT DISTINCT FROM h.tenant_id AND h.provision_requested_at IS NOT NULL
 		  AND h.state <> 'terminated'
 		ORDER BY coalesce(h.last_placement_ended_at, h.registered_at, h.created_at)`,
-		pl.Name, pl.TenantID, interval(s.scaleDownAfter(pl)), interval(s.cfg.LaunchTimeout), pl.Template, interval(s.cfg.LostGrace), interval(s.cfg.LeaseDuration), interval(s.cfg.ListingLag))
+		pl.ID, pl.TenantID, interval(s.scaleDownAfter(pl)), interval(s.cfg.LaunchTimeout), pl.Template, interval(s.cfg.LostGrace), interval(s.cfg.LeaseDuration), interval(s.cfg.ListingLag))
 	if err != nil {
 		return err
 	}
@@ -556,13 +544,13 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 				return err
 			}
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO host_tokens (id, tenant_id, pool, token_hash) VALUES ($1, $2, $3, $4)`,
-			tokenID, pl.TenantID, pl.Name, ids.Hash(token)); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO host_tokens (id, tenant_id, pool_id, token_hash) VALUES ($1, $2, $3, $4)`,
+			tokenID, pl.TenantID, pl.ID, ids.Hash(token)); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool, token_id, name, state, provision_requested_at, launch_template, tagged)
+		_, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool_id, token_id, name, state, provision_requested_at, launch_template, tagged)
 			VALUES ($1, $2, $3, $4, $5, 'provisioning', now(), $6, true)`,
-			hostID, pl.TenantID, pl.Name, tokenID, name, pl.Template)
+			hostID, pl.TenantID, pl.ID, tokenID, name, pl.Template)
 		if err != nil {
 			return err
 		}
@@ -582,7 +570,7 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 	}
 	env := map[string]string{"LUX_URL": s.cfg.RunnerURL, "LUX_HOST_TOKEN": token, "LUX_HOST_NAME": name}
 	tags := s.poolTags(pl)
-	tags["Name"], tags[tagHost] = name, hostID
+	tags["Name"], tags[tagHost], tags[tagPool] = name, hostID, pl.Name
 	l, launchErr := prov.Launch(ctx, pl.Template, tags, env)
 	if launchErr != nil {
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -739,7 +727,7 @@ func (s *Server) terminateTx(ctx context.Context, tx pgx.Tx, hostID, reason stri
 	err := tx.QueryRow(ctx, `WITH old AS (
 			SELECT h.id, h.state, h.name, h.drain_causes,
 				extract(epoch FROM coalesce(h.drain_requested_at, now()) - coalesce(h.last_placement_ended_at, h.registered_at))::float8 AS idle,
-				coalesce((SELECT p.retired FROM pools p WHERE p.name = h.pool AND p.tenant_id IS NOT DISTINCT FROM h.tenant_id), false) AS retired
+				coalesce((SELECT p.retired FROM pools p WHERE p.id = h.pool_id), false) AS retired
 			FROM hosts h WHERE h.id = $1 FOR NO KEY UPDATE OF h)
 		UPDATE hosts SET state = 'terminated', state_reason = $2,
 			terminate_requested_at = coalesce(terminate_requested_at, now()), terminated_at = now()

@@ -66,7 +66,8 @@ separate private repo should hold the real values and state.
   `ec2:RunInstances` scoped to the runner launch templates/subnets/SG
   (including spot-instances-request, for spot pools) and only from a
   runner launch template (`ec2:LaunchTemplate` on the instance),
-  `ec2:CreateTags` on create, `ec2:TerminateInstances` conditioned on
+  `ec2:CreateTags` on create only (every `lux:*` tag, `lux:pool-id` included,
+  is set at launch; a pool rename changes none), `ec2:TerminateInstances` conditioned on
   `lux:managed=true` and a `lux:host` tag (set only by luxd at launch; the
   control host carries no `lux:*` tag, and a postcondition refuses one
   arriving through `default_tags`), `ec2:DescribeInstances`, S3 on its own

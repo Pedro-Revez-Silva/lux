@@ -150,6 +150,7 @@ lux pools set <name> --default           # admin: make it the tenant's default p
 lux pools set <name> --default=false     # admin: clear it
 lux pools set <name> --provider static --hourly-price 0.40 --currency USD   # default price of hosts registering into it
 lux pools rm <name> [--force-evict]      # admin: cordons its provisioned hosts, terminated once idle; --force-evict stops their live Runs too
+lux pools rename <name> <new-name> [--platform]   # admin: only the name changes; hosts, Runs and instances stay with the pool
 lux pools events <name> [--platform] [--limit N] [--before ID] [--all]   # what happened to it, newest first
 lux hosts events <host> [--limit N] [--before ID] [--all]
 ```
@@ -159,6 +160,18 @@ starting and ending with a letter or digit (`arm64`, `gpu-a100`). The name
 reaches AWS in each instance's `lux:pool` tag and in its host name
 (`<pool>-xxxxxxxx`, which must fit a hostname). A pool created before this
 rule keeps its name and can still be updated; a new one cannot take it.
+
+A pool's identity is its id; its name is what you call it. Hosts, host
+tokens, Runs, costs and EC2 instances (`lux:pool-id`) refer to the id, and
+a Run is bound to its pool's id when it is submitted. `lux pools rename`
+therefore changes the name and nothing else: running Runs keep running,
+hosts stay in the pool, a default pool stays the default, and a new Run
+naming the new name goes where the old name went. The old name is free at
+once; a Run naming it no longer finds the pool. A name the owner already
+uses, by a live or removed pool, is refused (exit 4, `pool_exists`), as is
+one outside the rule above (`invalid_pool`). Instances keep the `lux:pool`
+tag of their launch. A Run's spec keeps the name it was submitted with;
+`lux get` and the console show the pool's current name (`pool`, `poolId`).
 
 `lux pools events` and `lux hosts events` print one line per event: its
 time, type and what it says (`-o json`: the events as the API has them).
@@ -172,7 +185,7 @@ hosts), `pool.host_released` (why: `idle` for how long, `pool removed`,
 `pool.spot_interrupted`, `pool.config_changed` (each field, old→new;
 the default mark is `isDefault`: marking a pool records it on that pool,
 and on the pool that was the default before, which loses it),
-`pool.retired` (removed: `lux pools rm`) and `pool.restored` (set again
+`pool.renamed` (`from`, `to`), `pool.retired` (removed: `lux pools rm`) and `pool.restored` (set again
 after it was removed; a pool keeps its events across both), and
 `pool.provider_error`. A host's are `host.registered`, `host.ready`,
 `host.placement_assigned`, `host.placement_ended` (with the Run's

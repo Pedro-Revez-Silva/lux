@@ -107,6 +107,7 @@ const (
 	evConfigChanged    = "pool.config_changed"
 	evRetired          = "pool.retired"
 	evRestored         = "pool.restored"
+	evRenamed          = "pool.renamed"
 	evPlacement        = "pool.placement"
 	evPoolProviderErr  = "pool.provider_error"
 	evRegistered       = "host.registered"
@@ -148,13 +149,11 @@ func poolEvent(ctx context.Context, tx pgx.Tx, poolID, typ string, data map[stri
 	return err
 }
 
-// hostPoolEvent records an event on the pool a host belongs to: the pool
-// of its owner (a platform host's is the platform's) and its pool's name.
-// None when that pool has no row (a static pool only its host tokens name).
+// hostPoolEvent records an event on the pool a host belongs to, if any.
 func hostPoolEvent(ctx context.Context, tx pgx.Tx, hostID, typ string, data map[string]any) error {
 	var poolID string
 	err := tx.QueryRow(ctx, `SELECT p.id FROM hosts h
-		JOIN pools p ON p.name = h.pool AND p.tenant_id IS NOT DISTINCT FROM h.tenant_id
+		JOIN pools p ON p.id = h.pool_id
 		WHERE h.id = $1`, hostID).Scan(&poolID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil

@@ -17,6 +17,7 @@ export function Pools() {
   const toast = useToast();
   const pools = useScopedQuery("pools", api.pools, { interval: 15_000 });
   const [marking, setMarking] = useState<PoolRow | null>(null);
+  const [renaming, setRenaming] = useState<PoolRow | null>(null);
   const [busy, setBusy] = useState(false);
   const hosts = useScopedQuery("hosts", (t, s) => api.hosts(t, {}, s), { interval: 15_000 });
 
@@ -64,24 +65,40 @@ export function Pools() {
       {
         key: "actions",
         header: "",
-        // Operators mark any pool (a platform pool as the platform's default); a tenant, its own pools.
+        // Operators mark and rename any pool (a platform pool as the
+        // platform's default); a tenant, its own pools. The row opens the
+        // pool's page: the buttons' click and Enter stay here.
         cell: (p) =>
-          !p.isDefault && (operator || !p.platform) ? (
-            // The row opens the pool's page: the button's click and Enter stay here.
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={(e) => {
-                e.stopPropagation();
-                setMarking(p);
-              }}
-              onKeyDown={(e) => e.stopPropagation()}
-            >
-              Make default
-            </Button>
+          operator || !p.platform ? (
+            <>
+              {!p.isDefault && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMarking(p);
+                  }}
+                  onKeyDown={(e) => e.stopPropagation()}
+                >
+                  Make default
+                </Button>
+              )}{" "}
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setRenaming(p);
+                }}
+                onKeyDown={(e) => e.stopPropagation()}
+              >
+                Rename
+              </Button>
+            </>
           ) : null,
         align: "right",
-        width: 140,
+        width: 220,
       },
     );
     return c;
@@ -108,6 +125,20 @@ export function Pools() {
     }
   };
 
+  const rename = async (p: PoolRow, newName: string) => {
+    setBusy(true);
+    try {
+      const r = await api.renamePool(p.platform ? undefined : p.tenant, p.name, newName.trim(), p.platform);
+      toast({ title: `Renamed ${p.name} to ${r.name}`, tone: "success" });
+      setRenaming(null);
+      await Promise.all([pools.refetch(), hosts.refetch()]);
+    } catch (e) {
+      toast({ title: "Rename failed", description: errorText(e), tone: "danger" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="page page-list">
       <PageHeader title="Pools" description={`${rows.length} pools · host counts from the hosts list (terminated excluded)`} />
@@ -119,6 +150,16 @@ export function Pools() {
           <Table columns={cols} rows={rows} rowKey={(p) => p.key} onRowClick={(p) => go(poolLink(p, showTenant))} loading={pools.loading} defaultSort={{ key: "name", dir: "asc" }} empty="No pools." />
         )}
       </Card>
+      <ConfirmDialog
+        open={renaming != null}
+        title={`Rename ${renaming?.name ?? ""}?`}
+        description="Only the name changes: its hosts, instances and Runs stay with the pool, and a default pool stays the default. The old name is free at once; Runs naming it no longer find this pool."
+        confirmLabel="Rename pool"
+        input={{ label: "New name", placeholder: renaming?.name, required: true }}
+        loading={busy}
+        onConfirm={(name) => renaming && void rename(renaming, name ?? "")}
+        onCancel={() => setRenaming(null)}
+      />
       <ConfirmDialog
         open={marking != null}
         title={`Make ${marking?.name} ${whose} default pool?`}

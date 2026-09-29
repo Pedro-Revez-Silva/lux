@@ -30,6 +30,7 @@ func costFixture(t *testing.T) (s *Server, keys map[string]string) {
 	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES
 		('k1', 't1', 'k', $1, ARRAY['read']), ('k2', 't2', 'k', $2, ARRAY['read']), ('ko', NULL, 'o', $3, ARRAY['operator'])`,
 		ids.Hash(keys["t1"]), ids.Hash(keys["t2"]), ids.Hash(keys["op"]))
+	namedPools(t, s, "p", "blue", "red", "shared")
 	return s, keys
 }
 

@@ -154,3 +154,40 @@ func TestEventLine(t *testing.T) {
 		}
 	}
 }
+
+// pools rename posts the new name to the pool's rename path; --platform
+// names the platform's pool.
+func TestPoolsRename(t *testing.T) {
+	var paths []string
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("body: %v", err)
+		}
+		paths, bodies = append(paths, r.Method+" "+r.URL.RequestURI()), append(bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"new"}`))
+	}))
+	defer srv.Close()
+	for _, args := range [][]string{{"pools", "rename", "old", "new"}, {"pools", "rename", "old", "new", "--platform"}} {
+		var out strings.Builder
+		a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: io.Discard}
+		root := a.root()
+		root.SetArgs(append([]string{"--url", srv.URL, "--api-key", "k"}, args...))
+		if err := root.Execute(); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		if out.String() != "renamed old to new\n" {
+			t.Errorf("%v printed %q", args, out.String())
+		}
+	}
+	if want := []string{"POST /v1/pools/old/rename", "POST /v1/pools/old/rename?owner=platform"}; !reflect.DeepEqual(paths, want) {
+		t.Errorf("requests %v, want %v", paths, want)
+	}
+	for _, b := range bodies {
+		if want := (map[string]any{"name": "new"}); !reflect.DeepEqual(b, want) {
+			t.Errorf("body %v, want %v", b, want)
+		}
+	}
+}

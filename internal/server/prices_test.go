@@ -18,7 +18,7 @@ import (
 )
 
 // priceFixture: tenants t1 and t2 with admin keys, an operator key, and a
-// host token per tenant for pool "lab" plus a platform one.
+// host token per tenant for pool "lab" plus a platform one in no pool.
 func priceFixture(t *testing.T) (*Server, map[string]string) {
 	t.Helper()
 	s := testServer(t)
@@ -28,8 +28,9 @@ func priceFixture(t *testing.T) (*Server, map[string]string) {
 	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES
 		('k1', 't1', 'k', $1, ARRAY['admin']), ('k2', 't2', 'k', $2, ARRAY['admin']), ('ko', NULL, 'o', $3, ARRAY['operator'])`,
 		ids.Hash(keys["t1"]), ids.Hash(keys["t2"]), ids.Hash(keys["op"]))
-	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, tenant_id, pool, token_hash) VALUES
-		('tok1', 't1', 'lab', 'h1'), ('tok2', 't2', 'lab', 'h2'), ('tokp', NULL, 'lab', 'hp')`)
+	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, tenant_id, pool_id, token_hash) VALUES
+		('tok1', 't1', $1, 'h1'), ('tok2', 't2', $2, 'h2'), ('tokp', NULL, NULL, 'hp')`,
+		poolID(t, s, "lab", "t1"), poolID(t, s, "lab", "t2"))
 	return s, keys
 }
 
@@ -58,7 +59,9 @@ func call(t *testing.T, s *Server, key, method, path string, body any) (int, str
 // and cpus / memory GiB of capacity, and returns the host's id.
 func helloAs(t *testing.T, s *Server, tok string, tenant *string, name string, cpus float64, memGiB int64) string {
 	t.Helper()
-	w, err := s.registerHost(context.Background(), &hostToken{ID: tok, TenantID: tenant, Pool: "lab"}, proto.Hello{
+	var pool *string
+	systemScan(t, s, `SELECT pool_id FROM host_tokens WHERE id = $1`, []any{tok}, &pool)
+	w, err := s.registerHost(context.Background(), &hostToken{ID: tok, TenantID: tenant, PoolID: pool}, proto.Hello{
 		Name: name, ProtocolVersion: proto.Version, Arch: "arm64",
 		Capacity: proto.Capacity{CPUs: cpus, Memory: memGiB * gib, Runs: 4},
 	})
@@ -291,8 +294,8 @@ func TestHostPriceAccess(t *testing.T) {
 		t.Errorf("platform host periods: %v", got)
 	}
 
-	execSQL(t, s, context.Background(), `INSERT INTO hosts (id, tenant_id, name, pool, state, provider_id, provision_requested_at)
-		VALUES ('h9', 't1', 'h9', 'burst', 'ready', 'i-9', now())`)
+	execSQL(t, s, context.Background(), `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provider_id, provision_requested_at)
+		VALUES ('h9', 't1', 'h9', $1, 'ready', 'i-9', now())`, poolID(t, s, "burst", "t1"))
 	if code, resp := call(t, s, keys["t1"], http.MethodPut, "/v1/hosts/h9/price", price); code != http.StatusUnprocessableEntity {
 		t.Errorf("pricing a provisioned host: %d %s, want 422", code, resp)
 	}
@@ -401,12 +404,12 @@ func TestHostRatesCheck(t *testing.T) {
 func TestStaticRateLeavesProviderPeriods(t *testing.T) {
 	s, _ := priceFixture(t)
 	ctx := context.Background()
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provider_id, provision_requested_at, hourly_price, price_currency)
-		VALUES ('h9', 't1', 'h9', 'lab', 'provisioning', 'i-9', $1, 0.40, 'USD')`, at("10:00"))
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provider_id, provision_requested_at, hourly_price, price_currency)
+		VALUES ('h9', 't1', 'h9', $2, 'provisioning', 'i-9', $1, 0.40, 'USD')`, at("10:00"), poolID(t, s, "lab", "t1"))
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, per_hour, currency, cap_cpus, cap_memory, source)
 		VALUES ('h9', $1, 0.0832, 'USD', 2, $2, 'aws-pricing')`, at("10:00"), 8*gib)
 	for _, cpus := range []float64{8, 4} {
-		w, err := s.registerHost(ctx, &hostToken{ID: "tok1", TenantID: strp("t1"), Pool: "lab"}, proto.Hello{
+		w, err := s.registerHost(ctx, &hostToken{ID: "tok1", TenantID: strp("t1"), PoolID: new(poolID(t, s, "lab", "t1"))}, proto.Hello{
 			Name: "h9", ProviderID: "i-9", ProtocolVersion: proto.Version, Arch: "arm64",
 			Capacity: proto.Capacity{CPUs: cpus, Memory: 32 * gib, Runs: 4},
 		})
@@ -478,8 +481,8 @@ func TestPriceChecks(t *testing.T) {
 // its name gets no price and no period.
 func TestRetiredPoolPrice(t *testing.T) {
 	s, _ := priceFixture(t)
-	execSQL(t, s, context.Background(), `INSERT INTO pools (id, tenant_id, name, provider, hourly_price, price_currency, retired)
-		VALUES ('pool1', 't1', 'lab', 'static', 0.40, 'USD', true)`)
+	execSQL(t, s, context.Background(), `UPDATE pools SET hourly_price = 0.40, price_currency = 'USD', retired = true
+		WHERE tenant_id = 't1' AND name = 'lab'`)
 	h1 := helloAs(t, s, "tok1", strp("t1"), "h1", 8, 32)
 	if got := periods(t, s, h1); len(got) != 0 {
 		t.Errorf("a host of a retired pool has periods: %v", got)

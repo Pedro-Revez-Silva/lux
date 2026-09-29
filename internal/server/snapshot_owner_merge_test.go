@@ -46,7 +46,7 @@ func TestSnapshotReportRefusedMoveKeepsPoolOwner(t *testing.T) {
 	}
 
 	var state, owner, serverState, serverStop string
-	systemScan(t, s, `SELECT r.state, coalesce(r.pool_owner, '<nil>'), sv.state, coalesce(sv.stop_reason, '')
+	systemScan(t, s, `SELECT r.state, coalesce((SELECT coalesce(p.tenant_id, '') FROM pools p WHERE p.id = r.pool_id), '<nil>'), sv.state, coalesce(sv.stop_reason, '')
 		FROM runs r JOIN run_servers sv ON sv.run_id = r.id WHERE r.id = $1`, []any{id}, &state, &owner, &serverState, &serverStop)
 	if state != StateStopped || owner != "" || serverState != ServerStopped || serverStop != "run stopped" {
 		t.Fatalf("after refused move: Run %q owner %q server %q %q", state, owner, serverState, serverStop)

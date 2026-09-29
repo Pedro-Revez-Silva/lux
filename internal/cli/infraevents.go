@@ -127,6 +127,8 @@ func eventLine(e server.LifecycleEvent) string {
 		if d["created"] == true {
 			line = "created: " + line
 		}
+	case "pool.renamed":
+		line = s("from") + " → " + s("to")
 	case "pool.provider_error", "host.provider_error":
 		line = s("op") + ": " + s("error")
 	case "host.registered":

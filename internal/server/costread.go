@@ -131,8 +131,8 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 	// Group selectors and label keys are values, never SQL identifiers.
 	const base = `WITH scoped AS (
 		SELECT c.hour, c.currency, c.amount, c.tenant_id, c.family, c.run_id,
-			coalesce(c.pool, '(none)') AS pool, coalesce(c.host_id, '(none)') AS host, r.labels
-		FROM cost_hourly c JOIN runs r ON r.id = c.run_id
+			coalesce(cp.name, '(none)') AS pool, coalesce(c.host_id, '(none)') AS host, r.labels
+		FROM cost_hourly c JOIN runs r ON r.id = c.run_id LEFT JOIN pools cp ON cp.id = c.pool_id
 		WHERE c.run_id IS NOT NULL AND c.hour >= $1 AND c.hour < $2
 			AND ($3 = '' OR c.family = $3)
 	), dimensions AS (

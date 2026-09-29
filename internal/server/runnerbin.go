@@ -119,7 +119,7 @@ func (s *Server) drainIfOutdated(ctx context.Context, tx pgx.Tx, later *laterEve
 		return nil, nil
 	}
 	var tenant, pool string
-	if err := tx.QueryRow(ctx, `SELECT coalesce(tenant_id, ''), pool FROM hosts WHERE id = $1`, hostID).Scan(&tenant, &pool); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT coalesce(tenant_id, ''), coalesce(pool_id, '') FROM hosts WHERE id = $1`, hostID).Scan(&tenant, &pool); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('outdated-drain:' || $1 || '/' || $2, 0))`, tenant, pool); err != nil {
@@ -131,7 +131,7 @@ func (s *Server) drainIfOutdated(ctx context.Context, tx pgx.Tx, later *laterEve
 			count(*) FILTER (WHERE state IN ('ready', 'draining')),
 			count(*) FILTER (WHERE state = 'draining' AND $3 = ANY(drain_causes))
 		FROM hosts
-		WHERE coalesce(tenant_id, '') = $1 AND pool = $2`,
+		WHERE coalesce(tenant_id, '') = $1 AND coalesce(pool_id, '') = $2`,
 		tenant, pool, causeOutdated).Scan(&live, &draining)
 	if err != nil || draining >= max(1, live*s.cfg.OutdatedDrainPercent/100) {
 		return nil, err

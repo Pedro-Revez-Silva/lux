@@ -115,6 +115,8 @@ export function infraEventSummary(e: LifecycleEvent): string {
         .map((k) => `${k} ${val(changes[k]?.old)}→${val(changes[k]?.new)}`);
       return (d.created === true ? "created: " : "") + parts.join(", ");
     }
+    case "pool.renamed":
+      return `${s("from")} → ${s("to")}`;
     case "pool.provider_error":
     case "host.provider_error":
       return `${s("op")}: ${s("error")}`;

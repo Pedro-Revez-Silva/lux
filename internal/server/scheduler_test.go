@@ -17,12 +17,13 @@ import (
 // registered after discovery into its placement decision.
 func TestSchedulerCandidateLockBoundary(t *testing.T) {
 	s := testServer(t)
+	namedPools(t, s, "default", "other", "unrelated")
 	s.cfg.LeaseDuration = time.Minute
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
 	tok := testHostToken(t, s, ctx)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, capacity, last_heartbeat) VALUES
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, capacity, last_heartbeat) VALUES
 		('a', 'a', 'default', 'ready', '{"runs":1}', now()),
 		('b', 'b', 'default', 'lost', '{"runs":1}', now())`)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES
@@ -127,10 +128,11 @@ func TestSchedulerCandidateLockBoundary(t *testing.T) {
 
 func TestSchedulerUnrelatedHostLockDoesNotBlock(t *testing.T) {
 	s := testServer(t)
+	namedPools(t, s, "default", "other", "unrelated")
 	s.cfg.LeaseDuration = time.Minute
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, last_heartbeat) VALUES
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, last_heartbeat) VALUES
 		('a-other', 'a-other', 'other', 'ready', now()),
 		('z-target', 'z-target', 'default', 'ready', now())`)
 
@@ -158,7 +160,7 @@ func TestSchedulerUnrelatedHostLockDoesNotBlock(t *testing.T) {
 	deadline, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	if err := s.db.Tx(deadline, store.System(), func(tx pgx.Tx) error {
-		ids, err := s.eligibleHostIDs(deadline, tx, []string{"default"}, []*string{nil}, []string{"t1"}, []string{""})
+		ids, err := s.eligibleHostIDs(deadline, tx, []*string{new("default")}, []string{"t1"}, []string{""})
 		if err != nil {
 			return err
 		}
@@ -185,6 +187,7 @@ func TestSchedulerUnrelatedHostLockDoesNotBlock(t *testing.T) {
 
 func TestSchedulerEligibleHostsScopeAndRevalidation(t *testing.T) {
 	s := testServer(t)
+	namedPools(t, s, "default", "other", "unrelated")
 	s.cfg.LeaseDuration = time.Minute
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1'), ('t2', 't2')`)
@@ -196,12 +199,12 @@ func TestSchedulerEligibleHostsScopeAndRevalidation(t *testing.T) {
 		if h.tenant != "" {
 			tenant = h.tenant
 		}
-		execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, tenant_id, state, last_heartbeat)
+		execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, tenant_id, state, last_heartbeat)
 			VALUES ($1, $1, $2, $3, 'ready', now())`, h.id, h.pool, tenant)
 	}
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		ids, err := s.eligibleHostIDs(ctx, tx,
-			[]string{"default", "other"}, []*string{nil, nil}, []string{"t1", "t2"}, []string{"", "c"})
+			[]*string{new("default"), new("other")}, []string{"t1", "t2"}, []string{"", "c"})
 		if err != nil {
 			return err
 		}
@@ -209,7 +212,7 @@ func TestSchedulerEligibleHostsScopeAndRevalidation(t *testing.T) {
 			return fmt.Errorf("mixed batch discovered %v, want [a b c e]", ids)
 		}
 		ids, err = s.eligibleHostIDs(ctx, tx,
-			[]string{"default"}, []*string{nil}, []string{"t1"}, []string{"c"})
+			[]*string{new("default")}, []string{"t1"}, []string{"c"})
 		if err != nil {
 			return err
 		}
@@ -217,14 +220,14 @@ func TestSchedulerEligibleHostsScopeAndRevalidation(t *testing.T) {
 			return fmt.Errorf("cross-tenant choice discovered %v, want [a e]", ids)
 		}
 		ids, err = s.eligibleHostIDs(ctx, tx,
-			[]string{"default", "other"}, []*string{nil, nil}, []string{"t1", "t2"}, []string{"", ""})
+			[]*string{new("default"), new("other")}, []string{"t1", "t2"}, []string{"", ""})
 		if err != nil {
 			return err
 		}
 		if !slices.Equal(ids, []string{"a", "b", "e"}) {
 			return fmt.Errorf("mixed pools discovered %v, want [a b e]", ids)
 		}
-		ids, err = s.eligibleHostIDs(ctx, tx, []string{"default"}, []*string{nil}, []string{"t1"}, []string{"b"})
+		ids, err = s.eligibleHostIDs(ctx, tx, []*string{new("default")}, []string{"t1"}, []string{"b"})
 		if err != nil {
 			return err
 		}

@@ -350,8 +350,14 @@ func admin(ctx context.Context, cfg config, args []string) error {
 			if err := server.CheckPoolName(ctx, tx, optional(*tenant), *pool); err != nil {
 				return err
 			}
-			_, err := tx.Exec(ctx, `INSERT INTO host_tokens (id, tenant_id, pool, labels, token_hash) VALUES ($1, nullif($2, ''), $3, $4, $5)`,
-				ids.New(ids.HostToken), *tenant, *pool, map[string]string(labels), ids.Hash(token))
+			// The token names its pool by id. A static pool used to exist as
+			// a name on its tokens alone: one with no row gets one.
+			poolID, err := server.EnsureStaticPool(ctx, tx, *tenant, *pool)
+			if err != nil {
+				return err
+			}
+			_, err = tx.Exec(ctx, `INSERT INTO host_tokens (id, tenant_id, pool_id, labels, token_hash) VALUES ($1, nullif($2, ''), $3, $4, $5)`,
+				ids.New(ids.HostToken), *tenant, poolID, map[string]string(labels), ids.Hash(token))
 			return err
 		})
 		if err != nil {

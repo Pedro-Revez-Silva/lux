@@ -447,12 +447,13 @@ func TestForceDrainInterleavesWithHelloReconciliation(t *testing.T) {
 // lock must be discovered in a new transaction, not updated unlocked.
 func TestForceDeletePoolRetriesNewlyEligibleHost(t *testing.T) {
 	s := testServer(t)
+	namedPools(t, s, "other", "default")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
 	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provider_id) VALUES
-		('h1', 't1', 'h1', 'burst', 'ready', 'i-1'),
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provider_id) VALUES
+		('h1', 't1', 'h1', 'pool1', 'ready', 'i-1'),
 		('h2', 't1', 'h2', 'other', 'ready', 'i-2')`)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r2', 't1', '{}', 'running', 1)`)
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state)
@@ -478,7 +479,7 @@ func TestForceDeletePoolRetriesNewlyEligibleHost(t *testing.T) {
 		done <- err
 	}()
 	waitForLockWaiters(t, s, ctx, 1)
-	execSQL(t, s, ctx, `UPDATE hosts SET pool = 'burst' WHERE id = 'h2'`)
+	execSQL(t, s, ctx, `UPDATE hosts SET pool_id = 'pool1' WHERE id = 'h2'`)
 	close(gate)
 	if err := <-gateErr; err != nil {
 		t.Fatal(err)
@@ -604,10 +605,11 @@ func TestDeletePoolForceEvict(t *testing.T) {
 	for _, forceEvict := range []bool{false, true} {
 		t.Run(fmt.Sprintf("forceEvict=%v", forceEvict), func(t *testing.T) {
 			s := testServer(t)
+			namedPools(t, s, "other", "default")
 			ctx := context.Background()
 			execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
 			execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
-			execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provider_id) VALUES ('h1', 't1', 'h1', 'burst', 'ready', 'i-123')`)
+			execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provider_id) VALUES ('h1', 't1', 'h1', 'pool1', 'ready', 'i-123')`)
 			execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('r1', 't1', '{}', 'running', 1)`)
 			execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p1', 't1', 'r1', 'h1', 1, 'running')`)
 
@@ -641,13 +643,14 @@ func TestDeletePoolForceEvict(t *testing.T) {
 // being deleted (deletePool only selects provider_id IS NOT NULL rows).
 func TestDeletePoolOnlyTouchesItsOwnHosts(t *testing.T) {
 	s := testServer(t)
+	namedPools(t, s, "other", "default")
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
 	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state) VALUES ('h-other', 't1', 'h-other', 'default', 'ready')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state) VALUES ('h-other', 't1', 'h-other', 'default', 'ready')`)
 	// A static host inside the pool being deleted: no provider_id, so it
 	// stays uncordoned (the provisioner never terminates it either).
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state) VALUES ('h-static', 't1', 'h-static', 'burst', 'ready')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state) VALUES ('h-static', 't1', 'h-static', 'pool1', 'ready')`)
 
 	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
 	in := &deletePoolInput{Name: "burst", ForceEvict: true}

@@ -42,6 +42,7 @@ func outdatedDrainingCount(t *testing.T, s *Server, ctx context.Context) int {
 // cap of 2 (10% of 20) cordon exactly 2, never more.
 func TestDrainIfOutdatedCapHoldsUnderConcurrentHellos(t *testing.T) {
 	s := testServer(t)
+	namedPools(t, s, "default", "burst")
 	s.bins = matchingBins()
 	s.cfg.OutdatedDrainPercent = 10
 	ctx := context.Background()
@@ -50,7 +51,7 @@ func TestDrainIfOutdatedCapHoldsUnderConcurrentHellos(t *testing.T) {
 	ids := make([]string, n)
 	for i := range n {
 		ids[i] = fmt.Sprintf("h%02d", i)
-		execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state) VALUES ($1, $1, 'default', 'ready')`, ids[i])
+		execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state) VALUES ($1, $1, 'default', 'ready')`, ids[i])
 	}
 
 	var wg sync.WaitGroup
@@ -82,13 +83,14 @@ func TestDrainIfOutdatedCapHoldsUnderConcurrentHellos(t *testing.T) {
 // cap once earlier instances are gone.
 func TestDrainIfOutdatedCapIgnoresTerminatedHosts(t *testing.T) {
 	s := testServer(t)
+	namedPools(t, s, "default", "burst")
 	s.bins = matchingBins()
 	s.cfg.OutdatedDrainPercent = 100
 	ctx := context.Background()
 
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state, draining, state_reason, drain_causes) VALUES
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, draining, state_reason, drain_causes) VALUES
 		('gone', 'gone', 'burst', 'terminated', true, $1, ARRAY[$2])`, outdatedBinariesReason, causeOutdated)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state) VALUES ('h1', 'h1', 'burst', 'ready')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state) VALUES ('h1', 'h1', 'burst', 'ready')`)
 
 	if err := drainIfOutdatedTx(s, ctx, "h1"); err != nil {
 		t.Fatal(err)
@@ -112,12 +114,13 @@ func TestDrainIfOutdatedCapPercentMaths(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			s := testServer(t)
+			namedPools(t, s, "default", "burst")
 			s.bins = matchingBins()
 			s.cfg.OutdatedDrainPercent = 10
 			ctx := context.Background()
 
 			for i := range c.live {
-				execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool, state) VALUES ($1, $1, 'default', 'ready')`, fmt.Sprintf("h%02d", i))
+				execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state) VALUES ($1, $1, 'default', 'ready')`, fmt.Sprintf("h%02d", i))
 			}
 			for i := range c.live {
 				if err := drainIfOutdatedTx(s, ctx, fmt.Sprintf("h%02d", i)); err != nil {
