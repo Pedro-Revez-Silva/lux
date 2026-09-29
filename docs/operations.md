@@ -301,9 +301,10 @@ unlabeled, which fails with `203/EXEC`. This is unrelated to
 
 Pool names follow the rule in [the CLI reference](cli.md#hosts-and-pools): 1-32
 lowercase letters, digits and `-`. `luxd admin create-pool` and
-`create-host-token --pool` apply it too, and refuse a name that is a live
-alias of a renamed pool (`pool_name_reserved`, naming the pool's new
-name; see [Renaming a pool](#renaming-a-pool)).
+`create-host-token --pool` apply it too. `create-host-token` never
+creates a pool row (a static pool needs none), and refuses the name a
+pool of the owner was renamed away from while no pool of the owner has it
+(`pool_renamed`, naming the new name; see [Renaming a pool](#renaming-a-pool)).
 
 A pool with `provider: ec2` is sized by luxd:
 
@@ -342,9 +343,10 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
 - **Failures:** a launch that fails is retried on the next pass. A host
   that never registers within `LUX_LAUNCH_TIMEOUT` (default 10m) is
   terminated. An instance EC2 no longer has is written off and replaced.
-- **Orphans:** once a minute luxd lists the pool's instances by tag. One
-  no host row claims (a launch whose reply was lost) is terminated, after
-  checking the host rows once more, under any pool name of the owner, right
+- **Orphans:** once a minute luxd lists the pool's instances by the
+  `lux:pool-id` tag (the pool's id, which never changes; see [Renaming a
+  pool](#renaming-a-pool)). One no host row claims (a launch whose reply
+  was lost) is terminated, after checking the host rows once more right
   before. A host missing from the listing is looked up by instance id
   (`DescribeInstances` with `InstanceIds`, which tag changes do not delay):
   written off (its runner silent) if EC2 says it is terminated or shutting
@@ -352,14 +354,14 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   checks at least `LUX_LISTING_LAG` apart and the host is older than
   `LUX_LAUNCH_TIMEOUT` plus `LUX_LISTING_LAG`: EC2 may not know an
   instance for a while after launching it. Still running, it is kept,
-  logged at WARN, and re-tagged if its `lux:pool` is not its pool's. Ids
+  logged at WARN, and given the tags it lacks. Ids
   are looked up 100 per call; a call EC2 refuses for an unknown id is split
   in halves until that id is alone. A tag listing alone never terminates
   or writes off anything. A host lost for over 5 minutes is terminated.
 - One luxd instance does all this at a time (a lease in Postgres). The
   lease carries a fencing token, new whenever it is taken after another
   luxd held it or after it expired (by the same luxd too); each
-  terminate, re-tag and write-off first checks that the pass still holds
+  terminate, tag and write-off first checks that the pass still holds
   the lease it began with, and EC2 calls are cancelled when it expires.
 
 ### Renaming a pool
@@ -378,87 +380,64 @@ given anew). Refused with 409:
   tenant, or by hosts or host tokens; for a platform pool, also when a
   tenant whose Runs would follow owns a pool by the new name (its Runs
   would then go to its own pool).
-- `rename_in_progress`: the pool's previous rename is unfinished.
-- `pool_name_reserved`: the new name is a live alias of another pool of
-  the owner (see below).
-- `too_many_aliases`: an `ec2` pool already has 8 live aliases.
-- `rename_cooldown`: an `ec2` pool finished a rename less than the
-  provisioner lease (30s, or ten scheduler ticks) plus `LUX_LISTING_LAG`
-  ago. A `CreateTags` sent by a luxd that has since lost its lease may still
-  land in that time, and would put the previous name back.
+- `pool_not_migrated`: an `ec2` pool with instances launched before
+  `lux:pool-id` that luxd has not yet seen carrying it (see below).
 - `rename_unsupported_by_deployment`: an `ec2` pool, while some luxd that
-  cannot follow a rename is running (see below).
+  finds instances by pool name is running (see below).
 - `confirm_required`: the pool has hosts and the request's `confirm` is
   not its current name. `lux pools rename` sends it (the name typed on the
   command line); the console asks for it to be typed.
 
-`cost_hourly` is
-rewritten rather than kept under the old name because it is recomputed
-from `hosts.pool`: history kept under the old name would split one host's
-hours between both names as they are recomputed.
+`cost_hourly` is rewritten rather than kept under the old name because it
+is recomputed from `hosts.pool`: history kept under the old name would
+split one host's hours between both names as they are recomputed. For an
+hour after a rename the provisioner also moves any row a cost pass wrote
+under the old name from a host row it read before the rename.
 
-An `ec2` pool's instances carry its name in the `lux:pool` tag, which is
-how luxd lists them, and an instance listed with no host row to claim it
-is terminated as an orphan. So the tags are changed after the database,
-and the pool keeps its previous names as **aliases**
-(`pool_tag_aliases`), listed alongside its name:
+The old name is free at once: any pool may take it. Until one does, a Run
+submitted to it and a host token minted for it are refused (409
+`pool_renamed`, naming the new name): the rename and a submission or a
+mint hold the same lock on the name, so a Run or token is either moved by
+the rename or refused after it, never left under a name no pool has.
 
-1. The transaction above adds the old name to the pool's aliases. From its
-   commit, the provisioner lists the pool under its name and every live
-   alias: every instance, whichever tag it carries, is claimed by its host
-   row, or, with none, terminated as an orphan. That includes an instance
-   whose `RunInstances` was sent with the old tag before the rename and
-   answered long after it (its reply lost, its host row timed out): it
-   turns up under the alias and is handled like any launch whose reply
-   was lost, never left running untracked. A live alias stays reserved:
-   no other pool of the owner can take it and see these instances as its
-   orphans (`pool_name_reserved`). Nothing is tagged before this commit,
-   so no instance ever carries a name no pool answers to.
-2. On each provider check (`LUX_PROVIDER_CHECK_EVERY`) the provisioner
-   re-tags the instances still carrying an alias (`ec2:CreateTags`,
-   `lux:pool` only, 500 instances per call). EC2's tag filters lag behind
-   tags, so for `LUX_LISTING_LAG` after a re-tag a host missing from every
-   listing is not even looked up; after it, it is looked up by id like any
-   unlisted host, and kept while it runs. The rename finishes (`pools ls`
-   no longer shows RENAMED FROM; the console drops its "renaming" badge)
-   on a check at least `LUX_LISTING_LAG` after the rename and the last
-   re-tag that lists nothing live under any alias, every host under the
-   new name, and has no launch in flight. Each check also moves to the new
-   name any `cost_hourly` row a cost pass wrote under an old one from a
-   host row it read before the rename.
-3. A finished rename's alias is still listed. It is retired (no longer
-   listed nor reserved) once every check has found nothing under it for
-   twice the longer of `LUX_LAUNCH_TIMEOUT` and `LUX_LISTING_LAG`; a check
-   that finds an instance under it starts that wait again. `pools ls -o
-   json` shows a pool's live `aliases`; a pool has at most 8, and a rename
-   that would add a ninth is refused (`too_many_aliases`). Renaming a pool
-   back to one of its own aliases is allowed: that alias is its name again.
+**How instances follow.** Every instance luxd launches carries
+`lux:pool-id=<pool id>`, which never changes, and luxd finds a pool's
+instances by that tag (with `lux:managed` and `lux:deployment`), never by
+`lux:pool`. So a rename changes nothing luxd looks for. `lux:pool`, the
+pool's name (`<tenant>/<pool>` for a tenant's pool), stays on instances
+for people and cost tooling: on each provider check
+(`LUX_PROVIDER_CHECK_EVERY`) luxd sets it to the pool's current name where
+it differs (`ec2:CreateTags`, 500 instances per call). A refused or failed
+`CreateTags` is logged as a warning and retried on the next check; it
+affects nothing else. An instance whose `RunInstances` was sent before the
+rename and answered after it carries the old name and the pool's id: it is
+found by id, claimed by its host row or, with none (its reply lost),
+terminated as an orphan.
 
-A luxd that stops before the commit leaves nothing renamed; after it,
-whichever luxd holds the provisioner lease carries on with step 2, which
-is idempotent. A refused `CreateTags` (the IAM statement below missing) is
-logged as a warning and retried on every check; the pool keeps working
-under its new name and nothing is terminated, but it stays listed under
-its aliases, `lux pools ls` shows RENAMED FROM, and it cannot be renamed
-again until the tags are fixed. A static pool has no tags: the
-transaction is the whole rename, and it gets no alias. A pool's provider
-cannot change while it has a live alias (`lux pools set` and
-`luxd admin create-pool`: 409 `rename_in_progress`).
+**Pools from before `lux:pool-id`.** Instances launched by an earlier luxd
+carry only `lux:pool`. A pool is *legacy* while any of its live hosts has
+an instance not yet seen carrying `lux:pool-id` (`hosts.pool_id_tagged`;
+hosts launched since carry it from launch). luxd lists a legacy pool by
+its name as well as by id, adds `lux:pool-id` to every instance it finds
+by name without it, and marks the host once a listing shows the tag. Once
+no live host is unmarked, the pool is listed by id alone. A legacy pool
+cannot be renamed (`pool_not_migrated`): wait for the next provider checks
+(normally two), or scale the pool to zero. Without the IAM permission
+below a pool stays legacy, and keeps working, listed by name as before.
 
 **Every luxd must be of this version or later before an `ec2` pool is
-renamed.** An older luxd lists a pool under its current name only: holding
-the provisioner lease during a rename, it would terminate every instance
-still tagged with the old name. Each luxd records its version and what it
-can do in `luxd_instances` before its first attempt at the provisioner
-lease, and again every `LUX_PROVIDER_CHECK_EVERY` (at most every lease
-duration). Two guards follow from it:
+renamed.** An older luxd finds instances by `lux:pool`: after a rename it
+would miss the pool's instances still carrying the old name, or take them
+for another pool's orphans. Each luxd records its version and what it can
+do in `luxd_instances` before its first attempt at the provisioner lease,
+and again every `LUX_PROVIDER_CHECK_EVERY` (at most every lease duration).
+Two guards follow from it:
 
-- The database refuses the provisioner lease to a luxd that has not
-  checked in with the `pool-rename` capability while any pool has a live
-  alias: a trigger on `leases` raises an error, which an older luxd logs
-  and retries, so it never becomes the provisioner while an alias is
-  live. With no live alias, any luxd may hold it: a mixed fleet keeps
-  working as long as nobody renames.
+- Once any `ec2` pool has been renamed (`pools.renamed_at`), the database
+  refuses the provisioner lease to a luxd that has not checked in with the
+  `pool-id-discovery` capability: a trigger on `leases` raises an error,
+  which an older luxd logs and retries. Before the first rename, any luxd
+  may hold it: a mixed fleet keeps working as long as nobody renames.
 - A rename of an `ec2` pool locks the provisioner lease row (creating it,
   expired and held by no one, if there is none) and is refused while its
   current holder, or any luxd that wrote a control sample within the last
@@ -466,17 +445,18 @@ duration). Two guards follow from it:
   (`rename_unsupported_by_deployment`, naming them). The rename and a
   lease acquisition both take that row's lock, so one waits for the
   other: either the rename sees the new holder, or the acquisition sees
-  the alias and is refused.
+  the rename and is refused.
 
-Static pools can always be renamed. Do not roll luxd back below this
-version while any pool has a live alias (`lux pools ls -o json` shows
-`aliases`): the database would refuse the older luxd the provisioner
-lease until the aliases retire. Wait for them to, or roll forward.
+Static pools carry no tags and can always be renamed; their renames do not
+arm the fence. Do not roll luxd back below this version once an `ec2` pool
+has been renamed: the database refuses the older luxd the provisioner
+lease. Roll forward.
 
-The re-tag needs this IAM statement on luxd's role (the Terraform module
-has it as `RetagManagedInstancePool`): `ec2:CreateTags` on instances
-tagged `lux:managed=true` and carrying `lux:host`, for the `lux:pool` key
-only:
+luxd's role needs, besides `CreateTags` at launch (which now includes
+`lux:pool-id`), this statement (the Terraform module has it as
+`RetagManagedInstancePool`): `ec2:CreateTags` on instances tagged
+`lux:managed=true` and carrying `lux:host`, for the `lux:pool` and
+`lux:pool-id` keys only:
 
 ```json
 {
@@ -486,14 +466,14 @@ only:
   "Condition": {
     "StringEquals": { "ec2:ResourceTag/lux:managed": "true" },
     "Null": { "ec2:ResourceTag/lux:host": "false", "aws:TagKeys": "false" },
-    "ForAllValues:StringEquals": { "aws:TagKeys": ["lux:pool"] }
+    "ForAllValues:StringEquals": { "aws:TagKeys": ["lux:pool", "lux:pool-id"] }
   }
 }
 ```
 
 A rename is logged at INFO (`pool renamed`, with the old and new names and
-how many hosts, Runs and instances followed) and again when its instances
-all carry the new name (`pool rename finished`).
+how many hosts, Runs and instances followed); tags applied by a provider
+check at INFO (`instances tagged`), and refused ones at WARN.
 
 ### Spot instances
 
@@ -543,7 +523,7 @@ What an instance needs:
   profile if the runner needs one (it doesn't hold S3 credentials).
 - luxd needs EC2 permissions for `RunInstances` (with the launch template
   and `CreateTags`), `TerminateInstances` and `DescribeInstances`,
-  `CreateTags` of `lux:pool` on its own instances to rename a pool
+  `CreateTags` of `lux:pool` and `lux:pool-id` on its own instances
   ([above](#renaming-a-pool)), plus
   `pricing:GetProducts` for on-demand prices and
   `ec2:DescribeSpotPriceHistory` for spot prices, from its standard AWS
@@ -569,7 +549,8 @@ LUX_HOST_TOKEN=luxh_… LUX_URL=https://luxd.example bash` (no auth on that
 endpoint: it carries no secret, only how to reach luxd).
 
 Instances are tagged `Name=<host>`, `lux:pool=<pool>` (`<tenant>/<pool>`
-for a tenant's pool), `lux:managed=true`, `lux:deployment=<id>` (which lux
+for a tenant's pool), `lux:pool-id=<pool id>` (what luxd lists a pool's
+instances by), `lux:managed=true`, `lux:deployment=<id>` (which lux
 database launched it: deployments sharing an account never touch each
 other's instances) and `lux:host=<host id>`, plus the
 template's `tags`. luxd also needs `DescribeInstances`, filtered by tag and by instance id.

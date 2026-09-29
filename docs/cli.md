@@ -132,23 +132,21 @@ rule keeps its name and can still be updated; a new one cannot take it.
 `lux pools rename` moves the pool's hosts, host tokens and Runs not yet
 final to the new name at once, so a Run waiting for the pool still
 schedules. Finished Runs keep the spec they ran with. An `ec2` pool's
-instances keep running and are re-tagged with the new name by luxd
-shortly after ([operations](operations.md#renaming-a-pool)); until then
-`pools ls` shows the old name under RENAMED FROM, and the pool cannot be
-renamed again (exit 4, `rename_in_progress`). The old name stays one of
-the pool's `aliases` (`pools ls -o json`) until no instance has carried
-it for a while: no other pool can take it meanwhile (exit 4,
-`pool_name_reserved`), and a pool has at most 8 (exit 4,
-`too_many_aliases`). A name taken by a live or removed pool is refused too
-(exit 4, `pool_exists`), and the new name must follow the rule above
-(exit 4, `invalid_pool`): an old name is kept, but never given anew. An
-`ec2` pool that finished a rename moments ago (`rename_cooldown`, saying
-how long remains), or one whose deployment still runs a luxd too old to
-follow a rename (`rename_unsupported_by_deployment`), is refused too
-(exit 4). The
-current name given as the first argument is the confirmation luxd needs
-for a pool with hosts. With an operator key and no `--tenant`, it renames
-a platform pool.
+instances keep running; luxd finds them by the pool's id, and updates
+their `lux:pool` name tag in the background
+([operations](operations.md#renaming-a-pool)). The old name is free at
+once; until a pool takes it, submitting a Run to it or minting a host
+token for it is refused (exit 4, `pool_renamed`, naming the new name). A
+name taken by a live or removed pool is refused (exit 4, `pool_exists`),
+and the new name must follow the rule above (exit 4, `invalid_pool`): an
+old name is kept, but never given anew. An `ec2` pool with instances
+launched by an older luxd that are not yet tagged with its id
+(`pool_not_migrated`: wait a couple of minutes, or scale it to zero), or
+one whose deployment still runs a luxd that finds instances by name
+(`rename_unsupported_by_deployment`), is refused too (exit 4). The current
+name given as the first argument is the confirmation luxd needs for a
+pool with hosts. With an operator key and no `--tenant`, it renames a
+platform pool.
 
 A static pool's `--hourly-price` is copied to each host when it first
 registers. Changing it later does not reprice the pool's existing hosts:
