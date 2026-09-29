@@ -646,6 +646,34 @@ terminated once idle; their live Runs finish where they are.
 	}
 	rm.Flags().BoolVar(&forceEvict, "force-evict", false, "also stop the pool's live Runs so they resume elsewhere")
 	defer cmd.AddCommand(rm)
+	var renamePlatform bool
+	rename := &cobra.Command{
+		Use:   "rename <name> <new-name>",
+		Short: "Rename a pool; its hosts, Runs and instances stay with it",
+		Long: `Rename a pool. A pool is its id: its hosts, host tokens, Runs and
+instances refer to that, so only its name changes. A default pool stays
+the default. The old name is free at once, and a Run naming it no longer
+finds this pool. --platform renames the platform's pool of that name
+(operators).`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := "/v1/pools/" + url.PathEscape(args[0]) + "/rename"
+			if renamePlatform {
+				path += "?owner=platform"
+			}
+			var out server.Pool
+			if err := a.c.Do(ctxOf(cmd), "POST", path, map[string]string{"name": args[1]}, &out); err != nil {
+				return err
+			}
+			if a.output == "json" {
+				return a.json(out)
+			}
+			fmt.Fprintf(a.stdout, "renamed %s to %s\n", args[0], out.Name)
+			return nil
+		},
+	}
+	rename.Flags().BoolVar(&renamePlatform, "platform", false, "operators: the platform's pool of that name")
+	defer cmd.AddCommand(rename)
 	set.Flags().StringVar(&p.Provider, "provider", "static", "static | ec2")
 	set.Flags().IntVar(&p.MinHosts, "min", 0, "minimum hosts")
 	set.Flags().IntVar(&p.MaxHosts, "max", 0, "maximum hosts")
