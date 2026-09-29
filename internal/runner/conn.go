@@ -199,6 +199,13 @@ func (c *conn) Send(ctx context.Context, f proto.Frame) error {
 // across reconnects until ctx ends. A nack is returned as an error; a
 // stale nack as errStale.
 func (c *conn) Report(ctx context.Context, f proto.Frame) error {
+	_, err := c.ReportAck(ctx, f)
+	return err
+}
+
+// ReportAck is Report, returning the ack's data (empty from a luxd that
+// sends none).
+func (c *conn) ReportAck(ctx context.Context, f proto.Frame) (proto.Ack, error) {
 	for {
 		reply, err := c.reportOnce(ctx, f)
 		if err == nil {
@@ -206,18 +213,22 @@ func (c *conn) Report(ctx context.Context, f proto.Frame) error {
 				var n proto.Nack
 				_ = json.Unmarshal(reply.Data, &n)
 				if n.Stale {
-					return errStale
+					return proto.Ack{}, errStale
 				}
-				return fmt.Errorf("luxd: %s", n.Error)
+				return proto.Ack{}, fmt.Errorf("luxd: %s", n.Error)
 			}
-			return nil
+			var a proto.Ack
+			if len(reply.Data) > 0 {
+				_ = json.Unmarshal(reply.Data, &a)
+			}
+			return a, nil
 		}
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return proto.Ack{}, ctx.Err()
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return proto.Ack{}, ctx.Err()
 		case <-time.After(time.Second):
 		}
 	}

@@ -372,7 +372,7 @@ func nonNil[T any](v []T) []T {
 
 // handleReport applies one runner report and returns the reply frame.
 func (s *Server) handleReport(ctx context.Context, hostID string, f proto.Frame) proto.Frame {
-	err := s.applyReport(ctx, hostID, f)
+	refused, err := s.applyReport(ctx, hostID, f)
 	if err != nil {
 		var stale *staleError
 		if errors.As(err, &stale) {
@@ -383,7 +383,11 @@ func (s *Server) handleReport(ctx context.Context, hostID string, f proto.Frame)
 		return proto.Frame{Type: proto.MsgNack, ID: f.ID, RunID: f.RunID, Epoch: f.Epoch,
 			Data: proto.Marshal(proto.Nack{Error: err.Error()})}
 	}
-	return proto.Frame{Type: proto.MsgAck, ID: f.ID, RunID: f.RunID, Epoch: f.Epoch}
+	ack := proto.Frame{Type: proto.MsgAck, ID: f.ID, RunID: f.RunID, Epoch: f.Epoch}
+	if refused {
+		ack.Data = proto.Marshal(proto.Ack{Refused: true})
+	}
+	return ack
 }
 
 type staleError struct {
@@ -395,28 +399,30 @@ func (e *staleError) Error() string {
 	return fmt.Sprintf("stale epoch %d for %s (current %d)", e.epoch, e.runID, e.current)
 }
 
-func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) error {
+// applyReport applies one report. refused: a snapshot.done that was not
+// recorded (see applySnapshotDone).
+func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) (refused bool, err error) {
 	switch f.Type {
 	case proto.MsgHeartbeat:
 		var hb proto.Heartbeat
 		if err := json.Unmarshal(f.Data, &hb); err != nil {
-			return err
+			return false, err
 		}
-		return s.heartbeat(ctx, hostID, hb)
+		return false, s.heartbeat(ctx, hostID, hb)
 	case proto.MsgHello:
-		return errors.New("hello after welcome")
+		return false, errors.New("hello after welcome")
 	case proto.MsgHostEvicting:
 		var ev proto.Evicting
 		if err := json.Unmarshal(f.Data, &ev); err != nil {
-			return err
+			return false, err
 		}
-		return s.hostEvicting(ctx, hostID, ev)
+		return false, s.hostEvicting(ctx, hostID, ev)
 	}
 
 	var kicked bool
 	var notifyHost string
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		notifyHost = ""
+	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		notifyHost, refused = "", false
 		// Fencing: every report about a Run must carry the epoch of its
 		// current placement, on this host.
 		var tenantID, placementHost, placementState string
@@ -461,7 +467,8 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 				return err
 			}
 			kicked = true
-			return s.applySnapshotDone(ctx, tx, tenantID, hostID, f.RunID, f.Epoch, current, sd)
+			refused, err = s.applySnapshotDone(ctx, tx, tenantID, hostID, f.RunID, f.Epoch, current, sd)
+			return err
 		case proto.MsgRunEvent:
 			var ev proto.RunEvent
 			if err := json.Unmarshal(f.Data, &ev); err != nil {
@@ -500,7 +507,7 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 	if err == nil && notifyHost != "" {
 		s.hub.Notify(notifyHost)
 	}
-	return err
+	return refused, err
 }
 
 func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbeat) error {

@@ -3675,12 +3675,12 @@ paths:
             examples:
               - running,stopped
             type: string
-        - description: "Only Runs resume accepts: stopped, lost or failed."
+        - description: "Only Runs resume accepts: stopped, lost or failed, except one whose only snapshot report was refused."
           explode: false
           in: query
           name: resumable
           schema:
-            description: "Only Runs resume accepts: stopped, lost or failed."
+            description: "Only Runs resume accepts: stopped, lost or failed, except one whose only snapshot report was refused."
             type: boolean
         - description: Only Runs with a placement (any epoch) on this host, by id or name.
           explode: false
@@ -4863,7 +4863,7 @@ paths:
       description: |-
         From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming.
 
-        git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. Adding needs a stopped, lost or failed Run: while it is resuming, 409.
+        git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. Adding needs a stopped, lost or failed Run: while it is resuming, 409. A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one.
 
         Needs the `run` scope.
       operationId: resumeRun

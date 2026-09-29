@@ -131,9 +131,10 @@ func TestRunSessionsSnapshotOnly(t *testing.T) {
 		snap, id string
 	}{{2, "snap2", "from-manifest"}, {1, "snap1", "from-epoch-1"}} {
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-			return s.applySnapshotDone(ctx, tx, "t1", "h1", "r1", sd.epoch, 2, proto.SnapshotDone{
+			_, err := s.applySnapshotDone(ctx, tx, "t1", "h1", "r1", sd.epoch, 2, proto.SnapshotDone{
 				Manifest: proto.Manifest{SnapshotID: sd.snap, RunID: "r1", Epoch: sd.epoch, SessionID: sd.id, Volumes: []proto.VolumeSnapshot{}},
 			})
+			return err
 		})
 		if err != nil {
 			t.Fatal(err)

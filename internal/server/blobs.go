@@ -69,17 +69,7 @@ func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
 			WHERE id = $1 AND location = 'host'`, id, key); err != nil {
 			return err
 		}
-		// A snapshot is uploaded once all its volumes are.
-		if _, err := tx.Exec(r.Context(), `UPDATE snapshots s SET uploaded = true
-			WHERE s.run_id = $1 AND s.epoch = $2 AND NOT s.uploaded AND NOT EXISTS (
-				SELECT 1 FROM jsonb_array_elements(coalesce(nullif(s.manifest->'volumes', 'null'), '[]')) v
-				JOIN blobs b ON b.id = v->>'blobId' WHERE b.location <> 's3')`, runID, epoch); err != nil {
-			return err
-		}
-		_, err := tx.Exec(r.Context(), `UPDATE placements p SET uploaded_at = now()
-			WHERE p.run_id = $1 AND p.epoch = $2 AND p.uploaded_at IS NULL AND NOT EXISTS (
-				SELECT 1 FROM blobs b WHERE b.run_id = $1 AND b.epoch = $2 AND b.location = 'host')`, runID, epoch)
-		return err
+		return markUploaded(r.Context(), tx, runID, epoch)
 	})
 	if err != nil {
 		return err
@@ -89,8 +79,29 @@ func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+// markUploaded records what a placement has in S3 after one of its blobs
+// arrived: its snapshot once every volume is a volume blob of the same Run
+// and placement (epoch) in S3, the placement once none of its blobs is left
+// on the host.
+func markUploaded(ctx context.Context, tx pgx.Tx, runID string, epoch int) error {
+	if _, err := tx.Exec(ctx, `UPDATE snapshots s SET uploaded = true
+		WHERE s.run_id = $1 AND s.epoch = $2 AND NOT s.uploaded AND NOT EXISTS (
+			SELECT 1 FROM jsonb_array_elements(coalesce(nullif(s.manifest->'volumes', 'null'), '[]')) v
+			WHERE NOT EXISTS (SELECT 1 FROM blobs b
+				WHERE b.id = v->>'blobId' AND b.run_id = s.run_id AND b.epoch = s.epoch
+				  AND b.kind = 'volume' AND b.location = 's3'))`, runID, epoch); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `UPDATE placements p SET uploaded_at = now()
+		WHERE p.run_id = $1 AND p.epoch = $2 AND p.uploaded_at IS NULL AND NOT EXISTS (
+			SELECT 1 FROM blobs b WHERE b.run_id = $1 AND b.epoch = $2 AND b.location = 'host')`, runID, epoch)
+	return err
+}
+
 // serveRunnerBlobDownload is GET /runner/v1/blobs/{id}: a runner fetching a
 // snapshot volume for a Run assigned to it. Redirects to a presigned URL.
+// Only a volume of the snapshot that Run restores, for its current
+// placement on the asking host.
 func (s *Server) serveRunnerBlobDownload(w http.ResponseWriter, r *http.Request) error {
 	tok, err := s.authHostToken(r)
 	if err != nil {
@@ -99,12 +110,14 @@ func (s *Server) serveRunnerBlobDownload(w http.ResponseWriter, r *http.Request)
 	id := r.PathValue("id")
 	var key, location string
 	err = s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
-		// Only for a Run whose current placement is on the asking host.
 		return tx.QueryRow(r.Context(), `SELECT coalesce(b.s3_key, ''), b.location FROM blobs b
 			JOIN runs rn ON rn.id = b.run_id
+			JOIN snapshots sn ON sn.id = rn.snapshot_id AND sn.run_id = rn.id
 			JOIN placements p ON p.run_id = rn.id AND p.epoch = rn.current_epoch
 			JOIN hosts h ON h.id = p.host_id
-			WHERE b.id = $1 AND h.token_id = $2 AND h.name = $3`, id, tok.ID, r.URL.Query().Get("host")).Scan(&key, &location)
+			WHERE b.id = $1 AND b.kind = 'volume' AND b.epoch = sn.epoch AND h.token_id = $2 AND h.name = $3
+			  AND EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(nullif(sn.manifest->'volumes', 'null'), '[]')) v
+				WHERE v->>'blobId' = b.id)`, id, tok.ID, r.URL.Query().Get("host")).Scan(&key, &location)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errf(http.StatusNotFound, "not_found", "no blob %s for a run assigned to this host", id)
