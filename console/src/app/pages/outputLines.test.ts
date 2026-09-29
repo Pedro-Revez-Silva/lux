@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { ChannelLines, eventLine, lineText, luxEventLines, systemLines } from "./outputLines.ts";
+import { ANSI_DIM } from "@lux/design-system";
+import { ChannelLines, eventLine, luxEventLines, systemLines } from "./outputLines.ts";
 
 const T = Date.UTC(2026, 8, 29, 10, 0, 0);
 
@@ -15,9 +16,10 @@ test("a multi-line event record is one LogLine per line", () => {
 });
 
 test("\\r\\n leaves no \\r; a bare \\r keeps what was written after it", () => {
-  expect(lineText("done\r")).toBe("done");
-  expect(lineText("10%\r50%\r100%")).toBe("100%");
-  expect(lineText("10%\r100%\r")).toBe("100%");
+  const texts = (s: string) => systemLines(T, s).map((l) => l.text);
+  expect(texts("done\r")).toEqual(["done"]);
+  expect(texts("10%\r50%\r100%")).toEqual(["100%"]);
+  expect(texts("10%\r100%\r")).toEqual(["100%"]);
   const ch = new ChannelLines("stdout");
   expect(ch.push(T, "one\r\ntwo\r").map((l) => l.text)).toEqual(["one"]);
   expect(ch.push(T + 1, "\nthree").map((l) => l.text)).toEqual(["two"]);
@@ -32,4 +34,22 @@ test("a line split across records starts at its first record's time", () => {
     { ts: T + 5, stream: "stderr", text: "next" },
   ]);
   expect(ch.flush()).toEqual([]);
+});
+
+test("stderr from opencode: plain visible text, and a colour opened in one record reaches the lines of the next", () => {
+  const ch = new ChannelLines("stderr");
+  const first = ch.push(T, "\x1b[0m\x1b[31mError handling request {\n  \x1b[0mid\x1b[2m:\x1b[0m \x1b[0m\x1b[33m3\x1b[0m,\n  \x1b[36mmethod");
+  expect(first.map((l) => l.text)).toEqual(["Error handling request {", "  id: 3,"]);
+  expect(first[0]!.spans).toEqual([{ text: "Error handling request {", fg: 1 }]);
+  expect(first[1]!.spans).toEqual([{ text: "  ", fg: 1 }, { text: "id" }, { text: ":", flags: ANSI_DIM }, { text: " " }, { text: "3", fg: 3 }, { text: "," }]);
+  const second = ch.push(T + 1, ": x\n}\x1b[0m\n");
+  expect(second.map((l) => l.text)).toEqual(["  method: x", "}"]);
+  expect(second[0]!.spans).toEqual([{ text: "  " }, { text: "method: x", fg: 6 }]);
+  expect(second[1]!.spans).toEqual([{ text: "}", fg: 6 }]);
+});
+
+test("a system line's escapes never reach its text", () => {
+  const lines = systemLines(T, "\x1b]0;title\x07\x1b[1mbold\nstill bold\x1b[22m plain");
+  expect(lines.map((l) => l.text)).toEqual(["bold", "still bold plain"]);
+  expect(lines[1]!.spans?.map((s) => s.flags ?? 0)).toEqual([1, 0]);
 });

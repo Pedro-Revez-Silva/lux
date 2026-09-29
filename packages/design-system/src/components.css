@@ -1371,7 +1371,8 @@ a.idchip-text:hover {
   line-height: 20px;
   padding: 0 var(--sp-5);
   white-space: pre;
-  color: var(--fg);
+  color: var(--logline-fg);
+  --logline-fg: var(--fg);
   /* Rows are windowed at a fixed height: text that would be taller (a stray
      newline) is clipped to its row, never painted over the next. Horizontal
      overflow stays visible: it is what scrolls a long line into view. */
@@ -1382,10 +1383,10 @@ a.idchip-text:hover {
 }
 .logline-stderr {
   background: var(--log-stderr-bg);
-  color: var(--log-stderr-fg);
+  --logline-fg: var(--log-stderr-fg);
 }
 .logline-system {
-  color: var(--fg-muted);
+  --logline-fg: var(--fg-muted);
   font-style: italic;
 }
 .logline-no {
@@ -1404,6 +1405,19 @@ a.idchip-text:hover {
 }
 .logline-text {
   flex: 1;
+}
+/* ANSI SGR attributes (colours are inline, from --ansi-* tokens; see ansi.ts). */
+.ansi-bold {
+  font-weight: var(--weight-semibold);
+}
+.ansi-dim {
+  opacity: 0.7;
+}
+.ansi-italic {
+  font-style: italic;
+}
+.ansi-underline {
+  text-decoration: underline;
 }
 .logview.is-wrap .logline {
   white-space: pre-wrap;

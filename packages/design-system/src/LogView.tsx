@@ -1,12 +1,16 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { IconArrowDown } from "./icons.tsx";
 import { formatClock } from "./format.ts";
+import { ANSI_BOLD, ANSI_DIM, ANSI_INVERSE, ANSI_ITALIC, ANSI_UNDERLINE, ansiColorCss, AnsiDecoder, hasAnsi, type AnsiSpan } from "./ansi.ts";
 
 export interface LogLine {
   /** Epoch ms; optional. */
   ts?: number;
   stream: "stdout" | "stderr" | "system";
+  /** The visible text. Raw ANSI escapes here are decoded for display, each line on its own. */
   text: string;
+  /** Styled runs whose texts make up `text`, when decoded upstream (AnsiDecoder keeps a style across lines). */
+  spans?: AnsiSpan[];
 }
 
 export interface LogViewProps {
@@ -26,6 +30,37 @@ export interface LogViewProps {
 
 const ROW_H = 18;
 const OVERSCAN = 20;
+
+function spanNode(sp: AnsiSpan, k: number): ReactNode {
+  const flags = sp.flags ?? 0;
+  if (sp.fg === undefined && sp.bg === undefined && flags === 0) return sp.text;
+  const style: CSSProperties = {};
+  // Inverse swaps the layers, each colour keeping its own tone: a text colour as the background, a background tint as the text.
+  if (flags & ANSI_INVERSE) {
+    style.color = sp.bg !== undefined ? ansiColorCss(sp.bg, "bg") : "var(--bg-inset)";
+    style.background = sp.fg !== undefined ? ansiColorCss(sp.fg, "fg") : "var(--logline-fg)";
+  } else {
+    if (sp.fg !== undefined) style.color = ansiColorCss(sp.fg, "fg");
+    if (sp.bg !== undefined) style.background = ansiColorCss(sp.bg, "bg");
+  }
+  const cls = [flags & ANSI_BOLD && "ansi-bold", flags & ANSI_DIM && "ansi-dim", flags & ANSI_ITALIC && "ansi-italic", flags & ANSI_UNDERLINE && "ansi-underline"].filter(Boolean).join(" ");
+  return (
+    <span key={k} className={cls || undefined} style={style}>
+      {sp.text}
+    </span>
+  );
+}
+
+/** A line's text: its spans, or its raw text decoded (escapes never print). */
+export function logLineContent(l: LogLine): ReactNode {
+  if (l.spans) return l.spans.map(spanNode);
+  if (!hasAnsi(l.text)) return l.text;
+  const d = new AnsiDecoder();
+  return l.text.split("\n").map((raw, i) => {
+    const line = d.line(raw);
+    return <span key={i}>{i > 0 ? "\n" : ""}{line.spans ? line.spans.map(spanNode) : line.text}</span>;
+  });
+}
 
 /** Monospace log pane. Windowed rendering (fixed row height) keeps ~50k lines cheap; follow-tail sticks to the bottom. */
 export function LogView({ lines, height = 360, timestamps = true, lineNumbers = false, follow: followProp = true, onFollowChange, wrap = false, emptyText = "No output yet." }: LogViewProps) {
@@ -92,7 +127,7 @@ export function LogView({ lines, height = 360, timestamps = true, lineNumbers = 
                       </span>
                     )}
                     {timestamps && <span className="logline-ts">{l.ts != null ? formatClock(l.ts) : ""}</span>}
-                    <span className="logline-text">{l.text}</span>
+                    <span className="logline-text">{logLineContent(l)}</span>
                   </div>
                 );
               })}
