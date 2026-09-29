@@ -169,11 +169,14 @@ def test_hosts_live_runs_shows_the_count_and_the_cap_only_near_it(page, lux, run
     expect(page.get_by_role("tooltip")).to_have_text("0 live · max 4 runs on this host")
     page.mouse.move(0, 0)
     # Half the cap is still just the count; three quarters is "N / M" in the warn tone.
-    runs = [lux.submit(generic(ALPINE_IMAGE, "sleep", "300")) for _ in range(2)]
+    # Small reservations: the cap, not CPU or memory, is what fills first.
+    small = {"cpus": 0.1, "memory": 64 * 1024 * 1024}
+    runs = [lux.submit(generic(ALPINE_IMAGE, "sleep", "300", resources=small)) for _ in range(2)]
     for r in runs:
         lux.wait_state(r, "running")
     expect(cell).to_have_text(re.compile(r"^\s*2\s*$"), timeout=15_000)
-    runs.append(lux.submit(generic(ALPINE_IMAGE, "sleep", "300")))
+    expect(cell.locator(".badge-warn")).to_have_count(0)
+    runs.append(lux.submit(generic(ALPINE_IMAGE, "sleep", "300", resources=small)))
     lux.wait_state(runs[-1], "running")
     expect(cell.locator(".badge-warn")).to_have_text("3 / 4", timeout=15_000)
     assert not page.errors, page.errors
