@@ -1,0 +1,133 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push to the same PR cancels the run for the older one.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # go vet, gofmt and every Go test. The store tests need Postgres: the same
+  # image and credentials the e2e harness uses (tests/env.py).
+  go:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18.6-alpine
+        env:
+          POSTGRES_USER: lux
+          POSTGRES_PASSWORD: lux
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U lux"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: make lint
+        run: make lint
+
+      # Unset in CI, but a developer's LUX_TENANT changes CLI queries: keep
+      # it empty so the CLI tests see what they expect.
+      - name: make unit
+        env:
+          LUX_TENANT: ""
+        run: make unit
+
+      # The store tests skip when Postgres is unreachable: here it must
+      # be, so a skip is a broken setup, not a pass.
+      - name: The store tests ran
+        run: |
+          go test ./internal/store -count=1 -v 2>&1 | tee store.log
+          ! grep -E -- '--- SKIP' store.log
+        env:
+          LUX_TEST_PG: postgres://lux:lux@127.0.0.1:55432/postgres?sslmode=disable
+
+  # The console: typecheck, its tests, and the build luxd embeds.
+  console:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: make console
+        run: make console
+
+  # The e2e harness's own configuration; no Docker.
+  harness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          working-directory: tests
+          enable-cache: true
+
+      - name: make harness-unit
+        run: make harness-unit
+
+  # Every e2e suite, across 4 environments (docs/development.md): privileged
+  # Podman hosts, Postgres and S3 in Docker, luxd on the runner. The agent
+  # suites skip without their API keys, the real-EC2 ones without
+  # --real-ec2.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          working-directory: tests
+          enable-cache: true
+
+      # luxd embeds console/dist: without it the console suites see only a
+      # page saying to build it.
+      - name: Build the console
+        run: make console
+
+      # The console suites drive a browser.
+      - name: Install Chromium for Playwright
+        working-directory: tests
+        run: uv run playwright install --with-deps chromium
+
+      - name: make e2e
+        env:
+          LUX_TENANT: ""
+          LUX_TEST_LOG_ROOT: ${{ runner.temp }}/lux-e2e
+        run: make e2e JOBS=4
+
+      - name: Upload the e2e logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: ${{ runner.temp }}/lux-e2e
+          retention-days: 7
