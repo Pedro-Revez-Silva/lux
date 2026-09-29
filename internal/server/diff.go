@@ -210,8 +210,9 @@ func notRunning(t diffTarget) error {
 // resume clones only the repositories it adds; the others are as the
 // snapshot has them). A snapshot older than the latest (resume
 // --from-snapshot) leads back through its own placement, never through
-// the placements after it. Placements scheduled before their snapshot was
-// recorded fall back to every earlier clone, latest first.
+// the placements after it. A placement scheduled before lineage was
+// recorded (no snapshotId) has no known source: only its own clones count,
+// never an earlier placement's, which may not be what it restored.
 func gitBases(ctx context.Context, tx pgx.Tx, runID string, epoch int) (map[string]string, error) {
 	m := map[string]string{}
 	clones := func(cond string, e int) error {
@@ -242,9 +243,6 @@ func gitBases(ctx context.Context, tx pgx.Tx, runID string, epoch int) (map[stri
 			WHERE run_id = $1 AND epoch = $2 AND type = 'state' AND data->>'state' = $3
 			ORDER BY id DESC LIMIT 1`, runID, e, StateScheduled).Scan(&recorded, &snap)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && !recorded) {
-			if err := clones("epoch < $3", e); err != nil {
-				return nil, err
-			}
 			break
 		}
 		if err != nil {

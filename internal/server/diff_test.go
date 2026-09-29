@@ -35,10 +35,12 @@ func diffFixture(t *testing.T) (*Server, map[string]string) {
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state) VALUES ('h1', 'h1', 'ready')`)
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES
 		('p1', 't1', 'r1', 'h1', 1, 'exited'), ('p2', 't1', 'r1', 'h1', 2, 'running')`)
+	execSQL(t, s, ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest) VALUES ('s1', 't1', 'r1', 'p1', 1, '{}')`)
 	// lib's base: its latest clone (an earlier one was replaced).
 	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES
 		('t1', 'r1', 1, 'git.clone', '{"repo": "app", "status": "cloned", "commit": "base-app"}'),
 		('t1', 'r1', 1, 'git.clone', '{"repo": "lib", "status": "cloned", "commit": "old-lib"}'),
+		('t1', 'r1', 2, 'state', '{"state":"scheduled","snapshotId":"s1"}'),
 		('t1', 'r1', 2, 'git.clone', '{"repo": "lib", "status": "failed"}'),
 		('t1', 'r1', 2, 'git.clone', '{"repo": "lib", "status": "cloned", "commit": "base-lib"}')`)
 	return s, keys
@@ -311,9 +313,8 @@ func TestDiffCapability(t *testing.T) {
 	}
 }
 
-// Every assignment carries each repository's clone base, so a resumed
-// placement (which does not clone) diffs from where the Run started. The
-// Run's placements predate recorded lineage: their latest clones count.
+// Every assignment carries the bases known from the restored snapshot's
+// lineage. A resumed placement that does not clone retains those bases.
 func TestAssignCarriesGitBases(t *testing.T) {
 	s, _ := diffFixture(t)
 	ctx := context.Background()
@@ -350,7 +351,7 @@ func TestGitBasesFollowTheRestoredSnapshot(t *testing.T) {
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES
 		('q1', 't1', 'rs', 'h1', 1, 'exited'), ('q2', 't1', 'rs', 'h1', 2, 'exited'), ('q3', 't1', 'rs', 'h1', 3, 'exited'), ('q4', 't1', 'rs', 'h1', 4, 'exited')`)
 	execSQL(t, s, ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest) VALUES
-		('s1', 't1', 'rs', 'q1', 1, '{}'), ('s2', 't1', 'rs', 'q2', 2, '{}'), ('s3', 't1', 'rs', 'q3', 3, '{}')`)
+		('rs-s1', 't1', 'rs', 'q1', 1, '{}'), ('rs-s2', 't1', 'rs', 'q2', 2, '{}'), ('rs-s3', 't1', 'rs', 'q3', 3, '{}')`)
 	schedule := func(epoch int, snap any) {
 		execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES ('t1', 'rs', $1, 'state', jsonb_build_object('state', 'scheduled', 'snapshotId', $2::text))`, epoch, snap)
 	}
@@ -359,10 +360,10 @@ func TestGitBasesFollowTheRestoredSnapshot(t *testing.T) {
 	}
 	schedule(1, nil)
 	clone(1, "app", "c1")
-	schedule(2, "s1")
+	schedule(2, "rs-s1")
 	clone(2, "app", "c2")
 	clone(2, "lib", "l2")
-	schedule(3, "s1")
+	schedule(3, "rs-s1")
 	clone(3, "lib", "l3")
 	bases := func(epoch int) map[string]string {
 		var m map[string]string
@@ -383,14 +384,14 @@ func TestGitBasesFollowTheRestoredSnapshot(t *testing.T) {
 			t.Errorf("epoch %d: %v, want %v", c.epoch, got, c.want)
 		}
 	}
-	schedule(4, "s3")
+	schedule(4, "rs-s3")
 	if got := bases(4); !maps.Equal(got, map[string]string{"app": "c1", "lib": "l3"}) {
 		t.Errorf("epoch 4 from s3: %v", got)
 	}
 	// The scheduler records the lineage it assigns: epoch 5's assignment,
 	// resumed from s1 again, has app at c1 and no lib.
 	var a proto.Assign
-	sid := "s1"
+	sid := "rs-s1"
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		if err := s.assign(ctx, tx, pendingRun{ID: "rs", TenantID: "t1", State: StateResuming, Epoch: 4, SnapshotID: &sid}, &candidateHost{ID: "h1"}); err != nil {
 			return err
@@ -402,6 +403,58 @@ func TestGitBasesFollowTheRestoredSnapshot(t *testing.T) {
 	}
 	if a.Epoch != 5 || !maps.Equal(a.GitBases, map[string]string{"app": "c1"}) {
 		t.Errorf("assign from s1: epoch %d, bases %v", a.Epoch, a.GitBases)
+	}
+}
+
+// A legacy scheduled event without snapshotId cannot identify its source
+// snapshot. After an older restore, an intervening placement's clones may
+// be unrelated; only clones in the queried epoch have a known base.
+func TestGitBasesLegacyScheduledLineage(t *testing.T) {
+	s, _ := diffFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('legacy', 't1', '{}', 'running', 6)`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES
+		('l1', 't1', 'legacy', 'h1', 1, 'exited'), ('l2', 't1', 'legacy', 'h1', 2, 'exited'),
+		('l3', 't1', 'legacy', 'h1', 3, 'exited'), ('l4', 't1', 'legacy', 'h1', 4, 'exited'),
+		('l5', 't1', 'legacy', 'h1', 5, 'exited'), ('l6', 't1', 'legacy', 'h1', 6, 'running')`)
+	execSQL(t, s, ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest) VALUES ('legacy-s1', 't1', 'legacy', 'l1', 1, '{}')`)
+	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES
+		('t1', 'legacy', 1, 'state', '{"state":"scheduled","snapshotId":null}'),
+		('t1', 'legacy', 1, 'git.clone', '{"repo":"app","status":"cloned","commit":"root"}'),
+		('t1', 'legacy', 2, 'state', '{"state":"scheduled","snapshotId":"legacy-s1"}'),
+		('t1', 'legacy', 2, 'git.clone', '{"repo":"app","status":"cloned","commit":"discarded"}'),
+		('t1', 'legacy', 3, 'state', '{"state":"scheduled","snapshotId":"legacy-s1"}'),
+		('t1', 'legacy', 4, 'git.clone', '{"repo":"lib","status":"cloned","commit":"unrelated"}'),
+		('t1', 'legacy', 5, 'state', '{"state":"scheduled"}'),
+		('t1', 'legacy', 5, 'git.clone', '{"repo":"app","status":"cloned","commit":"local"}')`)
+	bases := func(epoch int) map[string]string {
+		var m map[string]string
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) (err error) {
+			m, err = gitBases(ctx, tx, "legacy", epoch)
+			return
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	for _, c := range []struct {
+		epoch int
+		want  map[string]string
+	}{
+		{3, map[string]string{"app": "root"}},      // explicit older restore skips epoch 2
+		{4, map[string]string{"lib": "unrelated"}}, // no scheduled event
+		{5, map[string]string{"app": "local"}},     // missing snapshotId
+		{6, nil},                                   // no scheduled event and no clones
+	} {
+		if got := bases(c.epoch); !maps.Equal(got, c.want) {
+			t.Errorf("legacy epoch %d: %v, want %v", c.epoch, got, c.want)
+		}
+	}
+	// An explicit empty start also prevents recovery of earlier clones.
+	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES
+		('t1', 'legacy', 7, 'state', '{"state":"scheduled","snapshotId":null}')`)
+	if got := bases(7); got != nil {
+		t.Errorf("explicit empty start: %v", got)
 	}
 }
 
