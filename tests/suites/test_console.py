@@ -101,6 +101,58 @@ def test_run_page_streams_output_and_stops_the_run(page, operator, lux, runners,
     lux.run("cancel", run_id)
 
 
+def test_run_output_tabs_separate_the_workloads_lines_from_luxs(page, env, operator, lux, runners, hosts):
+    runners.start(hosts[0])
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "echo tabs-err >&2; echo tabs-out; sleep 300"))
+    lux.wait_output(run_id, "tabs-out")
+    page.sign_in(operator.api_key, f"/runs/{run_id}")
+    log = page.locator(".logview")
+    tabs = page.locator(".tabs-sm")
+    tab = lambda name: tabs.get_by_role("tab", name=re.compile(rf"^{name}\b"))
+
+    def texts(cls: str) -> list[str]:
+        return log.locator(f".logline-{cls} .logline-text").all_inner_texts()
+
+    # All (the default): the workload's lines and Lux's own, interleaved.
+    expect(log.get_by_text("tabs-out", exact=True)).to_have_count(1, timeout=20_000)
+    expect(log.get_by_text("tabs-err", exact=True)).to_have_count(1)
+    expect(log.locator(".logline-system").first).to_contain_text("lux: ", timeout=10_000)
+    expect(tab("All")).to_have_attribute("aria-selected", "true")
+    assert "output=" not in page.url, page.url
+
+    # Each tab counts its lines: All is Output plus Lux.
+    def counts_add_up() -> bool:
+        a, o, x = (int(tab(n).locator(".tab-count").inner_text()) for n in ("All", "Output", "Lux"))
+        return a == o + x and o == 2 and x >= 1
+    wait_until(counts_add_up, 10, 0.5, "the tab counts do not add up")
+
+    # Output: only stdout and stderr, numbered from 1.
+    tab("Output").click()
+    expect(tab("Output")).to_have_attribute("aria-selected", "true")
+    expect(page).to_have_url(re.compile(r"[?&]output=output\b"))
+    expect(log.locator(".logline-system")).to_have_count(0)
+    assert texts("stdout") == ["tabs-out"] and texts("stderr") == ["tabs-err"], (texts("stdout"), texts("stderr"))
+    expect(log.locator(".logline-no").first).to_have_text("1")
+    expect(log.locator(".logline")).to_have_count(2)
+
+    # Lux: only Lux's lines.
+    tab("Lux").click()
+    expect(page).to_have_url(re.compile(r"[?&]output=lux\b"))
+    expect(log.locator(".logline-stdout, .logline-stderr")).to_have_count(0)
+    assert texts("system") and all(t.startswith(("lux: ", "[", "---")) for t in texts("system")), texts("system")
+
+    # The choice round-trips through the URL; All drops the parameter.
+    page.goto(env.luxd_url + f"/runs/{run_id}?output=output")
+    expect(tab("Output")).to_have_attribute("aria-selected", "true", timeout=15_000)
+    expect(log.get_by_text("tabs-out", exact=True)).to_have_count(1, timeout=20_000)
+    expect(log.locator(".logline-system")).to_have_count(0)
+    tab("All").click()
+    expect(log.locator(".logline-system").first).to_be_visible()
+    assert "output=" not in page.url, page.url
+    assert not page.errors, page.errors
+    lux.run("cancel", run_id)
+
+
 def test_pages_update_live_from_events(page, operator, tenant_factory):
     """A new Run shows up on the Runs page within a moment, pushed by its
     event: while the stream is live, the page's own poll is a minute."""
