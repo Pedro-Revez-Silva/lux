@@ -439,8 +439,10 @@ class TestEnvironment:
         self.s3().create_bucket(Bucket=self.bucket)
 
     def _image_tar(self) -> Path:
+        from build import ensure_local
         tar = Path(self.log_dir) / "images.tar"
         images = list(PRELOAD_IMAGES)
+        ensure_local(*images)
         if self.fake_image:
             images.append(self.fake_image)
         images += [i for i in self.extra.get("images", {}).values() if i]
