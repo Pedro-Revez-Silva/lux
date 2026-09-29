@@ -465,3 +465,62 @@ func TestLiveDiffCancelAndBusy(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
+
+// ?repo= reads only that repository's blob: a sibling's missing or
+// host-only blob does not touch it. A blob missing from S3 is that
+// repository's error, never an empty patch.
+func TestDiffRepoFilterAndMissingBlob(t *testing.T) {
+	s, keys, mem := diffFixture(t)
+	ctx := context.Background()
+	snapshotWithDiffs(t, s, mem, "s1", 2, func(repo, kind string) string { return repo + " " + kind + "\n" })
+	// lib's clone patch: gone from S3.
+	var libKey string
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT b.s3_key FROM snapshot_diffs d JOIN blobs b ON b.id = d.blob_id
+			WHERE d.snapshot_id = 's1' AND d.repo = 'lib' AND d.kind = 'clone'`).Scan(&libKey)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mem.mu.Lock()
+	delete(mem.objs, "/b/"+libKey)
+	mem.mu.Unlock()
+	code, _, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff?repo=app", "")
+	if d := decodeDiff(t, body); code != http.StatusOK || len(d.Repos) != 1 || d.Repos[0].Patch != "app clone\n" {
+		t.Errorf("app, lib's blob missing: %d %s", code, body)
+	}
+	code, _, body = getDiff(t, s, keys["t1"], "/v1/runs/r1/diff", "")
+	d := decodeDiff(t, body)
+	if code != http.StatusOK || d.Repos[0].Patch != "app clone\n" || d.Repos[1].Error == "" || d.Repos[1].Patch != "" {
+		t.Errorf("both, lib's blob missing: %d %s", code, body)
+	}
+	// lib's blob not uploaded yet: app alone still answers.
+	execSQL(t, s, ctx, `UPDATE blobs SET location = 'host' WHERE name = 'lib'`)
+	if code, _, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff?repo=app", ""); code != http.StatusOK {
+		t.Errorf("app, lib's blob on its host: %d %s", code, body)
+	}
+	if code, _, _ := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff?repo=lib", ""); code != http.StatusConflict {
+		t.Errorf("lib, on its host: %d", code)
+	}
+	// A non-empty row without a blob at all.
+	execSQL(t, s, ctx, `UPDATE snapshot_diffs SET blob_id = NULL WHERE repo = 'lib' AND kind = 'head'`)
+	code, _, body = getDiff(t, s, keys["t1"], "/v1/runs/r1/diff?repo=lib&base=head", "")
+	if d := decodeDiff(t, body); code != http.StatusOK || d.Repos[0].Error == "" {
+		t.Errorf("no blob recorded: %d %s", code, body)
+	}
+}
+
+// The snapshot chosen is the newest with the kind asked for.
+func TestDiffSnapshotHasTheKind(t *testing.T) {
+	s, keys, mem := diffFixture(t)
+	snapshotWithDiffs(t, s, mem, "s1", 1, func(repo, kind string) string { return "old " + kind + "\n" })
+	snapshotWithDiffs(t, s, mem, "s2", 2, func(repo, kind string) string { return "new " + kind + "\n" })
+	execSQL(t, s, context.Background(), `DELETE FROM snapshot_diffs WHERE snapshot_id = 's2' AND kind = 'head'`)
+	_, _, body := getDiff(t, s, keys["t1"], "/v1/runs/r1/diff?base=head", "")
+	if d := decodeDiff(t, body); d.Repos[0].SnapshotID != "s1" || d.Repos[0].Patch != "old head\n" {
+		t.Errorf("head: %s", body)
+	}
+	_, _, body = getDiff(t, s, keys["t1"], "/v1/runs/r1/diff", "")
+	if d := decodeDiff(t, body); d.Repos[0].SnapshotID != "s2" {
+		t.Errorf("clone: %s", body)
+	}
+}

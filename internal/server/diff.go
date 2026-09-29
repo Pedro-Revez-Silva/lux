@@ -348,9 +348,14 @@ func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
+		names := make([]string, len(t.repos))
+		for i, r := range t.repos {
+			names[i] = r.Name
+		}
+		// The newest snapshot with this kind of diff for these repositories.
 		err = tx.QueryRow(ctx, `SELECT s.id, s.created_at FROM snapshots s
-			WHERE s.run_id = $1 AND EXISTS (SELECT 1 FROM snapshot_diffs d WHERE d.snapshot_id = s.id)
-			ORDER BY s.epoch DESC, s.created_at DESC LIMIT 1`, t.runID).Scan(&snapID, &at)
+			WHERE s.run_id = $1 AND EXISTS (SELECT 1 FROM snapshot_diffs d WHERE d.snapshot_id = s.id AND d.kind = $2 AND d.repo = ANY($3))
+			ORDER BY s.epoch DESC, s.created_at DESC LIMIT 1`, t.runID, kind, names).Scan(&snapID, &at)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errf(http.StatusNotFound, "no_diff", "no snapshot of this Run has a diff (it has not stopped since it started, or its snapshots predate diffs)")
 		}
@@ -361,7 +366,7 @@ func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget
 				d.filters_ignored, d.filtered_paths, d.error, d.error_code,
 				coalesce(b.s3_key, ''), coalesce(b.location, ''), d.size, d.sha256
 			FROM snapshot_diffs d LEFT JOIN blobs b ON b.id = d.blob_id
-			WHERE d.snapshot_id = $1 AND d.kind = $2`, snapID, kind)
+			WHERE d.snapshot_id = $1 AND d.kind = $2 AND d.repo = ANY($3)`, snapID, kind, names)
 		if err != nil {
 			return err
 		}
@@ -379,12 +384,20 @@ func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget
 	got := map[string]RepoDiff{}
 	for _, x := range rows {
 		x.d.Source, x.d.SnapshotID, x.d.At = "snapshot", snapID, at.UTC()
-		if !statOnly && x.d.Error == "" && x.location != "" {
+		if !statOnly && x.d.Error == "" && x.size > 0 {
 			patch, err := s.readDiffBlob(ctx, x.key, x.location, x.size)
-			if err != nil {
-				return nil, err
+			var ae *HTTPError
+			switch {
+			case errors.As(err, &ae):
+				return nil, err // not uploaded yet, or deleted: the request's answer
+			case err != nil:
+				// This repository's patch cannot be had: its error, not an
+				// empty patch, and not the other repositories' failure.
+				s.log.Warn("diff blob", "run", t.runID, "snapshot", snapID, "repo", x.d.Repo, "err", err)
+				x.d.Error = "its stored patch cannot be read: " + err.Error()
+			default:
+				setPatch(&x.d, patch)
 			}
-			setPatch(&x.d, patch)
 		}
 		got[x.d.Repo] = x.d
 	}
@@ -397,10 +410,12 @@ func (s *Server) snapshotDiff(ctx context.Context, tenantID string, t diffTarget
 	return out, nil
 }
 
-// readDiffBlob reads a stored patch (zstd in S3), at most size bytes.
+// readDiffBlob reads a stored patch (zstd in S3), exactly size bytes.
 func (s *Server) readDiffBlob(ctx context.Context, key, location string, size int64) ([]byte, error) {
 	switch location {
 	case "s3":
+	case "":
+		return nil, errors.New("no blob was recorded for it")
 	case "host":
 		return nil, errf(http.StatusConflict, "not_uploaded", "the diff is still being uploaded from its host")
 	default:

@@ -37,7 +37,10 @@ type app struct {
 
 // Main runs the CLI and returns the process exit code.
 func Main(args []string) int {
-	a := &app{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr}
+	return (&app{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr}).main(args)
+}
+
+func (a *app) main(args []string) int {
 	root := a.root()
 	root.SetArgs(args)
 	err := root.Execute()

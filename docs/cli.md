@@ -107,8 +107,10 @@ ignored) files alike.
 - While the Run's container runs, the diff is computed there, now
   (`live`); one at a time per Run (another, different `lux diff` meanwhile
   fails with `diff_busy`; retry). Otherwise it is the one saved with the latest snapshot
-  (`snapshot`), which has both bases. A Run that has never stopped since it
-  started (or whose snapshots predate this) has none: exit code 3.
+  (`snapshot`) that has the base asked for. A Run that has never stopped
+  since it started (or whose snapshots predate this) has none, nor has one
+  whose latest snapshot's diff is still being computed: `no_diff`, exit
+  code 3.
 - Each repository's section starts with a comment line, which `git apply`
   skips, so the output applies as it is:
 
@@ -126,7 +128,7 @@ ignored) files alike.
 - Colour follows `git diff`: on when stdout is a terminal (`--color auto`,
   and `NO_COLOR` unset). Nothing is printed, and the exit code is 0, when
   nothing changed. A repository whose diff failed is reported on stderr and
-  the exit code is 1 (`base_unreachable`: its base is no longer in its
+  the exit code is 1, with `-o json` too (`base_unreachable`: its base is no longer in its
   history; `--base head` still works). Files with clean/smudge filters,
   which are never run, are compared raw, and named on stderr.
 - `-o json` prints the API's response: per repository `repo`, `push`,

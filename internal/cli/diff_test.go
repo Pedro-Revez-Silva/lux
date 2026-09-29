@@ -2,6 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -60,4 +63,49 @@ func TestColorPatch(t *testing.T) {
 			t.Errorf("lacks %q in %q", w, got)
 		}
 	}
+}
+
+// lux diff's exit codes: 3 for no_diff, 1 when a repository's diff failed
+// (with -o json too, after printing it), 0 otherwise.
+func TestDiffCommandExitCodes(t *testing.T) {
+	ok := server.RunDiff{Base: "clone", Repos: []server.RepoDiff{{Repo: "app", Files: 1, Patch: "diff --git a/x b/x\n"}}}
+	failed := server.RunDiff{Base: "clone", Repos: []server.RepoDiff{{Repo: "app", Files: 1, Patch: "p\n"}, {Repo: "lib", Error: "gone", ErrorCode: "base_unreachable"}}}
+	f := &fakeLuxd{
+		bodies: map[string]any{"/v1/runs/r_ok/diff": ok, "/v1/runs/r_bad/diff": failed},
+		status: map[string]int{"/v1/runs/r_none/diff": http.StatusNotFound},
+		errors: map[string][2]string{"/v1/runs/r_none/diff": {"no_diff", "no snapshot of this Run has a diff"}},
+	}
+	for _, c := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{"diff", "r_ok"}, 0},
+		{[]string{"diff", "r_ok", "-o", "json"}, 0},
+		{[]string{"diff", "r_none"}, 3},
+		{[]string{"diff", "r_none", "-o", "json"}, 3},
+		{[]string{"diff", "r_bad"}, 1},
+		{[]string{"diff", "r_bad", "-o", "json"}, 1},
+	} {
+		out, code := mainCLI(t, f, c.args...)
+		if code != c.code {
+			t.Errorf("%v: exit %d, want %d", c.args, code, c.code)
+		}
+		if c.args[1] == "r_bad" && len(c.args) > 2 {
+			var d server.RunDiff
+			if err := json.Unmarshal([]byte(out), &d); err != nil || len(d.Repos) != 2 || d.Repos[1].ErrorCode != "base_unreachable" {
+				t.Errorf("json not printed: %v %q", err, out)
+			}
+		}
+	}
+}
+
+// mainCLI runs lux as Main does against f: stdout and the exit code.
+func mainCLI(t *testing.T, f *fakeLuxd, args ...string) (string, int) {
+	t.Helper()
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	var out, errOut bytes.Buffer
+	a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: &errOut}
+	code := a.main(append([]string{"--url", srv.URL, "--api-key", "k"}, args...))
+	return out.String(), code
 }

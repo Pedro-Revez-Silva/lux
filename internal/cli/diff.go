@@ -47,10 +47,18 @@ skips. Prints nothing when nothing changed.`,
 			}
 			var d server.RunDiff
 			if err := a.c.Do(ctxOf(cmd), "GET", "/v1/runs/"+args[0]+"/diff?"+q.Encode(), nil, &d); err != nil {
-				return err
+				return err // no_diff is a 404: exit 3
 			}
 			if a.output == "json" {
-				return a.json(d)
+				if err := a.json(d); err != nil {
+					return err
+				}
+				for _, r := range d.Repos {
+					if r.Error != "" {
+						return exitCode(1)
+					}
+				}
+				return nil
 			}
 			return a.printDiff(d, stat, colored)
 		},
