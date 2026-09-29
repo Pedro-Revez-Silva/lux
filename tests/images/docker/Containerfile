@@ -1,0 +1,12 @@
+# A workload image with Docker in it, for the nested-containers suite: the
+# workload (user agent) runs rootless dockerd inside its Run's container.
+# alpine.tar is an image to run in there, so no test reaches a registry.
+FROM docker.io/library/alpine:3.24.2
+RUN apk add --no-cache docker docker-rootless-extras docker-cli-buildx docker-cli-compose \
+      fuse-overlayfs shadow-uidmap libcap-setcap slirp4netns iptables ip6tables \
+ && setcap cap_setuid=ep /usr/bin/newuidmap && setcap cap_setgid=ep /usr/bin/newgidmap \
+ && adduser -D -u 1000 agent \
+ && printf 'agent:1:999\nagent:1001:64535\n' > /etc/subuid && cp /etc/subuid /etc/subgid
+COPY --chmod=644 alpine.tar /opt/alpine.tar
+USER agent
+WORKDIR /home/agent

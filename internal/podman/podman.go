@@ -123,12 +123,14 @@ func IsManifestUnknown(err error) bool {
 	return strings.Contains(m, "manifest unknown") || strings.Contains(m, "name unknown")
 }
 
-// ImageInfo is what the image GC weighs: an image's id, every name it
-// has, and its size.
+// ImageInfo is what the image GC weighs (an image's id, every name it has,
+// and its size) and what a placement reads of its config.
 type ImageInfo struct {
 	ID    string
 	Names []string
 	Size  int64
+	User  string
+	Env   []string
 }
 
 // ImageInspect returns what ref names.
@@ -141,11 +143,16 @@ func (p *Podman) ImageInspect(ctx context.Context, ref string) (ImageInfo, error
 		ID       string   `json:"Id"`
 		RepoTags []string `json:"RepoTags"`
 		Size     int64    `json:"Size"`
+		Config   struct {
+			User string   `json:"User"`
+			Env  []string `json:"Env"`
+		} `json:"Config"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil || len(raw) == 0 {
 		return ImageInfo{}, fmt.Errorf("image inspect %s: %v", ref, err)
 	}
-	return ImageInfo{ID: raw[0].ID, Names: raw[0].RepoTags, Size: raw[0].Size}, nil
+	r := raw[0]
+	return ImageInfo{ID: r.ID, Names: r.RepoTags, Size: r.Size, User: r.Config.User, Env: r.Config.Env}, nil
 }
 
 // ContainerImages is the set of image ids any container (running or not)

@@ -2,14 +2,18 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/marcioapm/lux/internal/gitws"
 	"github.com/marcioapm/lux/internal/passwd"
+	"github.com/marcioapm/lux/internal/podman"
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 )
@@ -155,14 +159,12 @@ func (p *placement) gitRepo(r spec.Repository) gitws.Repo {
 }
 
 // hostPath is where a container path on one of the Run's volumes is on the
-// host.
-// The most specific volume wins, as mounts nest.
+// host. The most specific volume wins, as mounts nest; a path under an
+// engine store is hidden by it.
 func (p *placement) hostPath(path string) (string, error) {
-	var best *volumeRef
-	for i, v := range p.state.Volumes {
-		if (path == v.Path || strings.HasPrefix(path, v.Path+"/")) && (best == nil || len(v.Path) > len(best.Path)) {
-			best = &p.state.Volumes[i]
-		}
+	best := deepestVolume(p.state.Volumes, path)
+	if e := deepestVolume(p.state.EngineVolumes, path); e != nil && (best == nil || len(e.Path) > len(best.Path)) {
+		return "", fmt.Errorf("%s is hidden by the nested engine store", path)
 	}
 	if best == nil {
 		return "", fmt.Errorf("%s is not on a volume", path)
@@ -174,36 +176,121 @@ func (p *placement) hostPath(path string) (string, error) {
 	return filepath.Join(mp, strings.TrimPrefix(path, best.Path)), nil
 }
 
+// deepestVolume is the volume a container path is on: the most specific
+// one, as mounts nest. nil if none.
+func deepestVolume(vols []volumeRef, path string) *volumeRef {
+	var best *volumeRef
+	for i := range vols {
+		if spec.Under(path, vols[i].Path) && (best == nil || len(vols[i].Path) > len(best.Path)) {
+			best = &vols[i]
+		}
+	}
+	return best
+}
+
+// openImage mounts image once for a placement's setup: whoever needs to read
+// it (the workload's passwd, copy-up, the engine parents walk) goes through
+// the returned root. close unmounts it; calling it again does nothing.
+func (p *placement) openImage(ctx context.Context, image string) (root *os.Root, close func(), err error) {
+	mnt, err := p.r.pm.Run(ctx, "image", "mount", image)
+	if err != nil {
+		return nil, nil, fmt.Errorf("mount image: %w", err)
+	}
+	unmount := func() { p.r.pm.Run(context.WithoutCancel(ctx), "image", "unmount", image) }
+	if root, err = os.OpenRoot(strings.TrimSpace(string(mnt))); err != nil {
+		unmount()
+		return nil, nil, fmt.Errorf("open image: %w", err)
+	}
+	return root, sync.OnceFunc(func() { root.Close(); unmount() }), nil
+}
+
 // workloadUser resolves who the workload runs as: the spec's user or the
-// image's, against the image's /etc/passwd, read by mounting the image
-// (no container is started).
-func (p *placement) workloadUser(ctx context.Context, sp spec.RunSpec, image string) (passwd.User, error) {
+// image's, against the image's /etc/passwd.
+func workloadUser(sp spec.RunSpec, info podman.ImageInfo, image *os.Root) (passwd.User, error) {
 	name := sp.Workload.User
 	if name == "" {
-		out, _ := p.r.pm.Run(ctx, "image", "inspect", "--format", "{{.Config.User}}", image)
-		name = strings.TrimSpace(string(out))
+		name = strings.TrimSpace(info.User)
 	}
 	if name == "" || name == "root" || name == "0" {
 		return passwd.Lookup(name, nil)
 	}
-	mnt, err := p.r.pm.Run(ctx, "image", "mount", image)
-	if err != nil {
-		return passwd.User{}, err
-	}
-	defer p.r.pm.Run(context.WithoutCancel(ctx), "image", "unmount", image)
-	b, _ := os.ReadFile(filepath.Join(strings.TrimSpace(string(mnt)), "etc", "passwd"))
+	b, _ := image.ReadFile("etc/passwd")
 	return passwd.Lookup(name, b)
+}
+
+// workloadEnv is what the runner places things by in the workload's
+// environment (HOME, XDG_DATA_HOME), as the shim builds it: the image's
+// XDG_DATA_HOME (its HOME never reaches the workload), then the spec's env.
+func workloadEnv(sp spec.RunSpec, info podman.ImageInfo) map[string]string {
+	env := map[string]string{}
+	for _, kv := range info.Env {
+		if k, v, _ := strings.Cut(kv, "="); k == "XDG_DATA_HOME" {
+			env[k] = v
+		}
+	}
+	for _, k := range []string{"HOME", "XDG_DATA_HOME"} {
+		if v, ok := sp.Env[k]; ok {
+			env[k] = v
+		}
+	}
+	return env
+}
+
+// madeParents are the directories on the way to each engine store that its
+// mount makes, as root: missing from the image and from any spec volume
+// over them (a restored state home). Only those are the workload's to have.
+// Below the home that is every such directory; for a store outside it, only
+// the data home itself. The rules are in docs/podman.md.
+func madeParents(stores, vols []volumeRef, home string, image *os.Root, mountpoint func(volumeRef) (string, error)) ([]string, error) {
+	var made []string
+	for _, store := range stores {
+		boundary := home
+		if boundary == "" || boundary == "/" || !spec.Under(store.Path, boundary) {
+			boundary = filepath.Dir(filepath.Dir(store.Path)) // the data home's parent
+		}
+		for d := filepath.Dir(store.Path); d != boundary && spec.Under(d, boundary); d = filepath.Dir(d) {
+			exists, err := existsIn(d, vols, image, mountpoint)
+			if err != nil {
+				return nil, fmt.Errorf("inspect engine parent %s: %w", d, err)
+			}
+			if !exists && !slices.Contains(made, d) {
+				made = append(made, d)
+			}
+		}
+	}
+	return made, nil
+}
+
+// existsIn: container path d is in whatever provides it before the engine
+// mounts, the deepest spec volume over it, else the image.
+func existsIn(d string, vols []volumeRef, image *os.Root, mountpoint func(volumeRef) (string, error)) (bool, error) {
+	root, rel := image, strings.TrimPrefix(d, "/")
+	if v := deepestVolume(vols, d); v != nil {
+		mp, err := mountpoint(*v)
+		if err != nil {
+			return false, err
+		}
+		if root, err = os.OpenRoot(mp); err != nil {
+			return false, err
+		}
+		defer root.Close()
+		if rel = strings.TrimPrefix(strings.TrimPrefix(d, v.Path), "/"); rel == "" {
+			rel = "."
+		}
+	}
+	_, err := root.Lstat(rel)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // volumeRoot is the container path of the volume a path is on.
 func (p *placement) volumeRoot(path string) string {
-	best := ""
-	for _, v := range p.state.Volumes {
-		if (path == v.Path || strings.HasPrefix(path, v.Path+"/")) && len(v.Path) > len(best) {
-			best = v.Path
-		}
+	if v := deepestVolume(p.state.Volumes, path); v != nil {
+		return v.Path
 	}
-	return best
+	return ""
 }
 
 func chownTree(root string, uid, gid int) error {
