@@ -5,19 +5,17 @@ import { api, errorText, INPUT_RUN_STATES, type Run } from "../../api/index.ts";
 import { setSearchParams, useSearchParams } from "../router.tsx";
 import { useRunOutput } from "./useRunOutput.ts";
 
-/** all: every line; output: the workload's stdout and stderr; lux: Lux's own (system) lines. */
 type OutputView = "all" | "output" | "lux";
 
-/** The lines the view shows, and each view's count, in one pass. */
 function filterOutput(lines: LogLine[], view: OutputView): { lines: LogLine[]; counts: Record<OutputView, number> } {
   const counts = { all: lines.length, output: 0, lux: 0 };
-  const shown: LogLine[] = [];
-  for (const l of lines) {
-    const k = l.stream === "system" ? "lux" : "output";
-    counts[k]++;
-    if (view === k) shown.push(l);
+  const visibleLines: LogLine[] = [];
+  for (const line of lines) {
+    const category = line.stream === "system" ? "lux" : "output";
+    counts[category]++;
+    if (view === category) visibleLines.push(line);
   }
-  return { lines: view === "all" ? lines : shown, counts };
+  return { lines: view === "all" ? lines : visibleLines, counts };
 }
 
 /** Output tab: streamed log, and an input box to steer a running agent. */

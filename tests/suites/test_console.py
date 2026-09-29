@@ -136,7 +136,9 @@ def test_run_output_tabs_separate_the_workloads_lines_from_luxs(page, env, opera
     page.sign_in(operator.api_key, f"/runs/{run_id}")
     log = page.locator(".logview")
     tabs = page.locator(".tabs-sm")
-    tab = lambda name: tabs.get_by_role("tab", name=re.compile(rf"^{name}\b"))
+
+    def tab(name: str):
+        return tabs.get_by_role("tab", name=re.compile(rf"^{name}\b"))
 
     def texts(cls: str) -> list[str]:
         return log.locator(f".logline-{cls} .logline-text").all_inner_texts()
@@ -150,8 +152,10 @@ def test_run_output_tabs_separate_the_workloads_lines_from_luxs(page, env, opera
 
     # Each tab counts its lines: All is Output plus Lux.
     def counts_add_up() -> bool:
-        a, o, x = (int(tab(n).locator(".tab-count").inner_text()) for n in ("All", "Output", "Lux"))
-        return a == o + x and o == 2 and x >= 1
+        all_count, output_count, lux_count = (
+            int(tab(name).locator(".tab-count").inner_text()) for name in ("All", "Output", "Lux")
+        )
+        return all_count == output_count + lux_count and output_count == 2 and lux_count >= 1
     wait_until(counts_add_up, 10, 0.5, "the tab counts do not add up")
 
     # Output: only stdout and stderr, numbered from 1.
