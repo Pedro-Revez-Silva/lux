@@ -599,6 +599,7 @@ func TestMarkerOnlyBodyFromTheEarlierCLI(t *testing.T) {
 	if code, body := call(t, s, keys["t1"], "POST", "/v1/pools", map[string]any{"name": "a", "provider": "ec2", "maxHosts": 3}); code != http.StatusOK {
 		t.Fatalf("create: %d %s", code, body)
 	}
+	// json.Marshal(server.Pool{Name: "a", IsDefault: &true}) at 80e1057.
 	earlier := json.RawMessage(`{"name":"a","provider":"","minHosts":0,"maxHosts":0,"warmHosts":0,"scaleDownAfter":"0s","shared":false,"platform":false,"isDefault":true}`)
 	if code, body := call(t, s, keys["t1"], "POST", "/v1/pools", earlier); code != http.StatusOK {
 		t.Fatalf("the earlier CLI's marker: %d %s", code, body)
