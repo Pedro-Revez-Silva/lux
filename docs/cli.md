@@ -107,7 +107,26 @@ lux pools ls
 lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON]
 lux pools set <name> --provider static --hourly-price 0.40 --currency USD   # default price of hosts registering into it
 lux pools rm <name> [--force-evict]      # admin: cordons its hosts, terminated once idle; --force-evict stops their live Runs too
+lux pools events <name> [--limit N] [--before ID] [--all]   # what happened to it, newest first
+lux hosts events <host> [--limit N] [--before ID] [--all]
 ```
+
+`lux pools events` and `lux hosts events` print one line per event: its
+time, type and what it says (`-o json`: the events as the API has them).
+A pool's are `pool.scale_up` (how many hosts and why: `waiting runs`,
+`warm` or `minimum`, with the counts), `pool.launch_requested`,
+`pool.host_launched`, `pool.launch_failed` (the provider's error),
+`pool.host_registered`, `pool.placement` (a Run placed on one of its
+hosts), `pool.host_released` (why: `idle` for how long, `pool removed`,
+`outdated`, `manual`, `evicted`, or why it was terminated),
+`pool.spot_interrupted`, `pool.config_changed` (each field, old→new) and
+`pool.provider_error`. A host's are `host.registered`, `host.ready`,
+`host.placement_assigned`, `host.placement_ended` (with the Run's
+outcome), `host.drain_requested` (its cause), `host.lost`,
+`host.terminate_requested`, `host.terminated` and `host.provider_error`.
+A failure that repeats on every provisioner pass is one event, shown with
+`(×N, last <time>)`. A tenant sees its own pools' and hosts' events; a
+platform pool's or host's are the operators'.
 
 A static pool's `--hourly-price` is copied to each host when it first
 registers. Changing it later does not reprice the pool's existing hosts:
