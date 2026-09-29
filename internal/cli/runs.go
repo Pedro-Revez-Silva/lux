@@ -238,7 +238,7 @@ an estimate, or a cost source has not answered yet.`,
 		},
 	}
 	cmd.Flags().StringVar(&state, "state", "", "filter by state (comma-separated)")
-	cmd.Flags().BoolVar(&resumable, "resumable", false, "only Runs resume accepts (stopped, lost, failed)")
+	cmd.Flags().BoolVar(&resumable, "resumable", false, "only Runs resume accepts (stopped, lost, failed; not those whose only snapshot report was refused)")
 	cmd.Flags().StringVar(&host, "host", "", "only Runs placed on this host (id or name), ever")
 	cmd.Flags().IntVar(&limit, "limit", 0, "at most this many (default 100, max 1000)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "filter by label key=value")

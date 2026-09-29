@@ -89,7 +89,8 @@ func (s *Server) routes(api huma.API) {
 		Description: "From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming.\n\n" +
 			"git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event " +
 			"with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. " +
-			"Adding needs a stopped, lost or failed Run: while it is resuming, 409.",
+			"Adding needs a stopped, lost or failed Run: while it is resuming, 409. " +
+			"A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusTooManyRequests},
 	}, "run", s.resumeRun)
@@ -673,7 +674,7 @@ func nonNilMap(m map[string]string) map[string]string {
 type listRunsInput struct {
 	TenantQuery
 	State     string   `query:"state" doc:"Only Runs in these states (comma-separated)." example:"running,stopped"`
-	Resumable bool     `query:"resumable" doc:"Only Runs resume accepts: stopped, lost or failed."`
+	Resumable bool     `query:"resumable" doc:"Only Runs resume accepts: stopped, lost or failed, except one whose only snapshot report was refused."`
 	Host      string   `query:"host" doc:"Only Runs with a placement (any epoch) on this host, by id or name."`
 	Label     []string `query:"label,explode" doc:"Only Runs with this label (key=value); repeat to require several."`
 	Before    string   `query:"before" doc:"Only Runs created before this time (RFC 3339): the next page after a list's last Run."`
@@ -710,7 +711,8 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 		where = append(where, "r.state = ANY("+arg(strings.Split(st, ","))+")")
 	}
 	if in.Resumable {
-		where = append(where, "r.state IN "+resumableRunStates)
+		where = append(where, "r.state IN "+resumableRunStates+` AND NOT (r.snapshot_id IS NULL AND EXISTS (
+			SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch AND p.snapshot_refused))`)
 	}
 	if in.Host != "" {
 		// By id, or by the name of a host not terminated (names are reused).
@@ -880,6 +882,13 @@ func (s *Server) resumability(ctx context.Context, tenantID string, run *Run) (*
 		}
 	}
 	err := s.db.Tx(ctx, store.Tenant(tenantID), func(tx pgx.Tx) error {
+		var noSnapshot bool
+		if err := tx.QueryRow(ctx, `SELECT `+refusedWithoutSnapshot+` FROM `+runsFrom+` WHERE r.id = $1`, run.ID).Scan(&noSnapshot); err != nil {
+			return err
+		}
+		if noSnapshot {
+			rs.Blockers = append(rs.Blockers, noSnapshotReason)
+		}
 		if err := checkRunQuota(ctx, tx, tenantID); err != nil {
 			rs.Blockers = append(rs.Blockers, err.Error())
 		}
@@ -1196,11 +1205,17 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		var state string
 		var refs []spec.SecretRef
 		var sp spec.RunSpec
-		if err := tx.QueryRow(ctx, `SELECT state, secrets, spec FROM runs WHERE id = $1 FOR UPDATE`, id).Scan(&state, &refs, &sp); err != nil {
+		var noSnapshot bool
+		if err := tx.QueryRow(ctx, `SELECT r.state, r.secrets, r.spec, `+refusedWithoutSnapshot+` FROM `+runsFrom+` WHERE r.id = $1 FOR UPDATE OF r`, id).
+			Scan(&state, &refs, &sp, &noSnapshot); err != nil {
 			return err
 		}
 		switch state {
 		case StateStopped, StateLost, StateFailed:
+			// Resuming would start from scratch, not from the refused state.
+			if noSnapshot && req.FromSnapshot == "" {
+				return errf(http.StatusConflict, "no_snapshot", "run cannot be resumed: %s", noSnapshotReason)
+			}
 		case StateResuming:
 			if len(adding) > 0 {
 				return errf(http.StatusConflict, "not_resumable", "run is resuming already: repositories can only be added to a stopped, lost or failed Run")

@@ -445,6 +445,14 @@ type PushResult struct {
 	Error  string `json:"error,omitempty"`
 }
 
+// Ack is the data of an ack, when there is any.
+type Ack struct {
+	// Refused: luxd accepted a snapshot.done report but did not record it
+	// (it did not match its Run's records). Its blobs will not be asked
+	// for: the runner does not upload them and may delete them.
+	Refused bool `json:"refused,omitempty"`
+}
+
 type Nack struct {
 	Error string `json:"error"`
 	// Stale means the report's epoch is not the Run's current one: the

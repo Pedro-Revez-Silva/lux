@@ -153,16 +153,21 @@ func (p *placement) times() map[string]int64 {
 
 // report sends a report about this placement; a stale nack fences it off.
 func (p *placement) report(ctx context.Context, typ string, data any) error {
+	_, err := p.reportAck(ctx, typ, data)
+	return err
+}
+
+func (p *placement) reportAck(ctx context.Context, typ string, data any) (proto.Ack, error) {
 	if p.isStale() {
-		return errStale
+		return proto.Ack{}, errStale
 	}
-	err := p.r.conn.Report(ctx, proto.Frame{Type: typ, RunID: p.runID, Epoch: p.epoch, Data: proto.Marshal(data)})
+	ack, err := p.r.conn.ReportAck(ctx, proto.Frame{Type: typ, RunID: p.runID, Epoch: p.epoch, Data: proto.Marshal(data)})
 	if errors.Is(err, errStale) {
 		p.logf("luxd fenced this placement off; stopping it")
 		p.markStale()
 		go p.kill(context.WithoutCancel(ctx))
 	}
-	return err
+	return ack, err
 }
 
 // reportRetrying reports an event that must reach luxd (it records state
@@ -380,16 +385,20 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 		p.logf("snapshot failed", "err", err)
 		sd = &proto.SnapshotDone{Error: err.Error(), OutputSeq: exit.OutputSeq}
 	}
-	for p.report(ctx, proto.MsgSnapshotDone, sd) != nil {
+	var ack proto.Ack
+	for {
+		if ack, err = p.reportAck(ctx, proto.MsgSnapshotDone, sd); err == nil {
+			break
+		}
 		if p.isStale() || ctx.Err() != nil {
 			return
 		}
 		time.Sleep(time.Second)
 	}
-	// luxd has the snapshot: its blobs can be uploaded, and what the
-	// workload published can go.
+	// luxd has the snapshot (or refused it): its blobs can be uploaded (or
+	// deleted), and what the workload published can go.
 	if sd.Manifest.SnapshotID != "" {
-		p.r.markReported(sd.Manifest.SnapshotID)
+		p.r.snapshotAcked(sd.Manifest.SnapshotID, ack)
 	}
 	p.clearPublished(ctx)
 	p.r.uploads.kick()
@@ -539,18 +548,33 @@ func (p *placement) restoreVolume(ctx context.Context, volume string, snap *prot
 		src = body
 	}
 	defer src.Close()
+	return importBlob(src, snap, func(r io.Reader) error { return p.r.pm.VolumeImport(ctx, volume, r) })
+}
+
+// importBlob decompresses a volume blob into imp, then checks the blob's
+// compressed size and sha256 against the assignment's (each when given).
+func importBlob(src io.Reader, snap *proto.VolumeSnapshot, imp func(io.Reader) error) error {
 	h := sha256.New()
-	zr, err := zstd.NewReader(io.TeeReader(src, h))
+	cw := &countWriter{w: h}
+	zr, err := zstd.NewReader(io.TeeReader(src, cw))
 	if err != nil {
 		return err
 	}
 	defer zr.Close()
-	if err := p.r.pm.VolumeImport(ctx, volume, zr); err != nil {
+	if err := imp(zr); err != nil {
 		return err
 	}
-	// Drain what the decoder did not read, so the hash covers everything.
-	_, _ = io.Copy(io.Discard, src)
-	if got := hex.EncodeToString(h.Sum(nil)); snap.SHA256 != "" && got != snap.SHA256 {
+	// Drain what the decoder did not read, so size and hash cover everything.
+	if _, err := io.Copy(cw, src); err != nil {
+		return err
+	}
+	if snap.Size != 0 && cw.n != snap.Size {
+		return fmt.Errorf("size mismatch: got %d bytes, want %d", cw.n, snap.Size)
+	}
+	if snap.SHA256 == "" {
+		return nil
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != snap.SHA256 {
 		return fmt.Errorf("checksum mismatch: got %s, want %s", got, snap.SHA256)
 	}
 	return nil
