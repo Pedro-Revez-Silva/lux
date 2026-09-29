@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -75,11 +76,11 @@ func defaultPools(t *testing.T, s *Server) map[string]string {
 
 func putPoolAs(t *testing.T, s *Server, tenant string, pl Pool) (Pool, error) {
 	t.Helper()
-	out, err := s.putPool(tenantCtx(tenant), &poolBody{Body: pl})
+	out, err := s.putPool(tenantCtx(tenant), poolIn(pl))
 	if err != nil {
 		return Pool{}, err
 	}
-	return out.Body, nil
+	return Pool(out.Body), nil
 }
 
 func mark(v bool) *bool { return &v }
@@ -273,7 +274,7 @@ func TestConcurrentMarks(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				_, errs[i] = s.putPool(tenantCtx("t1"), &poolBody{Body: Pool{Name: n, IsDefault: mark(true)}})
+				_, errs[i] = s.putPool(tenantCtx("t1"), poolIn(Pool{Name: n, IsDefault: mark(true)}))
 			}()
 		}
 		wg.Wait()
@@ -317,7 +318,7 @@ func TestOperatorMarksDefaultPools(t *testing.T) {
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
 	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pp', NULL, 'plat', 'static'), ('p1', 't1', 'plat', 'static')`)
 	op := context.WithValue(ctx, principalKey, Principal{Operator: true, Scopes: []string{"admin"}})
-	out, err := s.putPool(op, &poolBody{Body: Pool{Name: "plat", IsDefault: mark(true)}})
+	out, err := s.putPool(op, poolIn(Pool{Name: "plat", IsDefault: mark(true)}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,14 +329,14 @@ func TestOperatorMarksDefaultPools(t *testing.T) {
 		t.Fatalf("defaults %v, want only the platform's", got)
 	}
 	opT1 := context.WithValue(ctx, principalKey, Principal{Operator: true, TenantID: "t1", Scopes: []string{"admin"}})
-	if _, err := s.putPool(opT1, &poolBody{Body: Pool{Name: "plat", IsDefault: mark(true)}}); err != nil {
+	if _, err := s.putPool(opT1, poolIn(Pool{Name: "plat", IsDefault: mark(true)})); err != nil {
 		t.Fatal(err)
 	}
 	if got := defaultPools(t, s); got[""] != "plat" || got["t1"] != "plat" {
 		t.Fatalf("defaults %v", got)
 	}
 	var he *HTTPError
-	if _, err := s.putPool(op, &poolBody{Body: Pool{Name: "x", Provider: "static"}}); !errors.As(err, &he) || he.Code != "tenant_required" {
+	if _, err := s.putPool(op, poolIn(Pool{Name: "x", Provider: "static"})); !errors.As(err, &he) || he.Code != "tenant_required" {
 		t.Fatalf("an operator creating a pool without a tenant: %v", err)
 	}
 }
@@ -488,7 +489,7 @@ func TestConcurrentMarkAndDelete(t *testing.T) {
 		var wg sync.WaitGroup
 		errs := make([]error, 2)
 		wg.Go(func() {
-			_, errs[0] = s.putPool(tenantCtx("t1"), &poolBody{Body: Pool{Name: "a", IsDefault: mark(true)}})
+			_, errs[0] = s.putPool(tenantCtx("t1"), poolIn(Pool{Name: "a", IsDefault: mark(true)}))
 		})
 		wg.Go(func() { _, errs[1] = s.deletePool(tenantCtx("t1"), &deletePoolInput{Name: "a"}) })
 		wg.Wait()
@@ -508,5 +509,49 @@ func TestConcurrentMarkAndDelete(t *testing.T) {
 		if got := defaultPools(t, s); errs[0] != nil && got["t1"] != "b" || errs[0] == nil && len(got) != 0 {
 			t.Fatalf("mark err %v, defaults %v", errs[0], got)
 		}
+	}
+}
+
+// A body without provider only marks the default, so it must be exactly
+// name and isDefault: another field would be silently ignored, so it is
+// refused and the pool is left as it was.
+func TestMarkerOnlyBodyIsExact(t *testing.T) {
+	s, keys := priceFixture(t)
+	if code, body := call(t, s, keys["t1"], "POST", "/v1/pools", map[string]any{"name": "a", "provider": "static", "maxHosts": 3}); code != http.StatusOK {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	for _, extra := range []map[string]any{{"maxHosts": 9}, {"template": map[string]any{}}, {"minHosts": 0}} {
+		req := map[string]any{"name": "a", "isDefault": true}
+		for k, v := range extra {
+			req[k] = v
+		}
+		code, body := call(t, s, keys["t1"], "POST", "/v1/pools", req)
+		if code != http.StatusUnprocessableEntity || !strings.Contains(body, `"invalid_pool"`) {
+			t.Fatalf("marker with %v: %d %s, want 422 invalid_pool", extra, code, body)
+		}
+	}
+	var maxHosts int
+	systemScan(t, s, `SELECT max_hosts FROM pools WHERE name = 'a'`, nil, &maxHosts)
+	if got := defaultPools(t, s); len(got) != 0 || maxHosts != 3 {
+		t.Fatalf("a refused body changed the pool: defaults %v, maxHosts %d", got, maxHosts)
+	}
+
+	if code, body := call(t, s, keys["t1"], "POST", "/v1/pools", map[string]any{"name": "a", "isDefault": true}); code != http.StatusOK {
+		t.Fatalf("marker-only: %d %s", code, body)
+	}
+	systemScan(t, s, `SELECT max_hosts FROM pools WHERE name = 'a'`, nil, &maxHosts)
+	if got := defaultPools(t, s); got["t1"] != "a" || maxHosts != 3 {
+		t.Fatalf("marker-only: defaults %v, maxHosts %d", got, maxHosts)
+	}
+	// A full body without isDefault keeps the mark.
+	if code, body := call(t, s, keys["t1"], "POST", "/v1/pools", map[string]any{"name": "a", "provider": "static", "maxHosts": 4}); code != http.StatusOK {
+		t.Fatalf("full set: %d %s", code, body)
+	}
+	if got := defaultPools(t, s); got["t1"] != "a" {
+		t.Fatalf("a full set without isDefault moved the mark: %v", got)
+	}
+	// Unknown fields are refused as before.
+	if code, body := call(t, s, keys["t1"], "POST", "/v1/pools", map[string]any{"name": "a", "isDefault": true, "bogus": 1}); code != http.StatusBadRequest && code != http.StatusUnprocessableEntity {
+		t.Fatalf("unknown field: %d %s", code, body)
 	}
 }

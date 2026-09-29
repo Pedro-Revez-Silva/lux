@@ -1,10 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -260,8 +263,9 @@ func (s *Server) routes(api huma.API) {
 		Summary: "Create or update a pool",
 		Description: "`isDefault: true` makes it the tenant's default pool, where Runs whose spec names no pool go from then on " +
 			"(Runs already submitted keep theirs); the tenant's previous default loses the mark. `false` clears it. " +
-			"A body of only `name` and `isDefault` marks an existing pool and changes nothing else; " +
-			"from an operator key naming no tenant, it marks a platform pool as the platform's default, " +
+			"A body of exactly `name` and `isDefault` marks an existing pool and changes nothing else; " +
+			"any other field without `provider` is a 422 `invalid_pool`. " +
+			"From an operator key naming no tenant, a marker-only body marks a platform pool as the platform's default, " +
 			"for tenants without one of their own.",
 		Errors: []int{http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity},
 	}, "admin", s.putPool)
@@ -1760,7 +1764,42 @@ type Pool struct {
 	HourlyPrice string `json:"hourlyPrice,omitempty" doc:"Static pools: the default hourly price of hosts registering into the pool, a decimal string with up to 9 fractional digits. Copied to each host when it first registers; changing it does not reprice existing hosts. Refused for ec2 pools, which the provider prices." example:"0.40"`
 	Currency    string `json:"currency,omitempty" doc:"The currency of hourlyPrice (ISO 4217); both or neither." example:"USD"`
 	// IsDefault: nil in a request leaves the mark as it is.
-	IsDefault *bool `json:"isDefault,omitempty" doc:"Runs whose spec names no pool go to this pool (the tenant's; a platform default serves tenants without one). At most one per tenant: marking one clears the tenant's previous default. On create or update, omitted leaves the mark as it is. A body with only name and isDefault changes only the mark of an existing pool."`
+	IsDefault *bool `json:"isDefault,omitempty" doc:"Runs whose spec names no pool go to this pool (the tenant's; a platform default serves tenants without one). At most one per tenant: marking one clears the tenant's previous default. On create or update, omitted leaves the mark as it is. A body of exactly name and isDefault changes only the mark of an existing pool; any other field needs provider."`
+
+	// fields: the keys a request body had (poolInput), to tell a
+	// marker-only body from one whose settings would be ignored.
+	fields []string
+}
+
+// poolInput is putPool's body: a Pool (its schema too, newAPI) that
+// remembers which fields it was sent with.
+type poolInput Pool
+
+// UnmarshalJSON decodes as decodeStrict does (unknown fields refused), and
+// records the body's fields.
+func (pl *poolInput) UnmarshalJSON(b []byte) error {
+	type plain Pool
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode((*plain)(pl)); err != nil {
+		return err
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(b, &keys); err != nil {
+		return err
+	}
+	pl.fields = slices.Sorted(maps.Keys(keys))
+	return nil
+}
+
+// markerOnly: a body with no provider and an isDefault moves only the
+// mark, so it may have nothing but name besides. The other fields it has
+// are returned for the refusal.
+func (pl *Pool) markerOnly() (bool, []string) {
+	if pl.Provider != "" || pl.IsDefault == nil {
+		return false, nil
+	}
+	return true, slices.DeleteFunc(slices.Clone(pl.fields), func(f string) bool { return f == "name" || f == "isDefault" })
 }
 
 type listPoolsOutput struct {
@@ -1928,13 +1967,18 @@ func resolvePool(ctx context.Context, tx pgx.Tx, tenantID, pool string) (resolve
 // putPool creates or updates one of the tenant's pools.
 type poolBody struct {
 	TenantQuery
-	Body Pool
+	Body poolInput
 }
 
 func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	p := principal(ctx)
-	pl := in.Body
-	if pl.Name != "" && pl.Provider == "" && pl.IsDefault != nil && (p.TenantID != "" || p.Operator) {
+	pl := Pool(in.Body)
+	if marker, extra := pl.markerOnly(); marker && pl.Name != "" && (p.TenantID != "" || p.Operator) {
+		if len(extra) > 0 {
+			return nil, errf(http.StatusUnprocessableEntity, "invalid_pool",
+				"without provider, a body only marks the default: name and isDefault alone (got also %s); to change the pool's settings, give provider and all of them",
+				strings.Join(extra, ", "))
+		}
 		return s.markDefaultPool(ctx, p.TenantID, pl.Name, *pl.IsDefault)
 	}
 	if p.TenantID == "" {
@@ -1992,7 +2036,7 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 		return nil, err
 	}
 	s.Kick()
-	return &poolBody{Body: out}, nil
+	return &poolBody{Body: poolInput(out)}, nil
 }
 
 // markDefaultPool marks (or clears) one of the tenant's pools as its
@@ -2015,7 +2059,7 @@ func (s *Server) markDefaultPool(ctx context.Context, tenantID, name string, mar
 	if err != nil {
 		return nil, err
 	}
-	return &poolBody{Body: out}, nil
+	return &poolBody{Body: poolInput(out)}, nil
 }
 
 // lockDefaultPool serializes changes to an owner's default mark (tenantID

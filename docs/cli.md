@@ -124,7 +124,8 @@ A Run whose spec names no pool goes to the tenant's default pool, else the
 platform's, else the pool named `default`
 ([operations](operations.md#pools-and-the-default-pool)). `--default` is
 the one flag `pools set` does not replace when omitted: a `pools set`
-without it keeps the pool's mark. Given alone, it changes only the mark.
+without it keeps the pool's mark. Given alone, it changes only the mark;
+with any other flag, `--provider` is needed too (the pool is replaced).
 An operator without `--tenant` marks a platform pool as the platform's
 default.
 

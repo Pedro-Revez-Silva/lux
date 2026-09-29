@@ -25,24 +25,24 @@ func TestPutPoolRejectsUnknownUserData(t *testing.T) {
 	}
 	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
 
-	bad := &poolBody{Body: Pool{Name: "burst", Provider: "ec2", Template: map[string]any{"userData": "cloud-init-yaml"}}}
+	bad := poolIn(Pool{Name: "burst", Provider: "ec2", Template: map[string]any{"userData": "cloud-init-yaml"}})
 	if _, err := s.putPool(ctx, bad); err == nil {
 		t.Fatal("an unknown userData was accepted")
 	}
 
-	good := &poolBody{Body: Pool{Name: "burst", Provider: "ec2", Template: map[string]any{"userData": "script"}}}
+	good := poolIn(Pool{Name: "burst", Provider: "ec2", Template: map[string]any{"userData": "script"}})
 	if _, err := s.putPool(ctx, good); err != nil {
 		t.Fatalf("a valid userData was refused: %v", err)
 	}
 
 	// "" (unset) defaults to ignition and is not itself an error.
-	unset := &poolBody{Body: Pool{Name: "burst2", Provider: "ec2", Template: map[string]any{}}}
+	unset := poolIn(Pool{Name: "burst2", Provider: "ec2", Template: map[string]any{}})
 	if _, err := s.putPool(ctx, unset); err != nil {
 		t.Fatalf("no userData set was refused: %v", err)
 	}
 
 	// A static pool never checks userData: irrelevant there.
-	static := &poolBody{Body: Pool{Name: "burst3", Provider: "static", Template: map[string]any{"userData": "nonsense"}}}
+	static := poolIn(Pool{Name: "burst3", Provider: "static", Template: map[string]any{"userData": "nonsense"}})
 	if _, err := s.putPool(ctx, static); err != nil {
 		t.Fatalf("a static pool's template.userData was checked: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestPutPoolRejectsNonStringUserData(t *testing.T) {
 	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
 
 	for _, v := range []any{123, true} {
-		pool := &poolBody{Body: Pool{Name: "burst", Provider: "ec2", Template: map[string]any{"userData": v}}}
+		pool := poolIn(Pool{Name: "burst", Provider: "ec2", Template: map[string]any{"userData": v}})
 		_, err := s.putPool(ctx, pool)
 		if err == nil {
 			t.Fatalf("userData %#v (type %T) was accepted", v, v)
@@ -76,3 +76,5 @@ func TestPutPoolRejectsNonStringUserData(t *testing.T) {
 		}
 	}
 }
+
+func poolIn(pl Pool) *poolBody { return &poolBody{Body: poolInput(pl)} }
