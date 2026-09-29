@@ -19,9 +19,11 @@ operator's request on a Run runs in that Run's tenant's scope.
 ## One tenant, or all of them
 
 Without `--tenant`, an operator sees every tenant, and lists show a TENANT
-column. `--tenant <id or name>` (env `LUX_TENANT`, `?tenant=` in the API)
+column. `--tenant <id or name>` (env `LUX_TENANT`, `tenant` in
+`~/.config/lux/config.toml`, `?tenant=` in the API)
 narrows every command to one tenant and shows what that tenant would see.
-Tenant keys ignore it.
+Tenant keys ignore it. With a default tenant in the config file,
+`--tenant ""` (or `LUX_TENANT=`) reaches all tenants again.
 
 A Run's own commands (`get`, `logs`, `stop`, `resume`…) need no `--tenant`:
 luxd finds the Run's tenant. Commands that create something for a tenant

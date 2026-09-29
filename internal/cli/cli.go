@@ -37,7 +37,10 @@ type app struct {
 
 // Main runs the CLI and returns the process exit code.
 func Main(args []string) int {
-	a := &app{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr}
+	return (&app{stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr}).main(args)
+}
+
+func (a *app) main(args []string) int {
 	root := a.root()
 	root.SetArgs(args)
 	err := root.Execute()
@@ -51,6 +54,10 @@ func Main(args []string) int {
 	fmt.Fprintln(a.stderr, "lux:", err)
 	var ae *client.APIError
 	if errors.As(err, &ae) {
+		if ae.Code == "tenant_required" {
+			// luxd's message speaks of ?tenant=; say how the CLI sets it.
+			fmt.Fprintln(a.stderr, "lux: name one with --tenant, LUX_TENANT, or tenant in ~/.config/lux/config.toml")
+		}
 		switch {
 		case ae.Status == 404:
 			return 3
@@ -71,6 +78,20 @@ func (e exitCode) Error() string { return fmt.Sprintf("exit %d", int(e)) }
 type config struct {
 	URL    string `toml:"url"`
 	APIKey string `toml:"api_key"`
+	Tenant string `toml:"tenant"`
+}
+
+// tenantOf is the tenant to narrow to: --tenant, else LUX_TENANT, else the
+// config file's. A flag or variable set to "" still wins, so an operator
+// with a default tenant can reach all tenants.
+func tenantOf(cmd *cobra.Command, flag, cfg string) string {
+	if cmd.Flags().Changed("tenant") {
+		return flag
+	}
+	if env, ok := os.LookupEnv("LUX_TENANT"); ok {
+		return env
+	}
+	return cfg
 }
 
 func loadConfig() config {
@@ -113,13 +134,13 @@ func (a *app) root() *cobra.Command {
 				return fmt.Errorf("-o must be text or json")
 			}
 			a.c = client.New(a.url, a.key)
-			a.c.Tenant = cmp.Or(a.tenant, os.Getenv("LUX_TENANT"))
+			a.c.Tenant = tenantOf(cmd, a.tenant, cfg.Tenant)
 			return nil
 		},
 	}
 	root.PersistentFlags().StringVar(&a.url, "url", "", "luxd URL (env LUX_URL)")
 	root.PersistentFlags().StringVar(&a.key, "api-key", "", "API key (env LUX_API_KEY)")
-	root.PersistentFlags().StringVar(&a.tenant, "tenant", "", "with an operator key: act on this tenant only, by id or name (env LUX_TENANT)")
+	root.PersistentFlags().StringVar(&a.tenant, "tenant", "", "with an operator key: act on this tenant only, by id or name (env LUX_TENANT, config tenant); --tenant \"\" means all tenants")
 	root.PersistentFlags().StringVarP(&a.output, "output", "o", "text", "output format: text | json")
 	root.AddCommand(
 		a.runCmd(), a.lsCmd(), a.getCmd(), a.logsCmd(), a.eventsCmd(), a.steerCmd(), a.interruptCmd(),
