@@ -58,7 +58,7 @@ func TestLaunchSetsLuxURLFromRunnerURL(t *testing.T) {
 			execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('pool1', 'burst', 'ec2')`)
 			pl := poolRow{ID: "pool1", Name: "burst", Provider: "ec2"}
 			prov := &fakeLaunchProvider{}
-			if err := s.launch(ctx, prov, pl); err != nil {
+			if err := s.launch(ctx, prov, pl, nil); err != nil {
 				t.Fatal(err)
 			}
 			if prov.env["LUX_URL"] != c.wantLuxURL {
@@ -79,7 +79,7 @@ func TestLaunchStoresHostFacts(t *testing.T) {
 			s := testServer(t)
 			ctx := context.Background()
 			execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('pool1', 'burst', 'ec2')`)
-			if err := s.launch(ctx, &fakeLaunchProvider{launched: want}, poolRow{ID: "pool1", Name: "burst", Provider: "ec2"}); err != nil {
+			if err := s.launch(ctx, &fakeLaunchProvider{launched: want}, poolRow{ID: "pool1", Name: "burst", Provider: "ec2"}, nil); err != nil {
 				t.Fatal(err)
 			}
 			var got Launched
@@ -103,7 +103,7 @@ func TestLaunchMissingHostFactsAreNull(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('pool1', 'burst', 'ec2')`)
-	if err := s.launch(ctx, &fakeLaunchProvider{launched: Launched{ProviderID: "i-bare"}}, poolRow{ID: "pool1", Name: "burst", Provider: "ec2"}); err != nil {
+	if err := s.launch(ctx, &fakeLaunchProvider{launched: Launched{ProviderID: "i-bare"}}, poolRow{ID: "pool1", Name: "burst", Provider: "ec2"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	var providerID string
@@ -154,7 +154,7 @@ func TestHostAPIReturnsHostFacts(t *testing.T) {
 			facts{"instanceType": "m7i.2xlarge", "zone": "eu-west-1a", "market": "on-demand"}},
 		{Launched{ProviderID: "i-bare"}, facts{}},
 	} {
-		if err := s.launch(ctx, &fakeLaunchProvider{launched: l.launched}, poolRow{ID: "pool1", Name: "burst", Provider: "ec2"}); err != nil {
+		if err := s.launch(ctx, &fakeLaunchProvider{launched: l.launched}, poolRow{ID: "pool1", Name: "burst", Provider: "ec2"}, nil); err != nil {
 			t.Fatal(err)
 		}
 		var id string

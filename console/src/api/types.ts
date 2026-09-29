@@ -341,6 +341,18 @@ export interface Event {
   time: string;
 }
 
+/** A pool's or a host's event (GET /v1/pools/{name}/events, /v1/hosts/{id}/events). */
+export interface LifecycleEvent {
+  id: number;
+  type: string;
+  data: Record<string, unknown>;
+  /** How many times in a row it happened; 1 for most. */
+  count: number;
+  time: string;
+  /** When it last happened, if more than once. */
+  lastTime?: string;
+}
+
 export interface FeedEvent extends Event {
   runId: string;
   tenant: string;
@@ -422,8 +434,13 @@ export interface Pool {
   minHosts: number;
   maxHosts: number;
   warmHosts: number;
+  /** e.g. "600s"; absent: luxd's default. */
+  scaleDownAfter?: string;
+  warmWhileActive?: boolean;
   shared: boolean;
   platform: boolean;
+  hourlyPrice?: string;
+  currency?: string;
 }
 
 /** GET /v1/whoami: who the key belongs to. */

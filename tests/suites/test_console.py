@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from decimal import ROUND_HALF_EVEN, Decimal
 
+import psycopg
 import pytest
 from playwright.sync_api import expect
 
@@ -549,3 +550,177 @@ def test_host_page_shows_cost_to_its_owner_and_rates_to_operators(page, env, lux
         expect(rates.get_by_text(re.compile(r"static price|\(static\)"))).to_have_count(0)
         expect(page.get_by_text(re.compile(r"^allocated to Runs vs unallocated, per hour"))).to_have_count(1)
     _both_themes(page, env, f"/hosts/{host_id}", check)
+
+
+def test_pool_page_shows_its_settings_and_events(page, tenant_factory):
+    """The Pools list links each pool to its page: its settings, its hosts
+    and what happened to it, newest first."""
+    a = tenant_factory()
+    name = f"evpool-{a.tenant_id[-6:]}"
+    a.run("pools", "set", name, "--provider", "static", "--max", "2")
+    a.run("pools", "set", name, "--provider", "static", "--max", "3")
+    page.sign_in(a.api_key, "/pools")
+    page.get_by_role("link", name=name, exact=True).click()
+    page.wait_for_url(re.compile(rf"/pools/{name}$"), timeout=10_000)
+    expect(page.get_by_role("heading", name="Settings", exact=True)).to_have_count(1, timeout=15_000)
+    expect(page.get_by_text("min 0 · warm 0 · max 3")).to_have_count(1, timeout=15_000)
+    rows = page.locator("tr", has_text="pool.config_changed")
+    expect(rows).to_have_count(2, timeout=15_000)
+    # Newest first: the second change leads.
+    expect(rows.first).to_contain_text("maxHosts 2→3")
+    expect(rows.last).to_contain_text("created:")
+    # Live: a change made now appears without a reload (the page polls).
+    a.run("pools", "set", name, "--provider", "static", "--max", "4")
+    expect(rows).to_have_count(3, timeout=30_000)
+    expect(rows.first).to_contain_text("maxHosts 3→4")
+    assert not page.errors, page.errors
+
+
+def test_host_page_shows_its_events(page, lux, runners, hosts):
+    runners.start(hosts[0])
+    host_id = wait_until(lambda: next((h["id"] for h in lux.json("hosts", "ls")
+                                       if h["name"] == hosts[0].name and h["state"] == "ready"), None),
+                         30, 1, "the host never registered")
+    page.sign_in(lux.api_key, f"/hosts/{host_id}")
+    expect(page.get_by_role("heading", name="Events", exact=True)).to_have_count(1, timeout=15_000)
+    expect(page.locator("tr", has_text="host.registered")).to_have_count(1, timeout=15_000)
+    assert not page.errors, page.errors
+
+
+def test_platform_pool_page_is_reachable_beside_a_tenant_pool_of_its_name(page, env, operator, tenant_factory):
+    """A tenant's pool and the platform's may share a name: from the Pools
+    list, the platform row opens the platform's pool and its events, and
+    the tenant row that tenant's."""
+    a = tenant_factory()
+    name = f"twin-{a.tenant_id[-6:]}"
+    a.run("pools", "set", name, "--provider", "static", "--max", "2")
+    env.luxd_admin("create-pool", "--name", name, "--provider", "static", "--max", "7")
+    # The CLI's view first: each is reachable, the bare name is ambiguous.
+    assert [e["data"]["changes"]["maxHosts"]["new"] for e in operator.json("pools", "events", name, "--platform")] == [7]
+    assert [e["data"]["changes"]["maxHosts"]["new"] for e in operator.json("pools", "events", name, "--tenant", a.tenant_id)] == [2]
+    page.sign_in(operator.api_key, "/pools")
+    rows = page.locator("tr", has_text=name)
+    expect(rows).to_have_count(2, timeout=15_000)
+    rows.filter(has_text="platform").get_by_role("link", name=name, exact=True).click()
+    page.wait_for_url(re.compile(rf"/pools/{name}\?owner=platform$"), timeout=10_000)
+    expect(page.get_by_text("min 0 · warm 0 · max 7")).to_have_count(1, timeout=15_000)
+    events = page.locator("tr", has_text="pool.config_changed")
+    expect(events).to_have_count(1, timeout=15_000)
+    expect(events.first).to_contain_text("maxHosts –→7")
+    # Back to the list: the tenant's row opens the tenant's.
+    page.goto(env.luxd_url + "/pools")
+    tenant_row = page.locator("tr", has_text=name).filter(has_not_text="platform")
+    expect(tenant_row).to_have_count(1, timeout=15_000)
+    tenant_row.get_by_role("link", name=name, exact=True).click()
+    page.wait_for_url(re.compile(rf"/pools/{name}\?tenant="), timeout=10_000)
+    expect(page.get_by_text("min 0 · warm 0 · max 2")).to_have_count(1, timeout=15_000)
+    expect(page.locator("tr", has_text="pool.config_changed").first).to_contain_text("maxHosts –→2", timeout=15_000)
+    assert not page.errors, page.errors
+
+
+def _add_pool_events(env, tenant_id: str, pool: str, n: int, tag: str):
+    with psycopg.connect(env.owner_dsn) as conn:
+        conn.execute("""INSERT INTO pool_events (tenant_id, pool_id, type, data)
+            SELECT %s, p.id, 'pool.placement', jsonb_build_object('run', %s || '-' || i, 'epoch', 1, 'host', 'h')
+            FROM pools p, generate_series(1, %s) i WHERE p.tenant_id = %s AND p.name = %s ORDER BY i""",
+                     (tenant_id, tag, n, tenant_id, pool))
+
+
+def _event_tags(card) -> list[str]:
+    """The tags of the placement events the card lists, top to bottom."""
+    return card.evaluate("""c => [...c.querySelectorAll('tbody tr')]
+        .map(tr => (/((?:old|mid|late|new)-\\d+) epoch/.exec(tr.textContent) || [])[1])
+        .filter(Boolean)""")
+
+
+def _expected(*batches: tuple[str, int]) -> list[str]:
+    """Every tag added, oldest batch first, as the card lists them: newest first."""
+    return [f"{tag}-{i}" for tag, n in reversed(batches) for i in range(n, 0, -1)]
+
+
+def _events_card(page, key: str, name: str):
+    page.sign_in(key, f"/pools/{name}")
+    return page.locator(".card", has=page.get_by_role("heading", name="Events", exact=True))
+
+
+def _load_every_older(card):
+    button = card.get_by_role("button", name="Load older events")
+    while button.count() > 0:
+        n = card.locator("tbody tr").count()
+        button.click()
+        expect(card.locator("tbody tr")).not_to_have_count(n, timeout=15_000)
+
+
+def test_pool_events_keep_every_event_as_new_ones_arrive_above_older_pages(page, env, tenant_factory):
+    """With older pages loaded, new events push some off the polled newest
+    page: the page reads them back, so none goes missing between the two."""
+    a = tenant_factory()
+    name = f"busy-{a.tenant_id[-6:]}"
+    a.run("pools", "set", name, "--provider", "static")
+    _add_pool_events(env, a.tenant_id, name, 1100, "old")
+    card = _events_card(page, a.api_key, name)
+    expect(card.get_by_text(re.compile(r"^1000 events"))).to_have_count(1, timeout=15_000)
+    _load_every_older(card)
+    expect(card.get_by_text(re.compile(r"^1101 events"))).to_have_count(1, timeout=15_000)
+    _add_pool_events(env, a.tenant_id, name, 30, "new")
+    card.get_by_role("button", name="Refresh").click()
+    expect(card.get_by_text(re.compile(r"^1131 events"))).to_have_count(1, timeout=15_000)
+    assert _event_tags(card) == _expected(("old", 1100), ("new", 30))
+    assert not page.errors, page.errors
+
+
+def test_pool_events_read_back_a_burst_before_older_pages_are_loaded(page, env, tenant_factory):
+    """More than a page arrives between two reads of the newest page, before
+    any older page is loaded: the events between the two pages are read
+    back, and "load older" then continues below the first page, so every
+    event is listed once, in order."""
+    a = tenant_factory()
+    name = f"burst-{a.tenant_id[-6:]}"
+    a.run("pools", "set", name, "--provider", "static")
+    _add_pool_events(env, a.tenant_id, name, 1100, "old")
+    card = _events_card(page, a.api_key, name)
+    expect(card.get_by_text(re.compile(r"^1000 events"))).to_have_count(1, timeout=15_000)
+    _add_pool_events(env, a.tenant_id, name, 1030, "new")
+    card.get_by_role("button", name="Refresh").click()
+    # The new page (new-31..new-1030), the gap read back (new-1..new-30),
+    # the first page (old-101..old-1100).
+    expect(card.get_by_text(re.compile(r"^2030 events"))).to_have_count(1, timeout=15_000)
+    _load_every_older(card)
+    expect(card.get_by_text(re.compile(r"^2131 events"))).to_have_count(1, timeout=15_000)
+    assert _event_tags(card) == _expected(("old", 1100), ("new", 1030))
+    assert not page.errors, page.errors
+
+
+def test_pool_events_keep_reading_a_gap_while_the_stream_moves(page, env, tenant_factory):
+    """Events keep arriving while a gap larger than a page is read back: a
+    refresh landing mid-read adds a gap above, the read in flight carries
+    on (no request is repeated), and in the end every event is there once."""
+    a = tenant_factory()
+    name = f"stream-{a.tenant_id[-6:]}"
+    a.run("pools", "set", name, "--provider", "static")
+    _add_pool_events(env, a.tenant_id, name, 1100, "old")
+    gap_requests: list[str] = []
+    page.on("request", lambda r: "after=" in r.url and gap_requests.append(r.url))
+    held, holding = [], [True]
+    page.route(re.compile(r"/events\?.*after="), lambda route: held.append(route) if holding[0] else route.continue_())
+    card = _events_card(page, a.api_key, name)
+    expect(card.get_by_text(re.compile(r"^1000 events"))).to_have_count(1, timeout=15_000)
+    # 2500 more: a new newest page over a gap of 1500, read a page at a time.
+    _add_pool_events(env, a.tenant_id, name, 2500, "mid")
+    card.get_by_role("button", name="Refresh").click()
+    wait_until(lambda: (page.wait_for_timeout(50), len(held) == 1)[1], timeout=15, message="the first gap read")
+    # While it is in flight, 1200 more, and another refresh: a gap above.
+    _add_pool_events(env, a.tenant_id, name, 1200, "late")
+    card.get_by_role("button", name="Refresh").click()
+    expect(card.get_by_text(re.compile(r"^3000 events"))).to_have_count(1, timeout=15_000)
+    # The read in flight was not abandoned for the new gap: still the one request.
+    assert len(held) == 1, [r.request.url for r in held]
+    holding[0] = False
+    held[0].continue_()
+    # old-101 and up, all of it: 1000 + 2500 + 1200.
+    expect(card.get_by_text(re.compile(r"^4700 events"))).to_have_count(1, timeout=30_000)
+    assert len(gap_requests) == len(set(gap_requests)), gap_requests
+    _load_every_older(card)
+    expect(card.get_by_text(re.compile(r"^4801 events"))).to_have_count(1, timeout=15_000)
+    assert _event_tags(card) == _expected(("old", 1100), ("mid", 2500), ("late", 1200))
+    assert not page.errors, page.errors

@@ -76,6 +76,18 @@ export function PageSkeleton() {
 
 export const runPath = (id: string) => `/runs/${encodeURIComponent(id)}`;
 export const hostPath = (id: string) => `/hosts/${encodeURIComponent(id)}`;
+/**
+ * A pool's page. A tenant pool and the platform's may share a name: a
+ * platform pool's link says so (owner=platform), and a tenant pool's, from
+ * a view across tenants, names its tenant.
+ */
+export function poolPath(name: string, { tenant, platform }: { tenant?: string; platform?: boolean } = {}): string {
+  const q = new URLSearchParams();
+  if (platform) q.set("owner", "platform");
+  else if (tenant) q.set("tenant", tenant);
+  const qs = q.toString();
+  return `/pools/${encodeURIComponent(name)}${qs ? `?${qs}` : ""}`;
+}
 /** The runs list filtered to runs placed (any epoch) on a host. */
 export const hostRunsPath = (hostId: string) => `/runs?host=${encodeURIComponent(hostId)}`;
 

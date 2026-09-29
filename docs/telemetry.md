@@ -65,6 +65,12 @@ reordered report cannot lower a peak.
 
 Plus `lastHeartbeat`, which is updated with every heartbeat.
 
+What happened to a host, and to its pool, is also an event log of its own
+(`lux hosts events <host>`, `lux pools events <pool>`; see the
+[CLI](cli.md#hosts-and-pools)): each event is written in the transaction
+of the change it records. Like Run events they are kept as long as their
+host or pool.
+
 ## Events
 
 Every lifecycle change is also an event on its Run (`lux events <run>`).

@@ -674,6 +674,40 @@ components:
           description: "A message: agents get it as a prompt, generic workloads on stdin."
           type: string
       type: object
+    LifecycleEvent:
+      additionalProperties: false
+      properties:
+        count:
+          description: How many times it happened in a row (a failure repeated on every provisioner pass); 1 for most.
+          format: int64
+          type: integer
+        data:
+          additionalProperties: {}
+          type: object
+        id:
+          format: int64
+          type: integer
+        lastTime:
+          description: When it last happened, if more than once.
+          format: date-time
+          type: string
+        time:
+          description: When it (first) happened.
+          format: date-time
+          type: string
+        type:
+          type: string
+      type: object
+    LifecycleEventList:
+      additionalProperties: false
+      properties:
+        events:
+          items:
+            $ref: "#/components/schemas/LifecycleEvent"
+          type:
+            - array
+            - "null"
+      type: object
     ListRunsBody:
       additionalProperties: false
       properties:
@@ -2866,6 +2900,103 @@ paths:
       summary: Drain a host
       tags:
         - hosts
+  /v1/hosts/{id}/events:
+    get:
+      description: |-
+        What happened to the host, newest first: registered, ready, placements assigned and ended, drains and their cause, lost, termination, provider errors. A tenant sees its own hosts' events only, and so does an operator narrowed to it with `?tenant=`.
+
+        Needs the `read` scope.
+      operationId: listHostEvents
+      parameters:
+        - description: The host's id or name (a name of a host that is not terminated).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The host's id or name (a name of a host that is not terminated).
+            type: string
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: "Only events older than this id: the next page after a page's last event."
+          explode: false
+          in: query
+          name: before
+          schema:
+            description: "Only events older than this id: the next page after a page's last event."
+            examples:
+              - "0"
+            type: string
+        - description: "Only events newer than this id. With before, the events between the two (both exclusive), still newest first: a gap between two pages already read."
+          explode: false
+          in: query
+          name: after
+          schema:
+            description: "Only events newer than this id. With before, the events between the two (both exclusive), still newest first: a gap between two pages already read."
+            examples:
+              - "0"
+            type: string
+        - description: "At most this many events: 1 to 1000, default 100."
+          explode: false
+          in: query
+          name: limit
+          schema:
+            description: "At most this many events: 1 to 1000, default 100."
+            examples:
+              - "100"
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LifecycleEventList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List a host's events
+      tags:
+        - hosts
   /v1/hosts/{id}/history:
     get:
       description: |-
@@ -3269,6 +3400,113 @@ paths:
       security:
         - apiKey: []
       summary: Remove a pool
+      tags:
+        - pools
+  /v1/pools/{name}/events:
+    get:
+      description: |-
+        What happened to the pool, newest first: scale-ups and why, launches and their failures, placements on its hosts, hosts released and why, spot interruptions, configuration changes, removal (retired) and being set again (restored). A failure repeated on every provisioner pass is one event, its `count` and `lastTime` updated in place. A tenant's own pool of that name, else the platform's (`?owner=` picks one); a platform pool's events are the operators' (they name other tenants' Runs), and not shown to an operator narrowed with `?tenant=`.
+
+        Needs the `read` scope.
+      operationId: listPoolEvents
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: "Only events older than this id: the next page after a page's last event."
+          explode: false
+          in: query
+          name: before
+          schema:
+            description: "Only events older than this id: the next page after a page's last event."
+            examples:
+              - "0"
+            type: string
+        - description: "Only events newer than this id. With before, the events between the two (both exclusive), still newest first: a gap between two pages already read."
+          explode: false
+          in: query
+          name: after
+          schema:
+            description: "Only events newer than this id. With before, the events between the two (both exclusive), still newest first: a gap between two pages already read."
+            examples:
+              - "0"
+            type: string
+        - description: "At most this many events: 1 to 1000, default 100."
+          explode: false
+          in: query
+          name: limit
+          schema:
+            description: "At most this many events: 1 to 1000, default 100."
+            examples:
+              - "100"
+            type: string
+        - description: The pool's name.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The pool's name.
+            type: string
+        - description: "Which pool of that name: the platform's, or a tenant's (the caller's, or with ?tenant= that tenant's). Omitted: a tenant's own pool, else the platform's; for an operator not narrowed with ?tenant=, a name two pools share is ambiguous (409)."
+          explode: false
+          in: query
+          name: owner
+          schema:
+            description: "Which pool of that name: the platform's, or a tenant's (the caller's, or with ?tenant= that tenant's). Omitted: a tenant's own pool, else the platform's; for an operator not narrowed with ?tenant=, a name two pools share is ambiguous (409)."
+            enum:
+              - platform
+              - tenant
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LifecycleEventList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List a pool's events
       tags:
         - pools
   /v1/runs:

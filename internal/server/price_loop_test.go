@@ -39,7 +39,7 @@ func TestPriceRefreshDoesNotBlockLaunchOrCostDrain(t *testing.T) {
 	go func() {
 		launched <- s.launch(ctx, &fakeLaunchProvider{launched: Launched{
 			ProviderID: "i-test", InstanceType: "m7i.large", Market: MarketOnDemand,
-		}}, poolRow{ID: "pool1", Name: "burst", Provider: "ec2", Template: []byte(`{"region":"us-east-1"}`)})
+		}}, poolRow{ID: "pool1", Name: "burst", Provider: "ec2", Template: []byte(`{"region":"us-east-1"}`)}, nil)
 	}()
 	select {
 	case err := <-launched:

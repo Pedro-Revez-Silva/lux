@@ -200,3 +200,60 @@ func TestCostEnqueueGrant(t *testing.T) {
 		t.Error("queued with an unknown reason")
 	}
 }
+
+// Pool and host events are their tenant's (platform ones, NULL, the
+// system's only), and append-only but for a repeat's count.
+func TestInfraEventsRLS(t *testing.T) {
+	_, appDSN := testDB(t)
+	ctx := context.Background()
+	db, err := store.Open(ctx, appDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	err = db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO tenants (id, name) VALUES ('a', 'a'), ('b', 'b');
+			INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pa', 'a', 'p', 'ec2'), ('pb', 'b', 'p', 'ec2'), ('p0', NULL, 'p', 'ec2');
+			INSERT INTO hosts (id, tenant_id, name, state) VALUES ('ha', 'a', 'ha', 'ready'), ('hb', 'b', 'hb', 'ready'), ('h0', NULL, 'h0', 'ready');
+			INSERT INTO pool_events (tenant_id, pool_id, type) VALUES ('a', 'pa', 'x'), ('b', 'pb', 'x'), (NULL, 'p0', 'x');
+			INSERT INTO host_events (tenant_id, host_id, type) VALUES ('a', 'ha', 'x'), ('b', 'hb', 'x'), (NULL, 'h0', 'x')`)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"pool_events", "host_events"} {
+		var owners []string
+		err := db.Tx(ctx, store.Tenant("a"), func(tx pgx.Tx) error {
+			rows, err := tx.Query(ctx, `SELECT coalesce(tenant_id, 'platform') FROM `+table)
+			if err != nil {
+				return err
+			}
+			owners, err = pgx.CollectRows(rows, pgx.RowTo[string])
+			return err
+		})
+		if err != nil || len(owners) != 1 || owners[0] != "a" {
+			t.Errorf("tenant a sees %s of %v (%v), want only its own", table, owners, err)
+		}
+		err = db.Tx(ctx, store.Tenant("a"), func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO `+table+` (tenant_id, `+map[string]string{"pool_events": "pool_id", "host_events": "host_id"}[table]+`, type)
+				VALUES ('b', $1, 'forged')`, map[string]string{"pool_events": "pb", "host_events": "hb"}[table])
+			return err
+		})
+		if err == nil {
+			t.Errorf("tenant a wrote an event of tenant b into %s", table)
+		}
+		for _, q := range []string{`DELETE FROM ` + table, `UPDATE ` + table + ` SET type = 'rewritten'`} {
+			if err := db.Tx(ctx, store.System(), func(tx pgx.Tx) error { _, err := tx.Exec(ctx, q); return err }); err == nil {
+				t.Errorf("app role could %s", q)
+			}
+		}
+		if err := db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE `+table+` SET count = count + 1, last_at = now(), data = '{}'`)
+			return err
+		}); err != nil {
+			t.Errorf("app role could not fold a repeat in %s: %v", table, err)
+		}
+	}
+}

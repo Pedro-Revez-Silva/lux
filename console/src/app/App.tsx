@@ -16,6 +16,7 @@ import { parsePreviewUrl } from "./pages/previewTarget.ts";
 import { Hosts } from "./pages/Hosts.tsx";
 import { HostPage } from "./pages/HostPage.tsx";
 import { Pools } from "./pages/Pools.tsx";
+import { PoolPage } from "./pages/PoolPage.tsx";
 import { Tenants } from "./pages/Tenants.tsx";
 import { NotFound } from "./pages/NotFound.tsx";
 import { ErrorBlock } from "./pages/common.tsx";
@@ -49,6 +50,7 @@ const ROUTES: Route[] = [
   { pattern: "/hosts", title: "Hosts", render: () => <Hosts /> },
   { pattern: "/hosts/:id", title: "Host", render: (p) => <HostPage id={p.id!} /> },
   { pattern: "/pools", title: "Pools", render: () => <Pools /> },
+  { pattern: "/pools/:name", title: "Pool", render: (p) => <PoolPage name={p.name!} /> },
   { pattern: "/tenants", title: "Tenants", render: () => <Tenants /> },
   {
     pattern: "/preview-auth",
