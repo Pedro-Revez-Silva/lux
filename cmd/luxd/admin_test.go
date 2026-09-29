@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -110,5 +111,56 @@ func TestAdminPoolNames(t *testing.T) {
 	}
 	if n := count(`SELECT count(*) FROM host_tokens WHERE tenant_id = 't1' AND pool = 'Old_Static'`); n != 2 {
 		t.Errorf("no replacement token for the legacy static pool: %d tokens", n)
+	}
+}
+
+// create-pool --default marks the pool its owner's default, moves the mark
+// from another pool, and --default=false clears it; omitted leaves it.
+func TestAdminPoolDefault(t *testing.T) {
+	cfg, db := adminDB(t)
+	ctx := context.Background()
+	if _, err := db.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`); err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = devnull
+	t.Cleanup(func() { os.Stdout = stdout; devnull.Close() })
+
+	defaults := func() []string {
+		rows, err := db.Query(ctx, `SELECT coalesce(tenant_id, '-') || '/' || name FROM pools WHERE is_default ORDER BY 1`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var s string
+			if err := rows.Scan(&s); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, s)
+		}
+		return out
+	}
+	for _, c := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"create-pool", "--name", "a", "--tenant", "t1", "--default"}, []string{"t1/a"}},
+		{[]string{"create-pool", "--name", "b", "--tenant", "t1", "--default"}, []string{"t1/b"}},
+		{[]string{"create-pool", "--name", "b", "--tenant", "t1", "--max", "2"}, []string{"t1/b"}},
+		{[]string{"create-pool", "--name", "shared", "--default"}, []string{"-/shared", "t1/b"}},
+		{[]string{"create-pool", "--name", "b", "--tenant", "t1", "--default=false"}, []string{"-/shared"}},
+	} {
+		if err := admin(ctx, cfg, c.args); err != nil {
+			t.Fatalf("%v: %v", c.args, err)
+		}
+		if got := defaults(); !slices.Equal(got, c.want) {
+			t.Errorf("after %v: defaults %v, want %v", c.args, got, c.want)
+		}
 	}
 }

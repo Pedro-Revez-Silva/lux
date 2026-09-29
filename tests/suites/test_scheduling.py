@@ -163,7 +163,10 @@ def test_a_run_naming_no_pool_goes_to_the_tenants_default(lux, runners, hosts):
         header, *lines = lux.run("pools", "ls").stdout.splitlines()
         assert header.split()[:3] == ["NAME", "DEFAULT", "PROVIDER"], header
         marks = {line.split()[0]: line.split()[1] == "*" for line in lines}
-        assert marks == {"arm64": True, "other": False}, lines
+        # Other suites may leave platform pools the tenant sees: read ours,
+        # and check nothing else is marked.
+        assert {k: marks.get(k) for k in ("arm64", "other")} == {"arm64": True, "other": False}, lines
+        assert [k for k, v in marks.items() if v] == ["arm64"], lines
 
         run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "echo on-default; sleep 300"))
         runs.append(run_id)
