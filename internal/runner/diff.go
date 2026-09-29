@@ -11,6 +11,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -450,18 +451,24 @@ func (r *Runner) volumesFree(ctx context.Context, runID string, fence <-chan str
 // awaitRelease waits, at most volumesWait, for a helper to be confirmed
 // gone (released closed; nil: there was none).
 func awaitRelease(ctx context.Context, released <-chan struct{}, name string) error {
-	if released == nil {
+	return awaitClosed(ctx, released, fmt.Sprintf("the snapshot diff's container %s still has the Run's volumes mounted: it could not be removed in %s", name, volumesWait))
+}
+
+// awaitClosed waits, at most volumesWait, for ch to close (nil: at once);
+// then it is an error saying why.
+func awaitClosed(ctx context.Context, ch <-chan struct{}, why string) error {
+	if ch == nil {
 		return nil
 	}
 	t := time.NewTimer(volumesWait)
 	defer t.Stop()
 	select {
-	case <-released:
+	case <-ch:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-t.C:
-		return fmt.Errorf("the snapshot diff's container %s still has the Run's volumes mounted: it could not be removed in %s", name, volumesWait)
+		return errors.New(why)
 	}
 }
 
@@ -528,7 +535,7 @@ func (p *placement) startSnapshotDiffs(ctx context.Context, snapID string) {
 		removeSnapshotFiles(p.r, diffsRecord(snapID), rec)
 	}
 	dctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
-	released := make(chan struct{})
+	released, handed := make(chan struct{}), make(chan struct{})
 	// Checked and set under one lock with supersede: either the diff
 	// starts and supersede waits for its helper, or it never starts.
 	p.mu.Lock()
@@ -536,16 +543,26 @@ func (p *placement) startSnapshotDiffs(ctx context.Context, snapID string) {
 	if superseded == nil {
 		p.diffCancel, p.diffReleased = cancel, released
 	}
+	p.diffHanded = handed
 	p.mu.Unlock()
 	go func() {
 		defer close(done)
 		defer cancel(nil)
 		if superseded != nil {
-			p.reportSkipped(dctx, snapID, repos, superseded.Error())
+			p.reportSkipped(dctx, snapID, repos, superseded.Error(), handed)
 			return
 		}
-		p.snapshotDiffs(dctx, snapID, repos, released)
+		p.snapshotDiffs(dctx, snapID, repos, released, handed)
 	}()
+}
+
+// diffHandoff is closed once a snapshot diff's files are in its snapshot
+// record (nil: no diff was started): only then may a discard scan the
+// records and remove the Run's local state.
+func (p *placement) diffHandoff() <-chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.diffHanded
 }
 
 // supersede hands the Run's volumes on (to a later placement, or to a
@@ -584,8 +601,9 @@ func (p *placement) setDiffsFor(snapID string) {
 // placement's state volumes, stores each patch as a blob, and reports them
 // (snapshot.diffs). A repository it could not diff is reported with its
 // error; nothing here affects the snapshot. released is closed once the
-// helper container is confirmed gone, which may be after this returns.
-func (p *placement) snapshotDiffs(ctx context.Context, snapID string, repos []proto.DiffRepo, released chan struct{}) {
+// helper container is confirmed gone, which may be after this returns;
+// handed once the patches are in their snapshot record.
+func (p *placement) snapshotDiffs(ctx context.Context, snapID string, repos []proto.DiffRepo, released, handed chan struct{}) {
 	rep := proto.SnapshotDiffs{SnapshotID: snapID}
 	budget, skip := p.r.diffBudget()
 	if skip != "" {
@@ -611,15 +629,15 @@ func (p *placement) snapshotDiffs(ctx context.Context, snapID string, repos []pr
 		p.logf("snapshot diff", "skipped", skip, "err", rep.Error)
 		rep.Diffs = notComputed(repos, rep)
 	}
-	p.reportDiffs(ctx, rep)
+	p.reportDiffs(ctx, rep, handed)
 }
 
 // reportSkipped reports a snapshot diff that was never started.
-func (p *placement) reportSkipped(ctx context.Context, snapID string, repos []proto.DiffRepo, why string) {
+func (p *placement) reportSkipped(ctx context.Context, snapID string, repos []proto.DiffRepo, why string, handed chan struct{}) {
 	rep := proto.SnapshotDiffs{SnapshotID: snapID, Skipped: why}
 	p.logf("snapshot diff", "skipped", why)
 	rep.Diffs = notComputed(repos, rep)
-	p.reportDiffs(ctx, rep)
+	p.reportDiffs(ctx, rep, handed)
 }
 
 // notComputed is every repository's and kind's entry of a snapshot diff
@@ -638,13 +656,18 @@ func notComputed(repos []proto.DiffRepo, rep proto.SnapshotDiffs) []proto.Snapsh
 	return out
 }
 
+// beforeDiffRecord runs before a snapshot diff's record is saved (tests
+// widen the window a discard must not slip into).
+var beforeDiffRecord = func() {}
+
 // diffsRecord names the snapshot record of a snapshot's diff blobs.
 func diffsRecord(snapID string) string { return snapID + "-diffs" }
 
 // reportDiffs reports a snapshot's diffs until luxd has them (or fences
 // the placement off), then uploads their patches as it does a snapshot's
-// blobs. The patches go if luxd never learns of them.
-func (p *placement) reportDiffs(ctx context.Context, rep proto.SnapshotDiffs) {
+// blobs. The patches go if luxd never learns of them. handed is closed
+// once their record is saved (or they are gone).
+func (p *placement) reportDiffs(ctx context.Context, rep proto.SnapshotDiffs, handed chan struct{}) {
 	rec := &snapshotRecord{RunID: p.runID, Epoch: p.epoch, Created: time.Now().UnixMilli(), Diffs: true}
 	for _, d := range rep.Diffs {
 		if d.Blob != nil {
@@ -652,9 +675,14 @@ func (p *placement) reportDiffs(ctx context.Context, rep proto.SnapshotDiffs) {
 		}
 	}
 	id := diffsRecord(rep.SnapshotID)
-	if err := p.r.saveSnapshotRecord(id, rec); err != nil {
-		p.logf("snapshot diff: saving its record", "err", err)
+	beforeDiffRecord()
+	err := p.r.saveSnapshotRecord(id, rec)
+	if err != nil {
 		removeSnapshotFiles(p.r, id, rec)
+	}
+	close(handed)
+	if err != nil {
+		p.logf("snapshot diff: saving its record", "err", err)
 		p.setDiffsFor("")
 		return
 	}
@@ -679,6 +707,22 @@ func (p *placement) reportDiffs(ctx context.Context, rep proto.SnapshotDiffs) {
 		time.Sleep(time.Second)
 	}
 	p.setDiffsFor("")
+}
+
+// diffsLost tells luxd a reported snapshot diff's patches are lost (why),
+// then drops its record and whatever files it still has. Until luxd has
+// heard, the record stays, and a later pass tells it again.
+func (r *Runner) diffsLost(ctx context.Context, recID string, rec *snapshotRecord, why string) {
+	snapID := strings.TrimSuffix(recID, "-diffs")
+	c, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	err := r.conn.Report(c, proto.Frame{Type: proto.MsgSnapshotDiffs, RunID: rec.RunID, Epoch: rec.Epoch,
+		Data: proto.Marshal(proto.SnapshotDiffs{SnapshotID: snapID, Lost: why})})
+	if err != nil && !errors.Is(err, errStale) {
+		r.log.Warn("snapshot diff: telling luxd its patches are lost", "snapshot", snapID, "err", err)
+		return
+	}
+	removeSnapshotFiles(r, recID, rec)
 }
 
 func baseOf(r proto.DiffRepo, kind string) string {

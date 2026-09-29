@@ -491,7 +491,10 @@ committed changes, staged, unstaged and untracked (not ignored) files.
 - Each snapshot's diff has a state: `pending` from its snapshot until its
   report, then `complete`, `skipped` or `failed`; `unsupported` when its
   host's runner predates diffs. A report that never arrives (the runner
-  gives up after 10 minutes) is `failed` (`report_lost`) after 15. The
+  gives up after 10 minutes) is `failed` (`report_lost`) after 15; a
+  patch lost on its host before its upload makes the diff `failed` too
+  (with a `diff.failed` event). A discard of the host's copy keeps a
+  snapshot diff's patches until they are uploaded. The
   latest snapshot alone answers `GET /v1/runs/{id}/diff`: `pending` is 409
   `diff_pending` (with `retryAfter`), the others but `complete` are 404
   `diff_unavailable` (with `reason`); never an older snapshot's diff.

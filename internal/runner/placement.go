@@ -70,7 +70,10 @@ type placement struct {
 	diffCancel   context.CancelCauseFunc
 	diffReleased chan struct{}
 	diffDone     chan struct{}
-	superseded   error
+	// diffHanded is closed once the diff's patches are in their snapshot
+	// record (see diffHandoff).
+	diffHanded chan struct{}
+	superseded error
 	// volumesFence is closed once the previous placement's snapshot diff
 	// no longer has the Run's volumes mounted (nil: nothing to wait for).
 	volumesFence <-chan struct{}

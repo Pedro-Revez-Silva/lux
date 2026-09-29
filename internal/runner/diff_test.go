@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -814,5 +817,71 @@ func TestLiveDiffCancelOrdering(t *testing.T) {
 		if !idle() {
 			t.Fatalf("request %d still served after its cancel", i)
 		}
+	}
+}
+
+// A discard right after the helper is released (the report and its
+// record not yet saved) waits for the record: the patches are then kept
+// until uploaded, never removed with the Run's local state.
+func TestDiscardRightAfterReleaseKeepsThePatches(t *testing.T) {
+	r, l, dir := diffRunner(t)
+	var out bytes.Buffer
+	for _, k := range []string{"clone", "head"} {
+		gitdiff.WriteRecord(&out, gitdiff.Diff{Stat: proto.DiffStat{Repo: "app", Kind: k, Files: 1}, Patch: []byte("patch " + k + "\n")})
+	}
+	os.WriteFile(filepath.Join(dir, "out"), out.Bytes(), 0o644)
+	setVar(t, &beforeDiffRecord, func() { time.Sleep(500 * time.Millisecond) })
+	p := exitedPlacement(t, r, 1)
+	go p.finish(context.Background(), &exitRecord{Code: 0, Reason: "stopped"})
+	var released <-chan struct{}
+	for deadline := time.Now().Add(5 * time.Second); released == nil && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		p.mu.Lock()
+		released = p.diffReleased
+		p.mu.Unlock()
+	}
+	<-released
+	r.discard(context.Background(), "r1", 2)
+	f := l.wait(t, proto.MsgSnapshotDiffs, 5*time.Second)
+	d := diffsOf(t, f)
+	if len(d.Diffs) != 2 || d.Diffs[0].Blob == nil {
+		t.Fatalf("%+v", d)
+	}
+	rec := r.snapshotRecords()[diffsRecord(d.SnapshotID)]
+	if rec == nil || !rec.Discard || len(rec.Uploads) != 2 {
+		t.Fatalf("the diff's record after the discard: %+v", rec)
+	}
+	for _, up := range rec.Uploads {
+		if _, err := os.Stat(up.Path); err != nil {
+			t.Errorf("patch %s removed by the discard: %v", up.BlobID, err)
+		}
+	}
+}
+
+// A patch file missing when it is to be uploaded fails the diff: luxd is
+// told (lost), and the record goes; not a silent success.
+func TestMissingPatchIsReportedLost(t *testing.T) {
+	r, l, _ := diffRunner(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.Copy(io.Discard, r.Body) }))
+	defer srv.Close()
+	r.api = newAPI(srv.URL, "tok", "h")
+	rec := &snapshotRecord{RunID: "r1", Epoch: 1, Diffs: true, Reported: true,
+		Uploads: []pendingUpload{{BlobID: "blob_gone", Path: r.blobPath("blob_gone")}}}
+	if err := r.saveSnapshotRecord("snap_x-diffs", rec); err != nil {
+		t.Fatal(err)
+	}
+	r.uploads.pass(context.Background())
+	d := diffsOf(t, l.wait(t, proto.MsgSnapshotDiffs, 5*time.Second))
+	if d.SnapshotID != "snap_x" || !strings.Contains(d.Lost, "blob_gone") {
+		t.Errorf("%+v", d)
+	}
+	if r.snapshotRecords()["snap_x-diffs"] != nil {
+		t.Error("the record is still there")
+	}
+	// A snapshot's own blob that is gone is not a diff's concern.
+	rec.Diffs = false
+	r.saveSnapshotRecord("snap_y", rec)
+	r.uploads.pass(context.Background())
+	if n := len(l.frames(proto.MsgSnapshotDiffs)); n != 1 {
+		t.Errorf("%d snapshot.diffs", n)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -163,6 +164,17 @@ func (u *uploader) pass(ctx context.Context) {
 				continue
 			}
 			err := u.upload(ctx, up)
+			if errors.Is(err, os.ErrNotExist) && rec.Diffs {
+				// A patch owed to luxd is gone: its diff has failed,
+				// which luxd must hear; nothing more of it is uploaded.
+				u.r.log.Warn("snapshot diff: a patch to upload is missing; its diff has failed", "record", snapID, "blob", up.BlobID)
+				u.r.diffsLost(ctx, snapID, rec, "the patch file of blob "+up.BlobID+" is missing on its host")
+				done = false
+				break
+			}
+			if errors.Is(err, os.ErrNotExist) {
+				err = nil // its file is gone: nothing to upload
+			}
 			var he *httpError
 			if err != nil && errors.As(err, &he) && (he.Status == http.StatusNotFound || he.Status == http.StatusGone) {
 				err = nil // luxd deleted it (retention): nothing to do
@@ -234,12 +246,10 @@ func (r *Runner) updateRecord(snapID string, fn func(*snapshotRecord)) {
 	}
 }
 
+// upload uploads one blob; os.ErrNotExist when its file is gone.
 func (u *uploader) upload(ctx context.Context, up pendingUpload) error {
 	f, err := os.Open(up.Path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // its file is gone: nothing to upload
-		}
 		return err
 	}
 	defer f.Close()
@@ -265,9 +275,15 @@ func (r *Runner) discard(ctx context.Context, runID string, beforeEpoch int) {
 		return
 	}
 	// Not while a snapshot diff's helper may still have the volumes
-	// mounted: once it is confirmed gone, or never (the copy stays).
+	// mounted: once it is confirmed gone, or never (the copy stays). Nor
+	// before its patches are in their record, which the scan below must
+	// see to keep them until uploaded.
 	if p != nil {
-		if err := r.volumesFree(ctx, runID, p.supersede(errDiscarded), true); err != nil {
+		err := r.volumesFree(ctx, runID, p.supersede(errDiscarded), true)
+		if err == nil {
+			err = awaitClosed(ctx, p.diffHandoff(), fmt.Sprintf("the snapshot diff's patches were not recorded in %s", volumesWait))
+		}
+		if err != nil {
 			r.log.Error("discard of the local copy failed; it stays", "run", runID, "err", err)
 			return
 		}
