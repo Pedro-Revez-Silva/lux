@@ -94,7 +94,7 @@ export function PoolPage({ name }: { name: string }) {
       {(!pool.platform || (scope.operator && !scope.apiTenant)) && (
         <InfraEvents
           queryKey={`pool-events:${name}@${scope.tenant}/${pool.platform ? "platform" : "tenant"}`}
-          page={(before, s) => api.poolEvents(name, scope.apiTenant, pool.platform ? "platform" : "tenant", before, s)}
+          page={(q, s) => api.poolEvents(name, scope.apiTenant, pool.platform ? "platform" : "tenant", q, s)}
           interval={POLL}
           subtitle="scale-ups, launches, placements and releases"
         />

@@ -143,7 +143,7 @@ export function HostPage({ id }: { id: string }) {
 
       {/* A platform host's events are the operators', not narrowed to a tenant (they name other tenants' Runs). */}
       {(!h.platform || (scope.operator && !scope.apiTenant)) && (
-        <InfraEvents queryKey={`host-events:${id}@${scope.tenant}`} page={(before, s) => api.hostEvents(id, scope.apiTenant, before, s)} interval={5000} subtitle="registration, placements, drains, termination" />
+        <InfraEvents queryKey={`host-events:${id}@${scope.tenant}`} page={(q, s) => api.hostEvents(id, scope.apiTenant, q, s)} interval={5000} subtitle="registration, placements, drains, termination" />
       )}
 
       <Card flush title="Recent runs on this host" subtitle="any epoch, newest first, up to 50" actions={<Link to={hostRunsPath(id)}>All runs on this host</Link>}>
