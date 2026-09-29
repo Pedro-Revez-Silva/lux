@@ -70,7 +70,7 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 	var w proto.Welcome
 	w.LeaseSeconds = s.cfg.LeaseDuration.Seconds()
 	var outdatedDrained []string
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+	register := func(tx pgx.Tx, pool string) error {
 		var hostID string
 		err := tx.QueryRow(ctx, `SELECT id FROM hosts
 			WHERE coalesce(tenant_id, '') = coalesce($1, '') AND name = $2 AND state <> 'terminated'`,
@@ -102,7 +102,7 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 					SELECT $1, $2, $3, $4, $5, 'ready', p.hourly_price, p.price_currency
 					FROM (VALUES (1)) v LEFT JOIN pools p
 					  ON coalesce(p.tenant_id, '') = coalesce($2, '') AND p.name = $3 AND NOT p.retired`,
-					hostID, tok.TenantID, tok.Pool, tok.ID, h.Name); err != nil {
+					hostID, tok.TenantID, pool, tok.ID, h.Name); err != nil {
 					return err
 				}
 			}
@@ -171,7 +171,37 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 		}
 		w.HostID = hostID
 		return nil
-	})
+	}
+	// The token's pool as authenticated; a rename may have moved the token
+	// since. Under the name's shared lock a rename has either committed
+	// (the token names the new name: retried under it) or waits for the
+	// host row and moves it too.
+	owner := ""
+	if tok.TenantID != nil {
+		owner = *tok.TenantID
+	}
+	pool := tok.Pool
+	var err error
+	for range 3 {
+		err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			if err := lockPoolNameShared(ctx, tx, owner, pool); err != nil {
+				return err
+			}
+			var current string
+			if err := tx.QueryRow(ctx, `SELECT pool FROM host_tokens WHERE id = $1`, tok.ID).Scan(&current); err != nil {
+				return err
+			}
+			if current != pool {
+				return errTokenMoved(current)
+			}
+			return register(tx, pool)
+		})
+		var moved errTokenMoved
+		if !errors.As(err, &moved) {
+			break
+		}
+		pool = string(moved)
+	}
 	if err == nil {
 		// Reconciliation discovers Runs anew after registration commits.
 		err = retryHostPlacements(ctx, func() error {
@@ -732,3 +762,9 @@ func (s *Server) hostEvicting(ctx context.Context, hostID string, ev proto.Evict
 	s.Kick()
 	return nil
 }
+
+// errTokenMoved: a rename moved the host token to this pool name after
+// the hello was authenticated.
+type errTokenMoved string
+
+func (e errTokenMoved) Error() string { return "host token moved to pool " + string(e) }

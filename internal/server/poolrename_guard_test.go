@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/marcioapm/lux/internal/proto"
 )
 
 func httpErr(err error) (int, string, string) {
@@ -267,4 +269,69 @@ func TestRenameMovesFinalRunSpecsWithoutFinalRunEvents(t *testing.T) {
 	if got := f.query(t, `SELECT type FROM run_events WHERE run_id = 'done'`); got != "completed" {
 		t.Errorf("existing final Run event changed to %q", got)
 	}
+}
+
+// A first hello authenticated under a pool's old name, interleaved with a
+// rename of that pool: whichever commits first, the host row ends up under
+// the new name, never beside the renamed pool under the old one.
+func TestRegistrationRacingARename(t *testing.T) {
+	register := func(f *renameFixture, name string) <-chan error {
+		stale := &hostToken{ID: "tok1", TenantID: strp("t1"), Pool: "burst"}
+		done := make(chan error, 1)
+		go func() {
+			_, err := f.s.registerHost(f.ctx, stale, proto.Hello{Name: name, ProtocolVersion: proto.Version})
+			done <- err
+		}()
+		return done
+	}
+	rename := func(f *renameFixture) <-chan error {
+		done := make(chan error, 1)
+		go func() { _, err := renameConfirmed(f.ctx, f.s, "t1", "burst", "burst-eu", false); done <- err }()
+		return done
+	}
+	t.Run("rename first", func(t *testing.T) {
+		f := newRenameFixture(t, false)
+		// The rename holds both names, then waits here for the pool row.
+		row := holdPoolRow(t, f.ctx, f.s, "pool1")
+		renamed := rename(f)
+		time.Sleep(200 * time.Millisecond)
+		registered := register(f, "late-host")
+		blocked(t, registered, "registration during a rename")
+		if err := row.Commit(f.ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := recv(t, f.ctx, renamed, "rename"); err != nil {
+			t.Fatal(err)
+		}
+		if err := recv(t, f.ctx, registered, "registration"); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.query(t, `SELECT pool FROM hosts WHERE name = 'late-host'`); got != "burst-eu" {
+			t.Fatalf("host registered after the rename in %q", got)
+		}
+	})
+	t.Run("registration first", func(t *testing.T) {
+		f := newRenameFixture(t, false)
+		// Registration takes the name, then waits here to insert its row.
+		name := systemTx(t, f.ctx, f.s)
+		if _, err := name.Exec(f.ctx, `INSERT INTO hosts (id, tenant_id, pool, name, state) VALUES ('hold', 't1', 'other', 'early-host', 'ready')`); err != nil {
+			t.Fatal(err)
+		}
+		registered := register(f, "early-host")
+		time.Sleep(200 * time.Millisecond)
+		renamed := rename(f)
+		blocked(t, renamed, "rename during a registration")
+		if err := name.Rollback(f.ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := recv(t, f.ctx, registered, "registration"); err != nil {
+			t.Fatal(err)
+		}
+		if err := recv(t, f.ctx, renamed, "rename"); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.query(t, `SELECT pool FROM hosts WHERE name = 'early-host'`); got != "burst-eu" {
+			t.Fatalf("host registered before the rename left in %q", got)
+		}
+	})
 }
