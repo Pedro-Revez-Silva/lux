@@ -6,6 +6,13 @@ function str(v: unknown): string | undefined {
   return typeof v === "string" && v !== "" ? v : undefined;
 }
 
+// Why a submitted Run got its pool (its event's poolFrom); a pool the spec named needs no note.
+const POOL_FROM: Record<string, string> = {
+  "tenant-default": " (the tenant's default)",
+  "platform-default": " (the platform's default)",
+  fallback: " (no default pool marked)",
+};
+
 export function eventSummary(e: Event): string {
   const d = e.data ?? {};
   switch (e.type) {
@@ -15,8 +22,10 @@ export function eventSummary(e: Event): string {
       if (str(d.host)) parts.push(`on ${str(d.host)}`);
       return parts.join(" ");
     }
-    case "submitted":
-      return `by ${str(d.by) ?? "?"}`;
+    case "submitted": {
+      const pool = str(d.pool) ? ` · pool ${str(d.pool)}${POOL_FROM[str(d.poolFrom) ?? ""] ?? ""}` : "";
+      return `by ${str(d.by) ?? "?"}${pool}`;
+    }
     case "exited": {
       const code = typeof d.exitCode === "number" ? `exit ${d.exitCode}` : "exited";
       return [code, str(d.reason), str(d.message)].filter(Boolean).join(" · ");

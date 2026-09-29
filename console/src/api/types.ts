@@ -350,6 +350,8 @@ export interface Pool {
   warmHosts: number;
   shared: boolean;
   platform: boolean;
+  /** Where Runs naming no pool go: the tenant's default, or (platform pool) the platform's. */
+  isDefault?: boolean;
 }
 
 /** GET /v1/whoami: who the key belongs to. */
