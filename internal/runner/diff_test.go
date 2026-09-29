@@ -418,9 +418,6 @@ func TestBusyDiffSpawnsNothing(t *testing.T) {
 // one ignores its stdin). The slot is held until the exec has exited.
 func TestCancelledDiffIsSignalledAfterAGrace(t *testing.T) {
 	r, dir := diffRunner(t)
-	old := diffExecGrace
-	diffExecGrace = 500 * time.Millisecond
-	t.Cleanup(func() { diffExecGrace = old })
 	touch(t, dir, "exec-ignore-eof")
 	t.Cleanup(func() {
 		if b, err := os.ReadFile(filepath.Join(dir, "sleep.pid")); err == nil {
