@@ -597,3 +597,43 @@ func TestInfraEventsVisibility(t *testing.T) {
 		}
 	}
 }
+
+// listingProvider lists the given instances; nothing else is called.
+type listingProvider struct {
+	fakeLaunchProvider
+	instances map[string]Instance
+}
+
+func (p *listingProvider) Instances(context.Context, json.RawMessage, map[string]string) (map[string]Instance, error) {
+	return p.instances, nil
+}
+
+// A launch whose reply was lost is recovered from the provider's listing
+// by its tag: its host gets the instance, and the pool records the launch,
+// marked recovered. Once only: the next listing finds the host claimed.
+func TestRecoveredLaunchIsRecorded(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	infraFixture(t, s, ctx)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state, provision_requested_at, token_id, tagged)
+		VALUES ('h2', 't1', 'burst-h2', 'burst', 'provisioning', now(), 'tok1', true)`)
+	pl := poolRow{ID: "pool1", Name: "burst", Provider: "ec2", TenantID: new("t1")}
+	prov := &listingProvider{instances: map[string]Instance{"i-lost": {State: "running", Tags: map[string]string{tagHost: "h2"}}}}
+	for range 2 {
+		var st poolState
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return s.poolState(ctx, tx, pl, &st) }); err != nil {
+			t.Fatal(err)
+		}
+		s.reconcileWithProvider(ctx, prov, pl, &st)
+	}
+	if pid := queryOne[string](t, s, `SELECT provider_id FROM hosts WHERE id = 'h2'`); pid != "i-lost" {
+		t.Fatalf("provider_id %q", pid)
+	}
+	evs := events(t, s, evHostLaunched)
+	if len(evs) != 1 {
+		t.Fatalf("host_launched events %+v, want one", evs)
+	}
+	if d := evs[0].Data; evs[0].Owner != "pool1" || d["host"] != "h2" || d["name"] != "burst-h2" || d["providerId"] != "i-lost" || d["recovered"] != true {
+		t.Fatalf("host_launched %+v", evs[0])
+	}
+}

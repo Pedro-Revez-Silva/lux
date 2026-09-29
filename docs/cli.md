@@ -115,7 +115,8 @@ lux hosts events <host> [--limit N] [--before ID] [--all]
 time, type and what it says (`-o json`: the events as the API has them).
 A pool's are `pool.scale_up` (how many hosts and why: `waiting runs`,
 `warm` or `minimum`, with the counts), `pool.launch_requested`,
-`pool.host_launched`, `pool.launch_failed` (the provider's error),
+`pool.host_launched` (`recovered` when luxd found the instance by its tag
+after losing the provider's reply), `pool.launch_failed` (the provider's error),
 `pool.host_registered`, `pool.placement` (a Run placed on one of its
 hosts), `pool.host_released` (why: `idle` for how long, `pool removed`,
 `outdated`, `manual`, `evicted`, or why it was terminated),

@@ -334,7 +334,7 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 			case !known && !gone && st.launching[inst.Tags[tagHost]]:
 				// A launch whose instance id is not recorded yet (in flight,
 				// or luxd stopped mid-launch): its row claims it.
-				s.recordProviderID(ctx, inst.Tags[tagHost], pid)
+				s.recordProviderID(ctx, pl.ID, inst.Tags[tagHost], pid)
 			case !known && !gone:
 				// No live row claims it: an orphan (a launch whose reply was
 				// lost, or a host written off). Terminate it.
@@ -364,10 +364,21 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 	}
 }
 
-func (s *Server) recordProviderID(ctx context.Context, hostID, pid string) {
+// recordProviderID claims a tagged instance for the launch whose reply was
+// lost, and records it as launched (recovered: found by its tag, so only
+// what a listing says, its id).
+func (s *Server) recordProviderID(ctx context.Context, poolID, hostID, pid string) {
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE hosts SET provider_id = $2 WHERE id = $1 AND provider_id IS NULL AND state <> 'terminated'`, hostID, pid)
-		return err
+		var name string
+		err := tx.QueryRow(ctx, `UPDATE hosts SET provider_id = $2 WHERE id = $1 AND provider_id IS NULL AND state <> 'terminated'
+			RETURNING name`, hostID, pid).Scan(&name)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return poolEvent(ctx, tx, poolID, evHostLaunched, map[string]any{"host": hostID, "name": name, "providerId": pid, "recovered": true})
 	})
 	if err != nil {
 		s.log.Warn("record provider id", "host", hostID, "err", err)
