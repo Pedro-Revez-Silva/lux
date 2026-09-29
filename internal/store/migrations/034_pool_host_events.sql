@@ -1,4 +1,4 @@
--- 031_pool_host_events.sql — what happened to a pool and to a host
+-- 034_pool_host_events.sql — what happened to a pool and to a host
 -- (scale-ups, launches and their failures, placements, drains, losses,
 -- terminations), written in the transaction of the change each records.
 --

@@ -188,7 +188,7 @@ func ensureAppRoleOnce(ctx context.Context, conn *pgx.Conn, password string) err
 		// Events are an audit trail: the app appends, never rewrites.
 		"REVOKE UPDATE, DELETE ON run_events FROM lux_app",
 		// Pool and host events too, but for folding a repeat into its row
-		// (migration 031). A table-level REVOKE also drops column grants,
+		// (migration 034). A table-level REVOKE also drops column grants,
 		// so the column GRANT comes after it.
 		`DO $$ BEGIN
 			IF to_regclass('pool_events') IS NOT NULL THEN

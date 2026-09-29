@@ -17,7 +17,7 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// Pool and host events (migration 031): what happened to a pool or a host,
+// Pool and host events (migration 034): what happened to a pool or a host,
 // written in the transaction of the change each records. Type names carry
 // their table's prefix.
 //
