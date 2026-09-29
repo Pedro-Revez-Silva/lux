@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -497,18 +498,150 @@ func TestStreamRoundTrip(t *testing.T) {
 	}
 	var got []proto.DiffStat
 	var patches [][]byte
-	err = ReadStream(&buf, 4, proto.DiffLimit, func(st proto.DiffStat, r io.Reader) error {
+	incomplete, err := ReadStream(&buf, []string{"gone", "app"}, []string{proto.DiffBaseClone, proto.DiffBaseHead}, proto.DiffLimit, func(st proto.DiffStat, r io.Reader) error {
 		b, err := io.ReadAll(r)
 		got, patches = append(got, st), append(patches, b)
 		return err
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || len(incomplete) != 0 {
+		t.Fatal(err, incomplete)
 	}
 	if len(got) != 4 || got[0].Repo != "gone" || got[0].Error == "" || got[2].Repo != "app" || got[2].Error != "" {
 		t.Fatalf("%+v", got)
 	}
 	if !strings.Contains(string(patches[2]), "+unstaged") || int64(len(patches[2])) != got[2].PatchBytes {
 		t.Errorf("patch: %q", patches[2])
+	}
+}
+
+func record(t *testing.T, st proto.DiffStat, patch string) string {
+	t.Helper()
+	var b bytes.Buffer
+	if err := WriteRecord(&b, Diff{Stat: st, Patch: []byte(patch)}); err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
+func readAll(stream string, repos, kinds []string) (map[string]string, map[string]string, error) {
+	got := map[string]string{}
+	incomplete, err := ReadStream(strings.NewReader(stream), repos, kinds, proto.DiffLimit, func(st proto.DiffStat, r io.Reader) error {
+		b, err := io.ReadAll(r)
+		got[st.Repo+"/"+st.Kind] = string(b)
+		return err
+	})
+	return got, incomplete, err
+}
+
+// A stream is accepted only when it is whole: every patch its full length,
+// exactly one record per repository and kind asked for.
+func TestStreamMustBeComplete(t *testing.T) {
+	kinds := []string{proto.DiffBaseClone}
+	a := record(t, proto.DiffStat{Repo: "a", Kind: "clone", Files: 1}, "patch a\n")
+	b := record(t, proto.DiffStat{Repo: "b", Kind: "clone", Files: 1}, "patch b\n")
+
+	if got, inc, err := readAll(a+b, []string{"a", "b"}, kinds); err != nil || len(inc) != 0 || got["b/clone"] != "patch b\n" {
+		t.Fatalf("whole: %v %v %v", got, inc, err)
+	}
+	// The body ends early (the process died mid-patch).
+	short := a + b[:len(b)-3]
+	if _, _, err := readAll(short, []string{"a", "b"}, kinds); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("short body: %v", err)
+	}
+	// A header claiming more bytes than follow, fn reading it all.
+	lying := strings.Replace(a, `"patchBytes":8`, `"patchBytes":800`, 1)
+	if lying == a {
+		t.Fatal("no patchBytes to change in " + a)
+	}
+	if _, _, err := readAll(lying, []string{"a"}, kinds); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("header over its body: %v", err)
+	}
+	// A header line cut short.
+	if _, _, err := readAll(a+b[:10], []string{"a", "b"}, kinds); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("cut header: %v", err)
+	}
+	// The stream (a zero-exit shim) leaves a repository out: that one is
+	// incomplete, the other whole.
+	got, inc, err := readAll(a, []string{"a", "b"}, kinds)
+	if err != nil || inc["b"] == "" || inc["a"] != "" || got["a/clone"] != "patch a\n" {
+		t.Errorf("omitted: %v %v %v", got, inc, err)
+	}
+	// A kind left out is the same.
+	if _, inc, _ := readAll(a, []string{"a"}, []string{"clone", "head"}); inc["a"] == "" {
+		t.Errorf("omitted kind: %v", inc)
+	}
+	// A duplicate: that repository is incomplete, and fn saw it once.
+	a2 := record(t, proto.DiffStat{Repo: "a", Kind: "clone", Files: 2}, "other\n")
+	got, inc, err = readAll(a+a2, []string{"a", "b"}, kinds)
+	if err != nil || !strings.Contains(inc["a"], "2 clone records") || got["a/clone"] != "patch a\n" {
+		t.Errorf("duplicate: %v %v %v", got, inc, err)
+	}
+	// Something not asked for.
+	if _, _, err := readAll(a+b, []string{"a"}, kinds); err == nil {
+		t.Error("an unrequested repository was accepted")
+	}
+}
+
+// numstat keeps maxFileStats entries but totals every file, fed in
+// arbitrary pieces.
+func TestNumstatOverTheEntryCap(t *testing.T) {
+	var in bytes.Buffer
+	n := maxFileStats + 5
+	for i := range n {
+		if i%1000 == 7 {
+			fmt.Fprintf(&in, "1\t2\t\x00old%d\x00new%d\x00", i, i)
+		} else if i%1000 == 8 {
+			fmt.Fprintf(&in, "-\t-\tbin%d\x00", i)
+		} else {
+			fmt.Fprintf(&in, "3\t1\tf%d\x00", i)
+		}
+	}
+	s := &numstat{}
+	for b := in.Bytes(); len(b) > 0; {
+		k := min(len(b), 7)
+		if _, err := s.Write(b[:k]); err != nil {
+			t.Fatal(err)
+		}
+		b = b[k:]
+	}
+	if err := s.end(); err != nil {
+		t.Fatal(err)
+	}
+	renames, bins := 10, 10 // i%1000 == 7 or 8 for i < 10005
+	if s.n != n || len(s.files) != maxFileStats {
+		t.Fatalf("%d files, %d entries", s.n, len(s.files))
+	}
+	plain := n - renames - bins
+	if s.ins != 3*plain+renames || s.del != plain+2*renames {
+		t.Errorf("totals +%d -%d", s.ins, s.del)
+	}
+	if f := s.files[7]; f.OldPath != "old7" || f.Path != "new7" || s.files[8].Path != "bin8" || !s.files[8].Binary {
+		t.Errorf("entries: %+v %+v", f, s.files[8])
+	}
+	// Malformed or cut short: an error, not a wrong count.
+	for _, bad := range []string{"3\t1\tf\x00x\x00", "3\t1\t\x00old\x00", "a\tb\tf\x00", "3\t1\tf"} {
+		s := &numstat{}
+		_, err := s.Write([]byte(bad))
+		if err == nil {
+			err = s.end()
+		}
+		if err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	// A field over the bound is refused as it arrives.
+	if _, err := (&numstat{}).Write(bytes.Repeat([]byte("x"), maxPath+1)); err == nil {
+		t.Error("an unbounded field was buffered")
+	}
+}
+
+// git's stderr is held only up to its cap, however much it writes.
+func TestGitStderrIsBounded(t *testing.T) {
+	h := &head{max: 10}
+	for range 1000 {
+		h.Write(bytes.Repeat([]byte("e"), 1000))
+	}
+	if len(h.b) != 10 || !h.over {
+		t.Errorf("kept %d bytes", len(h.b))
 	}
 }

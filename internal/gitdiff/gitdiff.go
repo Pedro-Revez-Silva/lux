@@ -49,9 +49,8 @@ var safeConfig = []string{
 }
 
 // diffFlags make the patch git's plain format, whatever the config says.
-// --binary: a binary file's patch carries its content, so it applies.
 var diffFlags = []string{
-	"--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--no-relative",
+	"--no-ext-diff", "--no-textconv", "--no-color", "--no-relative",
 	"--src-prefix=a/", "--dst-prefix=b/", "-M", "-O/dev/null", "--ignore-submodules=none",
 }
 
@@ -75,19 +74,44 @@ func (r *repo) git(ctx context.Context, stdout io.Writer, args ...string) error 
 		// A partial clone would fetch missing objects from its remote.
 		"GIT_NO_LAZY_FETCH=1")
 	cmd.Env = append(cmd.Env, r.env...)
-	var stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = stdout, &stderr
+	stderr := &head{max: 4 << 10}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("git %s: %v: %s", args[0], err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }
 
+// out is a small command's output (at most maxOut bytes).
 func (r *repo) out(ctx context.Context, args ...string) (string, error) {
-	var b bytes.Buffer
-	err := r.git(ctx, &b, args...)
+	b := &head{max: maxOut}
+	err := r.git(ctx, b, args...)
+	if err == nil && b.over {
+		err = fmt.Errorf("git %s: more than %d bytes of output", args[0], maxOut)
+	}
 	return strings.TrimSpace(b.String()), err
 }
+
+const maxOut = 1 << 20
+
+// head keeps the first max bytes written to it; the rest is counted as
+// over, never buffered.
+type head struct {
+	max  int
+	b    []byte
+	over bool
+}
+
+func (h *head) Write(p []byte) (int, error) {
+	n := min(len(p), h.max-len(h.b))
+	h.b = append(h.b, p[:n]...)
+	if n < len(p) {
+		h.over = true
+	}
+	return len(p), nil
+}
+
+func (h *head) String() string { return string(h.b) }
 
 // Diff is a checkout's diff for one base kind.
 type Diff struct {
@@ -212,24 +236,22 @@ func (r *repo) filterOverrides(ctx context.Context) ([]string, error) {
 }
 
 func (r *repo) diff(ctx context.Context, d *Diff, from string, statOnly bool, limit int64) error {
-	var num bytes.Buffer
-	if err := r.git(ctx, &num, append(append([]string{"diff", "--numstat", "-z"}, diffFlags...), from, "--")...); err != nil {
+	num := &numstat{}
+	if err := r.git(ctx, num, append(append([]string{"diff", "--numstat", "-z"}, diffFlags...), from, "--")...); err != nil {
 		return err
 	}
-	d.Stat.FileStats = parseNumstat(num.Bytes())
-	d.Stat.Files = len(d.Stat.FileStats)
-	for _, f := range d.Stat.FileStats {
-		d.Stat.Insertions += f.Insertions
-		d.Stat.Deletions += f.Deletions
+	if err := num.end(); err != nil {
+		return err
 	}
-	if len(d.Stat.FileStats) > maxFileStats {
-		d.Stat.FileStats = d.Stat.FileStats[:maxFileStats]
-	}
+	d.Stat.FileStats = num.files
+	d.Stat.Files, d.Stat.Insertions, d.Stat.Deletions = num.n, num.ins, num.del
 	if statOnly || d.Stat.Files == 0 {
 		return nil
 	}
 	w := &capped{limit: limit}
-	if err := r.git(ctx, w, append(append([]string{"diff"}, diffFlags...), from, "--")...); err != nil {
+	// --binary: a binary file's patch carries its content, so it applies.
+	// (Not for --numstat: it implies --patch.)
+	if err := r.git(ctx, w, append(append([]string{"diff", "--binary"}, diffFlags...), from, "--")...); err != nil {
 		return err
 	}
 	d.Patch, d.Stat.Truncated = w.result()
@@ -275,34 +297,95 @@ func (c *capped) result() ([]byte, bool) {
 	return nil, true
 }
 
-// parseNumstat reads `git diff --numstat -z`: "ins\tdel\tpath\0", or for a
-// rename "ins\tdel\t\0old\0new\0"; "-" counts for a binary file.
-func parseNumstat(b []byte) []proto.DiffFile {
-	var out []proto.DiffFile
-	fields := strings.Split(string(b), "\x00")
-	for i := 0; i < len(fields); i++ {
-		rec := fields[i]
-		if rec == "" {
-			continue
+// numstat parses `git diff --numstat -z` as git writes it: "ins\tdel\tpath\0",
+// or for a rename "ins\tdel\t\0old\0new\0"; "-" counts for a binary file.
+// It keeps the first maxFileStats files and totals all of them, holding at
+// most one path at a time.
+type numstat struct {
+	tok   []byte
+	cur   proto.DiffFile
+	need  int // paths still owed to cur (a rename's two)
+	files []proto.DiffFile
+	n     int
+	ins   int
+	del   int
+}
+
+// maxPath bounds one NUL-terminated field (PATH_MAX is 4096).
+const maxPath = 64 << 10
+
+var errNumstat = errors.New("git diff --numstat: malformed output")
+
+func (s *numstat) Write(p []byte) (int, error) {
+	n := len(p)
+	for len(p) > 0 {
+		i := bytes.IndexByte(p, 0)
+		if i < 0 {
+			i = len(p)
 		}
-		parts := strings.SplitN(rec, "\t", 3)
-		if len(parts) != 3 {
-			continue
+		if len(s.tok)+i > maxPath {
+			return 0, fmt.Errorf("git diff --numstat: a field over %d bytes", maxPath)
 		}
-		f := proto.DiffFile{Path: parts[2]}
-		if parts[0] == "-" && parts[1] == "-" {
-			f.Binary = true
-		} else {
-			f.Insertions, _ = strconv.Atoi(parts[0])
-			f.Deletions, _ = strconv.Atoi(parts[1])
+		s.tok = append(s.tok, p[:i]...)
+		if i == len(p) {
+			break
 		}
-		if f.Path == "" && i+2 < len(fields) {
-			f.OldPath, f.Path = fields[i+1], fields[i+2]
-			i += 2
+		if err := s.field(string(s.tok)); err != nil {
+			return 0, err
 		}
-		out = append(out, f)
+		s.tok, p = s.tok[:0], p[i+1:]
 	}
-	return out
+	return n, nil
+}
+
+func (s *numstat) field(f string) error {
+	switch s.need {
+	case 2:
+		s.cur.OldPath, s.need = f, 1
+		return nil
+	case 1:
+		s.cur.Path, s.need = f, 0
+		s.add()
+		return nil
+	}
+	parts := strings.SplitN(f, "\t", 3)
+	if len(parts) != 3 {
+		return errNumstat
+	}
+	s.cur = proto.DiffFile{Path: parts[2]}
+	if parts[0] == "-" && parts[1] == "-" {
+		s.cur.Binary = true
+	} else {
+		var err1, err2 error
+		s.cur.Insertions, err1 = strconv.Atoi(parts[0])
+		s.cur.Deletions, err2 = strconv.Atoi(parts[1])
+		if err1 != nil || err2 != nil {
+			return errNumstat
+		}
+	}
+	if s.cur.Path == "" {
+		s.need = 2
+		return nil
+	}
+	s.add()
+	return nil
+}
+
+func (s *numstat) add() {
+	s.n++
+	s.ins += s.cur.Insertions
+	s.del += s.cur.Deletions
+	if len(s.files) < maxFileStats {
+		s.files = append(s.files, s.cur)
+	}
+}
+
+// end checks nothing was left half-written.
+func (s *numstat) end() error {
+	if len(s.tok) > 0 || s.need > 0 {
+		return errNumstat
+	}
+	return nil
 }
 
 func copyFile(src, dst string) error {
@@ -364,39 +447,96 @@ func WriteRecord(w io.Writer, d Diff) error {
 	return err
 }
 
-// ReadStream reads a stream Run wrote, calling fn for each record with a
-// reader of exactly its patch (fn need not read it all). The stream comes
-// from a process the workload could interfere with, so it is bounded: at
-// most maxRecords records, each patch at most maxPatch bytes, each record's
-// JSON line at most maxLine bytes.
-func ReadStream(r io.Reader, maxRecords int, maxPatch int64, fn func(proto.DiffStat, io.Reader) error) error {
+// ReadStream reads a stream Run wrote for repos and kinds, calling fn for
+// each record with a reader of exactly its patch (fn need not read it all;
+// a body cut short reads as io.ErrUnexpectedEOF). The stream comes from a
+// process the workload could interfere with, so it is bounded (at most one
+// record per repository and kind, each patch at most maxPatch bytes, each
+// JSON line at most maxLine bytes) and checked: fn sees only the first
+// record for each requested repository and kind. Incomplete lists, per
+// repository, why it is not whole: a kind with no record, or with more
+// than one. err is for the stream as a whole (unreadable, over its bounds,
+// or a record for something not asked for); the records fn saw before it
+// are whole.
+func ReadStream(r io.Reader, repos, kinds []string, maxPatch int64, fn func(proto.DiffStat, io.Reader) error) (incomplete map[string]string, err error) {
+	type key struct{ repo, kind string }
+	seen := map[key]int{}
+	for _, rp := range repos {
+		for _, k := range kinds {
+			seen[key{rp, k}] = 0
+		}
+	}
+	incomplete = map[string]string{}
+	defer func() {
+		for _, rp := range repos {
+			for _, k := range kinds {
+				if _, bad := incomplete[rp]; !bad && seen[key{rp, k}] == 0 {
+					incomplete[rp] = fmt.Sprintf("the diff stream has no %s record for it", k)
+				}
+			}
+		}
+	}()
 	br := bufio.NewReaderSize(r, 64<<10)
 	for n := 0; ; n++ {
 		line, err := readLine(br, maxLine)
 		if err == io.EOF && len(line) == 0 {
-			return nil
+			return incomplete, nil
+		}
+		if err == io.EOF {
+			return incomplete, fmt.Errorf("diff stream: %w", io.ErrUnexpectedEOF)
 		}
 		if err != nil {
-			return fmt.Errorf("diff stream: %w", err)
+			return incomplete, fmt.Errorf("diff stream: %w", err)
 		}
-		if n >= maxRecords {
-			return fmt.Errorf("diff stream: more than %d records", maxRecords)
+		if n >= len(seen) {
+			return incomplete, fmt.Errorf("diff stream: more than %d records", len(seen))
 		}
 		var st proto.DiffStat
 		if err := json.Unmarshal(line, &st); err != nil {
-			return fmt.Errorf("diff stream: %w", err)
+			return incomplete, fmt.Errorf("diff stream: %w", err)
 		}
 		if st.PatchBytes < 0 || st.PatchBytes > maxPatch {
-			return fmt.Errorf("diff stream: a %d-byte patch", st.PatchBytes)
+			return incomplete, fmt.Errorf("diff stream: a %d-byte patch", st.PatchBytes)
 		}
-		body := io.LimitReader(br, st.PatchBytes)
-		if err := fn(st, body); err != nil {
-			return err
+		k := key{st.Repo, st.Kind}
+		count, asked := seen[k]
+		if !asked {
+			return incomplete, fmt.Errorf("diff stream: a record for %q (%s), which was not asked for", st.Repo, st.Kind)
+		}
+		seen[k] = count + 1
+		body := &exact{r: br, n: st.PatchBytes}
+		if count > 0 {
+			incomplete[st.Repo] = fmt.Sprintf("the diff stream has %d %s records for it", count+1, st.Kind)
+		} else if err := fn(st, body); err != nil {
+			return incomplete, err
 		}
 		if _, err := io.Copy(io.Discard, body); err != nil {
-			return err
+			return incomplete, fmt.Errorf("diff stream: %w", err)
 		}
 	}
+}
+
+// exact reads exactly n bytes of r: io.ErrUnexpectedEOF if r ends first.
+type exact struct {
+	r io.Reader
+	n int64
+}
+
+func (e *exact) Read(p []byte) (int, error) {
+	if e.n <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > e.n {
+		p = p[:e.n]
+	}
+	n, err := e.r.Read(p)
+	e.n -= int64(n)
+	if err == io.EOF && e.n > 0 {
+		err = io.ErrUnexpectedEOF
+	} else if err == io.EOF {
+		err = nil
+	}
+	return n, err
 }
 
 // maxLine bounds one record's JSON: maxFileStats entries of long paths.

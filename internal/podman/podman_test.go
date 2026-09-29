@@ -1,6 +1,8 @@
 package podman
 
 import (
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/marcioapm/lux/internal/hoststat"
@@ -45,5 +47,14 @@ func TestReadHostUsage(t *testing.T) {
 	}
 	if !within(u.DiskBytes, d0.Used, d1.Used) {
 		t.Errorf("disk %d, hoststat used %d then %d", u.DiskBytes, d0.Used, d1.Used)
+	}
+}
+
+// RunTo's stderr keeps only its last 4 KiB, however much is written.
+func TestRunToStderrIsBounded(t *testing.T) {
+	p := &Podman{Bin: "sh"}
+	err := p.RunTo(t.Context(), io.Discard, "-c", `head -c 50000000 /dev/zero | tr '\0' x >&2; printf END >&2; exit 3`)
+	if err == nil || !strings.HasSuffix(err.Error(), "xEND") || len(err.Error()) > 4096+200 {
+		t.Fatalf("%.200s… (%d bytes)", err, len(err.Error()))
 	}
 }

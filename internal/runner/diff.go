@@ -36,14 +36,19 @@ func diffArgs(repos []proto.DiffRepo, kinds []string, statOnly bool) []string {
 	return []string{"diff", string(a)}
 }
 
-// readDiffs reads the shim's stream: at most one record per repository and
-// kind, each patch at most the limit.
-func readDiffs(r io.Reader, n int, fn func(proto.DiffStat, io.Reader) error) error {
-	return gitdiff.ReadStream(r, n, proto.DiffLimit, fn)
+// readDiffs reads the shim's stream (see gitdiff.ReadStream): incomplete
+// names each repository whose records are not exactly one per kind.
+func readDiffs(r io.Reader, repos []proto.DiffRepo, kinds []string, fn func(proto.DiffStat, io.Reader) error) (map[string]string, error) {
+	names := make([]string, len(repos))
+	for i, rp := range repos {
+		names[i] = rp.Name
+	}
+	return gitdiff.ReadStream(r, names, kinds, proto.DiffLimit, fn)
 }
 
 // liveDiff computes a running placement's diffs in its container and sends
-// each as it comes.
+// each as it comes. A repository whose records turn out incomplete is sent
+// again, with the error, after them.
 func (p *placement) liveDiff(ctx context.Context, req proto.DiffRequest, send func(proto.DiffResult) error) error {
 	ctx, cancel := context.WithTimeout(ctx, diffTimeout)
 	defer cancel()
@@ -60,7 +65,7 @@ func (p *placement) liveDiff(ctx context.Context, req proto.DiffRequest, send fu
 		pw.CloseWithError(err)
 		done <- err
 	}()
-	err := readDiffs(pr, len(req.Repos), func(st proto.DiffStat, body io.Reader) error {
+	incomplete, err := readDiffs(pr, req.Repos, []string{req.Kind}, func(st proto.DiffStat, body io.Reader) error {
 		patch, err := io.ReadAll(body)
 		if err != nil {
 			return err
@@ -72,7 +77,17 @@ func (p *placement) liveDiff(ctx context.Context, req proto.DiffRequest, send fu
 	if perr := <-done; err == nil && perr != nil {
 		err = perr
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	for _, rp := range req.Repos {
+		if why, ok := incomplete[rp.Name]; ok {
+			if err := send(proto.DiffResult{SubID: req.SubID, Stat: proto.DiffStat{Repo: rp.Name, Kind: req.Kind, Error: why}}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // running reports whether the placement's container is running now.
@@ -213,7 +228,7 @@ func (p *placement) computeSnapshotDiffs(ctx context.Context, repos []proto.Diff
 		done <- err
 	}()
 	var out []proto.SnapshotDiff
-	err := readDiffs(pr, len(repos)*len(diffKinds), func(st proto.DiffStat, body io.Reader) error {
+	incomplete, err := readDiffs(pr, repos, diffKinds, func(st proto.DiffStat, body io.Reader) error {
 		d, err := p.diffBlob(st, body)
 		if err != nil {
 			return err
@@ -225,15 +240,28 @@ func (p *placement) computeSnapshotDiffs(ctx context.Context, repos []proto.Diff
 	if perr := <-done; err == nil && perr != nil {
 		err = perr
 	}
-	if err != nil {
-		for _, d := range out {
+	// Only whole repositories are kept: every kind, once each.
+	kept := out[:0]
+	for _, d := range out {
+		if _, bad := incomplete[d.Repo]; bad || err != nil {
 			if d.Blob != nil {
 				os.Remove(p.r.blobPath(d.Blob.BlobID))
 			}
+			continue
 		}
+		kept = append(kept, d)
+	}
+	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	for _, r := range repos {
+		if why, bad := incomplete[r.Name]; bad {
+			for _, k := range diffKinds {
+				kept = append(kept, proto.SnapshotDiff{DiffStat: proto.DiffStat{Repo: r.Name, Kind: k, Base: baseOf(r, k), Error: why}})
+			}
+		}
+	}
+	return kept, nil
 }
 
 // diffBlob stores one patch as a blob; none for an empty patch.

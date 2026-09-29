@@ -253,21 +253,36 @@ func (p *Podman) VolumeList(ctx context.Context, label string) ([]string, error)
 }
 
 // RunTo runs podman with its stdout written to w (not buffered). Errors
-// include the end of stderr.
+// include the end of stderr, of which at most 4 KiB is ever held: what the
+// command prints may come from a workload.
 func (p *Podman) RunTo(ctx context.Context, w io.Writer, args ...string) error {
-	var stderr bytes.Buffer
+	stderr := &tail{max: 4096}
 	c := p.cmd(ctx, args...)
 	c.Cancel = func() error { return c.Process.Signal(syscall.SIGTERM) }
 	c.WaitDelay = 30 * time.Second
-	c.Stdout, c.Stderr = w, &stderr
+	c.Stdout, c.Stderr = w, stderr
 	if err := c.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if len(msg) > 4096 {
-			msg = msg[len(msg)-4096:]
-		}
-		return fmt.Errorf("podman %s: %v: %s", args[0], err, msg)
+		return fmt.Errorf("podman %s: %v: %s", args[0], err, strings.TrimSpace(string(stderr.b)))
 	}
 	return nil
+}
+
+// tail keeps the last max bytes written to it.
+type tail struct {
+	max int
+	b   []byte
+}
+
+func (t *tail) Write(p []byte) (int, error) {
+	n := len(p)
+	if len(p) > t.max {
+		p = p[len(p)-t.max:]
+	}
+	if drop := len(t.b) + len(p) - t.max; drop > 0 {
+		t.b = t.b[drop:]
+	}
+	t.b = append(t.b, p...)
+	return n, nil
 }
 
 // VolumeExport writes a tar of the volume to w.
