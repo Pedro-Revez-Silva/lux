@@ -438,3 +438,34 @@ def test_host_page_shows_its_events(page, lux, runners, hosts):
     expect(page.get_by_role("heading", name="Events", exact=True)).to_have_count(1, timeout=15_000)
     expect(page.locator("tr", has_text="host.registered")).to_have_count(1, timeout=15_000)
     assert not page.errors, page.errors
+
+
+def test_platform_pool_page_is_reachable_beside_a_tenant_pool_of_its_name(page, env, operator, tenant_factory):
+    """A tenant's pool and the platform's may share a name: from the Pools
+    list, the platform row opens the platform's pool and its events, and
+    the tenant row that tenant's."""
+    a = tenant_factory()
+    name = f"twin-{a.tenant_id[-6:]}"
+    a.run("pools", "set", name, "--provider", "static", "--max", "2")
+    env.luxd_admin("create-pool", "--name", name, "--provider", "static", "--max", "7")
+    # The CLI's view first: each is reachable, the bare name is ambiguous.
+    assert [e["data"]["changes"]["maxHosts"]["new"] for e in operator.json("pools", "events", name, "--platform")] == [7]
+    assert [e["data"]["changes"]["maxHosts"]["new"] for e in operator.json("pools", "events", name, "--tenant", a.tenant_id)] == [2]
+    page.sign_in(operator.api_key, "/pools")
+    rows = page.locator("tr", has_text=name)
+    expect(rows).to_have_count(2, timeout=15_000)
+    rows.filter(has_text="platform").get_by_role("link", name=name, exact=True).click()
+    page.wait_for_url(re.compile(rf"/pools/{name}\?owner=platform$"), timeout=10_000)
+    expect(page.get_by_text("min 0 · warm 0 · max 7")).to_have_count(1, timeout=15_000)
+    events = page.locator("tr", has_text="pool.config_changed")
+    expect(events).to_have_count(1, timeout=15_000)
+    expect(events.first).to_contain_text("maxHosts 0→7")
+    # Back to the list: the tenant's row opens the tenant's.
+    page.goto(env.luxd_url + "/pools")
+    tenant_row = page.locator("tr", has_text=name).filter(has_not_text="platform")
+    expect(tenant_row).to_have_count(1, timeout=15_000)
+    tenant_row.get_by_role("link", name=name, exact=True).click()
+    page.wait_for_url(re.compile(rf"/pools/{name}\?tenant="), timeout=10_000)
+    expect(page.get_by_text("min 0 · warm 0 · max 2")).to_have_count(1, timeout=15_000)
+    expect(page.locator("tr", has_text="pool.config_changed").first).to_contain_text("maxHosts 0→2", timeout=15_000)
+    assert not page.errors, page.errors

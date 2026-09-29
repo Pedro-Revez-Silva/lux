@@ -2666,7 +2666,7 @@ paths:
   /v1/hosts/{id}/events:
     get:
       description: |-
-        What happened to the host, newest first: registered, ready, placements assigned and ended, drains and their cause, lost, termination, provider errors. A tenant sees its own hosts' events only.
+        What happened to the host, newest first: registered, ready, placements assigned and ended, drains and their cause, lost, termination, provider errors. A tenant sees its own hosts' events only, and so does an operator narrowed to it with `?tenant=`.
 
         Needs the `read` scope.
       operationId: listHostEvents
@@ -3159,7 +3159,7 @@ paths:
   /v1/pools/{name}/events:
     get:
       description: |-
-        What happened to the pool, newest first: scale-ups and why, launches and their failures, placements on its hosts, hosts released and why, spot interruptions, configuration changes. A failure repeated on every provisioner pass is one event, its `count` and `lastTime` updated in place. A tenant's own pool of that name, else the platform's; a platform pool's events are the operators' (they name other tenants' Runs).
+        What happened to the pool, newest first: scale-ups and why, launches and their failures, placements on its hosts, hosts released and why, spot interruptions, configuration changes. A failure repeated on every provisioner pass is one event, its `count` and `lastTime` updated in place. A tenant's own pool of that name, else the platform's (`?owner=` picks one); a platform pool's events are the operators' (they name other tenants' Runs), and not shown to an operator narrowed with `?tenant=`.
 
         Needs the `read` scope.
       operationId: listPoolEvents
@@ -3195,6 +3195,16 @@ paths:
           required: true
           schema:
             description: The pool's name.
+            type: string
+        - description: "Which pool of that name: the platform's, or a tenant's (the caller's, or with ?tenant= that tenant's). Omitted: a tenant's own pool, else the platform's; for an operator not narrowed with ?tenant=, a name two pools share is ambiguous (409)."
+          explode: false
+          in: query
+          name: owner
+          schema:
+            description: "Which pool of that name: the platform's, or a tenant's (the caller's, or with ?tenant= that tenant's). Omitted: a tenant's own pool, else the platform's; for an operator not narrowed with ?tenant=, a name two pools share is ambiguous (409)."
+            enum:
+              - platform
+              - tenant
             type: string
       responses:
         "200":

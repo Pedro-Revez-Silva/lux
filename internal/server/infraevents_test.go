@@ -555,16 +555,21 @@ func TestInfraEventsPagination(t *testing.T) {
 }
 
 // A tenant reads its own pool's and hosts' events, never another tenant's
-// nor the platform's; an operator reads any, narrowed with ?tenant=.
+// nor the platform's; an operator reads any. ?owner= picks the platform's
+// pool or a tenant's of a shared name; an operator narrowed with ?tenant=
+// sees what that tenant would.
 func TestInfraEventsVisibility(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
 	infraFixture(t, s, ctx)
 	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t2', 't2')`)
-	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool2', 't2', 'burst', 'ec2'), ('pool0', NULL, 'shared', 'ec2')`)
+	// "burst" is t1's, t2's and the platform's; "shared" only the platform's.
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool2', 't2', 'burst', 'ec2'),
+		('pool0', NULL, 'shared', 'ec2'), ('poolP', NULL, 'burst', 'ec2')`)
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state) VALUES ('h2', 't2', 'h2', 'burst', 'ready'), ('h0', NULL, 'h0', 'shared', 'ready')`)
 	for _, q := range []string{
-		`INSERT INTO pool_events (tenant_id, pool_id, type) VALUES ('t1', 'pool1', 'pool.t1'), ('t2', 'pool2', 'pool.t2'), (NULL, 'pool0', 'pool.platform')`,
+		`INSERT INTO pool_events (tenant_id, pool_id, type) VALUES ('t1', 'pool1', 'pool.t1'), ('t2', 'pool2', 'pool.t2'),
+			(NULL, 'pool0', 'pool.platform'), (NULL, 'poolP', 'pool.platform-burst')`,
 		`INSERT INTO host_events (tenant_id, host_id, type) VALUES ('t1', 'h1', 'host.t1'), ('t2', 'h2', 'host.t2'), (NULL, 'h0', 'host.platform')`,
 	} {
 		execSQL(t, s, ctx, q)
@@ -577,15 +582,29 @@ func TestInfraEventsVisibility(t *testing.T) {
 		typ       string
 	}{
 		{t1, "/v1/pools/burst/events", 200, "pool.t1"},
+		{t1, "/v1/pools/burst/events?owner=tenant", 200, "pool.t1"},
+		{t1, "/v1/pools/burst/events?owner=platform", 403, ""},
 		{t1, "/v1/hosts/h1/events", 200, "host.t1"},
 		{t1, "/v1/hosts/h2/events", 404, ""},
 		{t1, "/v1/hosts/h0/events", 403, ""},
 		{t1, "/v1/pools/shared/events", 403, ""},
+		{t1, "/v1/pools/shared/events?owner=tenant", 404, ""},
 		{op, "/v1/pools/burst/events", 409, ""},
+		{op, "/v1/pools/burst/events?owner=tenant", 409, ""},
+		{op, "/v1/pools/burst/events?owner=platform", 200, "pool.platform-burst"},
 		{op, "/v1/pools/burst/events?tenant=t2", 200, "pool.t2"},
+		{op, "/v1/pools/burst/events?tenant=t2&owner=tenant", 200, "pool.t2"},
 		{op, "/v1/pools/shared/events", 200, "pool.platform"},
+		{op, "/v1/pools/nothing/events", 404, ""},
+		{op, "/v1/pools/burst/events?owner=someone", 422, ""},
 		{op, "/v1/hosts/h2/events", 200, "host.t2"},
 		{op, "/v1/hosts/h0/events", 200, "host.platform"},
+		// Narrowed: what t2 would see, and t2 sees no platform events.
+		{op, "/v1/pools/shared/events?tenant=t2", 403, ""},
+		{op, "/v1/pools/burst/events?tenant=t2&owner=platform", 403, ""},
+		{op, "/v1/hosts/h0/events?tenant=t2", 403, ""},
+		{op, "/v1/hosts/h2/events?tenant=t2", 200, "host.t2"},
+		{op, "/v1/hosts/h1/events?tenant=t2", 404, ""},
 	} {
 		code, evs := getEvents(t, s, c.key, c.path)
 		if code != c.code {
@@ -595,6 +614,27 @@ func TestInfraEventsVisibility(t *testing.T) {
 		if c.typ != "" && (len(evs) != 1 || evs[0].Type != c.typ) {
 			t.Errorf("%s: %+v, want one %s", c.path, evs, c.typ)
 		}
+	}
+}
+
+// A host's pool events go to the pool of its owner and its pool's name: a
+// platform host in "burst" to the platform's burst, not a tenant's.
+func TestHostPoolEventsGoToItsOwnersPool(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	infraFixture(t, s, ctx)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('poolP', NULL, 'burst', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool, state) VALUES ('hP', NULL, 'hP', 'burst', 'ready')`)
+	for _, h := range []string{"h1", "hP"} {
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return hostPoolEvent(ctx, tx, h, evHostRegistered, map[string]any{"host": h})
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	evs := events(t, s, evHostRegistered)
+	if len(evs) != 2 || evs[0].Owner != "pool1" || evs[1].Owner != "poolP" {
+		t.Fatalf("host_registered events %+v: want h1's on pool1, hP's on poolP", evs)
 	}
 }
 

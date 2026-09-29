@@ -452,6 +452,8 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 		return err
 	}
 	// The placement is on the Run, its host and its host's pool alike.
+	// TODO(pool-owner): name the pool by runs.pool_owner too, once it
+	// exists; by name alone a tenant pool and a platform pool are the same.
 	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID, "pool": h.Pool}); err != nil {
 		return err
 	}

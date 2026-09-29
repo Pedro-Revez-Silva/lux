@@ -81,7 +81,7 @@ export function HostPage({ id }: { id: string }) {
             <IdChip value={h.id} />
             {h.tenant && <span>tenant {h.tenant}</span>}
             <span>
-              pool <Link to={poolPath(h.pool, scope.showTenant && !h.platform ? h.tenant : undefined)}>{h.pool}</Link>
+              pool <Link to={poolPath(h.pool, { platform: h.platform, tenant: scope.showTenant ? h.tenant : undefined })}>{h.pool}</Link>
             </span>
             <Link to={hostRunsPath(h.id)}>
               {h.liveRuns} live run{h.liveRuns === 1 ? "" : "s"} · all runs on this host
@@ -141,8 +141,10 @@ export function HostPage({ id }: { id: string }) {
       {/* The host history rule: operators, and a tenant for its own host (a tenant sees no other non-platform host). */}
       {(scope.operator || !h.platform) && <HostCost id={h.id} range={scope.range} operator={scope.operator} />}
 
-      {/* Like its history: a platform host's events are the operators'. */}
-      {(scope.operator || !h.platform) && <InfraEvents queryKey={`host-events:${id}`} page={(before, s) => api.hostEvents(id, before, s)} interval={5000} subtitle="registration, placements, drains, termination" />}
+      {/* A platform host's events are the operators', not narrowed to a tenant (they name other tenants' Runs). */}
+      {(!h.platform || (scope.operator && !scope.apiTenant)) && (
+        <InfraEvents queryKey={`host-events:${id}@${scope.tenant}`} page={(before, s) => api.hostEvents(id, scope.apiTenant, before, s)} interval={5000} subtitle="registration, placements, drains, termination" />
+      )}
 
       <Card flush title="Recent runs on this host" subtitle="any epoch, newest first, up to 50" actions={<Link to={hostRunsPath(id)}>All runs on this host</Link>}>
         <ErrorStrip error={recent.error} />

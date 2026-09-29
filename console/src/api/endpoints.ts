@@ -36,14 +36,17 @@ export const api = {
   hostCost: (id: string, since: string, signal?: Sig) => request<HostCost>(`/hosts/${enc(id)}/cost`, { query: { since }, signal }),
   drainHost: (id: string, forceEvict = false) => request<{ draining: boolean; host: string }>(`/hosts/${enc(id)}/drain`, { method: "POST", body: { forceEvict } }),
 
-  hostEvents: (id: string, before: number | undefined, signal?: Sig) =>
-    request<{ events: LifecycleEvent[] }>(`/hosts/${enc(id)}/events`, { query: { before, limit: EVENTS_PAGE }, signal }).then((r) => r.events),
+  hostEvents: (id: string, tenant: Scope, before: number | undefined, signal?: Sig) =>
+    request<{ events: LifecycleEvent[] }>(`/hosts/${enc(id)}/events`, { tenant, query: { before, limit: EVENTS_PAGE }, signal }).then((r) => r.events),
 
   pools: (tenant: Scope, signal?: Sig) => request<{ pools: Pool[] }>("/pools", { tenant, signal }).then((r) => r.pools),
-  poolEvents: (name: string, tenant: Scope, before: number | undefined, signal?: Sig) =>
-    request<{ events: LifecycleEvent[] }>(`/pools/${enc(name)}/events`, { tenant, query: { before, limit: EVENTS_PAGE }, signal }).then((r) => r.events),
+  /** owner: which pool of that name, where a tenant's and the platform's share it; undefined: the server's default. */
+  poolEvents: (name: string, tenant: Scope, owner: PoolOwner | undefined, before: number | undefined, signal?: Sig) =>
+    request<{ events: LifecycleEvent[] }>(`/pools/${enc(name)}/events`, { tenant, query: { owner, before, limit: EVENTS_PAGE }, signal }).then((r) => r.events),
   tenants: (signal?: Sig) => request<{ tenants: Tenant[] }>("/tenants", { signal }).then((r) => r.tenants),
 };
+
+export type PoolOwner = "platform" | "tenant";
 
 /** Pool and host events per request: the server's maximum. */
 export const EVENTS_PAGE = 1000;

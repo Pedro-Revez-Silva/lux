@@ -334,7 +334,8 @@ type lifecycleEventsOutput struct {
 type listPoolEventsInput struct {
 	TenantQuery
 	EventPage
-	Name string `path:"name" doc:"The pool's name."`
+	Name  string `path:"name" doc:"The pool's name."`
+	Owner string `query:"owner" enum:"platform,tenant" doc:"Which pool of that name: the platform's, or a tenant's (the caller's, or with ?tenant= that tenant's). Omitted: a tenant's own pool, else the platform's; for an operator not narrowed with ?tenant=, a name two pools share is ambiguous (409)."`
 }
 
 type listHostEventsInput struct {
@@ -343,16 +344,25 @@ type listHostEventsInput struct {
 	EventPage
 }
 
+// seesPlatformEvents: platform pools' and hosts' events name other
+// tenants' Runs, so they are an operator's, and not an operator's narrowed
+// with ?tenant= (which shows what that tenant would see).
+func (p Principal) seesPlatformEvents() bool { return p.Operator && p.TenantID == "" }
+
 func (s *Server) listPoolEvents(ctx context.Context, in *listPoolEventsInput) (*lifecycleEventsOutput, error) {
 	p := principal(ctx)
 	var poolID string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		// A tenant's own pool shadows the platform's of the same name, as
-		// for its Runs. An operator not narrowed to a tenant sees every
-		// pool: a name two of them share is ambiguous.
+		// Unless owner says which, a tenant's own pool shadows the
+		// platform's of the same name, as for its Runs. An operator not
+		// narrowed to a tenant sees every tenant's pool: a name two of
+		// them share is ambiguous.
 		rows, err := tx.Query(ctx, `SELECT id, tenant_id IS NULL FROM pools
-			WHERE name = $2 AND ($1 = '' OR tenant_id = $1 OR tenant_id IS NULL)
-			ORDER BY tenant_id NULLS LAST, retired LIMIT 2`, p.TenantID, in.Name)
+			WHERE name = $2
+			  AND CASE $3 WHEN 'platform' THEN tenant_id IS NULL
+			              WHEN 'tenant' THEN tenant_id IS NOT NULL AND ($1 = '' OR tenant_id = $1)
+			              ELSE $1 = '' OR tenant_id = $1 OR tenant_id IS NULL END
+			ORDER BY tenant_id NULLS LAST, retired LIMIT 2`, p.TenantID, in.Name, in.Owner)
 		if err != nil {
 			return err
 		}
@@ -367,8 +377,8 @@ func (s *Server) listPoolEvents(ctx context.Context, in *listPoolEventsInput) (*
 		case len(pools) == 0:
 			return errNotFound
 		case len(pools) > 1 && p.TenantID == "":
-			return errf(http.StatusConflict, "ambiguous", "more than one pool is named %s: use ?tenant=", in.Name)
-		case pools[0].Platform && !p.Operator:
+			return errf(http.StatusConflict, "ambiguous", "more than one pool is named %s: use ?owner=platform, or ?tenant=", in.Name)
+		case pools[0].Platform && !p.seesPlatformEvents():
 			return errf(http.StatusForbidden, "forbidden", "a platform pool's events are the operators'")
 		}
 		poolID = pools[0].ID
@@ -388,14 +398,12 @@ func (s *Server) listHostEvents(ctx context.Context, in *listHostEventsInput) (*
 		if err != nil {
 			return err
 		}
-		if !p.Operator {
-			var own bool
-			if err := tx.QueryRow(ctx, `SELECT tenant_id IS NOT DISTINCT FROM $2 FROM hosts WHERE id = $1`, id, p.TenantID).Scan(&own); err != nil {
-				return err
-			}
-			if !own {
-				return errf(http.StatusForbidden, "forbidden", "a platform host's events are the operators'")
-			}
+		var platform bool
+		if err := tx.QueryRow(ctx, `SELECT tenant_id IS NULL FROM hosts WHERE id = $1`, id).Scan(&platform); err != nil {
+			return err
+		}
+		if platform && !p.seesPlatformEvents() {
+			return errf(http.StatusForbidden, "forbidden", "a platform host's events are the operators'")
 		}
 		hostID = id
 		return nil
@@ -407,8 +415,8 @@ func (s *Server) listHostEvents(ctx context.Context, in *listHostEventsInput) (*
 }
 
 // lifecycleEvents reads a page of an owner's events, newest first. A
-// tenant reads under its own scope: row-level security holds even if the
-// checks before are wrong.
+// tenant, or an operator narrowed to one, reads under that tenant's scope:
+// row-level security holds even if the checks before are wrong.
 func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable, owner string, page EventPage) (*lifecycleEventsOutput, error) {
 	limit := 100
 	if n, err := strconv.Atoi(page.Limit); err == nil && n > 0 && n <= 1000 {
@@ -422,10 +430,7 @@ func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable,
 		}
 		before = &n
 	}
-	sc := store.System()
-	if !p.Operator {
-		sc = store.Tenant(p.TenantID)
-	}
+	sc := p.scope()
 	out := &lifecycleEventsOutput{}
 	out.Body.Events = []LifecycleEvent{}
 	err := s.db.Tx(ctx, sc, func(tx pgx.Tx) error {

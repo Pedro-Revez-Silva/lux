@@ -63,7 +63,7 @@ export function Pools() {
   );
 }
 
-/** Across tenants, a tenant's pool is linked in its tenant's scope (names repeat across tenants). */
+/** A platform pool's page is the platform's; across tenants, a tenant's pool is linked in its tenant's scope (names repeat across tenants). */
 function poolLink(p: Pool, acrossTenants: boolean): string {
-  return poolPath(p.name, acrossTenants && !p.platform ? p.tenant : undefined);
+  return poolPath(p.name, { platform: p.platform, tenant: acrossTenants ? p.tenant : undefined });
 }

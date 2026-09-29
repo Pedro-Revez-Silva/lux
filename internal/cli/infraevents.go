@@ -14,8 +14,8 @@ import (
 
 // infraEventsCmd is `lux pools events` and `lux hosts events`: newest
 // first, a page at a time (--before an id, --limit), or every page with
-// --all.
-func (a *app) infraEventsCmd(use, short, base string) *cobra.Command {
+// --all. query adds the command's own parameters.
+func (a *app) infraEventsCmd(use, short, base string, query func(url.Values)) *cobra.Command {
 	var before, limit int
 	var all bool
 	cmd := &cobra.Command{
@@ -28,6 +28,9 @@ func (a *app) infraEventsCmd(use, short, base string) *cobra.Command {
 				q := url.Values{"limit": {fmt.Sprint(limit)}}
 				if next > 0 {
 					q.Set("before", fmt.Sprint(next))
+				}
+				if query != nil {
+					query(q)
 				}
 				var resp struct {
 					Events []server.LifecycleEvent `json:"events"`
@@ -55,6 +58,20 @@ func (a *app) infraEventsCmd(use, short, base string) *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 100, "at most this many events (1 to 1000), newest first")
 	cmd.Flags().IntVar(&before, "before", 0, "only events older than this event id (the next page)")
 	cmd.Flags().BoolVar(&all, "all", false, "every event, page after page")
+	return cmd
+}
+
+// poolEventsCmd is `lux pools events`; --platform picks the platform's
+// pool where a tenant's has the same name.
+func (a *app) poolEventsCmd() *cobra.Command {
+	var platform bool
+	cmd := a.infraEventsCmd("events <name>", "What happened to a pool: scale-ups, launches, placements, releases, newest first", "/v1/pools/",
+		func(q url.Values) {
+			if platform {
+				q.Set("owner", "platform")
+			}
+		})
+	cmd.Flags().BoolVar(&platform, "platform", false, "operators: the platform's pool of that name, not a tenant's")
 	return cmd
 }
 

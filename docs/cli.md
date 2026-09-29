@@ -107,7 +107,7 @@ lux pools ls
 lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON]
 lux pools set <name> --provider static --hourly-price 0.40 --currency USD   # default price of hosts registering into it
 lux pools rm <name> [--force-evict]      # admin: cordons its hosts, terminated once idle; --force-evict stops their live Runs too
-lux pools events <name> [--limit N] [--before ID] [--all]   # what happened to it, newest first
+lux pools events <name> [--platform] [--limit N] [--before ID] [--all]   # what happened to it, newest first
 lux hosts events <host> [--limit N] [--before ID] [--all]
 ```
 
@@ -127,7 +127,11 @@ outcome), `host.drain_requested` (its cause), `host.lost`,
 `host.terminate_requested`, `host.terminated` and `host.provider_error`.
 A failure that repeats on every provisioner pass is one event, shown with
 `(×N, last <time>)`. A tenant sees its own pools' and hosts' events; a
-platform pool's or host's are the operators'.
+platform pool's or host's are the operators' (not shown with `--tenant`,
+which shows what that tenant would see). A tenant's pool and the
+platform's may share a name: `lux pools events <name>` is the tenant's
+(for an operator without `--tenant`, an error when two pools share the
+name), `--platform` the platform's.
 
 A static pool's `--hourly-price` is copied to each host when it first
 registers. Changing it later does not reprice the pool's existing hosts:

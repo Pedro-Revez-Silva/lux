@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { Badge, Card, formatBytes, formatCores, KeyValue, PageHeader, StatePill, Table, type Column } from "@lux/design-system";
-import { api, type Host, type Pool } from "../../api/index.ts";
-import { go } from "../router.tsx";
+import { api, type Host, type Pool, type PoolOwner } from "../../api/index.ts";
+import { go, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostPath, labelsText, PageSkeleton, RelativeTime } from "./common.tsx";
 import { InfraEvents } from "./InfraEvents.tsx";
@@ -11,12 +11,17 @@ const POLL = 15_000;
 
 export function PoolPage({ name }: { name: string }) {
   const scope = useScope();
+  const ownerParam = useSearchParams().get("owner");
+  const owner: PoolOwner | undefined = ownerParam === "platform" || ownerParam === "tenant" ? ownerParam : undefined;
   const pools = useScopedQuery("pools", api.pools, { interval: POLL });
   const hosts = useScopedQuery(`pool-hosts:${name}`, (t, s) => api.hosts(t, { pool: name }, s), { interval: POLL });
 
-  // A tenant's own pool shadows the platform's of the same name, as it does
+  // ?owner= picks the platform's pool or a tenant's where both have the
+  // name; without it a tenant's own pool shadows the platform's, as it does
   // for its Runs (and for this page's events).
-  const matches = (pools.data ?? []).filter((p) => p.name === name).sort((a, b) => Number(a.platform) - Number(b.platform));
+  const matches = (pools.data ?? [])
+    .filter((p) => p.name === name && (owner == null || p.platform === (owner === "platform")))
+    .sort((a, b) => Number(a.platform) - Number(b.platform));
   const pool: Pool | undefined = matches[0];
   const ambiguous = scope.showTenant && matches.length > 1;
   const own = useMemo(() => (hosts.data ?? []).filter((h) => pool && h.platform === pool.platform && (pool.platform || h.tenant === pool.tenant)), [hosts.data, pool]);
@@ -32,7 +37,7 @@ export function PoolPage({ name }: { name: string }) {
   if (!pool) {
     return (
       <div className="page">
-        <ErrorBlock error={`No pool named ${name}${scope.apiTenant ? " for this tenant" : ""}.`} />
+        <ErrorBlock error={`No ${owner === "platform" ? "platform " : ""}pool named ${name}${scope.apiTenant ? " for this tenant" : ""}.`} />
       </div>
     );
   }
@@ -40,7 +45,7 @@ export function PoolPage({ name }: { name: string }) {
     return (
       <div className="page">
         <PageHeader title={name} />
-        <ErrorBlock error={`${matches.length} pools are named ${name} (${matches.map((p) => (p.platform ? "platform" : p.tenant)).join(", ")}): pick a tenant.`} />
+        <ErrorBlock error={`${matches.length} pools are named ${name} (${matches.map((p) => (p.platform ? "platform" : p.tenant)).join(", ")}): pick a tenant, or open one from the Pools list.`} />
       </div>
     );
   }
@@ -85,11 +90,11 @@ export function PoolPage({ name }: { name: string }) {
         <PoolHosts hosts={own} loading={hosts.loading} />
       </Card>
 
-      {/* A platform pool's events name other tenants' Runs: the operators'. */}
-      {(scope.operator || !pool.platform) && (
+      {/* A platform pool's events name other tenants' Runs: the operators', not narrowed to a tenant. */}
+      {(!pool.platform || (scope.operator && !scope.apiTenant)) && (
         <InfraEvents
-          queryKey={`pool-events:${name}@${scope.tenant}`}
-          page={(before, s) => api.poolEvents(name, scope.apiTenant, before, s)}
+          queryKey={`pool-events:${name}@${scope.tenant}/${pool.platform ? "platform" : "tenant"}`}
+          page={(before, s) => api.poolEvents(name, scope.apiTenant, pool.platform ? "platform" : "tenant", before, s)}
           interval={POLL}
           subtitle="scale-ups, launches, placements and releases"
         />
