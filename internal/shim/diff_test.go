@@ -301,6 +301,19 @@ func TestDiffFlaggedEntriesOmitted(t *testing.T) {
 	}
 }
 
+// An untracked nested repository has no patch: it is omitted, and the
+// diff truncated.
+func TestDiffNestedRepoOmitted(t *testing.T) {
+	dir, base := newRepo(t, map[string]string{"a.txt": "one\n"})
+	gitT(t, dir, "init", "-q", "nested")
+	write(t, dir, "nested/f.txt", "inner\n", 0o644)
+	write(t, dir, "new.txt", "new\n", 0o644)
+	d := diffOne(t, dir, base, proto.DiffBaseClone)
+	if !d.Truncated || d.OmittedCount != 1 || len(d.Omitted) != 1 || d.Omitted[0] != "nested/" || d.Files != 1 {
+		t.Fatalf("%+v", d)
+	}
+}
+
 // A repository that fails does not fail the others.
 func TestDiffOneRepoFails(t *testing.T) {
 	dir, base := newRepo(t, map[string]string{"a.txt": "one\n"})

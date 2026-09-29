@@ -1153,7 +1153,7 @@ components:
           format: int64
           type: integer
         omitted:
-          description: "Up to 50 paths the diff cannot show: tracked files marked assume-unchanged or skip-worktree."
+          description: "Up to 50 paths the diff cannot show: tracked files marked assume-unchanged or skip-worktree, untracked nested repositories (listed as dir/) and other untracked entries that are neither files nor symlinks."
           items:
             type: string
           type:

@@ -162,10 +162,15 @@ func (w *repoWork) trackedDiff(ctx context.Context, r proto.DiffRepo, base strin
 		return err
 	}
 	for p := range strings.SplitSeq(string(list), "\x00") {
-		// A nested repository is listed as its directory ("sub/"); fifos
-		// and sockets have no content to show.
-		if fi, err := os.Lstat(filepath.Join(r.Path, p)); p != "" && err == nil && (fi.Mode().IsRegular() || fi.Mode()&os.ModeSymlink != 0) {
+		// A nested repository is listed as its directory ("sub/"); it, a
+		// fifo or a socket has no patch to show. One gone since is none.
+		fi, err := os.Lstat(filepath.Join(r.Path, p))
+		switch {
+		case p == "" || err != nil:
+		case fi.Mode().IsRegular() || fi.Mode()&os.ModeSymlink != 0:
 			w.untracked = append(w.untracked, p)
+		default:
+			w.omit(p)
 		}
 	}
 	return nil

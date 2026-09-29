@@ -42,7 +42,7 @@ func TestDiffText(t *testing.T) {
 	}
 	// Omitted paths are named on stderr, past the list as a count.
 	d.Repos[1].Omitted, d.Repos[1].OmittedCount, d.Repos[1].Truncated = []string{"x.txt", "y.txt"}, 3, true
-	if _, _, errOut := diffCLI(t, d); !strings.Contains(errOut, "lux: repo same: not in the diff, marked assume-unchanged or skip-worktree: x.txt, y.txt and 1 more;") {
+	if _, _, errOut := diffCLI(t, d); !strings.Contains(errOut, "lux: repo same: not in the diff (assume-unchanged or skip-worktree files, untracked nested repositories or special files): x.txt, y.txt and 1 more;") {
 		t.Fatal(errOut)
 	}
 	// A repository that failed: exit 1, in JSON too.
