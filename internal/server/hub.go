@@ -43,6 +43,8 @@ type runnerConn struct {
 	send   chan proto.Frame
 	notify chan struct{}
 	done   chan struct{}
+	// caps: the optional features its runner said it has (proto.CapDiff).
+	caps []string
 }
 
 func (h *Hub) conn(hostID string) *runnerConn {
@@ -225,6 +227,7 @@ func (s *Server) serveRunnerWS(w http.ResponseWriter, r *http.Request) error {
 		send:   make(chan proto.Frame, 256),
 		notify: make(chan struct{}, 1),
 		done:   make(chan struct{}),
+		caps:   hello.Capabilities,
 	}
 	if err := writeFrame(ctx, ws, proto.Frame{Type: proto.MsgWelcome, Data: proto.Marshal(welcome)}); err != nil {
 		return nil
@@ -286,7 +289,7 @@ func (s *Server) serveRunnerWS(w http.ResponseWriter, r *http.Request) error {
 			}
 		case proto.MsgStreamData, proto.MsgStreamClose:
 			s.hub.route(f.Stream, f)
-		case proto.MsgOutputRecords, proto.MsgOutputEnd:
+		case proto.MsgOutputRecords, proto.MsgOutputEnd, proto.MsgDiffResult:
 			var ref struct {
 				SubID string `json:"subId"`
 			}

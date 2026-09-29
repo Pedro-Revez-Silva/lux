@@ -156,6 +156,9 @@ func (c *conn) dispatch(ctx context.Context, f proto.Frame) {
 	case proto.MsgOutputSubscribe, proto.MsgOutputCancel:
 		// Live, not durable: no ack.
 		go c.r.handleLive(ctx, f)
+	case proto.MsgDiffRequest:
+		// Live, not durable: no ack.
+		go c.r.serveDiff(ctx, f)
 	default:
 		// Durable control message: handle, then ack. Handling must be
 		// idempotent: an unacked message is redelivered on reconnect.
