@@ -355,7 +355,8 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   in halves until that id is alone. A tag listing alone never terminates
   or writes off anything. A host lost for over 5 minutes is terminated.
 - One luxd instance does all this at a time (a lease in Postgres). The
-  lease carries a fencing token, new whenever another luxd takes it; each
+  lease carries a fencing token, new whenever it is taken after another
+  luxd held it or after it expired (by the same luxd too); each
   terminate, re-tag and write-off first checks that the pass still holds
   the lease it began with, and EC2 calls are cancelled when it expires.
 

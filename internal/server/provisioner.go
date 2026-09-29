@@ -854,17 +854,21 @@ func (s *Server) provisionLeaseDuration() time.Duration {
 
 // provisionLease makes this luxd the provisioner for the next while, if
 // no other one is (a row with a holder and an expiry); nil if another is.
-// A different holder taking the lease draws a new token.
+// Taking the lease draws a new token unless this luxd holds it unexpired:
+// after an expiry, even its own earlier pass may have been overtaken.
+// Expiry is compared with clock_timestamp(), not now(): the statement may
+// have waited for the row's lock since the transaction began (ON CONFLICT
+// judges its WHERE once it holds the lock).
 func (s *Server) provisionLease(ctx context.Context) (*passLease, error) {
 	start := time.Now()
 	var l passLease
 	var left float64
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `INSERT INTO leases (name, holder, expires_at, token) VALUES ('provisioner', $1, now() + $2::interval, nextval('lease_tokens'))
-			ON CONFLICT (name) DO UPDATE SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at,
-				token = CASE WHEN leases.holder = EXCLUDED.holder THEN leases.token ELSE EXCLUDED.token END
-				WHERE leases.holder = EXCLUDED.holder OR leases.expires_at < now()
-			RETURNING token, extract(epoch FROM expires_at - now())::float8`, s.id, interval(s.provisionLeaseDuration())).Scan(&l.token, &left)
+		return tx.QueryRow(ctx, `INSERT INTO leases (name, holder, expires_at, token) VALUES ('provisioner', $1, clock_timestamp() + $2::interval, nextval('lease_tokens'))
+			ON CONFLICT (name) DO UPDATE SET holder = EXCLUDED.holder, expires_at = clock_timestamp() + $2::interval,
+				token = CASE WHEN leases.holder = EXCLUDED.holder AND leases.expires_at > clock_timestamp() THEN leases.token ELSE EXCLUDED.token END
+				WHERE leases.holder = EXCLUDED.holder OR leases.expires_at < clock_timestamp()
+			RETURNING token, extract(epoch FROM expires_at - clock_timestamp())::float8`, s.id, interval(s.provisionLeaseDuration())).Scan(&l.token, &left)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -879,16 +883,18 @@ func (s *Server) provisionLease(ctx context.Context) (*passLease, error) {
 }
 
 // renewLease extends the pass's lease, or says it is fenced: another luxd
-// took it (a different token) or it could not be renewed.
+// took it, it expired, or it was taken again (a new token).
 func (s *Server) renewLease(ctx context.Context, l *passLease) error {
-	now, err := s.provisionLease(ctx)
+	var until time.Time
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var err error
+		until, err = s.fenceTx(ctx, tx, l)
+		return err
+	})
 	if err != nil {
 		return err
 	}
-	if now == nil || now.token != l.token {
-		return errFenced
-	}
-	l.expires = now.expires
+	l.expires = until
 	return nil
 }
 
@@ -896,13 +902,18 @@ func (s *Server) renewLease(ctx context.Context, l *passLease) error {
 // with (same holder, same token, not expired) and renews it. The lease row
 // stays locked until tx ends, so no other luxd takes the lease between
 // this check and what tx decides. It returns when the lease expires, by
-// this process's clock.
+// this process's clock, derived from the database's clock after the lock.
 func (s *Server) fenceTx(ctx context.Context, tx pgx.Tx, l *passLease) (time.Time, error) {
+	// The lock first, in its own statement: an UPDATE judges its WHERE
+	// before waiting for a row lock, and again only if the row changed.
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM leases WHERE name = 'provisioner' FOR UPDATE`); err != nil {
+		return time.Time{}, err
+	}
 	start := time.Now()
 	var left float64
-	err := tx.QueryRow(ctx, `UPDATE leases SET expires_at = now() + $3::interval
-		WHERE name = 'provisioner' AND holder = $1 AND token = $2 AND expires_at > now()
-		RETURNING extract(epoch FROM expires_at - now())::float8`, s.id, l.token, interval(s.provisionLeaseDuration())).Scan(&left)
+	err := tx.QueryRow(ctx, `UPDATE leases SET expires_at = clock_timestamp() + $3::interval
+		WHERE name = 'provisioner' AND holder = $1 AND token = $2 AND expires_at > clock_timestamp()
+		RETURNING extract(epoch FROM expires_at - clock_timestamp())::float8`, s.id, l.token, interval(s.provisionLeaseDuration())).Scan(&left)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return time.Time{}, errFenced
 	}

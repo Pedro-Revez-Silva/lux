@@ -320,6 +320,29 @@ func TestProvisionLeaseToken(t *testing.T) {
 	if c.token == b.token || c.token == a.token {
 		t.Errorf("taking over an expired lease kept a token (%d; before %d, %d)", c.token, a.token, b.token)
 	}
+
+	// The same luxd taking its own lease again after it expired: a new
+	// token, and the pass that held it before is fenced.
+	execSQL(t, f.s, f.ctx, `UPDATE leases SET expires_at = now() - interval '1 second'`)
+	if err := f.s.renewLease(f.ctx, c); !errors.Is(err, errFenced) {
+		t.Errorf("renewing an expired lease: %v, want fenced", err)
+	}
+	if got := f.query(t, `SELECT (expires_at < now())::text FROM leases`); got != "true" {
+		t.Error("a refused renewal took the lease again")
+	}
+	d := takeLease(t, f.s)
+	if d.token == c.token {
+		t.Errorf("re-taking its own expired lease kept token %d", c.token)
+	}
+	if err := f.s.writeOff(f.ctx, c, "h1", "test"); !errors.Is(err, errFenced) {
+		t.Errorf("the earlier pass's write-off after its lease was re-taken: %v, want fenced", err)
+	}
+	if got := f.query(t, `SELECT state FROM hosts WHERE id = 'h1'`); got == "terminated" {
+		t.Error("the earlier pass wrote a host off")
+	}
+	if err := f.s.renewLease(f.ctx, d); err != nil {
+		t.Errorf("renewing the current lease: %v", err)
+	}
 }
 
 // A launch whose RunInstances, sent with the old tag, is answered only
@@ -364,5 +387,64 @@ func TestRenameRaceLateLaunchUnderTheOldTag(t *testing.T) {
 		if got := f.query(t, `SELECT state FROM hosts WHERE id = $1`, h); got == "terminated" {
 			t.Errorf("%s written off", h)
 		}
+	}
+}
+
+// A renewal that waited for the lease row's lock past the lease's expiry
+// is refused: expiry is judged by the clock after the wait, not by the
+// transaction's start.
+func TestLeaseRenewalAfterALockWait(t *testing.T) {
+	f := newRenameFixture(t, false)
+	ctx, cancel := context.WithTimeout(f.ctx, raceWait)
+	defer cancel()
+	l := takeLease(t, f.s)
+	execSQL(t, f.s, ctx, `UPDATE leases SET expires_at = now() + interval '300 milliseconds'`)
+	tx := systemTx(t, ctx, f.s)
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM leases WHERE name = 'provisioner' FOR UPDATE`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- f.s.renewLease(ctx, l) }()
+	time.Sleep(600 * time.Millisecond)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := recv(t, done, "the renewal"); !errors.Is(err, errFenced) {
+		t.Fatalf("a renewal that waited past the expiry: %v, want fenced", err)
+	}
+}
+
+// Likewise taking the lease: this luxd's own lease that expired while the
+// acquisition waited for the row's lock is taken with a new token.
+func TestLeaseAcquisitionAfterALockWait(t *testing.T) {
+	f := newRenameFixture(t, false)
+	ctx, cancel := context.WithTimeout(f.ctx, raceWait)
+	defer cancel()
+	l := takeLease(t, f.s)
+	execSQL(t, f.s, ctx, `UPDATE leases SET expires_at = now() + interval '300 milliseconds'`)
+	tx := systemTx(t, ctx, f.s)
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM leases WHERE name = 'provisioner' FOR UPDATE`); err != nil {
+		t.Fatal(err)
+	}
+	type got struct {
+		l   *passLease
+		err error
+	}
+	done := make(chan got, 1)
+	go func() {
+		var g got
+		g.l, g.err = f.s.provisionLease(ctx)
+		done <- g
+	}()
+	time.Sleep(600 * time.Millisecond)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	g := recv(t, done, "the acquisition")
+	if g.err != nil || g.l == nil {
+		t.Fatalf("taking the lease after it expired: %v, %v", g.l, g.err)
+	}
+	if g.l.token == l.token {
+		t.Fatalf("kept token %d across an expiry", l.token)
 	}
 }
