@@ -119,11 +119,22 @@ func lockPoolName(ctx context.Context, tx pgx.Tx, tenantID, name string) error {
 	return err
 }
 
-// CheckPoolNameFree holds the tenant's ("": the platform's) pool name
-// until the transaction ends and refuses it while it is a live alias of a
-// pool: instances may still carry it.
+// lockPoolNameAnyOwner holds a pool name for every owner until tx ends:
+// a platform pool's rename looks for tenants' pools by its new name, which
+// no tenant may create meanwhile. Taken after lockPoolName.
+func lockPoolNameAnyOwner(ctx context.Context, tx pgx.Tx, name string) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('pool-name-any:' || $1, 0))`, name)
+	return err
+}
+
+// CheckPoolNameFree holds the tenant's ("": the platform's) pool name, for
+// that owner and across owners, until the transaction ends, and refuses it
+// while it is a live alias of a pool: instances may still carry it.
 func CheckPoolNameFree(ctx context.Context, tx pgx.Tx, tenantID, name string) error {
 	if err := lockPoolName(ctx, tx, tenantID, name); err != nil {
+		return err
+	}
+	if err := lockPoolNameAnyOwner(ctx, tx, name); err != nil {
 		return err
 	}
 	return checkNotAlias(ctx, tx, tenantID, name, "")
@@ -243,6 +254,9 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 		}
 		checkName := to != ""
 		if checkName {
+			if err := lockPoolNameAnyOwner(ctx, tx, to); err != nil {
+				return err
+			}
 			if err := lockProvisionerLease(ctx, tx); err != nil {
 				return err
 			}

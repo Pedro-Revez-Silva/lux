@@ -270,3 +270,39 @@ func TestHostTokenDuringARename(t *testing.T) {
 		t.Fatalf("host tokens name %s, want burst-us only", got)
 	}
 }
+
+// A tenant creating a pool named like a platform pool's new name while it
+// is renamed: the rename waits for it, then sees it (the tenant's Runs
+// that follow the platform pool would resolve to it) and is refused.
+func TestTenantPoolCreatedDuringAPlatformRename(t *testing.T) {
+	s := testServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), raceWait)
+	defer cancel()
+	if err := s.checkIn(ctx); err != nil {
+		t.Fatal(err)
+	}
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 'acme')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('plat', NULL, 'shared', 'static')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r1', 't1', '{"placement":{"pool":"shared"}}', 'provisioning')`)
+
+	tx := systemTx(t, ctx, s)
+	if err := CheckPoolNameFree(ctx, tx, "t1", "gpu"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('mine', 't1', 'gpu', 'static')`); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := renameConfirmed(ctx, s, "", "shared", "gpu", false)
+		done <- err
+	}()
+	blocked(t, done, "a platform rename during a tenant's pool creation")
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	err := recv(t, done, "the rename")
+	if st, code, _ := httpErr(err); st != http.StatusConflict || code != "pool_exists" {
+		t.Fatalf("platform rename onto a tenant's pool created meanwhile: %v", err)
+	}
+}
