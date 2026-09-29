@@ -96,3 +96,50 @@ func TestLaunchReturnsInstanceFacts(t *testing.T) {
 		t.Errorf("requested markets %q, want on-demand (none) then spot", markets)
 	}
 }
+
+// Retag sends one CreateTags for every instance, with the one tag, and
+// passes an IAM refusal back as an error.
+func TestRetagSendsCreateTags(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_PROFILE", "")
+	var got []map[string]string
+	deny := false
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		form := map[string]string{}
+		for k, v := range r.PostForm {
+			form[k] = v[0]
+		}
+		got = append(got, form)
+		w.Header().Set("Content-Type", "text/xml")
+		if deny {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, `<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>no</Message></Error></Errors><RequestID>x</RequestID></Response>`)
+			return
+		}
+		fmt.Fprint(w, `<CreateTagsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><return>true</return></CreateTagsResponse>`)
+	}))
+	defer fake.Close()
+	p := New(fake.URL)
+	tmpl := json.RawMessage(`{"region":"eu-west-1"}`)
+	if err := p.Retag(context.Background(), tmpl, []string{"i-1", "i-2"}, "lux:pool", "t1/new"); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"Action": "CreateTags", "ResourceId.1": "i-1", "ResourceId.2": "i-2", "Tag.1.Key": "lux:pool", "Tag.1.Value": "t1/new"}
+	for k, v := range want {
+		if got[0][k] != v {
+			t.Errorf("%s = %q, want %q (%v)", k, got[0][k], v, got[0])
+		}
+	}
+	if _, extra := got[0]["Tag.2.Key"]; extra {
+		t.Errorf("more than one tag sent: %v", got[0])
+	}
+	deny = true
+	if err := p.Retag(context.Background(), tmpl, []string{"i-1"}, "lux:pool", "t1/new"); err == nil || !strings.Contains(err.Error(), "UnauthorizedOperation") {
+		t.Errorf("a refused CreateTags: err = %v", err)
+	}
+}

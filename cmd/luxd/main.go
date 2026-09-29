@@ -371,6 +371,9 @@ func admin(ctx context.Context, cfg config, args []string) error {
 			if err := server.CheckPoolName(ctx, tx, optional(*tenant), *name); err != nil {
 				return err
 			}
+			if err := server.CheckPoolNameFree(ctx, tx, *tenant, *name); err != nil {
+				return err
+			}
 			_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
 					scale_down_after_s, warm_while_active, hourly_price, price_currency)
 				VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11, nullif($12, '')::numeric, nullif($13, ''))

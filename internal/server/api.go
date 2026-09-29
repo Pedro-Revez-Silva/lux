@@ -322,6 +322,16 @@ func (s *Server) routes(api huma.API) {
 			"forceEvict also stops its hosts' live Runs so they resume elsewhere.",
 		Errors: []int{http.StatusNotFound},
 	}, "admin", forTenant(s.deletePool))
+	register(s, api, huma.Operation{
+		OperationID: "renamePool", Method: http.MethodPost, Path: "/v1/pools/{name}/rename", Tags: []string{"pools"},
+		Summary: "Rename a pool",
+		Description: "Its hosts, host tokens and Runs not yet final follow in one step: they name the new pool from then on, and Runs waiting for it still schedule. " +
+			"Final Runs keep the spec they ran with. A provisioned pool's instances stay up and are re-tagged with the new name (lux:pool) by the provisioner; " +
+			"until that is done the pool lists `renamedFrom`, its old name stays reserved and the pool cannot be renamed again (409 rename_in_progress). " +
+			"409 pool_exists if the new name is taken, by a live or retired pool of the tenant; 422 for an invalid name. " +
+			"A tenant's own pools; with an operator key and no tenant, a platform pool. dryRun counts what would follow without renaming.",
+		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
+	}, "admin", s.renamePool)
 }
 
 type statusBody struct {
@@ -1807,9 +1817,14 @@ type Pool struct {
 	// HourlyPrice and Currency: a static pool's default price, copied to
 	// each host when it first registers. Changing it does not reprice the
 	// pool's existing hosts (PUT /v1/hosts/{id}/price does, one host).
-	HourlyPrice string `json:"hourlyPrice,omitempty" doc:"Static pools: the default hourly price of hosts registering into the pool, a decimal string with up to 9 fractional digits. Copied to each host when it first registers; changing it does not reprice existing hosts. Refused for ec2 pools, which the provider prices." example:"0.40"`
-	Currency    string `json:"currency,omitempty" doc:"The currency of hourlyPrice (ISO 4217); both or neither." example:"USD"`
+	HourlyPrice string  `json:"hourlyPrice,omitempty" doc:"Static pools: the default hourly price of hosts registering into the pool, a decimal string with up to 9 fractional digits. Copied to each host when it first registers; changing it does not reprice existing hosts. Refused for ec2 pools, which the provider prices." example:"0.40"`
+	Currency    string  `json:"currency,omitempty" doc:"The currency of hourlyPrice (ISO 4217); both or neither." example:"USD"`
+	RenamedFrom *string `json:"renamedFrom,omitempty" readOnly:"true" doc:"While a rename is unfinished (its instances are being re-tagged), the pool's previous name. No pool may take that name meanwhile, and the pool cannot be renamed again."`
 }
+
+const poolColumns = `p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
+	coalesce(p.scale_down_after_s, 0), p.warm_while_active,
+	p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, ''), p.renamed_from`
 
 type listPoolsOutput struct {
 	Body struct {
@@ -1821,9 +1836,7 @@ func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutpu
 	p := principal(ctx)
 	pools := []Pool{}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
-				coalesce(p.scale_down_after_s, 0), p.warm_while_active,
-				p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, '')
+		rows, err := tx.Query(ctx, `SELECT `+poolColumns+`
 			FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id
 			WHERE ($1 = '' OR p.tenant_id = $1 OR p.tenant_id IS NULL) AND NOT p.retired ORDER BY p.name, t.name NULLS FIRST`, p.TenantID)
 		if err != nil {
@@ -1834,7 +1847,7 @@ func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutpu
 			var pl Pool
 			var sda int
 			if err := rows.Scan(&pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts,
-				&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency); err != nil {
+				&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &pl.RenamedFrom); err != nil {
 				return err
 			}
 			pl.ScaleDownAfter.Duration = time.Duration(sda) * time.Second
@@ -1913,6 +1926,7 @@ type poolBody struct {
 func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	p := principal(ctx)
 	pl := in.Body
+	pl.RenamedFrom = nil
 	if pl.Name == "" || (pl.Provider != "static" && pl.Provider != "ec2") {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "name and provider (static | ec2) are required")
 	}
@@ -1954,6 +1968,9 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "scaleDownAfter must be at least 1s")
 	}
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		if err := CheckPoolNameFree(ctx, tx, p.TenantID, pl.Name); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
 				scale_down_after_s, warm_while_active, hourly_price, price_currency)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''))

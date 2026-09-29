@@ -219,3 +219,7 @@ func TestHostAPIReturnsHostFacts(t *testing.T) {
 		})
 	}
 }
+
+func (p *fakeLaunchProvider) Retag(ctx context.Context, template json.RawMessage, providerIDs []string, key, value string) error {
+	return nil
+}

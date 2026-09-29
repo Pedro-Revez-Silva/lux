@@ -25,6 +25,8 @@ type Provider interface {
 	// Instances lists the provider's hosts carrying all the given tags,
 	// by provider id.
 	Instances(ctx context.Context, template json.RawMessage, tags map[string]string) (map[string]Instance, error)
+	// Retag sets one tag on hosts it launched (a pool rename).
+	Retag(ctx context.Context, template json.RawMessage, providerIDs []string, key, value string) error
 }
 
 // Launched is a host as the provider started it. InstanceType is the
@@ -106,7 +108,14 @@ type poolRow struct {
 	// ScaleDownAfterS: the pool's own idle seconds, or nil for luxd's.
 	ScaleDownAfterS *int
 	WarmWhileActive bool
+	// RenamedFrom: the old name while a rename re-tags its instances;
+	// RetaggedAt: when it last re-tagged some (poolrename.go).
+	RenamedFrom *string
+	RetaggedAt  *time.Time
 }
+
+const poolRowColumns = `id, name, provider, tenant_id, template, min_hosts, max_hosts, warm_hosts, retired,
+	scale_down_after_s, warm_while_active, renamed_from, retagged_at`
 
 func (s *Server) provision(ctx context.Context) error {
 	// Leadership: a lease in the database, not a lock held on a connection
@@ -117,10 +126,9 @@ func (s *Server) provision(ctx context.Context) error {
 	}
 	var pools []poolRow
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id, name, provider, tenant_id, template, min_hosts, max_hosts, warm_hosts, retired,
-				scale_down_after_s, warm_while_active
+		rows, err := tx.Query(ctx, `SELECT `+poolRowColumns+`
 			FROM pools WHERE provider <> 'static'
-			  AND (NOT retired OR EXISTS (SELECT 1 FROM hosts h WHERE h.pool = pools.name
+			  AND (NOT retired OR renamed_from IS NOT NULL OR EXISTS (SELECT 1 FROM hosts h WHERE h.pool = pools.name
 			       AND coalesce(h.tenant_id, '') = coalesce(pools.tenant_id, '') AND h.state <> 'terminated'))`)
 		if err != nil {
 			return err
@@ -184,6 +192,16 @@ type hostRef struct {
 func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, checkAlive bool) error {
 	var st poolState
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// The row as of now, held until its hosts are read: a rename that
+		// committed since the pools were listed must not pair the old name
+		// with hosts that carry the new one.
+		rows, err := tx.Query(ctx, `SELECT `+poolRowColumns+` FROM pools WHERE id = $1 FOR SHARE`, pl.ID)
+		if err != nil {
+			return err
+		}
+		if pl, err = pgx.CollectExactlyOneRow(rows, pgx.RowToStructByPos[poolRow]); err != nil {
+			return err
+		}
 		return s.poolState(ctx, tx, pl, &st)
 	})
 	if err != nil {
@@ -252,34 +270,59 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 		templates[string(h.Template)] = h.Template
 		rows[h.ProviderID] = h
 	}
-	tags := s.poolTags(pl)
+	// A pool being renamed is listed under its old name too (poolrename.go):
+	// its instances are its own whichever name they carry.
+	tagSets := []map[string]string{s.poolTags(pl)}
+	var oldTag string
+	if pl.RenamedFrom != nil {
+		oldTag = poolTagValue(pl.TenantID, *pl.RenamedFrom)
+		old := s.poolTags(pl)
+		old[tagPool] = oldTag
+		tagSets = append(tagSets, old)
+	}
+	rc := renameCheck{stale: map[string][]string{}, templates: templates}
 	listed := map[string]bool{}
-	for _, tmpl := range templates {
-		insts, err := prov.Instances(ctx, tmpl, tags)
-		if err != nil {
-			s.log.Warn("provider check", "pool", pl.Name, "err", err)
-			return
-		}
-		for pid, inst := range insts {
-			if listed[pid] {
-				continue // two templates in one region list the same instances
+	listedNew := map[string]bool{} // under the pool's current name
+	for key, tmpl := range templates {
+		for i, tags := range tagSets {
+			insts, err := prov.Instances(ctx, tmpl, tags)
+			if err != nil {
+				s.log.Warn("provider check", "pool", pl.Name, "err", err)
+				return
 			}
-			listed[pid] = true
-			gone := inst.State == "terminated" || inst.State == "shutting-down"
-			h, known := rows[pid]
-			switch {
-			case known && gone:
-				s.providerGone(ctx, h, st)
-			case !known && !gone && st.launching[inst.Tags[tagHost]]:
-				// A launch whose instance id is not recorded yet (in flight,
-				// or luxd stopped mid-launch): its row claims it.
-				s.recordProviderID(ctx, inst.Tags[tagHost], pid)
-			case !known && !gone:
-				// No live row claims it: an orphan (a launch whose reply was
-				// lost, or a host written off). Terminate it.
-				s.log.Warn("terminating an orphaned instance", "pool", pl.Name, "providerId", pid)
-				if err := prov.Terminate(ctx, tmpl, pid); err != nil {
-					s.log.Warn("terminate orphan", "providerId", pid, "err", err)
+			for pid, inst := range insts {
+				if i == 0 {
+					listedNew[pid] = true
+				}
+				if listed[pid] {
+					continue // two templates in one region, or both names, list the same instances
+				}
+				listed[pid] = true
+				gone := inst.State == "terminated" || inst.State == "shutting-down"
+				h, known := rows[pid]
+				if oldTag != "" && !gone && inst.Tags[tagPool] == oldTag {
+					if known {
+						rc.stale[key] = append(rc.stale[key], pid)
+					} else {
+						// A launch not recorded yet, or an orphan terminated
+						// below: the rename waits for either to settle.
+						rc.unlisted = true
+					}
+				}
+				switch {
+				case known && gone:
+					s.providerGone(ctx, h, st)
+				case !known && !gone && st.launching[inst.Tags[tagHost]]:
+					// A launch whose instance id is not recorded yet (in flight,
+					// or luxd stopped mid-launch): its row claims it.
+					s.recordProviderID(ctx, inst.Tags[tagHost], pid)
+				case !known && !gone:
+					// No live row claims it: an orphan (a launch whose reply was
+					// lost, or a host written off). Terminate it.
+					s.log.Warn("terminating an orphaned instance", "pool", pl.Name, "providerId", pid)
+					if err := prov.Terminate(ctx, tmpl, pid); err != nil {
+						s.log.Warn("terminate orphan", "providerId", pid, "err", err)
+					}
 				}
 			}
 		}
@@ -287,9 +330,14 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 	// Terminated instances drop out of the provider's listings after a while
 	// (EC2 purges them): a settled host that is not listed is gone too. It
 	// is terminated first all the same: if a listing was merely incomplete,
-	// a host written off must not run on.
+	// a host written off must not run on. Not within listing_lag of a
+	// rename's re-tag, when an instance may briefly match neither name.
+	retagging := pl.RetaggedAt != nil && time.Since(*pl.RetaggedAt) < s.cfg.ListingLag
 	for pid, h := range rows {
-		if listed[pid] || !h.Settled {
+		if !listedNew[pid] {
+			rc.unlisted = true
+		}
+		if listed[pid] || !h.Settled || retagging {
 			continue
 		}
 		if err := prov.Terminate(ctx, h.Template, pid); err != nil {
@@ -297,6 +345,9 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 			continue
 		}
 		s.providerGone(ctx, h, st)
+	}
+	if pl.RenamedFrom != nil {
+		s.retagRenamed(ctx, prov, pl, st, rc)
 	}
 }
 
@@ -320,11 +371,7 @@ func (s *Server) providerGone(ctx context.Context, h hostRef, st *poolState) {
 // poolTags are the tags every instance of a pool carries, and what its
 // instances are listed by. Tenant pools are named by tenant and name.
 func (s *Server) poolTags(pl poolRow) map[string]string {
-	pool := pl.Name
-	if pl.TenantID != nil {
-		pool = *pl.TenantID + "/" + pl.Name
-	}
-	return map[string]string{tagManaged: "true", tagDeployment: s.deployment, tagPool: pool}
+	return map[string]string{tagManaged: "true", tagDeployment: s.deployment, tagPool: poolTagValue(pl.TenantID, pl.Name)}
 }
 
 // warm is how many idle hosts the pool keeps ready: its warm count, or
@@ -450,7 +497,18 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow) error {
 	name := fmt.Sprintf("%s-%s", pl.Name, hostID[len(hostID)-8:])
 	token := ids.Secret("luxh")
 	tokenID := ids.New(ids.HostToken)
+	renamed := false
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// Not under a name the pool has just left (a rename): the row
+		// would join no pool. Held until commit, so a rename after it
+		// moves this row too, and the provisioner re-tags its instance.
+		var current string
+		if err := tx.QueryRow(ctx, `SELECT name FROM pools WHERE id = $1 FOR SHARE`, pl.ID).Scan(&current); err != nil {
+			return err
+		}
+		if renamed = current != pl.Name; renamed {
+			return nil
+		}
 		if pl.TenantID != nil {
 			if err := checkHostQuota(ctx, tx, *pl.TenantID); err != nil {
 				return err
@@ -469,7 +527,7 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow) error {
 	if errors.As(err, &he) && he.Code == "quota_exceeded" {
 		return nil // at the tenant's host quota: Runs wait
 	}
-	if err != nil {
+	if err != nil || renamed {
 		return err
 	}
 	env := map[string]string{"LUX_URL": s.cfg.RunnerURL, "LUX_HOST_TOKEN": token, "LUX_HOST_NAME": name}

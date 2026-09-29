@@ -960,6 +960,10 @@ components:
           type: boolean
         provider:
           type: string
+        renamedFrom:
+          description: While a rename is unfinished (its instances are being re-tagged), the pool's previous name. No pool may take that name meanwhile, and the pool cannot be renamed again.
+          readOnly: true
+          type: string
         scaleDownAfter:
           description: "How long a provisioned host stays idle before it is released, e.g. 600s; empty: luxd's scale_down_after (default 10m)."
           oneOf:
@@ -992,6 +996,26 @@ components:
           type:
             - array
             - "null"
+      type: object
+    PoolRenamed:
+      additionalProperties: false
+      properties:
+        dryRun:
+          type: boolean
+        hosts:
+          description: The pool's hosts that are not terminated; they follow the rename.
+          format: int64
+          type: integer
+        instances:
+          description: "Of those hosts, the ones a provider launched: the provisioner re-tags their instances (lux:pool) after the rename."
+          format: int64
+          type: integer
+        pool:
+          $ref: "#/components/schemas/Pool"
+        runs:
+          description: Runs not yet final (neither succeeded, failed nor cancelled) that name the pool; their spec names the new one.
+          format: int64
+          type: integer
       type: object
     Port:
       additionalProperties: false
@@ -1069,6 +1093,15 @@ components:
           type: string
         secret:
           description: The secret (in secrets) holding user:password, or a bare token (sent as the password, with the user lux).
+          type: string
+      type: object
+    RenamePoolRequest:
+      additionalProperties: false
+      properties:
+        name:
+          description: The new name.
+          examples:
+            - burst-eu
           type: string
       type: object
     Repository:
@@ -3261,6 +3294,89 @@ paths:
       security:
         - apiKey: []
       summary: Remove a pool
+      tags:
+        - pools
+  /v1/pools/{name}/rename:
+    post:
+      description: |-
+        Its hosts, host tokens and Runs not yet final follow in one step: they name the new pool from then on, and Runs waiting for it still schedule. Final Runs keep the spec they ran with. A provisioned pool's instances stay up and are re-tagged with the new name (lux:pool) by the provisioner; until that is done the pool lists `renamedFrom`, its old name stays reserved and the pool cannot be renamed again (409 rename_in_progress). 409 pool_exists if the new name is taken, by a live or retired pool of the tenant; 422 for an invalid name. A tenant's own pools; with an operator key and no tenant, a platform pool. dryRun counts what would follow without renaming.
+
+        Needs the `admin` scope.
+      operationId: renamePool
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: The pool's current name.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The pool's current name.
+            type: string
+        - description: Check the rename and count what would follow it, without renaming.
+          explode: false
+          in: query
+          name: dryRun
+          schema:
+            description: Check the rename and count what would follow it, without renaming.
+            type: boolean
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RenamePoolRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PoolRenamed"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Rename a pool
       tags:
         - pools
   /v1/runs:

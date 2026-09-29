@@ -241,6 +241,28 @@ func isNotFound(err error) bool {
 	return errors.As(err, &ae) && ae.ErrorCode() == "InvalidInstanceID.NotFound"
 }
 
+// Retag sets one tag on instances (a pool rename's lux:pool). IAM allows
+// it only on instances luxd launched, and only for lux:pool
+// (deploy/terraform/aws/iam.tf, RetagManagedInstancePool).
+func (p *Provider) Retag(ctx context.Context, template json.RawMessage, ids []string, key, value string) error {
+	t, err := parse(template)
+	if err != nil {
+		return err
+	}
+	c, err := p.client(ctx, t.Region)
+	if err != nil {
+		return err
+	}
+	_, err = c.CreateTags(ctx, &awsec2.CreateTagsInput{
+		Resources: ids,
+		Tags:      []types.Tag{{Key: aws.String(key), Value: aws.String(value)}},
+	})
+	if err != nil {
+		return fmt.Errorf("ec2 CreateTags: %w", err)
+	}
+	return nil
+}
+
 // renderUserData builds the instance's user data in the pool's chosen
 // format (hostboot.ValidUserData is checked when the pool is set).
 func renderUserData(format string, env map[string]string) ([]byte, error) {
