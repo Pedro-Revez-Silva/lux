@@ -943,7 +943,7 @@ components:
             - "0.40"
           type: string
         isDefault:
-          description: "Runs whose spec names no pool go to this pool (the tenant's; a platform default serves tenants without one). At most one per tenant: marking one clears the tenant's previous default. On create or update, omitted leaves the mark as it is. A body of exactly name and isDefault changes only the mark of an existing pool; any other field needs provider."
+          description: "Runs whose spec names no pool go to this pool (the tenant's; a platform default serves tenants without one). At most one per tenant: marking one clears the tenant's previous default. On create or update, omitted leaves the mark as it is. A body without provider changes only the mark of an existing pool: besides name and isDefault its fields must be absent or zero (\"\", 0, false, null, {}); any other value needs provider."
           type: boolean
         maxHosts:
           format: int64

@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"net/http"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -1764,42 +1764,43 @@ type Pool struct {
 	HourlyPrice string `json:"hourlyPrice,omitempty" doc:"Static pools: the default hourly price of hosts registering into the pool, a decimal string with up to 9 fractional digits. Copied to each host when it first registers; changing it does not reprice existing hosts. Refused for ec2 pools, which the provider prices." example:"0.40"`
 	Currency    string `json:"currency,omitempty" doc:"The currency of hourlyPrice (ISO 4217); both or neither." example:"USD"`
 	// IsDefault: nil in a request leaves the mark as it is.
-	IsDefault *bool `json:"isDefault,omitempty" doc:"Runs whose spec names no pool go to this pool (the tenant's; a platform default serves tenants without one). At most one per tenant: marking one clears the tenant's previous default. On create or update, omitted leaves the mark as it is. A body of exactly name and isDefault changes only the mark of an existing pool; any other field needs provider."`
-
-	// fields: the keys a request body had (poolInput), to tell a
-	// marker-only body from one whose settings would be ignored.
-	fields []string
+	IsDefault *bool `json:"isDefault,omitempty" doc:"Runs whose spec names no pool go to this pool (the tenant's; a platform default serves tenants without one). At most one per tenant: marking one clears the tenant's previous default. On create or update, omitted leaves the mark as it is. A body without provider changes only the mark of an existing pool: besides name and isDefault its fields must be absent or zero (\"\", 0, false, null, {}); any other value needs provider."`
 }
 
-// poolInput is putPool's body: a Pool (its schema too, newAPI) that
-// remembers which fields it was sent with.
+// poolInput is putPool's body: a Pool (its schema too, newAPI), decoded
+// with unknown fields refused.
 type poolInput Pool
 
-// UnmarshalJSON decodes as decodeStrict does (unknown fields refused), and
-// records the body's fields.
 func (pl *poolInput) UnmarshalJSON(b []byte) error {
 	type plain Pool
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode((*plain)(pl)); err != nil {
-		return err
-	}
-	var keys map[string]json.RawMessage
-	if err := json.Unmarshal(b, &keys); err != nil {
-		return err
-	}
-	pl.fields = slices.Sorted(maps.Keys(keys))
-	return nil
+	return dec.Decode((*plain)(pl))
 }
 
 // markerOnly: a body with no provider and an isDefault moves only the
-// mark, so it may have nothing but name besides. The other fields it has
-// are returned for the refusal.
+// mark. Its other fields must be zero, as a full Pool with only name and
+// isDefault set serializes (earlier CLIs sent that); the non-zero ones are
+// returned for the refusal. The decoded values are checked, not the keys:
+// the decoder matches keys case-insensitively, and absent and zero decode
+// alike.
 func (pl *Pool) markerOnly() (bool, []string) {
 	if pl.Provider != "" || pl.IsDefault == nil {
 		return false, nil
 	}
-	return true, slices.DeleteFunc(slices.Clone(pl.fields), func(f string) bool { return f == "name" || f == "isDefault" })
+	var extra []string
+	v := reflect.ValueOf(*pl)
+	for i, f := range reflect.VisibleFields(v.Type()) {
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name == "name" || name == "isDefault" {
+			continue
+		}
+		fv := v.Field(i)
+		if !fv.IsZero() && !(fv.Kind() == reflect.Map && fv.Len() == 0) {
+			extra = append(extra, name)
+		}
+	}
+	return true, extra
 }
 
 type listPoolsOutput struct {
@@ -1976,7 +1977,7 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	if marker, extra := pl.markerOnly(); marker && pl.Name != "" && (p.TenantID != "" || p.Operator) {
 		if len(extra) > 0 {
 			return nil, errf(http.StatusUnprocessableEntity, "invalid_pool",
-				"without provider, a body only marks the default: name and isDefault alone (got also %s); to change the pool's settings, give provider and all of them",
+				"without provider, a body only marks the default: name and isDefault, other fields absent or zero (got also %s); to change the pool's settings, give provider and all of them",
 				strings.Join(extra, ", "))
 		}
 		return s.markDefaultPool(ctx, p.TenantID, pl.Name, *pl.IsDefault)

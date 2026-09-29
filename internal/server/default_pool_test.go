@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -512,15 +513,15 @@ func TestConcurrentMarkAndDelete(t *testing.T) {
 	}
 }
 
-// A body without provider only marks the default, so it must be exactly
-// name and isDefault: another field would be silently ignored, so it is
-// refused and the pool is left as it was.
+// A body without provider only marks the default, so any other field with
+// a value would be silently ignored: it is refused, naming the field, and
+// the pool is left as it was.
 func TestMarkerOnlyBodyIsExact(t *testing.T) {
 	s, keys := priceFixture(t)
 	if code, body := call(t, s, keys["t1"], "POST", "/v1/pools", map[string]any{"name": "a", "provider": "static", "maxHosts": 3}); code != http.StatusOK {
 		t.Fatalf("create: %d %s", code, body)
 	}
-	for _, extra := range []map[string]any{{"maxHosts": 9}, {"template": map[string]any{}}, {"minHosts": 0}} {
+	for _, extra := range []map[string]any{{"maxHosts": 9}, {"template": map[string]any{"x": 1}}, {"hourlyPrice": "0.40"}, {"MinHosts": 1}} {
 		req := map[string]any{"name": "a", "isDefault": true}
 		for k, v := range extra {
 			req[k] = v
@@ -528,6 +529,11 @@ func TestMarkerOnlyBodyIsExact(t *testing.T) {
 		code, body := call(t, s, keys["t1"], "POST", "/v1/pools", req)
 		if code != http.StatusUnprocessableEntity || !strings.Contains(body, `"invalid_pool"`) {
 			t.Fatalf("marker with %v: %d %s, want 422 invalid_pool", extra, code, body)
+		}
+		for k := range extra {
+			if !strings.Contains(body, strings.ToLower(k[:1])+k[1:]) {
+				t.Fatalf("marker with %v: %s does not name the field", extra, body)
+			}
 		}
 	}
 	var maxHosts int
@@ -553,5 +559,45 @@ func TestMarkerOnlyBodyIsExact(t *testing.T) {
 	// Unknown fields are refused as before.
 	if code, body := call(t, s, keys["t1"], "POST", "/v1/pools", map[string]any{"name": "a", "isDefault": true, "bogus": 1}); code != http.StatusBadRequest && code != http.StatusUnprocessableEntity {
 		t.Fatalf("unknown field: %d %s", code, body)
+	}
+}
+
+// The CLI before marker-only bodies were exact sent `pools set NAME
+// --default` as a whole Pool with only name and isDefault set: every
+// other field zero. That still only moves the mark, as does a key in
+// another case (the decoder matches keys case-insensitively); a non-zero
+// setting is still refused.
+func TestMarkerOnlyBodyFromTheEarlierCLI(t *testing.T) {
+	s, keys := priceFixture(t)
+	if code, body := call(t, s, keys["t1"], "POST", "/v1/pools", map[string]any{"name": "a", "provider": "ec2", "maxHosts": 3}); code != http.StatusOK {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	// json.Marshal(server.Pool{Name: "a", IsDefault: &true}) at 80e1057.
+	earlier := json.RawMessage(`{"name":"a","provider":"","minHosts":0,"maxHosts":0,"warmHosts":0,"scaleDownAfter":"0s","shared":false,"platform":false,"isDefault":true}`)
+	if code, body := call(t, s, keys["t1"], "POST", "/v1/pools", earlier); code != http.StatusOK {
+		t.Fatalf("the earlier CLI's marker: %d %s", code, body)
+	}
+	var provider string
+	var maxHosts int
+	systemScan(t, s, `SELECT provider, max_hosts FROM pools WHERE name = 'a'`, nil, &provider, &maxHosts)
+	if got := defaultPools(t, s); got["t1"] != "a" || provider != "ec2" || maxHosts != 3 {
+		t.Fatalf("defaults %v, provider %q, maxHosts %d; want a marked and unchanged", got, provider, maxHosts)
+	}
+
+	clear := json.RawMessage(`{"name":"a","template":{},"minHosts":0,"hourlyPrice":"","currency":null,"IsDefault":false}`)
+	if code, body := call(t, s, keys["t1"], "POST", "/v1/pools", clear); code != http.StatusOK {
+		t.Fatalf("a zero-valued marker with IsDefault: %d %s", code, body)
+	}
+	if got := defaultPools(t, s); len(got) != 0 {
+		t.Fatalf("defaults %v after clearing", got)
+	}
+
+	withMax := json.RawMessage(`{"name":"a","provider":"","minHosts":0,"maxHosts":3,"warmHosts":0,"scaleDownAfter":"0s","shared":false,"platform":false,"isDefault":true}`)
+	code, body := call(t, s, keys["t1"], "POST", "/v1/pools", withMax)
+	if code != http.StatusUnprocessableEntity || !strings.Contains(body, "maxHosts") {
+		t.Fatalf("a marker with maxHosts 3: %d %s, want 422 naming maxHosts", code, body)
+	}
+	if got := defaultPools(t, s); len(got) != 0 {
+		t.Fatalf("a refused marker moved the mark: %v", got)
 	}
 }
