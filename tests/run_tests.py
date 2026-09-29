@@ -47,6 +47,9 @@ def main() -> None:
                         help="with --serve: preload an image from the local Docker into every host (repeatable)")
     parser.add_argument("-j", "--jobs", type=int, default=1,
                         help="environments to run suites in, in parallel (each its own luxd, database, hosts)")
+    parser.add_argument("--shard", default="", metavar="N/M",
+                        help="run only the Nth of M even shares of the suites (by recorded duration), e.g. on "
+                             "M CI machines; with -j, split that share further")
     args, pytest_args = parser.parse_known_args()
 
     if args.down is not None:
@@ -64,6 +67,16 @@ def main() -> None:
     # them). Suites named on the command line (paths); options and their
     # values are not.
     selected = [a for a in pytest_args if a.startswith("suites/") or a.endswith(".py")]
+    if args.shard:
+        if selected:
+            sys.exit("--shard picks its own suites: name none")
+        n, m = (int(x) for x in args.shard.split("/"))
+        if not 1 <= n <= m:
+            sys.exit(f"--shard {args.shard}: need 1 <= N <= M")
+        all_suites = sorted(str(p.relative_to(TESTS_DIR)) for p in (TESTS_DIR / "suites").glob("test_*.py"))
+        selected = _split(all_suites, m, _suite_seconds())[n - 1]
+        pytest_args = [*selected, *pytest_args]
+        print(f"shard {n}/{m}: {' '.join(Path(s).name for s in selected)}")
     # By file, with or without a node id (suites/test_nested.py::test_x); a
     # directory (suites/) selects every suite in it.
     files = [a.split("::")[0].rsplit("/", 1)[-1] for a in selected]
