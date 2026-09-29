@@ -42,20 +42,20 @@ func ValidPoolName(name string) error {
 // replacement token must not start failing on upgrade. A *PoolNameError
 // is the rule; any other error is the database's.
 func CheckPoolName(ctx context.Context, tx pgx.Tx, tenantID *string, name string) error {
-	err := ValidPoolName(name)
-	if err == nil {
+	validationErr := ValidPoolName(name)
+	if validationErr == nil {
 		return nil
 	}
 	var exists bool
-	if qerr := tx.QueryRow(ctx, `SELECT
+	if err := tx.QueryRow(ctx, `SELECT
 			EXISTS (SELECT 1 FROM pools WHERE coalesce(tenant_id, '') = coalesce($1, '') AND name = $2)
 			OR EXISTS (SELECT 1 FROM host_tokens WHERE coalesce(tenant_id, '') = coalesce($1, '') AND pool = $2)
 			OR EXISTS (SELECT 1 FROM hosts WHERE coalesce(tenant_id, '') = coalesce($1, '') AND pool = $2)`,
-		tenantID, name).Scan(&exists); qerr != nil {
-		return qerr
+		tenantID, name).Scan(&exists); err != nil {
+		return err
 	}
 	if exists {
 		return nil
 	}
-	return err
+	return validationErr
 }
