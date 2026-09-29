@@ -403,15 +403,17 @@ const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.
 
 // runsFrom: a Run with its tenant, its current placement's host, and its
 // runtime (rr). Runtime is the sum over its placements of started_at
-// (reached running) to ended_at (exited or lost), or to now() for one not
-// yet ended; a placement that never reached running adds 0. since is when
-// the unended one started. Per Run, one scan of placements (run_id, epoch).
+// (reached running) to ended_at (exited or lost), or to now() for one still
+// live (stopping included); a placement that never reached running adds 0,
+// and so does a terminal one missing ended_at, rather than growing forever.
+// since is when the live one started. Per Run, one scan of placements
+// (run_id, epoch).
 const runsFrom = `runs r JOIN tenants rt ON rt.id = r.tenant_id
 	LEFT JOIN placements rp ON rp.run_id = r.id AND rp.epoch = r.current_epoch
 	LEFT JOIN hosts rh ON rh.id = rp.host_id
 	CROSS JOIN LATERAL (SELECT
-			coalesce(sum(extract(epoch FROM coalesce(p.ended_at, now()) - p.started_at)), 0)::float8 AS seconds,
-			max(p.started_at) FILTER (WHERE p.ended_at IS NULL) AS since
+			coalesce(sum(extract(epoch FROM coalesce(p.ended_at, CASE WHEN p.state IN ` + livePlacementStates + ` THEN now() ELSE p.started_at END) - p.started_at)), 0)::float8 AS seconds,
+			max(p.started_at) FILTER (WHERE p.ended_at IS NULL AND p.state IN ` + livePlacementStates + `) AS since
 		FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) rr`
 
 func scanRun(row pgx.Row) (*Run, error) {
@@ -635,7 +637,7 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 		// The page is chosen first, so runsFrom's joins and runtime
 		// aggregate run for its rows only, not for every Run matched.
 		rows, err := tx.Query(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.id IN (SELECT r.id FROM runs r WHERE `+
-			strings.Join(where, " AND ")+` ORDER BY r.created_at DESC LIMIT `+strconv.Itoa(limit)+`) ORDER BY r.created_at DESC`, args...)
+			strings.Join(where, " AND ")+` ORDER BY r.created_at DESC, r.id DESC LIMIT `+strconv.Itoa(limit)+`) ORDER BY r.created_at DESC, r.id DESC`, args...)
 		if err != nil {
 			return err
 		}

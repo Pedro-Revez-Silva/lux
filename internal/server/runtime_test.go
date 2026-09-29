@@ -21,6 +21,13 @@ func TestRunRuntime(t *testing.T) {
 		('p3', 't1', 'r1', 'h1', 3, 'exited', $1, NULL, $1::timestamptz + interval '300 seconds'),
 		('p4', 't1', 'r1', 'h1', 4, 'running', $2, $2, NULL),
 		('p5', 't1', 'r3', 'h1', 1, 'exited', $1, NULL, $1::timestamptz + interval '10 seconds')`, t0, live)
+	// r4: a stopping placement still accrues; r5: a lost one missing
+	// ended_at (inconsistent) adds nothing and is not live.
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES
+		('r4', 't1', '{}', 'stopping', 1), ('r5', 't1', '{}', 'lost', 1)`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, created_at, started_at, ended_at) VALUES
+		('p6', 't1', 'r4', 'h1', 1, 'stopping', $1, $1, NULL),
+		('p7', 't1', 'r5', 'h1', 1, 'lost', $2, $2, NULL)`, live, t0)
 
 	check := func(name string, r *Run, before, after time.Time) {
 		t.Helper()
@@ -46,6 +53,12 @@ func TestRunRuntime(t *testing.T) {
 	check("list r1", byID["r1"], before, after)
 	if r := byID["r3"]; r == nil || r.RuntimeSeconds != 0 || r.RuntimeSince != nil {
 		t.Errorf("never-started r3: %+v", r)
+	}
+	if r := byID["r4"]; r == nil || r.RuntimeSince == nil || !r.RuntimeSince.Equal(live) || r.RuntimeSeconds < before.Sub(live).Seconds()-0.001 {
+		t.Errorf("stopping r4: want live since %v, got %+v", live, r)
+	}
+	if r := byID["r5"]; r == nil || r.RuntimeSeconds != 0 || r.RuntimeSince != nil {
+		t.Errorf("lost r5 without ended_at: want 0 and not live, got %+v", r)
 	}
 
 	before = time.Now()

@@ -134,6 +134,11 @@ export function runColumns({ tenant, host = true, adapter = true, cost = false }
 // which no clock skew between browser and luxd can distort.
 const runSeenAt = new WeakMap<Run, number>();
 
+// How far past its response a live row keeps counting. Polled rows are
+// replaced long before this; an older loaded page is never re-polled, and
+// its Run may have finished, so it stops rather than growing forever.
+const RUNTIME_EXTRAPOLATE_MS = 60_000;
+
 /**
  * Time the Run's placements have spent running, summed (runtimeSeconds);
  * ticks on the shared clock while a placement runs (runtimeSince). An en
@@ -145,7 +150,7 @@ function RuntimeCell({ run }: { run: Run }) {
   let seen = runSeenAt.get(run);
   if (seen === undefined) runSeenAt.set(run, (seen = t));
   if (!run.runtimeSince && !run.runtimeSeconds) return DASH;
-  const secs = run.runtimeSeconds + (run.runtimeSince ? (t - seen) / 1000 : 0);
+  const secs = run.runtimeSeconds + (run.runtimeSince ? Math.min(t - seen, RUNTIME_EXTRAPOLATE_MS) / 1000 : 0);
   return <span>{formatDuration(secs >= 1 ? Math.floor(secs) : secs)}</span>;
 }
 
