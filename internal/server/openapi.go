@@ -162,6 +162,7 @@ func (s *Server) newAPI(mux *http.ServeMux) huma.API {
 	registry := huma.NewMapRegistry("#/components/schemas/", schemaNamer)
 	registry.RegisterTypeAlias(reflect.TypeFor[spec.Duration](), reflect.TypeFor[durationSchema]())
 	registry.RegisterTypeAlias(reflect.TypeFor[spec.Bytes](), reflect.TypeFor[bytesSchema]())
+	registry.RegisterTypeAlias(reflect.TypeFor[poolInput](), reflect.TypeFor[Pool]())
 	cfg := huma.Config{
 		OpenAPI: &huma.OpenAPI{
 			OpenAPI: "3.1.0",

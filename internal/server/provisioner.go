@@ -439,13 +439,15 @@ func (s *Server) scaleDownAfter(pl poolRow) time.Duration {
 }
 
 func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolState) error {
-	// Runs waiting for a host in this pool. A tenant pool serves its
-	// tenant; a platform pool anyone whose Runs name it (and who has no
-	// pool of their own by that name).
+	// Runs waiting for a host in this pool. A Run that resolved to a pool
+	// row (pool_owner set) counts toward exactly that one. Otherwise a
+	// tenant pool serves its tenant; a platform pool anyone whose Runs name
+	// it (and who has no pool of their own by that name).
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM runs r
 		WHERE r.state = 'provisioning' AND NOT r.cancel_requested
 		  AND coalesce(r.spec->'placement'->>'pool', 'default') = $1
-		  AND CASE WHEN $2::text IS NULL
+		  AND CASE WHEN r.pool_owner IS NOT NULL THEN r.pool_owner = coalesce($2, '')
+		           WHEN $2::text IS NULL
 		           THEN NOT EXISTS (SELECT 1 FROM pools o WHERE o.tenant_id = r.tenant_id AND o.name = $1 AND NOT o.retired)
 		           ELSE r.tenant_id = $2 END`, pl.Name, pl.TenantID).Scan(&st.demand); err != nil {
 		return err

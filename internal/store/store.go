@@ -203,6 +203,18 @@ func ensureAppRoleOnce(ctx context.Context, conn *pgx.Conn, password string) err
 				GRANT EXECUTE ON FUNCTION lux_cost_enqueue(text, text) TO lux_app;
 			END IF;
 		END $$`,
+		// Not PUBLIC's either (migration 032).
+		`DO $$ BEGIN
+			IF to_regprocedure('lux_default_pool()') IS NOT NULL THEN
+				GRANT EXECUTE ON FUNCTION lux_default_pool() TO lux_app;
+			END IF;
+		END $$`,
+		// Nor this (migration 033).
+		`DO $$ BEGIN
+			IF to_regprocedure('lux_pool_owner(text)') IS NOT NULL THEN
+				GRANT EXECUTE ON FUNCTION lux_pool_owner(text) TO lux_app;
+			END IF;
+		END $$`,
 	)
 	for _, s := range stmts {
 		if _, err := conn.Exec(ctx, s); err != nil {

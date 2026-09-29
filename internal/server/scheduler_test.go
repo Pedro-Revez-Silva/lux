@@ -158,7 +158,7 @@ func TestSchedulerUnrelatedHostLockDoesNotBlock(t *testing.T) {
 	deadline, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	if err := s.db.Tx(deadline, store.System(), func(tx pgx.Tx) error {
-		ids, err := s.eligibleHostIDs(deadline, tx, []string{"default"}, []string{"t1"}, []string{""})
+		ids, err := s.eligibleHostIDs(deadline, tx, []string{"default"}, []*string{nil}, []string{"t1"}, []string{""})
 		if err != nil {
 			return err
 		}
@@ -201,7 +201,7 @@ func TestSchedulerEligibleHostsScopeAndRevalidation(t *testing.T) {
 	}
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		ids, err := s.eligibleHostIDs(ctx, tx,
-			[]string{"default", "other"}, []string{"t1", "t2"}, []string{"", "c"})
+			[]string{"default", "other"}, []*string{nil, nil}, []string{"t1", "t2"}, []string{"", "c"})
 		if err != nil {
 			return err
 		}
@@ -209,7 +209,7 @@ func TestSchedulerEligibleHostsScopeAndRevalidation(t *testing.T) {
 			return fmt.Errorf("mixed batch discovered %v, want [a b c e]", ids)
 		}
 		ids, err = s.eligibleHostIDs(ctx, tx,
-			[]string{"default"}, []string{"t1"}, []string{"c"})
+			[]string{"default"}, []*string{nil}, []string{"t1"}, []string{"c"})
 		if err != nil {
 			return err
 		}
@@ -217,14 +217,14 @@ func TestSchedulerEligibleHostsScopeAndRevalidation(t *testing.T) {
 			return fmt.Errorf("cross-tenant choice discovered %v, want [a e]", ids)
 		}
 		ids, err = s.eligibleHostIDs(ctx, tx,
-			[]string{"default", "other"}, []string{"t1", "t2"}, []string{"", ""})
+			[]string{"default", "other"}, []*string{nil, nil}, []string{"t1", "t2"}, []string{"", ""})
 		if err != nil {
 			return err
 		}
 		if !slices.Equal(ids, []string{"a", "b", "e"}) {
 			return fmt.Errorf("mixed pools discovered %v, want [a b e]", ids)
 		}
-		ids, err = s.eligibleHostIDs(ctx, tx, []string{"default"}, []string{"t1"}, []string{"b"})
+		ids, err = s.eligibleHostIDs(ctx, tx, []string{"default"}, []*string{nil}, []string{"t1"}, []string{"b"})
 		if err != nil {
 			return err
 		}

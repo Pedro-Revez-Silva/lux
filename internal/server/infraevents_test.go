@@ -344,7 +344,7 @@ func TestInfraEventsAreWrittenWithTheirChange(t *testing.T) {
 		{
 			typ: evConfigChanged,
 			act: func(s *Server, ctx context.Context) error {
-				_, err := s.putPool(tenant, &poolBody{Body: Pool{Name: "burst", Provider: "ec2", MaxHosts: 4, Template: map[string]any{"region": "eu-west-1"}}})
+				_, err := s.putPool(tenant, poolIn(Pool{Name: "burst", Provider: "ec2", MaxHosts: 4, Template: map[string]any{"region": "eu-west-1"}}))
 				return err
 			},
 			changed: func(t *testing.T, s *Server) bool {
@@ -711,7 +711,7 @@ func TestConfigChangedRecordsARemovedTemplateKey(t *testing.T) {
 	infraFixture(t, s, ctx)
 	tenant := context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
 	for _, tmpl := range []map[string]any{{"region": "eu-west-1", "subnet": "subnet-1"}, {"region": "eu-west-1"}} {
-		if _, err := s.putPool(tenant, &poolBody{Body: Pool{Name: "burst", Provider: "ec2", Template: tmpl}}); err != nil {
+		if _, err := s.putPool(tenant, poolIn(Pool{Name: "burst", Provider: "ec2", Template: tmpl})); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -802,10 +802,10 @@ func TestPoolRetiredAndRestored(t *testing.T) {
 	if _, err := s.deletePool(tenant, &deletePoolInput{Name: "burst"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.putPool(tenant, &poolBody{Body: Pool{Name: "burst", Provider: "ec2", MaxHosts: 2}}); err != nil {
+	if _, err := s.putPool(tenant, poolIn(Pool{Name: "burst", Provider: "ec2", MaxHosts: 2})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.putPool(tenant, &poolBody{Body: Pool{Name: "burst", Provider: "ec2", MaxHosts: 3}}); err != nil {
+	if _, err := s.putPool(tenant, poolIn(Pool{Name: "burst", Provider: "ec2", MaxHosts: 3})); err != nil {
 		t.Fatal(err)
 	}
 	types := queryOne[[]string](t, s, `SELECT array_agg(type ORDER BY id) FROM pool_events WHERE pool_id = 'pool1' AND type NOT LIKE 'pool.host%'`)

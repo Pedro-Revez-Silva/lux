@@ -46,6 +46,11 @@ func TestNormalizeExample(t *testing.T) {
 	if s.Volumes[0].Kind != "state" {
 		t.Fatal("volume kind default")
 	}
+	// The pool is luxd's to choose at submit (the tenant's default), not
+	// validation's.
+	if s.Placement.Pool != "" {
+		t.Fatalf("placement.pool filled with %q", s.Placement.Pool)
+	}
 	for _, sec := range s.Secrets {
 		if sec.Name == "GITHUB_TOKEN" && !sec.RunnerOnly {
 			t.Fatal("git credential must be runner-only")

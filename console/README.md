@@ -10,6 +10,7 @@ bun install          # once, at the repository root (a Bun workspace: console + 
 cd console
 bun run dev          # http://localhost:5173/  (Bun HTML-import server, HMR)
 bun run typecheck    # tsc --noEmit
+bun run test         # bun test: the pages' pure logic (src/**/*.test.ts)
 bun run build        # static files in dist/, assets under /
 bun run preview      # serve dist/ at / with SPA fallback (what luxd does)
 ```

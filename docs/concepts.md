@@ -188,7 +188,9 @@ lux server stop|start|restart|rm <run> web
 A **host** runs `lux-runner`. It belongs to a **pool**. Pools are `static`
 (hosts registered by hand) or `ec2` (luxd launches hosts on demand). Hosts
 belong to a tenant by default. A platform pool can be marked `shared`, which
-lets several tenants' Runs share its hosts.
+lets several tenants' Runs share its hosts. A Run that names no pool goes
+to the tenant's **default pool**: the one pool it marked, else the
+platform's marked one, else the pool named `default`.
 
 ## Tenants and keys
 

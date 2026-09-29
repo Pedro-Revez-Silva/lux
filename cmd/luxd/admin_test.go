@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -110,5 +111,117 @@ func TestAdminPoolNames(t *testing.T) {
 	}
 	if n := count(`SELECT count(*) FROM host_tokens WHERE tenant_id = 't1' AND pool = 'Old_Static'`); n != 2 {
 		t.Errorf("no replacement token for the legacy static pool: %d tokens", n)
+	}
+}
+
+// create-pool --default marks the pool its owner's default, moves the mark
+// from another pool, and --default=false clears it; omitted leaves it.
+func TestAdminPoolDefault(t *testing.T) {
+	cfg, db := adminDB(t)
+	ctx := context.Background()
+	if _, err := db.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`); err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = devnull
+	t.Cleanup(func() { os.Stdout = stdout; devnull.Close() })
+
+	defaults := func() []string {
+		rows, err := db.Query(ctx, `SELECT coalesce(tenant_id, '-') || '/' || name FROM pools WHERE is_default ORDER BY 1`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var s string
+			if err := rows.Scan(&s); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, s)
+		}
+		return out
+	}
+	for _, c := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"create-pool", "--name", "a", "--tenant", "t1", "--default"}, []string{"t1/a"}},
+		{[]string{"create-pool", "--name", "b", "--tenant", "t1", "--default"}, []string{"t1/b"}},
+		{[]string{"create-pool", "--name", "b", "--tenant", "t1", "--max", "2"}, []string{"t1/b"}},
+		{[]string{"create-pool", "--name", "shared", "--default"}, []string{"-/shared", "t1/b"}},
+		{[]string{"create-pool", "--name", "b", "--tenant", "t1", "--default=false"}, []string{"-/shared"}},
+	} {
+		if err := admin(ctx, cfg, c.args); err != nil {
+			t.Fatalf("%v: %v", c.args, err)
+		}
+		if got := defaults(); !slices.Equal(got, c.want) {
+			t.Errorf("after %v: defaults %v, want %v", c.args, got, c.want)
+		}
+	}
+}
+
+// create-pool --default writes the pool, its mark and their events in one
+// transaction: each pool the mark moves between records it, and when an
+// event cannot be written neither the settings nor the mark change.
+func TestAdminPoolDefaultEvents(t *testing.T) {
+	cfg, db := adminDB(t)
+	ctx := context.Background()
+	stdout := os.Stdout
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = devnull
+	t.Cleanup(func() { os.Stdout = stdout; devnull.Close() })
+
+	for _, args := range [][]string{
+		{"create-pool", "--name", "a", "--default"},
+		{"create-pool", "--name", "b", "--max", "2", "--default"},
+	} {
+		if err := admin(ctx, cfg, args); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	var got []string
+	rows, err := db.Query(ctx, `SELECT p.name || ' ' || e.type || ' ' || coalesce(e.data->'changes'->'isDefault'->>'old', 'null') || '→' || (e.data->'changes'->'isDefault'->>'new')
+		FROM pool_events e JOIN pools p ON p.id = e.pool_id ORDER BY e.id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, s)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"a pool.config_changed null→true", "b pool.config_changed null→true", "a pool.config_changed true→false"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("events %v, want %v", got, want)
+	}
+
+	if _, err := db.Exec(ctx, `CREATE FUNCTION refuse_event() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN RAISE EXCEPTION 'event refused'; END $$;
+		CREATE TRIGGER refuse BEFORE INSERT ON pool_events FOR EACH ROW EXECUTE FUNCTION refuse_event()`); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin(ctx, cfg, []string{"create-pool", "--name", "a", "--max", "5", "--default"}); err == nil {
+		t.Fatal("create-pool succeeded with its events refused")
+	}
+	var marked string
+	var maxA int
+	if err := db.QueryRow(ctx, `SELECT (SELECT name FROM pools WHERE is_default), (SELECT max_hosts FROM pools WHERE name = 'a')`).Scan(&marked, &maxA); err != nil {
+		t.Fatal(err)
+	}
+	if marked != "b" || maxA != 0 {
+		t.Fatalf("after a refused create-pool: default %q, a's max_hosts %d; want b and 0", marked, maxA)
 	}
 }

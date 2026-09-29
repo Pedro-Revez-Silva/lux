@@ -43,16 +43,16 @@ func TestPutPoolName(t *testing.T) {
 		return context.WithValue(ctx, principalKey, Principal{TenantID: tenant, Scopes: []string{"admin"}})
 	}
 	for _, name := range []string{"Burst", "burst_1", "-burst", strings.Repeat("b", MaxPoolName+1)} {
-		_, err := s.putPool(as("t1"), &poolBody{Body: Pool{Name: name, Provider: "static"}})
+		_, err := s.putPool(as("t1"), poolIn(Pool{Name: name, Provider: "static"}))
 		var he *HTTPError
 		if err == nil || !errors.As(err, &he) || he.Status != http.StatusUnprocessableEntity {
 			t.Errorf("new pool %q: err %v, want 422", name, err)
 		}
 	}
-	if _, err := s.putPool(as("t1"), &poolBody{Body: Pool{Name: "burst-1", Provider: "static"}}); err != nil {
+	if _, err := s.putPool(as("t1"), poolIn(Pool{Name: "burst-1", Provider: "static"})); err != nil {
 		t.Errorf("a valid name was refused: %v", err)
 	}
-	if _, err := s.putPool(as("t1"), &poolBody{Body: Pool{Name: "Legacy_Pool", Provider: "static", MaxHosts: 3}}); err != nil {
+	if _, err := s.putPool(as("t1"), poolIn(Pool{Name: "Legacy_Pool", Provider: "static", MaxHosts: 3})); err != nil {
 		t.Errorf("a stored pool's own name was refused on update: %v", err)
 	}
 	var maxHosts int
@@ -62,7 +62,7 @@ func TestPutPoolName(t *testing.T) {
 		t.Errorf("legacy pool not updated: max_hosts %d, %v", maxHosts, err)
 	}
 	// The grandfathering is per owner: another tenant cannot create one.
-	_, err := s.putPool(as("t2"), &poolBody{Body: Pool{Name: "Legacy_Pool", Provider: "static"}})
+	_, err := s.putPool(as("t2"), poolIn(Pool{Name: "Legacy_Pool", Provider: "static"}))
 	var he *HTTPError
 	if !errors.As(err, &he) || he.Status != http.StatusUnprocessableEntity || he.Code != "invalid_pool" {
 		t.Errorf("another tenant, stored invalid name: err %v, want 422 invalid_pool", err)

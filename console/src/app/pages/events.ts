@@ -6,6 +6,22 @@ function str(v: unknown): string | undefined {
   return typeof v === "string" && v !== "" ? v : undefined;
 }
 
+// Why a submitted Run got its pool (its event's poolFrom); a pool the spec named needs no note.
+const POOL_FROM: Record<string, string> = {
+  "tenant-default": "the tenant's default",
+  "platform-default": "the platform's default",
+  fallback: "no default pool marked",
+};
+
+// "pool burst (platform, the platform's default)": its owner (poolOwner, platform or tenant: a
+// tenant pool and a platform pool may share the name) and why it got it.
+function poolNote(d: Record<string, unknown>): string {
+  const pool = str(d.pool);
+  if (!pool) return "";
+  const notes = [str(d.poolOwner), POOL_FROM[str(d.poolFrom) ?? ""]].filter(Boolean);
+  return ` · pool ${pool}${notes.length > 0 ? ` (${notes.join(", ")})` : ""}`;
+}
+
 export function eventSummary(e: Event): string {
   const d = e.data ?? {};
   switch (e.type) {
@@ -17,7 +33,7 @@ export function eventSummary(e: Event): string {
       return parts.join(" ");
     }
     case "submitted":
-      return `by ${str(d.by) ?? "?"}`;
+      return `by ${str(d.by) ?? "?"}${poolNote(d)}`;
     case "exited": {
       const code = typeof d.exitCode === "number" ? `exit ${d.exitCode}` : "exited";
       return [code, str(d.reason), str(d.message)].filter(Boolean).join(" · ");
