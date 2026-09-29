@@ -218,7 +218,9 @@ func (h *Hub) route(from *runnerConn, id string, f proto.Frame) {
 	if sub.maxBytes == 0 || sub.queued+n <= sub.maxBytes {
 		select {
 		case sub.ch <- f:
-			sub.queued += n
+			if sub.maxBytes > 0 {
+				sub.queued += n
+			}
 			return
 		default:
 		}
