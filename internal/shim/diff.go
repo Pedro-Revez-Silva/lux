@@ -17,7 +17,11 @@ import (
 	"github.com/marcioapm/lux/internal/proto"
 )
 
-// diff-index and ls-files do not refresh the checkout's index, unlike git diff.
+// `lux-shim diff <json>`: each repository's diff from its base to its
+// working tree, tracked and untracked, as one proto.DiffResult on stdout.
+// The runner runs it as the workload user inside the Run's container.
+// Nothing is written in the checkout: diff-index and ls-files never
+// refresh the index, as `git diff` does even with GIT_OPTIONAL_LOCKS=0.
 
 const (
 	untrackedCap      = 32 << 10 // per untracked file
@@ -29,6 +33,7 @@ const (
 
 var errTooLarge = fmt.Errorf("the diff is larger than %d MiB, more than lux diff returns", diffHardLimit>>20)
 
+// Diff is `lux-shim diff`'s main.
 func Diff(args []string) int {
 	var a proto.DiffArgs
 	if len(args) != 1 || json.Unmarshal([]byte(args[0]), &a) != nil {
@@ -66,7 +71,8 @@ func diffRepos(ctx context.Context, a proto.DiffArgs) proto.DiffResult {
 		}
 		work[i] = w
 	}
-	// Retry at the smaller cap only if the first pass exceeds the soft limit.
+	// Untracked files at 32 KiB each; if the whole diff then passes 1 MiB,
+	// at 8 KiB each instead.
 	var size int
 	for _, limit := range []int64{untrackedCap, untrackedCapSmall} {
 		size = 0
@@ -170,6 +176,9 @@ func (w *repoWork) untrackedDiff(limit int64) error {
 	return nil
 }
 
+// newFilePatch writes git's patch creating the untracked file p, its
+// content cut at limit bytes. cut: the patch leaves content out (cut at
+// the limit, or a binary file's), so it does not recreate the file.
 func newFilePatch(b *bytes.Buffer, dir, p string, limit int64) (ins int, cut bool, err error) {
 	full := filepath.Join(dir, p)
 	fi, err := os.Lstat(full)
@@ -239,7 +248,9 @@ func newFilePatch(b *bytes.Buffer, dir, p string, limit int64) (ins int, cut boo
 	return len(lines), cut, nil
 }
 
-// git patch headers C-quote control characters but leave UTF-8 unescaped.
+// quoteName is a path as git's patch headers write it with
+// core.quotePath=false: C-quoted if it has a quote, a backslash or a
+// control character.
 func quoteName(s string) string {
 	if !strings.ContainsFunc(s, func(r rune) bool { return r == '"' || r == '\\' || r < 0x20 || r == 0x7f }) {
 		return s
@@ -266,6 +277,8 @@ func quoteName(s string) string {
 	return b.String()
 }
 
+// git runs git in dir and returns its stdout, failing with errTooLarge past
+// limit bytes.
 func git(ctx context.Context, dir string, limit int, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir, "-c", "core.quotePath=false"}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")

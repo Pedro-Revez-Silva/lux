@@ -10,8 +10,11 @@ import (
 	"github.com/marcioapm/lux/internal/proto"
 )
 
+// diffTimeout bounds one live diff's podman exec.
 var diffTimeout = 60 * time.Second
 
+// serveDiff answers a diff.request: `lux-shim diff` in the placement's
+// container, as the workload user. One at a time per placement.
 func (r *Runner) serveDiff(ctx context.Context, f proto.Frame) {
 	var req proto.DiffRequest
 	_ = json.Unmarshal(f.Data, &req)
@@ -76,6 +79,8 @@ func (r *Runner) diff(ctx context.Context, runID string, epoch int, base string)
 	return res
 }
 
+// setGitBase records the commit a repository was cloned at, the base of
+// its live diffs, in the run state a restarted runner reads.
 func (p *placement) setGitBase(repo, commit string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

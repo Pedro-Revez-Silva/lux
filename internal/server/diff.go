@@ -17,12 +17,16 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
+// A running Run's diff, per repository, computed now in its container by
+// its runner (proto.MsgDiffRequest).
+
 type diffInput struct {
 	RunPath
 	Base string `query:"base" enum:"clone,head" doc:"clone (default): from the commit each repository was cloned at. head: from its HEAD."`
 	Stat bool   `query:"stat" doc:"Totals only, no patches."`
 }
 
+// RepoDiff is one repository's diff.
 type RepoDiff struct {
 	Repo        string               `json:"repo"`
 	Base        string               `json:"base" doc:"The commit diffed from."`
@@ -37,6 +41,7 @@ type RepoDiff struct {
 	Error       string               `json:"error,omitempty" doc:"Why this repository's diff could not be computed."`
 }
 
+// RunDiff is a Run's diff, per repository.
 type RunDiff struct {
 	Base  string     `json:"base" enum:"clone,head"`
 	Repos []RepoDiff `json:"repos"`
@@ -46,6 +51,8 @@ type runDiffOutput struct {
 	Body RunDiff
 }
 
+// diffWait is how long luxd waits for the runner, which gives the shim a
+// minute.
 var diffWait = 75 * time.Second
 
 func (s *Server) runDiff(ctx context.Context, in *diffInput) (*runDiffOutput, error) {
@@ -101,6 +108,8 @@ func (s *Server) runDiff(ctx context.Context, in *diffInput) (*runDiffOutput, er
 	return out, nil
 }
 
+// askDiff sends a diff request on the host's WebSocket and waits for its
+// result.
 func (s *Server) askDiff(ctx context.Context, hostID, runID string, epoch int, base string) (proto.DiffResult, error) {
 	var res proto.DiffResult
 	c := s.hub.conn(hostID)
@@ -134,9 +143,12 @@ func (s *Server) askDiff(ctx context.Context, hostID, runID string, epoch int, b
 	}
 }
 
+// keepAPatch is how to keep a Run's changes past its stop.
 const keepAPatch = "resume it, or save a patch at stop with workload.beforeStop " +
 	"(git add -N . && git diff --binary <base> > $LUX_ARTIFACTS/final.patch) and fetch it with lux artifacts"
 
+// notRunning is the answer for a Run whose container is not running: one
+// not up yet, or one that has stopped (or is ending).
 func notRunning(runState, plState string) error {
 	if plState == "assigned" || plState == "starting" ||
 		slices.Contains([]string{StateSubmitted, StateScheduled, StateProvisioning, StateStarting, StateResuming}, runState) {
