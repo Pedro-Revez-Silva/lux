@@ -43,6 +43,13 @@ CREATE POLICY tenant_rows ON pool_tag_aliases USING (tenant_id = lux_tenant() OR
 ALTER TABLE pools ADD COLUMN retagged_at timestamptz;
 ALTER TABLE pools ADD COLUMN rename_finished_at timestamptz;
 
+-- not_found_since: when a provider check first found a provisioned host's
+-- instance unknown to the provider (EC2's InvalidInstanceID.NotFound),
+-- cleared on any sighting of it. The provider is eventually consistent:
+-- a just-launched instance may be unknown for a while, so NotFound writes
+-- a host off only when seen again listing_lag later, on an old host.
+ALTER TABLE hosts ADD COLUMN not_found_since timestamptz;
+
 -- A fencing token: a new one each time a different holder takes the lease,
 -- so a provisioner pass can tell, before each destructive provider call,
 -- that no other luxd has held the lease since the pass began. From a

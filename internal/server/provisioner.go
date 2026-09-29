@@ -27,7 +27,7 @@ type Provider interface {
 	Instances(ctx context.Context, template json.RawMessage, tags map[string]string) (map[string]Instance, error)
 	// Describe looks hosts up by provider id, which unlike a tag listing
 	// does not lag behind tag changes. An id the provider does not know is
-	// absent from the result, not an error.
+	// absent from the result, not an error; it may be one just launched.
 	Describe(ctx context.Context, template json.RawMessage, providerIDs []string) (map[string]Instance, error)
 	// Retag sets one tag on hosts it launched (a pool rename).
 	Retag(ctx context.Context, template json.RawMessage, providerIDs []string, key, value string) error
@@ -209,6 +209,10 @@ type hostRef struct {
 	// Settled: that, and its runner is not heartbeating either; one missing
 	// from the listings may be gone.
 	Listable, Settled bool
+	// NotFound: a provider check found its instance unknown (not_found_since
+	// set). NotFoundLong: listing_lag or longer ago, on a host created more
+	// than LaunchTimeout plus listing_lag ago: unknown again, it is gone.
+	NotFound, NotFoundLong bool
 }
 
 func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, checkAlive bool, lease *passLease) error {
@@ -398,14 +402,21 @@ func (s *Server) reconcileWithProvider(ctx context.Context, prov Provider, pl po
 	// instance may briefly match no name.
 	retagging := pl.RetaggedAt != nil && time.Since(*pl.RetaggedAt) < s.cfg.ListingLag
 	unlisted := map[string][]hostRef{} // by template
+	var seen []string
 	for pid, h := range rows {
 		if !listedNew[pid] {
 			rc.unlisted = true
+		}
+		if listed[pid] && h.NotFound {
+			seen = append(seen, h.ID)
 		}
 		if listed[pid] || !h.Listable || retagging {
 			continue
 		}
 		unlisted[string(h.Template)] = append(unlisted[string(h.Template)], h)
+	}
+	if err := s.recordNotFound(ctx, lease, seen, nil); err != nil {
+		return err
 	}
 	for _, hosts := range unlisted {
 		if err := s.checkUnlisted(ctx, prov, pl, st, lease, hosts); err != nil {
@@ -424,7 +435,11 @@ func instanceGone(inst Instance) bool {
 
 // checkUnlisted looks up by id settled hosts (of one template) that no
 // listing showed, writes off the ones the provider says are gone, and
-// keeps the others, re-tagging any whose lux:pool is not the pool's.
+// keeps the others, re-tagging any whose lux:pool is not the pool's. An id
+// the provider does not know is not proof: EC2 answers NotFound for a
+// while after a launch. It writes a host off only when found unknown on
+// two checks listing_lag apart, on a host older than a launch can take to
+// show (hostRef.NotFoundLong).
 func (s *Server) checkUnlisted(ctx context.Context, prov Provider, pl poolRow, st *poolState, lease *passLease, hosts []hostRef) error {
 	pids := make([]string, len(hosts))
 	for i, h := range hosts {
@@ -437,22 +452,46 @@ func (s *Server) checkUnlisted(ctx context.Context, prov Provider, pl poolRow, s
 		s.log.Warn("provider check: describing unlisted hosts; nothing done this pass", "pool", pl.Name, "err", err)
 		return nil
 	}
+	var seen, unknown []string
+	for _, h := range hosts {
+		if _, known := insts[h.ProviderID]; known && h.NotFound {
+			seen = append(seen, h.ID)
+		} else if !known && !h.NotFound {
+			unknown = append(unknown, h.ID)
+		}
+	}
+	if err := s.recordNotFound(ctx, lease, seen, unknown); err != nil {
+		return err
+	}
 	// The pool's name as this pass read it, only to spot a tag that
 	// differs; retagOne re-tags with the name the host row has then.
 	want := poolTagValue(pl.TenantID, pl.Name)
 	for _, h := range hosts {
 		inst, known := insts[h.ProviderID]
-		if (!known || instanceGone(inst)) && h.Settled {
-			if err := s.writeOff(ctx, lease, h.ID, "the provider terminated this host"); err != nil {
-				return err
-			}
-			if !h.Draining {
-				st.total--
+		if !known {
+			if h.Settled && h.NotFoundLong {
+				if err := s.writeOff(ctx, lease, h.ID, "the provider no longer knows this host"); err != nil {
+					return err
+				}
+				if !h.Draining {
+					st.total--
+				}
+			} else {
+				s.log.Warn("provider check: the provider does not know a host's instance; kept until it says so again later",
+					"pool", pl.Name, "host", h.ID, "providerId", h.ProviderID)
 			}
 			continue
 		}
-		if !known || instanceGone(inst) {
-			continue // its runner still heartbeats: the reaper decides
+		if instanceGone(inst) {
+			if h.Settled {
+				if err := s.writeOff(ctx, lease, h.ID, "the provider terminated this host"); err != nil {
+					return err
+				}
+				if !h.Draining {
+					st.total--
+				}
+			}
+			continue // otherwise its runner still heartbeats: the reaper decides
 		}
 		s.log.Warn("provider check: a host missing from its pool's listing is still up; kept",
 			"pool", pl.Name, "host", h.ID, "providerId", h.ProviderID, "state", inst.State, "lux:pool", inst.Tags[tagPool])
@@ -462,6 +501,31 @@ func (s *Server) checkUnlisted(ctx context.Context, prov Provider, pl poolRow, s
 		if err := s.retagOne(ctx, prov, lease, h.Template, h.ProviderID, h.ID); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// recordNotFound clears not_found_since on hosts whose instance the
+// provider showed (seen), and sets it on those it did not know (unknown).
+func (s *Server) recordNotFound(ctx context.Context, lease *passLease, seen, unknown []string) error {
+	if len(seen) == 0 && len(unknown) == 0 {
+		return nil
+	}
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if _, err := s.fenceTx(ctx, tx, lease); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE hosts SET not_found_since = NULL WHERE id = ANY($1)`, seen); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE hosts SET not_found_since = coalesce(not_found_since, now()) WHERE id = ANY($1)`, unknown)
+		return err
+	})
+	if errors.Is(err, errFenced) {
+		return err
+	}
+	if err != nil {
+		s.log.Warn("provider check: recording hosts the provider does not know", "err", err)
 	}
 	return nil
 }
@@ -605,7 +669,9 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 			h.provision_requested_at < now() - $4::interval,
 			coalesce(h.lost_at < now() - $6::interval, false),
 			h.tagged AND h.provision_requested_at < now() - $8::interval,
-			coalesce(h.last_heartbeat < now() - $7::interval, true)
+			coalesce(h.last_heartbeat < now() - $7::interval, true),
+			h.not_found_since IS NOT NULL,
+			coalesce(h.not_found_since <= now() - $8::interval AND h.created_at < now() - $4::interval - $8::interval, false)
 		FROM hosts h
 		WHERE h.pool = $1 AND coalesce(h.tenant_id, '') = coalesce($2, '') AND h.provision_requested_at IS NOT NULL
 		  AND h.state <> 'terminated'
@@ -620,7 +686,7 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 		var h hostRef
 		var state string
 		var draining, busy, pending, idleLong, launchLong, lostLong, silent bool
-		if err := rows.Scan(&h.ID, &h.ProviderID, &h.Template, &state, &draining, &busy, &pending, &idleLong, &launchLong, &lostLong, &h.Listable, &silent); err != nil {
+		if err := rows.Scan(&h.ID, &h.ProviderID, &h.Template, &state, &draining, &busy, &pending, &idleLong, &launchLong, &lostLong, &h.Listable, &silent, &h.NotFound, &h.NotFoundLong); err != nil {
 			return err
 		}
 		h.Settled = h.Listable && silent

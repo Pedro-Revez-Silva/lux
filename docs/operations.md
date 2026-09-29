@@ -74,7 +74,7 @@ its variable; the table below lists them by variable.
 | `LUX_DEFAULT_CPUS`, `LUX_DEFAULT_MEMORY`, `LUX_DEFAULT_DISK`, `LUX_DEFAULT_PIDS` | `2`, `8Gi`, `20Gi`, `1024` | Resources a Run gets when its spec sets none. |
 | `LUX_PROVIDER_CHECK_EVERY` | `1m` | How often each EC2 pool's instances are listed (orphans terminated, vanished hosts written off). Mind the provider's API limits. |
 | `LUX_LOST_GRACE` | `5m` | How long a lost provisioned host's instance is kept (a runner restart or a network blip is not a loss) before it is terminated. |
-| `LUX_LISTING_LAG` | `1m` | How long after a launch EC2's listings may still miss an instance: until then a host missing from them is not looked up. After it, one is looked up by id, and written off only if EC2 says it is gone. |
+| `LUX_LISTING_LAG` | `1m` | How long after a launch EC2's listings may still miss an instance: until then a host missing from them is not looked up. After it, one is looked up by id, and written off only if EC2 says it is gone (an id EC2 does not know: on two checks this far apart). |
 | `LUX_SCALE_DOWN_AFTER` | `10m` | How long a provisioned host stays idle before it is cordoned, then terminated once idle. |
 | `LUX_LAUNCH_TIMEOUT` | `10m` | How long a launched host may take to register before it is terminated. |
 | `LUX_OUTDATED_DRAIN_PERCENT` | `10` | Caps concurrent outdated-binaries drains per pool, as a percentage of its live hosts (at least 1 regardless). |
@@ -345,11 +345,15 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   checking the host rows once more, under any pool name of the owner, right
   before. A host missing from the listing is looked up by instance id
   (`DescribeInstances` with `InstanceIds`, which tag changes do not delay):
-  written off only if EC2 says it is terminated or does not know it (and
-  its runner is silent); still running, it is kept, logged at WARN, and
-  re-tagged if its `lux:pool` is not its pool's. A tag listing alone never
-  terminates or writes off anything. A host lost for over 5 minutes is
-  terminated.
+  written off (its runner silent) if EC2 says it is terminated or shutting
+  down, or if EC2 does not know it (`InvalidInstanceID.NotFound`) on two
+  checks at least `LUX_LISTING_LAG` apart and the host is older than
+  `LUX_LAUNCH_TIMEOUT` plus `LUX_LISTING_LAG`: EC2 may not know an
+  instance for a while after launching it. Still running, it is kept,
+  logged at WARN, and re-tagged if its `lux:pool` is not its pool's. Ids
+  are looked up 100 per call; a call EC2 refuses for an unknown id is split
+  in halves until that id is alone. A tag listing alone never terminates
+  or writes off anything. A host lost for over 5 minutes is terminated.
 - One luxd instance does all this at a time (a lease in Postgres). The
   lease carries a fencing token, new whenever another luxd takes it; each
   terminate, re-tag and write-off first checks that the pass still holds

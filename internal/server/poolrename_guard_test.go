@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -253,5 +254,76 @@ func TestRenamePoolTooManyAliases(t *testing.T) {
 	pl := f.pool(t)
 	if pl.Name != "old3" || len(pl.Aliases) != maxPoolAliases || slices.Contains(pl.Aliases, "old3") || !slices.Contains(pl.Aliases, "burst") {
 		t.Fatalf("pool %s aliases %v", pl.Name, pl.Aliases)
+	}
+}
+
+// forget: the provider no longer knows pid (Describe leaves it out, as
+// EC2 answers InvalidInstanceID.NotFound), nor lists it.
+func (c *fakeCloud) forget(pid string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.insts, pid)
+}
+
+// An instance id the provider does not know is not proof the host is
+// gone: EC2 answers NotFound for a while after a launch. A host is written
+// off only when unknown on two checks listing_lag apart, and old enough.
+func TestNotFoundIsInconclusive(t *testing.T) {
+	f := newRenameFixture(t, true)
+	state := func(h string) string { return f.query(t, `SELECT state FROM hosts WHERE id = $1`, h) }
+	since := func(h string) string {
+		return f.query(t, `SELECT coalesce(not_found_since::text, 'null') FROM hosts WHERE id = $1`, h)
+	}
+
+	// Fresh: created just now (launched and listable, its instance not
+	// yet known by id). h2 is old.
+	execSQL(t, f.s, f.ctx, `UPDATE hosts SET created_at = CASE id WHEN 'h1' THEN now() ELSE now() - interval '1 day' END`)
+	f.cloud.forget("i-1")
+	for range 2 {
+		f.check(t, f.pool(t))
+		time.Sleep(f.s.cfg.ListingLag)
+	}
+	if got := state("h1"); got == "terminated" {
+		t.Fatal("a fresh host written off on NotFound")
+	}
+	if since("h1") == "null" {
+		t.Fatal("not_found_since not recorded")
+	}
+
+	// Old: unknown once, then running again: kept, and cleared.
+	f.cloud.forget("i-2")
+	f.check(t, f.pool(t))
+	if got := state("h2"); got == "terminated" {
+		t.Fatal("an old host written off on a first NotFound")
+	}
+	f.cloud.add("i-2", map[string]string{tagManaged: "true", tagDeployment: "d1", tagPool: "t1/burst", tagHost: "h2"})
+	f.cloud.hidden = map[string]bool{"i-2": true} // looked up by id again
+	f.check(t, f.pool(t))
+	if got := since("h2"); got != "null" {
+		t.Fatalf("not_found_since %s after the provider showed the instance", got)
+	}
+	f.cloud.hidden = map[string]bool{}
+	f.check(t, f.pool(t))
+
+	// Old, unknown twice listing_lag apart: written off.
+	f.cloud.forget("i-2")
+	f.check(t, f.pool(t))
+	f.check(t, f.pool(t))
+	if got := state("h2"); got == "terminated" {
+		t.Fatal("written off on two NotFounds less than listing_lag apart")
+	}
+	time.Sleep(f.s.cfg.ListingLag)
+	f.check(t, f.pool(t))
+	if got := state("h2"); got != "terminated" {
+		t.Fatalf("h2 is %s after NotFound twice across listing_lag", got)
+	}
+	// h1, old now, likewise.
+	execSQL(t, f.s, f.ctx, `UPDATE hosts SET created_at = now() - interval '1 day' WHERE id = 'h1'`)
+	f.check(t, f.pool(t))
+	if got := state("h1"); got != "terminated" {
+		t.Fatalf("h1 is %s once old", got)
+	}
+	if got := f.cloud.terminatedIDs(); len(got) > 0 {
+		t.Fatalf("terminated %v", got)
 	}
 }
