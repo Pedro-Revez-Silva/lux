@@ -81,19 +81,6 @@ type config struct {
 	Tenant string `toml:"tenant"`
 }
 
-// tenantOf is the tenant to narrow to: --tenant, else LUX_TENANT, else the
-// config file's. A flag or variable set to "" still wins, so an operator
-// with a default tenant can reach all tenants.
-func tenantOf(cmd *cobra.Command, flag, cfg string) string {
-	if cmd.Flags().Changed("tenant") {
-		return flag
-	}
-	if env, ok := os.LookupEnv("LUX_TENANT"); ok {
-		return env
-	}
-	return cfg
-}
-
 func loadConfig() config {
 	var c config
 	dir, err := os.UserConfigDir()
@@ -134,7 +121,14 @@ func (a *app) root() *cobra.Command {
 				return fmt.Errorf("-o must be text or json")
 			}
 			a.c = client.New(a.url, a.key)
-			a.c.Tenant = tenantOf(cmd, a.tenant, cfg.Tenant)
+			a.c.Tenant = cfg.Tenant
+			if env, ok := os.LookupEnv("LUX_TENANT"); ok {
+				a.c.Tenant = env
+			}
+			// An explicitly empty flag overrides both the environment and config.
+			if cmd.Flags().Changed("tenant") {
+				a.c.Tenant = a.tenant
+			}
 			return nil
 		},
 	}

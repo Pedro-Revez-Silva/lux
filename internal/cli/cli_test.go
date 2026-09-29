@@ -58,16 +58,15 @@ func TestTenantPrecedence(t *testing.T) {
 		config string
 		env    string   // unset: not in the environment
 		flag   []string // nil: not given
-		want   string   // "" : no ?tenant=
-		absent bool
+		want   string   // empty: no ?tenant=
 	}{
 		{name: "flag", config: `tenant = "cfg"`, env: "env", flag: []string{"--tenant", "flag"}, want: "flag"},
 		{name: "env", config: `tenant = "cfg"`, env: "env", want: "env"},
 		{name: "config", config: `tenant = "cfg"`, env: unset, want: "cfg"},
-		{name: "env set empty", config: `tenant = "cfg"`, env: "", absent: true},
-		{name: "flag set empty", config: `tenant = "cfg"`, env: "env", flag: []string{"--tenant", ""}, absent: true},
-		{name: "flag set empty with =", config: `tenant = "cfg"`, env: unset, flag: []string{"--tenant="}, absent: true},
-		{name: "none", config: `url = "http://unused"`, env: unset, absent: true},
+		{name: "env set empty", config: `tenant = "cfg"`, env: ""},
+		{name: "flag set empty", config: `tenant = "cfg"`, env: "env", flag: []string{"--tenant", ""}},
+		{name: "flag set empty with =", config: `tenant = "cfg"`, env: unset, flag: []string{"--tenant="}},
+		{name: "none", config: `url = "http://unused"`, env: unset},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			isolateConfig(t, c.config)
@@ -86,7 +85,7 @@ func TestTenantPrecedence(t *testing.T) {
 				t.Fatal(err)
 			}
 			q := u.Query()
-			if c.absent {
+			if c.want == "" {
 				if q.Has("tenant") {
 					t.Errorf("sent tenant=%q, want none (%s)", q.Get("tenant"), f.seen[0])
 				}
