@@ -333,7 +333,11 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 				"pool %q has %d hosts that follow the rename: confirm with its current name", from, out.Hosts)
 		}
 
-		if _, err := tx.Exec(ctx, `UPDATE runs SET spec = jsonb_set(spec, '{placement,pool}', to_jsonb($3::text)), updated_at = now()
+		// A platform rename binds the unbound Runs it moves to the platform:
+		// unbound, a resumed one (failed Runs are final but resumable) would
+		// take its tenant's pool of the new name.
+		if _, err := tx.Exec(ctx, `UPDATE runs SET spec = jsonb_set(spec, '{placement,pool}', to_jsonb($3::text)), updated_at = now(),
+				pool_owner = CASE WHEN $1 = '' THEN coalesce(pool_owner, '') ELSE pool_owner END
 			WHERE id IN (SELECT r.id `+runs+` ORDER BY r.id FOR UPDATE)`, tenantID, from, to); err != nil {
 			return err
 		}

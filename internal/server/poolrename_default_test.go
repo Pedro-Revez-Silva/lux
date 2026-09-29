@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -148,6 +149,38 @@ func TestRenameMovesRunsByTheirOwner(t *testing.T) {
 	}
 	if got, owner := runOf(t, s, "t2-plat"); got != "mine" || owner != "" {
 		t.Fatalf("t2-plat names %s owner %s, want mine owner platform", got, owner)
+	}
+}
+
+// A failed Run is final but resumable. Unbound, following the platform's
+// shared, it moves with the platform's rename onto gpu, a name its tenant
+// also has a pool by: resumed, it goes to the platform's host, not the
+// tenant's.
+func TestPlatformRenameBindsAFailedUnboundRun(t *testing.T) {
+	s := testServer(t)
+	s.cfg.LeaseDuration = time.Minute
+	ctx := testCtx(t)
+	renameStatic(t, s, ctx)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('plat', NULL, 'shared', 'static')`)
+	id := submitAs(t, s, "t1", "shared", "")
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'failed', pool_owner = NULL WHERE id = $1`, id)
+	mustPut(t, s, "t1", Pool{Name: "gpu", Provider: "static"})
+	readyHost(t, s, "h-plat", "shared", "", false)
+	// The tenant's host is the more attractive one (the image is cached).
+	readyHost(t, s, "h-t1", "gpu", "t1", true)
+
+	if _, err := renameConfirmed(ctx, s, "", "shared", "gpu", false); err != nil {
+		t.Fatal(err)
+	}
+	if p, o := runOf(t, s, id); p != "gpu" || o != "" {
+		t.Fatalf("failed Run after the platform rename: %s owner %s, want gpu owner platform", p, o)
+	}
+	if _, err := s.resumeRun(tenantCtx("t1"), &resumeRunInput{RunPath: RunPath{ID: id}}); err != nil {
+		t.Fatal(err)
+	}
+	schedule(t, s)
+	if host, _, _ := placedOn(t, s, id); host != "h-plat" {
+		t.Fatalf("resumed onto %q, want h-plat (the platform's gpu)", host)
 	}
 }
 

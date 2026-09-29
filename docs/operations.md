@@ -436,7 +436,8 @@ platform's `burst` where they are, and the other way round. A Run bound
 to no pool row (submitted before owners were recorded, or to a name no
 pool had) follows as the provisioner counts it: a tenant pool's, its
 tenant's; a platform pool's, those of tenants with no pool of their own
-by that name. A pool marked as its owner's default stays the default
+by that name, and the platform's rename binds each of them to the
+platform pool, final ones too (a failed Run can be resumed). A pool marked as its owner's default stays the default
 under the new name; a platform rename changes no tenant's default. Only Runs not yet final count in the rename response. A Run
 waiting for the pool schedules under the new name at once. The new name follows the [pool-name rule](cli.md#hosts-and-pools)
 (422 `invalid_pool` otherwise; a name kept from before the rule is never
