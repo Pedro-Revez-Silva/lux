@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -52,8 +53,9 @@ func TestRunPoolFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	body = submitted(t, "run", "-f", file, "--pool", "arm64")
-	if p := placement(body); p["pool"] != "arm64" || p["requires"] == nil {
-		t.Errorf("-f with --pool: placement = %v, want pool arm64 and the spec's requires kept", p)
+	want := map[string]any{"pool": "arm64", "requires": map[string]any{"zone": "a"}}
+	if p := placement(body); !reflect.DeepEqual(p, want) {
+		t.Errorf("-f with --pool: placement = %v, want %v (the spec's requires kept)", p, want)
 	}
 	body = submitted(t, "run", "-f", file)
 	if got := placement(body)["pool"]; got != "gpu" {
