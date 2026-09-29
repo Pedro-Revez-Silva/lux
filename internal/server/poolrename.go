@@ -237,18 +237,21 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 	from, to, dryRun := a.From, a.To, a.DryRun
 	out := PoolRenamed{DryRun: dryRun}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		// Both names, always in the same order.
-		if err := lockPoolName(ctx, tx, tenantID, min(from, to)); err != nil {
-			return err
+		// Both names, the owner's then across owners, each in name order:
+		// a tenant creating a pool under either name would change which of
+		// its Runs a platform rename moves.
+		for _, name := range []string{min(from, to), max(from, to)} {
+			if err := lockPoolName(ctx, tx, tenantID, name); err != nil {
+				return err
+			}
 		}
-		if err := lockPoolName(ctx, tx, tenantID, max(from, to)); err != nil {
-			return err
+		for _, name := range []string{min(from, to), max(from, to)} {
+			if err := lockPoolNameAnyOwner(ctx, tx, name); err != nil {
+				return err
+			}
 		}
 		checkName := to != ""
 		if checkName {
-			if err := lockPoolNameAnyOwner(ctx, tx, to); err != nil {
-				return err
-			}
 			if err := lockProvisionerLease(ctx, tx); err != nil {
 				return err
 			}
@@ -337,7 +340,7 @@ func (s *Server) renamePoolTx(ctx context.Context, tenantID string, a renameArgs
 		// cost_hourly.pool is copied from hosts.pool whenever an hour is
 		// (re)computed: left alone, one host's hours would split between
 		// both names as they are recomputed.
-		if err := renameCostHours(ctx, tx, tenantID, from, to); err != nil {
+		if err := renameCostHours(ctx, tx, tenantID, from, to, time.Time{}); err != nil {
 			return err
 		}
 		// A provisioned pool's rename arms the lease fence for good: a
@@ -384,13 +387,14 @@ const legacyHost = `h.pool = p.name AND coalesce(h.tenant_id, '') = coalesce(p.t
 	AND h.provision_requested_at IS NOT NULL AND h.tagged AND NOT h.pool_id_tagged AND h.state <> 'terminated'`
 
 // renameCostHours moves the pool's hosts' cost hours still under the old
-// name. Idempotent: the provisioner runs it again for a while after a
-// rename, for hours computed from a host row read before the rename and
-// written after it (cost writers copy hosts.pool without the rename's
-// locks).
-func renameCostHours(ctx context.Context, tx pgx.Tx, tenantID, from, to string) error {
-	_, err := tx.Exec(ctx, `UPDATE cost_hourly SET pool = $3 WHERE pool = $2
-		AND host_id IN (SELECT id FROM hosts WHERE coalesce(tenant_id, '') = $1 AND pool = $3)`, tenantID, from, to)
+// name, from hour since on (zero: all of them). The provisioner runs it
+// again for a while after a rename, for hours computed from a host row
+// read before the rename and written after it (cost writers copy
+// hosts.pool without the rename's locks), from costRepairFrom on: bounded
+// by hour, it reads cost_hourly_hour rather than every row of the table.
+func renameCostHours(ctx context.Context, tx pgx.Tx, tenantID, from, to string, since time.Time) error {
+	_, err := tx.Exec(ctx, `UPDATE cost_hourly SET pool = $3 WHERE hour >= $4 AND pool = $2
+		AND host_id IN (SELECT id FROM hosts WHERE coalesce(tenant_id, '') = $1 AND pool = $3)`, tenantID, from, to, since)
 	return err
 }
 
@@ -398,6 +402,12 @@ func renameCostHours(ctx context.Context, tx pgx.Tx, tenantID, from, to string) 
 // moves cost hours written under an old name. A cost pass's transaction
 // is far shorter.
 const costRepairAfterRename = time.Hour
+
+// costRepairFrom: the earliest hour the provisioner's repair moves after
+// a rename at renamedAt. A cost pass normally writes the current hour or
+// the one before; a host whose cost cursor is further behind (a backlog)
+// may write an older hour under the old name, which this does not move.
+func costRepairFrom(renamedAt time.Time) time.Time { return renamedAt.Add(-2 * time.Hour) }
 
 // checkDeploymentCanRename refuses a provisioned pool's rename while a luxd
 // that discovers instances by name may hold the provisioner lease: after

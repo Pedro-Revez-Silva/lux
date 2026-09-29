@@ -96,6 +96,38 @@ func TestRenamePoolNeedsConfirmationWithHosts(t *testing.T) {
 	}
 }
 
+// The rename moves every retained hour; the provisioner's later repair only
+// hours from two before the rename on, and only within an hour of it.
+func TestRenameCostHoursRepairWindow(t *testing.T) {
+	f := newRenameFixture(t, false)
+	insert := func(hour string) {
+		t.Helper()
+		execSQL(t, f.s, f.ctx, `INSERT INTO cost_hourly (hour, source, family, currency, host_id, pool, allocated)
+			VALUES (date_trunc('hour', now()) + $1::interval, 'compute', 'compute', 'USD', 'h1', 'burst', 1)`, hour)
+	}
+	pools := func() string {
+		return f.query(t, `SELECT string_agg(pool, ',' ORDER BY hour) FROM cost_hourly`)
+	}
+	insert("-72 hours")
+	insert("-1 hour")
+	f.rename(t, "burst", "burst-eu")
+	if got := pools(); got != "burst-eu,burst-eu" {
+		t.Fatalf("after the rename: %s, want every hour moved", got)
+	}
+	// As if written under the old name after the rename.
+	execSQL(t, f.s, f.ctx, `UPDATE cost_hourly SET pool = 'burst'`)
+	f.check(t, f.pool(t))
+	if got := pools(); got != "burst,burst-eu" {
+		t.Fatalf("after a pass: %s, want only the recent hour moved", got)
+	}
+	execSQL(t, f.s, f.ctx, `UPDATE cost_hourly SET pool = 'burst'`)
+	execSQL(t, f.s, f.ctx, `UPDATE pools SET renamed_at = now() - $1::interval WHERE id = 'pool1'`, interval(costRepairAfterRename+time.Minute))
+	f.check(t, f.pool(t))
+	if got := pools(); got != "burst,burst" {
+		t.Fatalf("a pass over an hour after the rename: %s, want nothing moved", got)
+	}
+}
+
 // A cost hour written under the old name after the rename committed (its
 // writer read the host row before) is moved by the provisioner's next
 // passes; another pool's hours under that name are not.
@@ -242,9 +274,6 @@ func TestPoolTagsInBatches(t *testing.T) {
 	f.noneTerminated(t)
 }
 
-// A rename moves every Run naming the pool, final ones too, so a final
-// Run resumed later waits for the pool, not its old name; only the Runs
-// not yet final are counted, and final ones get no event.
 func TestRenameMovesFinalRunSpecsWithoutFinalRunEvents(t *testing.T) {
 	f := newRenameFixture(t, false)
 	execSQL(t, f.s, f.ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES

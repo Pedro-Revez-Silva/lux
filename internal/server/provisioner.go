@@ -245,7 +245,7 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 		// read before the rename (poolrename.go).
 		if pl.RenamedAt != nil && time.Since(*pl.RenamedAt) < costRepairAfterRename {
 			for _, old := range pl.PreviousNames {
-				if err := renameCostHours(ctx, tx, ownerOf(pl), old, pl.Name); err != nil {
+				if err := renameCostHours(ctx, tx, ownerOf(pl), old, pl.Name, costRepairFrom(*pl.RenamedAt)); err != nil {
 					return err
 				}
 			}

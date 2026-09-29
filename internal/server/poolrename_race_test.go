@@ -8,6 +8,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/store"
 )
 
 // Interleavings of a provisioner pass with a rename, a lease handoff, a
@@ -380,6 +384,80 @@ func TestRenameRaceLateLaunchUnderTheOldName(t *testing.T) {
 				if got := f.query(t, `SELECT state FROM hosts WHERE id = $1`, h); got == "terminated" {
 					t.Errorf("%s written off", h)
 				}
+			}
+		})
+	}
+}
+
+// A tenant creating a pool under the platform pool's old name and a
+// platform rename serialize regardless of which transaction commits first.
+func TestPlatformRenameOldNameCrossOwnerLock(t *testing.T) {
+	for _, first := range []string{"creation", "rename"} {
+		t.Run(first, func(t *testing.T) {
+			s := testServer(t)
+			ctx := testCtx(t)
+			execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 'acme')`)
+			execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('plat', 'shared', 'static')`)
+			execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r1', 't1', '{"placement":{"pool":"shared"}}', 'provisioning')`)
+			rename := func() <-chan error {
+				done := make(chan error, 1)
+				go func() { _, err := renameConfirmed(ctx, s, "", "shared", "gpu", false); done <- err }()
+				return done
+			}
+			tx := systemTx(t, ctx, s)
+			if first == "creation" {
+				if err := LockPoolName(ctx, tx, "t1", "shared"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('mine', 't1', 'shared', 'static')`); err != nil {
+					t.Fatal(err)
+				}
+				done := rename()
+				blocked(t, done, "rename waiting for old cross-owner name")
+				if err := tx.Commit(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if err := recv(t, ctx, done, "rename"); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := tx.Rollback(ctx); err != nil {
+					t.Fatal(err)
+				}
+				row := holdPoolRow(t, ctx, s, "plat")
+				done := rename()
+				time.Sleep(200 * time.Millisecond)
+				created := make(chan error, 1)
+				go func() {
+					created <- s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+						if err := LockPoolName(ctx, tx, "t1", "shared"); err != nil {
+							return err
+						}
+						_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('mine', 't1', 'shared', 'static')`)
+						return err
+					})
+				}()
+				blocked(t, created, "creation waiting for old cross-owner name")
+				if err := row.Commit(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if err := recv(t, ctx, done, "rename"); err != nil {
+					t.Fatal(err)
+				}
+				if err := recv(t, ctx, created, "creation"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := func() string {
+				var pool string
+				if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+					return tx.QueryRow(ctx, `SELECT spec->'placement'->>'pool' FROM runs WHERE id = 'r1'`).Scan(&pool)
+				}); err != nil {
+					t.Fatal(err)
+				}
+				return pool
+			}(); got != map[string]string{"creation": "shared", "rename": "gpu"}[first] {
+				t.Fatalf("Run pool after %s committed first: %s", first, got)
 			}
 		})
 	}
