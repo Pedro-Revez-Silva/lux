@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"testing"
@@ -12,6 +13,118 @@ import (
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/store"
 )
+
+func TestSchedulerFitWaitAndPlacementResources(t *testing.T) {
+	s := testServer(t)
+	namedPools(t, s, "pool")
+	ctx := context.Background()
+	s.cfg.LeaseDuration = time.Minute
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `UPDATE pools SET provider = 'ec2' WHERE id = 'pool'`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, capacity, last_heartbeat)
+		VALUES ('h', 'h', 'pool', 'ready', '{"cpus":1,"memory":4096}', now())`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES
+		('r', 't1', '{"placement":{"pool":"pool"},"resources":{"cpus":2.5,"memory":8192,"disk":4096}}', 'submitted')`)
+	s.hub.polled("h")
+	for _, capacity := range []float64{1, 2} {
+		execSQL(t, s, ctx, `UPDATE hosts SET capacity = jsonb_build_object('cpus', $1::float8, 'memory', 4096) WHERE id = 'h'`, capacity)
+		if err := s.scheduleOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var state, reason string
+		systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r'`, nil, &state, &reason)
+		r, h := fitFixture()
+		h.Capacity = proto.Capacity{CPUs: capacity, Memory: 4096}
+		want := hostFitReason(h, hostFit(r, h))
+		if state != StateProvisioning || reason != want {
+			t.Fatalf("Run = %s/%q, want provisioning/%q", state, reason, want)
+		}
+	}
+	execSQL(t, s, ctx, `UPDATE hosts SET capacity = '{"cpus":4,"memory":16384}' WHERE id = 'h'`)
+	if err := s.scheduleOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	systemScan(t, s, `SELECT state FROM runs WHERE id = 'r'`, nil, &state)
+	if state != StateScheduled {
+		t.Fatalf("state = %s", state)
+	}
+	for _, query := range []string{
+		`SELECT data FROM host_events WHERE data->>'run' = 'r'`,
+		`SELECT data FROM pool_events WHERE data->>'run' = 'r'`,
+	} {
+		var data json.RawMessage
+		systemScan(t, s, query, nil, &data)
+		var event struct {
+			Resources struct {
+				CPUs   float64
+				Memory int64
+				Disk   int64
+			}
+		}
+		if err := json.Unmarshal(data, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Resources.CPUs != 2.5 || event.Resources.Memory != 8192 || event.Resources.Disk != 4096 {
+			t.Fatalf("placement resources = %+v", event.Resources)
+		}
+	}
+}
+
+func TestPickHostAffinityAndSnapshotWait(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	r, cached := fitFixture()
+	r.Spec.Image.Ref = "image"
+	cached.Images = []string{"image"}
+	local := *cached
+	local.ID = "local"
+	local.Images = nil
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state) VALUES ('local', 'local', 'ready')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r', 't1', '{}', 'resuming')`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p', 't1', 'r', 'local', 1, 'exited')`)
+	execSQL(t, s, ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, host_id, manifest, available, uploaded, host_copy)
+		VALUES ('snap', 't1', 'r', 'p', 1, 'local', '{}', true, false, true)`)
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		h, wait, err := s.pickHost(ctx, tx, r, []*candidateHost{&local, cached})
+		if err != nil {
+			return err
+		}
+		if h != cached || wait != "" {
+			return fmt.Errorf("image affinity: %v / %q", h, wait)
+		}
+		r.SnapshotID = new("snap")
+		h, wait, err = s.pickHost(ctx, tx, r, []*candidateHost{cached, &local})
+		if err != nil {
+			return err
+		}
+		if h != &local || wait != "" {
+			return fmt.Errorf("snapshot affinity: %v / %q", h, wait)
+		}
+		local.Capacity.CPUs = 1
+		h, wait, err = s.pickHost(ctx, tx, r, []*candidateHost{cached, &local})
+		if err != nil {
+			return err
+		}
+		if h != nil || wait != "waiting for snapshot upload" {
+			return fmt.Errorf("snapshot wait: %v / %q", h, wait)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE snapshots SET uploaded = true WHERE id = 'snap'`); err != nil {
+			return err
+		}
+		h, wait, err = s.pickHost(ctx, tx, r, []*candidateHost{cached, &local})
+		if err != nil {
+			return err
+		}
+		if h != cached || wait != "" {
+			return fmt.Errorf("uploaded snapshot: %v / %q", h, wait)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // A scheduler waiting on a finalizer's host lock must not admit a host
 // registered after discovery into its placement decision.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -346,52 +347,10 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 			r.PlaceOn = ""
 		}
 	}
+	var fitReasons []string
 	for _, h := range hosts {
-		if !h.Connected {
-			continue
-		}
-		// Chosen by an operator: that host, whatever its pool, labels or
-		// sharing (it still needs the tenancy and capacity). A host to
-		// avoid (the one a migration left) is only scored down: rather
-		// back where it was than nowhere.
-		chosen := r.PlaceOn != ""
-		if chosen && h.ID != r.PlaceOn {
-			continue
-		}
-		// Its pool, by id, whatever the pool is called now. A removed
-		// pool's static hosts stay up but take no Runs: the Run waits for
-		// the pool to be re-created.
-		if !chosen && (r.PoolID == nil || h.PoolID != *r.PoolID || h.Retired) {
-			continue
-		}
-		// Tenancy: a tenant's own hosts; a shared platform pool; or a
-		// platform host no other tenant is using right now.
-		if h.TenantID != nil && *h.TenantID != r.TenantID {
-			continue
-		}
-		if h.TenantID == nil && !h.Shared {
-			other := false
-			for _, t := range h.Tenants {
-				if t != r.TenantID {
-					other = true
-				}
-			}
-			if other {
-				continue
-			}
-		}
-		if !labelsMatch(h.Labels, r.Spec.Placement.Requires) && !chosen {
-			continue
-		}
-		if r.Spec.Sandbox.NestedContainers && h.Labels["nested"] != "true" {
-			continue
-		}
-		res := r.Spec.Resources
-		if h.Capacity.Runs > 0 && h.UsedRuns >= h.Capacity.Runs ||
-			h.Capacity.CPUs > 0 && h.UsedCPUs+res.CPUs > h.Capacity.CPUs ||
-			h.Capacity.Memory > 0 && h.UsedMem+int64(res.Memory) > h.Capacity.Memory ||
-			h.Capacity.Disk > 0 && h.UsedDisk+int64(res.Disk) > h.Capacity.Disk {
-			reason = "waiting for capacity"
+		if blockers := hostFit(r, h); len(blockers) != 0 {
+			fitReasons = append(fitReasons, hostFitReason(h, blockers))
 			continue
 		}
 		// A snapshot only on another host, not yet uploaded: that host must
@@ -438,19 +397,14 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 		ok = append(ok, scored{h, sc})
 	}
 	if len(ok) == 0 {
+		if reason != "waiting for snapshot upload" && len(fitReasons) > 0 {
+			slices.Sort(fitReasons)
+			reason = strings.Join(fitReasons, "; ")
+		}
 		return nil, reason, nil
 	}
 	sort.SliceStable(ok, func(i, j int) bool { return ok[i].score > ok[j].score })
 	return ok[0].h, "", nil
-}
-
-func labelsMatch(have, want map[string]string) bool {
-	for k, v := range want {
-		if have[k] != v {
-			return false
-		}
-	}
-	return true
 }
 
 // noHost records why a Run is waiting, and asks a provider for a host if
@@ -478,9 +432,8 @@ func (s *Server) noHost(ctx context.Context, tx pgx.Tx, r pendingRun, wait strin
 	var err error
 	if provider != "" && provider != "static" && wait != "waiting for snapshot upload" {
 		if r.State != StateProvisioning {
-			return setRunState(ctx, tx, r.TenantID, r.ID, StateProvisioning, "waiting for a host", r.Epoch)
+			return setRunState(ctx, tx, r.TenantID, r.ID, StateProvisioning, wait, r.Epoch)
 		}
-		return nil
 	}
 	_, err = tx.Exec(ctx, `UPDATE runs SET state_reason = $2 WHERE id = $1 AND state_reason <> $2`, r.ID, wait)
 	return err
@@ -520,7 +473,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID, "pool": h.Pool, "poolId": h.PoolID, "snapshotId": r.SnapshotID}); err != nil {
 		return err
 	}
-	placed := map[string]any{"run": r.ID, "epoch": epoch, "host": h.ID}
+	placed := map[string]any{"run": r.ID, "epoch": epoch, "host": h.ID, "resources": r.Spec.Resources}
 	if err := hostEvent(ctx, tx, h.ID, evPlacementAssign, placed); err != nil {
 		return err
 	}
@@ -551,11 +504,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	if err := s.startSpecServers(ctx, tx, r.TenantID, r.ID, epoch); err != nil {
 		return err
 	}
-	h.UsedRuns++
-	h.UsedCPUs += r.Spec.Resources.CPUs
-	h.UsedMem += int64(r.Spec.Resources.Memory)
-	h.UsedDisk += int64(r.Spec.Resources.Disk)
-	h.Tenants = append(h.Tenants, r.TenantID)
+	reserveHost(h, r)
 	return nil
 }
 
