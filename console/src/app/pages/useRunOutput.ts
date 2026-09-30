@@ -1,10 +1,10 @@
-// Streams a Run's output (SSE) into LogView lines. stdout/stderr records are
-// split into lines (a record may end mid-line; the rest waits for the next
-// one); "event" records and lux lifecycle events become system lines.
+// Streams a Run's output (SSE) into LogView lines (outputLines.ts): one
+// LogLine per visual line, whether from stdout/stderr, "event" records or
+// lux lifecycle events.
 import { useEffect, useRef, useState } from "react";
 import type { LogLine } from "@lux/design-system";
 import { errorText, streamSSE, type Event, type OutputRecord } from "../../api/index.ts";
-import { eventSummary } from "./events.ts";
+import { ChannelLines, eventLine, luxEventLines, systemLines } from "./outputLines.ts";
 
 export interface OutputState {
   lines: LogLine[];
@@ -15,14 +15,8 @@ export interface OutputState {
 
 const MAX_LINES = 200_000;
 
-/** An "event" record: a {type, data} object summarized like lux events, else its JSON. */
-function eventLine(ev: unknown): string {
-  if (ev && typeof ev === "object" && typeof (ev as { type?: unknown }).type === "string") {
-    const e = ev as { type: string; data?: unknown };
-    const data = e.data && typeof e.data === "object" && !Array.isArray(e.data) ? (e.data as Record<string, unknown>) : e.data === undefined ? {} : { data: e.data };
-    return `[${e.type}] ${eventSummary({ id: 0, type: e.type, data, time: "" })}`.trimEnd();
-  }
-  return typeof ev === "string" ? ev : JSON.stringify(ev);
+function newChannels(): Record<"stdout" | "stderr", ChannelLines> {
+  return { stdout: new ChannelLines("stdout"), stderr: new ChannelLines("stderr") };
 }
 
 /** restartKey: bump to reopen the stream from the current cursor (e.g. the Run resumed). */
@@ -30,12 +24,14 @@ export function useRunOutput(id: string, restartKey: number): OutputState {
   const [state, setState] = useState<OutputState>({ lines: [], status: "connecting", error: null, cursor: "" });
   const cursor = useRef("");
   const afterEvent = useRef(0);
-  const partial = useRef<Record<string, { text: string; ts: number }>>({});
+  const channels = useRef(newChannels());
+  const partialOrder = useRef(new Set<"stdout" | "stderr">());
 
   useEffect(() => {
     cursor.current = "";
     afterEvent.current = 0;
-    partial.current = {};
+    channels.current = newChannels();
+    partialOrder.current.clear();
     setState({ lines: [], status: "connecting", error: null, cursor: "" });
   }, [id]);
 
@@ -64,23 +60,14 @@ export function useRunOutput(id: string, restartKey: number): OutputState {
         return { ...s, lines, cursor: cursor.current };
       });
     };
-    const push = (l: LogLine) => {
-      pending.push(l);
+    const push = (ls: LogLine[]) => {
+      if (ls.length === 0) return;
+      for (const l of ls) pending.push(l);
       if (flushTimer == null) flushTimer = setTimeout(flush, 50);
     };
-    const pushData = (ch: string, ts: number, data: string) => {
-      const stream: LogLine["stream"] = ch === "stderr" ? "stderr" : "stdout";
-      const p = partial.current[ch];
-      const parts = ((p?.text ?? "") + data).split("\n");
-      const rest = parts.pop() ?? "";
-      // Only the line the carried-over partial completes started at its time.
-      parts.forEach((line, i) => push({ ts: i === 0 && p ? p.ts : ts, stream, text: line }));
-      if (rest) partial.current[ch] = { text: rest, ts: parts.length === 0 && p ? p.ts : ts };
-      else delete partial.current[ch];
-    };
     const flushPartials = () => {
-      for (const [ch, p] of Object.entries(partial.current)) if (p.text) push({ ts: p.ts, stream: ch === "stderr" ? "stderr" : "stdout", text: p.text });
-      partial.current = {};
+      for (const ch of partialOrder.current) push(channels.current[ch].flush());
+      partialOrder.current.clear();
     };
 
     setState((s) => ({ ...s, status: "connecting", error: null }));
@@ -100,21 +87,30 @@ export function useRunOutput(id: string, restartKey: number): OutputState {
           case "record": {
             const r = body as OutputRecord;
             cursor.current = r.cursor;
-            if (r.ch === "event") push({ ts: r.t, stream: "system", text: eventLine(r.event) });
-            else pushData(r.ch, r.t, r.data ?? "");
+            if (r.ch === "event") push(systemLines(r.t, eventLine(r.event)));
+            else {
+              const ch = r.ch === "stderr" ? "stderr" : "stdout";
+              const lines = channels.current[ch].push(r.t, r.data ?? "");
+              // Completing a line also completes its arrival-order slot; a new
+              // trailing partial starts after the other outstanding channel.
+              if (lines.length > 0 || !channels.current[ch].hasPartial) partialOrder.current.delete(ch);
+              if (channels.current[ch].hasPartial) partialOrder.current.add(ch);
+              push(lines);
+            }
             break;
           }
           case "lux": {
             const e = body as Event;
             afterEvent.current = Math.max(afterEvent.current, e.id);
             flushPartials();
-            push({ ts: Date.parse(e.time), stream: "system", text: `lux: ${e.type}${e.epoch ? ` (epoch ${e.epoch})` : ""} ${eventSummary(e)}`.trimEnd() });
+            push(luxEventLines(e));
             break;
           }
           case "gap": {
             const g = body as { epoch?: number; reason?: string };
             flushPartials();
-            push({ ts: Date.now(), stream: "system", text: `--- gap in epoch ${g.epoch ?? "?"}: ${g.reason ?? "unknown"} ---` });
+            channels.current = newChannels();
+            push(systemLines(Date.now(), `--- gap in epoch ${g.epoch ?? "?"}: ${g.reason ?? "unknown"} ---`));
             break;
           }
           case "end": {
