@@ -13,7 +13,9 @@ INNER = f"podman load -q -i /opt/alpine.tar >/dev/null && podman run --rm {ALPIN
 
 
 def nested(script: str, **extra) -> dict:
-    return generic(NESTED, "sh", "-c", script, sandbox={"nestedContainers": True}, **extra)
+    # Errors to stdout, which the assertions show: an inner engine that
+    # fails says why only on stderr.
+    return generic(NESTED, "sh", "-c", f"exec 2>&1; {script}", sandbox={"nestedContainers": True}, **extra)
 
 
 def test_a_run_runs_containers_inside(lux, runners, hosts):

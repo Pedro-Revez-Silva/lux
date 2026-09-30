@@ -74,7 +74,6 @@ def test_follow_across_a_restart_of_the_runner(lux, runners, hosts):
     run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "for i in $(seq 1 12); do echo tick-$i; sleep 1; done"))
     lux.wait_output(run_id, "tick-2")
     runners.stop(hosts[0], "KILL")
-    time.sleep(2)
     runners.start(hosts[0])
     run = lux.wait_state(run_id, "succeeded", "failed", timeout=60)
     assert run["state"] == "succeeded", run

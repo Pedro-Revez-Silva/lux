@@ -5,7 +5,6 @@ are never reachable."""
 
 from __future__ import annotations
 
-import time
 
 from conftest import generic
 from env import ALPINE_IMAGE, wait_until
@@ -130,7 +129,6 @@ def test_rules_survive_a_runner_restart(lux, runners, egress_hosts, net_targets)
                                 network={"egress": [{"cidr": f"{t.allowed_ip}/32"}]}))
     lux.wait_output(run_id, f"OK:{t.allowed_ip}")
     runners.stop(egress_hosts[0], "KILL")
-    time.sleep(3)
     runners.start(egress_hosts[0])
     wait_until(lambda: lux.logs(run_id).count(f"OK:{t.allowed_ip}") > 10, 60, 1, "the Run lost its allowed egress")
     assert f"OK:{t.denied_ip}" not in lux.logs(run_id)
