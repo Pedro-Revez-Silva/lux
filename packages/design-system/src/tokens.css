@@ -87,6 +87,47 @@
   --log-stderr-fg: #8f2b2b;
   --log-line-hover: rgba(22, 24, 29, 0.04);
 
+  /* ANSI colours in logs (LogView). Text colours are 4.5:1 or better on
+     --bg-inset, on --log-stderr-bg, and hovered; background colours are
+     tints the log's text reads on. Explicit 256/truecolor RGB keeps its hue
+     with its OKLCH lightness clamped into the --ansi-{fg,bg}-l-* band. */
+  --ansi-black: #16181d;
+  --ansi-red: #b32626;
+  --ansi-green: #0b6e0b;
+  --ansi-yellow: #7f4c00;
+  --ansi-blue: #1c5cab;
+  --ansi-magenta: #9a2a82;
+  --ansi-cyan: #0a6873;
+  --ansi-white: #4b5058;
+  --ansi-bright-black: #5f646c;
+  --ansi-bright-red: #bd2323;
+  --ansi-bright-green: #157315;
+  --ansi-bright-yellow: #8a5600;
+  --ansi-bright-blue: #235fb3;
+  --ansi-bright-magenta: #a1328b;
+  --ansi-bright-cyan: #0b6e7a;
+  --ansi-bright-white: #16181d;
+  --ansi-bg-black: #dfe1e5;
+  --ansi-bg-red: #fce8e8;
+  --ansi-bg-green: #e4f5e4;
+  --ansi-bg-yellow: #fff1d6;
+  --ansi-bg-blue: #e3eefc;
+  --ansi-bg-magenta: #f8e6f3;
+  --ansi-bg-cyan: #dff3f5;
+  --ansi-bg-white: #eceef1;
+  --ansi-bg-bright-black: #d3d6db;
+  --ansi-bg-bright-red: #f9d9d9;
+  --ansi-bg-bright-green: #d5efd5;
+  --ansi-bg-bright-yellow: #ffe8bd;
+  --ansi-bg-bright-blue: #d3e4fa;
+  --ansi-bg-bright-magenta: #f3d6eb;
+  --ansi-bg-bright-cyan: #cdebef;
+  --ansi-bg-bright-white: #ffffff;
+  --ansi-fg-l-min: 0;
+  --ansi-fg-l-max: 0.5;
+  --ansi-bg-l-min: 0.9;
+  --ansi-bg-l-max: 1;
+
   /* Terminal: the frame around a Solarized screen (the screen's own colours
      are terminalThemes.ts; these are what the CSS around it needs). */
   --term-bg: #fdf6e3;
@@ -292,6 +333,43 @@
     --log-stderr-fg: #f0a0a0;
     --log-line-hover: rgba(255, 255, 255, 0.04);
 
+    --ansi-black: #9aa0a8;
+    --ansi-red: #f07f7f;
+    --ansi-green: #5fcf5f;
+    --ansi-yellow: #f0b93d;
+    --ansi-blue: #86b6ef;
+    --ansi-magenta: #e08ad0;
+    --ansi-cyan: #5cc8d4;
+    --ansi-white: #b4b8bf;
+    --ansi-bright-black: #a8adb4;
+    --ansi-bright-red: #f6a3a3;
+    --ansi-bright-green: #8ee08e;
+    --ansi-bright-yellow: #f7d27a;
+    --ansi-bright-blue: #aecdf5;
+    --ansi-bright-magenta: #edb2e3;
+    --ansi-bright-cyan: #94dfe8;
+    --ansi-bright-white: #ececee;
+    --ansi-bg-black: #2b2e33;
+    --ansi-bg-red: #451919;
+    --ansi-bg-green: #123a12;
+    --ansi-bg-yellow: #3d2c08;
+    --ansi-bg-blue: #17294a;
+    --ansi-bg-magenta: #3f1a38;
+    --ansi-bg-cyan: #0f3438;
+    --ansi-bg-white: #3a3d44;
+    --ansi-bg-bright-black: #34373d;
+    --ansi-bg-bright-red: #5a2020;
+    --ansi-bg-bright-green: #194a19;
+    --ansi-bg-bright-yellow: #4d380a;
+    --ansi-bg-bright-blue: #1e355e;
+    --ansi-bg-bright-magenta: #512248;
+    --ansi-bg-bright-cyan: #144349;
+    --ansi-bg-bright-white: #43464d;
+    --ansi-fg-l-min: 0.72;
+    --ansi-fg-l-max: 1;
+    --ansi-bg-l-min: 0.2;
+    --ansi-bg-l-max: 0.36;
+
     --term-bg: #002b36;
     --term-scrollbar: #586e75;
 
@@ -365,6 +443,43 @@
   --log-stderr-bg: rgba(230, 103, 103, 0.10);
   --log-stderr-fg: #f0a0a0;
   --log-line-hover: rgba(255, 255, 255, 0.04);
+
+  --ansi-black: #9aa0a8;
+  --ansi-red: #f07f7f;
+  --ansi-green: #5fcf5f;
+  --ansi-yellow: #f0b93d;
+  --ansi-blue: #86b6ef;
+  --ansi-magenta: #e08ad0;
+  --ansi-cyan: #5cc8d4;
+  --ansi-white: #b4b8bf;
+  --ansi-bright-black: #a8adb4;
+  --ansi-bright-red: #f6a3a3;
+  --ansi-bright-green: #8ee08e;
+  --ansi-bright-yellow: #f7d27a;
+  --ansi-bright-blue: #aecdf5;
+  --ansi-bright-magenta: #edb2e3;
+  --ansi-bright-cyan: #94dfe8;
+  --ansi-bright-white: #ececee;
+  --ansi-bg-black: #2b2e33;
+  --ansi-bg-red: #451919;
+  --ansi-bg-green: #123a12;
+  --ansi-bg-yellow: #3d2c08;
+  --ansi-bg-blue: #17294a;
+  --ansi-bg-magenta: #3f1a38;
+  --ansi-bg-cyan: #0f3438;
+  --ansi-bg-white: #3a3d44;
+  --ansi-bg-bright-black: #34373d;
+  --ansi-bg-bright-red: #5a2020;
+  --ansi-bg-bright-green: #194a19;
+  --ansi-bg-bright-yellow: #4d380a;
+  --ansi-bg-bright-blue: #1e355e;
+  --ansi-bg-bright-magenta: #512248;
+  --ansi-bg-bright-cyan: #144349;
+  --ansi-bg-bright-white: #43464d;
+  --ansi-fg-l-min: 0.72;
+  --ansi-fg-l-max: 1;
+  --ansi-bg-l-min: 0.2;
+  --ansi-bg-l-max: 0.36;
 
   --term-bg: #002b36;
   --term-scrollbar: #586e75;

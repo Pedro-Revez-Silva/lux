@@ -1,5 +1,5 @@
 // Deterministic fake data for the style guide. Seeded so reloads look the same.
-import type { HostState, LogLine, RunState, ServerInfo, Tenant, TimelineStage } from "../src/index.ts";
+import { AnsiDecoder, type HostState, type LogLine, type RunState, type ServerInfo, type Tenant, type TimelineStage } from "../src/index.ts";
 
 function rng(seed: number) {
   let s = seed >>> 0;
@@ -180,6 +180,47 @@ export function fakeLogs(n = 50_000): LogLine[] {
     const err = m.startsWith("Traceback") || m.startsWith("  File") || m.startsWith("ValueError") || m.startsWith("npm WARN") || m.startsWith("warning");
     out.push({ ts: t, stream: i % 997 === 0 ? "system" : err ? "stderr" : "stdout", text: i % 997 === 0 ? `--- placement epoch ${1 + Math.floor(i / 997)} on ${pick(HOSTS)} ---` : m });
   }
+  return out;
+}
+
+/** A multi-line prompt as the console splits it (one LogLine per line), then a line that still holds a newline: LogView clips it to its row. */
+export function fakeMultilineLogs(): LogLine[] {
+  const t = NOW - 5 * 60_000;
+  const prompt = ["lux: input (epoch 1) input: Fix the flaky scheduler test.", "", "Steps:", "1. run go test ./internal/server -run TestSchedule -count=20", "2. fix the race, keep the test"];
+  return [
+    ...prompt.map((text): LogLine => ({ ts: t, stream: "system", text })),
+    { ts: t + 900, stream: "stdout", text: "[acp] session/prompt → turn 1" },
+    { ts: t + 1200, stream: "system", text: "unsplit record: first line\nsecond line (clipped, never over the row below)" },
+    { ts: t + 1300, stream: "stdout", text: "the next row reads clean" },
+  ];
+}
+
+/** Coloured output as a tool with FORCE_COLOR prints it, decoded as the console does (one AnsiDecoder per stream, so a colour spans lines). */
+export function fakeAnsiLogs(): LogLine[] {
+  const t = NOW - 3 * 60_000;
+  const e = "\x1b[";
+  const stderr = `${e}0m${e}31mError handling request {\n  ${e}0mid${e}2m:${e}0m ${e}0m${e}33m3${e}0m,\n  method${e}2m:${e}0m ${e}32m"session/prompt"${e}0m,\n  error${e}2m:${e}0m ${e}1m${e}31mProviderAuthError${e}22m: token expired${e}0m\n}`;
+  const stdout = [
+    `${e}1mbold${e}22m ${e}2mdim${e}22m ${e}3mitalic${e}23m ${e}4munderline${e}24m ${e}7minverse${e}27m ${e}1;7;32mbold inverse green${e}0m`,
+    `${e}30mblack${e}31m red${e}32m green${e}33m yellow${e}34m blue${e}35m magenta${e}36m cyan${e}37m white${e}0m`,
+    `${e}90mblack${e}91m red${e}92m green${e}93m yellow${e}94m blue${e}95m magenta${e}96m cyan${e}97m white${e}0m`,
+    `${e}41m red ${e}42m green ${e}43m yellow ${e}44m blue ${e}45m magenta ${e}46m cyan ${e}47m white ${e}100m bright black ${e}0m`,
+    `256: ${[16, 46, 51, 93, 160, 172, 208, 226, 232, 244, 255].map((n) => `${e}38;5;${n}m■ ${n}`).join(" ")}${e}0m`,
+    `truecolor: ${e}38;2;255;105;180mhot pink${e}39m ${e}38;2;30;30;30mnear black${e}39m ${e}38;2;250;250;250mnear white${e}39m ${e}48;2;0;90;200m on blue ${e}0m`,
+    `${e}2K${e}1Gstripped: \x1b]0;window title\x07cursor moves, erase, OSC title, lone ESC\x1b`,
+    `${e}32m${"▰".repeat(8)}${"▱".repeat(2)} 80%\r${e}32m${"▰".repeat(10)} 100%${e}0m`,
+  ].join("\n");
+  const out: LogLine[] = [];
+  const add = (ts: number, stream: "stdout" | "stderr", text: string) => {
+    const d = new AnsiDecoder();
+    for (const raw of text.split("\n")) {
+      const { text: visible, spans } = d.line(raw);
+      out.push(spans ? { ts, stream, text: visible, spans } : { ts, stream, text: visible });
+    }
+  };
+  add(t, "stdout", stdout);
+  add(t + 400, "stderr", stderr);
+  out.push({ ts: t + 500, stream: "stdout", text: `${e}36mraw escapes in a line's text are decoded too${e}0m` });
   return out;
 }
 
