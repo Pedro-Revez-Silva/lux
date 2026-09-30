@@ -76,8 +76,8 @@ func (s *Server) ineligibleReadyHosts(ctx context.Context, tx pgx.Tx, pl poolRow
 	return err
 }
 
-// idleDecisions adds decision "idle" for the pool's live hosts this plan did
-// not consider whose latest decision says otherwise, so a verdict from past
+// idleDecisions adds decision "idle" for live hosts this pool decided on that
+// this plan did not consider and whose latest decision says otherwise, so a verdict from past
 // demand does not stay the latest. Those hosts are the ones this process
 // recorded a non-idle decision for (s.decided, kept by recordHostDecisions);
 // the first pass per pool since the process took the provisioner lease also
@@ -124,24 +124,27 @@ func (s *Server) idleDecisions(ctx context.Context, tx pgx.Tx, pl poolRow, plan 
 	if len(stale) == 0 {
 		return nil
 	}
-	rows, err := tx.Query(ctx, `SELECT id, CASE state WHEN 'provisioning' THEN 'starting' ELSE state END FROM hosts
-		WHERE id = ANY($1) AND pool_id = $2 AND tenant_id IS NOT DISTINCT FROM $3::text AND state <> 'terminated'`,
-		stale, pl.ID, pl.TenantID)
+	// A decided host may be outside this pool (a chosen host in another pool,
+	// or moved since): it is retracted too, under its current pool's name.
+	rows, err := tx.Query(ctx, `SELECT h.id, CASE h.state WHEN 'provisioning' THEN 'starting' ELSE h.state END, COALESCE(p.name, '')
+		FROM hosts h LEFT JOIN pools p ON p.id = h.pool_id
+		WHERE h.id = ANY($1) AND h.tenant_id IS NOT DISTINCT FROM $2::text AND h.state <> 'terminated'`,
+		stale, pl.TenantID)
 	if err != nil {
 		return err
 	}
-	type live struct{ ID, Stage string }
+	type live struct{ ID, Stage, Pool string }
 	hosts, err := pgx.CollectRows(rows, pgx.RowToStructByPos[live])
 	if err != nil {
 		return err
 	}
-	// A host terminated or moved out of the pool has nothing to retract here.
+	// A terminated host has nothing to retract.
 	for _, id := range stale {
 		delete(decided, id)
 	}
 	for _, h := range hosts {
 		decided[h.ID] = true
-		plan.hostDecisions[h.ID] = hostDecision{Pool: pl.Name, Stage: h.Stage, Decision: "idle"}
+		plan.hostDecisions[h.ID] = hostDecision{Pool: h.Pool, Stage: h.Stage, Decision: "idle"}
 	}
 	return nil
 }

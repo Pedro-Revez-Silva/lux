@@ -318,6 +318,31 @@ func TestHostDecisionIdleScope(t *testing.T) {
 			t.Fatalf("host a decisions %+v, want blocked then idle", got)
 		}
 	})
+	t.Run("chosen host in another pool is retracted under its pool", func(t *testing.T) {
+		s, pl, p := planningFixture(t, 1)
+		ctx := context.Background()
+		execSQL(t, s, ctx, `INSERT INTO pools (id,tenant_id,name,provider,template) VALUES ('pool2','t1','other','ec2','{"version":1}')`)
+		observePlanningHost(t, s, "chosen", "ready", proto.Capacity{CPUs: 1}, map[string]string{})
+		execSQL(t, s, ctx, `UPDATE hosts SET pool_id='pool2' WHERE id='chosen'`)
+		livePlacement(t, s, "chosen", `{"cpus":1}`)
+		execSQL(t, s, ctx, `UPDATE runs SET place_on='chosen' WHERE id='r0'`)
+		pl2 := poolRow{ID: "pool2", Name: "other", Provider: "ec2", TenantID: new("t1"), Template: json.RawMessage(`{"version":1}`)}
+		// pool2 sweeps first, so only pool1's own record can retract it.
+		planningTick(t, s, pl2, p, false)
+		planningTick(t, s, pl, p, false)
+		if got := hostDecisions(t, s, "chosen"); len(got) != 1 || got[0]["decision"] != "blocked" {
+			t.Fatalf("chosen decisions %+v, want blocked", got)
+		}
+		execSQL(t, s, ctx, `UPDATE runs SET state='cancelled' WHERE id='r0'`)
+		for range 3 {
+			planningTick(t, s, pl2, p, false)
+			planningTick(t, s, pl, p, false)
+		}
+		got := hostDecisions(t, s, "chosen")
+		if last := got[len(got)-1]; !reflect.DeepEqual(last, map[string]any{"pool": "other", "stage": "ready", "decision": "idle"}) {
+			t.Fatalf("chosen decisions %+v, want idle in pool other last", got)
+		}
+	})
 	t.Run("provisioning host idles as starting", func(t *testing.T) {
 		s, pl, p := planningFixture(t, 1)
 		observePlanningHost(t, s, "hist", "terminated", proto.Capacity{CPUs: 4}, map[string]string{})
