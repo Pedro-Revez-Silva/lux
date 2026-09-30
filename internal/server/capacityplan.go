@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -235,37 +236,35 @@ func (s *Server) hostExpectation(ctx context.Context, tx pgx.Tx, pl poolRow) (*h
 // hosts, of which those it reserves are not surplus (reservedIdle).
 func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle map[string]bool) (capacityPlan, error) {
 	plan := capacityPlan{reserved: map[string]bool{}, hostDecisions: map[string]hostDecision{}}
-	// Per actual host: its first blocker and stage, and how many Runs it took;
+	// Per actual host: the stage it was reserved at, and its first blocker;
 	// its decision is settled after every Run was tried.
 	type hostBlock struct {
 		stage    string
 		blockers []planBlocker
 	}
-	blockedHosts, reservedOn, stageOf := map[string]hostBlock{}, map[string]int{}, map[string]string{}
-	evidence := func(r pendingRun, host, stage string, fit []fitBlocker) {
-		blockers := diagnosticBlockers(fit)
-		if host == "" {
-			if len(plan.Deficits) < planSampleSize {
-				plan.Deficits = append(plan.Deficits, planDeficit{Run: r.ID, Stage: stage, Blockers: blockers})
-			} else {
-				plan.Omitted++
-			}
-			return
-		}
-		// The first blocking Run per host represents it: one entry and one decision per host.
-		if _, seen := blockedHosts[host]; seen {
-			return
-		}
-		blockedHosts[host] = hostBlock{stage, blockers}
-		if len(plan.Exhausted) < planSampleSize {
-			plan.Exhausted = append(plan.Exhausted, planDeficit{Run: r.ID, Host: host, Stage: stage, Blockers: blockers})
+	reservedStage, blockedHosts := map[string]string{}, map[string]hostBlock{}
+	sample := func(list *[]planDeficit, d planDeficit) {
+		if len(*list) < planSampleSize {
+			*list = append(*list, d)
 		} else {
 			plan.Omitted++
 		}
 	}
+	deficit := func(r pendingRun, stage string, fit []fitBlocker) {
+		sample(&plan.Deficits, planDeficit{Run: r.ID, Stage: stage, Blockers: diagnosticBlockers(fit)})
+	}
 	unsatisfied := func(r pendingRun, reason string) {
 		plan.Blocked++
-		evidence(r, "", "prerequisite", []fitBlocker{{Reason: reason}})
+		deficit(r, "prerequisite", []fitBlocker{{Reason: reason}})
+	}
+	// The first blocking Run per host represents it: one entry and one decision per host.
+	hostBlocked := func(r pendingRun, host, stage string, fit []fitBlocker) {
+		if _, seen := blockedHosts[host]; seen {
+			return
+		}
+		blockers := diagnosticBlockers(fit)
+		blockedHosts[host] = hostBlock{stage, blockers}
+		sample(&plan.Exhausted, planDeficit{Run: r.ID, Host: host, Stage: stage, Blockers: blockers})
 	}
 	var err error
 	var lastRegistered time.Time
@@ -276,73 +275,21 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 	if plan.Expected == nil {
 		plan.Unknown = "no registered host observations for current template"
 	}
-	// updated_at is when the Run entered provisioning: setRunState stamps it,
-	// and while it waits only state_reason and place_on change, neither of
-	// which touches updated_at.
-	rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, snapshot_id,
-		jsonb_array_length(secrets) > 0, coalesce(place_on, ''), coalesce(avoid_host, ''), pool_id, updated_at
-		FROM runs WHERE pool_id = $1 AND state = 'provisioning' AND NOT cancel_requested
-		ORDER BY updated_at, id`, pl.ID)
+	runs, waitingSince, err := waitingRuns(ctx, tx, pl)
 	if err != nil {
 		return plan, err
 	}
-	var runs []pendingRun
-	waitingSince := map[string]time.Time{}
-	for rows.Next() {
-		var r pendingRun
-		var since time.Time
-		if err := rows.Scan(&r.ID, &r.TenantID, &r.State, &r.Spec, &r.SnapshotID, &r.HasSecrets, &r.PlaceOn, &r.AvoidHost, &r.PoolID, &since); err != nil {
-			rows.Close()
-			return plan, err
-		}
-		runs = append(runs, r)
-		waitingSince[r.ID] = since
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return plan, err
-	}
-	// Every Run is in this pool: one (tenant, chosen host) tuple each suffices.
-	var pools []*string
-	var tenants, chosen []string
-	seen := map[[2]string]bool{}
-	for _, r := range runs {
-		if key := [2]string{r.TenantID, r.PlaceOn}; !seen[key] {
-			seen[key] = true
-			pools = append(pools, r.PoolID)
-			tenants = append(tenants, r.TenantID)
-			chosen = append(chosen, r.PlaceOn)
-		}
-	}
-	ids, err := s.eligibleHostIDs(ctx, tx, pools, tenants, chosen)
+	ready, err := s.readyHosts(ctx, tx, runs)
 	if err != nil {
 		return plan, err
 	}
-	ready, err := s.candidateHosts(ctx, tx, ids)
-	if err != nil {
-		return plan, err
-	}
-	// The hub only knows runners connected to this luxd; a fresh heartbeat
-	// (required by candidateHosts) is the cluster-wide liveness signal.
-	for _, h := range ready {
-		h.Connected = true
-	}
-	slices.SortFunc(ready, func(a, b *candidateHost) int {
-		if a.ID < b.ID {
-			return -1
-		}
-		if a.ID > b.ID {
-			return 1
-		}
-		return 0
-	})
 	if len(runs) > 0 {
 		if err := s.ineligibleReadyHosts(ctx, tx, pl, &plan); err != nil {
 			return plan, err
 		}
 	}
 	// Only current-template, non-expired starts represent future capacity.
-	rows, err = tx.Query(ctx, `SELECT id FROM hosts WHERE pool_id = $1
+	rows, err := tx.Query(ctx, `SELECT id FROM hosts WHERE pool_id = $1
 		AND tenant_id IS NOT DISTINCT FROM $2::text AND state = 'provisioning' AND NOT draining
 		AND provision_requested_at > now() - $3::interval AND launch_template = $4::jsonb ORDER BY id`,
 		pl.ID, pl.TenantID, interval(s.cfg.LaunchTimeout), pl.Template)
@@ -367,93 +314,68 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 			future = append(future, virtual(id))
 		}
 	}
-	usedStarting := map[string]bool{}
 	probe := false
-	reserve := func(hosts []*candidateHost, r pendingRun, isReady bool) bool {
+	// reserve fits r on the first of hosts it fits; hosts are at stage, or
+	// "planned" for a new host (no id).
+	reserve := func(hosts []*candidateHost, r pendingRun, stage string) bool {
 		for _, h := range hosts {
-			stage := "starting"
-			if isReady {
-				stage = "ready"
-			} else if h.ID == "" {
-				stage = "planned"
+			hostStage := stage
+			if h.ID == "" {
+				hostStage = "planned"
 			}
 			if blockers := hostFit(r, h); len(blockers) != 0 {
 				// Another host's chosen-host wait is not evidence about this
 				// host, nor is a host outside the pool (a candidate only
 				// because another Run chose it) evidence for a Run that did not.
-				if stage != "planned" && (r.PlaceOn == "" && h.PoolID == pl.ID || r.PlaceOn == h.ID) {
-					evidence(r, h.ID, stage, blockers)
+				if h.ID != "" && (r.PlaceOn == "" && h.PoolID == pl.ID || r.PlaceOn == h.ID) {
+					hostBlocked(r, h.ID, hostStage, blockers)
 				}
 				continue
 			}
 			reserveHost(h, r)
-			if h.ID != "" {
-				reservedOn[h.ID]++
-				stageOf[h.ID] = stage
-			}
-			if isReady {
+			switch hostStage {
+			case "ready":
 				plan.Ready++
 				plan.reserved[h.ID] = true
-			} else if h.ID != "" {
+			case "starting":
 				plan.Starting++
-				usedStarting[h.ID] = true
-			} else {
+			case "planned":
 				plan.Planned++
+			}
+			if h.ID != "" {
+				reservedStage[h.ID] = hostStage
 			}
 			return true
 		}
 		return false
 	}
 	for _, r := range runs {
-		if _, ok := s.secrets.get(r.ID); r.HasSecrets && !ok {
-			unsatisfied(r, "run secrets unavailable")
+		if reason, err := s.unmetPrerequisite(ctx, tx, r); err != nil {
+			return plan, err
+		} else if reason != "" {
+			unsatisfied(r, reason)
 			continue
 		}
-		if r.SnapshotID != nil {
-			var available, uploaded bool
-			if err := tx.QueryRow(ctx, `SELECT available, uploaded FROM snapshots WHERE id = $1`, *r.SnapshotID).Scan(&available, &uploaded); errors.Is(err, pgx.ErrNoRows) {
-				unsatisfied(r, "snapshot missing")
-				continue
-			} else if err != nil {
-				return plan, err
-			}
-			if !available || !uploaded {
-				reason := "snapshot upload pending"
-				if !available {
-					reason = "snapshot unavailable"
-				}
-				unsatisfied(r, reason)
-				continue
-			}
-			if _, err := restoreManifest(ctx, tx, r.ID, *r.SnapshotID); err != nil {
-				var foreign *foreignBlobError
-				if errors.As(err, &foreign) {
-					unsatisfied(r, "snapshot manifest references unavailable blobs")
-					continue
-				}
-				return plan, err
-			}
-		}
-		if reserve(ready, r, true) {
+		if reserve(ready, r, "ready") {
 			continue
 		}
 		// A chosen-host wait must not trigger launches on unrelated hosts.
 		if r.PlaceOn != "" {
-			plan.Blocked++
-			evidence(r, "", "prerequisite", []fitBlocker{{Reason: "waiting for its chosen host"}})
+			unsatisfied(r, "waiting for its chosen host")
 			continue
 		}
-		if reserve(future, r, false) {
+		if reserve(future, r, "starting") {
 			continue
 		}
-		plan.Unmet++
 		if plan.Expected == nil {
-			evidence(r, "", "new_host", []fitBlocker{{Reason: "new host capacity unknown"}})
+			plan.Unmet++
+			deficit(r, "new_host", []fitBlocker{{Reason: "new host capacity unknown"}})
 			continue
 		}
 		h := virtual("")
 		if blockers := hostFit(r, h); len(blockers) != 0 {
-			evidence(r, "", "new_host", blockers)
+			plan.Unmet++
+			deficit(r, "new_host", blockers)
 			// The expectation may be stale ($Default moved to a larger
 			// instance type): a Run that has seen no current-template host
 			// register since it began waiting may justify one probe.
@@ -466,16 +388,15 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 		future = append(future, h)
 		plan.NewHosts++
 		plan.Planned++
-		plan.Unmet--
 	}
 	for id, b := range blockedHosts {
 		decision := "blocked"
-		if reservedOn[id] > 0 {
+		if _, reserved := reservedStage[id]; reserved {
 			decision = "exhausted"
 		}
 		plan.hostDecisions[id] = hostDecision{Pool: pl.Name, Stage: b.stage, Decision: decision, Blockers: b.blockers}
 	}
-	for id, stage := range stageOf {
+	for id, stage := range reservedStage {
 		if _, blocked := blockedHosts[id]; !blocked {
 			plan.hostDecisions[id] = hostDecision{Pool: pl.Name, Stage: stage, Decision: "reserved"}
 		}
@@ -494,7 +415,11 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 		plan.Probe = probe
 	}
 	plan.awaitingStart = (bootstrap || probe) && len(startingIDs) > 0
-	plan.reservedStarting = len(usedStarting)
+	for _, stage := range reservedStage {
+		if stage == "starting" {
+			plan.reservedStarting++
+		}
+	}
 	for id := range plan.reserved {
 		if idle[id] {
 			plan.reservedIdle++
@@ -504,4 +429,94 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 		plan.reservedStarting = 1
 	}
 	return plan, nil
+}
+
+// waitingRuns is the pool's Runs waiting for capacity, oldest first, with
+// when each began waiting.
+func waitingRuns(ctx context.Context, tx pgx.Tx, pl poolRow) ([]pendingRun, map[string]time.Time, error) {
+	// updated_at is when the Run entered provisioning: setRunState stamps it,
+	// and while it waits only state_reason and place_on change, neither of
+	// which touches updated_at.
+	rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, snapshot_id,
+		jsonb_array_length(secrets) > 0, coalesce(place_on, ''), coalesce(avoid_host, ''), pool_id, updated_at
+		FROM runs WHERE pool_id = $1 AND state = 'provisioning' AND NOT cancel_requested
+		ORDER BY updated_at, id`, pl.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var runs []pendingRun
+	waitingSince := map[string]time.Time{}
+	for rows.Next() {
+		var r pendingRun
+		var since time.Time
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.State, &r.Spec, &r.SnapshotID, &r.HasSecrets, &r.PlaceOn, &r.AvoidHost, &r.PoolID, &since); err != nil {
+			return nil, nil, err
+		}
+		runs = append(runs, r)
+		waitingSince[r.ID] = since
+	}
+	return runs, waitingSince, rows.Err()
+}
+
+// readyHosts is the hosts the scheduler would consider for runs, by id.
+func (s *Server) readyHosts(ctx context.Context, tx pgx.Tx, runs []pendingRun) ([]*candidateHost, error) {
+	// Every Run is in this pool: one (tenant, chosen host) tuple each suffices.
+	var pools []*string
+	var tenants, chosen []string
+	seen := map[[2]string]bool{}
+	for _, r := range runs {
+		if key := [2]string{r.TenantID, r.PlaceOn}; !seen[key] {
+			seen[key] = true
+			pools = append(pools, r.PoolID)
+			tenants = append(tenants, r.TenantID)
+			chosen = append(chosen, r.PlaceOn)
+		}
+	}
+	ids, err := s.eligibleHostIDs(ctx, tx, pools, tenants, chosen)
+	if err != nil {
+		return nil, err
+	}
+	ready, err := s.candidateHosts(ctx, tx, ids)
+	if err != nil {
+		return nil, err
+	}
+	// The hub only knows runners connected to this luxd; a fresh heartbeat
+	// (required by candidateHosts) is the cluster-wide liveness signal.
+	for _, h := range ready {
+		h.Connected = true
+	}
+	slices.SortFunc(ready, func(a, b *candidateHost) int { return strings.Compare(a.ID, b.ID) })
+	return ready, nil
+}
+
+// unmetPrerequisite is why r cannot be placed on any host yet (its secrets
+// or its snapshot), or "".
+func (s *Server) unmetPrerequisite(ctx context.Context, tx pgx.Tx, r pendingRun) (string, error) {
+	if _, ok := s.secrets.get(r.ID); r.HasSecrets && !ok {
+		return "run secrets unavailable", nil
+	}
+	if r.SnapshotID == nil {
+		return "", nil
+	}
+	var available, uploaded bool
+	err := tx.QueryRow(ctx, `SELECT available, uploaded FROM snapshots WHERE id = $1`, *r.SnapshotID).Scan(&available, &uploaded)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return "snapshot missing", nil
+	case err != nil:
+		return "", err
+	case !available:
+		return "snapshot unavailable", nil
+	case !uploaded:
+		return "snapshot upload pending", nil
+	}
+	if _, err := restoreManifest(ctx, tx, r.ID, *r.SnapshotID); err != nil {
+		var foreign *foreignBlobError
+		if errors.As(err, &foreign) {
+			return "snapshot manifest references unavailable blobs", nil
+		}
+		return "", err
+	}
+	return "", nil
 }
