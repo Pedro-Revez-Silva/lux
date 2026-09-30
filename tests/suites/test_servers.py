@@ -138,11 +138,20 @@ def test_start_stop_and_a_port_started_by_hand(lux, runners, hosts, fake_image):
     lux.run("cancel", run_id)
 
 
+def _accepts(port: int) -> bool:
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=1).close()
+        return True
+    except OSError:
+        return False
+
+
 def http_forward_fails(lux, run_id: str, name: str) -> bool:
     local = free_port()
     p = lux.popen("port-forward", run_id, name, str(local))
     try:
-        p.stderr.readline()  # "forwarding ...", once it listens
+        # Once it listens (or has exited: the forward fails either way).
+        wait_until(lambda: p.poll() is not None or _accepts(local), 10, 0.2, "port-forward never listened")
         return "hello" not in http_get(local)
     finally:
         p.terminate()

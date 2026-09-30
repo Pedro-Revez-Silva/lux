@@ -73,6 +73,7 @@ def test_attach_to_a_terminal_workload(lux, runners, hosts):
 
     def typed():
         # Typed again until it lands: what comes before attach connects is lost.
+        assert p.poll() is None, f"attach exited {p.returncode}: {p.stderr.read()}"
         p.stdin.write("hello-attach\n")
         p.stdin.flush()
         return "got:hello-attach" in lux.logs(run_id)
