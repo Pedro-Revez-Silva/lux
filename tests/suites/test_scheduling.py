@@ -18,7 +18,7 @@ def test_unplaceable_runs_do_not_block_the_queue(lux, runners, hosts):
     # And the waiting ones say why, with the reason committed.
     run = lux.get(blocked[0])
     assert run["state"] == "submitted"
-    assert run["stateReason"] == "no host matches", run
+    assert run["stateReason"] == "waiting for capacity: 1 host in its pool lacks its required labels", run
 
 
 def test_drain_only_touches_the_callers_host(tenant_factory, runners, hosts, env):

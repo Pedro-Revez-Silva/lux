@@ -21,3 +21,117 @@ test("without an owner, as for a name no pool has, only why", () => {
 test("a rename says from and to", () => {
   expect(infraEventSummary({ id: 1, type: "pool.renamed", data: { from: "burst", to: "burst2" }, count: 1, time: "" })).toBe("burst → burst2");
 });
+
+function infra(type: string, data: Record<string, unknown>): string {
+  return infraEventSummary({ id: 1, type, data, count: 1, time: "" });
+}
+
+const GiB = 1024 ** 3;
+
+test("a scale-up from before capacity planning keeps its line", () => {
+  expect(infra("pool.scale_up", { hosts: 2, reason: "waiting runs", waiting: 2, warm: 0, min: 0, max: 10, total: 1, idle: 0, provisioning: 1 })).toBe(
+    "+2 hosts for waiting runs: 2 waiting, warm 0, min 0, max 10; had 1 (0 idle, 1 provisioning)",
+  );
+});
+
+test("a planned scale-up adds its plan, expected capacity and evidence", () => {
+  const data = {
+    hosts: 1, reason: "waiting runs", waiting: 3, warm: 0, min: 0, max: 10, total: 2, idle: 1, provisioning: 1,
+    ready: 1, starting: 1, planned: 1, unmet: 0, blocked: 1,
+    expected: { capacity: { cpus: 8, memory: 32 * GiB, disk: 0, runs: 4 }, observations: 3 },
+    deficits: [{ run: "r4", stage: "prerequisite", blockers: [{ reason: "snapshot upload pending" }] }],
+    exhausted: [{ run: "r3", host: "h1", stage: "ready", blockers: [
+      { resource: "memory", requested: 16 * GiB, used: 24 * GiB, capacity: 32 * GiB, available: 8 * GiB },
+      { resource: "cpus", requested: 4, used: 6, capacity: 8, available: 2 },
+    ] }],
+    ineligible: [{ host: "h2", reason: "draining" }],
+    omitted: 2,
+  };
+  expect(infra("pool.scale_up", data)).toBe(
+    "+1 host for waiting runs: 3 waiting, warm 0, min 0, max 10; had 2 (1 idle, 1 provisioning); " +
+      "plan: 1 ready, 1 starting, 1 planned, 0 unmet, 1 blocked; " +
+      "new host cpus 8, memory 32 GiB, disk unlimited, runs 4 from 3 observation(s); " +
+      "deficits: r4 prerequisite [snapshot upload pending]; " +
+      "exhausted: h1 (ready) for r3 [memory requested 16 GiB, used 24 GiB, capacity 32 GiB, available 8 GiB; cpus requested 4, used 6, capacity 8, available 2]; " +
+      "ineligible: h2 draining; 2 more omitted",
+  );
+});
+
+test("a cold pool's scale-up says new-host capacity is unknown", () => {
+  const data = {
+    hosts: 1, reason: "waiting runs", waiting: 1, warm: 0, min: 0, max: 0, total: 0, idle: 0, provisioning: 0,
+    ready: 0, starting: 0, planned: 0, unmet: 1, blocked: 0, expected: null,
+    unknown: "no registered host observations for current template",
+    deficits: [{ run: "r1", stage: "new_host", blockers: [{ reason: "new host capacity unknown" }] }],
+  };
+  expect(infra("pool.scale_up", data)).toBe(
+    "+1 host for waiting runs: 1 waiting, warm 0, min 0, max 0; had 0 (0 idle, 0 provisioning); " +
+      "plan: 0 ready, 0 starting, 0 planned, 1 unmet, 0 blocked; " +
+      "new host capacity unknown: no registered host observations for current template; " +
+      "deficits: r1 new host [new host capacity unknown]",
+  );
+});
+
+test("a host's capacity decision says why", () => {
+  expect(infra("host.capacity_decision", { pool: "burst", stage: "ready", decision: "exhausted", blockers: [
+    { resource: "disk", requested: 10 * GiB, used: 100 * GiB, capacity: 100 * GiB, available: 0 },
+    { resource: "runs", requested: 1, used: 4, capacity: 4, available: 0 },
+  ] })).toBe("exhausted (ready) in pool burst: disk requested 10 GiB, used 100 GiB, capacity 100 GiB, available 0 B; runs requested 1, used 4, capacity 4, available 0");
+  expect(infra("host.capacity_decision", { pool: "burst", stage: "starting", decision: "blocked", blockers: [{ reason: "required labels do not match" }] })).toBe(
+    "blocked (starting) in pool burst: required labels do not match",
+  );
+  expect(infra("host.capacity_decision", { pool: "burst", stage: "ready", decision: "ineligible", reason: "heartbeat stale" })).toBe(
+    "ineligible (ready) in pool burst: heartbeat stale",
+  );
+  expect(infra("host.capacity_decision", { pool: "burst", stage: "starting", decision: "reserved" })).toBe("reserved (starting) in pool burst");
+});
+
+test("a placement shows its resources when it has them", () => {
+  expect(infra("pool.placement", { run: "r1", epoch: 2, host: "h1", resources: { cpus: 2, memory: 4 * GiB, disk: 20 * GiB } })).toBe(
+    "r1 epoch 2 on h1 (cpus 2, memory 4 GiB, disk 20 GiB)",
+  );
+  expect(infra("host.placement_assigned", { run: "r1", epoch: 1, host: "h1" })).toBe("r1 epoch 1 on h1");
+});
+
+test("a blocked scale-up says why no host was launched", () => {
+  const data = {
+    waiting: 1, total: 0, max: 2, ready: 0, starting: 0, planned: 0, unmet: 1, blocked: 0,
+    expected: { capacity: { cpus: 2, memory: 0, disk: 0, runs: 0 }, observations: 1 },
+    deficits: [{ run: "r1", stage: "new_host", blockers: [{ resource: "cpus", requested: 4, used: 0, capacity: 2, available: 2 }] }],
+  };
+  expect(infra("pool.scale_blocked", data)).toBe(
+    "no host launched: 1 waiting, had 0, max 2; plan: 0 ready, 0 starting, 0 planned, 1 unmet, 0 blocked; " +
+      "new host cpus 2, memory unlimited, disk unlimited, runs unlimited from 1 observation(s); " +
+      "deficits: r1 new host [cpus requested 4, used 0, capacity 2, available 2]",
+  );
+});
+
+test("a blocked scale-up names its cause", () => {
+  const expected = { capacity: { cpus: 8, memory: 0, disk: 0, runs: 0 }, observations: 1 };
+  const plan = { ready: 0, starting: 0, unmet: 0, blocked: 0, expected, deficits: [], exhausted: [], ineligible: [] };
+  expect(infra("pool.scale_blocked", { ...plan, cause: "max", wanted: 3, waiting: 20, total: 1, max: 1, planned: 20 })).toBe(
+    "no host launched: at max 1 (3 more wanted); 20 waiting, had 1, max 1; plan: 0 ready, 0 starting, 20 planned, 0 unmet, 0 blocked; " +
+      "new host cpus 8, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)",
+  );
+  expect(infra("pool.scale_blocked", { ...plan, cause: "quota", wanted: 1, waiting: 1, total: 1, max: 0, planned: 1 })).toBe(
+    "no host launched: tenant host quota reached (1 more wanted); 1 waiting, had 1, max 0; plan: 0 ready, 0 starting, 1 planned, 0 unmet, 0 blocked; " +
+      "new host cpus 8, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)",
+  );
+  expect(infra("pool.scale_blocked", { ...plan, cause: "no_fit", waiting: 1, total: 0, max: 2, planned: 0, unmet: 1 })).toBe(
+    "no host launched: no new host fits the unmet runs; 1 waiting, had 0, max 2; plan: 0 ready, 0 starting, 0 planned, 1 unmet, 0 blocked; " +
+      "new host cpus 8, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)",
+  );
+});
+
+test("a probe scale-up says it is one", () => {
+  const data = {
+    hosts: 1, reason: "waiting runs", waiting: 1, warm: 0, min: 0, max: 0, total: 0, idle: 0, provisioning: 0,
+    ready: 0, starting: 0, planned: 0, unmet: 1, blocked: 0, probe: true,
+    expected: { capacity: { cpus: 2, memory: 0, disk: 0, runs: 0 }, observations: 1 },
+  };
+  expect(infra("pool.scale_up", data)).toBe(
+    "+1 host for waiting runs: 1 waiting, warm 0, min 0, max 0; had 0 (0 idle, 0 provisioning); " +
+      "plan: 0 ready, 0 starting, 0 planned, 1 unmet, 0 blocked; probe: one host to re-observe capacity no expected host fits; " +
+      "new host cpus 2, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)",
+  );
+});

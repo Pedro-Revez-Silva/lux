@@ -19,8 +19,9 @@ def _clean(lux, ec2):
     wait_until(lambda: not ec2.running(), 90, 0.3, "the removed pool's instances were not terminated")
 
 
-def pool(lux, ec2, name="burst", spot=False, **kw):
-    template = {**ec2.template, "spot": True} if spot else ec2.template
+def pool(lux, ec2, name="burst", spot=False, template=None, **kw):
+    template = template or ec2.template
+    template = {**template, "spot": True} if spot else template
     args = ["pools", "set", name, "--provider", "ec2", "--template", json.dumps(template)]
     for k, v in kw.items():
         args += [f"--{k}", str(v)]
