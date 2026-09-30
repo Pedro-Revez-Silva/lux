@@ -6,7 +6,6 @@ what a Run runs on. Builds run contained, on the Run's network."""
 from __future__ import annotations
 
 from conftest import generic
-import time
 import uuid
 
 from env import ALPINE_IMAGE, wait_until
@@ -179,8 +178,7 @@ def test_cancel_ends_a_build(lux, runners, hosts):
     host = runners.start(hosts[0])
     marker = f"6{uuid.uuid4().int % 10**6:06d}"  # a sleep no other process runs
     run_id = lux.submit(built(f"FROM {ALPINE_IMAGE}\nRUN sleep {marker}\n", "true"))
-    wait_until(lambda: events(lux, run_id, "image.build"), 30, 0.3, "the build never started")
-    time.sleep(1)
+    wait_until(lambda: host.running("sleep", marker), 30, 0.3, "the build step never ran")
     lux.run("cancel", run_id)
     lux.wait_state(run_id, "cancelled", timeout=30)
     wait_until(lambda: not host.running("sleep", marker), 20, 0.5, "the build is still running")

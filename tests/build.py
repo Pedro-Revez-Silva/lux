@@ -85,6 +85,15 @@ NESTED_IMAGE = "localhost/lux-nested:test"
 DOCKER_IMAGE = "localhost/lux-docker:test"
 
 
+def ensure_local(*refs: str) -> None:
+    """Pulls each image the local Docker does not have yet: the harness saves
+    and preloads them, and a fresh machine (CI) starts with none."""
+    for ref in refs:
+        if subprocess.run(["docker", "image", "inspect", ref], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode != 0:
+            subprocess.run(["docker", "pull", "-q", ref], check=True, stdout=subprocess.DEVNULL)
+
+
 def build_nested_images(podman: bool, docker: bool) -> tuple[str | None, str | None]:
     """Workload images with Podman and with Docker in them, each only if
     asked, and an alpine archive to run inside (see tests/images/nested and
@@ -92,6 +101,7 @@ def build_nested_images(podman: bool, docker: bool) -> tuple[str | None, str | N
     from env import ALPINE_IMAGE
     if not (podman or docker):
         return None, None
+    ensure_local(ALPINE_IMAGE)
     with tempfile.TemporaryDirectory() as d:
         tar = Path(d) / "alpine.tar"
         subprocess.run(["docker", "save", "-o", str(tar), ALPINE_IMAGE], check=True)

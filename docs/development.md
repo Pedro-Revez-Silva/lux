@@ -98,6 +98,12 @@ CLI** wherever possible, which tests the CLI and the behaviour at once. They
 go around it only for admin bootstrap (`luxd admin`), for things no client
 can see (the database, a host's disk, nftables), and for fault injection.
 
+**Console suites share one browser page per file.** A suite that drives the
+web console signs in on one page for the whole file (`test_console.py`'s
+`page` fixture resets it between tests: signed out, default size, local
+settings cleared). So keep a file's tests alike, and start a new file for
+a different part of the console rather than growing one without end.
+
 ```bash
 cd tests
 uv run python run_tests.py -j 4              # all suites, across 4 environments (~4 min; make e2e)

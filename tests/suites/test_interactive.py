@@ -70,10 +70,14 @@ def test_attach_to_a_terminal_workload(lux, runners, hosts):
     run_id = lux.submit(spec)
     lux.wait_output(run_id, "started")
     p = lux.popen("attach", run_id, stdin=subprocess.PIPE)
-    time.sleep(1)
-    p.stdin.write("hello-attach\n")
-    p.stdin.flush()
-    wait_until(lambda: "got:hello-attach" in lux.logs(run_id), 20, 0.3, "input never reached the terminal")
+
+    def typed():
+        # Typed again until it lands: what comes before attach connects is lost.
+        assert p.poll() is None, f"attach exited {p.returncode}: {p.stderr.read()}"
+        p.stdin.write("hello-attach\n")
+        p.stdin.flush()
+        return "got:hello-attach" in lux.logs(run_id)
+    wait_until(typed, 20, 0.5, "input never reached the terminal")
     p.stdin.close()
     p.terminate()
     p.wait(timeout=10)
@@ -151,7 +155,7 @@ def test_a_stream_ends_when_the_runner_goes_away(lux, runners, hosts):
     run_id = lux.submit(sleeper())
     lux.wait_output(run_id, "up")
     p = lux.popen("exec", run_id, "-T", "--", "sleep", "300", stdin=subprocess.PIPE)
-    time.sleep(2)
+    wait_until(lambda: hosts[0].running("sleep", "300"), 20, 0.3, "the exec never started")
     runners.stop(hosts[0], "KILL")
     try:
         p.wait(timeout=30)

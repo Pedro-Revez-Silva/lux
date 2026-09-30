@@ -119,9 +119,12 @@ def test_events_feed(operator, tenant_factory):
     assert {e["runId"] for e in _feed(b, start)} & {ra, rb} == {rb}
     # Followed: new events arrive as they happen, pushed (not polled: well
     # under the feed's fallback of 5s).
-    p = operator.popen("events", "--all", "-o", "json", "--tenant", a.tenant_id)
+    # Streamed from just before a's last event: that one arriving shows the
+    # stream has caught up to now.
+    last = max(e["id"] for e in _feed(operator, start, "--tenant", a.tenant_id))
+    p = operator.popen("events", "--all", "-o", "json", "--tenant", a.tenant_id, "--after", str(last - 1))
     try:
-        time.sleep(1)
+        assert json.loads(p.stdout.readline())["id"] == last
         start = time.monotonic()
         a.run("cancel", ra)
         assert json.loads(p.stdout.readline())["runId"] == ra

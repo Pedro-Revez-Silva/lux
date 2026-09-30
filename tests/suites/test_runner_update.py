@@ -35,7 +35,9 @@ def runner_bin_dir(env, tmp_path_factory):
             content.setdefault(arch, {})[name] = hashlib.sha256(data).hexdigest()
     env.stop_luxd()
     env.start_luxd(LUX_RUNNER_BIN_DIR=str(d))
-    token = env.luxd_admin("create-host-token")["token"]
+    # Its own platform pool: a token without --pool makes the platform's
+    # "default", which every later Run naming no pool would then resolve to.
+    token = env.luxd_admin("create-host-token", "--pool", "runner-update")["token"]
     yield d, token, content
     env.stop_luxd()
     env.start_luxd()
@@ -90,7 +92,7 @@ def test_an_arch_missing_one_of_the_pair_is_not_offered(env, tmp_path_factory):
     env.stop_luxd()
     env.start_luxd(LUX_RUNNER_BIN_DIR=str(d))
     try:
-        token = env.luxd_admin("create-host-token")["token"]
+        token = env.luxd_admin("create-host-token", "--pool", "runner-update")["token"]
         manifest = _get(env, "/runner/v1/bin/manifest", token).json()
         assert "linux-arm64" not in manifest, manifest
         # The binary itself is still servable by name (a partial mirror is

@@ -229,6 +229,11 @@ class Host:
                 "--name", name or self.name,
                 "--data-dir", "/var/lib/lux",
                 "--shim", "/opt/lux/lux-shim",
+                # The same capacity on any machine: by default a runner
+                # offers the whole machine, and a 16 GB CI runner fits one
+                # Run at the 8 GiB default where a workstation fits several.
+                # A test's own --cpus or --memory, later, wins.
+                "--cpus", "16", "--memory", str(64 << 30),
                 *extra,
             ],
             stdout=log,
@@ -439,8 +444,10 @@ class TestEnvironment:
         self.s3().create_bucket(Bucket=self.bucket)
 
     def _image_tar(self) -> Path:
+        from build import ensure_local
         tar = Path(self.log_dir) / "images.tar"
         images = list(PRELOAD_IMAGES)
+        ensure_local(*images)
         if self.fake_image:
             images.append(self.fake_image)
         images += [i for i in self.extra.get("images", {}).values() if i]
@@ -479,8 +486,14 @@ class TestEnvironment:
                   "graphroot = \"/var/lib/containers/storage\"\\n' > /etc/containers/storage.conf")
         tar = image_tar or Path(self.log_dir) / "images.tar"
         with open(tar, "rb") as f:
-            subprocess.run(["docker", "exec", "-i", container, "podman", "load", "-q"],
-                           stdin=f, check=True, capture_output=True)
+            loaded = subprocess.run(["docker", "exec", "-i", container, "podman", "load", "-q"],
+                                    stdin=f, capture_output=True)
+        if loaded.returncode:
+            diagnostic = loaded.stdout + loaded.stderr
+            Path(host.log_dir).mkdir(parents=True, exist_ok=True)
+            (Path(host.log_dir) / "image-load.log").write_bytes(diagnostic)
+            raise RuntimeError(f"{container}: podman load exited {loaded.returncode}: "
+                               f"{diagnostic.decode(errors='replace')}")
         # docker save records Docker Hub images by short name (alpine:3.24.2),
         # which podman loads as localhost/alpine; tag them with the full
         # references specs use, so nothing ever reaches a registry.

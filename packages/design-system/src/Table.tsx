@@ -27,6 +27,23 @@ export function dropsOptional(columns: readonly Pick<Column<unknown>, "width" | 
   return flex > 0 && (width - fixed) / flex < FLEX_MIN;
 }
 
+/**
+ * A sensible floor for the table's width: fixed widths plus FLEX_MIN per
+ * column without one, with percentage columns taking their share on top
+ * (a 22% column leaves the rest 78% of the table, not the table less a
+ * guess). Other widths (em, auto) count as 120px.
+ */
+export function tableFloor(columns: readonly Pick<Column<unknown>, "width">[]): number {
+  let fixed = 0;
+  let pct = 0;
+  for (const c of columns) {
+    if (typeof c.width === "number") fixed += c.width;
+    else if (typeof c.width === "string" && c.width.endsWith("%")) pct += parseFloat(c.width) / 100;
+    else fixed += c.width ? 120 : FLEX_MIN;
+  }
+  return Math.ceil(fixed / Math.max(1 - pct, 0.1));
+}
+
 export interface Column<Row> {
   key: string;
   header: ReactNode;
@@ -144,13 +161,7 @@ export function Table<Row>(props: TableProps<Row>) {
     else setSort({ key: c.key, dir: c.align === "right" ? "desc" : "asc" });
   };
 
-  // A sensible floor: fixed widths plus 140px per flexible column.
-  const floor = useMemo(() => {
-    if (minWidth != null) return minWidth;
-    let w = 0;
-    for (const c of columns) w += typeof c.width === "number" ? c.width : c.width ? 120 : FLEX_MIN;
-    return w;
-  }, [columns, minWidth]);
+  const floor = useMemo(() => (minWidth != null ? minWidth : tableFloor(columns)), [columns, minWidth]);
 
   const showSkeleton = loading && rows.length === 0;
   const showEmpty = !loading && rows.length === 0;

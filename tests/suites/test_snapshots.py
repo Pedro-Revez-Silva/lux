@@ -7,7 +7,6 @@ epoch."""
 
 from __future__ import annotations
 
-import time
 
 import pytest
 
@@ -109,14 +108,13 @@ def test_generic_state_volume_survives_stop(lux, runners, hosts):
 
 def test_ephemeral_volume_does_not(lux, runners, hosts):
     runners.start(hosts[0])
-    spec = generic(ALPINE_IMAGE, "sh", "-c", "ls /scratch; touch /scratch/x; sleep 300",
+    spec = generic(ALPINE_IMAGE, "sh", "-c", "ls /scratch; touch /scratch/x; echo ready; sleep 300",
                    volumes=[{"name": "scratch", "path": "/scratch", "kind": "ephemeral"}])
     run_id = lux.submit(spec)
-    lux.wait_state(run_id, "running")
-    time.sleep(1)
+    lux.wait_output(run_id, "ready")
     lux.run("stop", run_id, "--wait")
     lux.run("resume", run_id, "--wait")
-    time.sleep(2)
+    wait_until(lambda: lux.logs(run_id).split().count("ready") == 2, 30, 0.5, "the resumed Run never listed /scratch")
     assert "x" not in lux.logs(run_id).split()
     lux.run("cancel", run_id, "--wait")
 

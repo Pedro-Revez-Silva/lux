@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { dropsOptional } from "./Table.tsx";
+import { dropsOptional, tableFloor } from "./Table.tsx";
 
 // The Runs list's widths: name 22%, Id, State flexible, Host, Adapter,
 // Runtime, Placements, Cost, Created; Id/Adapter/Placements optional.
@@ -18,4 +18,11 @@ test("optional columns drop when with them a flexible column would get under 140
   expect(dropsOptional(runs, 1400)).toBe(false);
   // No optional column: nothing to drop.
   expect(dropsOptional(runs.map(({ width }) => ({ width })), 1300)).toBe(false);
+});
+
+test("the floor leaves each flexible column 140px beside percentage columns", () => {
+  // 464px fixed and two flexible columns at 140px are the other 78%.
+  const cols = [{ width: "22%" }, {}, { width: 150 }, {}, { width: 90 }, { width: 120 }, { width: 104 }];
+  expect(tableFloor(cols)).toBe(Math.ceil(744 / 0.78));
+  expect(tableFloor([{ width: 100 }, {}])).toBe(240);
 });
