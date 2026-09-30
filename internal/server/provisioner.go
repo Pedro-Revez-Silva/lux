@@ -353,11 +353,11 @@ func scaleUp(pl poolRow, st *poolState, warm, want int) map[string]any {
 }
 
 // summary is the plan's bounded evidence, shared by pool.scale_up and
-// pool.scale_blocked.
+// pool.scale_blocked. Lists are [] when empty, never null.
 func (p *capacityPlan) summary() map[string]any {
 	return map[string]any{"ready": p.Ready, "starting": p.Starting, "planned": p.Planned, "unmet": p.Unmet,
 		"blocked": p.Blocked, "unknown": p.Unknown, "expected": p.Expected,
-		"deficits": p.Deficits, "exhausted": p.Exhausted, "ineligible": p.Ineligible, "omitted": p.Omitted}
+		"deficits": nonNil(p.Deficits), "exhausted": nonNil(p.Exhausted), "ineligible": nonNil(p.Ineligible), "omitted": p.Omitted}
 }
 
 // scaleBlockedEvent is a state: a stuck pool records it once, and again only

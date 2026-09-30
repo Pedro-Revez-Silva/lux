@@ -161,35 +161,44 @@ func (w *waitCapacity) reason(r pendingRun) string {
 		if n == 0 {
 			continue
 		}
-		verb := map[bool]string{true: "lacks", false: "lack"}[n == 1]
+		lack := plural(n, "lacks", "lack")
 		var what string
 		switch kind {
 		case "cpus":
-			what = fmt.Sprintf("%s cpus (requested %g)", verb, res.CPUs)
+			what = fmt.Sprintf("%s cpus (requested %g)", lack, res.CPUs)
 		case "memory":
-			what = fmt.Sprintf("%s memory (requested %s)", verb, bytesText(int64(res.Memory)))
+			what = fmt.Sprintf("%s memory (requested %s)", lack, bytesText(int64(res.Memory)))
 		case "disk":
-			what = fmt.Sprintf("%s disk (requested %s)", verb, bytesText(int64(res.Disk)))
+			what = fmt.Sprintf("%s disk (requested %s)", lack, bytesText(int64(res.Disk)))
 		case "runs":
-			what = map[bool]string{true: "is at its Run limit", false: "are at their Run limit"}[n == 1]
+			what = plural(n, "is at its Run limit", "are at their Run limit")
 		case "labels":
-			what = verb + " its required labels"
+			what = lack + " its required labels"
 		case "nested":
-			what = map[bool]string{true: "does", false: "do"}[n == 1] + " not support nested containers"
+			what = plural(n, "does", "do") + " not support nested containers"
 		}
-		subject := fmt.Sprint(n) + " "
-		if r.PlaceOn != "" {
-			subject = ""
-		}
-		if len(parts) == 0 {
-			subject = map[bool]string{true: "1 host in its pool ", false: fmt.Sprintf("%d hosts in its pool ", n)}[n == 1]
-			if r.PlaceOn != "" {
-				subject = "its chosen host "
-			}
+		// The subject is named once: the first part says which hosts, later
+		// parts only how many (nothing for the chosen host).
+		var subject string
+		switch {
+		case r.PlaceOn != "" && len(parts) == 0:
+			subject = "its chosen host "
+		case r.PlaceOn != "":
+		case len(parts) == 0:
+			subject = fmt.Sprintf("%d %s in its pool ", n, plural(n, "host", "hosts"))
+		default:
+			subject = fmt.Sprintf("%d ", n)
 		}
 		parts = append(parts, subject+what)
 	}
 	return truncate("waiting for capacity: "+strings.Join(parts, ", "), maxWaitReason)
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // bytesText is a byte count in binary units, as the CLI prints it.

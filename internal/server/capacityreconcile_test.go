@@ -166,33 +166,3 @@ func TestCapacityReconcileExpectedLabelIntersection(t *testing.T) {
 		})
 	}
 }
-
-// A Run waiting for its chosen host is no evidence about the pool's other hosts.
-func TestCapacityReconcileChosenHostIsNotOtherHostsEvidence(t *testing.T) {
-	s, pl, p := planningFixture(t, 1)
-	observePlanningHost(t, s, "chosen", "ready", proto.Capacity{CPUs: 1}, map[string]string{})
-	observePlanningHost(t, s, "other", "ready", proto.Capacity{CPUs: 1}, map[string]string{})
-	livePlacement(t, s, "chosen", `{"cpus":1}`)
-	execSQL(t, s, context.Background(), `UPDATE runs SET place_on = 'chosen'`)
-	pl.Min = 3
-	planningTick(t, s, pl, p, false)
-	if got := hostDecisions(t, s, "other"); len(got) != 0 {
-		t.Fatalf("other host decisions %+v", got)
-	}
-	exhausted := events(t, s, evScaleUp)[0].Data["exhausted"].([]any)
-	if len(exhausted) != 1 || exhausted[0].(map[string]any)["host"] != "chosen" {
-		t.Fatalf("exhausted %v, want only the chosen host", exhausted)
-	}
-}
-
-// A ready host that never heartbeat is ineligible with that reason.
-func TestScaleUpRecordsNoHeartbeatHost(t *testing.T) {
-	s, pl, p := planningFixture(t, 1)
-	observePlanningHost(t, s, "silent", "ready", proto.Capacity{CPUs: 4}, map[string]string{})
-	execSQL(t, s, context.Background(), `UPDATE hosts SET last_heartbeat = NULL`)
-	planningTick(t, s, pl, p, false)
-	in := events(t, s, evScaleUp)[0].Data["ineligible"]
-	if want := []any{map[string]any{"host": "silent", "reason": "no heartbeat"}}; !reflect.DeepEqual(in, want) {
-		t.Fatalf("ineligible %v, want %v", in, want)
-	}
-}

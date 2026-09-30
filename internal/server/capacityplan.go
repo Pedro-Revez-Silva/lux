@@ -10,22 +10,23 @@ import (
 	"github.com/marcioapm/lux/internal/proto"
 )
 
-// capacityPlan is a transient reservation simulation, never a placement promise.
+// capacityPlan is a transient reservation simulation, never a placement
+// promise. summary() is what events carry of it; NewHosts is not exported.
 type capacityPlan struct {
-	Ready            int    `json:"ready"`
-	Starting         int    `json:"starting"` // Runs covered by existing starts only.
-	Planned          int    `json:"planned"`
-	Unmet            int    `json:"unmet"`   // Capacity-eligible Runs not covered by ready, existing-start, or planned capacity.
-	Blocked          int    `json:"blocked"` // Runs excluded before capacity simulation; they never trigger launches.
-	Unknown          string `json:"unknown,omitempty"`
-	Probe            bool   `json:"probe,omitempty"` // One host launched to re-observe capacity no expected host fits.
+	Ready            int
+	Starting         int // Runs covered by existing starts only.
+	Planned          int
+	Unmet            int // Capacity-eligible Runs not covered by ready, existing-start, or planned capacity.
+	Blocked          int // Runs excluded before capacity simulation; they never trigger launches.
+	Unknown          string
+	Probe            bool // One host launched to re-observe capacity no expected host fits.
 	hostDecisions    map[string]hostDecision
-	NewHosts         int              `json:"newHosts"`
-	Expected         *hostExpectation `json:"expected"`
-	Deficits         []planDeficit    `json:"deficits,omitempty"`  // Prerequisite and new-host blockers.
-	Exhausted        []planDeficit    `json:"exhausted,omitempty"` // Fit blockers on actual ready or starting hosts.
-	Omitted          int              `json:"omitted,omitempty"`   // Evidence entries beyond planSampleSize per list.
-	Ineligible       []ineligibleHost `json:"ineligible,omitempty"`
+	NewHosts         int
+	Expected         *hostExpectation
+	Deficits         []planDeficit // Prerequisite and new-host blockers.
+	Exhausted        []planDeficit // Fit blockers on actual ready or starting hosts.
+	Omitted          int           // Evidence entries beyond planSampleSize per list.
+	Ineligible       []ineligibleHost
 	reserved         map[string]bool
 	reservedIdle     int
 	reservedStarting int

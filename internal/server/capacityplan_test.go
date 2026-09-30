@@ -532,7 +532,7 @@ func TestCapacityReconcileScaleBlockedOnce(t *testing.T) {
 		"ready":0,"starting":0,"planned":0,"unmet":1,"blocked":0,"unknown":"",
 		"expected":{"capacity":{"cpus":2,"memory":0,"disk":0,"runs":0},"observations":1},
 		"deficits":[{"run":"r0","stage":"new_host","blockers":[{"resource":"cpus","requested":4,"used":0,"capacity":2,"available":2}]}],
-		"exhausted":null,"ineligible":[],"omitted":0}`), &want); err != nil {
+		"exhausted":[],"ineligible":[],"omitted":0}`), &want); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(evs[0].Data, want) {

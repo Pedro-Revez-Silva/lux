@@ -164,7 +164,8 @@ the label values).
 
 **`host.capacity_decision`** is the planner's verdict on one actual host,
 written only when it differs from that host's previous one: `pool`;
-`stage` (`ready` or `starting`); `decision`
+`stage` (`ready` or `starting`; for `idle`, the host's state then:
+`ready`, `starting`, `draining` or `lost`); `decision`
 `reserved` (it holds simulated Runs and every Run tried on it fit),
 `exhausted` (it holds some, and at least one other Run did not fit),
 `blocked` (it holds none), `idle` (no waiting Run considered it this
