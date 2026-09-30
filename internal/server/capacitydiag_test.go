@@ -47,8 +47,9 @@ func blockerOf(t *testing.T, entries []any, host string) map[string]any {
 
 func wantResource(t *testing.T, b map[string]any, resource string, requested, used, capacity, available float64) {
 	t.Helper()
-	if b["resource"] != resource || b["requested"] != requested || b["used"] != used || b["capacity"] != capacity || b["available"] != available {
-		t.Fatalf("blocker %+v, want %s requested %g used %g capacity %g available %g", b, resource, requested, used, capacity, available)
+	want := map[string]any{"resource": resource, "requested": requested, "used": used, "capacity": capacity, "available": available}
+	if !reflect.DeepEqual(b, want) {
+		t.Fatalf("blocker %+v, want %+v", b, want)
 	}
 }
 
@@ -146,9 +147,10 @@ func TestScaleUpRecordsIneligibleReadyHosts(t *testing.T) {
 	execSQL(t, s, context.Background(), `UPDATE hosts SET draining=true WHERE id='drain'`)
 	planningTick(t, s, pl, p, false)
 	d := events(t, s, evScaleUp)[0].Data
-	in := d["ineligible"].([]any)
-	if len(in) != 2 || in[0].(map[string]any)["reason"] != "draining" || in[1].(map[string]any)["reason"] != "heartbeat stale" {
-		t.Fatalf("ineligible %v", in)
+	// Sampled by host id.
+	want := []any{map[string]any{"host": "drain", "reason": "draining"}, map[string]any{"host": "stale", "reason": "heartbeat stale"}}
+	if in := d["ineligible"]; !reflect.DeepEqual(in, want) {
+		t.Fatalf("ineligible %v, want %v", in, want)
 	}
 	if got := hostDecisions(t, s, "stale"); len(got) != 1 || got[0]["decision"] != "ineligible" {
 		t.Fatalf("stale decisions %+v", got)
@@ -161,7 +163,7 @@ func TestScaleUpUnknownCapacityReason(t *testing.T) {
 	execSQL(t, s, context.Background(), `UPDATE runs SET secrets='["TOKEN"]' WHERE id='r1'`)
 	planningTick(t, s, pl, p, false)
 	d := events(t, s, evScaleUp)[0].Data
-	if d["unknown"] == "" || d["unmet"] != 1.0 || d["blocked"] != 1.0 {
+	if d["unknown"] != "no registered host observations for current template" || d["unmet"] != 1.0 || d["blocked"] != 1.0 {
 		t.Fatalf("summary %+v", d)
 	}
 	reasons := map[string]bool{}

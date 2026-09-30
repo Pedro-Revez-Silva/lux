@@ -416,9 +416,9 @@ func TestCapacityReconcileBoundedExactSummary(t *testing.T) {
 	if len(deficits) != 8 {
 		t.Fatalf("sample length %d, want 8", len(deficits))
 	}
-	b := deficits[0].(map[string]any)["blockers"].([]any)[0].(map[string]any)
-	if b["resource"] != "cpus" || b["requested"] != float64(3) || b["capacity"] != float64(2) || b["available"] != float64(2) {
-		t.Fatalf("blocker: %+v", b)
+	wantBlockers := []any{map[string]any{"resource": "cpus", "requested": 3.0, "used": 0.0, "capacity": 2.0, "available": 2.0}}
+	if b := deficits[0].(map[string]any)["blockers"]; !reflect.DeepEqual(b, wantBlockers) {
+		t.Fatalf("blockers %+v, want %+v", b, wantBlockers)
 	}
 	for range 2 {
 		planningTick(t, s, pl, p, false)
