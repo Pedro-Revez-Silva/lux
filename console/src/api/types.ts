@@ -124,6 +124,12 @@ export interface Run {
   runtimeSeconds: number;
   /** When the placement still running started; set while one is. */
   runtimeSince?: string;
+  /** Placement time: per placement, from needing a host until its workload started, summed (wait + start). */
+  placementSeconds: number;
+  placementWaitSeconds: number;
+  placementStartSeconds: number;
+  /** Still being placed: placementSeconds counts up from the response. */
+  placing?: boolean;
   placements?: Placement[];
   usage?: RunUsage;
   resume?: Resumability;
@@ -428,7 +434,16 @@ export interface Host {
   market?: "on-demand" | "spot";
   lastHeartbeat?: string;
   times: Record<HostTimeKey, string | null>;
+  /** How luxd's launch of it went (provisioned hosts); failed: the provider refused and no instance ran. */
+  launch?: HostLaunch;
   placements?: HostPlacement[];
+}
+
+export interface HostLaunch {
+  outcome: "requested" | "launched" | "failed" | "abandoned";
+  requestedAt?: string;
+  finishedAt?: string;
+  error?: string;
 }
 
 export interface Pool {
@@ -616,7 +631,7 @@ export interface MigrateRequest {
   input?: { text: string };
 }
 
-export interface RunListParams {
+export interface RunListParams extends PageParams {
   state?: string[];
   resumable?: boolean;
   host?: string;
@@ -625,10 +640,32 @@ export interface RunListParams {
   limit?: number;
 }
 
-export interface HostListParams {
+export interface HostListParams extends PageParams {
   all?: boolean;
   pool?: string;
   state?: string;
+  lifecycle?: "live" | "ended";
+  limit?: number;
+  offset?: number;
+}
+
+/** A paged list's order and where to read: a response's cursors, sent back. */
+export interface PageParams {
+  sort?: string;
+  dir?: "asc" | "desc";
+  next?: string;
+  prev?: string;
+  at?: string;
+}
+
+/** A page of a paged list: its rows and cursors (and, for hosts, the count). */
+export interface Page<T> {
+  rows: T[];
+  next?: string;
+  prev?: string;
+  page?: string;
+  total?: number;
+  offset?: number;
 }
 
 /** Run states that never change again. */

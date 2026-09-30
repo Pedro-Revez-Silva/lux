@@ -1,7 +1,7 @@
 // Small pieces shared by pages: error/loading blocks, links, the runs table
 // columns, chart series builders and lookups.
 import { useMemo, useRef, type ReactNode } from "react";
-import { Button, CostFigure, EmptyState, formatDuration, formatPercent, formatUnit, IdChip, KeyValue, LinkButton, RelativeTime, Skeleton, SkeletonLines, StatePill, type ChartMark, type Column, type LinkButtonProps, type Unit } from "@lux/design-system";
+import { Button, CostFigure, DurationCell, EmptyState, formatDuration, formatPercent, formatUnit, IdChip, KeyValue, LinkButton, RelativeTime, RUN_STATE_LIST, Skeleton, SkeletonLines, StatePill, type ChartMark, type Column, type LinkButtonProps, type RunState, type Unit } from "@lux/design-system";
 import { api, isRunActive, useNow, useQuery, type QueryState, type Run, type Sample } from "../../api/index.ts";
 import { Link, linkTo, useSearch } from "../router.tsx";
 
@@ -140,29 +140,70 @@ export function StateCell({ kind, state, activity, reason, children }: { kind: "
 
 /**
  * Shared columns of a runs table. The name leads; the id is a quiet mono
- * column beside it. Name and state share the flexible width.
+ * column beside it. Name and state share the flexible width. Every column
+ * sorts: the loaded rows by default, or, with server, the server's order
+ * (the keys are GET /v1/runs' sort keys).
  */
-export function runColumns({ tenant, host = true, adapter = true, cost = false }: { tenant: boolean; host?: boolean; adapter?: boolean; cost?: boolean }): Column<Run>[] {
+export function runColumns({ tenant, host = true, adapter = true, cost = false, placement = false }: { tenant: boolean; host?: boolean; adapter?: boolean; cost?: boolean; placement?: boolean }): Column<Run>[] {
   const c: Column<Run>[] = [
     { key: "name", header: "Run", cell: (r) => <RunNameLink id={r.id} name={r.name} />, sortValue: (r) => r.name || r.id, lead: true, width: "22%" },
     { key: "id", header: "Id", cell: (r) => <RunLink id={r.id} />, sortValue: (r) => r.id, mono: true, width: 200, optional: true },
   ];
   if (tenant) c.push({ key: "tenant", header: "Tenant", cell: (r) => r.tenant, sortValue: (r) => r.tenant, width: 120 });
-  c.push({ key: "state", header: "State", cell: (r) => <StateCell kind="run" state={r.state} activity={r.activity} reason={r.stateReason} />, sortValue: (r) => r.state });
+  c.push({ key: "state", header: "State", cell: (r) => <StateCell kind="run" state={r.state} activity={r.activity} reason={r.stateReason} />, sortValue: (r) => RUN_STATE_LIST.indexOf(r.state as RunState), sortFirst: "asc" });
   if (host) c.push({ key: "host", header: "Host", cell: (r) => (r.hostId ? <HostLink id={r.hostId} name={r.host} /> : DASH), sortValue: (r) => r.host, width: 150 });
   c.push({ key: "pool", header: "Pool", cell: (r) => r.pool || DASH, sortValue: (r) => r.pool });
   if (adapter) c.push({ key: "adapter", header: "Adapter", cell: (r) => <span className="secondary">{r.spec.workload.adapter}</span>, sortValue: (r) => r.spec.workload.adapter, width: 110, optional: true });
   c.push(
-    { key: "runtime", header: "Runtime", cell: (r) => <RuntimeCell run={r} />, sortValue: (r) => r.runtimeSeconds, align: "right", mono: true, width: 90 },
+    { key: "runtime", header: "Runtime", cell: (r) => <RuntimeCell run={r} />, sortValue: (r) => (r.runtimeSince || r.runtimeSeconds ? r.runtimeSeconds : null), align: "right", mono: true, width: 90 },
     // The API field is epoch: it goes up by one per placement. A title, not
     // a Tooltip: table headers clip overflow.
-    { key: "epoch", header: <span title="Times this Run has been placed on a host">Placements</span>, cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 116, optional: true },
+    { key: "placements", header: <span title="Times this Run has been placed on a host">Placements</span>, cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 116, optional: true },
   );
+  if (placement)
+    c.push({
+      key: "placement",
+      header: <span title="Getting the Run onto a host and started, summed over its placements">Placement time</span>,
+      cell: (r) => <PlacementTimeCell run={r} />,
+      sortValue: (r) => r.placementSeconds,
+      align: "right",
+      mono: true,
+      width: 132,
+    });
   if (cost) c.push({ key: "cost", header: "Cost", cell: (r) => <RunCostCell run={r} />, sortValue: (r) => costSortValue(r), align: "right", mono: true, width: 120 });
-  c.push(
-    { key: "created", header: "Created", cell: (r) => <RelativeTime at={r.createdAt} />, sortValue: (r) => Date.parse(r.createdAt), align: "right", width: 104 },
-  );
+  c.push({ key: "created", header: "Created", cell: (r) => <RelativeTime at={r.createdAt} label="Created" />, sortValue: (r) => Date.parse(r.createdAt), align: "right", width: 104 });
   return c;
+}
+
+/** Placement time over this many seconds reads in the warn tone. */
+export const SLOW_PLACEMENT_S = 300;
+
+/**
+ * Placement time (placementSeconds): waiting for a host plus starting on
+ * it, over every placement. A Run still being placed counts up with "…";
+ * the Tooltip splits the two.
+ */
+export function PlacementTimeCell({ run }: { run: Run }) {
+  useNow(); // re-render on the shared clock
+  const now = Date.now();
+  let seen = runSeenAt.get(run);
+  if (seen === undefined) {
+    seen = now;
+    runSeenAt.set(run, now);
+  }
+  const grow = run.placing ? Math.min(now - seen, RUNTIME_EXTRAPOLATE_MS) / 1000 : 0;
+  const total = run.placementSeconds + grow;
+  const n = Math.max(1, run.epoch + (run.placing && !run.hostId ? 1 : 0));
+  const tip = [
+    `${n} placement${n === 1 ? "" : "s"}`,
+    `waiting for a host ${formatDuration(run.placementWaitSeconds)}`,
+    `starting ${formatDuration(run.placementStartSeconds)}`,
+    run.placing ? "so far: still being placed" : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  if (!run.placing && total === 0 && run.epoch === 0) return DASH;
+  return <DurationCell seconds={total} live={run.placing} ellipsis={run.placing} warn={total > SLOW_PLACEMENT_S} tip={tip} />;
 }
 
 // Extrapolate from the first render of each response object, not from
@@ -197,7 +238,7 @@ function RunCostCell({ run }: { run: Run }) {
   return <CostFigure status={run.cost?.status ?? "pending"} totals={run.cost?.totals} />;
 }
 
-/** Sort by the first currency's total; rows without one sort together. */
+/** Sort by the first currency's total; rows without one sort last. */
 function costSortValue(r: Run): number | null {
   const t = r.cost?.totals[0];
   // Ordering only: the displayed figure is formatted from the string.

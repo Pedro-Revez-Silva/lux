@@ -89,18 +89,22 @@ Run-scoped calls (`/runs/{id}/…`, `/hosts/{id}/…`, `/artifacts/…`) do not 
 | Route | Page | Data |
 | --- | --- | --- |
 | `/` | Overview: stat tiles, charts over the selected range, live activity feed | `/status` (5s), `/history?since=` (30s), `/events` SSE |
-| `/runs` | Runs table with state presets and chips, resumable/host/label filters, "Load more" (`before=`) | `/runs` (5s) |
+| `/runs` | Runs over time and started/finished charts (the tenant scope's history over the global range; table filters do not narrow them), then the Runs table with state presets and chips, resumable/host/label filters; every column (Placement time and Cost included) sorts on the server across every match; cursor pages (First / Previous / Next, page size) | `/runs?sort=&dir=&limit=` with `next`/`prev`/`at` cursors (5s), `/history?since=` (30s) |
 | `/runs/:id` | Header + actions (Terminal, Stop, Cancel, Resume, Migrate), tabs (`?tab=`): Output (SSE), Servers (the run's `servers`; Add server, start/stop/restart/remove, a log per server), Timeline (per-epoch waterfall), Resources (charts, epoch marks), Events, Snapshots & artifacts, Spec | `/runs/{id}` (3s while active), `/runs/{id}/output`, `/runs/{id}/servers/{name}/log`, `/history`, `/events`, `/snapshots`, `/artifacts` |
 | `/runs/:id/terminal` | A shell in the run's container: xterm.js over the exec WebSocket, font size (persisted), terminal colours (Match console / Solarized light / Solarized dark: this terminal only, `lux.terminal.theme`, changed in place without reconnecting; the console theme stays in the top bar), Reconnect, Open in new tab; exited / lost overlays; an empty state while the run is not running | `/runs/{id}` (5s), `GET /runs/{id}/exec` (WebSocket; `POST /runs/{id}/tickets` first with a key) |
-| `/hosts` | Hosts table (pool/state filters, include terminated) with allocation bars | `/hosts` (5s), `/pools` |
-| `/hosts/:id` | Details, Drain, lifecycle timeline, live placements, usage charts, events (own and operators), recent runs | `/hosts/{id}` (5s), `/hosts/{id}/history`, `/hosts/{id}/events` (5s), `/runs?host=` |
+| `/hosts` | Hosts table: pool and state filters (launch failed among them), Live / All / Ended; Created, Terminated (relative, exact in a Tooltip) and Uptime; every column sorts on the server; counted pages (numbered, page size) | `/hosts?sort=&dir=&limit=&offset=` (5s), `/hosts` (the live summary, 15s), `/pools` |
+| `/hosts/:id` | Details, Drain, lifecycle timeline, live placements, usage charts, events (own and operators), recent runs. A host whose launch failed shows its launch instead (requested, failed, the provider's error; no terminate time, no usage, no cost) | `/hosts/{id}` (5s), `/hosts/{id}/history`, `/hosts/{id}/events` (5s), `/runs?host=` |
 | `/pools` | Pools with host counts; a row opens its pool | `/pools`, `/hosts` |
 | `/pools/:name` | Settings, its hosts, events (scale-ups, launches, placements, releases) | `/pools` (15s), `/hosts?pool=` (15s), `/pools/{name}/events` (15s) |
 | `/tenants` | Tenants (operators); a row sets the tenant scope and opens Overview | `/tenants` |
 | `/preview-auth?to=` | No shell: the preview listener sends a browser here without a cookie. Mints a `preview` ticket for the run in `to`'s host (`<server>-<runsuffix>.<domain>`) and redirects to `https://<host>/.lux/auth?ticket=…&to=<path>` | `POST /runs/{id}/tickets` |
 
 Pages live in `src/app/pages/`; `common.tsx` holds the shared bits (error
-blocks, usage bar, series builders, scoped links).
+blocks, usage bar, series builders, scoped links, the runs table's
+columns). `src/app/paged.ts` (`usePaged`) is every server-paged list's
+state: sort, page size and cursors; a filter, tenant, sort or size change
+starts at page 1 and aborts the request in flight, and a refresh re-reads
+the page on screen from its own cursor, so polling never moves the reader.
 
 ## Layout
 
