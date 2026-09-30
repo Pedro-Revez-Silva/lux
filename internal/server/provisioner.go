@@ -165,7 +165,19 @@ func (s *Server) provision(ctx context.Context) error {
 // the database once again (idleDecisions).
 func (s *Server) tookProvisionLease() {
 	s.leaseHeld = true
-	s.swept, s.decided = nil, nil
+	s.swept, s.decided = make(map[string]bool), make(map[string]map[string]bool)
+}
+
+// decidedFor is s.decided[poolID], created on first use (a Server whose
+// pools are reconciled without provision() never took the lease).
+func (s *Server) decidedFor(poolID string) map[string]bool {
+	if s.decided == nil {
+		s.swept, s.decided = make(map[string]bool), make(map[string]map[string]bool)
+	}
+	if s.decided[poolID] == nil {
+		s.decided[poolID] = map[string]bool{}
+	}
+	return s.decided[poolID]
 }
 
 // poolState is what a pool has and needs, counted in one transaction.
@@ -369,6 +381,9 @@ var scaleBlockedEvent = transition{typ: evScaleBlocked,
 	endedBy:         []string{evScaleUp},
 	runlessDeficits: true}
 
+// capacityDecisionEvent is a host's latest verdict, recorded on change.
+var capacityDecisionEvent = transition{typ: evCapacityDecision}
+
 // scaleBlocked records why a pass launched nothing while hosts were wanted
 // or Runs stay unmet (blockedCause); wanted is how many hosts the plan,
 // warm and min asked for.
@@ -422,12 +437,10 @@ func (s *Server) recordHostDecisions(ctx context.Context, pl poolRow, decisions 
 			continue
 		}
 		// idleDecisions retracts what this set holds once demand leaves.
-		if decided := s.decided[pl.ID]; decided != nil {
-			if data.Decision == "idle" {
-				delete(decided, id)
-			} else {
-				decided[id] = true
-			}
+		if data.Decision == "idle" {
+			delete(s.decidedFor(pl.ID), id)
+		} else {
+			s.decidedFor(pl.ID)[id] = true
 		}
 	}
 }
@@ -435,7 +448,7 @@ func (s *Server) recordHostDecisions(ctx context.Context, pl poolRow, decisions 
 // hostDecisionEvent appends a host's decision when it differs from its
 // latest one (transitionEvent: an unchanged decision takes no lock).
 func hostDecisionEvent(ctx context.Context, tx pgx.Tx, hostID string, data any) error {
-	return transitionEvent(ctx, tx, hostEvents, hostID, transition{typ: evCapacityDecision}, data)
+	return transitionEvent(ctx, tx, hostEvents, hostID, capacityDecisionEvent, data)
 }
 
 // providerError records a failed provider call, in a transaction of its own

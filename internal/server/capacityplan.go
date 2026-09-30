@@ -85,13 +85,7 @@ func (s *Server) ineligibleReadyHosts(ctx context.Context, tx pgx.Tx, pl poolRow
 // verdicts. A decision another process records later is not retracted by
 // this one. The idle stage is the host's state, provisioning as starting.
 func (s *Server) idleDecisions(ctx context.Context, tx pgx.Tx, pl poolRow, plan *capacityPlan) error {
-	if s.decided == nil {
-		s.decided = map[string]map[string]bool{}
-	}
-	if s.decided[pl.ID] == nil {
-		s.decided[pl.ID] = map[string]bool{}
-	}
-	decided := s.decided[pl.ID]
+	decided := s.decidedFor(pl.ID)
 	if !s.swept[pl.ID] {
 		rows, err := tx.Query(ctx, `SELECT h.id FROM hosts h
 			WHERE h.pool_id = $1 AND h.tenant_id IS NOT DISTINCT FROM $2::text AND h.state <> 'terminated'
@@ -109,9 +103,6 @@ func (s *Server) idleDecisions(ctx context.Context, tx pgx.Tx, pl poolRow, plan 
 		}
 		for _, id := range ids {
 			decided[id] = true
-		}
-		if s.swept == nil {
-			s.swept = map[string]bool{}
 		}
 		s.swept[pl.ID] = true
 	}
