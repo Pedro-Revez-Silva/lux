@@ -372,7 +372,10 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
 ```
 
 - **Scale up:** when Runs for the pool wait in `provisioning`, luxd launches
-  enough hosts for them, plus `--warm` idle ones kept ready. It keeps at
+  the hosts they need beyond what ready and starting hosts can hold, sized
+  from the capacity its registered hosts reported
+  ([capacity planning](telemetry.md#capacity-planning)), plus `--warm` idle
+  ones kept ready. It keeps at
   least `--min` hosts and never more than `--max`. Launches alternate
   across the template's subnets.
 - **Scale down:** a host idle longer than the pool's `--scale-down-after`

@@ -71,6 +71,80 @@ What happened to a host, and to its pool, is also an event log of its own
 of the change it records. Like Run events they are kept as long as their
 host or pool.
 
+## Capacity planning
+
+On each provisioner pass an `ec2` pool simulates placing its waiting Runs
+(state `provisioning`, oldest first) to decide how many hosts to launch.
+The simulation reserves capacity only for sizing; the scheduler places
+Runs independently.
+
+**Where new-host capacity comes from.** Only hosts luxd launched for the
+same pool and the same tenant, that have registered, and whose launch
+template is exactly the pool's current one count as observations. The
+expected capacity of a new host is, per resource (`cpus`, `memory`,
+`disk`, `runs`), the smallest value those hosts reported, and its labels
+are those every observation shares with the same value. A reported `0`
+means that resource is unlimited on that host; the expectation is
+unlimited only when every observation reported `0`, otherwise the
+smallest non-zero value wins. With no observation (a new pool, or a
+changed template) the capacity is unknown, which is never taken as
+unlimited: luxd launches one host to learn it, and none while a host of
+the current template is already starting.
+
+**Planning order.** Each Run is tried against:
+
+1. ready hosts the scheduler would consider, by id;
+2. hosts already starting from the current template (not draining, within
+   `LUX_LAUNCH_TIMEOUT`), sized by the expected capacity;
+3. new hosts of the expected capacity, added one at a time as needed.
+
+A Run whose prerequisites are unmet (its secrets are not in this luxd's
+memory; its snapshot is missing, unavailable, not yet uploaded, or
+references blobs it cannot read), or that waits for a chosen host, is
+*blocked* and never causes a launch. A Run that fits nowhere, including a
+new host, is *unmet*. The pool launches the new hosts of step 3, plus
+warm hosts not already covered by unreserved idle or starting hosts,
+at least enough for `--min` and never beyond `--max`. Idle ready hosts
+the simulation reserved are not drained by scale-down.
+
+**`pool.scale_up`** keeps its earlier fields (`hosts`, `reason`,
+`waiting`, `warm`, `min`, `max`, `total`, `idle`, `provisioning`) and
+adds the plan; rows written before planning have none of these:
+
+| Field | Meaning |
+| --- | --- |
+| `ready` | Runs the simulation fitted on ready hosts. |
+| `future` | Runs fitted on hosts already starting. |
+| `planned` | Runs fitted on new hosts (the launches' reason). |
+| `unmet` | Capacity-eligible Runs no ready, starting or new host fits. |
+| `blocked` | Runs excluded before simulation (prerequisites, chosen host). |
+| `expected` | New-host `capacity` (`cpus`, `memory` and `disk` in bytes, `runs`; `0` unlimited) and how many `observations` it is from; `null` when unknown. |
+| `unknown` | Why `expected` is `null`. |
+| `deficits` | Per Run: prerequisite (`stage` `prerequisite`) or new-host (`new_host`) blockers. |
+| `exhausted` | Per actual host (`host`, `stage` `ready` or `starting`): the first Run it could not fit and why. |
+| `ineligible` | Ready hosts the scheduler skips: `draining`, `no heartbeat`, `heartbeat stale`. |
+| `omitted` | Entries left out of `deficits` and `exhausted`, each capped at 8; `ineligible` is capped at 8 too. |
+
+A blocker is either a resource, with `resource` (`cpus`, `memory`, `disk`
+or `runs`), `requested`, `used`, `capacity` and `available`
+(`capacity - used`) in that resource's unit (CPUs, bytes, placements), or
+a constraint `reason` (another tenant's host, a removed pool, no nested
+containers; a label mismatch is `required labels do not match`, without
+the label values).
+
+**`host.capacity_decision`** is the planner's verdict on one actual host,
+written only when it differs from that host's previous one (at most 32
+hosts per pool pass): `pool`; `stage` (`ready` or `starting`); `decision`
+`reserved` (it holds simulated Runs), `exhausted` (it holds some and the
+next did not fit), `blocked` (no Run fits it) or `ineligible` (with
+`reason`, as above); and `blockers` for `exhausted` and `blocked`.
+
+`pool.placement` and `host.placement_assigned` carry the Run's requested
+`resources` (`cpus`, `memory` and `disk` in bytes, `pids`).
+
+`lux pools events`, `lux hosts events` and the console render all of these
+as one line each, with memory and disk in binary units.
+
 ## Events
 
 Every lifecycle change is also an event on its Run (`lux events <run>`).

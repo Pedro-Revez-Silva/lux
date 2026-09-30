@@ -82,3 +82,71 @@ func TestInfraEventsLimit(t *testing.T) {
 		t.Fatalf("--all gave %v in %d requests (%v), want %v in 3", ids, len(p.seen), p.seen, want)
 	}
 }
+
+// eventOf decodes data as the API client does, so numbers are float64.
+func eventOf(t *testing.T, typ, data string) server.LifecycleEvent {
+	t.Helper()
+	e := server.LifecycleEvent{Type: typ, Count: 1}
+	if err := json.Unmarshal([]byte(data), &e.Data); err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func TestEventLineCapacity(t *testing.T) {
+	for _, c := range []struct {
+		name, typ, data, want string
+	}{
+		{"scale-up before capacity planning", "pool.scale_up",
+			`{"hosts":2,"reason":"waiting runs","waiting":2,"warm":0,"min":0,"max":10,"total":1,"idle":0,"provisioning":1}`,
+			"+2 host(s) for waiting runs: 2 waiting, warm 0, min 0, max 10; had 1 (0 idle, 1 provisioning)"},
+		{"scale-up from observed capacity", "pool.scale_up",
+			`{"hosts":1,"reason":"waiting runs","waiting":3,"warm":0,"min":0,"max":10,"total":2,"idle":1,"provisioning":1,
+			  "ready":1,"future":1,"planned":1,"unmet":0,"blocked":1,
+			  "expected":{"capacity":{"cpus":8,"memory":34359738368,"disk":0,"runs":4},"observations":3},
+			  "deficits":[{"run":"r4","stage":"prerequisite","blockers":[{"reason":"snapshot upload pending"}]}],
+			  "exhausted":[{"run":"r3","host":"h1","stage":"ready","blockers":[
+			    {"resource":"memory","requested":17179869184,"used":25769803776,"capacity":34359738368,"available":8589934592},
+			    {"resource":"cpus","requested":4,"used":6,"capacity":8,"available":2}]}],
+			  "ineligible":[{"host":"h2","reason":"draining"}],"omitted":2}`,
+			"+1 host(s) for waiting runs: 3 waiting, warm 0, min 0, max 10; had 2 (1 idle, 1 provisioning); " +
+				"plan: 1 ready, 1 future, 1 planned, 0 unmet, 1 blocked; " +
+				"new host cpus 8, memory 32.0 GiB, disk unlimited, runs 4 from 3 observation(s); " +
+				"deficits: r4 prerequisite [snapshot upload pending]; " +
+				"exhausted: h1 (ready) for r3 [memory requested 16.0 GiB, used 24.0 GiB, capacity 32.0 GiB, available 8.0 GiB; cpus requested 4, used 6, capacity 8, available 2]; " +
+				"ineligible: h2 draining; 2 more omitted"},
+		{"cold pool bootstraps one host", "pool.scale_up",
+			`{"hosts":1,"reason":"waiting runs","waiting":1,"warm":0,"min":0,"max":0,"total":0,"idle":0,"provisioning":0,
+			  "ready":0,"future":0,"planned":0,"unmet":1,"blocked":0,"expected":null,
+			  "unknown":"no registered host observations for current template",
+			  "deficits":[{"run":"r1","stage":"new_host","blockers":[{"reason":"new host capacity unknown"}]}]}`,
+			"+1 host(s) for waiting runs: 1 waiting, warm 0, min 0, max 0; had 0 (0 idle, 0 provisioning); " +
+				"plan: 0 ready, 0 future, 0 planned, 1 unmet, 0 blocked; " +
+				"new host capacity unknown: no registered host observations for current template; " +
+				"deficits: r1 new host [new host capacity unknown]"},
+		{"exhausted host", "host.capacity_decision",
+			`{"pool":"burst","stage":"ready","decision":"exhausted","blockers":[
+			  {"resource":"disk","requested":10737418240,"used":107374182400,"capacity":107374182400,"available":0},
+			  {"resource":"runs","requested":1,"used":4,"capacity":4,"available":0}]}`,
+			"exhausted (ready) in pool burst: disk requested 10.0 GiB, used 100.0 GiB, capacity 100.0 GiB, available 0 B; runs requested 1, used 4, capacity 4, available 0"},
+		{"constraint-blocked starting host", "host.capacity_decision",
+			`{"pool":"burst","stage":"starting","decision":"blocked","blockers":[{"reason":"required labels do not match"}]}`,
+			"blocked (starting) in pool burst: required labels do not match"},
+		{"ineligible host", "host.capacity_decision",
+			`{"pool":"burst","stage":"ready","decision":"ineligible","reason":"heartbeat stale"}`,
+			"ineligible (ready) in pool burst: heartbeat stale"},
+		{"reserved host", "host.capacity_decision",
+			`{"pool":"burst","stage":"starting","decision":"reserved"}`,
+			"reserved (starting) in pool burst"},
+		{"placement with resources", "pool.placement",
+			`{"run":"r1","epoch":2,"host":"h1","resources":{"cpus":2,"memory":4294967296,"disk":21474836480}}`,
+			"r1 epoch 2 on h1 (cpus 2, memory 4.0 GiB, disk 20.0 GiB)"},
+		{"placement without resources", "host.placement_assigned",
+			`{"run":"r1","epoch":1,"host":"h1"}`,
+			"r1 epoch 1 on h1"},
+	} {
+		if got := eventLine(eventOf(t, c.typ, c.data)); got != c.want {
+			t.Errorf("%s:\n got %q\nwant %q", c.name, got, c.want)
+		}
+	}
+}

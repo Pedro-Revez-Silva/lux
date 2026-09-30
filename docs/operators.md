@@ -52,6 +52,14 @@ operators'.
 A host is named by id or name. Two tenants may each have a host of the
 same name; an operator then names it by id, or with `--tenant`.
 
+Why an EC2 pool launched a host, or did not, is in its events: `lux pools
+events <pool>` shows each `pool.scale_up` with its capacity plan (Runs
+covered by ready, starting and planned hosts, those unmet or blocked, the
+new-host capacity it assumed and sampled blockers), and `lux hosts events
+<host>` shows `host.capacity_decision` when the planner's verdict on that
+host changes. The console's pool and host pages show the same lines. See
+[Telemetry](telemetry.md#capacity-planning) for what each field means.
+
 ## Acting
 
 ```bash

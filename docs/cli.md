@@ -176,11 +176,12 @@ tag of their launch. A Run's spec keeps the name it was submitted with;
 `lux pools events` and `lux hosts events` print one line per event: its
 time, type and what it says (`-o json`: the events as the API has them).
 A pool's are `pool.scale_up` (how many hosts and why: `waiting runs`,
-`warm` or `minimum`, with the counts), `pool.launch_requested`,
+`warm` or `minimum`, with the counts and, since capacity planning, the
+plan behind it: see [Telemetry](telemetry.md#capacity-planning)), `pool.launch_requested`,
 `pool.host_launched` (`recovered` when luxd found the instance by its tag
 after losing the provider's reply), `pool.launch_failed` (the provider's error),
 `pool.host_registered`, `pool.placement` (a Run placed on one of its
-hosts), `pool.host_released` (why: `idle` for how long, `pool removed`,
+hosts, with the resources it requested), `pool.host_released` (why: `idle` for how long, `pool removed`,
 `outdated`, `manual`, `evicted`, or why it was terminated),
 `pool.spot_interrupted`, `pool.config_changed` (each field, old→new;
 the default mark is `isDefault`: marking a pool records it on that pool,
@@ -189,7 +190,8 @@ and on the pool that was the default before, which loses it),
 after it was removed; a pool keeps its events across both), and
 `pool.provider_error`. A host's are `host.registered`, `host.ready`,
 `host.placement_assigned`, `host.placement_ended` (with the Run's
-outcome), `host.drain_requested` (its cause), `host.lost`,
+outcome), `host.capacity_decision` (the capacity planner's verdict on the
+host, when it changes), `host.drain_requested` (its cause), `host.lost`,
 `host.terminate_requested`, `host.terminated` and `host.provider_error`.
 A failure that repeats on every provisioner pass is one event, shown with
 `(×N, last <time>)`. A tenant sees its own pools' and hosts' events; a

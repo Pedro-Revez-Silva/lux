@@ -192,6 +192,16 @@ lets several tenants' Runs share its hosts. A Run that names no pool goes
 to the tenant's **default pool**: the one pool it marked, else the
 platform's marked one, else the pool named `default`.
 
+An `ec2` pool sizes itself from what its hosts report. Each pass simulates
+placing its waiting Runs on ready hosts, then on hosts already starting,
+then on new hosts, and launches only the new hosts that simulation needs
+(plus warm hosts). A new host's capacity is the smallest of what registered
+hosts of the same pool and tenant, launched from exactly the pool's current
+template, reported. Before any such host has registered, that capacity is
+unknown, and the pool launches one host to learn it. The simulation is a
+reservation for sizing only; the scheduler still places each Run on its
+own. See [Telemetry](telemetry.md#capacity-planning).
+
 ## Tenants and keys
 
 Everything is scoped to a **tenant**. API keys carry scopes:
