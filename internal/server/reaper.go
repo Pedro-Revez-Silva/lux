@@ -31,15 +31,17 @@ func (s *Server) reaperLoop(ctx context.Context) {
 }
 
 // aliveGap is the longest luxd may go without recording itself alive
-// before the time counts as a gap: a heartbeat interval, or a couple of
-// ticks.
+// before the time counts as a gap: a sixth of the lease (or a couple of
+// ticks). A shorter one is safe as is: a runner cut off that long waits
+// no longer than that to reconnect (its backoff doubles from 0.5s), and a
+// heartbeat interval (a third of the lease) more to renew, within a lease.
 func (s *Server) aliveGap() time.Duration {
-	return max(s.cfg.LeaseDuration/3, 2*s.cfg.Tick)
+	return max(s.cfg.LeaseDuration/6, 2*s.cfg.Tick)
 }
 
-// aliveLoop records, every tick, that a luxd can hear heartbeats, and
-// when one came back from a gap (luxd_alive). It is apart from reaperLoop,
-// so a slow reap is not taken for a gap.
+// aliveLoop records, every tick, that a luxd is running and reaches
+// Postgres, and when one came back from a gap (luxd_alive). It is apart
+// from reaperLoop, so a slow reap is not taken for a gap.
 func (s *Server) aliveLoop(ctx context.Context) {
 	t := time.NewTicker(s.cfg.Tick)
 	defer t.Stop()
@@ -60,13 +62,18 @@ func (s *Server) aliveLoop(ctx context.Context) {
 }
 
 // recordAlive records this instant, and returns the gap it ends, if any.
-// The row lock makes two luxds back at once agree on one resumption.
+// The row lock makes two luxds back at once agree on one resumption, and
+// clock_timestamp() is taken after it, so a wait for the lock is not a gap.
+// The row is put back if missing (a restore without it).
 func (s *Server) recordAlive(ctx context.Context) (gap *time.Duration, err error) {
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `UPDATE luxd_alive n SET at = now(),
-				resumed_at = CASE WHEN o.at < now() - $1::interval THEN now() ELSE n.resumed_at END
-			FROM (SELECT at FROM luxd_alive FOR UPDATE) o
-			RETURNING CASE WHEN o.at < now() - $1::interval THEN now() - o.at END`, interval(s.aliveGap())).Scan(&gap)
+		if _, err := tx.Exec(ctx, `INSERT INTO luxd_alive DEFAULT VALUES ON CONFLICT DO NOTHING`); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `UPDATE luxd_alive n SET at = greatest(o.at, o.now),
+				resumed_at = CASE WHEN o.at < o.now - $1::interval THEN o.now ELSE n.resumed_at END
+			FROM (SELECT at, clock_timestamp() AS now FROM luxd_alive FOR UPDATE) o
+			RETURNING CASE WHEN o.at < o.now - $1::interval THEN o.now - o.at END`, interval(s.aliveGap())).Scan(&gap)
 	})
 	return gap, err
 }
@@ -80,7 +87,7 @@ func (s *Server) recordAlive(ctx context.Context) (gap *time.Duration, err error
 func (s *Server) heartbeatsHeard(ctx context.Context, tx pgx.Tx) (bool, error) {
 	var heard bool
 	err := tx.QueryRow(ctx, `SELECT coalesce(at >= now() - $1::interval, true) AND coalesce(resumed_at < now() - $2::interval, true)
-		FROM luxd_alive`, interval(s.aliveGap()), interval(s.cfg.LeaseDuration+10*time.Second)).Scan(&heard)
+		FROM luxd_alive`, interval(s.aliveGap()), interval(s.cfg.LeaseDuration+proto.MaxReconnectWait)).Scan(&heard)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return true, nil
 	}
