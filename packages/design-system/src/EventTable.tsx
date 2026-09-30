@@ -69,7 +69,14 @@ export function EventTable<E extends LifecycleEventRow>({ events, summary, detai
           );
         },
         wrap: true,
-        // Sorting by the details is by the event's data, server-side only.
+        // Loaded rows sort by their summary's text (by type when it is not
+        // text); a server-paged table by the event's data.
+        sortValue: server
+          ? undefined
+          : (e) => {
+              const t = summary(e);
+              return typeof t === "string" || typeof t === "number" ? String(t) : e.type;
+            },
         sortable: server,
         sortFirst: "asc",
       },

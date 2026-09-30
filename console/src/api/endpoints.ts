@@ -1,6 +1,6 @@
 // Typed calls, one per endpoint. Lists are unwrapped from their envelope.
 import { download, request } from "./client.ts";
-import type { Artifact, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, LifecycleEvent, MigrateRequest, Page, PageParams, Pool, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
+import type { Artifact, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, LifecycleEvent, MigrateRequest, Page, PageParams, Pool, PoolCost, PoolMetrics, PoolStats, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
 
 type Sig = AbortSignal | undefined;
 /** Tenant scope of a list call: a tenant id or name, or undefined for all the key sees. */
@@ -70,6 +70,11 @@ export const api = {
   /** owner: which pool of that name, where a tenant's and the platform's share it; undefined: the server's default. */
   poolEvents: (name: string, tenant: Scope, owner: PoolOwner | undefined, page: EventRange, signal?: Sig) =>
     request<{ events: LifecycleEvent[] }>(`/pools/${enc(name)}/events`, { tenant, query: { owner, ...page, limit: EVENTS_PAGE }, signal }).then((r) => r.events),
+  /** Every pool's figures over since, in one read. */
+  poolStats: (tenant: Scope, since: string, signal?: Sig) => request<{ pools: PoolStats[] }>("/pools/stats", { tenant, query: { since }, signal }).then((r) => r.pools),
+  poolMetrics: (name: string, tenant: Scope, owner: PoolOwner | undefined, since: string, signal?: Sig) => request<PoolMetrics>(`/pools/${enc(name)}/metrics`, { tenant, query: { owner, since }, signal }),
+  poolCost: (name: string, tenant: Scope, owner: PoolOwner | undefined, since: string, interval: "hour" | "day", signal?: Sig) =>
+    request<PoolCost>(`/pools/${enc(name)}/cost`, { tenant, query: { owner, since, interval }, signal }),
   /** A page of a pool's events in a sort's order. */
   poolEventsPage: (name: string, tenant: Scope, owner: PoolOwner | undefined, p: PageParams & { limit: number }, signal?: Sig) =>
     request<{ events: LifecycleEvent[]; next?: string; prev?: string; page?: string }>(`/pools/${enc(name)}/events`, { tenant, query: { owner, limit: p.limit, ...pageQuery(p) }, signal }).then(

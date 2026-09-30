@@ -3,7 +3,7 @@ import type { Pool } from "../../api/index.ts";
 import { currentDefaultText } from "./defaultPool.ts";
 
 function pool(name: string, owner: string, isDefault = false): Pool {
-  return { name, tenant: owner || undefined, platform: owner === "", isDefault, provider: "static", minHosts: 0, maxHosts: 0, warmHosts: 0, shared: false };
+  return { id: `pool_${owner}_${name}`, name, tenant: owner || undefined, platform: owner === "", isDefault, provider: "static", minHosts: 0, maxHosts: 0, warmHosts: 0, shared: false };
 }
 
 test("a tenant's own default is named first", () => {

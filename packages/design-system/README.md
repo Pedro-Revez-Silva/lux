@@ -243,7 +243,9 @@ DurationCell (a duration with how it was measured in a Tooltip, a live one
 in the foreground, a slow one in the warn tone),
 Tooltip, Select, TenantPicker, TimeRangePicker, TimeSeriesChart (uPlot, with
 optional vertical `marks`; height from `--chart-h` unless given), Timeline
-(placement waterfall), EventTable (a lifecycle event log: Run, pool, host), LogView, Terminal (xterm.js in the LogView's frame,
+(placement waterfall), EventTable (a lifecycle event log: Run, pool, host;
+every column sorts, and with `onSortChange`, `sort` and a `footer`
+Pagination it is a server-paged, server-sorted table), LogView, Terminal (xterm.js in the LogView's frame,
 Solarized inside via `terminalThemes`; `scheme` light or dark, else the
 console theme; a transport-agnostic handle: `write`, `onData`, `onResize`) with
 TerminalOverlay (the card over a dimmed screen), ServerList / ServerRow (a

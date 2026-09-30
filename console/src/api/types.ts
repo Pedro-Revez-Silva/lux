@@ -447,6 +447,8 @@ export interface HostLaunch {
 }
 
 export interface Pool {
+  /** The pool's immutable id (a rename keeps it). */
+  id: string;
   name: string;
   tenant?: string;
   provider: string;
@@ -680,4 +682,79 @@ export const EXEC_RUN_STATES = new Set(["running"]);
 /** Still changing: worth polling. */
 export function isRunActive(state: string): boolean {
   return !TERMINAL_RUN_STATES.has(state) && state !== "stopped" && state !== "lost";
+}
+
+/** GET /v1/pools/stats: one pool's figures over the range (a tenant: its own Runs, allocation and cost). */
+export interface PoolStats {
+  id: string;
+  hosts: Record<string, number>;
+  capacityCpus: number;
+  allocatedCpus: number;
+  runsStarted: number;
+  runsHourly: number[];
+  launchFailures: number;
+  /** Per currency; empty: nothing reported, not zero. */
+  cost: MoneyTotal[];
+}
+
+export interface PoolSample {
+  at: string;
+  hosts?: Record<string, number>;
+  capacityCpus: number;
+  capacityMemory: number;
+  allocatedCpus: number;
+  allocatedMemory: number;
+  running: number;
+  queued: number;
+  started: number;
+  finished: number;
+  launches: number;
+  launchFailures: number;
+}
+
+export interface PoolMetrics {
+  poolId: string;
+  from: string;
+  to: string;
+  resolution: number;
+  /** The pool's first sample: before it there is no history. */
+  historyFrom?: string;
+  now: {
+    hosts: Record<string, number>;
+    capacityCpus: number;
+    capacityMemory: number;
+    allocatedCpus: number;
+    allocatedMemory: number;
+    running: number;
+    queued: number;
+    oldestQueuedAt?: string;
+    launchFailures: number;
+    lastLaunchFailure?: string;
+    lastLaunchError?: string;
+  };
+  samples: PoolSample[];
+}
+
+export interface PoolHostTime {
+  at?: string;
+  hostId?: string;
+  hostName?: string;
+  currency: string;
+  allocated: string;
+  unallocated: string;
+}
+
+export interface PoolCost {
+  poolId: string;
+  from: string;
+  to: string;
+  basis: string;
+  interval: "hour" | "day";
+  totals: MoneyTotal[];
+  series: { at: string; family: string; currency: string; amount: string }[];
+  families?: { family: string; displayName?: string; color?: string }[];
+  topRuns: { id: string; name?: string; currency: string; amount: string; estimate: boolean }[];
+  idle?: MoneyTotal[];
+  hostSeries?: PoolHostTime[];
+  hosts?: PoolHostTime[];
 }

@@ -87,3 +87,13 @@ pre,
 .secondary {
   color: var(--fg-secondary);
 }
+/* A figure that is a failure count, beside its label. */
+.text-danger {
+  color: var(--danger-fg);
+}
+/* An inline sparkline with its figure (a table cell). */
+.spark-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
