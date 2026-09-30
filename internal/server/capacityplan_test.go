@@ -502,8 +502,8 @@ func TestCapacityReconcileStaleExpectationProbesOnce(t *testing.T) {
 }
 
 // With want 0 and unmet Runs, the pool says why it does not scale; a stuck
-// pool folds its passes into one row.
-func TestCapacityReconcileScaleBlockedFolds(t *testing.T) {
+// pool records that once, however many passes it stays stuck.
+func TestCapacityReconcileScaleBlockedOnce(t *testing.T) {
 	s, pl, p := planningFixture(t, 1)
 	ctx := context.Background()
 	execSQL(t, s, ctx, `UPDATE runs SET spec='{"resources":{"cpus":4},"placement":{"pool":"burst"}}'`)
@@ -517,8 +517,8 @@ func TestCapacityReconcileScaleBlockedFolds(t *testing.T) {
 		t.Fatalf("launched %d", p.calls)
 	}
 	evs := events(t, s, evScaleBlocked)
-	if len(evs) != 1 || evs[0].Count != 3 {
-		t.Fatalf("scale-blocked rows %+v, want one with count 3", evs)
+	if len(evs) != 1 || evs[0].Count != 1 {
+		t.Fatalf("scale-blocked rows %+v, want one", evs)
 	}
 	var want map[string]any
 	if err := json.Unmarshal([]byte(`{"waiting":1,"total":0,"max":0,
@@ -536,6 +536,44 @@ func TestCapacityReconcileScaleBlockedFolds(t *testing.T) {
 	s.providerError(ctx, poolEvents, "pool1", "list", "", errors.New("throttled"))
 	if evs := events(t, s, evPoolProviderErr); len(evs) != 1 || evs[0].Count != 2 {
 		t.Fatalf("provider-error rows %+v, want one with count 2", evs)
+	}
+}
+
+// A pool stuck on one oversized Run beside a busy host: placements land and
+// the host's usage moves every pass, and the blocked state is recorded once.
+// A new Run it cannot serve changes the state and adds a row.
+func TestCapacityReconcileScaleBlockedBusyPool(t *testing.T) {
+	s, pl, p := planningFixture(t, 1)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET spec='{"resources":{"cpus":64},"placement":{"pool":"burst"}}', updated_at=now()-interval '1 hour'`)
+	observePlanningHost(t, s, "busy", "ready", proto.Capacity{CPUs: 8}, map[string]string{})
+	for i := range 10 {
+		execSQL(t, s, ctx, `INSERT INTO runs (id,tenant_id,pool_id,spec,state) VALUES ($1,'t1','pool1','{"resources":{"cpus":0.5},"placement":{"pool":"burst"}}','provisioning')`,
+			fmt.Sprintf("small%d", i))
+		s.hub.polled("busy")
+		if err := s.scheduleOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		planningTick(t, s, pl, p, false)
+	}
+	if got := queryOne[int](t, s, `SELECT count(*) FROM placements WHERE host_id='busy'`); got != 10 {
+		t.Fatalf("placed %d small Runs, want 10", got)
+	}
+	if p.calls != 0 {
+		t.Fatalf("launched %d", p.calls)
+	}
+	evs := events(t, s, evScaleBlocked)
+	if len(evs) != 1 || evs[0].Count != 1 {
+		t.Fatalf("scale-blocked rows %d (%+v), want one over 10 passes", len(evs), evs)
+	}
+	// Waiting since before the latest registration: no probe, a new deficit.
+	execSQL(t, s, ctx, `INSERT INTO runs (id,tenant_id,pool_id,spec,state,updated_at) VALUES ('big2','t1','pool1','{"resources":{"cpus":32},"placement":{"pool":"burst"}}','provisioning',now()-interval '1 hour')`)
+	for range 2 {
+		planningTick(t, s, pl, p, false)
+	}
+	evs = events(t, s, evScaleBlocked)
+	if len(evs) != 2 || evs[1].Data["unmet"] != 2.0 {
+		t.Fatalf("scale-blocked rows %+v, want a second with unmet 2", evs)
 	}
 }
 

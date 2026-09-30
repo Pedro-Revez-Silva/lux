@@ -79,9 +79,10 @@ import (
 //     id (recordProviderID alike).
 //   - terminateRequested, terminateTx, providerError: after their one host
 //     row (terminateTx: its copies and token too).
-//   - scaleBlocked (pool.scale_blocked, a fold) and hostDecisionEvent
-//     (host.capacity_decision, exclusive only when the decision changed):
-//     each in a transaction of its own that takes no other lock.
+//   - scaleBlocked (pool.scale_blocked) and hostDecisionEvent
+//     (host.capacity_decision): transitions (transitionEvent), each in a
+//     transaction of its own that takes no other lock; the stream is taken
+//     exclusive only when the state changed.
 //
 // A fold takes its stream exclusive after every other lock its transaction
 // takes (launch writes its host row, then folds; a failed launch
@@ -127,7 +128,9 @@ const (
 
 // poolRetry: the events a pool writes on every provisioner tick while a
 // launch keeps failing. A repeat within an unbroken run of them is folded
-// into the earlier row (see collapse) instead of adding one.
+// into the earlier row (see collapse) instead of adding one. A stuck pool's
+// scale_blocked (a transition, never folded) belongs to that loop: a
+// provider error repeated across it still folds.
 var poolRetry = []string{evScaleUp, evScaleBlocked, evLaunchRequested, evLaunchFailed, evPoolProviderErr}
 
 // hostRetry: a terminate the provider keeps refusing.
@@ -222,13 +225,63 @@ func hostRepeatEvent(ctx context.Context, tx pgx.Tx, hostID string, data map[str
 	return hostEvent(ctx, tx, hostID, evHostProviderErr, data)
 }
 
-// eventTable names one of the two event tables and its owner column.
-type eventTable struct{ table, owner string }
+// eventTable names one of the two event tables, its owner column and the
+// owners' table.
+type eventTable struct{ table, owner, owners string }
 
 var (
-	poolEvents = eventTable{"pool_events", "pool_id"}
-	hostEvents = eventTable{"host_events", "host_id"}
+	poolEvents = eventTable{"pool_events", "pool_id", "pools"}
+	hostEvents = eventTable{"host_events", "host_id", "hosts"}
 )
+
+// transitionWindow is how many of an owner's latest events a transition
+// lookup reads: a state whose latest record is older than that is recorded
+// again once, which is still accurate.
+const transitionWindow = 4 * foldWindow
+
+// transition is an event type that records a state, not an occurrence.
+// Keys in volatile do not tell two states apart (the row written keeps their
+// values at the change); an event of a type in endedBy ends the state, so
+// the same state after it is recorded again.
+type transition struct {
+	typ      string
+	volatile []string
+	endedBy  []string
+}
+
+// transitionEvent appends a transition's event only when data differs from
+// the owner's latest event of that type within transitionWindow, whatever
+// other events came between. An unchanged state writes nothing and takes no
+// lock; a change takes the stream exclusively and reads again before
+// appending, so two writers of one change append it once.
+func transitionEvent(ctx context.Context, tx pgx.Tx, t eventTable, owner string, tr transition, data any) error {
+	if same, err := sameLatest(ctx, tx, t, owner, tr, data); err != nil || same {
+		return err
+	}
+	if err := lockStream(ctx, tx, t, owner, true); err != nil {
+		return err
+	}
+	if same, err := sameLatest(ctx, tx, t, owner, tr, data); err != nil || same {
+		return err
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO `+t.table+` (tenant_id, `+t.owner+`, type, data)
+		SELECT tenant_id, id, $2, $3 FROM `+t.owners+` WHERE id = $1`, owner, tr.typ, data)
+	return err
+}
+
+// sameLatest: the owner's latest event of tr's type or of one ending it,
+// within transitionWindow, is of tr's type and equals data but for the
+// volatile keys. The window is foldLookup's.
+func sameLatest(ctx context.Context, tx pgx.Tx, t eventTable, owner string, tr transition, data any) (bool, error) {
+	var same bool
+	err := tx.QueryRow(ctx, `SELECT type = $5 AND same FROM (`+foldLookup(t)+`) latest
+		WHERE type = $5 OR type = ANY($6::text[]) ORDER BY id DESC LIMIT 1`,
+		owner, nonNil(tr.volatile), data, transitionWindow, tr.typ, nonNil(tr.endedBy)).Scan(&same)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return same, err
+}
 
 // foldWindow is how many of an owner's latest events a fold looks at. A
 // failing provisioner pass stops at its first failed launch, so it writes

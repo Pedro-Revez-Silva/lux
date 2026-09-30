@@ -143,9 +143,12 @@ adds the plan; rows written before planning have none of these:
 launches nothing: no new host fits them, `--max` or the tenant's host
 quota is reached, or a probe or bootstrap host is still starting. It
 carries `waiting`, `total`, `max` and the same plan fields as
-`pool.scale_up` (`ready` through `omitted`). A pool stuck this way repeats
-it every pass, and repeats fold into one row, counted like a failing
-launch's.
+`pool.scale_up` (`ready` through `omitted`). It records a state, not each
+pass: a pool that stays stuck writes it once, and again only when why it
+is stuck changes (`unmet`, `blocked`, `planned`, `max`, `expected`,
+`unknown`, or the deficits' Runs and blockers) or after a scale-up. The
+usage-derived fields (`ready`, `starting`, `exhausted`, `ineligible`,
+`omitted`, `waiting`, `total`) are those of the pass that wrote the row.
 
 A blocker is either a resource, with `resource` (`cpus`, `memory`, `disk`
 or `runs`), `requested`, `used`, `capacity` and `available`

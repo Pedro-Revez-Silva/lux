@@ -84,7 +84,7 @@ func (s *Server) idleDecisions(ctx context.Context, tx pgx.Tx, pl poolRow, plan 
 				WHERE e.host_id = h.id AND (e.host_id, e.id) <= (h.id, 9223372036854775807)
 				ORDER BY e.host_id DESC, e.id DESC LIMIT $4) l
 			WHERE l.type = $3 ORDER BY l.id DESC LIMIT 1) <> 'idle'`,
-		pl.ID, pl.TenantID, evCapacityDecision, decisionWindow)
+		pl.ID, pl.TenantID, evCapacityDecision, transitionWindow)
 	if err != nil {
 		return err
 	}

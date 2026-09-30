@@ -313,14 +313,21 @@ func (p *capacityPlan) summary() map[string]any {
 		"deficits": p.Deficits, "exhausted": p.Exhausted, "ineligible": p.Ineligible, "omitted": p.Omitted}
 }
 
+// scaleBlockedEvent is a state: a stuck pool records it once, and again only
+// when why it is stuck changes. The usage-derived evidence is kept from the
+// pass that recorded it but does not tell two states apart; a scale-up ends
+// the state.
+var scaleBlockedEvent = transition{typ: evScaleBlocked,
+	volatile: []string{"ready", "starting", "exhausted", "ineligible", "omitted", "waiting", "total"},
+	endedBy:  []string{evScaleUp}}
+
 // scaleBlocked records why Runs the plan could not cover launch nothing (no
-// new host fits them, or max or quota stops it). A pool that stays stuck
-// folds each pass into one row.
+// new host fits them, or max or quota stops it).
 func (s *Server) scaleBlocked(ctx context.Context, pl poolRow, st *poolState) {
 	d := st.plan.summary()
 	d["waiting"], d["total"], d["max"] = st.demand, st.total, pl.Max
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return poolRepeatEvent(ctx, tx, pl.ID, evScaleBlocked, d)
+		return transitionEvent(ctx, tx, poolEvents, pl.ID, scaleBlockedEvent, d)
 	}); err != nil {
 		s.log.Warn("recording a blocked scale-up", "pool", pl.Name, "err", err)
 	}
@@ -332,15 +339,9 @@ const evCapacityDecision = "host.capacity_decision"
 // maxHostDecisions bounds host-decision transactions per pool pass.
 const maxHostDecisions = 32
 
-// decisionWindow is how many of a host's latest events the decision lookups
-// read: a decision older than that is re-recorded once, which is still accurate.
-const decisionWindow = 4 * foldWindow
-
 // recordHostDecisions appends a host's capacity decision only when it differs
-// from that host's latest one. Each host uses its own transaction after the
-// planning transaction commits, so no row lock is held. The exclusive stream
-// lock precedes the read, which keeps concurrent writers from both appending
-// the same change.
+// from that host's latest one (hostDecisionEvent). Each host uses its own
+// transaction after the planning transaction commits, so no row lock is held.
 //
 // A pass records at most maxHostDecisions hosts, in id order starting after
 // the last host the previous pass of this pool recorded, wrapping around, so
@@ -365,34 +366,10 @@ func (s *Server) recordHostDecisions(ctx context.Context, pl poolRow, decisions 
 	}
 }
 
-// hostDecisionEvent reads the host's latest decision first without a lock,
-// so an unchanged decision takes none; only a change takes the stream
-// exclusively and reads again before appending.
+// hostDecisionEvent appends a host's decision when it differs from its
+// latest one (transitionEvent: an unchanged decision takes no lock).
 func hostDecisionEvent(ctx context.Context, tx pgx.Tx, hostID string, data any) error {
-	if same, err := sameLatestDecision(ctx, tx, hostID, data); err != nil || same {
-		return err
-	}
-	if err := lockStream(ctx, tx, hostEvents, hostID, true); err != nil {
-		return err
-	}
-	if same, err := sameLatestDecision(ctx, tx, hostID, data); err != nil || same {
-		return err
-	}
-	_, err := tx.Exec(ctx, `INSERT INTO host_events (tenant_id, host_id, type, data)
-		SELECT tenant_id, id, $2, $3 FROM hosts WHERE id = $1`, hostID, evCapacityDecision, data)
-	return err
-}
-
-// sameLatestDecision: the host's latest decision within its latest
-// decisionWindow events equals data. The window is foldLookup's.
-func sameLatestDecision(ctx context.Context, tx pgx.Tx, hostID string, data any) (bool, error) {
-	var same bool
-	err := tx.QueryRow(ctx, `SELECT same FROM (`+foldLookup(hostEvents)+`) latest
-		WHERE type = $5 ORDER BY id DESC LIMIT 1`, hostID, []string{}, data, decisionWindow, evCapacityDecision).Scan(&same)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	return same, err
+	return transitionEvent(ctx, tx, hostEvents, hostID, transition{typ: evCapacityDecision}, data)
 }
 
 // providerError records a failed provider call, in a transaction of its own
