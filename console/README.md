@@ -48,7 +48,9 @@ WebSocket, an event stream that stays open. Any key signs in.
 `MOCK_STATE=stopped` makes the run stopped, `MOCK_AUTH=cloudflare-access`
 signs in a person instead of a key, `MOCK_PREVIEW=` (empty) turns previews
 off, `MOCK_OPEN_DELAY=<ms>` holds the shell's opening. For layout, states
-and screenshots only: nothing it answers is real.
+and screenshots only: nothing it answers is real. `tests/console_mock/`
+drives it in a headless browser (`cd tests && uv run pytest console_mock`;
+`LUX_TEST_CHROME` names a Chrome when Playwright's own is not installed).
 
 ## Auth
 
@@ -89,7 +91,7 @@ Run-scoped calls (`/runs/{id}/…`, `/hosts/{id}/…`, `/artifacts/…`) do not 
 | `/` | Overview: stat tiles, charts over the selected range, live activity feed | `/status` (5s), `/history?since=` (30s), `/events` SSE |
 | `/runs` | Runs table with state presets and chips, resumable/host/label filters, "Load more" (`before=`) | `/runs` (5s) |
 | `/runs/:id` | Header + actions (Terminal, Stop, Cancel, Resume, Migrate), tabs (`?tab=`): Output (SSE), Servers (the run's `servers`; Add server, start/stop/restart/remove, a log per server), Timeline (per-epoch waterfall), Resources (charts, epoch marks), Events, Snapshots & artifacts, Spec | `/runs/{id}` (3s while active), `/runs/{id}/output`, `/runs/{id}/servers/{name}/log`, `/history`, `/events`, `/snapshots`, `/artifacts` |
-| `/runs/:id/terminal` | A shell in the run's container: xterm.js over the exec WebSocket, font size (persisted), Reconnect, Open in new tab; exited / lost overlays; an empty state while the run is not running | `/runs/{id}` (5s), `GET /runs/{id}/exec` (WebSocket; `POST /runs/{id}/tickets` first with a key) |
+| `/runs/:id/terminal` | A shell in the run's container: xterm.js over the exec WebSocket, font size (persisted), terminal colours (Match console / Solarized light / Solarized dark: this terminal only, `lux.terminal.theme`, changed in place without reconnecting; the console theme stays in the top bar), Reconnect, Open in new tab; exited / lost overlays; an empty state while the run is not running | `/runs/{id}` (5s), `GET /runs/{id}/exec` (WebSocket; `POST /runs/{id}/tickets` first with a key) |
 | `/hosts` | Hosts table (pool/state filters, include terminated) with allocation bars | `/hosts` (5s), `/pools` |
 | `/hosts/:id` | Details, Drain, lifecycle timeline, live placements, usage charts, events (own and operators), recent runs | `/hosts/{id}` (5s), `/hosts/{id}/history`, `/hosts/{id}/events` (5s), `/runs?host=` |
 | `/pools` | Pools with host counts; a row opens its pool | `/pools`, `/hosts` |
