@@ -303,6 +303,7 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "listPools", Method: http.MethodGet, Path: "/v1/pools", Tags: []string{"pools"},
 		Summary: "List pools", Description: "The tenant's pools and the platform pools it can use. Operators: every pool.",
 	}, "read", s.listPools)
+	s.poolRoutes(api)
 	register(s, api, huma.Operation{
 		OperationID: "listPoolEvents", Method: http.MethodGet, Path: "/v1/pools/{name}/events", Tags: []string{"pools"},
 		Summary: "List a pool's events",

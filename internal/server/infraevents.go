@@ -525,43 +525,55 @@ func (p Principal) seesPlatformEvents() bool { return p.Operator && p.TenantID =
 
 func (s *Server) listPoolEvents(ctx context.Context, in *listPoolEventsInput) (*lifecycleEventsOutput, error) {
 	p := principal(ctx)
-	var poolID string
+	var pool namedPool
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		// Unless owner says which, a tenant's own pool shadows the
-		// platform's of the same name, as for its Runs. An operator not
-		// narrowed to a tenant sees every tenant's pool: a name two of
-		// them share is ambiguous.
-		rows, err := tx.Query(ctx, `SELECT id, tenant_id IS NULL FROM pools
-			WHERE name = $2
-			  AND CASE $3 WHEN 'platform' THEN tenant_id IS NULL
-			              WHEN 'tenant' THEN tenant_id IS NOT NULL AND ($1 = '' OR tenant_id = $1)
-			              ELSE $1 = '' OR tenant_id = $1 OR tenant_id IS NULL END
-			ORDER BY tenant_id NULLS LAST, retired LIMIT 2`, p.TenantID, in.Name, in.Owner)
-		if err != nil {
+		var err error
+		if pool, err = resolveNamedPool(ctx, tx, p, in.Name, in.Owner); err != nil {
 			return err
 		}
-		type found struct {
-			ID       string
-			Platform bool
-		}
-		pools, err := pgx.CollectRows(rows, pgx.RowToStructByPos[found])
-		switch {
-		case err != nil:
-			return err
-		case len(pools) == 0:
-			return errNotFound
-		case len(pools) > 1 && p.TenantID == "":
-			return errf(http.StatusConflict, "ambiguous", "more than one pool is named %s: use ?owner=platform, or ?tenant=", in.Name)
-		case pools[0].Platform && !p.seesPlatformEvents():
+		if pool.Platform && !p.seesPlatformEvents() {
 			return errf(http.StatusForbidden, "forbidden", "a platform pool's events are the operators'")
 		}
-		poolID = pools[0].ID
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return s.lifecycleEvents(ctx, p, poolEvents, poolID, in.EventPage, in.PageQuery)
+	return s.lifecycleEvents(ctx, p, poolEvents, pool.ID, in.EventPage, in.PageQuery)
+}
+
+// namedPool is the pool a request names: its immutable id, and whose it is.
+type namedPool struct {
+	ID       string
+	Platform bool
+	TenantID *string
+}
+
+// resolveNamedPool is the pool a request names, by name and owner, as the
+// principal sees it: unless owner says which, a tenant's own pool shadows
+// the platform's of the same name, as for its Runs; an operator not
+// narrowed to a tenant sees every tenant's pool, and a name two of them
+// share is ambiguous. A live pool wins over a retired one of the name.
+func resolveNamedPool(ctx context.Context, tx pgx.Tx, p Principal, name, owner string) (namedPool, error) {
+	rows, err := tx.Query(ctx, `SELECT id, tenant_id IS NULL, tenant_id FROM pools
+		WHERE name = $2
+		  AND CASE $3 WHEN 'platform' THEN tenant_id IS NULL
+		              WHEN 'tenant' THEN tenant_id IS NOT NULL AND ($1 = '' OR tenant_id = $1)
+		              ELSE $1 = '' OR tenant_id = $1 OR tenant_id IS NULL END
+		ORDER BY tenant_id NULLS LAST, retired LIMIT 2`, p.TenantID, name, owner)
+	if err != nil {
+		return namedPool{}, err
+	}
+	pools, err := pgx.CollectRows(rows, pgx.RowToStructByPos[namedPool])
+	switch {
+	case err != nil:
+		return namedPool{}, err
+	case len(pools) == 0:
+		return namedPool{}, errNotFound
+	case len(pools) > 1 && p.TenantID == "":
+		return namedPool{}, errf(http.StatusConflict, "ambiguous", "more than one pool is named %s: use ?owner=platform, or ?tenant=", name)
+	}
+	return pools[0], nil
 }
 
 func (s *Server) listHostEvents(ctx context.Context, in *listHostEventsInput) (*lifecycleEventsOutput, error) {

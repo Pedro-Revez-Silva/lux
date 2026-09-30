@@ -944,6 +944,14 @@ components:
           description: The host to move to (id or name); by default, any other.
           type: string
       type: object
+    MoneyAmount:
+      additionalProperties: false
+      properties:
+        amount:
+          type: string
+        currency:
+          type: string
+      type: object
     Network:
       additionalProperties: false
       properties:
@@ -1106,6 +1114,102 @@ components:
           description: Keep warmHosts only while the pool is in use (a Run placed or ended within scaleDownAfter, or one waiting); an idle pool scales down to minHosts.
           type: boolean
       type: object
+    PoolCost:
+      additionalProperties: false
+      properties:
+        basis:
+          type: string
+        families:
+          items:
+            $ref: "#/components/schemas/CostFamilyInfo"
+          type:
+            - array
+            - "null"
+        from:
+          format: date-time
+          type: string
+        hostSeries:
+          description: "Operators: host time per bucket, allocated and idle."
+          items:
+            $ref: "#/components/schemas/PoolHostTime"
+          type:
+            - array
+            - "null"
+        hosts:
+          description: "Operators: host time per host in the range, allocated and idle."
+          items:
+            $ref: "#/components/schemas/PoolHostTime"
+          type:
+            - array
+            - "null"
+        idle:
+          description: "Operators: host time no Run reserved, per currency. Not part of totals."
+          items:
+            $ref: "#/components/schemas/MoneyAmount"
+          type:
+            - array
+            - "null"
+        interval:
+          type: string
+        poolId:
+          type: string
+        series:
+          description: The same by family and bucket; a bucket without a row is no cost reported, not zero.
+          items:
+            $ref: "#/components/schemas/PoolCostPoint"
+          type:
+            - array
+            - "null"
+        to:
+          format: date-time
+          type: string
+        topRuns:
+          description: The costliest Runs, up to 10 per currency, costliest first.
+          items:
+            $ref: "#/components/schemas/PoolTopRun"
+          type:
+            - array
+            - "null"
+        totals:
+          description: The Runs' cost on the pool in the range, per currency.
+          items:
+            $ref: "#/components/schemas/MoneyAmount"
+          type:
+            - array
+            - "null"
+      type: object
+    PoolCostPoint:
+      additionalProperties: false
+      properties:
+        amount:
+          type: string
+        at:
+          format: date-time
+          type: string
+        currency:
+          type: string
+        family:
+          type: string
+      type: object
+    PoolHostTime:
+      additionalProperties: false
+      properties:
+        allocated:
+          description: Host time reserved by Runs (their compute cost comes from it).
+          type: string
+        at:
+          format: date-time
+          type: string
+        currency:
+          type: string
+        hostId:
+          type: string
+        hostName:
+          type: string
+        unallocated:
+          description: "Host time no Run reserved: idle."
+          type: string
+      type: object
     PoolList:
       additionalProperties: false
       properties:
@@ -1115,6 +1219,191 @@ components:
           type:
             - array
             - "null"
+      type: object
+    PoolMetrics:
+      additionalProperties: false
+      properties:
+        from:
+          format: date-time
+          type: string
+        historyFrom:
+          description: "The pool's first sample at this resolution: before it, no history (a gap, not zero)."
+          format: date-time
+          type: string
+        now:
+          $ref: "#/components/schemas/PoolNow"
+        poolId:
+          type: string
+        resolution:
+          format: int64
+          type: integer
+        samples:
+          items:
+            $ref: "#/components/schemas/PoolSample"
+          type:
+            - array
+            - "null"
+        to:
+          format: date-time
+          type: string
+      type: object
+    PoolNow:
+      additionalProperties: false
+      properties:
+        allocatedCpus:
+          format: double
+          type: number
+        allocatedMemory:
+          format: int64
+          type: integer
+        capacityCpus:
+          format: double
+          type: number
+        capacityMemory:
+          format: int64
+          type: integer
+        hosts:
+          additionalProperties:
+            format: int64
+            type: integer
+          type: object
+        lastLaunchError:
+          type: string
+        lastLaunchFailure:
+          format: date-time
+          type: string
+        launchFailures:
+          description: Launches the provider refused in the range.
+          format: int64
+          type: integer
+        oldestQueuedAt:
+          format: date-time
+          type: string
+        queued:
+          format: int64
+          type: integer
+        running:
+          format: int64
+          type: integer
+      type: object
+    PoolSample:
+      additionalProperties: false
+      properties:
+        allocatedCpus:
+          format: double
+          type: number
+        allocatedMemory:
+          format: int64
+          type: integer
+        at:
+          format: date-time
+          type: string
+        capacityCpus:
+          format: double
+          type: number
+        capacityMemory:
+          format: int64
+          type: integer
+        finished:
+          format: int64
+          type: integer
+        hosts:
+          additionalProperties:
+            format: int64
+            type: integer
+          description: Hosts by state.
+          type: object
+        launchFailures:
+          format: int64
+          type: integer
+        launches:
+          format: int64
+          type: integer
+        queued:
+          format: int64
+          type: integer
+        running:
+          format: int64
+          type: integer
+        started:
+          format: int64
+          type: integer
+      type: object
+    PoolStats:
+      additionalProperties: false
+      properties:
+        allocatedCpus:
+          description: "Cores its live placements hold (a tenant: its own)."
+          format: double
+          type: number
+        capacityCpus:
+          description: Cores of its ready and draining hosts.
+          format: double
+          type: number
+        cost:
+          description: "The cost of the Runs on it in the range, per currency; empty: none reported."
+          items:
+            $ref: "#/components/schemas/MoneyAmount"
+          type:
+            - array
+            - "null"
+        hosts:
+          additionalProperties:
+            format: int64
+            type: integer
+          description: Hosts not terminated, by state.
+          type: object
+        id:
+          type: string
+        launchFailures:
+          description: Launches the provider refused in the range.
+          format: int64
+          type: integer
+        runsHourly:
+          description: The same per hour of the range, oldest first.
+          items:
+            format: int64
+            type: integer
+          type:
+            - array
+            - "null"
+        runsStarted:
+          description: "Runs first started in the range (a tenant: its own)."
+          format: int64
+          type: integer
+      type: object
+    PoolStatsList:
+      additionalProperties: false
+      properties:
+        basis:
+          type: string
+        from:
+          format: date-time
+          type: string
+        pools:
+          items:
+            $ref: "#/components/schemas/PoolStats"
+          type:
+            - array
+            - "null"
+        to:
+          format: date-time
+          type: string
+      type: object
+    PoolTopRun:
+      additionalProperties: false
+      properties:
+        amount:
+          type: string
+        currency:
+          type: string
+        estimate:
+          description: Part of it may still change (estimate lines).
+          type: boolean
+        id:
+          type: string
+        name:
+          type: string
       type: object
     Port:
       additionalProperties: false
@@ -3636,6 +3925,72 @@ paths:
       summary: Create or update a pool
       tags:
         - pools
+  /v1/pools/stats:
+    get:
+      description: |-
+        Per pool the caller sees (as GET /v1/pools): hosts by state, CPU allocated of capacity (ready and draining hosts), Runs first started in the range with an hourly count, launches the provider refused in the range, and the cost of the Runs on it in the range, per currency (list prices; never summed across currencies; absent: none reported, not zero). A tenant's figures on a shared platform pool are its own Runs', allocation and cost; hosts and capacity are the pool's.
+
+        Needs the `read` scope.
+      operationId: poolStats
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: "The range, back from now: a Go duration or days (7d). Default 24h."
+          explode: false
+          in: query
+          name: since
+          schema:
+            description: "The range, back from now: a Go duration or days (7d). Default 24h."
+            examples:
+              - 24h
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PoolStatsList"
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Every pool's figures, in one read
+      tags:
+        - pools
   /v1/pools/{name}:
     delete:
       description: |-
@@ -3703,6 +4058,135 @@ paths:
       summary: Remove a pool
       tags:
         - pools
+  /v1/pools/{name}/cost:
+    get:
+      description: |-
+        List prices, per currency, never summed across currencies. `series`: the cost of the Runs on it by family per hour (day for ranges over 7 days): compute on its hosts, and other families of Runs bound to it. `topRuns`: its costliest Runs in the range. Operators not narrowed to a tenant also get the pool's host time: `hosts` (per host, allocated to Runs and idle) and `hostSeries`; idle time is apart from the Runs' cost, never added to it. A tenant sees only its own Runs' cost.
+
+        Needs the `read` scope.
+      operationId: poolCost
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: The pool's name.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The pool's name.
+            type: string
+        - description: Which pool of that name (as for its events).
+          explode: false
+          in: query
+          name: owner
+          schema:
+            description: Which pool of that name (as for its events).
+            enum:
+              - platform
+              - tenant
+              - ""
+            type: string
+        - description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+          explode: false
+          in: query
+          name: since
+          schema:
+            description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+            examples:
+              - 24h
+            type: string
+        - description: The start (RFC 3339), instead of since.
+          explode: false
+          in: query
+          name: from
+          schema:
+            description: The start (RFC 3339), instead of since.
+            type: string
+        - description: The end (RFC 3339); default now.
+          explode: false
+          in: query
+          name: to
+          schema:
+            description: The end (RFC 3339); default now.
+            type: string
+        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+          explode: false
+          in: query
+          name: res
+          schema:
+            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            type: string
+        - description: "Buckets of series: hour (default) or day."
+          explode: false
+          in: query
+          name: interval
+          schema:
+            description: "Buckets of series: hour (default) or day."
+            enum:
+              - hour
+              - day
+              - ""
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PoolCost"
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: What a pool cost
+      tags:
+        - pools
+        - costs
   /v1/pools/{name}/events:
     get:
       description: |-
@@ -3849,6 +4333,124 @@ paths:
       summary: List a pool's events
       tags:
         - pools
+  /v1/pools/{name}/metrics:
+    get:
+      description: |-
+        Now: hosts by state, capacity and what live placements hold, Runs running and queued, launch failures in the range. Over time: the pool's samples (by its id: a rename keeps them; a new pool of an old name starts its own) of the same, with starts, finishes and launches per sample. Samples begin when luxd started taking them (historyFrom); earlier is a gap, not zero. A tenant's Runs and allocation are its own.
+
+        Needs the `read` scope.
+      operationId: poolMetrics
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: The pool's name.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The pool's name.
+            type: string
+        - description: Which pool of that name (as for its events).
+          explode: false
+          in: query
+          name: owner
+          schema:
+            description: Which pool of that name (as for its events).
+            enum:
+              - platform
+              - tenant
+              - ""
+            type: string
+        - description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+          explode: false
+          in: query
+          name: since
+          schema:
+            description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+            examples:
+              - 24h
+            type: string
+        - description: The start (RFC 3339), instead of since.
+          explode: false
+          in: query
+          name: from
+          schema:
+            description: The start (RFC 3339), instead of since.
+            type: string
+        - description: The end (RFC 3339); default now.
+          explode: false
+          in: query
+          name: to
+          schema:
+            description: The end (RFC 3339); default now.
+            type: string
+        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+          explode: false
+          in: query
+          name: res
+          schema:
+            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PoolMetrics"
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: A pool now, and over time
+      tags:
+        - pools
+        - history
   /v1/pools/{name}/rename:
     post:
       description: |-

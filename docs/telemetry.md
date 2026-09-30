@@ -85,6 +85,30 @@ reason starts `launch failed:` and that never had an instance id or a
 registration is `failed` (its reason text is kept); one with an instance id
 is `launched`; everything else was left without an outcome.
 
+## Pools over time
+
+Each system sample also writes one row per pool into `pool_samples`
+(migration 040), keyed by the pool's id, so a rename keeps a pool's history
+and a removed pool and a new one of its name stay apart. The pool's own row
+(tenant `''`) holds its hosts by state, the capacity of its ready and
+draining hosts, what live placements on its hosts hold, its Runs running
+and queued, Runs first started and finished in the sample's window, and the
+launches it requested and the provider refused. A row per tenant holds
+that tenant's part (its Runs, allocation, starts and finishes) and nothing
+of the pool's hosts. They roll up and expire with the other samples. The
+first rows are written when this ships: an older range is a gap, never an
+invented zero (`historyFrom` says where a pool's history starts).
+
+`GET /v1/pools/{name}/metrics` reads them (with the pool's figures now),
+`GET /v1/pools/{name}/cost` reads `cost_hourly` by the pool's id (its Runs'
+cost by family per hour, or per day, top Runs, and for operators its host
+time, allocated and idle, which is never added to the Runs' cost), and
+`GET /v1/pools/stats` is every pool's figures in one read for the Pools
+list. A tenant looking at a shared platform pool sees its hosts and
+capacity, as `GET /v1/hosts` shows them, and only its own Runs, allocation
+and cost: its sample rows, and cost rows under its RLS scope. Money is per
+currency and never summed across currencies.
+
 ## Lists: sort and pages
 
 `GET /v1/hosts`, `GET /v1/runs` and `GET /v1/pools/{name}/events` page when
