@@ -16,6 +16,8 @@ from env import ALPINE_IMAGE, wait_until
 
 pytestmark = pytest.mark.ec2
 
+GiB = 1 << 30
+
 
 def test_a_waiting_run_gets_a_host_launched(lux, ec2):
     pool(lux, ec2, max=2)
@@ -45,7 +47,14 @@ def test_a_waiting_run_gets_a_host_launched(lux, ec2):
     assert [t for t in types if t in story] == story, types
     by = {e["type"]: e for e in evs}
     assert by["pool.scale_up"]["data"]["reason"] == "waiting runs" and by["pool.scale_up"]["data"]["waiting"] == 1, by["pool.scale_up"]
-    assert by["pool.placement"]["data"] == {"run": run_id, "epoch": 1, "host": host_id}, by["pool.placement"]
+    # The Run's resources are the spec defaults (spec.BuiltinDefaults).
+    assert by["pool.placement"]["data"] == {"run": run_id, "epoch": 1, "host": host_id,
+                                            "resources": {"cpus": 2, "memory": 8 * GiB, "disk": 20 * GiB, "pids": 1024}}, by["pool.placement"]
+    # A cold pool: no host of its template has registered, so one is launched to learn its capacity.
+    up = by["pool.scale_up"]["data"]
+    assert {k: up.get(k) for k in ("hosts", "ready", "starting", "planned", "unmet", "blocked", "expected", "unknown")} == \
+        {"hosts": 1, "ready": 0, "starting": 0, "planned": 0, "unmet": 1, "blocked": 0, "expected": None,
+         "unknown": "no registered host observations for current template"}, up
     assert by["pool.host_registered"]["data"]["host"] == host_id
     released = by["pool.host_released"]["data"]
     assert released["host"] == host_id and released["reason"] == "idle" and released["idleSeconds"] >= 3, released
@@ -60,6 +69,27 @@ def test_a_waiting_run_gets_a_host_launched(lux, ec2):
     # The text form: one line each.
     text = lux.run("pools", "events", "burst", "--limit", "20").stdout
     assert re.search(r"pool\.host_released\s+\S+ released: idle for \d+s", text), text
+
+
+def test_a_cold_burst_launches_one_host_and_fills_it(lux, ec2):
+    """Three Runs for a pool no host of its template has registered in:
+    one host is launched to learn the capacity, none more while it starts,
+    and once it registers all three are placed on it (the harness host
+    reports its own CPUs and memory, and 16 Runs)."""
+    fake_only(ec2)
+    # A template of its own: no earlier test's host counts as an observation.
+    pool(lux, ec2, max=3, template={**ec2.template, "tags": {"test": "cold-burst"}})
+    runs = [lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "sleep 2", placement={"pool": "burst"},
+                               resources={"cpus": 0.5, "memory": "256Mi"})) for _ in range(3)]
+    wait_until(lambda: ec2_hosts(lux), 120, 0.3, "the bootstrap host never registered")
+    assert ec2.calls.count("RunInstances") == 1, ec2.calls
+    for r in runs:
+        lux.wait_state(r, "succeeded", timeout=120)
+    hosts = {lux.get(r)["placements"][0]["host"] for r in runs}
+    assert len(hosts) == 1, hosts
+    assert ec2.calls.count("RunInstances") == 1, ec2.calls
+    requested = [e for e in pool_events(lux) if e["type"] == "pool.launch_requested"]
+    assert len(requested) == 1 and requested[0]["count"] == 1, requested
 
 
 def test_template_tags_are_kept_and_lux_tags_are_reserved(lux, ec2):
