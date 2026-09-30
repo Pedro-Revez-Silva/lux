@@ -103,6 +103,8 @@ func TestHostDecisionExhaustedAfterOversizedHead(t *testing.T) {
 	ctx := context.Background()
 	execSQL(t, s, ctx, `UPDATE runs SET spec='{"resources":{"cpus":8},"placement":{"pool":"burst"}}', updated_at=now()-interval '1 hour' WHERE id='r0'`)
 	execSQL(t, s, ctx, `UPDATE runs SET spec='{"resources":{"cpus":1},"placement":{"pool":"burst"}}' WHERE id<>'r0'`)
+	// Newest, and blocked too once the two 1-CPU Runs are reserved.
+	execSQL(t, s, ctx, `INSERT INTO runs (id,tenant_id,pool_id,spec,state,updated_at) VALUES ('r3','t1','pool1','{"resources":{"cpus":4},"placement":{"pool":"burst"}}','provisioning',now()+interval '1 minute')`)
 	observePlanningHost(t, s, "h", "ready", proto.Capacity{CPUs: 4}, map[string]string{})
 	planningTick(t, s, pl, p, false)
 	got := hostDecisions(t, s, "h")
@@ -388,6 +390,27 @@ func TestCapacityReconcileChosenHostIsNotOtherHostsEvidence(t *testing.T) {
 	exhausted := events(t, s, evScaleUp)[0].Data["exhausted"].([]any)
 	if len(exhausted) != 1 || exhausted[0].(map[string]any)["host"] != "chosen" {
 		t.Fatalf("exhausted %v, want only the chosen host", exhausted)
+	}
+}
+
+// A chosen host in another pool is still the evidence for the Run that
+// chose it, beside a Run of the same tenant that chose none.
+func TestCapacityReconcileChosenHostInAnotherPool(t *testing.T) {
+	s, pl, p := planningFixture(t, 2)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO pools (id,tenant_id,name,provider,template) VALUES ('pool2','t1','other','ec2','{"version":1}')`)
+	observePlanningHost(t, s, "hist", "terminated", proto.Capacity{CPUs: 4}, map[string]string{})
+	observePlanningHost(t, s, "chosen", "ready", proto.Capacity{CPUs: 1}, map[string]string{})
+	execSQL(t, s, ctx, `UPDATE hosts SET pool_id='pool2' WHERE id='chosen'`)
+	livePlacement(t, s, "chosen", `{"cpus":1}`)
+	execSQL(t, s, ctx, `UPDATE runs SET updated_at=now()-interval '1 hour' WHERE id='r0'`)
+	execSQL(t, s, ctx, `UPDATE runs SET place_on='chosen' WHERE id='r1'`)
+	planningTick(t, s, pl, p, false)
+	d := events(t, s, evScaleUp)[0].Data
+	want := []any{map[string]any{"run": "r1", "host": "chosen", "stage": "ready", "blockers": []any{
+		map[string]any{"resource": "cpus", "requested": 1.0, "used": 1.0, "capacity": 1.0, "available": 0.0}}}}
+	if !reflect.DeepEqual(d["exhausted"], want) {
+		t.Fatalf("exhausted %v, want %v", d["exhausted"], want)
 	}
 }
 

@@ -384,8 +384,10 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 				stage = "planned"
 			}
 			if blockers := hostFit(r, h); len(blockers) != 0 {
-				// Another host's chosen-host wait is not evidence about this host.
-				if stage != "planned" && (r.PlaceOn == "" || r.PlaceOn == h.ID) {
+				// Another host's chosen-host wait is not evidence about this
+				// host, nor is a host outside the pool (a candidate only
+				// because another Run chose it) evidence for a Run that did not.
+				if stage != "planned" && (r.PlaceOn == "" && h.PoolID == pl.ID || r.PlaceOn == h.ID) {
 					evidence(r, h.ID, stage, blockers)
 				}
 				continue

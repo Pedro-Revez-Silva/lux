@@ -163,6 +163,35 @@ func TestCapacityReconcileProviderGoneBeforePlan(t *testing.T) {
 	}
 }
 
+// A warm start whose launch never recorded its instance id, past the launch
+// timeout, is written off and replaced in the same pass, without a provider
+// check.
+func TestCapacityReconcileAbandonedWarmStart(t *testing.T) {
+	s, pl, p := planningFixture(t, 0)
+	pl.Warm = 1
+	execSQL(t, s, context.Background(), `INSERT INTO hosts (id,name,tenant_id,pool_id,state,provision_requested_at,launch_template,tagged)
+		VALUES ('abandoned','abandoned','t1','pool1','provisioning',now()-interval '1 day','{"version":1}',true)`)
+	planningTick(t, s, pl, p, false)
+	if state := queryOne[string](t, s, `SELECT state FROM hosts WHERE id='abandoned'`); state != "terminated" || p.calls != 1 {
+		t.Fatalf("abandoned start %s, %d launches; want terminated and 1", state, p.calls)
+	}
+}
+
+// Runs that fit the expected host are planned as usual beside an oversized
+// one; the planned hosts are the re-observation, no extra probe.
+func TestCapacityReconcileProbeBesidePlannedHosts(t *testing.T) {
+	s, pl, p := staleExpectation(t)
+	for i := range 3 {
+		execSQL(t, s, context.Background(), `INSERT INTO runs (id,tenant_id,pool_id,spec,state) VALUES ($1,'t1','pool1','{"resources":{"cpus":2},"placement":{"pool":"burst"}}','provisioning')`,
+			fmt.Sprintf("fit%d", i))
+	}
+	planningTick(t, s, pl, p, false)
+	up := events(t, s, evScaleUp)
+	if p.calls != 3 || len(up) != 1 || up[0].Data["planned"] != 3.0 || up[0].Data["probe"] != nil {
+		t.Fatalf("launched %d with %+v, want 3 planned and no probe", p.calls, up)
+	}
+}
+
 // A warm start the provider check finds gone is replaced in the same pass:
 // the pass counts starts again after the check.
 func TestCapacityReconcileProviderGoneWarmStart(t *testing.T) {
