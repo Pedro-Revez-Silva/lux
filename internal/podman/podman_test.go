@@ -1,10 +1,43 @@
 package podman
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/marcioapm/lux/internal/hoststat"
 )
+
+// A build runs under the cgroupfs manager, set before the subcommand (a
+// global flag), whatever the host's containers.conf defaults to: the
+// runner's --cgroup-parent is a cgroupfs path, which the systemd manager
+// cannot place a build step under.
+func TestBuildUsesCgroupfs(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "podman")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := &Podman{Bin: bin}
+	if _, err := p.Build(context.Background(), "--cgroup-parent", "/lux.slice/build-run1", "-f", "Containerfile", "ctx"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(bin + ".args")
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Split(strings.TrimSpace(string(b)), "\n")
+	build := slices.Index(args, "build")
+	if build < 0 || !slices.Contains(args[:build], "--cgroup-manager=cgroupfs") {
+		t.Fatalf("podman %q: want --cgroup-manager=cgroupfs before build", args)
+	}
+	if !slices.Equal(args[build+1:], []string{"--cgroup-parent", "/lux.slice/build-run1", "-f", "Containerfile", "ctx"}) {
+		t.Fatalf("podman %q: build's own arguments changed", args)
+	}
+}
 
 // The runner's heartbeat usage is hoststat's: CPU busy seconds, memory used
 // and the disk used on dir's filesystem. The machine keeps changing, so each
