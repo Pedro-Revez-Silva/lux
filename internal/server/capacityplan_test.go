@@ -72,6 +72,10 @@ func TestCapacityReconcileColdBurstAndDelayedRegistration(t *testing.T) {
 	if p.calls != 1 {
 		t.Fatalf("cold burst launched %d, want one bootstrap", p.calls)
 	}
+	// The pool waits for its bootstrap host: that is not a blocked scale-up.
+	if evs := events(t, s, evScaleBlocked); len(evs) != 0 {
+		t.Fatalf("scale-blocked while the bootstrap starts: %+v", evs)
+	}
 	id := p.hosts[0]
 	execSQL(t, s, context.Background(), `UPDATE hosts SET state='ready',registered_at=now(),last_heartbeat=now(),capacity=$2 WHERE id=$1`, id, proto.Capacity{CPUs: 6, Memory: 60, Disk: 60, Runs: 6})
 	s.hub.polled(id)
@@ -479,6 +483,9 @@ func TestCapacityReconcileStaleExpectationProbesOnce(t *testing.T) {
 			}
 			if p.calls != 1 {
 				t.Fatalf("stale expectation launched %d, want one probe", p.calls)
+			}
+			if evs := events(t, s, evScaleBlocked); len(evs) != 0 {
+				t.Fatalf("scale-blocked while the probe starts: %+v", evs)
 			}
 			up := events(t, s, evScaleUp)
 			if len(up) != 1 || up[0].Data["probe"] != true {

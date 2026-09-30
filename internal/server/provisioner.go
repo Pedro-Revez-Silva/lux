@@ -305,15 +305,16 @@ const (
 	causeNoFit = "no_fit"
 )
 
-// blockedCause is "" when nothing is blocked: nothing was wanted, or the
-// pass waits for a bootstrap or probe host already starting.
+// blockedCause is "" when nothing is blocked: nothing was wanted, or unmet
+// Runs wait for a bootstrap or probe host already starting (its scale-up
+// said why).
 func blockedCause(pl poolRow, st *poolState, needed int, quota bool) string {
 	switch {
 	case quota:
 		return causeQuota
 	case pl.Max > 0 && needed > 0 && needed > pl.Max-st.total:
 		return causeMax
-	case st.plan.Unmet > 0:
+	case st.plan.Unmet > 0 && !st.plan.awaitingStart:
 		return causeNoFit
 	}
 	return ""

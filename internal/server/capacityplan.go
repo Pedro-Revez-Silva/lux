@@ -30,6 +30,9 @@ type capacityPlan struct {
 	reserved         map[string]bool
 	reservedIdle     int
 	reservedStarting int
+	// awaitingStart: unmet Runs wait for a current-template start to
+	// register (a bootstrap or probe in flight), not on a blocker.
+	awaitingStart bool
 }
 
 // hostDecision is a host.capacity_decision event's data.
@@ -450,6 +453,7 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 		plan.NewHosts = 1
 		plan.Probe = probe
 	}
+	plan.awaitingStart = (bootstrap || probe) && len(startingIDs) > 0
 	plan.reservedStarting = len(usedStarting)
 	for id := range plan.reserved {
 		if idle[id] {

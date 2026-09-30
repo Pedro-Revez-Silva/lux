@@ -142,8 +142,10 @@ adds the plan; rows written before planning have none of these:
 **`pool.scale_blocked`** is written on a pass that launches nothing while
 hosts are wanted or Runs stay unmet. `cause` says why: `max` (`--max`
 stops the hosts the plan, warm or `--min` wanted), `quota` (the tenant's
-host quota is reached) or `no_fit` (unmet Runs that no new host fits), or
-a probe or bootstrap host is still starting. For `max` and `quota`,
+host quota is reached) or `no_fit` (unmet Runs that no new host fits). It
+is not written while unmet Runs wait for a probe or bootstrap host of the
+current template that is still starting: the pass is waiting, not blocked.
+For `max` and `quota`,
 `wanted` is how many hosts the pool asked for. It
 carries `waiting`, `total`, `max` and the same plan fields as
 `pool.scale_up` (`ready` through `omitted`). It records a state, not each
