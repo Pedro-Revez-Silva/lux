@@ -158,7 +158,13 @@ func (s *Server) hostExpectation(ctx context.Context, tx pgx.Tx, pl poolRow) (*h
 
 func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capacityPlan, error) {
 	plan := capacityPlan{reserved: map[string]bool{}, hostDecisions: map[string]map[string]any{}}
-	blockedHosts, reservedOn := map[string]bool{}, map[string]int{}
+	// Per actual host: its first blocker and stage, and how many Runs it took;
+	// its decision is settled after every Run was tried.
+	type hostBlock struct {
+		stage    string
+		blockers []planBlocker
+	}
+	blockedHosts, reservedOn, stageOf := map[string]hostBlock{}, map[string]int{}, map[string]string{}
 	evidence := func(r pendingRun, host, stage string, fit []fitBlocker) {
 		blockers := diagnosticBlockers(fit)
 		if host == "" {
@@ -173,17 +179,12 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 		if _, seen := blockedHosts[host]; seen {
 			return
 		}
-		blockedHosts[host] = true
+		blockedHosts[host] = hostBlock{stage, blockers}
 		if len(plan.Exhausted) < planSampleSize {
 			plan.Exhausted = append(plan.Exhausted, planDeficit{Run: r.ID, Host: host, Stage: stage, Blockers: blockers})
 		} else {
 			plan.Omitted++
 		}
-		decision := "blocked"
-		if reservedOn[host] > 0 {
-			decision = "exhausted"
-		}
-		plan.hostDecisions[host] = map[string]any{"stage": stage, "decision": decision, "blockers": blockers}
 	}
 	unsatisfied := func(r pendingRun, reason string) {
 		plan.Blocked++
@@ -307,9 +308,7 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 			reserveHost(h, r)
 			if h.ID != "" {
 				reservedOn[h.ID]++
-				if !blockedHosts[h.ID] {
-					plan.hostDecisions[h.ID] = map[string]any{"stage": stage, "decision": "reserved"}
-				}
+				stageOf[h.ID] = stage
 			}
 			if isReady {
 				plan.Ready++
@@ -387,6 +386,18 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 		plan.NewHosts++
 		plan.Planned++
 		plan.Unmet--
+	}
+	for id, b := range blockedHosts {
+		decision := "blocked"
+		if reservedOn[id] > 0 {
+			decision = "exhausted"
+		}
+		plan.hostDecisions[id] = map[string]any{"stage": b.stage, "decision": decision, "blockers": b.blockers}
+	}
+	for id, stage := range stageOf {
+		if _, blocked := blockedHosts[id]; !blocked {
+			plan.hostDecisions[id] = map[string]any{"stage": stage, "decision": "reserved"}
+		}
 	}
 	// Unknown capacity bootstraps one host; a stale expectation probes with
 	// one. Either waits for any current-template start to register first, and

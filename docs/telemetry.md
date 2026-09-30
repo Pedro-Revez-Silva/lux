@@ -157,9 +157,11 @@ the label values).
 **`host.capacity_decision`** is the planner's verdict on one actual host,
 written only when it differs from that host's previous one (at most 32
 hosts per pool pass): `pool`; `stage` (`ready` or `starting`); `decision`
-`reserved` (it holds simulated Runs), `exhausted` (it holds some and the
-next did not fit), `blocked` (no Run fits it) or `ineligible` (with
-`reason`, as above); and `blockers` for `exhausted` and `blocked`.
+`reserved` (it holds simulated Runs and every Run tried on it fit),
+`exhausted` (it holds some, and at least one other Run did not fit),
+`blocked` (it holds none) or `ineligible` (with
+`reason`, as above); and `blockers` for `exhausted` and `blocked`: those of
+the first Run that did not fit, in queue order.
 
 `pool.placement` and `host.placement_assigned` carry the Run's requested
 `resources` (`cpus`, `memory` and `disk` in bytes, `pids`).

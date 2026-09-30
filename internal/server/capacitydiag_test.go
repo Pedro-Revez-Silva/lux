@@ -55,19 +55,20 @@ func wantResource(t *testing.T, b map[string]any, resource string, requested, us
 func TestScaleUpRecordsExhaustedReadyHosts(t *testing.T) {
 	s, pl, p := planningFixture(t, 3)
 	observePlanningHost(t, s, "cpu-full", "ready", proto.Capacity{CPUs: 4, Memory: 1000}, map[string]string{"secret": "v"})
-	observePlanningHost(t, s, "mem-full", "ready", proto.Capacity{CPUs: 8, Memory: 25}, map[string]string{"secret": "v"})
+	// mem-full takes one Run (memory 30 of 35), then is exhausted.
+	observePlanningHost(t, s, "mem-full", "ready", proto.Capacity{CPUs: 8, Memory: 35}, map[string]string{"secret": "v"})
 	livePlacement(t, s, "cpu-full", `{"cpus":4}`)
 	livePlacement(t, s, "mem-full", `{"memory":20}`)
 	planningTick(t, s, pl, p, false)
-	if p.calls != 2 {
-		t.Fatalf("launched %d, want 2 (each new host fits two Runs by memory)", p.calls)
+	if p.calls != 1 {
+		t.Fatalf("launched %d, want 1 (a new host fits three Runs by memory)", p.calls)
 	}
 	evs := events(t, s, evScaleUp)
 	if len(evs) != 1 {
 		t.Fatalf("scale-up events %d", len(evs))
 	}
 	d := evs[0].Data
-	if d["ready"] != 0.0 || d["future"] != 0.0 || d["planned"] != 3.0 || d["unmet"] != 0.0 || d["blocked"] != 0.0 {
+	if d["ready"] != 1.0 || d["future"] != 0.0 || d["planned"] != 2.0 || d["unmet"] != 0.0 || d["blocked"] != 0.0 {
 		t.Fatalf("summary %+v", d)
 	}
 	exhausted := d["exhausted"].([]any)
@@ -75,7 +76,7 @@ func TestScaleUpRecordsExhaustedReadyHosts(t *testing.T) {
 		t.Fatalf("exhausted %v, want one entry per host", exhausted)
 	}
 	wantResource(t, blockerOf(t, exhausted, "cpu-full"), "cpus", 1, 4, 4, 0)
-	wantResource(t, blockerOf(t, exhausted, "mem-full"), "memory", 10, 20, 25, 5)
+	wantResource(t, blockerOf(t, exhausted, "mem-full"), "memory", 10, 30, 35, 5)
 	if _, ok := d["expected"].(map[string]any)["labels"]; ok {
 		t.Fatalf("expected exposes labels: %v", d["expected"])
 	}
@@ -85,10 +86,26 @@ func TestScaleUpRecordsExhaustedReadyHosts(t *testing.T) {
 	}
 	wantResource(t, cpu[0]["blockers"].([]any)[0].(map[string]any), "cpus", 1, 4, 4, 0)
 	mem := hostDecisions(t, s, "mem-full")
-	if len(mem) != 1 {
+	if len(mem) != 1 || mem[0]["decision"] != "exhausted" {
 		t.Fatalf("mem-full decisions %+v", mem)
 	}
-	wantResource(t, mem[0]["blockers"].([]any)[0].(map[string]any), "memory", 10, 20, 25, 5)
+	wantResource(t, mem[0]["blockers"].([]any)[0].(map[string]any), "memory", 10, 30, 35, 5)
+}
+
+// A host that cannot fit the oldest Run but takes later ones is exhausted,
+// with the first blocker as evidence, whatever order the Runs came in.
+func TestHostDecisionExhaustedAfterOversizedHead(t *testing.T) {
+	s, pl, p := planningFixture(t, 3)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET spec='{"resources":{"cpus":8},"placement":{"pool":"burst"}}', updated_at=now()-interval '1 hour' WHERE id='r0'`)
+	execSQL(t, s, ctx, `UPDATE runs SET spec='{"resources":{"cpus":1},"placement":{"pool":"burst"}}' WHERE id<>'r0'`)
+	observePlanningHost(t, s, "h", "ready", proto.Capacity{CPUs: 4}, map[string]string{})
+	planningTick(t, s, pl, p, false)
+	got := hostDecisions(t, s, "h")
+	if len(got) != 1 || got[0]["decision"] != "exhausted" || got[0]["stage"] != "ready" {
+		t.Fatalf("decisions %+v, want one exhausted", got)
+	}
+	wantResource(t, got[0]["blockers"].([]any)[0].(map[string]any), "cpus", 8, 0, 4, 4)
 }
 
 // Unchanged decisions are not re-appended on later passes; a changed one is.
