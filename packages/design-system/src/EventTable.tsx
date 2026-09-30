@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { formatClock, formatTimestamp } from "./format.ts";
-import { Table, type Column } from "./Table.tsx";
+import { Table, type Column, type SortState } from "./Table.tsx";
 
 /** One lifecycle event: a Run's, a pool's or a host's. */
 export interface LifecycleEventRow {
@@ -26,6 +26,11 @@ export interface EventTableProps<E extends LifecycleEventRow> {
   epoch?: boolean;
   loading?: boolean;
   empty?: ReactNode;
+  /** Server-sorted pages: the sort shown and asked for (keys id, time, type, summary); rows are shown as given. */
+  sort?: SortState;
+  onSortChange?: (s: SortState) => void;
+  /** Under the table (a Pagination). */
+  footer?: ReactNode;
 }
 
 /** "×3 · last 10:00:05" for an event that happened more than once, else "". */
@@ -39,14 +44,15 @@ export function repeatNote(count: number | undefined, lastTime: string | undefin
  * how often a repeated event happened), and a row click that expands its
  * data. The Run, pool and host pages share it.
  */
-export function EventTable<E extends LifecycleEventRow>({ events, summary, detail, epoch, loading, empty = "No events." }: EventTableProps<E>) {
+export function EventTable<E extends LifecycleEventRow>({ events, summary, detail, epoch, loading, empty = "No events.", sort, onSortChange, footer }: EventTableProps<E>) {
+  const server = onSortChange != null;
   const [open, setOpen] = useState<number | null>(null);
   const cols = useMemo<Column<E>[]>(() => {
     const c: Column<E>[] = [
       { key: "id", header: "#", cell: (e) => e.id, sortValue: (e) => e.id, align: "right", mono: true, width: 76, optional: true },
       { key: "time", header: "Time", cell: (e) => formatTimestamp(e.time), sortValue: (e) => Date.parse(e.time), mono: true, width: 180 },
     ];
-    if (epoch) c.push({ key: "epoch", header: "Epoch", cell: (e) => e.epoch ?? "–", sortValue: (e) => e.epoch ?? 0, align: "right", mono: true, width: 72, optional: true });
+    if (epoch) c.push({ key: "epoch", header: "Epoch", cell: (e) => e.epoch ?? "–", sortValue: (e) => e.epoch, align: "right", mono: true, width: 72, optional: true });
     c.push(
       { key: "type", header: "Type", cell: (e) => <span className="secondary">{e.type}</span>, sortValue: (e) => e.type, width: 200 },
       {
@@ -63,10 +69,13 @@ export function EventTable<E extends LifecycleEventRow>({ events, summary, detai
           );
         },
         wrap: true,
+        // Sorting by the details is by the event's data, server-side only.
+        sortable: server,
+        sortFirst: "asc",
       },
     );
     return c;
-  }, [open, summary, detail, epoch]);
+  }, [open, summary, detail, epoch, server]);
   return (
     <Table
       columns={cols}
@@ -74,6 +83,10 @@ export function EventTable<E extends LifecycleEventRow>({ events, summary, detai
       rowKey={(e) => String(e.id)}
       loading={loading}
       defaultSort={{ key: "id", dir: "desc" }}
+      sort={sort}
+      onSortChange={onSortChange}
+      sortMode={server ? "server" : "client"}
+      footer={footer}
       onRowClick={detail ? (e) => setOpen((o) => (o === e.id ? null : e.id)) : undefined}
       selected={open != null ? String(open) : null}
       empty={empty}

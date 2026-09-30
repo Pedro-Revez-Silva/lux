@@ -11,6 +11,7 @@ import {
   ConnectionBadge,
   CostFigure,
   CostStatusBadge,
+  DurationCell,
   EmptyState,
   EventTable,
   familyColor,
@@ -36,7 +37,11 @@ import {
   MoneyList,
   Logo,
   PageHeader,
+  Pagination,
+  RelativeTime,
   RUN_STATE_LIST,
+  SegmentedControl,
+  sortRows,
   SectionHeader,
   Select,
   SERVER_STATE_LIST,
@@ -60,11 +65,13 @@ import {
   Timeline,
   Tooltip,
   useDensity,
+  useTerminalScheme,
   useTheme,
   useToast,
   type Column,
   type ConnectionStatus,
   type ServerInfo,
+  type SortState,
   type TerminalHandle,
   type TimeRange,
 } from "../src/index.ts";
@@ -83,7 +90,7 @@ function Section({ id, title, children, note }: { id: string; title: string; not
   );
 }
 
-const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "tabs", "selects", "charts", "costs", "timeline", "events", "logs", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
+const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "paging", "tabs", "selects", "charts", "costs", "timeline", "events", "logs", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
 
 /** The gallery: a slim bar (brand, theme and density) over the sections. */
 export function Gallery() {
@@ -136,6 +143,7 @@ function Sections() {
         <Stats />
         <Cards />
         <Tables />
+        <Paging />
         <TabsDemo />
         <Selects />
         <Charts />
@@ -697,6 +705,118 @@ function Tables() {
   );
 }
 
+interface PagedHost {
+  id: string;
+  name: string;
+  pool: string;
+  state: string;
+  created: number;
+  terminated: number | null;
+  uptime: number | null;
+}
+
+// 1,284 fake hosts, sorted and sliced as the server does it: the table
+// only shows the page it is given.
+const pagedHosts: PagedHost[] = Array.from({ length: 1284 }, (_, k) => {
+  const state = ["ready", "ready", "provisioning", "draining", "terminated", "terminated", "launch_failed", "lost"][(k * 5) % 8]!;
+  const created = NOW - (3 + k * 17 + ((k * k) % 11)) * 60_000;
+  const ended = state === "terminated" || state === "lost";
+  const terminated = ended ? created + (NOW - created) * (0.3 + (k % 5) / 10) : null;
+  return {
+    id: `host_${(0x8a41c2fe + k * 977).toString(16)}`,
+    name: `${["burst", "burst", "spot-large", "default"][k % 4]}-${(0x8a41c2fe + k * 977).toString(16).slice(-8)}`,
+    pool: ["burst", "burst", "spot-large", "default"][k % 4]!,
+    state,
+    created,
+    terminated,
+    uptime: state === "launch_failed" ? null : ((terminated ?? NOW) - created) / 1000,
+  };
+});
+
+function Paging() {
+  const [sort, setSort] = useState<SortState>({ key: "created", dir: "desc" });
+  const [page, setPage] = useState(1);
+  const [size, setSize] = useState(25);
+  const [cursorPage, setCursorPage] = useState(1);
+  const [life, setLife] = useState<"live" | "all" | "ended">("all");
+  const value: Record<string, (h: PagedHost) => string | number | null> = {
+    name: (h) => h.name,
+    pool: (h) => h.pool,
+    state: (h) => h.state,
+    created: (h) => h.created,
+    terminated: (h) => h.terminated,
+    uptime: (h) => h.uptime,
+  };
+  const filtered = pagedHosts.filter((h) => life === "all" || (life === "live") === ["ready", "provisioning", "draining"].includes(h.state));
+  const rows = sortRows(filtered, value[sort.key]!, sort.dir).slice((page - 1) * size, page * size);
+  const cols: Column<PagedHost>[] = [
+    { key: "name", header: "Host", cell: (h) => <a className="name-link" href={`#${h.id}`}>{h.name}</a>, sortable: true, lead: true, width: 190 },
+    { key: "pool", header: "Pool", cell: (h) => h.pool, sortable: true, width: 110 },
+    { key: "state", header: "State", cell: (h) => <StatePill kind="host" state={h.state} />, sortable: true },
+    { key: "created", header: "Created", cell: (h) => <RelativeTime at={h.created} now={NOW} label="Created" />, sortable: true, sortFirst: "desc", width: 110 },
+    { key: "terminated", header: "Terminated", cell: (h) => <RelativeTime at={h.terminated} now={NOW} label="Terminated" />, sortable: true, sortFirst: "desc", width: 120 },
+    {
+      key: "uptime",
+      header: "Uptime",
+      cell: (h) => <DurationCell seconds={h.uptime} live={h.terminated == null} tip={h.terminated == null ? "Created → now (still up)" : "Created → terminated"} missing="Never launched: no instance ran" />,
+      sortable: true,
+      align: "right",
+      mono: true,
+      width: 100,
+    },
+  ];
+  const change = (s: SortState) => {
+    setSort(s);
+    setPage(1);
+  };
+  return (
+    <Section id="paging" title="Server sort, Pagination, SegmentedControl, RelativeTime" note="A paged table sorts on the server across the whole result (sortMode server: the Table reports the sort, the page comes back in it). Every sortable header shows ↕, the sorted one ↑ or ↓, is focusable and sets aria-sort; missing values sort last both ways; text sorts A→Z first, numbers and times largest first. Pagination: count mode where the server counts the result, cursor mode (First / Previous / Next in the current order) where totals are costly or keep moving. Times read “3h ago” with the exact time and zone in a Tooltip; durations say how they were measured.">
+      <div className="sg-row">
+        <SegmentedControl
+          label="Lifecycle"
+          value={life}
+          onChange={(v) => {
+            setLife(v);
+            setPage(1);
+          }}
+          options={[
+            { value: "live", label: "Live" },
+            { value: "all", label: "All" },
+            { value: "ended", label: "Ended" },
+          ]}
+        />
+      </div>
+      <Card title="Hosts" subtitle="1,284 fake hosts · count pagination · server-sorted" flush>
+        <Table
+          columns={cols}
+          rows={rows}
+          rowKey={(h) => h.id}
+          sortMode="server"
+          sort={sort}
+          onSortChange={change}
+          footer={
+            <Pagination
+              mode="count"
+              page={page}
+              pageSize={size}
+              total={filtered.length}
+              noun="hosts"
+              onPage={setPage}
+              onPageSize={(n) => {
+                setSize(n);
+                setPage(1);
+              }}
+            />
+          }
+        />
+      </Card>
+      <Card title="Cursor mode" subtitle="runs and events: no total, pages follow the sort" flush>
+        <Pagination mode="cursor" page={cursorPage} count={50} pageSize={50} pageSizes={[50, 100]} hasPrev={cursorPage > 1} hasNext={cursorPage < 4} noun="runs" sortLabel="Created, newest first" onFirst={() => setCursorPage(1)} onPrev={() => setCursorPage((p) => p - 1)} onNext={() => setCursorPage((p) => p + 1)} onPageSize={() => {}} />
+      </Card>
+    </Section>
+  );
+}
+
 function TabsDemo() {
   const [v, setV] = useState("logs");
   const [w, setW] = useState("all");
@@ -842,7 +962,7 @@ function TerminalDemo() {
   const [fontSize, setFontSize] = useState(13);
   const [size, setSize] = useState({ cols: 80, rows: 24 });
   const [round, setRound] = useState(0);
-  const { resolved } = useTheme();
+  const scheme = useTerminalScheme();
   const prompt = "\x1b[1;32magent@run-k3jq7x2m\x1b[0m:\x1b[1;34m/workspace\x1b[0m$ ";
 
   useEffect(() => {
@@ -926,7 +1046,7 @@ function TerminalDemo() {
     ) : undefined;
 
   return (
-    <Section id="terminal" title="Terminal, ConnectionBadge, TerminalOverlay" note="xterm.js in the LogView's frame, Solarized inside (terminalThemes: exact dark and light, following the console theme). Transport-agnostic: the page writes bytes through the handle and gets keystrokes and resizes back; WebGL rendering with a DOM fallback. Type into it; Ctrl-D ends the fake shell; Ctrl+Shift+C copies the selection.">
+    <Section id="terminal" title="Terminal, ConnectionBadge, TerminalOverlay" note="xterm.js in the LogView's frame, Solarized inside (terminalThemes: exact dark and light). scheme picks the terminal's own colours (Match console, Solarized light or dark: useTerminalScheme, saved as lux.terminal.theme); it changes this terminal only, in place, and never the console theme. Transport-agnostic: the page writes bytes through the handle and gets keystrokes and resizes back; WebGL rendering with a DOM fallback. Type into it; Ctrl-D ends the fake shell; Ctrl+Shift+C copies the selection.">
       <div className="sg-row">
         <ConnectionBadge status={state} exitCode={state === "exited" ? 0 : undefined} />
         <div className="btn-group" role="group" aria-label="Font size">
@@ -947,14 +1067,25 @@ function TerminalDemo() {
         <Button size="sm" onClick={() => setState("disconnected")}>
           Connection lost
         </Button>
+        <SegmentedControl
+          label="Terminal colours"
+          value={scheme.pref}
+          onChange={scheme.set}
+          options={[
+            { value: "auto", label: "Match console" },
+            { value: "light", label: "Solarized light" },
+            { value: "dark", label: "Solarized dark" },
+          ]}
+        />
         <span className="muted">
-          {resolved === "dark" ? "Solarized Dark" : "Solarized Light"} · <span className="mono">{solarized.base03}</span> / <span className="mono">{solarized.base3}</span>
+          {scheme.resolved === "dark" ? "Solarized Dark" : "Solarized Light"} · <span className="mono">{solarized.base03}</span> / <span className="mono">{solarized.base3}</span>
         </span>
       </div>
       <div style={{ height: 420, display: "flex" }}>
         <Terminal
           ref={term}
           fontSize={fontSize}
+          scheme={scheme.resolved}
           disabled={state !== "connected"}
           onData={onData}
           onResize={setSize}

@@ -33,6 +33,12 @@ export interface TerminalProps {
   /** Called once the terminal is open and fitted, with its grid. */
   onReady?: (size: TerminalSize) => void;
   fontSize?: number;
+  /**
+   * The screen's scheme: Solarized light or dark. Omitted: the console's
+   * resolved theme. Applied to this terminal only (its xterm options and its
+   * frame), without a remount: the connection and scrollback stay.
+   */
+  scheme?: "light" | "dark";
   /** No input, dimmed screen, still cursor: the shell is gone. */
   disabled?: boolean;
   /** A card over the dimmed screen (TerminalOverlay). */
@@ -48,15 +54,16 @@ export const DEFAULT_FONT_SIZE = 13;
 /**
  * An xterm.js terminal in the console's frame (LogView's inset, hairline
  * and radius; a status bar under the screen), Solarized inside, following
- * the console theme. Transport-agnostic: the page feeds it bytes through
+ * the console theme unless given a scheme of its own. Transport-agnostic: the page feeds it bytes through
  * the handle and gets keystrokes and resizes back. WebGL rendering when the
  * browser has it, xterm's DOM renderer otherwise.
  */
-export function Terminal({ ref, onData, onResize, onReady, fontSize = DEFAULT_FONT_SIZE, disabled = false, overlay, bar, className, "aria-label": ariaLabel = "Terminal" }: TerminalProps) {
+export function Terminal({ ref, onData, onResize, onReady, fontSize = DEFAULT_FONT_SIZE, scheme: schemeProp, disabled = false, overlay, bar, className, "aria-label": ariaLabel = "Terminal" }: TerminalProps) {
   const host = useRef<HTMLDivElement>(null);
   const term = useRef<XTerm | null>(null);
   const fitter = useRef<FitAddon | null>(null);
-  const scheme = useTheme().resolved;
+  const consoleScheme = useTheme().resolved;
+  const scheme = schemeProp ?? consoleScheme;
   // Callbacks change every render; the terminal is built once.
   const cbs = useRef({ onData, onResize, onReady });
   cbs.current = { onData, onResize, onReady };
@@ -156,7 +163,7 @@ export function Terminal({ ref, onData, onResize, onReady, fontSize = DEFAULT_FO
   );
 
   return (
-    <div className={["term", disabled ? "is-dimmed" : "", className ?? ""].join(" ").trim()} aria-label={ariaLabel}>
+    <div className={["term", disabled ? "is-dimmed" : "", className ?? ""].join(" ").trim()} data-term-scheme={scheme} aria-label={ariaLabel}>
       <div ref={host} className="term-screen" />
       {overlay && <div className="term-overlay">{overlay}</div>}
       {bar && <div className="term-bar">{bar}</div>}

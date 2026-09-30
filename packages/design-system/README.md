@@ -10,7 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
-bun run test           # bun test: money rounding, y scale, family colours, CostFigure, Table columns, EventTable (src/*.test.ts*)
+bun run test           # bun test: money rounding, y scale, family colours, CostFigure, Table sort and columns, EventTable, Pagination, SegmentedControl, RelativeTime, terminal scheme (src/*.test.ts*)
 ```
 
 ## Using it
@@ -90,6 +90,18 @@ gallery/            the gallery app (index.html, Gallery.tsx, fake data)
   gets a `~` prefix, never a colour, with the status spelled out in its
   Tooltip (`CostFigure`); `~` is what `lux ls` prints too.
 
+## Terminal scheme
+
+The terminal's colours are its own. `useTerminalScheme()` reads and sets
+the choice, "auto" (Match console: the console's resolved theme), "light"
+or "dark" (Solarized), persisted in `localStorage["lux.terminal.theme"]`
+(anything else reads as auto). Pass its `resolved` to `Terminal`'s
+`scheme`: the terminal updates xterm's theme in place (no remount, so the
+connection, scrollback and selection stay) and sets its frame colours on
+`.term[data-term-scheme]`. It never writes `lux.theme` or
+`html[data-theme]`, and never changes a global token: the console theme
+stays the top bar's.
+
 ## Density
 
 Two settings, switched from the console's top bar (the rows icon) and persisted in
@@ -126,7 +138,27 @@ Page widths (`src/layout.css`): `.page` (detail), `.page-list` (tables), `.page-
 4 by container width), `.grid-2`, `.grid-3` (collapse to one column under
 900px of content).
 
-Tables (`Table`): `table-layout: fixed`; columns with a `width` keep it and
+Tables (`Table`): every column that has a `sortValue` (client sort) or
+`sortable: true` (server sort) sorts. Its header is focusable (Enter or
+Space sorts, as a click does), sets `aria-sort` and shows ↕, or ↑ / ↓ on
+the sorted column; clicking it again reverses. The first click sorts text
+A→Z and numbers, times and durations largest (newest) first
+(`firstSortDir`; `sortFirst` overrides). Missing values sort last in both
+directions (`sortRows`). A small, unpaged table sorts its loaded rows
+(`defaultSort`, or controlled `sort`); a paged one passes
+`sortMode="server"`, `sort` and `onSortChange` and fetches the page in that
+order, so a sorted page is the whole list sorted, never the visible rows
+re-ordered. `footer` holds its `Pagination`.
+
+`Pagination` has two modes. Count (`mode="count"`): "1–25 of 1,284 hosts",
+numbered pages (first, last, the current and its neighbours) and a page
+size, where the server counts the whole result. Cursor (`mode="cursor"`):
+"Page 3 · runs 101–150", First / Previous / Next in the current sort
+order and a page size, where an exact total is costly or keeps moving
+(runs, events). The page owns the cursors; a refresh re-reads the page it
+is on and never moves the reader to another.
+
+`table-layout: fixed`; columns with a `width` keep it and
 the rest share the remainder. `lead` marks the name column, `optional`
 columns drop out when the table's container is under 1100px, or when with
 them a column without a width would get under 140px (a State pill beside a
@@ -148,7 +180,7 @@ All in `src/tokens.css`.
 | State hues | `--st-{neutral,blue,teal,green,amber,red,violet}-{fg,bg,dot}` |
 | Chart | `--chart-1` … `--chart-8` (fixed order; cost families map onto them, compute is `--chart-1`), `--chart-grid` `--chart-axis` `--chart-label` `--chart-cursor`, `--chart-h`; unallocated cost uses `--st-neutral-dot` |
 | Logs | `--log-stderr-bg` `--log-stderr-fg` `--log-line-hover` |
-| Terminal | `--term-bg` `--term-scrollbar` (the frame around the screen; the screen's palette is `terminalThemes.ts`) |
+| Terminal | `--term-bg` `--term-scrollbar` (the frame around the screen, following the console theme; a Terminal with a `scheme` sets its own on `.term[data-term-scheme]`; the screen's palette is `terminalThemes.ts`) |
 | Type | `--font-sans` `--font-mono`, `--text-{xs,sm,md,lg,xl,2xl,3xl}` (density-dependent), `--leading-{tight,normal}`, `--weight-{normal,medium,semibold}` |
 | Spacing | `--sp-1` … `--sp-9` (2, 4, 6, 8, 12, 16, 24, 32, 48px); density-dependent `--gap` `--gap-lg` `--pad-page` `--pad-card` `--pad-cell` |
 | Radius | `--radius-{sm,md,lg,pill}` (3, 5, 8px, pill) |
@@ -166,7 +198,14 @@ State mapping (`src/states.ts`):
 | violet | idle | | |
 | green | succeeded | ready | ready |
 | amber | stopping | draining, terminating | unreachable |
-| red | lost, failed | lost | exited |
+| red | lost, failed | lost, launch failed (outline) | exited |
+
+`launch_failed` is not a state luxd sets: a host's operational state stays
+`terminated` (cleanup, tokens and costs treat it as gone), and its launch
+outcome (`launch.outcome`, from GET /v1/hosts) says the provider refused
+the launch. `hostDisplayState(host)` maps the two to the pill the console
+shows: a red outline, "Launch failed", apart from a Terminated host that
+ran and from a Lost one.
 
 Cost status (`costStatusStyle`, `CostStatusBadge`): the `status` of
 `GET /v1/runs/{id}/cost`, as a Badge whose Tooltip says what it means (and,
@@ -197,18 +236,23 @@ Logo (the star, 16–32px; the detailed mark is `docs/brand/lux.svg`),
 Button, IconButton, LinkButton (an anchor styled as a Button), Badge,
 StatePill (run, host and server states; ServerStateMark is the server
 shorthand), ConnectionBadge,
-StatTile, Sparkline, Card, Table, Tabs,
+StatTile, Sparkline, Card, Table, Pagination, Tabs, SegmentedControl (one
+of a few choices as joined buttons, a radio group), RelativeTime ("3h ago",
+the exact date, time and zone in a Tooltip; every table's times),
+DurationCell (a duration with how it was measured in a Tooltip, a live one
+in the foreground, a slow one in the warn tone),
 Tooltip, Select, TenantPicker, TimeRangePicker, TimeSeriesChart (uPlot, with
 optional vertical `marks`; height from `--chart-h` unless given), Timeline
 (placement waterfall), EventTable (a lifecycle event log: Run, pool, host), LogView, Terminal (xterm.js in the LogView's frame,
-Solarized inside via `terminalThemes`, following the console theme; a
-transport-agnostic handle: `write`, `onData`, `onResize`) with
+Solarized inside via `terminalThemes`; `scheme` light or dark, else the
+console theme; a transport-agnostic handle: `write`, `onData`, `onResize`) with
 TerminalOverlay (the card over a dimmed screen), ServerList / ServerRow (a
 run's servers: state, URL, start/stop/restart/remove, an expandable log the
 caller renders),
 KeyValue, IdChip, Code, PageHeader (with optional breadcrumbs; CrumbSep),
 SectionHeader, ConfirmDialog, Dialog (a form modal), Toast (`useToast`),
-EmptyState, Spinner, Skeleton. Hooks: `useTheme`, `useDensity`, `useCopy`. All exported
+EmptyState, Spinner, Skeleton. Hooks: `useTheme`, `useDensity`, `useTerminalScheme`, `useNow` (the shared
+clock relative times tick on), `useCopy`. All exported
 from `src/index.ts` with typed props; icons from `@lux/design-system/icons`.
 
 Cost additions (`src/Cost.tsx`, `format.ts`, `states.ts`; gallery section

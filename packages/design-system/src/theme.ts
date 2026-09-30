@@ -97,6 +97,52 @@ export function useDensity(): { density: Density; toggle: () => void; set: (d: D
   return { density, toggle, set: setDensity };
 }
 
+/* ---------- Terminal scheme ---------- */
+
+/** The terminal's own colours: the console's resolved theme ("auto"), or Solarized light or dark. */
+export type TerminalSchemePref = "auto" | "light" | "dark";
+
+export const TERMINAL_THEME_KEY = "lux.terminal.theme";
+const terminalListeners = new Set<() => void>();
+
+/** The stored preference; anything but light or dark (missing, garbage) is auto. */
+export function readTerminalScheme(): TerminalSchemePref {
+  try {
+    const v = localStorage.getItem(TERMINAL_THEME_KEY);
+    if (v === "light" || v === "dark") return v;
+  } catch {}
+  return "auto";
+}
+
+/** Stores the terminal's scheme. Touches neither lux.theme nor html[data-theme]. */
+export function setTerminalScheme(p: TerminalSchemePref) {
+  try {
+    if (p === "auto") localStorage.removeItem(TERMINAL_THEME_KEY);
+    else localStorage.setItem(TERMINAL_THEME_KEY, p);
+  } catch {}
+  for (const l of terminalListeners) l();
+}
+
+function subscribeTerminal(cb: () => void) {
+  terminalListeners.add(cb);
+  const onStorage = (e: StorageEvent) => e.key === TERMINAL_THEME_KEY && cb();
+  window.addEventListener("storage", onStorage);
+  return () => {
+    terminalListeners.delete(cb);
+    window.removeEventListener("storage", onStorage);
+  };
+}
+
+/**
+ * The terminal's scheme preference and what it resolves to (auto: the
+ * console's resolved theme). Only the Terminal it is passed to changes.
+ */
+export function useTerminalScheme(): { pref: TerminalSchemePref; resolved: "light" | "dark"; set: (p: TerminalSchemePref) => void } {
+  const pref = useSyncExternalStore(subscribeTerminal, readTerminalScheme, () => "auto" as TerminalSchemePref);
+  const consoleScheme = useSyncExternalStore(subscribe, resolvedTheme, () => "light" as const);
+  return { pref, resolved: pref === "auto" ? consoleScheme : pref, set: setTerminalScheme };
+}
+
 /** Read a CSS custom property off :root (used by canvas charts). */
 export function cssVar(name: string, el: Element = document.documentElement): string {
   return getComputedStyle(el).getPropertyValue(name).trim();

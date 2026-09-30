@@ -87,6 +87,14 @@ export function formatTimestamp(when: Date | number | string | null | undefined,
   return opts.seconds === false ? base : `${base}:${p(d.getSeconds())}`;
 }
 
+/** Absolute local timestamp with its time zone, "2026-09-24 14:03:11 GMT+1": the exact time behind a relative one. */
+export function formatTimestampZone(when: Date | number | string | null | undefined): string {
+  const t = toMillis(when);
+  if (t == null) return MISSING;
+  const zone = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" }).formatToParts(new Date(t)).find((p) => p.type === "timeZoneName")?.value;
+  return zone ? `${formatTimestamp(t)} ${zone}` : formatTimestamp(t);
+}
+
 /** Time only, "14:03:11". Used on chart axes for short ranges. */
 export function formatClock(when: Date | number | string | null | undefined): string {
   const t = toMillis(when);

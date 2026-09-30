@@ -1,9 +1,9 @@
 import { useMemo } from "react";
-import { Badge, Button, Card, formatBytes, formatCores, HOST_STATE_LIST, PageHeader, Select, Table, Tooltip, type Column } from "@lux/design-system";
+import { Badge, Button, Card, formatBytes, formatCores, HOST_STATE_LIST, PageHeader, Select, Table, Tooltip, type Column, RelativeTime } from "@lux/design-system";
 import { api, type Host } from "../../api/index.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip, HostLink, hostPath, hostRunsPath, IdLink, RelativeTime, StateCell, UsageBar } from "./common.tsx";
+import { DASH, ErrorBlock, ErrorStrip, HostLink, hostPath, hostRunsPath, IdLink, StateCell, UsageBar } from "./common.tsx";
 
 /**
  * A host's live Run count. The cap (lux-runner --max-runs) is rarely what

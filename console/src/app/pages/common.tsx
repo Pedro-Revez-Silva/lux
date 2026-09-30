@@ -1,7 +1,7 @@
 // Small pieces shared by pages: error/loading blocks, links, the runs table
 // columns, chart series builders and lookups.
 import { useMemo, useRef, type ReactNode } from "react";
-import { Button, CostFigure, EmptyState, formatDuration, formatPercent, formatRelative, formatTimestamp, formatUnit, IdChip, KeyValue, LinkButton, Skeleton, SkeletonLines, StatePill, Tooltip, type ChartMark, type Column, type LinkButtonProps, type Unit } from "@lux/design-system";
+import { Button, CostFigure, EmptyState, formatDuration, formatPercent, formatUnit, IdChip, KeyValue, LinkButton, RelativeTime, Skeleton, SkeletonLines, StatePill, type ChartMark, type Column, type LinkButtonProps, type Unit } from "@lux/design-system";
 import { api, isRunActive, useNow, useQuery, type QueryState, type Run, type Sample } from "../../api/index.ts";
 import { Link, linkTo, useSearch } from "../router.tsx";
 
@@ -135,17 +135,6 @@ export function StateCell({ kind, state, activity, reason, children }: { kind: "
         </span>
       )}
     </span>
-  );
-}
-
-/** "3m ago" with the timestamp in a tooltip; re-renders itself as time passes. */
-export function RelativeTime({ at }: { at: string | null | undefined }) {
-  const now = useNow();
-  if (!at) return DASH;
-  return (
-    <Tooltip content={formatTimestamp(at)}>
-      <span>{formatRelative(at, now)}</span>
-    </Tooltip>
   );
 }
 

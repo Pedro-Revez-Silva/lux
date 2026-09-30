@@ -1,9 +1,9 @@
 import { useMemo } from "react";
-import { Badge, Card, formatBytes, formatCores, KeyValue, PageHeader, StatePill, Table, type Column } from "@lux/design-system";
+import { Badge, Card, formatBytes, formatCores, KeyValue, PageHeader, StatePill, Table, type Column, RelativeTime } from "@lux/design-system";
 import { api, type Host, type Pool, type PoolOwner } from "../../api/index.ts";
 import { go, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip, hostPath, labelsText, PageSkeleton, RelativeTime } from "./common.tsx";
+import { DASH, ErrorBlock, ErrorStrip, hostPath, labelsText, PageSkeleton } from "./common.tsx";
 import { InfraEvents } from "./InfraEvents.tsx";
 
 /** The Pools page's poll: this page's too. */
