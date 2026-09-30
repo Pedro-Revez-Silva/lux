@@ -156,6 +156,7 @@ func (s *Server) provision(ctx context.Context) error {
 // poolState is what a pool has and needs, counted in one transaction.
 type poolState struct {
 	demand, idle, provisioning, total int
+	plan                              capacityPlan
 	// active: a placement started or ended on the pool's hosts within its
 	// scale-down time (warm_while_active keeps warm hosts only then).
 	active bool
@@ -205,10 +206,25 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 		s.reconcileWithProvider(ctx, prov, pl, &st)
 	}
 
-	// Scale down: drain idle hosts beyond what warm and waiting Runs need
-	// (and never below the minimum), terminate what is done.
+	// Provider reconciliation changes both live reservations and valid starts.
+	st = poolState{}
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if err := s.poolState(ctx, tx, pl, &st); err != nil {
+			return err
+		}
+		var err error
+		st.plan, err = s.planCapacity(ctx, tx, pl)
+		return err
+	}); err != nil {
+		return err
+	}
+
+	// Ready hosts reserved by the simulation are not idle surplus.
 	for _, id := range st.idleExpired {
-		if st.idle <= s.warm(pl, &st)+st.demand || st.total <= pl.Min {
+		if st.plan.reserved[id] {
+			continue
+		}
+		if st.idle-st.plan.reservedIdle <= s.warm(pl, &st) || st.total <= pl.Min {
 			break
 		}
 		drained, err := s.drainForScaleDown(ctx, id)
@@ -236,7 +252,7 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 		return nil
 	}
 	warm := s.warm(pl, &st)
-	want := max(pl.Min-st.total, warm+st.demand-st.idle-st.provisioning)
+	want := max(pl.Min-st.total, st.plan.NewHosts+max(0, warm-(st.idle-st.plan.reservedIdle)-st.plan.unusedStarting))
 	if pl.Max > 0 {
 		want = min(want, pl.Max-st.total)
 	}
@@ -268,7 +284,9 @@ func scaleUp(pl poolRow, st *poolState, warm, want int) map[string]any {
 		reason = "warm"
 	}
 	return map[string]any{"hosts": want, "reason": reason, "waiting": st.demand, "warm": warm, "min": pl.Min, "max": pl.Max,
-		"total": st.total, "idle": st.idle, "provisioning": st.provisioning}
+		"total": st.total, "idle": st.idle, "provisioning": st.provisioning,
+		"ready": st.plan.Ready, "future": st.plan.Future, "unmet": st.plan.Unmet,
+		"expected": st.plan.Expected, "deficits": st.plan.Deficits}
 }
 
 // providerError records a failed provider call, in a transaction of its own
