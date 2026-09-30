@@ -158,6 +158,19 @@ func TestCapacityReconcileProviderGoneBeforePlan(t *testing.T) {
 		t.Fatalf("gone future host needs replacement this tick, got %d", p.calls)
 	}
 }
+
+// A warm start the provider check finds gone is replaced in the same pass:
+// the pass counts starts again after the check.
+func TestCapacityReconcileProviderGoneWarmStart(t *testing.T) {
+	s, pl, p := planningFixture(t, 0)
+	pl.Warm = 1
+	planningTick(t, s, pl, p, false)
+	p.instances["i-1"] = Instance{State: "terminated"}
+	planningTick(t, s, pl, p, true)
+	if p.calls != 2 {
+		t.Fatalf("gone warm start needs replacement this tick, got %d launches", p.calls)
+	}
+}
 func TestCapacityReconcileBlockedDemandAndIndependentTargets(t *testing.T) {
 	for _, blocked := range []string{"chosen", "secrets", "snapshot", "unavailable", "invalid"} {
 		t.Run(blocked, func(t *testing.T) {

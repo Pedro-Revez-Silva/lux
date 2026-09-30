@@ -198,6 +198,12 @@ func TestConcurrentHostDecisions(t *testing.T) {
 	if !appender.settle(t, ctx, s) {
 		t.Fatal("the appender waited on nothing")
 	}
+	// An unchanged decision takes no lock: it does not wait on the appender.
+	unchanged := holdTx(ctx, s, func(tx pgx.Tx) error { return hostDecisionEvent(ctx, tx, "h1", blocked) })
+	if !unchanged.settle(t, ctx, s) {
+		t.Fatal("an unchanged decision waited on the stream")
+	}
+	unchanged.finish(t, ctx)
 	changed := holdTx(ctx, s, func(tx pgx.Tx) error {
 		return hostDecisionEvent(ctx, tx, "h1", map[string]any{"decision": "reserved", "pool": "burst"})
 	})

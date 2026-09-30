@@ -250,11 +250,17 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 	if err := rows.Err(); err != nil {
 		return plan, err
 	}
-	pools, tenants, chosen := make([]*string, 0, len(runs)), make([]string, 0, len(runs)), make([]string, 0, len(runs))
+	// Every Run is in this pool: one (tenant, chosen host) tuple each suffices.
+	var pools []*string
+	var tenants, chosen []string
+	seen := map[[2]string]bool{}
 	for _, r := range runs {
-		pools = append(pools, r.PoolID)
-		tenants = append(tenants, r.TenantID)
-		chosen = append(chosen, r.PlaceOn)
+		if key := [2]string{r.TenantID, r.PlaceOn}; !seen[key] {
+			seen[key] = true
+			pools = append(pools, r.PoolID)
+			tenants = append(tenants, r.TenantID)
+			chosen = append(chosen, r.PlaceOn)
+		}
 	}
 	ids, err := s.eligibleHostIDs(ctx, tx, pools, tenants, chosen)
 	if err != nil {

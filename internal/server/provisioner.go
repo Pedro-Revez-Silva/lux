@@ -208,11 +208,15 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 		s.reconcileWithProvider(ctx, prov, pl, &st)
 	}
 
-	// Provider reconciliation changes both live reservations and valid starts.
-	st = poolState{}
+	// Provider reconciliation and write-offs change live reservations and
+	// valid starts: only then is the state read again with the plan.
+	reread := checkAlive || len(st.abandoned) > 0
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		if err := s.poolState(ctx, tx, pl, &st); err != nil {
-			return err
+		if reread {
+			st = poolState{}
+			if err := s.poolState(ctx, tx, pl, &st); err != nil {
+				return err
+			}
 		}
 		var err error
 		st.plan, err = s.planCapacity(ctx, tx, pl)
@@ -366,25 +370,34 @@ func (s *Server) recordHostDecisions(ctx context.Context, pl poolRow, decisions 
 	}
 }
 
+// hostDecisionEvent reads the host's latest decision first without a lock,
+// so an unchanged decision takes none; only a change takes the stream
+// exclusively and reads again before appending.
 func hostDecisionEvent(ctx context.Context, tx pgx.Tx, hostID string, data map[string]any) error {
+	if same, err := sameLatestDecision(ctx, tx, hostID, data); err != nil || same {
+		return err
+	}
 	if err := lockStream(ctx, tx, hostEvents, hostID, true); err != nil {
 		return err
 	}
-	// Bounded to the host's latest events: a decision older than that is
-	// re-recorded once, which is still accurate.
-	var same bool
-	err := tx.QueryRow(ctx, `SELECT data = $3::jsonb FROM (SELECT id, type, data FROM host_events
-			WHERE host_id = $1 ORDER BY host_id DESC, id DESC LIMIT $4) latest
-		WHERE type = $2 ORDER BY id DESC LIMIT 1`, hostID, evCapacityDecision, data, decisionWindow).Scan(&same)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if same, err := sameLatestDecision(ctx, tx, hostID, data); err != nil || same {
 		return err
 	}
-	if same {
-		return nil
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO host_events (tenant_id, host_id, type, data)
+	_, err := tx.Exec(ctx, `INSERT INTO host_events (tenant_id, host_id, type, data)
 		SELECT tenant_id, id, $2, $3 FROM hosts WHERE id = $1`, hostID, evCapacityDecision, data)
 	return err
+}
+
+// sameLatestDecision: the host's latest decision within its latest
+// decisionWindow events equals data. The window is foldLookup's.
+func sameLatestDecision(ctx context.Context, tx pgx.Tx, hostID string, data map[string]any) (bool, error) {
+	var same bool
+	err := tx.QueryRow(ctx, `SELECT same FROM (`+foldLookup(hostEvents)+`) latest
+		WHERE type = $5 ORDER BY id DESC LIMIT 1`, hostID, []string{}, data, decisionWindow, evCapacityDecision).Scan(&same)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return same, err
 }
 
 // providerError records a failed provider call, in a transaction of its own
