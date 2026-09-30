@@ -360,6 +360,10 @@ func setField(v reflect.Value, s string) error {
 
 func (c config) check() error {
 	var problems []string
+	// Runners heartbeat every third of the lease, at least every second.
+	if c.Lease.Duration < 3*time.Second {
+		problems = append(problems, "lease (LUX_LEASE) must be at least 3s")
+	}
 	if !(c.Defaults.CPUs > 0) || math.IsInf(c.Defaults.CPUs, 0) {
 		problems = append(problems, "defaults.cpus (LUX_DEFAULT_CPUS) must be a positive number")
 	}

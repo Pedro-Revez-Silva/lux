@@ -149,20 +149,18 @@ func (c *conn) wsSession(ctx context.Context) error {
 	}
 }
 
-// readLive reads a frame, giving the connection up if none comes for a
-// lease: luxd acks a heartbeat every third of one, so silence that long is
-// a luxd gone without a word (its machine died, a load balancer dropped
-// it), and the runner must reach another luxd within the lease.
+// readLive reads a frame, giving the connection up if none comes for two
+// heartbeat intervals (two thirds of a lease): luxd acks each heartbeat, so
+// silence that long is a luxd gone without a word (its machine died, a
+// load balancer dropped it), and a third of the lease is left to reach
+// another luxd before it runs out.
 func (c *conn) readLive(ctx context.Context, ws *websocket.Conn, f *proto.Frame) error {
-	lease := time.Duration(c.r.lease.Load())
-	if lease <= 0 {
-		lease = 30 * time.Second
-	}
-	rctx, cancel := context.WithTimeout(ctx, lease)
+	silence := 2 * c.r.heartbeatEvery()
+	rctx, cancel := context.WithTimeout(ctx, silence)
 	defer cancel()
 	err := readFrame(rctx, ws, f)
 	if err != nil && ctx.Err() == nil && rctx.Err() != nil {
-		return fmt.Errorf("nothing from luxd for %s", lease)
+		return fmt.Errorf("nothing from luxd for %s", silence)
 	}
 	return err
 }
@@ -350,7 +348,12 @@ func (c *conn) pollLoop(ctx context.Context) error {
 			req["hello"] = hello
 		}
 		var resp proto.PollResponse
-		if err := c.r.api.postJSON(ctx, "/runner/v1/poll?name="+c.r.cfg.Name, req, &resp); err != nil {
+		// Bounded like a reconnect attempt: a luxd gone without a word must
+		// not hold the runner past the grace luxd allows after a gap.
+		pctx, pcancel := context.WithTimeout(ctx, proto.MaxReconnectWait)
+		err := c.r.api.postJSON(pctx, "/runner/v1/poll?name="+c.r.cfg.Name, req, &resp)
+		pcancel()
+		if err != nil {
 			return err
 		}
 		for _, f := range resp.Replies {

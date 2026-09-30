@@ -43,7 +43,10 @@ func (s *Server) aliveGap() time.Duration {
 func (s *Server) aliveLoop(ctx context.Context) {
 	// Rows of luxds gone a day, once per process: each start adds one.
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `DELETE FROM luxd_alive WHERE at < now() - interval '1 day'`)
+		// The newest row stays: it is the evidence of a gap longer than
+		// the day, until recordAlive has ended that gap.
+		_, err := tx.Exec(ctx, `DELETE FROM luxd_alive WHERE at < now() - interval '1 day'
+			AND at < (SELECT max(at) FROM luxd_alive)`)
 		return err
 	}); err != nil && ctx.Err() == nil {
 		s.log.Warn("pruning luxd_alive", "err", err)
@@ -97,8 +100,10 @@ func (s *Server) recordAlive(ctx context.Context) (gap *time.Duration, err error
 // gap sees it. No record yet (older luxds only) is no gap.
 func (s *Server) heartbeatsHeard(ctx context.Context, tx pgx.Tx) (bool, error) {
 	var heard bool
-	err := tx.QueryRow(ctx, `SELECT coalesce(max(at) >= now() - $1::interval, true)
-			AND coalesce(max(resumed_at) < now() - $2::interval, true)
+	// clock_timestamp(), not now(): checked again after a reap's lock
+	// waits, a gap during them must show.
+	err := tx.QueryRow(ctx, `SELECT coalesce(max(at) >= clock_timestamp() - $1::interval, true)
+			AND coalesce(max(resumed_at) < clock_timestamp() - $2::interval, true)
 		FROM luxd_alive`, interval(s.aliveGap()), interval(s.cfg.LeaseDuration+proto.MaxReconnectWait)).Scan(&heard)
 	return heard, err
 }
@@ -128,6 +133,9 @@ func (s *Server) reapLeases(ctx context.Context) error {
 		}
 		expired, err = livePlacements(ctx, tx, "p.lease_expires_at < now() AND p.run_id = ANY($1)", runs)
 		if err != nil {
+			return err
+		}
+		if heard, err := s.heartbeatsHeard(ctx, tx); err != nil || !heard {
 			return err
 		}
 		var later laterEvents
@@ -218,6 +226,9 @@ func (s *Server) reapHosts(ctx context.Context) error {
 			if !locked[run] {
 				return nil
 			}
+		}
+		if heard, err := s.heartbeatsHeard(ctx, tx); err != nil || !heard {
+			return err
 		}
 		// Heartbeats may have refreshed a candidate while the locks were
 		// acquired. Only retire hosts still stale under the host advisory lock.
