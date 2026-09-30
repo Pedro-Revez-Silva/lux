@@ -129,6 +129,8 @@ type Server struct {
 	// wakeups wake followers of Run events (wakeups.go).
 	wakeups *wakeups
 	kick    chan struct{}
+	// alive: when aliveLoop last recorded this luxd alive (unix nanos).
+	alive atomic.Int64
 	// lastAliveCheck: when the provisioner last asked providers which
 	// hosts still exist.
 	lastAliveCheck time.Time
@@ -293,7 +295,8 @@ func (s *Server) Run(ctx context.Context) error {
 		go func() { errc <- psrv.ListenAndServe() }()
 		s.log.Info("previews listening", "addr", s.cfg.Preview.Listen, "domain", s.cfg.Preview.Domain)
 	}
-	s.wg.Add(9)
+	s.wg.Add(10)
+	go func() { defer s.wg.Done(); s.aliveLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.ticketReaper(ctx) }()
 	go func() { defer s.wg.Done(); s.schedulerLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.provisionerLoop(ctx) }()

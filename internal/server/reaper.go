@@ -11,7 +11,8 @@ import (
 )
 
 // reaperLoop enforces time: expired leases, lost hosts, Run timeouts, and
-// retention of the blobs of finished Runs.
+// retention of the blobs of finished Runs. Leases and hosts are judged
+// only while aliveLoop keeps up: after an outage it forgives the gap first.
 func (s *Server) reaperLoop(ctx context.Context) {
 	t := time.NewTicker(s.cfg.Tick)
 	defer t.Stop()
@@ -21,15 +22,11 @@ func (s *Server) reaperLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		reaps := []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapRetention, s.reapOutdatedStaticHosts}
-		if err := s.forgiveOutage(ctx); err != nil {
-			// Unsure whether leases ran out while nobody listened: judge
-			// none of them this tick.
-			reaps = reaps[2:]
-			if ctx.Err() == nil {
-				s.log.Warn("reaper", "err", err)
-			}
+		var reaps []func(context.Context) error
+		if time.Since(time.Unix(0, s.alive.Load())) <= s.ordinaryGap() {
+			reaps = append(reaps, s.reapLeases, s.reapHosts)
 		}
+		reaps = append(reaps, s.reapTimeouts, s.reapRetention, s.reapOutdatedStaticHosts)
 		for _, f := range reaps {
 			if err := f(ctx); err != nil && ctx.Err() == nil {
 				s.log.Warn("reaper", "err", err)
@@ -38,35 +35,75 @@ func (s *Server) reaperLoop(ctx context.Context) {
 	}
 }
 
-// forgiveOutage adds time no reaper ran (every luxd stopped or hung, or
-// Postgres unreachable) back to host heartbeats and placement leases: no
-// luxd could hear a runner then, so it is not the runner's to answer for.
-// A gap shorter than a heartbeat interval (or a couple of ticks) is
-// ordinary. Nothing is extended past what a heartbeat now would give it.
+// ordinaryGap is the longest a luxd may go without hearing heartbeats
+// before the time counts as an outage: a heartbeat interval, or a couple
+// of ticks.
+func (s *Server) ordinaryGap() time.Duration {
+	return max(s.cfg.LeaseDuration/3, 2*s.cfg.Tick)
+}
+
+// aliveLoop records, every tick, that a luxd can hear heartbeats. It is
+// apart from reaperLoop so a slow reap is not taken for an outage.
+func (s *Server) aliveLoop(ctx context.Context) {
+	t := time.NewTicker(s.cfg.Tick)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if err := s.forgiveOutage(ctx); err != nil {
+			if ctx.Err() == nil {
+				s.log.Warn("recording luxd alive", "err", err)
+			}
+			continue
+		}
+		s.alive.Store(time.Now().UnixNano())
+	}
+}
+
+// forgiveOutage adds the time no luxd recorded itself alive (every luxd
+// stopped or hung, or Postgres unreachable) back to host heartbeats and
+// placement leases: no luxd could hear a runner then, so it is not the
+// runner's to answer for. It only extends, never past what a heartbeat now
+// would give, so doing it twice (two luxds back at once, or a failure part
+// way) is harmless: each step is its own transaction, and the record moves
+// last.
 func (s *Server) forgiveOutage(ctx context.Context) error {
-	ordinary := max(s.cfg.LeaseDuration/3, 2*s.cfg.Tick)
 	var gap time.Duration
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `SELECT now() - at FROM reaper_alive FOR UPDATE`).Scan(&gap); err != nil {
+	// NULL until a luxd that records it first runs: time before is not
+	// forgiven.
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT coalesce(now() - max(at), '0') FROM reaper_alive`).Scan(&gap)
+	}); err != nil {
+		return err
+	}
+	if gap > s.ordinaryGap() {
+		s.log.Warn("no luxd heard heartbeats for a while: extending leases by the gap", "gap", gap.Round(time.Millisecond))
+		// Rows locked in id order, as reapHosts does; greatest() keeps a
+		// heartbeat that landed meanwhile.
+		if err := s.systemExec(ctx, `UPDATE hosts h SET last_heartbeat = greatest(h.last_heartbeat, least(h.last_heartbeat + $1::interval, now()))
+			FROM (SELECT id FROM hosts WHERE state IN ('ready', 'draining') ORDER BY id FOR NO KEY UPDATE) l WHERE h.id = l.id`,
+			interval(gap)); err != nil {
 			return err
 		}
-		if gap > ordinary {
-			if _, err := tx.Exec(ctx, `UPDATE hosts SET last_heartbeat = least(last_heartbeat + $1::interval, now())
-				WHERE state IN ('ready', 'draining')`, interval(gap)); err != nil {
-				return err
-			}
-			if _, err := tx.Exec(ctx, `UPDATE placements SET lease_expires_at = least(lease_expires_at + $1::interval, now() + $2::interval)
-				WHERE state IN `+livePlacementStates, interval(gap), interval(s.cfg.LeaseDuration)); err != nil {
-				return err
-			}
+		if err := s.systemExec(ctx, `UPDATE placements p SET lease_expires_at = greatest(p.lease_expires_at, least(p.lease_expires_at + $1::interval, now() + $2::interval))
+			FROM (SELECT id FROM placements WHERE state IN `+livePlacementStates+` ORDER BY id FOR NO KEY UPDATE) l WHERE p.id = l.id`,
+			interval(gap), interval(s.cfg.LeaseDuration)); err != nil {
+			return err
 		}
-		_, err := tx.Exec(ctx, `UPDATE reaper_alive SET at = now()`)
+	}
+	// The row is upserted: one missing (a restore) must not stop reaping.
+	return s.systemExec(ctx, `INSERT INTO reaper_alive (at) VALUES (now()) ON CONFLICT (one) DO UPDATE SET at = now()`)
+}
+
+// systemExec runs one statement in a transaction of its own.
+func (s *Server) systemExec(ctx context.Context, q string, args ...any) error {
+	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, q, args...)
 		return err
 	})
-	if err == nil && gap > ordinary {
-		s.log.Warn("no reaper ran for a while: leases extended by the gap", "gap", gap.Round(time.Millisecond))
-	}
-	return err
 }
 
 // reapLeases: a placement whose lease expired is lost.
