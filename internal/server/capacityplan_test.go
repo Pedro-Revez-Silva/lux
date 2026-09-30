@@ -372,7 +372,7 @@ func TestCapacityReconcileBoundedExactSummary(t *testing.T) {
 		t.Fatalf("scale-up events: %d", len(evs))
 	}
 	d := evs[0].Data
-	if d["ready"] != float64(0) || d["future"] != float64(0) || d["unmet"] != float64(12) {
+	if d["ready"] != float64(0) || d["future"] != float64(0) || d["planned"] != float64(0) || d["unmet"] != float64(12) || d["omitted"] != float64(4) {
 		t.Fatalf("summary: %+v", d)
 	}
 	deficits := d["deficits"].([]any)

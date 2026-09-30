@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"time"
@@ -224,6 +225,7 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	}); err != nil {
 		return err
 	}
+	s.recordHostDecisions(ctx, pl, st.plan.hostDecisions)
 
 	// Ready hosts reserved by the simulation are not idle surplus.
 	for _, id := range st.idleExpired {
@@ -293,8 +295,57 @@ func scaleUp(pl poolRow, st *poolState, warm, want int) map[string]any {
 	}
 	return map[string]any{"hosts": want, "reason": reason, "waiting": st.demand, "warm": warm, "min": pl.Min, "max": pl.Max,
 		"total": st.total, "idle": st.idle, "provisioning": st.provisioning,
-		"ready": st.plan.Ready, "future": st.plan.Future, "unmet": st.plan.Unmet,
-		"expected": st.plan.Expected, "deficits": st.plan.Deficits}
+		"ready": st.plan.Ready, "future": st.plan.Future, "planned": st.plan.Planned, "unmet": st.plan.Unmet,
+		"blocked": st.plan.Blocked, "unknown": st.plan.Unknown, "expected": st.plan.Expected,
+		"deficits": st.plan.Deficits, "exhausted": st.plan.Exhausted, "ineligible": st.plan.Ineligible, "omitted": st.plan.Omitted}
+}
+
+// evCapacityDecision records the planner's verdict on one actual host.
+const evCapacityDecision = "host.capacity_decision"
+
+// maxHostDecisions bounds host-decision transactions per pool pass.
+const maxHostDecisions = 32
+
+// recordHostDecisions appends a host's capacity decision only when it differs
+// from that host's latest one. Each host uses its own transaction after the
+// planning transaction commits, so no row lock is held. The exclusive stream
+// lock precedes the read, which keeps concurrent writers from both appending
+// the same change.
+func (s *Server) recordHostDecisions(ctx context.Context, pl poolRow, decisions map[string]map[string]any) {
+	hosts := slices.Sorted(maps.Keys(decisions))
+	if len(hosts) > maxHostDecisions {
+		hosts = hosts[:maxHostDecisions]
+	}
+	for _, id := range hosts {
+		data := maps.Clone(decisions[id])
+		data["pool"] = pl.Name
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return hostDecisionEvent(ctx, tx, id, data)
+		}); err != nil {
+			s.log.Warn("recording a capacity decision", "host", id, "err", err)
+		}
+	}
+}
+
+func hostDecisionEvent(ctx context.Context, tx pgx.Tx, hostID string, data map[string]any) error {
+	if err := lockStream(ctx, tx, hostEvents, hostID, true); err != nil {
+		return err
+	}
+	// Bounded to the host's latest events: a decision older than that is
+	// re-recorded once, which is still accurate.
+	var same bool
+	err := tx.QueryRow(ctx, `SELECT data = $3::jsonb FROM (SELECT id, type, data FROM host_events
+			WHERE host_id = $1 ORDER BY host_id DESC, id DESC LIMIT $4) latest
+		WHERE type = $2 ORDER BY id DESC LIMIT 1`, hostID, evCapacityDecision, data, 4*foldWindow).Scan(&same)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if same {
+		return nil
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO host_events (tenant_id, host_id, type, data)
+		SELECT tenant_id, id, $2, $3 FROM hosts WHERE id = $1`, hostID, evCapacityDecision, data)
+	return err
 }
 
 // providerError records a failed provider call, in a transaction of its own
