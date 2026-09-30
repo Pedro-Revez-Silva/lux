@@ -165,6 +165,10 @@ func (s *Server) provision(ctx context.Context) error {
 // the database once again (idleDecisions).
 func (s *Server) tookProvisionLease() {
 	s.leaseHeld = true
+	s.forgetDecisions()
+}
+
+func (s *Server) forgetDecisions() {
 	s.swept, s.decided = make(map[string]bool), make(map[string]map[string]bool)
 }
 
@@ -172,7 +176,7 @@ func (s *Server) tookProvisionLease() {
 // pools are reconciled without provision() never took the lease).
 func (s *Server) decidedFor(poolID string) map[string]bool {
 	if s.decided == nil {
-		s.swept, s.decided = make(map[string]bool), make(map[string]map[string]bool)
+		s.forgetDecisions()
 	}
 	if s.decided[poolID] == nil {
 		s.decided[poolID] = map[string]bool{}
@@ -428,6 +432,7 @@ func (s *Server) recordHostDecisions(ctx context.Context, pl poolRow, decisions 
 		}
 		s.decisionCursor[pl.ID] = hosts[len(hosts)-1]
 	}
+	decided := s.decidedFor(pl.ID)
 	for _, id := range hosts {
 		data := decisions[id]
 		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -438,9 +443,9 @@ func (s *Server) recordHostDecisions(ctx context.Context, pl poolRow, decisions 
 		}
 		// idleDecisions retracts what this set holds once demand leaves.
 		if data.Decision == "idle" {
-			delete(s.decidedFor(pl.ID), id)
+			delete(decided, id)
 		} else {
-			s.decidedFor(pl.ID)[id] = true
+			decided[id] = true
 		}
 	}
 }
