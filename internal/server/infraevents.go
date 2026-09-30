@@ -247,6 +247,16 @@ type transition struct {
 	typ      string
 	volatile []string
 	endedBy  []string
+	// runlessDeficits: "deficits" entries are told apart by stage and
+	// blockers as a set; their run ids are evidence only.
+	runlessDeficits bool
+}
+
+// runlessDeficits is x with "deficits" replaced by its distinct entries
+// without "run", sorted.
+func runlessDeficits(x string) string {
+	return `CASE WHEN ` + x + ` ? 'deficits' THEN ` + x + ` || jsonb_build_object('deficits',
+		(SELECT jsonb_agg(DISTINCT e - 'run' ORDER BY e - 'run') FROM jsonb_array_elements(` + x + `->'deficits') e)) ELSE ` + x + ` END`
 }
 
 // transitionEvent appends a transition's event only when data differs from
@@ -274,7 +284,11 @@ func transitionEvent(ctx context.Context, tx pgx.Tx, t eventTable, owner string,
 // volatile keys. The window is foldLookup's.
 func sameLatest(ctx context.Context, tx pgx.Tx, t eventTable, owner string, tr transition, data any) (bool, error) {
 	var same bool
-	err := tx.QueryRow(ctx, `SELECT type = $5 AND same FROM (`+foldLookup(t)+`) latest
+	lookup := foldLookup(t)
+	if tr.runlessDeficits {
+		lookup = foldLookupBy(t, runlessDeficits("(data - $2::text[])")+` = `+runlessDeficits("($3::jsonb - $2::text[])"))
+	}
+	err := tx.QueryRow(ctx, `SELECT type = $5 AND same FROM (`+lookup+`) latest
 		WHERE type = $5 OR type = ANY($6::text[]) ORDER BY id DESC LIMIT 1`,
 		owner, nonNil(tr.volatile), data, transitionWindow, tr.typ, nonNil(tr.endedBy)).Scan(&same)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -298,7 +312,12 @@ const foldWindow = 8
 // with the owner alone the planner may walk the primary key backwards and
 // filter every newer event of other owners.
 func foldLookup(t eventTable) string {
-	return `SELECT id, type, data - $2::text[] = $3::jsonb - $2::text[] AS same FROM ` + t.table + `
+	return foldLookupBy(t, `data - $2::text[] = $3::jsonb - $2::text[]`)
+}
+
+// foldLookupBy is foldLookup with same computed by the expression same.
+func foldLookupBy(t eventTable, same string) string {
+	return `SELECT id, type, ` + same + ` AS same FROM ` + t.table + `
 		WHERE ` + t.owner + ` = $1 AND (` + t.owner + `, id) <= ($1, 9223372036854775807)
 		ORDER BY ` + t.owner + ` DESC, id DESC LIMIT $4`
 }

@@ -613,6 +613,38 @@ func TestCapacityReconcileScaleBlockedBusyPool(t *testing.T) {
 	}
 }
 
+// no_fit deficits are told apart by stage and blockers, not by Run: a queue
+// of oversized Runs rotating keeps one row; a new kind of blocker adds one.
+func TestCapacityReconcileScaleBlockedNoFitRotatingQueue(t *testing.T) {
+	s, pl, p := planningFixture(t, 0)
+	ctx := context.Background()
+	observePlanningHost(t, s, "old", "terminated", proto.Capacity{CPUs: 2, Memory: 100}, map[string]string{})
+	// Waiting since before the registration: no probe is due.
+	arrive := func(id, res string) {
+		execSQL(t, s, ctx, `INSERT INTO runs (id,tenant_id,pool_id,spec,state,updated_at) VALUES ($1,'t1','pool1',
+			jsonb_build_object('resources', $2::jsonb, 'placement', '{"pool":"burst"}'::jsonb),'provisioning',now()-interval '1 hour')`, id, res)
+	}
+	for i := range 3 {
+		arrive(fmt.Sprintf("big%d", i), `{"cpus":4}`)
+	}
+	for i := range 8 {
+		execSQL(t, s, ctx, `UPDATE runs SET state='cancelled' WHERE id=$1`, fmt.Sprintf("big%d", i))
+		arrive(fmt.Sprintf("big%d", i+3), `{"cpus":4}`)
+		planningTick(t, s, pl, p, false)
+	}
+	evs := events(t, s, evScaleBlocked)
+	if p.calls != 0 || len(evs) != 1 || evs[0].Data["cause"] != "no_fit" {
+		t.Fatalf("launched %d, scale-blocked %+v, want one no_fit row over 8 passes", p.calls, evs)
+	}
+	// Same count waiting; one Run is now blocked on memory instead.
+	execSQL(t, s, ctx, `UPDATE runs SET state='cancelled' WHERE id='big8'`)
+	arrive("fat", `{"memory":1000}`)
+	planningTick(t, s, pl, p, false)
+	if evs := events(t, s, evScaleBlocked); len(evs) != 2 || evs[1].Data["unmet"] != 3.0 {
+		t.Fatalf("scale-blocked %+v, want a second row for the memory blocker", evs)
+	}
+}
+
 // --max and the tenant's host quota stopping a scale-up are recorded once,
 // with how many hosts were wanted.
 func TestCapacityReconcileScaleBlockedCause(t *testing.T) {

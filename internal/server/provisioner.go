@@ -362,11 +362,12 @@ func (p *capacityPlan) summary() map[string]any {
 
 // scaleBlockedEvent is a state: a stuck pool records it once, and again only
 // when why it is stuck changes. The usage-derived evidence is kept from the
-// pass that recorded it but does not tell two states apart; a scale-up ends
-// the state.
+// pass that recorded it but does not tell two states apart, nor do the Runs
+// naming the deficits; a scale-up ends the state.
 var scaleBlockedEvent = transition{typ: evScaleBlocked,
-	volatile: []string{"ready", "starting", "exhausted", "ineligible", "omitted", "waiting", "total", "wanted"},
-	endedBy:  []string{evScaleUp}}
+	volatile:        []string{"ready", "starting", "exhausted", "ineligible", "omitted", "waiting", "total", "wanted"},
+	endedBy:         []string{evScaleUp},
+	runlessDeficits: true}
 
 // scaleBlocked records why a pass launched nothing while hosts were wanted
 // or Runs stay unmet (blockedCause); wanted is how many hosts the plan,
