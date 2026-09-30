@@ -162,6 +162,7 @@ type poolState struct {
 	active bool
 	// Idle hosts that have been idle longer than the cooldown, oldest first.
 	idleExpired []string
+	idleHosts   map[string]bool
 	// Hosts to terminate now: drained ones that are done (no live
 	// placements, nothing to upload), ones that never registered, and lost
 	// ones (their runner stopped answering; the instance may still run).
@@ -214,6 +215,11 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 		}
 		var err error
 		st.plan, err = s.planCapacity(ctx, tx, pl)
+		for id := range st.plan.reserved {
+			if st.idleHosts[id] {
+				st.plan.reservedIdle++
+			}
+		}
 		return err
 	}); err != nil {
 		return err
@@ -252,7 +258,9 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 		return nil
 	}
 	warm := s.warm(pl, &st)
-	want := max(pl.Min-st.total, st.plan.NewHosts+max(0, warm-(st.idle-st.plan.reservedIdle)-st.plan.unusedStarting))
+	warmStarting := max(0, st.provisioning-st.plan.reservedStarting)
+	warmDeficit := max(0, warm-(st.idle-st.plan.reservedIdle)-warmStarting)
+	want := max(pl.Min-st.total, st.plan.NewHosts+warmDeficit)
 	if pl.Max > 0 {
 		want = min(want, pl.Max-st.total)
 	}
@@ -530,6 +538,10 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 			st.provisioning++
 		case state == "ready" && !busy:
 			st.idle++
+			if st.idleHosts == nil {
+				st.idleHosts = map[string]bool{}
+			}
+			st.idleHosts[h.ID] = true
 			if idleLong {
 				st.idleExpired = append(st.idleExpired, h.ID)
 			}

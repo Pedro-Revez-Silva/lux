@@ -11,15 +11,15 @@ import (
 
 // capacityPlan is a transient reservation simulation, never a placement promise.
 type capacityPlan struct {
-	Ready          int              `json:"ready"`
-	Future         int              `json:"future"`
-	Unmet          int              `json:"unmet"`
-	NewHosts       int              `json:"newHosts"`
-	Expected       *hostExpectation `json:"expected"`
-	Deficits       []planDeficit    `json:"deficits,omitempty"`
-	reserved       map[string]bool
-	reservedIdle   int
-	unusedStarting int
+	Ready            int              `json:"ready"`
+	Future           int              `json:"future"`
+	Unmet            int              `json:"unmet"`
+	NewHosts         int              `json:"newHosts"`
+	Expected         *hostExpectation `json:"expected"`
+	Deficits         []planDeficit    `json:"deficits,omitempty"`
+	reserved         map[string]bool
+	reservedIdle     int
+	reservedStarting int
 }
 
 type hostExpectation struct {
@@ -118,10 +118,6 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 	ready, err := s.candidateHosts(ctx, tx, ids)
 	if err != nil {
 		return plan, err
-	}
-	physicallyIdle := map[string]bool{}
-	for _, h := range ready {
-		physicallyIdle[h.ID] = h.UsedRuns == 0
 	}
 	slices.SortFunc(ready, func(a, b *candidateHost) int {
 		if a.ID < b.ID {
@@ -234,14 +230,9 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 	if plan.Expected == nil && plan.Unmet > 0 && len(startingIDs) == 0 {
 		plan.NewHosts = 1
 	}
-	for _, h := range ready {
-		if plan.reserved[h.ID] && physicallyIdle[h.ID] && h.PoolID == pl.ID {
-			plan.reservedIdle++
-		}
-	}
-	plan.unusedStarting = len(startingIDs) - len(usedStarting)
-	if plan.Expected == nil && plan.Unmet > 0 && plan.unusedStarting > 0 {
-		plan.unusedStarting--
+	plan.reservedStarting = len(usedStarting)
+	if plan.Expected == nil && plan.Unmet > 0 && len(startingIDs) > 0 {
+		plan.reservedStarting = 1
 	}
 	return plan, nil
 }

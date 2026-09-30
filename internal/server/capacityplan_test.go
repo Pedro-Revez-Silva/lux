@@ -208,6 +208,189 @@ func TestCapacityReconcileProtectsReservedIdleAndWarm(t *testing.T) {
 		t.Fatalf("warm physical idle target needs one extra host, got %d", p.calls)
 	}
 }
+func TestCapacityReconcileExpiredStartDoesNotSuppressBootstrap(t *testing.T) {
+	s, pl, p := planningFixture(t, 6)
+	planningTick(t, s, pl, p, false)
+	execSQL(t, s, context.Background(), `UPDATE hosts SET provision_requested_at=now()-interval '1 day'`)
+	planningTick(t, s, pl, p, false)
+	if p.calls != 2 {
+		t.Fatalf("expired start suppressed replacement: %d launches", p.calls)
+	}
+	if state := queryOne[string](t, s, `SELECT state FROM hosts WHERE id=$1`, p.hosts[0]); state != "terminated" {
+		t.Fatalf("expired host state %s", state)
+	}
+}
+
+func TestCapacityReconcileObservedUnlimitedAndCommonLabels(t *testing.T) {
+	for _, finite := range []bool{false, true} {
+		t.Run(fmt.Sprint(finite), func(t *testing.T) {
+			s, pl, p := planningFixture(t, 6)
+			observePlanningHost(t, s, "unlimited", "terminated", proto.Capacity{}, map[string]string{"arch": "arm64"})
+			if finite {
+				observePlanningHost(t, s, "finite", "terminated", proto.Capacity{Runs: 2}, map[string]string{"arch": "arm64"})
+			}
+			execSQL(t, s, context.Background(), `UPDATE runs SET spec=jsonb_set(spec,'{placement,requires}','{"arch":"arm64"}')`)
+			for range 2 {
+				planningTick(t, s, pl, p, false)
+			}
+			want := 1
+			if finite {
+				want = 3
+			}
+			if p.calls != want {
+				t.Fatalf("observed limits launched %d, want %d", p.calls, want)
+			}
+		})
+	}
+}
+
+func TestCapacityReconcileWarmWhileActive(t *testing.T) {
+	s, pl, p := planningFixture(t, 0)
+	pl.Warm = 2
+	pl.WarmWhileActive = true
+	planningTick(t, s, pl, p, false)
+	if p.calls != 0 {
+		t.Fatalf("inactive pool launched %d warm hosts", p.calls)
+	}
+	observePlanningHost(t, s, "busy", "ready", proto.Capacity{Runs: 6}, map[string]string{})
+	execSQL(t, s, context.Background(), `INSERT INTO runs (id,tenant_id,spec,state) VALUES ('live','t1','{}','running')`)
+	execSQL(t, s, context.Background(), `INSERT INTO placements (id,tenant_id,run_id,host_id,epoch,state) VALUES ('p','t1','live','busy',1,'running')`)
+	for range 2 {
+		planningTick(t, s, pl, p, false)
+	}
+	if p.calls != 2 {
+		t.Fatalf("active pool needs two physical warm hosts, got %d", p.calls)
+	}
+}
+
+func TestCapacityReconcileOldTemplateStartCountsForPhysicalWarm(t *testing.T) {
+	s, pl, p := planningFixture(t, 0)
+	pl.Warm = 1
+	planningTick(t, s, pl, p, false)
+	pl.Template = json.RawMessage(`{"version":2}`)
+	for range 2 {
+		planningTick(t, s, pl, p, false)
+	}
+	if p.calls != 1 {
+		t.Fatalf("template edits must not duplicate physical warm starts: %d", p.calls)
+	}
+}
+
+func TestCapacityReconcileSafetyLimits(t *testing.T) {
+	for _, rule := range []string{"max", "quota", "retired"} {
+		t.Run(rule, func(t *testing.T) {
+			s, pl, p := planningFixture(t, 6)
+			observePlanningHost(t, s, "history", "terminated", proto.Capacity{Runs: 1}, map[string]string{})
+			want := 2
+			switch rule {
+			case "max":
+				pl.Max = 2
+			case "quota":
+				execSQL(t, s, context.Background(), `UPDATE tenants SET max_hosts=2 WHERE id='t1'`)
+			case "retired":
+				pl.Retired = true
+				execSQL(t, s, context.Background(), `UPDATE pools SET retired=true WHERE id='pool1'`)
+				want = 0
+			}
+			for range 3 {
+				planningTick(t, s, pl, p, false)
+			}
+			if p.calls != want {
+				t.Fatalf("%s launched %d, want %d", rule, p.calls, want)
+			}
+		})
+	}
+}
+
+func TestCapacityReconcileReadyEligibility(t *testing.T) {
+	for _, rule := range []string{"stale", "disconnected", "draining"} {
+		t.Run(rule, func(t *testing.T) {
+			s, pl, p := planningFixture(t, 6)
+			observePlanningHost(t, s, "host", "ready", proto.Capacity{CPUs: 6}, map[string]string{})
+			switch rule {
+			case "stale":
+				execSQL(t, s, context.Background(), `UPDATE hosts SET last_heartbeat=now()-interval '1 day'`)
+			case "disconnected":
+				s.hub.mu.Lock()
+				delete(s.hub.polls, "host")
+				s.hub.mu.Unlock()
+			case "draining":
+				execSQL(t, s, context.Background(), `UPDATE hosts SET draining=true`)
+			}
+			planningTick(t, s, pl, p, false)
+			if p.calls != 1 {
+				t.Fatalf("%s host must not cover demand, got %d launches", rule, p.calls)
+			}
+		})
+	}
+}
+
+func TestCapacityReconcileExpectationIdentity(t *testing.T) {
+	for _, rule := range []string{"pool", "tenant", "template", "static", "unregistered", "jsonb"} {
+		t.Run(rule, func(t *testing.T) {
+			s, pl, p := planningFixture(t, 6)
+			observePlanningHost(t, s, "history", "terminated", proto.Capacity{Runs: 2}, map[string]string{})
+			want := 1
+			switch rule {
+			case "pool":
+				execSQL(t, s, context.Background(), `INSERT INTO pools (id,name,provider) VALUES ('other','other','ec2')`)
+				execSQL(t, s, context.Background(), `UPDATE hosts SET pool_id='other'`)
+			case "tenant":
+				execSQL(t, s, context.Background(), `INSERT INTO tenants (id,name) VALUES ('other','other')`)
+				execSQL(t, s, context.Background(), `UPDATE hosts SET tenant_id='other'`)
+			case "template":
+				execSQL(t, s, context.Background(), `UPDATE hosts SET launch_template='{"version":2}'`)
+			case "static":
+				execSQL(t, s, context.Background(), `UPDATE hosts SET provision_requested_at=NULL`)
+			case "unregistered":
+				execSQL(t, s, context.Background(), `UPDATE hosts SET registered_at=NULL`)
+			case "jsonb":
+				pl.Template = json.RawMessage(`{ "version" : 1.0 }`)
+				want = 3
+			}
+			for range 2 {
+				planningTick(t, s, pl, p, false)
+			}
+			if p.calls != want {
+				t.Fatalf("%s launched %d, want %d", rule, p.calls, want)
+			}
+		})
+	}
+}
+
+func TestCapacityReconcileBoundedExactSummary(t *testing.T) {
+	s, pl, p := planningFixture(t, 12)
+	observePlanningHost(t, s, "history", "terminated", proto.Capacity{CPUs: 2, Memory: 20, Disk: 20, Runs: 2}, map[string]string{})
+	execSQL(t, s, context.Background(), `UPDATE runs SET spec='{"resources":{"cpus":3},"placement":{"pool":"burst"}}'`)
+	pl.Min = 1
+	planningTick(t, s, pl, p, false)
+	if p.calls != 1 {
+		t.Fatalf("only minimum should launch, got %d", p.calls)
+	}
+	evs := events(t, s, evScaleUp)
+	if len(evs) != 1 {
+		t.Fatalf("scale-up events: %d", len(evs))
+	}
+	d := evs[0].Data
+	if d["ready"] != float64(0) || d["future"] != float64(0) || d["unmet"] != float64(12) {
+		t.Fatalf("summary: %+v", d)
+	}
+	deficits := d["deficits"].([]any)
+	if len(deficits) != 8 {
+		t.Fatalf("sample length %d, want 8", len(deficits))
+	}
+	b := deficits[0].(map[string]any)["blockers"].([]any)[0].(map[string]any)
+	if b["resource"] != "cpus" || b["requested"] != float64(3) || b["capacity"] != float64(2) || b["available"] != float64(2) {
+		t.Fatalf("blocker: %+v", b)
+	}
+	for range 2 {
+		planningTick(t, s, pl, p, false)
+	}
+	if p.calls != 1 {
+		t.Fatalf("oversized demand caused repeated launches: %d", p.calls)
+	}
+}
+
 func TestCapacityReconcileFailureRetriesOneBootstrap(t *testing.T) {
 	s, pl, p := planningFixture(t, 6)
 	p.fail = true
