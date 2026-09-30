@@ -220,3 +220,11 @@ test("the floor leaves each flexible column 140px beside percentage columns", ()
   expect(tableFloor(cols)).toBe(Math.ceil(744 / 0.78));
   expect(tableFloor([{ width: 100 }, {}])).toBe(240);
 });
+
+test("a malformed percentage width counts as 0%, never NaN", () => {
+  expect(tableFloor([{ width: "%" }, {}])).toBe(140);
+  // Under 1100px optional columns drop whatever the widths; above, a "%"
+  // column leaves the flexible one all it had.
+  expect(dropsOptional([{ width: "%" }, {}, { width: 100, optional: true }], 1400)).toBe(false);
+  expect(dropsOptional([{ width: "%" }, {}, { width: 1200, optional: true }], 1300)).toBe(true);
+});

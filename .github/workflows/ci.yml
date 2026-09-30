@@ -41,11 +41,7 @@ jobs:
       - name: make lint
         run: make lint
 
-      # Unset in CI, but a developer's LUX_TENANT changes CLI queries: keep
-      # it empty so the CLI tests see what they expect.
       - name: make unit
-        env:
-          LUX_TENANT: ""
         run: make unit
 
       # The store tests skip when Postgres is unreachable: here it must
@@ -137,7 +133,6 @@ jobs:
       - name: e2e shard
         working-directory: tests
         env:
-          LUX_TENANT: ""
           LUX_TEST_LOG_ROOT: ${{ runner.temp }}/lux-e2e
         run: uv run python run_tests.py --shard ${{ matrix.shard }}/6
 

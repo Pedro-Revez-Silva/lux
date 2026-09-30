@@ -13,6 +13,11 @@ const FLEX_MIN = 140;
  * leave each column without a width under FLEX_MIN (with none, when they
  * alone are wider than the container).
  */
+/** A percentage width's share (0.22 for "22%"); a malformed one is 0, never NaN. */
+function pct(width: string): number {
+  return (parseFloat(width) || 0) / 100;
+}
+
 export function dropsOptional(columns: readonly Pick<Column<unknown>, "width" | "optional">[], width: number): boolean {
   if (width <= 0) return false;
   if (width < NARROW) return true;
@@ -21,7 +26,7 @@ export function dropsOptional(columns: readonly Pick<Column<unknown>, "width" | 
   let flex = 0;
   for (const c of columns) {
     if (typeof c.width === "number") fixed += c.width;
-    else if (typeof c.width === "string" && c.width.endsWith("%")) fixed += (parseFloat(c.width) / 100) * width;
+    else if (typeof c.width === "string" && c.width.endsWith("%")) fixed += pct(c.width) * width;
     else flex++;
   }
   return width - fixed < flex * FLEX_MIN;
@@ -35,13 +40,13 @@ export function dropsOptional(columns: readonly Pick<Column<unknown>, "width" | 
  */
 export function tableFloor(columns: readonly Pick<Column<unknown>, "width">[]): number {
   let fixed = 0;
-  let pct = 0;
+  let share = 0;
   for (const c of columns) {
     if (typeof c.width === "number") fixed += c.width;
-    else if (typeof c.width === "string" && c.width.endsWith("%")) pct += parseFloat(c.width) / 100;
+    else if (typeof c.width === "string" && c.width.endsWith("%")) share += pct(c.width);
     else fixed += c.width ? 120 : FLEX_MIN;
   }
-  return Math.ceil(fixed / Math.max(1 - pct, 0.1));
+  return Math.ceil(fixed / Math.max(1 - share, 0.1));
 }
 
 export type SortDir = "asc" | "desc";
