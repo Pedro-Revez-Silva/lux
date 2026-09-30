@@ -187,8 +187,8 @@ func capacityPlanText(d map[string]any) string {
 		}
 		return "0"
 	}
-	parts := []string{fmt.Sprintf("plan: %s ready, %s future, %s planned, %s unmet, %s blocked",
-		num("ready"), num("future"), num("planned"), num("unmet"), num("blocked"))}
+	parts := []string{fmt.Sprintf("plan: %s ready, %s starting, %s planned, %s unmet, %s blocked",
+		num("ready"), num("starting"), num("planned"), num("unmet"), num("blocked"))}
 	if d["probe"] == true {
 		parts = append(parts, "probe: one host to re-observe capacity no expected host fits")
 	}

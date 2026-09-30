@@ -409,7 +409,7 @@ func TestCapacityReconcileBoundedExactSummary(t *testing.T) {
 		t.Fatalf("scale-up events: %d", len(evs))
 	}
 	d := evs[0].Data
-	if d["ready"] != float64(0) || d["future"] != float64(0) || d["planned"] != float64(0) || d["unmet"] != float64(12) || d["omitted"] != float64(4) {
+	if d["ready"] != float64(0) || d["starting"] != float64(0) || d["planned"] != float64(0) || d["unmet"] != float64(12) || d["omitted"] != float64(4) {
 		t.Fatalf("summary: %+v", d)
 	}
 	deficits := d["deficits"].([]any)
@@ -522,7 +522,7 @@ func TestCapacityReconcileScaleBlockedFolds(t *testing.T) {
 	}
 	var want map[string]any
 	if err := json.Unmarshal([]byte(`{"waiting":1,"total":0,"max":0,
-		"ready":0,"future":0,"planned":0,"unmet":1,"blocked":0,"unknown":"",
+		"ready":0,"starting":0,"planned":0,"unmet":1,"blocked":0,"unknown":"",
 		"expected":{"capacity":{"cpus":2,"memory":0,"disk":0,"runs":0},"observations":1},
 		"deficits":[{"run":"r0","stage":"new_host","blockers":[{"resource":"cpus","requested":4,"used":0,"capacity":2,"available":2}]}],
 		"exhausted":null,"ineligible":[],"omitted":0}`), &want); err != nil {

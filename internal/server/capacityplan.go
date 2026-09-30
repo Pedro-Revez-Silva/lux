@@ -14,13 +14,13 @@ import (
 // capacityPlan is a transient reservation simulation, never a placement promise.
 type capacityPlan struct {
 	Ready            int    `json:"ready"`
-	Future           int    `json:"future"` // Runs covered by existing starts only.
+	Starting         int    `json:"starting"` // Runs covered by existing starts only.
 	Planned          int    `json:"planned"`
 	Unmet            int    `json:"unmet"`   // Capacity-eligible Runs not covered by ready, existing-start, or planned capacity.
 	Blocked          int    `json:"blocked"` // Runs excluded before capacity simulation; they never trigger launches.
 	Unknown          string `json:"unknown,omitempty"`
 	Probe            bool   `json:"probe,omitempty"` // One host launched to re-observe capacity no expected host fits.
-	hostDecisions    map[string]map[string]any
+	hostDecisions    map[string]hostDecision
 	NewHosts         int              `json:"newHosts"`
 	Expected         *hostExpectation `json:"expected"`
 	Deficits         []planDeficit    `json:"deficits,omitempty"`  // Prerequisite and new-host blockers.
@@ -30,6 +30,15 @@ type capacityPlan struct {
 	reserved         map[string]bool
 	reservedIdle     int
 	reservedStarting int
+}
+
+// hostDecision is a host.capacity_decision event's data.
+type hostDecision struct {
+	Pool     string        `json:"pool"`
+	Stage    string        `json:"stage"`
+	Decision string        `json:"decision"`
+	Reason   string        `json:"reason,omitempty"`
+	Blockers []planBlocker `json:"blockers,omitempty"`
 }
 
 type hostExpectation struct {
@@ -59,7 +68,7 @@ func (s *Server) ineligibleReadyHosts(ctx context.Context, tx pgx.Tx, pl poolRow
 	}
 	plan.Ineligible, err = pgx.CollectRows(rows, pgx.RowToStructByPos[ineligibleHost])
 	for _, h := range plan.Ineligible {
-		plan.hostDecisions[h.Host] = map[string]any{"stage": "ready", "decision": "ineligible", "reason": h.Reason}
+		plan.hostDecisions[h.Host] = hostDecision{Pool: pl.Name, Stage: "ready", Decision: "ineligible", Reason: h.Reason}
 	}
 	return err
 }
@@ -83,7 +92,7 @@ func (s *Server) idleDecisions(ctx context.Context, tx pgx.Tx, pl poolRow, plan 
 	hosts, err := pgx.CollectRows(rows, pgx.RowToStructByPos[stale])
 	for _, h := range hosts {
 		if _, considered := plan.hostDecisions[h.ID]; !considered {
-			plan.hostDecisions[h.ID] = map[string]any{"stage": h.Stage, "decision": "idle"}
+			plan.hostDecisions[h.ID] = hostDecision{Pool: pl.Name, Stage: h.Stage, Decision: "idle"}
 		}
 	}
 	return err
@@ -181,8 +190,10 @@ func (s *Server) hostExpectation(ctx context.Context, tx pgx.Tx, pl poolRow) (*h
 	return expected, latest, rows.Err()
 }
 
-func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capacityPlan, error) {
-	plan := capacityPlan{reserved: map[string]bool{}, hostDecisions: map[string]map[string]any{}}
+// planCapacity plans the pool's waiting Runs; idle is the pool's idle ready
+// hosts, of which those it reserves are not surplus (reservedIdle).
+func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle map[string]bool) (capacityPlan, error) {
+	plan := capacityPlan{reserved: map[string]bool{}, hostDecisions: map[string]hostDecision{}}
 	// Per actual host: its first blocker and stage, and how many Runs it took;
 	// its decision is settled after every Run was tried.
 	type hostBlock struct {
@@ -301,12 +312,8 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 	if err != nil {
 		return plan, err
 	}
-	var shared bool
-	if err := tx.QueryRow(ctx, `SELECT shared AND tenant_id IS NULL FROM pools WHERE id = $1`, pl.ID).Scan(&shared); err != nil {
-		return plan, err
-	}
 	virtual := func(id string) *candidateHost {
-		h := &candidateHost{ID: id, TenantID: pl.TenantID, PoolID: pl.ID, Pool: pl.Name, Shared: shared, Retired: pl.Retired, Connected: true}
+		h := &candidateHost{ID: id, TenantID: pl.TenantID, PoolID: pl.ID, Pool: pl.Name, Shared: pl.Shared && pl.TenantID == nil, Retired: pl.Retired, Connected: true}
 		if plan.Expected != nil {
 			h.Capacity = plan.Expected.Capacity
 			h.Labels = plan.Expected.Labels
@@ -345,7 +352,7 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 				plan.Ready++
 				plan.reserved[h.ID] = true
 			} else if h.ID != "" {
-				plan.Future++
+				plan.Starting++
 				usedStarting[h.ID] = true
 			} else {
 				plan.Planned++
@@ -423,11 +430,11 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 		if reservedOn[id] > 0 {
 			decision = "exhausted"
 		}
-		plan.hostDecisions[id] = map[string]any{"stage": b.stage, "decision": decision, "blockers": b.blockers}
+		plan.hostDecisions[id] = hostDecision{Pool: pl.Name, Stage: b.stage, Decision: decision, Blockers: b.blockers}
 	}
 	for id, stage := range stageOf {
 		if _, blocked := blockedHosts[id]; !blocked {
-			plan.hostDecisions[id] = map[string]any{"stage": stage, "decision": "reserved"}
+			plan.hostDecisions[id] = hostDecision{Pool: pl.Name, Stage: stage, Decision: "reserved"}
 		}
 	}
 	if err := s.idleDecisions(ctx, tx, pl, &plan); err != nil {
@@ -444,6 +451,11 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 		plan.Probe = probe
 	}
 	plan.reservedStarting = len(usedStarting)
+	for id := range plan.reserved {
+		if idle[id] {
+			plan.reservedIdle++
+		}
+	}
 	if bootstrap && len(startingIDs) > 0 {
 		plan.reservedStarting = 1
 	}

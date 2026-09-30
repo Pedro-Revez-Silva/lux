@@ -127,7 +127,7 @@ adds the plan; rows written before planning have none of these:
 | Field | Meaning |
 | --- | --- |
 | `ready` | Runs the simulation fitted on ready hosts. |
-| `future` | Runs fitted on hosts already starting. |
+| `starting` | Runs fitted on hosts already starting. |
 | `planned` | Runs fitted on new hosts (the launches' reason). |
 | `unmet` | Capacity-eligible Runs no ready, starting or new host fits. |
 | `blocked` | Runs excluded before simulation (prerequisites, chosen host). |

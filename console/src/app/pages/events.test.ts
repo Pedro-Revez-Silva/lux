@@ -37,7 +37,7 @@ test("a scale-up from before capacity planning keeps its line", () => {
 test("a planned scale-up adds its plan, expected capacity and evidence", () => {
   const data = {
     hosts: 1, reason: "waiting runs", waiting: 3, warm: 0, min: 0, max: 10, total: 2, idle: 1, provisioning: 1,
-    ready: 1, future: 1, planned: 1, unmet: 0, blocked: 1,
+    ready: 1, starting: 1, planned: 1, unmet: 0, blocked: 1,
     expected: { capacity: { cpus: 8, memory: 32 * GiB, disk: 0, runs: 4 }, observations: 3 },
     deficits: [{ run: "r4", stage: "prerequisite", blockers: [{ reason: "snapshot upload pending" }] }],
     exhausted: [{ run: "r3", host: "h1", stage: "ready", blockers: [
@@ -49,7 +49,7 @@ test("a planned scale-up adds its plan, expected capacity and evidence", () => {
   };
   expect(infra("pool.scale_up", data)).toBe(
     "+1 host for waiting runs: 3 waiting, warm 0, min 0, max 10; had 2 (1 idle, 1 provisioning); " +
-      "plan: 1 ready, 1 future, 1 planned, 0 unmet, 1 blocked; " +
+      "plan: 1 ready, 1 starting, 1 planned, 0 unmet, 1 blocked; " +
       "new host cpus 8, memory 32 GiB, disk unlimited, runs 4 from 3 observation(s); " +
       "deficits: r4 prerequisite [snapshot upload pending]; " +
       "exhausted: h1 (ready) for r3 [memory requested 16 GiB, used 24 GiB, capacity 32 GiB, available 8 GiB; cpus requested 4, used 6, capacity 8, available 2]; " +
@@ -60,13 +60,13 @@ test("a planned scale-up adds its plan, expected capacity and evidence", () => {
 test("a cold pool's scale-up says new-host capacity is unknown", () => {
   const data = {
     hosts: 1, reason: "waiting runs", waiting: 1, warm: 0, min: 0, max: 0, total: 0, idle: 0, provisioning: 0,
-    ready: 0, future: 0, planned: 0, unmet: 1, blocked: 0, expected: null,
+    ready: 0, starting: 0, planned: 0, unmet: 1, blocked: 0, expected: null,
     unknown: "no registered host observations for current template",
     deficits: [{ run: "r1", stage: "new_host", blockers: [{ reason: "new host capacity unknown" }] }],
   };
   expect(infra("pool.scale_up", data)).toBe(
     "+1 host for waiting runs: 1 waiting, warm 0, min 0, max 0; had 0 (0 idle, 0 provisioning); " +
-      "plan: 0 ready, 0 future, 0 planned, 1 unmet, 0 blocked; " +
+      "plan: 0 ready, 0 starting, 0 planned, 1 unmet, 0 blocked; " +
       "new host capacity unknown: no registered host observations for current template; " +
       "deficits: r1 new host [new host capacity unknown]",
   );
@@ -95,12 +95,12 @@ test("a placement shows its resources when it has them", () => {
 
 test("a blocked scale-up says why no host was launched", () => {
   const data = {
-    waiting: 1, total: 0, max: 2, ready: 0, future: 0, planned: 0, unmet: 1, blocked: 0,
+    waiting: 1, total: 0, max: 2, ready: 0, starting: 0, planned: 0, unmet: 1, blocked: 0,
     expected: { capacity: { cpus: 2, memory: 0, disk: 0, runs: 0 }, observations: 1 },
     deficits: [{ run: "r1", stage: "new_host", blockers: [{ resource: "cpus", requested: 4, used: 0, capacity: 2, available: 2 }] }],
   };
   expect(infra("pool.scale_blocked", data)).toBe(
-    "no host launched: 1 waiting, had 0, max 2; plan: 0 ready, 0 future, 0 planned, 1 unmet, 0 blocked; " +
+    "no host launched: 1 waiting, had 0, max 2; plan: 0 ready, 0 starting, 0 planned, 1 unmet, 0 blocked; " +
       "new host cpus 2, memory unlimited, disk unlimited, runs unlimited from 1 observation(s); " +
       "deficits: r1 new host [cpus requested 4, used 0, capacity 2, available 2]",
   );
@@ -109,12 +109,12 @@ test("a blocked scale-up says why no host was launched", () => {
 test("a probe scale-up says it is one", () => {
   const data = {
     hosts: 1, reason: "waiting runs", waiting: 1, warm: 0, min: 0, max: 0, total: 0, idle: 0, provisioning: 0,
-    ready: 0, future: 0, planned: 0, unmet: 1, blocked: 0, probe: true,
+    ready: 0, starting: 0, planned: 0, unmet: 1, blocked: 0, probe: true,
     expected: { capacity: { cpus: 2, memory: 0, disk: 0, runs: 0 }, observations: 1 },
   };
   expect(infra("pool.scale_up", data)).toBe(
     "+1 host for waiting runs: 1 waiting, warm 0, min 0, max 0; had 0 (0 idle, 0 provisioning); " +
-      "plan: 0 ready, 0 future, 0 planned, 1 unmet, 0 blocked; probe: one host to re-observe capacity no expected host fits; " +
+      "plan: 0 ready, 0 starting, 0 planned, 1 unmet, 0 blocked; probe: one host to re-observe capacity no expected host fits; " +
       "new host cpus 2, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)",
   );
 });

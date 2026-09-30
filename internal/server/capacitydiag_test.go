@@ -71,7 +71,7 @@ func TestScaleUpRecordsExhaustedReadyHosts(t *testing.T) {
 		t.Fatalf("scale-up events %d", len(evs))
 	}
 	d := evs[0].Data
-	if d["ready"] != 1.0 || d["future"] != 0.0 || d["planned"] != 2.0 || d["unmet"] != 0.0 || d["blocked"] != 0.0 {
+	if d["ready"] != 1.0 || d["starting"] != 0.0 || d["planned"] != 2.0 || d["unmet"] != 0.0 || d["blocked"] != 0.0 {
 		t.Fatalf("summary %+v", d)
 	}
 	exhausted := d["exhausted"].([]any)

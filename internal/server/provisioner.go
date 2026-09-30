@@ -107,6 +107,7 @@ type poolRow struct {
 	Template           json.RawMessage
 	Min, Max, Warm     int
 	Retired            bool
+	Shared             bool
 	// ScaleDownAfterS: the pool's own idle seconds, or nil for luxd's.
 	ScaleDownAfterS *int
 	WarmWhileActive bool
@@ -121,7 +122,7 @@ func (s *Server) provision(ctx context.Context) error {
 	}
 	var pools []poolRow
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id, name, provider, tenant_id, template, min_hosts, max_hosts, warm_hosts, retired,
+		rows, err := tx.Query(ctx, `SELECT id, name, provider, tenant_id, template, min_hosts, max_hosts, warm_hosts, retired, shared,
 				scale_down_after_s, warm_while_active
 			FROM pools WHERE provider <> 'static'
 			  AND (NOT retired OR EXISTS (SELECT 1 FROM hosts h WHERE h.pool_id = pools.id AND h.state <> 'terminated'))`)
@@ -219,12 +220,7 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 			}
 		}
 		var err error
-		st.plan, err = s.planCapacity(ctx, tx, pl)
-		for id := range st.plan.reserved {
-			if st.idleHosts[id] {
-				st.plan.reservedIdle++
-			}
-		}
+		st.plan, err = s.planCapacity(ctx, tx, pl, st.idleHosts)
 		return err
 	}); err != nil {
 		return err
@@ -312,7 +308,7 @@ func scaleUp(pl poolRow, st *poolState, warm, want int) map[string]any {
 // summary is the plan's bounded evidence, shared by pool.scale_up and
 // pool.scale_blocked.
 func (p *capacityPlan) summary() map[string]any {
-	return map[string]any{"ready": p.Ready, "future": p.Future, "planned": p.Planned, "unmet": p.Unmet,
+	return map[string]any{"ready": p.Ready, "starting": p.Starting, "planned": p.Planned, "unmet": p.Unmet,
 		"blocked": p.Blocked, "unknown": p.Unknown, "expected": p.Expected,
 		"deficits": p.Deficits, "exhausted": p.Exhausted, "ineligible": p.Ineligible, "omitted": p.Omitted}
 }
@@ -349,7 +345,7 @@ const decisionWindow = 4 * foldWindow
 // A pass records at most maxHostDecisions hosts, in id order starting after
 // the last host the previous pass of this pool recorded, wrapping around, so
 // on a larger pool every host is recorded within a few passes.
-func (s *Server) recordHostDecisions(ctx context.Context, pl poolRow, decisions map[string]map[string]any) {
+func (s *Server) recordHostDecisions(ctx context.Context, pl poolRow, decisions map[string]hostDecision) {
 	hosts := slices.Sorted(maps.Keys(decisions))
 	if len(hosts) > maxHostDecisions {
 		start, _ := slices.BinarySearch(hosts, s.decisionCursor[pl.ID]+"\x00")
@@ -360,8 +356,7 @@ func (s *Server) recordHostDecisions(ctx context.Context, pl poolRow, decisions 
 		s.decisionCursor[pl.ID] = hosts[len(hosts)-1]
 	}
 	for _, id := range hosts {
-		data := maps.Clone(decisions[id])
-		data["pool"] = pl.Name
+		data := decisions[id]
 		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 			return hostDecisionEvent(ctx, tx, id, data)
 		}); err != nil {
@@ -373,7 +368,7 @@ func (s *Server) recordHostDecisions(ctx context.Context, pl poolRow, decisions 
 // hostDecisionEvent reads the host's latest decision first without a lock,
 // so an unchanged decision takes none; only a change takes the stream
 // exclusively and reads again before appending.
-func hostDecisionEvent(ctx context.Context, tx pgx.Tx, hostID string, data map[string]any) error {
+func hostDecisionEvent(ctx context.Context, tx pgx.Tx, hostID string, data any) error {
 	if same, err := sameLatestDecision(ctx, tx, hostID, data); err != nil || same {
 		return err
 	}
@@ -390,7 +385,7 @@ func hostDecisionEvent(ctx context.Context, tx pgx.Tx, hostID string, data map[s
 
 // sameLatestDecision: the host's latest decision within its latest
 // decisionWindow events equals data. The window is foldLookup's.
-func sameLatestDecision(ctx context.Context, tx pgx.Tx, hostID string, data map[string]any) (bool, error) {
+func sameLatestDecision(ctx context.Context, tx pgx.Tx, hostID string, data any) (bool, error) {
 	var same bool
 	err := tx.QueryRow(ctx, `SELECT same FROM (`+foldLookup(hostEvents)+`) latest
 		WHERE type = $5 ORDER BY id DESC LIMIT 1`, hostID, []string{}, data, decisionWindow, evCapacityDecision).Scan(&same)

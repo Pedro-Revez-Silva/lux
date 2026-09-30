@@ -102,7 +102,7 @@ func TestEventLineCapacity(t *testing.T) {
 			"+2 host(s) for waiting runs: 2 waiting, warm 0, min 0, max 10; had 1 (0 idle, 1 provisioning)"},
 		{"scale-up from observed capacity", "pool.scale_up",
 			`{"hosts":1,"reason":"waiting runs","waiting":3,"warm":0,"min":0,"max":10,"total":2,"idle":1,"provisioning":1,
-			  "ready":1,"future":1,"planned":1,"unmet":0,"blocked":1,
+			  "ready":1,"starting":1,"planned":1,"unmet":0,"blocked":1,
 			  "expected":{"capacity":{"cpus":8,"memory":34359738368,"disk":0,"runs":4},"observations":3},
 			  "deficits":[{"run":"r4","stage":"prerequisite","blockers":[{"reason":"snapshot upload pending"}]}],
 			  "exhausted":[{"run":"r3","host":"h1","stage":"ready","blockers":[
@@ -110,33 +110,33 @@ func TestEventLineCapacity(t *testing.T) {
 			    {"resource":"cpus","requested":4,"used":6,"capacity":8,"available":2}]}],
 			  "ineligible":[{"host":"h2","reason":"draining"}],"omitted":2}`,
 			"+1 host(s) for waiting runs: 3 waiting, warm 0, min 0, max 10; had 2 (1 idle, 1 provisioning); " +
-				"plan: 1 ready, 1 future, 1 planned, 0 unmet, 1 blocked; " +
+				"plan: 1 ready, 1 starting, 1 planned, 0 unmet, 1 blocked; " +
 				"new host cpus 8, memory 32.0 GiB, disk unlimited, runs 4 from 3 observation(s); " +
 				"deficits: r4 prerequisite [snapshot upload pending]; " +
 				"exhausted: h1 (ready) for r3 [memory requested 16.0 GiB, used 24.0 GiB, capacity 32.0 GiB, available 8.0 GiB; cpus requested 4, used 6, capacity 8, available 2]; " +
 				"ineligible: h2 draining; 2 more omitted"},
 		{"cold pool bootstraps one host", "pool.scale_up",
 			`{"hosts":1,"reason":"waiting runs","waiting":1,"warm":0,"min":0,"max":0,"total":0,"idle":0,"provisioning":0,
-			  "ready":0,"future":0,"planned":0,"unmet":1,"blocked":0,"expected":null,
+			  "ready":0,"starting":0,"planned":0,"unmet":1,"blocked":0,"expected":null,
 			  "unknown":"no registered host observations for current template",
 			  "deficits":[{"run":"r1","stage":"new_host","blockers":[{"reason":"new host capacity unknown"}]}]}`,
 			"+1 host(s) for waiting runs: 1 waiting, warm 0, min 0, max 0; had 0 (0 idle, 0 provisioning); " +
-				"plan: 0 ready, 0 future, 0 planned, 1 unmet, 0 blocked; " +
+				"plan: 0 ready, 0 starting, 0 planned, 1 unmet, 0 blocked; " +
 				"new host capacity unknown: no registered host observations for current template; " +
 				"deficits: r1 new host [new host capacity unknown]"},
 		{"blocked scale-up", "pool.scale_blocked",
-			`{"waiting":1,"total":0,"max":2,"ready":0,"future":0,"planned":0,"unmet":1,"blocked":0,
+			`{"waiting":1,"total":0,"max":2,"ready":0,"starting":0,"planned":0,"unmet":1,"blocked":0,
 			  "expected":{"capacity":{"cpus":2,"memory":0,"disk":0,"runs":0},"observations":1},
 			  "deficits":[{"run":"r1","stage":"new_host","blockers":[{"resource":"cpus","requested":4,"used":0,"capacity":2,"available":2}]}]}`,
-			"no host launched: 1 waiting, had 0, max 2; plan: 0 ready, 0 future, 0 planned, 1 unmet, 0 blocked; " +
+			"no host launched: 1 waiting, had 0, max 2; plan: 0 ready, 0 starting, 0 planned, 1 unmet, 0 blocked; " +
 				"new host cpus 2, memory unlimited, disk unlimited, runs unlimited from 1 observation(s); " +
 				"deficits: r1 new host [cpus requested 4, used 0, capacity 2, available 2]"},
 		{"probe scale-up", "pool.scale_up",
 			`{"hosts":1,"reason":"waiting runs","waiting":1,"warm":0,"min":0,"max":0,"total":0,"idle":0,"provisioning":0,
-			  "ready":0,"future":0,"planned":0,"unmet":1,"blocked":0,"probe":true,
+			  "ready":0,"starting":0,"planned":0,"unmet":1,"blocked":0,"probe":true,
 			  "expected":{"capacity":{"cpus":2,"memory":0,"disk":0,"runs":0},"observations":1}}`,
 			"+1 host(s) for waiting runs: 1 waiting, warm 0, min 0, max 0; had 0 (0 idle, 0 provisioning); " +
-				"plan: 0 ready, 0 future, 0 planned, 1 unmet, 0 blocked; probe: one host to re-observe capacity no expected host fits; " +
+				"plan: 0 ready, 0 starting, 0 planned, 1 unmet, 0 blocked; probe: one host to re-observe capacity no expected host fits; " +
 				"new host cpus 2, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)"},
 		{"exhausted host", "host.capacity_decision",
 			`{"pool":"burst","stage":"ready","decision":"exhausted","blockers":[

@@ -130,7 +130,7 @@ function capacity(c: Obj, resource: string): string {
 
 function capacityPlan(d: Obj): string {
   const n = (k: string) => (typeof d[k] === "number" ? String(d[k]) : "0");
-  const parts = [`plan: ${n("ready")} ready, ${n("future")} future, ${n("planned")} planned, ${n("unmet")} unmet, ${n("blocked")} blocked`];
+  const parts = [`plan: ${n("ready")} ready, ${n("starting")} starting, ${n("planned")} planned, ${n("unmet")} unmet, ${n("blocked")} blocked`];
   if (d.probe === true) parts.push("probe: one host to re-observe capacity no expected host fits");
   const expected = d.expected == null ? undefined : obj(d.expected);
   if (expected) {
