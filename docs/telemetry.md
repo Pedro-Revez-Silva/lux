@@ -145,15 +145,19 @@ stops the hosts the plan, warm or `--min` wanted), `quota` (the tenant's
 host quota is reached) or `no_fit` (unmet Runs that no new host fits). It
 is not written while unmet Runs wait for a probe or bootstrap host of the
 current template that is still starting: the pass is waiting, not blocked.
-For `max` and `quota`,
-`wanted` is how many hosts the pool asked for. It
+For `max` and `quota`, `wanted` is how many hosts the pool asked for. It
 carries `waiting`, `total`, `max` and the same plan fields as
 `pool.scale_up` (`ready` through `omitted`). It records a state, not each
-pass: a pool that stays stuck writes it once, and again only when why it
-is stuck changes (`cause`, `unmet`, `blocked`, `planned`, `max`, `expected`,
-`unknown`, or the deficits' Runs and blockers) or after a scale-up. The
-usage-derived fields (`ready`, `starting`, `exhausted`, `ineligible`,
-`omitted`, `waiting`, `total`, `wanted`) are those of the pass that wrote the row.
+pass. For `max` and `quota`, only `cause` and `max` distinguish states;
+changes to queue size, fit or expected capacity do not write another row.
+For `no_fit`, identity also includes `unmet`, `blocked`, `planned`,
+`expected`, `unknown`, and the deficits' Runs and blockers. A scale-up ends
+the state. Evidence values are those of the pass that wrote the row, not
+live usage. A state is recorded again whenever its last record falls
+outside the latest 32 pool events; more than 32 events per pass can make
+it repeat each pass. Clearing demand without a scale-up does not reset
+this bounded event lookup, and a folded scale-up retains its original
+position in the stream.
 
 A blocker is either a resource, with `resource` (`cpus`, `memory`, `disk`
 or `runs`), `requested`, `used`, `capacity` and `available`

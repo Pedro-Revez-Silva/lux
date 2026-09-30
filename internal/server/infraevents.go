@@ -235,8 +235,8 @@ var (
 )
 
 // transitionWindow is how many of an owner's latest events a transition
-// lookup reads: a state whose latest record is older than that is recorded
-// again once, which is still accurate.
+// lookup reads: a state is recorded again whenever its latest record falls
+// outside the window; a pool busier than the window per pass repeats each pass.
 const transitionWindow = 4 * foldWindow
 
 // transition is an event type that records a state, not an occurrence.

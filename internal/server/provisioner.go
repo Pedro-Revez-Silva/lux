@@ -377,8 +377,13 @@ func (s *Server) scaleBlocked(ctx context.Context, pl poolRow, st *poolState, ca
 	if cause != causeNoFit {
 		d["wanted"] = wanted
 	}
+	tr := scaleBlockedEvent
+	if cause == causeMax || cause == causeQuota {
+		// At a fleet cap, the queue's size and fit do not change the cause.
+		tr.volatile = slices.Concat(tr.volatile, []string{"planned", "unmet", "blocked", "deficits", "expected", "unknown"})
+	}
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return transitionEvent(ctx, tx, poolEvents, pl.ID, scaleBlockedEvent, d)
+		return transitionEvent(ctx, tx, poolEvents, pl.ID, tr, d)
 	}); err != nil {
 		s.log.Warn("recording a blocked scale-up", "pool", pl.Name, "err", err)
 	}

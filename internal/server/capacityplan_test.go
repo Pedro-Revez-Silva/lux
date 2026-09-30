@@ -647,6 +647,19 @@ func TestCapacityReconcileScaleBlockedCause(t *testing.T) {
 			if d["cause"] != tc.cause || d["wanted"] != tc.wanted || d["planned"] != 20.0 || d["unmet"] != 0.0 {
 				t.Fatalf("scale-blocked %+v, want cause %s wanted %v", d, tc.cause, tc.wanted)
 			}
+			// Backlog size and fit change, but the cap remains the cause.
+			for i := range 4 {
+				execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, pool_id, spec, state)
+					VALUES ($1, 't1', 'pool1', '{"resources":{"cpus":1},"placement":{"pool":"burst"}}', 'provisioning')`, fmt.Sprintf("arrival%d", i))
+				planningTick(t, s, pl, p, false)
+			}
+			execSQL(t, s, ctx, `UPDATE runs SET spec = '{"resources":{"cpus":1},"placement":{"pool":"burst","requires":{"arch":"missing"}}}' WHERE id = 'arrival0'`)
+			planningTick(t, s, pl, p, false)
+			execSQL(t, s, ctx, `UPDATE runs SET cancel_requested = true WHERE id LIKE 'arrival%'`)
+			planningTick(t, s, pl, p, false)
+			if evs := events(t, s, evScaleBlocked); len(evs) != 1 {
+				t.Fatalf("moving backlog wrote %d blocked rows for %s, want one", len(evs), tc.cause)
+			}
 		})
 	}
 }
