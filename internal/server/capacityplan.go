@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -167,15 +166,14 @@ type planBlocker struct {
 func diagnosticBlockers(blockers []fitBlocker) []planBlocker {
 	out := make([]planBlocker, 0, len(blockers))
 	for _, b := range blockers {
-		if b.Resource != "" {
+		switch b.Kind {
+		case kindResource:
 			out = append(out, planBlocker{Resource: b.Resource, Requested: &b.Requested, Used: &b.Used, Capacity: &b.Capacity, Available: &b.Available})
-			continue
+		case kindLabel:
+			out = append(out, planBlocker{Reason: "required labels do not match"})
+		default:
+			out = append(out, planBlocker{Reason: b.Reason})
 		}
-		reason := b.Reason
-		if strings.HasPrefix(reason, "requires label ") {
-			reason = "required labels do not match"
-		}
-		out = append(out, planBlocker{Reason: reason})
 	}
 	return out
 }

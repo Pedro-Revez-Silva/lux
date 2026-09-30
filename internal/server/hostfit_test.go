@@ -25,36 +25,36 @@ func TestHostFitConstraints(t *testing.T) {
 		want   []fitBlocker
 	}{
 		{"fits", func(r *pendingRun, h *candidateHost) {}, nil},
-		{"disconnected", func(r *pendingRun, h *candidateHost) { h.Connected = false }, []fitBlocker{{Reason: "host is not connected"}}},
-		{"pool identity", func(r *pendingRun, h *candidateHost) { h.PoolID = "other"; h.Pool = "pool" }, []fitBlocker{{Reason: "host is not in its pool pool"}}},
-		{"unbound pool", func(r *pendingRun, h *candidateHost) { r.PoolID = nil }, []fitBlocker{{Reason: "host is not in its pool pool"}}},
-		{"retired", func(r *pendingRun, h *candidateHost) { h.Retired = true }, []fitBlocker{{Reason: "its pool was removed"}}},
-		{"foreign tenant", func(r *pendingRun, h *candidateHost) { h.TenantID = new("t2"); h.Shared = true }, []fitBlocker{{Reason: "host belongs to another tenant"}}},
+		{"disconnected", func(r *pendingRun, h *candidateHost) { h.Connected = false }, []fitBlocker{{Kind: kindConnected, Reason: "host is not connected"}}},
+		{"pool identity", func(r *pendingRun, h *candidateHost) { h.PoolID = "other"; h.Pool = "pool" }, []fitBlocker{{Kind: kindScope, Reason: "host is not in its pool pool"}}},
+		{"unbound pool", func(r *pendingRun, h *candidateHost) { r.PoolID = nil }, []fitBlocker{{Kind: kindScope, Reason: "host is not in its pool pool"}}},
+		{"retired", func(r *pendingRun, h *candidateHost) { h.Retired = true }, []fitBlocker{{Kind: kindScope, Reason: "its pool was removed"}}},
+		{"foreign tenant", func(r *pendingRun, h *candidateHost) { h.TenantID = new("t2"); h.Shared = true }, []fitBlocker{{Kind: kindScope, Reason: "host belongs to another tenant"}}},
 		{"own tenant", func(r *pendingRun, h *candidateHost) { h.TenantID = new("t1") }, nil},
-		{"exclusive occupied", func(r *pendingRun, h *candidateHost) { h.Tenants = []string{"t1", "t2"} }, []fitBlocker{{Reason: "non-shared host is used by another tenant"}}},
+		{"exclusive occupied", func(r *pendingRun, h *candidateHost) { h.Tenants = []string{"t1", "t2"} }, []fitBlocker{{Kind: kindScope, Reason: "non-shared host is used by another tenant"}}},
 		{"exclusive same tenant", func(r *pendingRun, h *candidateHost) { h.Tenants = []string{"t1"} }, nil},
 		{"shared", func(r *pendingRun, h *candidateHost) { h.Shared = true; h.Tenants = []string{"t2"} }, nil},
 		{"labels deterministic", func(r *pendingRun, h *candidateHost) {
 			r.Spec.Placement.Requires = map[string]string{"z": "v", "a": "v"}
-		}, []fitBlocker{{Reason: `requires label a=v (host has "")`}, {Reason: `requires label z=v (host has "")`}}},
+		}, []fitBlocker{{Kind: kindLabel, Reason: `requires label a=v (host has "")`}, {Kind: kindLabel, Reason: `requires label z=v (host has "")`}}},
 		{"labels match", func(r *pendingRun, h *candidateHost) {
 			r.Spec.Placement.Requires = map[string]string{"arch": "arm64"}
 			h.Labels = map[string]string{"arch": "arm64"}
 		}, nil},
-		{"nested", func(r *pendingRun, h *candidateHost) { r.Spec.Sandbox.NestedContainers = true }, []fitBlocker{{Reason: "host does not support nested containers"}}},
+		{"nested", func(r *pendingRun, h *candidateHost) { r.Spec.Sandbox.NestedContainers = true }, []fitBlocker{{Kind: kindNested, Reason: "host does not support nested containers"}}},
 		{"nested supported", func(r *pendingRun, h *candidateHost) {
 			r.Spec.Sandbox.NestedContainers = true
 			h.Labels = map[string]string{"nested": "true"}
 		}, nil},
-		{"chosen mismatch", func(r *pendingRun, h *candidateHost) { r.PlaceOn = "other" }, []fitBlocker{{Reason: "waiting for its chosen host other"}}},
+		{"chosen mismatch", func(r *pendingRun, h *candidateHost) { r.PlaceOn = "other" }, []fitBlocker{{Kind: kindScope, Reason: "waiting for its chosen host other"}}},
 		{"chosen overrides placement", func(r *pendingRun, h *candidateHost) {
 			r.PlaceOn = h.ID
 			r.PoolID = nil
 			h.Retired = true
 			r.Spec.Placement.Requires = map[string]string{"arch": "missing"}
 		}, nil},
-		{"chosen preserves isolation", func(r *pendingRun, h *candidateHost) { r.PlaceOn = h.ID; h.Tenants = []string{"t2"} }, []fitBlocker{{Reason: "non-shared host is used by another tenant"}}},
-		{"chosen preserves nested", func(r *pendingRun, h *candidateHost) { r.PlaceOn = h.ID; r.Spec.Sandbox.NestedContainers = true }, []fitBlocker{{Reason: "host does not support nested containers"}}},
+		{"chosen preserves isolation", func(r *pendingRun, h *candidateHost) { r.PlaceOn = h.ID; h.Tenants = []string{"t2"} }, []fitBlocker{{Kind: kindScope, Reason: "non-shared host is used by another tenant"}}},
+		{"chosen preserves nested", func(r *pendingRun, h *candidateHost) { r.PlaceOn = h.ID; r.Spec.Sandbox.NestedContainers = true }, []fitBlocker{{Kind: kindNested, Reason: "host does not support nested containers"}}},
 		{"unlimited", func(r *pendingRun, h *candidateHost) {
 			h.Capacity = proto.Capacity{}
 			h.UsedCPUs = 100
@@ -88,33 +88,20 @@ func TestHostFitResourceIdentityAndReservation(t *testing.T) {
 	r, h := fitFixture()
 	h.UsedCPUs, h.UsedMem, h.UsedDisk, h.UsedRuns = 2, 10000, 5000, 2
 	want := []fitBlocker{
-		{Resource: "cpus", Requested: 2.5, Used: 2, Capacity: 4, Available: 2},
-		{Resource: "memory", Requested: 8192, Used: 10000, Capacity: 16384, Available: 6384},
-		{Resource: "disk", Requested: 4096, Used: 5000, Capacity: 8192, Available: 3192},
-		{Resource: "runs", Requested: 1, Used: 2, Capacity: 2, Available: 0},
+		{Kind: kindResource, Resource: "cpus", Requested: 2.5, Used: 2, Capacity: 4, Available: 2},
+		{Kind: kindResource, Resource: "memory", Requested: 8192, Used: 10000, Capacity: 16384, Available: 6384},
+		{Kind: kindResource, Resource: "disk", Requested: 4096, Used: 5000, Capacity: 8192, Available: 3192},
+		{Kind: kindResource, Resource: "runs", Requested: 1, Used: 2, Capacity: 2, Available: 0},
 	}
 	if got := hostFit(r, h); !reflect.DeepEqual(got, want) {
 		t.Fatalf("blockers = %+v, want %+v", got, want)
-	}
-	for _, b := range want {
-		encoded, err := json.Marshal(b)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var decoded fitBlocker
-		if err := json.Unmarshal(encoded, &decoded); err != nil {
-			t.Fatal(err)
-		}
-		if decoded != b {
-			t.Fatalf("JSON round trip = %+v, want %+v", decoded, b)
-		}
 	}
 	r, h = fitFixture()
 	reserveHost(h, r)
 	if h.UsedCPUs != 2.5 || h.UsedMem != 8192 || h.UsedDisk != 4096 || h.UsedRuns != 1 || !reflect.DeepEqual(h.Tenants, []string{"t1"}) {
 		t.Fatalf("reservation = %+v", h)
 	}
-	if got := hostFit(r, h); !reflect.DeepEqual(got, []fitBlocker{{Resource: "cpus", Requested: 2.5, Used: 2.5, Capacity: 4, Available: 1.5}}) {
+	if got := hostFit(r, h); !reflect.DeepEqual(got, []fitBlocker{{Kind: kindResource, Resource: "cpus", Requested: 2.5, Used: 2.5, Capacity: 4, Available: 1.5}}) {
 		t.Fatalf("second fit = %+v", got)
 	}
 	r.TenantID = "t2"
@@ -144,26 +131,43 @@ func TestWaitCapacityReason(t *testing.T) {
 	if got := w.reason(r); got != "" {
 		t.Fatalf("no hosts: %q", got)
 	}
-	cpu := []fitBlocker{{Resource: "cpus", Requested: 2.5, Used: 3, Capacity: 4, Available: 1}}
+	cpu := []fitBlocker{{Kind: kindResource, Resource: "cpus", Requested: 2.5, Used: 3, Capacity: 4, Available: 1}}
 	w.add(cpu)
 	w.add(cpu)
-	w.add([]fitBlocker{{Resource: "cpus", Requested: 2.5, Used: 2, Capacity: 4, Available: 2}, {Resource: "memory"}})
-	w.add([]fitBlocker{{Reason: `requires label arch=arm64 (host has "amd64")`}})
+	w.add([]fitBlocker{{Kind: kindResource, Resource: "cpus", Requested: 2.5, Used: 2, Capacity: 4, Available: 2}, {Kind: kindResource, Resource: "memory"}})
+	w.add([]fitBlocker{{Kind: kindLabel, Reason: `requires label arch=arm64 (host has "amd64")`}})
 	// Hosts the Run could not use anyway are not counted, nor are hosts this
 	// luxd does not reach (another may: the reason must not depend on which
 	// luxd wrote it).
-	w.add([]fitBlocker{{Reason: "host is not connected"}, {Resource: "cpus"}})
-	w.add([]fitBlocker{{Reason: "host belongs to another tenant"}, {Resource: "cpus"}})
-	w.add([]fitBlocker{{Reason: "host is not in its pool pool"}})
-	w.add([]fitBlocker{{Reason: "non-shared host is used by another tenant"}, {Resource: "disk"}})
+	w.add([]fitBlocker{{Kind: kindConnected, Reason: "host is not connected"}, {Kind: kindResource, Resource: "cpus"}})
+	w.add([]fitBlocker{{Kind: kindScope, Reason: "host belongs to another tenant"}, {Kind: kindResource, Resource: "cpus"}})
+	w.add([]fitBlocker{{Kind: kindScope, Reason: "host is not in its pool pool"}})
+	w.add([]fitBlocker{{Kind: kindScope, Reason: "non-shared host is used by another tenant"}, {Kind: kindResource, Resource: "disk"}})
 	want := "waiting for capacity: 3 hosts in its pool lack cpus (requested 2.5), 1 lacks memory (requested 16.0 GiB), 1 lacks its required labels"
 	if got := w.reason(r); got != want {
 		t.Fatalf("reason\n got %q\nwant %q", got, want)
 	}
 	r.PlaceOn = "h"
 	var chosen waitCapacity
-	chosen.add([]fitBlocker{{Resource: "runs"}, {Reason: "host does not support nested containers"}})
+	chosen.add([]fitBlocker{{Kind: kindResource, Resource: "runs"}, {Kind: kindNested, Reason: "host does not support nested containers"}})
 	if got := chosen.reason(r); got != "waiting for capacity: its chosen host is at its Run limit, does not support nested containers" {
 		t.Fatalf("chosen reason %q", got)
+	}
+}
+
+// Consumers classify blockers by Kind, whatever hostFit's wording: a label
+// mismatch is counted and redacted, a scope blocker rules the host out.
+func TestBlockerKindsNotText(t *testing.T) {
+	r, _ := fitFixture()
+	var w waitCapacity
+	w.add([]fitBlocker{{Kind: kindLabel, Reason: "label x differs (host has secret)"}})
+	w.add([]fitBlocker{{Kind: kindNested, Reason: "no nesting"}})
+	w.add([]fitBlocker{{Kind: kindScope, Reason: "requires label a=b"}, {Kind: kindResource, Resource: "cpus"}})
+	if got, want := w.reason(r), "waiting for capacity: 1 host in its pool lacks its required labels, 1 does not support nested containers"; got != want {
+		t.Fatalf("reason\n got %q\nwant %q", got, want)
+	}
+	got := diagnosticBlockers([]fitBlocker{{Kind: kindLabel, Reason: "label x differs (host has secret)"}, {Kind: kindScope, Reason: "host belongs to another tenant"}})
+	if want := []planBlocker{{Reason: "required labels do not match"}, {Reason: "host belongs to another tenant"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("diagnostic blockers %+v, want %+v", got, want)
 	}
 }

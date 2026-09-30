@@ -6,41 +6,61 @@ import (
 	"strings"
 )
 
-// Resource values use CPUs, bytes (memory and disk), or placement counts (runs).
+// Resource values use CPUs, bytes (memory and disk), or placement counts
+// (runs). Kind classifies it for its consumers (the wait reason, planner
+// evidence), which never read Reason's text to tell kinds apart; events
+// carry planBlocker, not this.
 type fitBlocker struct {
-	Resource  string  `json:"resource,omitempty"`
-	Requested float64 `json:"requested,omitempty"`
-	Used      float64 `json:"used,omitempty"`
-	Capacity  float64 `json:"capacity,omitempty"`
-	Available float64 `json:"available,omitempty"`
-	Reason    string  `json:"reason,omitempty"`
+	Kind      blockerKind
+	Resource  string
+	Requested float64
+	Used      float64
+	Capacity  float64
+	Available float64
+	Reason    string
 }
+
+type blockerKind int
+
+const (
+	// kindOther: a planner prerequisite (secrets, snapshot, chosen host).
+	kindOther blockerKind = iota
+	kindResource
+	kindLabel // Reason names the label and both values: never exported.
+	kindNested
+	kindConnected
+	// kindScope: the host is not the Run's (pool, removed pool, tenant,
+	// sharing, another chosen host).
+	kindScope
+)
 
 // hostFit is independent of snapshot locality and scheduler affinity. A chosen
 // host bypasses pool and required labels, but not isolation or nested support.
 func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 	var blockers []fitBlocker
-	constraint := func(reason string) { blockers = append(blockers, fitBlocker{Reason: reason}) }
+	constraint := func(kind blockerKind, reason string) {
+		blockers = append(blockers, fitBlocker{Kind: kind, Reason: reason})
+	}
 	if !h.Connected {
-		constraint("host is not connected")
+		constraint(kindConnected, "host is not connected")
 	}
 	chosen := r.PlaceOn != ""
 	if chosen && h.ID != r.PlaceOn {
-		constraint("waiting for its chosen host " + r.PlaceOn)
+		constraint(kindScope, "waiting for its chosen host "+r.PlaceOn)
 	}
 	if !chosen {
 		if r.PoolID == nil || h.PoolID != *r.PoolID {
-			constraint("host is not in its pool " + r.Spec.Placement.Pool)
+			constraint(kindScope, "host is not in its pool "+r.Spec.Placement.Pool)
 		}
 		if h.Retired {
-			constraint("its pool was removed")
+			constraint(kindScope, "its pool was removed")
 		}
 	}
 	if h.TenantID != nil && *h.TenantID != r.TenantID {
-		constraint("host belongs to another tenant")
+		constraint(kindScope, "host belongs to another tenant")
 	}
 	if h.TenantID == nil && !h.Shared && slices.ContainsFunc(h.Tenants, func(t string) bool { return t != r.TenantID }) {
-		constraint("non-shared host is used by another tenant")
+		constraint(kindScope, "non-shared host is used by another tenant")
 	}
 	if !chosen {
 		keys := make([]string, 0, len(r.Spec.Placement.Requires))
@@ -51,17 +71,17 @@ func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 		for _, k := range keys {
 			v := r.Spec.Placement.Requires[k]
 			if h.Labels[k] != v {
-				constraint(fmt.Sprintf("requires label %s=%s (host has %q)", k, v, h.Labels[k]))
+				constraint(kindLabel, fmt.Sprintf("requires label %s=%s (host has %q)", k, v, h.Labels[k]))
 			}
 		}
 	}
 	if r.Spec.Sandbox.NestedContainers && h.Labels["nested"] != "true" {
-		constraint("host does not support nested containers")
+		constraint(kindNested, "host does not support nested containers")
 	}
 	res := r.Spec.Resources
 	resource := func(name string, requested, used, capacity float64, blocked bool) {
 		if blocked {
-			blockers = append(blockers, fitBlocker{Resource: name, Requested: requested, Used: used, Capacity: capacity, Available: capacity - used})
+			blockers = append(blockers, fitBlocker{Kind: kindResource, Resource: name, Requested: requested, Used: used, Capacity: capacity, Available: capacity - used})
 		}
 	}
 	resource("cpus", res.CPUs, h.UsedCPUs, h.Capacity.CPUs,
@@ -104,12 +124,13 @@ var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested"
 func (w *waitCapacity) add(blockers []fitBlocker) {
 	var hit [len(waitKinds)]bool
 	for _, b := range blockers {
-		kind := b.Resource
-		switch {
-		case kind != "":
-		case strings.HasPrefix(b.Reason, "requires label "):
+		var kind string
+		switch b.Kind {
+		case kindResource:
+			kind = b.Resource
+		case kindLabel:
 			kind = "labels"
-		case b.Reason == "host does not support nested containers":
+		case kindNested:
 			kind = "nested"
 		default:
 			return
