@@ -116,6 +116,12 @@ uv run python run_tests.py --real-ec2        # EC2 suites against real AWS (nigh
 uv run pytest test_harness_config.py         # the harness's own config; no Docker (make harness-unit)
 ```
 
+Your own lux settings never reach the harness's `lux` and `luxd`: every
+`LUX_*` variable is dropped except the harness's `LUX_TEST_*` and
+`LUX_DEBUG`, and so are your CLI config (`XDG_CONFIG_HOME`) and any
+`/etc/lux/luxd.toml`. A `LUX_TENANT` pointing at your deployment, say,
+changes nothing in a test.
+
 Each invocation:
 
 1. Builds every `cmd/<name>` into `bin/` (static) and the fake agent's

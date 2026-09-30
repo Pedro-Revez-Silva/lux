@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from env import BIN_DIR, Host, TestEnvironment, wait_until
+from env import BIN_DIR, Host, TestEnvironment, clean_environ, wait_until
 
 
 def _require(env: TestEnvironment, *binaries: str) -> None:
@@ -64,7 +64,7 @@ class Lux:
         self.env, self.api_key, self.tenant_id = env, api_key, tenant_id
 
     def _env(self) -> dict:
-        return {**os.environ, "LUX_URL": self.env.luxd_url, "LUX_API_KEY": self.api_key, "HOME": "/nonexistent"}
+        return {**clean_environ(), "LUX_URL": self.env.luxd_url, "LUX_API_KEY": self.api_key, "HOME": "/nonexistent"}
 
     def run(self, *args: str, check: bool = True, input: str | None = None, timeout: float = 120) -> subprocess.CompletedProcess:
         p = subprocess.run([str(BIN_DIR / "lux"), *args], env=self._env(), input=input,
