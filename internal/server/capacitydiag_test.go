@@ -289,6 +289,31 @@ func TestHostDecisionIdleSweepOncePerLease(t *testing.T) {
 	}
 }
 
+// provision() reads decisions from the database again once it re-takes a
+// provisioner lease another process held in between.
+func TestHostDecisionIdleSweepAfterLeaseLoss(t *testing.T) {
+	s, _, p := planningFixture(t, 0)
+	ctx := context.Background()
+	s.cfg.Providers = map[string]Provider{"ec2": p}
+	observePlanningHost(t, s, "h", "ready", proto.Capacity{CPUs: 1}, map[string]string{})
+	provision := func() {
+		t.Helper()
+		if err := s.provision(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	provision()
+	execSQL(t, s, ctx, `UPDATE leases SET holder='other', expires_at=now()+interval '1 minute' WHERE name='provisioner'`)
+	provision()
+	insertDecision(t, s, "h", "blocked")
+	execSQL(t, s, ctx, `UPDATE leases SET expires_at=now()-interval '1 second' WHERE name='provisioner'`)
+	provision()
+	got := hostDecisions(t, s, "h")
+	if len(got) != 2 || !reflect.DeepEqual(got[1], map[string]any{"pool": "burst", "stage": "ready", "decision": "idle"}) {
+		t.Fatalf("decisions %+v, want the other holder's blocked, then idle", got)
+	}
+}
+
 // Retracting a verdict is scoped to the pool that made it, stages a
 // provisioning host as starting, and leaves terminated hosts alone.
 func TestHostDecisionIdleScope(t *testing.T) {

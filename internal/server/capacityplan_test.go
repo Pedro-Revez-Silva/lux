@@ -645,6 +645,19 @@ func TestCapacityReconcileScaleBlockedNoFitRotatingQueue(t *testing.T) {
 	}
 }
 
+// capFixture: 20 one-slot Runs, new hosts known to take 8, and one full
+// ready host of an older template.
+func capFixture(t *testing.T) (*Server, poolRow, *planningProvider) {
+	t.Helper()
+	s, pl, p := planningFixture(t, 20)
+	observePlanningHost(t, s, "history", "terminated", proto.Capacity{Runs: 8}, map[string]string{})
+	observePlanningHost(t, s, "full", "ready", proto.Capacity{Runs: 1}, map[string]string{})
+	// An older template's host: not an observation of new hosts.
+	execSQL(t, s, context.Background(), `UPDATE hosts SET launch_template='{"version":0}' WHERE id='full'`)
+	livePlacement(t, s, "full", `{"cpus":1}`)
+	return s, pl, p
+}
+
 // --max and the tenant's host quota stopping a scale-up are recorded once,
 // with how many hosts were wanted.
 func TestCapacityReconcileScaleBlockedCause(t *testing.T) {
@@ -653,13 +666,8 @@ func TestCapacityReconcileScaleBlockedCause(t *testing.T) {
 		wanted float64
 	}{{"max", 3}, {"quota", 3}} {
 		t.Run(tc.cause, func(t *testing.T) {
-			s, pl, p := planningFixture(t, 20)
+			s, pl, p := capFixture(t)
 			ctx := context.Background()
-			observePlanningHost(t, s, "history", "terminated", proto.Capacity{Runs: 8}, map[string]string{})
-			observePlanningHost(t, s, "full", "ready", proto.Capacity{Runs: 1}, map[string]string{})
-			// An older template's host: not an observation of new hosts.
-			execSQL(t, s, ctx, `UPDATE hosts SET launch_template='{"version":0}' WHERE id='full'`)
-			livePlacement(t, s, "full", `{"cpus":1}`)
 			if tc.cause == "max" {
 				pl.Max = 1
 			} else {
@@ -676,8 +684,13 @@ func TestCapacityReconcileScaleBlockedCause(t *testing.T) {
 				t.Fatalf("scale-blocked rows %+v, want one", evs)
 			}
 			d := evs[0].Data
-			if d["cause"] != tc.cause || d["wanted"] != tc.wanted || d["planned"] != 20.0 || d["unmet"] != 0.0 {
-				t.Fatalf("scale-blocked %+v, want cause %s wanted %v", d, tc.cause, tc.wanted)
+			delete(d, "exhausted")
+			want := map[string]any{"cause": tc.cause, "wanted": tc.wanted, "waiting": 20.0, "total": 1.0, "max": float64(pl.Max),
+				"ready": 0.0, "starting": 0.0, "planned": 20.0, "unmet": 0.0, "blocked": 0.0, "unknown": "",
+				"expected": map[string]any{"capacity": map[string]any{"cpus": 0.0, "memory": 0.0, "disk": 0.0, "runs": 8.0}, "observations": 1.0},
+				"deficits": []any{}, "ineligible": []any{}, "omitted": 0.0}
+			if !reflect.DeepEqual(d, want) {
+				t.Fatalf("scale-blocked\n got %v\nwant %v", d, want)
 			}
 			// Backlog size and fit change, but the cap remains the cause.
 			for i := range 4 {
@@ -693,6 +706,69 @@ func TestCapacityReconcileScaleBlockedCause(t *testing.T) {
 				t.Fatalf("moving backlog wrote %d blocked rows for %s, want one", len(evs), tc.cause)
 			}
 		})
+	}
+}
+
+// A scale-up ends a blocked state: the same cap on the same queue after one
+// is recorded again. A changed cause alone is a new state too.
+func TestCapacityReconcileScaleBlockedEnds(t *testing.T) {
+	t.Run("by a scale-up", func(t *testing.T) {
+		s, pl, p := capFixture(t)
+		for _, max := range []int{1, 2, 1, 1} {
+			pl.Max = max
+			planningTick(t, s, pl, p, false)
+		}
+		evs := events(t, s, evScaleBlocked)
+		if p.calls != 1 || len(evs) != 2 || evs[0].Data["cause"] != "max" || evs[1].Data["cause"] != "max" {
+			t.Fatalf("launched %d, scale-blocked %+v, want two max rows around one launch", p.calls, evs)
+		}
+	})
+	t.Run("by its cause", func(t *testing.T) {
+		s, pl, p := capFixture(t)
+		ctx := context.Background()
+		// --max 2 leaves room for one host, and the quota refuses it.
+		pl.Max = 2
+		execSQL(t, s, ctx, `UPDATE tenants SET max_hosts=1 WHERE id='t1'`)
+		planningTick(t, s, pl, p, false)
+		// A second full host: --max now stops it first; only the cause changed.
+		execSQL(t, s, ctx, `UPDATE tenants SET max_hosts=0 WHERE id='t1'`)
+		observePlanningHost(t, s, "full2", "ready", proto.Capacity{Runs: 1}, map[string]string{})
+		execSQL(t, s, ctx, `UPDATE hosts SET launch_template='{"version":0}' WHERE id='full2'`)
+		livePlacement(t, s, "full2", `{"cpus":1}`)
+		planningTick(t, s, pl, p, false)
+		evs := events(t, s, evScaleBlocked)
+		if p.calls != 0 || len(evs) != 2 || evs[0].Data["cause"] != "quota" || evs[1].Data["cause"] != "max" {
+			t.Fatalf("launched %d, scale-blocked %+v, want quota then max", p.calls, evs)
+		}
+	})
+}
+
+// A pool above a lowered --max with nothing wanted is not blocked.
+func TestCapacityReconcileScaleBlockedNothingWanted(t *testing.T) {
+	s, pl, p := planningFixture(t, 0)
+	for _, id := range []string{"a", "b", "c"} {
+		observePlanningHost(t, s, id, "ready", proto.Capacity{CPUs: 1}, map[string]string{})
+	}
+	pl.Max = 1
+	planningTick(t, s, pl, p, false)
+	if evs := events(t, s, evScaleBlocked); p.calls != 0 || len(evs) != 0 {
+		t.Fatalf("launched %d, scale-blocked %+v, want none", p.calls, evs)
+	}
+}
+
+// A warm start in flight is not a start that will serve an unfittable Run.
+func TestCapacityReconcileScaleBlockedBesideWarmStart(t *testing.T) {
+	s, pl, p := planningFixture(t, 1)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET spec='{"resources":{"cpus":4},"placement":{"pool":"burst"}}', updated_at=now()-interval '1 hour'`)
+	observePlanningHost(t, s, "old", "terminated", proto.Capacity{CPUs: 2}, map[string]string{})
+	pl.Warm = 1
+	for range 2 {
+		planningTick(t, s, pl, p, false)
+	}
+	evs := events(t, s, evScaleBlocked)
+	if p.calls != 1 || len(evs) != 1 || evs[0].Data["cause"] != "no_fit" {
+		t.Fatalf("launched %d, scale-blocked %+v, want one warm start and one no_fit row", p.calls, evs)
 	}
 }
 
