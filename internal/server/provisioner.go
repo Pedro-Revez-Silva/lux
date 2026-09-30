@@ -118,7 +118,11 @@ func (s *Server) provision(ctx context.Context) error {
 	// across provider calls. One luxd reconciles at a time; another takes
 	// over when the lease lapses.
 	if ok, err := s.provisionLease(ctx); err != nil || !ok {
+		s.leaseHeld = false
 		return err
+	}
+	if !s.leaseHeld {
+		s.tookProvisionLease()
 	}
 	var pools []poolRow
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -146,6 +150,7 @@ func (s *Server) provision(ctx context.Context) error {
 		}
 		// Provider calls can be slow: still the provisioner?
 		if ok, err := s.provisionLease(ctx); err != nil || !ok {
+			s.leaseHeld = false
 			return err
 		}
 		if err := s.reconcilePool(ctx, prov, pl, checkAlive); err != nil {
@@ -153,6 +158,14 @@ func (s *Server) provision(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// tookProvisionLease: another provisioner may have recorded host decisions
+// while this process did not hold the lease, so each pool's are read from
+// the database once again (idleDecisions).
+func (s *Server) tookProvisionLease() {
+	s.leaseHeld = true
+	s.swept, s.decided = nil, nil
 }
 
 // poolState is what a pool has and needs, counted in one transaction.
@@ -400,6 +413,15 @@ func (s *Server) recordHostDecisions(ctx context.Context, pl poolRow, decisions 
 			return hostDecisionEvent(ctx, tx, id, data)
 		}); err != nil {
 			s.log.Warn("recording a capacity decision", "host", id, "err", err)
+			continue
+		}
+		// idleDecisions retracts what this set holds once demand leaves.
+		if decided := s.decided[pl.ID]; decided != nil {
+			if data.Decision == "idle" {
+				delete(decided, id)
+			} else {
+				decided[id] = true
+			}
 		}
 	}
 }

@@ -135,6 +135,14 @@ type Server struct {
 	// decisionCursor: per pool id, the last host whose capacity decision
 	// the provisioner recorded (recordHostDecisions); provisioner goroutine only.
 	decisionCursor map[string]string
+	// decided: per pool id, the hosts whose latest capacity decision this
+	// process recorded as not idle, which a pass that no longer considers
+	// them retracts (idleDecisions). swept: pools whose hosts' decisions
+	// were read from the database once since this process last took the
+	// provisioner lease. Provisioner goroutine only.
+	decided   map[string]map[string]bool
+	swept     map[string]bool
+	leaseHeld bool
 	// deployment identifies this lux database in provider tags, so two
 	// deployments sharing a cloud account never take each other's
 	// instances for orphans (read by the provisioner).

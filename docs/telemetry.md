@@ -168,7 +168,9 @@ written only when it differs from that host's previous one: `pool`;
 `reserved` (it holds simulated Runs and every Run tried on it fit),
 `exhausted` (it holds some, and at least one other Run did not fit),
 `blocked` (it holds none), `idle` (no waiting Run considered it this
-pass, after an earlier decision that was not `idle`) or `ineligible` (with
+pass, after an earlier decision that was not `idle`: the provisioner keeps
+the hosts it decided on in memory, and reads a previous provisioner's
+decisions once per pool when it takes over) or `ineligible` (with
 `reason`, as above); and `blockers` for `exhausted` and `blocked`: those of
 the first Run that did not fit, in queue order. A pass records at most 32
 hosts per pool, in host id order starting after the last host the previous

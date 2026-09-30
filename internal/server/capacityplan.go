@@ -78,27 +78,72 @@ func (s *Server) ineligibleReadyHosts(ctx context.Context, tx pgx.Tx, pl poolRow
 
 // idleDecisions adds decision "idle" for the pool's live hosts this plan did
 // not consider whose latest decision says otherwise, so a verdict from past
-// demand does not stay the latest. The lookup reads each host's latest
-// events through its (host_id, id) index, bounded like hostDecisionEvent's.
+// demand does not stay the latest. Those hosts are the ones this process
+// recorded a non-idle decision for (s.decided, kept by recordHostDecisions);
+// the first pass per pool since the process took the provisioner lease also
+// reads them from the database, retracting a previous provisioner's
+// verdicts. A decision another process records later is not retracted by
+// this one. The idle stage is the host's state, provisioning as starting.
 func (s *Server) idleDecisions(ctx context.Context, tx pgx.Tx, pl poolRow, plan *capacityPlan) error {
-	rows, err := tx.Query(ctx, `SELECT h.id, CASE h.state WHEN 'provisioning' THEN 'starting' ELSE h.state END FROM hosts h
-		WHERE h.pool_id = $1 AND h.tenant_id IS NOT DISTINCT FROM $2::text AND h.state <> 'terminated'
-		  AND (SELECT l.data->>'decision' FROM (SELECT e.id, e.type, e.data FROM host_events e
-				WHERE e.host_id = h.id AND (e.host_id, e.id) <= (h.id, 9223372036854775807)
-				ORDER BY e.host_id DESC, e.id DESC LIMIT $4) l
-			WHERE l.type = $3 ORDER BY l.id DESC LIMIT 1) <> 'idle'`,
-		pl.ID, pl.TenantID, evCapacityDecision, transitionWindow)
+	if s.decided == nil {
+		s.decided = map[string]map[string]bool{}
+	}
+	if s.decided[pl.ID] == nil {
+		s.decided[pl.ID] = map[string]bool{}
+	}
+	decided := s.decided[pl.ID]
+	if !s.swept[pl.ID] {
+		rows, err := tx.Query(ctx, `SELECT h.id FROM hosts h
+			WHERE h.pool_id = $1 AND h.tenant_id IS NOT DISTINCT FROM $2::text AND h.state <> 'terminated'
+			  AND (SELECT l.data->>'decision' FROM (SELECT e.id, e.type, e.data FROM host_events e
+					WHERE e.host_id = h.id AND (e.host_id, e.id) <= (h.id, 9223372036854775807)
+					ORDER BY e.host_id DESC, e.id DESC LIMIT $4) l
+				WHERE l.type = $3 ORDER BY l.id DESC LIMIT 1) <> 'idle'`,
+			pl.ID, pl.TenantID, evCapacityDecision, transitionWindow)
+		if err != nil {
+			return err
+		}
+		ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			decided[id] = true
+		}
+		if s.swept == nil {
+			s.swept = map[string]bool{}
+		}
+		s.swept[pl.ID] = true
+	}
+	var stale []string
+	for id := range decided {
+		if _, considered := plan.hostDecisions[id]; !considered {
+			stale = append(stale, id)
+		}
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+	rows, err := tx.Query(ctx, `SELECT id, CASE state WHEN 'provisioning' THEN 'starting' ELSE state END FROM hosts
+		WHERE id = ANY($1) AND pool_id = $2 AND tenant_id IS NOT DISTINCT FROM $3::text AND state <> 'terminated'`,
+		stale, pl.ID, pl.TenantID)
 	if err != nil {
 		return err
 	}
-	type stale struct{ ID, Stage string }
-	hosts, err := pgx.CollectRows(rows, pgx.RowToStructByPos[stale])
-	for _, h := range hosts {
-		if _, considered := plan.hostDecisions[h.ID]; !considered {
-			plan.hostDecisions[h.ID] = hostDecision{Pool: pl.Name, Stage: h.Stage, Decision: "idle"}
-		}
+	type live struct{ ID, Stage string }
+	hosts, err := pgx.CollectRows(rows, pgx.RowToStructByPos[live])
+	if err != nil {
+		return err
 	}
-	return err
+	// A host terminated or moved out of the pool has nothing to retract here.
+	for _, id := range stale {
+		delete(decided, id)
+	}
+	for _, h := range hosts {
+		decided[h.ID] = true
+		plan.hostDecisions[h.ID] = hostDecision{Pool: pl.Name, Stage: h.Stage, Decision: "idle"}
+	}
+	return nil
 }
 
 type planDeficit struct {

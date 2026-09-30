@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"testing"
@@ -247,6 +248,103 @@ func TestHostDecisionIdleOnceDemandClears(t *testing.T) {
 	if got := hostDecisions(t, s, p.hosts[0]); len(got) != 0 {
 		t.Fatalf("start decisions %+v", got)
 	}
+}
+
+// insertDecision records a host decision as another luxd's provisioner would.
+func insertDecision(t *testing.T, s *Server, host, decision string) {
+	t.Helper()
+	execSQL(t, s, context.Background(), `INSERT INTO host_events (tenant_id, host_id, type, data)
+		SELECT tenant_id, id, $2, jsonb_build_object('pool', 'burst', 'stage', 'ready', 'decision', $3::text) FROM hosts WHERE id = $1`,
+		host, evCapacityDecision, decision)
+}
+
+// This process knows which hosts it decided on. A previous provisioner's
+// verdict is read from the database on the first pass per pool and
+// retracted once; later passes with no demand read no decisions, so a verdict
+// another process writes after that is not retracted by this one: it is that
+// process's to retract.
+func TestHostDecisionIdleSweepOncePerLease(t *testing.T) {
+	s, pl, p := planningFixture(t, 0)
+	observePlanningHost(t, s, "h", "ready", proto.Capacity{CPUs: 1}, map[string]string{})
+	insertDecision(t, s, "h", "blocked")
+	planningTick(t, s, pl, p, false)
+	got := hostDecisions(t, s, "h")
+	if len(got) != 2 || !reflect.DeepEqual(got[1], map[string]any{"pool": "burst", "stage": "ready", "decision": "idle"}) {
+		t.Fatalf("decisions %+v, want the other process's blocked, then idle", got)
+	}
+	insertDecision(t, s, "h", "exhausted")
+	for range 3 {
+		planningTick(t, s, pl, p, false)
+	}
+	if got := hostDecisions(t, s, "h"); len(got) != 3 || got[2]["decision"] != "exhausted" {
+		t.Fatalf("decisions %+v, want the later external verdict left alone", got)
+	}
+	// Taking the provisioner lease again sweeps again.
+	s.tookProvisionLease()
+	planningTick(t, s, pl, p, false)
+	if got := hostDecisions(t, s, "h"); len(got) != 4 || got[3]["decision"] != "idle" {
+		t.Fatalf("decisions %+v, want idle after a new lease", got)
+	}
+}
+
+// Retracting a verdict is scoped to the pool that made it, stages a
+// provisioning host as starting, and leaves terminated hosts alone.
+func TestHostDecisionIdleScope(t *testing.T) {
+	t.Run("other pool untouched", func(t *testing.T) {
+		s, pl, p := planningFixture(t, 1)
+		ctx := context.Background()
+		execSQL(t, s, ctx, `INSERT INTO pools (id,tenant_id,name,provider,template) VALUES ('pool2','t1','other','ec2','{"version":1}')`)
+		observePlanningHost(t, s, "a", "ready", proto.Capacity{CPUs: 1}, map[string]string{})
+		livePlacement(t, s, "a", `{"cpus":1}`)
+		observePlanningHost(t, s, "b", "ready", proto.Capacity{CPUs: 1}, map[string]string{})
+		execSQL(t, s, ctx, `UPDATE hosts SET pool_id='pool2' WHERE id='b'`)
+		livePlacement(t, s, "b", `{"cpus":1}`)
+		execSQL(t, s, ctx, `INSERT INTO runs (id,tenant_id,pool_id,spec,state) VALUES ('rb','t1','pool2','{"resources":{"cpus":1},"placement":{"pool":"other"}}','provisioning')`)
+		pl2 := poolRow{ID: "pool2", Name: "other", Provider: "ec2", TenantID: new("t1"), Template: json.RawMessage(`{"version":1}`)}
+		// pool2 decides first, so pool1's first pass finds b's verdict if it
+		// looked beyond its own pool.
+		planningTick(t, s, pl2, p, false)
+		planningTick(t, s, pl, p, false)
+		execSQL(t, s, ctx, `UPDATE runs SET state='cancelled' WHERE id='r0'`)
+		for range 2 {
+			planningTick(t, s, pl, p, false)
+		}
+		if got := hostDecisions(t, s, "b"); len(got) != 1 || got[0]["decision"] != "blocked" || got[0]["pool"] != "other" {
+			t.Fatalf("other pool's host decisions %+v, want only its blocked", got)
+		}
+		if got := hostDecisions(t, s, "a"); len(got) != 2 || got[1]["decision"] != "idle" {
+			t.Fatalf("host a decisions %+v, want blocked then idle", got)
+		}
+	})
+	t.Run("provisioning host idles as starting", func(t *testing.T) {
+		s, pl, p := planningFixture(t, 1)
+		observePlanningHost(t, s, "hist", "terminated", proto.Capacity{CPUs: 4}, map[string]string{})
+		// The first pass launches the start, the second reserves it.
+		for range 2 {
+			planningTick(t, s, pl, p, false)
+		}
+		execSQL(t, s, context.Background(), `UPDATE runs SET state='cancelled'`)
+		planningTick(t, s, pl, p, false)
+		got := hostDecisions(t, s, p.hosts[0])
+		want := []map[string]any{{"pool": "burst", "stage": "starting", "decision": "reserved"}, {"pool": "burst", "stage": "starting", "decision": "idle"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("start decisions %+v, want %+v", got, want)
+		}
+	})
+	t.Run("terminated host", func(t *testing.T) {
+		s, pl, p := planningFixture(t, 1)
+		observePlanningHost(t, s, "full", "ready", proto.Capacity{CPUs: 1}, map[string]string{})
+		livePlacement(t, s, "full", `{"cpus":1}`)
+		planningTick(t, s, pl, p, false)
+		execSQL(t, s, context.Background(), `UPDATE hosts SET state='terminated' WHERE id='full'`)
+		execSQL(t, s, context.Background(), `UPDATE runs SET state='cancelled' WHERE id='r0'`)
+		for range 2 {
+			planningTick(t, s, pl, p, false)
+		}
+		if got := hostDecisions(t, s, "full"); len(got) != 1 || got[0]["decision"] != "blocked" {
+			t.Fatalf("terminated host decisions %+v, want only blocked", got)
+		}
+	})
 }
 
 // A pass records at most maxHostDecisions hosts; the window rotates, so every
