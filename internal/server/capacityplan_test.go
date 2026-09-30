@@ -318,10 +318,33 @@ func TestCapacityReconcileReadyEligibility(t *testing.T) {
 				execSQL(t, s, context.Background(), `UPDATE hosts SET draining=true`)
 			}
 			planningTick(t, s, pl, p, false)
-			if p.calls != 1 {
-				t.Fatalf("%s host must not cover demand, got %d launches", rule, p.calls)
+			want := 1
+			if rule == "disconnected" {
+				// Another luxd may hold its connection: a fresh heartbeat counts.
+				want = 0
+			}
+			if p.calls != want {
+				t.Fatalf("%s host: %d launches, want %d", rule, p.calls, want)
 			}
 		})
+	}
+}
+
+func TestCapacityReconcileHeartbeatHostOnOtherInstance(t *testing.T) {
+	s, pl, p := planningFixture(t, 1)
+	observePlanningHost(t, s, "elsewhere", "ready", proto.Capacity{CPUs: 6}, map[string]string{})
+	execSQL(t, s, context.Background(), `UPDATE hosts SET registered_at=now()-interval '1 day' WHERE id='elsewhere'`)
+	s.hub.mu.Lock()
+	delete(s.hub.polls, "elsewhere")
+	s.hub.mu.Unlock()
+	for range 2 {
+		planningTick(t, s, pl, p, false)
+	}
+	if p.calls != 0 {
+		t.Fatalf("host connected to another luxd: %d launches", p.calls)
+	}
+	if got := queryOne[int](t, s, `SELECT count(*) FROM hosts WHERE draining`); got != 0 {
+		t.Fatalf("drained %d hosts reserved for the waiting run", got)
 	}
 }
 

@@ -216,6 +216,11 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 	if err != nil {
 		return plan, err
 	}
+	// The hub only knows runners connected to this luxd; a fresh heartbeat
+	// (required by candidateHosts) is the cluster-wide liveness signal.
+	for _, h := range ready {
+		h.Connected = true
+	}
 	slices.SortFunc(ready, func(a, b *candidateHost) int {
 		if a.ID < b.ID {
 			return -1
