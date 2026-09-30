@@ -195,7 +195,8 @@ def test_disk_is_reserved_on_the_host(lux, runners, hosts):
     lux.wait_state(big, "running", timeout=60)
     second = lux.submit(generic(ALPINE_IMAGE, "true", resources={"disk": "512Mi"}))
     from env import wait_until
-    wait_until(lambda: lux.get(second).get("stateReason") == "waiting for capacity", 20, 0.5, "not held for disk")
+    wait_until(lambda: lux.get(second).get("stateReason") == "waiting for capacity: 1 host in its pool lacks disk (requested 512.0 MiB)",
+               20, 0.5, "not held for disk")
     lux.run("cancel", big, "--wait")
     lux.wait_state(second, "succeeded", timeout=60)
 

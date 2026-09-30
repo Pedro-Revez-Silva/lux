@@ -71,6 +71,125 @@ What happened to a host, and to its pool, is also an event log of its own
 of the change it records. Like Run events they are kept as long as their
 host or pool.
 
+## Capacity planning
+
+On each provisioner pass an `ec2` pool simulates placing its waiting Runs
+(state `provisioning`, oldest first) to decide how many hosts to launch.
+The simulation reserves capacity only for sizing; the scheduler places
+Runs independently.
+
+**Where new-host capacity comes from.** Only hosts luxd launched for the
+same pool and the same tenant, that have registered, and whose launch
+template is exactly the pool's current one count as observations, and of
+those only the latest 8 by registration time, terminated ones included.
+The expected capacity of a new host is, per resource (`cpus`, `memory`,
+`disk`, `runs`), the smallest value those 8 reported, and its labels
+are those every one of them shares with the same value. A reported `0`
+means that resource is unlimited on that host; the expectation is
+unlimited only when every observation reported `0`, otherwise the
+smallest non-zero value wins. With no observation (a new pool, or a
+changed template) the capacity is unknown, which is never taken as
+unlimited: luxd launches one host to learn it, and none while a host of
+the current template is already starting.
+
+**Probe hosts.** The pool's template names an EC2 launch template, and
+the instance type behind its `$Default` version can change without the
+pool's template changing. The expectation then still describes the old
+instance type until 8 newer hosts register. When a Run fits no expected
+new host (a resource or a label), no host of the current template is
+starting, and none has registered since the Run entered `provisioning`,
+the pool launches one *probe* host (`pool.scale_up` with `probe: true`),
+as it does for unknown capacity. Once the probe registers, the Runs that
+were waiting are older than it, so it is at most one probe per group of
+Runs that began waiting together; if the probe is no larger, those Runs
+stay unmet and `pool.scale_blocked` says so.
+
+**Planning order.** Each Run is tried against:
+
+1. ready hosts the scheduler would consider, by id;
+2. hosts already starting from the current template (not draining, within
+   `LUX_LAUNCH_TIMEOUT`), sized by the expected capacity;
+3. new hosts of the expected capacity, added one at a time as needed.
+
+A Run whose prerequisites are unmet (its secrets are not in this luxd's
+memory; its snapshot is missing, unavailable, not yet uploaded, or
+references blobs it cannot read), or that waits for a chosen host, is
+*blocked* and never causes a launch. A Run that fits nowhere, including a
+new host, is *unmet*. The pool launches the new hosts of step 3, plus
+warm hosts not already covered by unreserved idle or starting hosts,
+at least enough for `--min` and never beyond `--max`. Idle ready hosts
+the simulation reserved are not drained by scale-down.
+
+**`pool.scale_up`** keeps its earlier fields (`hosts`, `reason`,
+`waiting`, `warm`, `min`, `max`, `total`, `idle`, `provisioning`) and
+adds the plan; rows written before planning have none of these:
+
+| Field | Meaning |
+| --- | --- |
+| `ready` | Runs the simulation fitted on ready hosts. |
+| `starting` | Runs fitted on hosts already starting. |
+| `planned` | Runs fitted on new hosts (the launches' reason). |
+| `unmet` | Capacity-eligible Runs no ready, starting or new host fits. |
+| `blocked` | Runs excluded before simulation (prerequisites, chosen host). |
+| `expected` | New-host `capacity` (`cpus`, `memory` and `disk` in bytes, `runs`; `0` unlimited) and how many `observations` it is from; `null` when unknown. |
+| `unknown` | Why `expected` is `null`. |
+| `deficits` | Per Run: prerequisite (`stage` `prerequisite`) or new-host (`new_host`) blockers. |
+| `exhausted` | Per actual host (`host`, `stage` `ready` or `starting`): the first Run it could not fit and why. |
+| `ineligible` | Ready hosts the scheduler skips: `draining`, `no heartbeat`, `heartbeat stale`. |
+| `omitted` | Entries left out of `deficits` and `exhausted`, each capped at 8; `ineligible` is capped at 8 too. |
+| `probe` | `true` when the one host launched is a probe (above). |
+
+**`pool.scale_blocked`** is written on a pass that launches nothing while
+hosts are wanted or Runs stay unmet. `cause` says why: `max` (`--max`
+stops the hosts the plan, warm or `--min` wanted), `quota` (the tenant's
+host quota is reached) or `no_fit` (unmet Runs that no new host fits). It
+is not written while unmet Runs wait for a probe or bootstrap host of the
+current template that is still starting: the pass is waiting, not blocked.
+It carries `waiting`, `total`, `max`, the same plan fields as
+`pool.scale_up` (`ready` through `omitted`) and, for `max` and `quota`,
+`wanted`: how many hosts the pool asked for.
+
+It records a state, not each pass. For `max` and `quota`, only `cause` and
+`max` distinguish states; changes to queue size, fit or expected capacity
+do not write another row. For `no_fit`, identity also includes `unmet`,
+`blocked`, `planned`, `expected`, `unknown`, and the deficits' Runs and
+blockers. A scale-up ends the state. Evidence values are those of the pass
+that wrote the row, not live usage. A state is recorded again whenever its
+last record falls outside the latest 32 pool events; more than 32 events
+per pass can make it repeat each pass. Clearing demand without a scale-up
+does not reset this bounded event lookup, and a folded scale-up retains
+its original position in the stream.
+
+A blocker is either a resource, with `resource` (`cpus`, `memory`, `disk`
+or `runs`), `requested`, `used`, `capacity` and `available`
+(`capacity - used`) in that resource's unit (CPUs, bytes, placements), or
+a constraint `reason` (another tenant's host, a removed pool, no nested
+containers; a label mismatch is `required labels do not match`, without
+the label values).
+
+**`host.capacity_decision`** is the planner's verdict on one actual host,
+written only when it differs from that host's previous one: `pool`;
+`stage` (`ready` or `starting`; for `idle`, the host's state then:
+`ready`, `starting`, `draining` or `lost`); `decision`
+`reserved` (it holds simulated Runs and every Run tried on it fit),
+`exhausted` (it holds some, and at least one other Run did not fit),
+`blocked` (it holds none), `idle` (no waiting Run considered it this
+pass, after an earlier decision that was not `idle`: the provisioner keeps
+the hosts it decided on in memory, and reads a previous provisioner's
+decisions once per pool when it takes over) or `ineligible` (with
+`reason`, as above); and `blockers` for `exhausted` and `blocked`: those of
+the first Run that did not fit, in queue order. A pass records at most 32
+hosts per pool, in host id order starting after the last host the previous
+pass recorded and wrapping around, so on a larger pool each host's
+decision lands within a few passes (after a luxd restart the rotation
+starts again from the first id).
+
+`pool.placement` and `host.placement_assigned` carry the Run's requested
+`resources` (`cpus`, `memory` and `disk` in bytes, `pids`).
+
+`lux pools events`, `lux hosts events` and the console render all of these
+as one line each, with memory and disk in binary units.
+
 ## Events
 
 Every lifecycle change is also an event on its Run (`lux events <run>`).

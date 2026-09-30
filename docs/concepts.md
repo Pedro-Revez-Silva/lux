@@ -54,7 +54,11 @@ submitted → scheduled → starting → running ─┬─▶ succeeded
 | `lost` | Its host stopped heartbeating while it was live. Resumable from the last snapshot taken *before* the lost placement. Work since then is gone. |
 
 `stateReason` explains the current state, for example `exit code 3`,
-`waiting for capacity`, or `lease expired: host stopped heartbeating`.
+`waiting for capacity: 2 hosts in its pool lack cpus (requested 4)`, or
+`lease expired: host stopped heartbeating`. A Run waiting for a host counts
+only hosts of its own pool and tenant (or its chosen host) that the luxd
+writing the reason is connected to, per missing resource or constraint,
+without host names or their usage; the reason is at most 512 bytes.
 
 ## Volumes and snapshots
 
@@ -191,6 +195,16 @@ belong to a tenant by default. A platform pool can be marked `shared`, which
 lets several tenants' Runs share its hosts. A Run that names no pool goes
 to the tenant's **default pool**: the one pool it marked, else the
 platform's marked one, else the pool named `default`.
+
+An `ec2` pool sizes itself from what its hosts report. Each pass simulates
+placing its waiting Runs on ready hosts, then on hosts already starting,
+then on new hosts, and launches only the new hosts that simulation needs
+(plus warm hosts). A new host's capacity is the smallest of what registered
+hosts of the same pool and tenant, launched from exactly the pool's current
+template, reported. Before any such host has registered, that capacity is
+unknown, and the pool launches one host to learn it. The simulation is a
+reservation for sizing only; the scheduler still places each Run on its
+own. See [Telemetry](telemetry.md#capacity-planning).
 
 ## Tenants and keys
 

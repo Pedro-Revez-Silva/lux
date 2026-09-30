@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"time"
@@ -106,6 +107,7 @@ type poolRow struct {
 	Template           json.RawMessage
 	Min, Max, Warm     int
 	Retired            bool
+	Shared             bool
 	// ScaleDownAfterS: the pool's own idle seconds, or nil for luxd's.
 	ScaleDownAfterS *int
 	WarmWhileActive bool
@@ -116,11 +118,15 @@ func (s *Server) provision(ctx context.Context) error {
 	// across provider calls. One luxd reconciles at a time; another takes
 	// over when the lease lapses.
 	if ok, err := s.provisionLease(ctx); err != nil || !ok {
+		s.leaseHeld = false
 		return err
+	}
+	if !s.leaseHeld {
+		s.tookProvisionLease()
 	}
 	var pools []poolRow
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id, name, provider, tenant_id, template, min_hosts, max_hosts, warm_hosts, retired,
+		rows, err := tx.Query(ctx, `SELECT id, name, provider, tenant_id, template, min_hosts, max_hosts, warm_hosts, retired, shared,
 				scale_down_after_s, warm_while_active
 			FROM pools WHERE provider <> 'static'
 			  AND (NOT retired OR EXISTS (SELECT 1 FROM hosts h WHERE h.pool_id = pools.id AND h.state <> 'terminated'))`)
@@ -144,6 +150,7 @@ func (s *Server) provision(ctx context.Context) error {
 		}
 		// Provider calls can be slow: still the provisioner?
 		if ok, err := s.provisionLease(ctx); err != nil || !ok {
+			s.leaseHeld = false
 			return err
 		}
 		if err := s.reconcilePool(ctx, prov, pl, checkAlive); err != nil {
@@ -153,14 +160,40 @@ func (s *Server) provision(ctx context.Context) error {
 	return nil
 }
 
+// tookProvisionLease: another provisioner may have recorded host decisions
+// while this process did not hold the lease, so each pool's are read from
+// the database once again (idleDecisions).
+func (s *Server) tookProvisionLease() {
+	s.leaseHeld = true
+	s.forgetDecisions()
+}
+
+func (s *Server) forgetDecisions() {
+	s.swept, s.decided = make(map[string]bool), make(map[string]map[string]bool)
+}
+
+// decidedFor is s.decided[poolID], created on first use (a Server whose
+// pools are reconciled without provision() never took the lease).
+func (s *Server) decidedFor(poolID string) map[string]bool {
+	if s.decided == nil {
+		s.forgetDecisions()
+	}
+	if s.decided[poolID] == nil {
+		s.decided[poolID] = map[string]bool{}
+	}
+	return s.decided[poolID]
+}
+
 // poolState is what a pool has and needs, counted in one transaction.
 type poolState struct {
 	demand, idle, provisioning, total int
+	plan                              capacityPlan
 	// active: a placement started or ended on the pool's hosts within its
 	// scale-down time (warm_while_active keeps warm hosts only then).
 	active bool
 	// Idle hosts that have been idle longer than the cooldown, oldest first.
 	idleExpired []string
+	idleHosts   map[string]bool
 	// Hosts to terminate now: drained ones that are done (no live
 	// placements, nothing to upload), ones that never registered, and lost
 	// ones (their runner stopped answering; the instance may still run).
@@ -205,10 +238,30 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 		s.reconcileWithProvider(ctx, prov, pl, &st)
 	}
 
-	// Scale down: drain idle hosts beyond what warm and waiting Runs need
-	// (and never below the minimum), terminate what is done.
+	// Provider reconciliation and write-offs change live reservations and
+	// valid starts: only then is the state read again with the plan.
+	reread := checkAlive || len(st.abandoned) > 0
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if reread {
+			st = poolState{}
+			if err := s.poolState(ctx, tx, pl, &st); err != nil {
+				return err
+			}
+		}
+		var err error
+		st.plan, err = s.planCapacity(ctx, tx, pl, st.idleHosts)
+		return err
+	}); err != nil {
+		return err
+	}
+	s.recordHostDecisions(ctx, pl, st.plan.hostDecisions)
+
+	// Ready hosts reserved by the simulation are not idle surplus.
 	for _, id := range st.idleExpired {
-		if st.idle <= s.warm(pl, &st)+st.demand || st.total <= pl.Min {
+		if st.plan.reserved[id] {
+			continue
+		}
+		if st.idle-st.plan.reservedIdle <= s.warm(pl, &st) || st.total <= pl.Min {
 			break
 		}
 		drained, err := s.drainForScaleDown(ctx, id)
@@ -236,11 +289,15 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 		return nil
 	}
 	warm := s.warm(pl, &st)
-	want := max(pl.Min-st.total, warm+st.demand-st.idle-st.provisioning)
+	warmStarting := max(0, st.provisioning-st.plan.reservedStarting)
+	warmDeficit := max(0, warm-(st.idle-st.plan.reservedIdle)-warmStarting)
+	needed := max(pl.Min-st.total, st.plan.NewHosts+warmDeficit)
+	want := needed
 	if pl.Max > 0 {
 		want = min(want, pl.Max-st.total)
 	}
 	up := scaleUp(pl, &st, warm, want)
+	launched, quota := 0, false
 	for i := range max(want, 0) {
 		if i > 0 {
 			if ok, err := s.provisionLease(ctx); err != nil || !ok {
@@ -248,13 +305,48 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 			}
 			up = nil // recorded with the first launch
 		}
-		if err := s.launch(ctx, prov, pl, up); errors.Is(err, errPoolRetired) {
+		err := s.launch(ctx, prov, pl, up)
+		if errors.Is(err, errPoolRetired) {
 			return nil
-		} else if err != nil {
+		}
+		if errors.Is(err, errHostQuota) {
+			quota = true
+			break
+		}
+		if err != nil {
 			return err
+		}
+		launched++
+	}
+	if launched == 0 {
+		if cause := blockedCause(pl, &st, needed, quota); cause != "" {
+			s.scaleBlocked(ctx, pl, &st, cause, needed)
 		}
 	}
 	return nil
+}
+
+// Why a pass that launched nothing did not: the tenant's host quota, --max
+// clipping the hosts the plan or warm wanted, or unmet Runs no new host fits.
+const (
+	causeQuota = "quota"
+	causeMax   = "max"
+	causeNoFit = "no_fit"
+)
+
+// blockedCause is "" when nothing is blocked: nothing was wanted, or unmet
+// Runs wait for a bootstrap or probe host already starting (its scale-up
+// said why).
+func blockedCause(pl poolRow, st *poolState, needed int, quota bool) string {
+	switch {
+	case quota:
+		return causeQuota
+	case pl.Max > 0 && needed > 0 && needed > pl.Max-st.total:
+		return causeMax
+	case st.plan.Unmet > 0 && !st.plan.awaitingStart:
+		return causeNoFit
+	}
+	return ""
 }
 
 // scaleUp is a pool.scale_up event's data: how many hosts and why, with
@@ -267,8 +359,101 @@ func scaleUp(pl poolRow, st *poolState, warm, want int) map[string]any {
 	case st.demand == 0:
 		reason = "warm"
 	}
-	return map[string]any{"hosts": want, "reason": reason, "waiting": st.demand, "warm": warm, "min": pl.Min, "max": pl.Max,
+	d := map[string]any{"hosts": want, "reason": reason, "waiting": st.demand, "warm": warm, "min": pl.Min, "max": pl.Max,
 		"total": st.total, "idle": st.idle, "provisioning": st.provisioning}
+	maps.Copy(d, st.plan.summary())
+	if st.plan.Probe {
+		d["probe"] = true
+	}
+	return d
+}
+
+// summary is the plan's bounded evidence, shared by pool.scale_up and
+// pool.scale_blocked. Lists are [] when empty, never null.
+func (p *capacityPlan) summary() map[string]any {
+	return map[string]any{"ready": p.Ready, "starting": p.Starting, "planned": p.Planned, "unmet": p.Unmet,
+		"blocked": p.Blocked, "unknown": p.Unknown, "expected": p.Expected,
+		"deficits": nonNil(p.Deficits), "exhausted": nonNil(p.Exhausted), "ineligible": nonNil(p.Ineligible), "omitted": p.Omitted}
+}
+
+// scaleBlockedEvent is a state: a stuck pool records it once, and again only
+// when why it is stuck changes. The usage-derived evidence is kept from the
+// pass that recorded it but does not tell two states apart, nor do the Runs
+// naming the deficits; a scale-up ends the state.
+var scaleBlockedEvent = transition{typ: evScaleBlocked,
+	volatile:        []string{"ready", "starting", "exhausted", "ineligible", "omitted", "waiting", "total", "wanted"},
+	endedBy:         []string{evScaleUp},
+	runlessDeficits: true}
+
+// capacityDecisionEvent is a host's latest verdict, recorded on change.
+var capacityDecisionEvent = transition{typ: evCapacityDecision}
+
+// scaleBlocked records why a pass launched nothing while hosts were wanted
+// or Runs stay unmet (blockedCause); wanted is how many hosts the plan,
+// warm and min asked for.
+func (s *Server) scaleBlocked(ctx context.Context, pl poolRow, st *poolState, cause string, wanted int) {
+	d := st.plan.summary()
+	d["waiting"], d["total"], d["max"], d["cause"] = st.demand, st.total, pl.Max, cause
+	if cause != causeNoFit {
+		d["wanted"] = wanted
+	}
+	tr := scaleBlockedEvent
+	if cause == causeMax || cause == causeQuota {
+		// At a fleet cap, the queue's size and fit do not change the cause.
+		tr.volatile = slices.Concat(tr.volatile, []string{"planned", "unmet", "blocked", "deficits", "expected", "unknown"})
+	}
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return transitionEvent(ctx, tx, poolEvents, pl.ID, tr, d)
+	}); err != nil {
+		s.log.Warn("recording a blocked scale-up", "pool", pl.Name, "err", err)
+	}
+}
+
+// evCapacityDecision records the planner's verdict on one actual host.
+const evCapacityDecision = "host.capacity_decision"
+
+// maxHostDecisions bounds host-decision transactions per pool pass.
+const maxHostDecisions = 32
+
+// recordHostDecisions appends a host's capacity decision only when it differs
+// from that host's latest one (hostDecisionEvent). Each host uses its own
+// transaction after the planning transaction commits, so no row lock is held.
+//
+// A pass records at most maxHostDecisions hosts, in id order starting after
+// the last host the previous pass of this pool recorded, wrapping around, so
+// on a larger pool every host is recorded within a few passes.
+func (s *Server) recordHostDecisions(ctx context.Context, pl poolRow, decisions map[string]hostDecision) {
+	hosts := slices.Sorted(maps.Keys(decisions))
+	if len(hosts) > maxHostDecisions {
+		start, _ := slices.BinarySearch(hosts, s.decisionCursor[pl.ID]+"\x00")
+		hosts = slices.Concat(hosts[start:], hosts[:start])[:maxHostDecisions]
+		if s.decisionCursor == nil {
+			s.decisionCursor = map[string]string{}
+		}
+		s.decisionCursor[pl.ID] = hosts[len(hosts)-1]
+	}
+	decided := s.decidedFor(pl.ID)
+	for _, id := range hosts {
+		data := decisions[id]
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return hostDecisionEvent(ctx, tx, id, data)
+		}); err != nil {
+			s.log.Warn("recording a capacity decision", "host", id, "err", err)
+			continue
+		}
+		// idleDecisions retracts what this set holds once demand leaves.
+		if data.Decision == "idle" {
+			delete(decided, id)
+		} else {
+			decided[id] = true
+		}
+	}
+}
+
+// hostDecisionEvent appends a host's decision when it differs from its
+// latest one (transitionEvent: an unchanged decision takes no lock).
+func hostDecisionEvent(ctx context.Context, tx pgx.Tx, hostID string, data any) error {
+	return transitionEvent(ctx, tx, hostEvents, hostID, capacityDecisionEvent, data)
 }
 
 // providerError records a failed provider call, in a transaction of its own
@@ -512,6 +697,10 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 			st.provisioning++
 		case state == "ready" && !busy:
 			st.idle++
+			if st.idleHosts == nil {
+				st.idleHosts = map[string]bool{}
+			}
+			st.idleHosts[h.ID] = true
 			if idleLong {
 				st.idleExpired = append(st.idleExpired, h.ID)
 			}
@@ -563,7 +752,7 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 	})
 	var he *HTTPError
 	if errors.As(err, &he) && he.Code == "quota_exceeded" {
-		return nil // at the tenant's host quota: Runs wait
+		return errHostQuota // Runs wait; the pass records why
 	}
 	if err != nil {
 		return err
@@ -615,6 +804,10 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 // errPoolRetired: launch found its pool removed since the pass read it,
 // and launched nothing.
 var errPoolRetired = errors.New("pool retired")
+
+// errHostQuota: launch found the pool's tenant at its host quota, and
+// launched nothing.
+var errHostQuota = errors.New("tenant host quota reached")
 
 // lockPoolRetired locks a pool's row FOR SHARE (the first lock of the lock
 // order in infraevents.go: a removal's FOR NO KEY UPDATE waits for it and

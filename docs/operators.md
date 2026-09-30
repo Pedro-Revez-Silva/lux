@@ -52,6 +52,25 @@ operators'.
 A host is named by id or name. Two tenants may each have a host of the
 same name; an operator then names it by id, or with `--tenant`.
 
+Why an EC2 pool launched a host, or did not, is in its events: `lux pools
+events <pool>` shows each `pool.scale_up` with its capacity plan (Runs
+covered by ready, starting and planned hosts, those unmet or blocked, the
+new-host capacity it assumed and sampled blockers), and `lux hosts events
+<host>` shows `host.capacity_decision` when the planner's verdict on that
+host changes. The console's pool and host pages show the same lines. See
+[Telemetry](telemetry.md#capacity-planning) for what each field means.
+A pass that launches nothing while hosts are wanted or Runs stay unmet
+writes `pool.scale_blocked` with its cause (`--max`, the tenant's host
+quota, or no new host fits) and the same plan, once per stuck state.
+
+The capacity a new host is expected to have comes from the latest 8 hosts
+that registered from the pool's exact current template. Moving the EC2
+launch template's `$Default` to another instance type does not change the
+pool's template, so the old observations age out as 8 new hosts register;
+a Run too large for the old size gets one probe host meanwhile. Editing
+the pool's template (`lux pools set`) starts from no observations at once:
+the pool launches one host to learn the new capacity.
+
 ## Acting
 
 ```bash
