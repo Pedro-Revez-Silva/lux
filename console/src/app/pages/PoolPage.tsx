@@ -1,11 +1,12 @@
 import { useMemo } from "react";
-import { Badge, Card, compareMoney, EmptyState, EventTable, familyDisplay, formatBytes, formatClock, formatCores, formatCount, formatElapsed, KeyValue, ListPriceNote, Money, MoneyList, PageHeader, Pagination, RelativeTime, SectionHeader, StatePill, StatTile, Table, Tabs, TimeSeriesChart, useNow, type Column } from "@lux/design-system";
-import { api, type Host, type Pool, type PoolCost, type PoolMetrics, type PoolOwner } from "../../api/index.ts";
+import { Badge, Card, compareMoney, EmptyState, EventTable, familyDisplay, formatBytes, formatClock, formatCores, formatCount, formatElapsed, KeyValue, ListPriceNote, Money, MoneyList, PageHeader, Pagination, SectionHeader, StatTile, Table, Tabs, TimeSeriesChart, useNow, type Column } from "@lux/design-system";
+import { api, type Pool, type PoolCost, type PoolMetrics, type PoolOwner } from "../../api/index.ts";
 import { sortLabel, usePaged } from "../paged.ts";
 import { go, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostPath, JsonBlock, labelsText, PageSkeleton, RunLink, RunNameLink, runPath } from "./common.tsx";
 import { infraEventSummary } from "./events.ts";
+import { HostsList } from "./Hosts.tsx";
 
 /** The Pools page's poll: this page's too. */
 const POLL = 15_000;
@@ -341,8 +342,7 @@ function PoolCostTab({ name, owner, operatorView }: { name: string; owner?: Pool
 }
 
 function PoolHostsTab({ pool }: { pool: Pool }) {
-  const hosts = useScopedQuery(`pool-hosts:${pool.id}`, (t, s) => api.hosts(t, { pool: pool.name }, s), { interval: POLL });
-  const own = (hosts.data ?? []).filter((h) => h.poolId === pool.id);
+  const scope = useScope();
   const template = pool.template && Object.keys(pool.template).length > 0 ? <span className="mono">{labelsText(pool.template)}</span> : DASH;
   return (
     <div className="stack">
@@ -357,27 +357,9 @@ function PoolHostsTab({ pool }: { pool: Pool }) {
           ]}
         />
       </Card>
-      <Card flush title="Hosts" subtitle={`${own.length} not terminated · every host, sorted and paged: the Hosts page filtered to this pool`} actions={<a href={`/hosts?pool=${encodeURIComponent(pool.name)}&lifecycle=all`} onClick={(e) => { e.preventDefault(); go(`/hosts?pool=${encodeURIComponent(pool.name)}&lifecycle=all`); }}>All of this pool's hosts</a>}>
-        <ErrorStrip error={hosts.error} />
-        <PoolHosts hosts={own} loading={hosts.loading} />
-      </Card>
+      <HostsList pool={pool.name} poolId={pool.id} view={scope.tenant} embedded />
     </div>
   );
-}
-
-function PoolHosts({ hosts, loading }: { hosts: Host[]; loading: boolean }) {
-  const cols = useMemo<Column<Host>[]>(
-    () => [
-      { key: "name", header: "Host", cell: (h) => h.name, sortValue: (h) => h.name, lead: true },
-      { key: "state", header: "State", cell: (h) => <StatePill kind="host" state={h.state} />, sortValue: (h) => h.state, width: 140 },
-      { key: "runs", header: "Runs", cell: (h) => h.liveRuns, sortValue: (h) => h.liveRuns, align: "right", mono: true, width: 80 },
-      { key: "alloc", header: "Allocated", cell: (h) => `${formatCores(h.allocated.cpus ?? 0)} · ${formatBytes(h.allocated.memory ?? 0)}`, sortValue: (h) => h.allocated.cpus ?? 0, sortFirst: "desc", mono: true, width: 170, optional: true },
-      { key: "type", header: "Instance", cell: (h) => h.instanceType ?? DASH, sortValue: (h) => h.instanceType, mono: true, width: 130, optional: true },
-      { key: "heartbeat", header: "Heartbeat", cell: (h) => <RelativeTime at={h.lastHeartbeat} label="Last heartbeat" />, sortValue: (h) => (h.lastHeartbeat ? Date.parse(h.lastHeartbeat) : null), align: "right", width: 110 },
-    ],
-    [],
-  );
-  return <Table columns={cols} rows={hosts} rowKey={(h) => h.id} loading={loading} onRowClick={(h) => go(hostPath(h.id))} defaultSort={{ key: "name", dir: "asc" }} empty="No hosts." dense />;
 }
 
 /** A pool's events, a page at a time in the sort chosen (server-side). */

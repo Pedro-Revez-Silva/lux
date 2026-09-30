@@ -1788,6 +1788,7 @@ type listHostsInput struct {
 	PageQuery
 	All       string `query:"all" doc:"true to include terminated hosts." example:"true"`
 	Pool      string `query:"pool" doc:"Only this pool's hosts."`
+	PoolID    string `query:"poolId" doc:"Only the hosts of the pool with this id (names repeat across owners)."`
 	State     string `query:"state" doc:"Only hosts in this state: provisioning, ready, draining, lost or terminated; or launch_failed, the terminated hosts whose launch the provider refused (terminated then means the others)."`
 	Lifecycle string `query:"lifecycle" enum:"live,ended," doc:"live: hosts not terminated; ended: terminated ones (launch failures included). Implies all."`
 	Limit     string `query:"limit" doc:"Paged lists: hosts per page, 1 to 500 (default 25)."`
@@ -1855,6 +1856,9 @@ func (s *Server) listHosts(ctx context.Context, in *listHostsInput) (*listHostsO
 	}
 	if in.Pool != "" {
 		where = append(where, "hp.name = "+arg(in.Pool))
+	}
+	if in.PoolID != "" {
+		where = append(where, "h.pool_id = "+arg(in.PoolID))
 	}
 	switch in.State {
 	case "":

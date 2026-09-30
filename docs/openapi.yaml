@@ -3131,6 +3131,13 @@ paths:
           schema:
             description: Only this pool's hosts.
             type: string
+        - description: Only the hosts of the pool with this id (names repeat across owners).
+          explode: false
+          in: query
+          name: poolId
+          schema:
+            description: Only the hosts of the pool with this id (names repeat across owners).
+            type: string
         - description: "Only hosts in this state: provisioning, ready, draining, lost or terminated; or launch_failed, the terminated hosts whose launch the provider refused (terminated then means the others)."
           explode: false
           in: query

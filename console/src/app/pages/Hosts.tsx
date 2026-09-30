@@ -49,20 +49,31 @@ const LIFECYCLE = [
 type Lifecycle = (typeof LIFECYCLE)[number]["value"];
 
 export function Hosts() {
+  const { tenant } = useScope();
+  const params = useSearchParams();
+  const pool = params.get("pool") ?? "";
+  return <HostsList pool={pool} view={tenant} />;
+}
+
+/**
+ * The hosts table with its filters and pager: the Hosts page, or one
+ * pool's hosts (fixed, by id: the pool page's Hosts tab).
+ */
+export function HostsList({ pool, poolId, view: scopeView, embedded }: { pool: string; poolId?: string; view: string; embedded?: boolean }) {
   const { showTenant, tenant, apiTenant } = useScope();
   // Filters live in the URL, so a filtered list is a link.
   const params = useSearchParams();
-  const pool = params.get("pool") ?? "";
   const state = params.get("state") ?? "";
   const lifecycle: Lifecycle = params.get("lifecycle") === "all" || params.get("all") === "true" ? "all" : params.get("lifecycle") === "ended" ? "ended" : "live";
   const setPool = (v: string) => setSearchParams({ pool: v || null });
+  void scopeView;
   const setState = (v: string) => setSearchParams({ state: v || null });
   const setLifecycle = (v: Lifecycle) => setSearchParams({ lifecycle: v === "live" ? null : v, all: null });
-  const view = `${tenant}|${pool}|${state}|${lifecycle}`;
+  const view = `${tenant}|${pool}|${poolId ?? ""}|${state}|${lifecycle}`;
   const q = usePaged<Host>(
     view,
     (req, s) =>
-      api.hostsPage(apiTenant, { ...req, pool: pool || undefined, state: state || undefined, all: lifecycle === "all" || undefined, lifecycle: lifecycle === "ended" ? "ended" : lifecycle === "live" && !state ? "live" : undefined }, s),
+      api.hostsPage(apiTenant, { ...req, pool: poolId ? undefined : pool || undefined, poolId, state: state || undefined, all: lifecycle === "all" || undefined, lifecycle: lifecycle === "ended" ? "ended" : lifecycle === "live" && !state ? "live" : undefined }, s),
     { defaultSort: { key: "created", dir: "desc" }, defaultSize: 25, interval: 5000 },
   );
   const pools = useScopedQuery("pools", api.pools, { interval: 60_000 });
@@ -114,7 +125,49 @@ export function Hosts() {
     return t;
   }, [live.data]);
 
-  const filtered = pool !== "" || state !== "" || lifecycle !== "live";
+  const filtered = (!embedded && pool !== "") || state !== "" || lifecycle !== "live";
+  const rows = q.rows;
+  const table = (
+    <Card flush>
+      <ErrorStrip error={rows.length > 0 ? q.error : null} />
+      {q.error && rows.length === 0 && !q.loading ? (
+        <ErrorBlock error={q.error} onRetry={q.refetch} />
+      ) : (
+        <Table
+          columns={cols}
+          rows={rows}
+          rowKey={(h) => h.id}
+          loading={q.loading}
+          sortMode="server"
+          sort={q.sort}
+          onSortChange={q.setSort}
+          onRowClick={(h) => go(hostPath(h.id))}
+          empty="No hosts match these filters."
+          footer={q.total != null && q.total > 0 ? <Pagination mode="count" page={q.page} pageSize={q.size} total={q.total} noun="hosts" onPage={q.goto} onPageSize={q.setSize} /> : undefined}
+        />
+      )}
+    </Card>
+  );
+  const filters = (
+    <div className="filters">
+      {!embedded && <Select size="sm" prefix="Pool" value={pool} onChange={setPool} options={poolOptions} width={150} searchable={poolOptions.length > 8} />}
+      <Select size="sm" prefix="State" value={state} onChange={setState} options={[{ value: "", label: "Any state", text: "Any state" }, ...STATES.map((s) => ({ value: s, label: s === "launch_failed" ? "launch failed" : s, text: s }))]} width={170} />
+      <SegmentedControl label="Lifecycle" value={lifecycle} onChange={setLifecycle} options={LIFECYCLE} />
+      {filtered && (
+        <Button size="sm" variant="ghost" onClick={() => setSearchParams({ pool: embedded ? pool : null, state: null, all: null, lifecycle: null })}>
+          Clear
+        </Button>
+      )}
+    </div>
+  );
+  if (embedded) {
+    return (
+      <div className="stack">
+        {filters}
+        {table}
+      </div>
+    );
+  }
   return (
     <div className="page page-list">
       <PageHeader
@@ -126,35 +179,8 @@ export function Hosts() {
           </span>
         }
       />
-      <div className="filters">
-        <Select size="sm" prefix="Pool" value={pool} onChange={setPool} options={poolOptions} width={150} searchable={poolOptions.length > 8} />
-        <Select size="sm" prefix="State" value={state} onChange={setState} options={[{ value: "", label: "Any state", text: "Any state" }, ...STATES.map((s) => ({ value: s, label: s === "launch_failed" ? "launch failed" : s, text: s }))]} width={170} />
-        <SegmentedControl label="Lifecycle" value={lifecycle} onChange={setLifecycle} options={LIFECYCLE} />
-        {filtered && (
-          <Button size="sm" variant="ghost" onClick={() => setSearchParams({ pool: null, state: null, all: null, lifecycle: null })}>
-            Clear
-          </Button>
-        )}
-      </div>
-      <Card flush>
-        <ErrorStrip error={q.rows.length > 0 ? q.error : null} />
-        {q.error && q.rows.length === 0 && !q.loading ? (
-          <ErrorBlock error={q.error} onRetry={q.refetch} />
-        ) : (
-          <Table
-            columns={cols}
-            rows={q.rows}
-            rowKey={(h) => h.id}
-            loading={q.loading}
-            sortMode="server"
-            sort={q.sort}
-            onSortChange={q.setSort}
-            onRowClick={(h) => go(hostPath(h.id))}
-            empty="No hosts match these filters."
-            footer={q.total != null && q.total > 0 ? <Pagination mode="count" page={q.page} pageSize={q.size} total={q.total} noun="hosts" onPage={q.goto} onPageSize={q.setSize} /> : undefined}
-          />
-        )}
-      </Card>
+      {filters}
+      {table}
     </div>
   );
 }

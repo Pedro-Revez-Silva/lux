@@ -244,6 +244,16 @@ func TestHostsPagedSortEveryFamily(t *testing.T) {
 	if !slices.Equal(via.IDs, p3.IDs) || *via.Offset != 14 {
 		t.Fatalf("page 3 by cursor %v (offset %v), by offset %v", via.IDs, *via.Offset, p3.IDs)
 	}
+	// One pool's hosts, by the pool's id: another pool's are not counted.
+	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('pool2', 'other', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state) VALUES ('hz', 'hz', 'pool2', 'ready')`)
+	if p := fetchPage(t, s, key, "/v1/hosts?all=true&sort=created&limit=100&poolId=pool1", "hosts"); *p.Total != 57 || slices.Contains(p.IDs, "hz") {
+		t.Fatalf("poolId=pool1: total %d", *p.Total)
+	}
+	if p := fetchPage(t, s, key, "/v1/hosts?all=true&sort=created&poolId=pool2", "hosts"); *p.Total != 1 || p.IDs[0] != "hz" {
+		t.Fatalf("poolId=pool2: %v", p.IDs)
+	}
+	execSQL(t, s, ctx, `DELETE FROM hosts WHERE id = 'hz'`)
 	// Unpaged, as it always was: every live host, by name.
 	var list struct {
 		Hosts []struct{ ID, Name string }

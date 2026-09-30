@@ -645,6 +645,7 @@ export interface RunListParams extends PageParams {
 export interface HostListParams extends PageParams {
   all?: boolean;
   pool?: string;
+  poolId?: string;
   state?: string;
   lifecycle?: "live" | "ended";
   limit?: number;

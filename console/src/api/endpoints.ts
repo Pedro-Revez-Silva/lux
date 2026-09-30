@@ -50,7 +50,7 @@ export const api = {
   hostsPage: (tenant: Scope, p: HostListParams, signal?: Sig) =>
     request<{ hosts: Host[]; next?: string; prev?: string; page?: string; total?: number; offset?: number }>("/hosts", {
       tenant,
-      query: { all: p.all, pool: p.pool, state: p.state, lifecycle: p.lifecycle, limit: p.limit, offset: p.offset, ...pageQuery(p) },
+      query: { all: p.all, pool: p.pool, poolId: p.poolId, state: p.state, lifecycle: p.lifecycle, limit: p.limit, offset: p.offset, ...pageQuery(p) },
       signal,
     }).then((r): Page<Host> => ({ rows: r.hosts, next: r.next, prev: r.prev, page: r.page, total: r.total, offset: r.offset })),
   host: (id: string, signal?: Sig) => request<Host>(`/hosts/${enc(id)}`, { signal }),
