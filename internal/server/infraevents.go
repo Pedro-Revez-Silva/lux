@@ -488,12 +488,25 @@ type EventPage struct {
 type lifecycleEventsOutput struct {
 	Body struct {
 		Events []LifecycleEvent `json:"events"`
+		Next   string           `json:"next,omitempty" doc:"Paged lists (sort or a cursor): the next page's cursor (?next=)."`
+		Prev   string           `json:"prev,omitempty" doc:"Paged lists: the previous page's cursor (?prev=)."`
+		Page   string           `json:"page,omitempty" doc:"Paged lists: this page's own cursor (?at=), to read it again in place."`
 	} `nameHint:"LifecycleEventList"`
+}
+
+// eventSortKeys: the sort keys of a pool's or host's events. time is when
+// it (first) happened; detail orders by its data.
+var eventSortKeys = map[string]sortKey{
+	"time":   {expr: `created_at`, cast: "timestamptz", first: "desc", notNull: true},
+	"id":     {expr: `id`, cast: "bigint", first: "desc", notNull: true},
+	"type":   {expr: `type`, cast: "text", first: "asc", notNull: true},
+	"detail": {expr: `data::text`, cast: "text", first: "asc", notNull: true},
 }
 
 type listPoolEventsInput struct {
 	TenantQuery
 	EventPage
+	PageQuery
 	Name  string `path:"name" doc:"The pool's name."`
 	Owner string `query:"owner" enum:"platform,tenant" doc:"Which pool of that name: the platform's, or a tenant's (the caller's, or with ?tenant= that tenant's). Omitted: a tenant's own pool, else the platform's; for an operator not narrowed with ?tenant=, a name two pools share is ambiguous (409)."`
 }
@@ -502,6 +515,7 @@ type listHostEventsInput struct {
 	HostPath
 	TenantQuery
 	EventPage
+	PageQuery
 }
 
 // seesPlatformEvents: platform pools' and hosts' events name other
@@ -547,7 +561,7 @@ func (s *Server) listPoolEvents(ctx context.Context, in *listPoolEventsInput) (*
 	if err != nil {
 		return nil, err
 	}
-	return s.lifecycleEvents(ctx, p, poolEvents, poolID, in.EventPage)
+	return s.lifecycleEvents(ctx, p, poolEvents, poolID, in.EventPage, in.PageQuery)
 }
 
 func (s *Server) listHostEvents(ctx context.Context, in *listHostEventsInput) (*lifecycleEventsOutput, error) {
@@ -571,13 +585,24 @@ func (s *Server) listHostEvents(ctx context.Context, in *listHostEventsInput) (*
 	if err != nil {
 		return nil, err
 	}
-	return s.lifecycleEvents(ctx, p, hostEvents, hostID, in.EventPage)
+	return s.lifecycleEvents(ctx, p, hostEvents, hostID, in.EventPage, in.PageQuery)
 }
 
 // lifecycleEvents reads a page of an owner's events, newest first. A
 // tenant, or an operator narrowed to one, reads under that tenant's scope:
 // row-level security holds even if the checks before are wrong.
-func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable, owner string, page EventPage) (*lifecycleEventsOutput, error) {
+func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable, owner string, page EventPage, pq PageQuery) (*lifecycleEventsOutput, error) {
+	pg, paged, err := resolvePaging(pq, eventSortKeys, "time", page.Limit, 50, 1000)
+	if err != nil {
+		return nil, err
+	}
+	if paged {
+		if page.Before != "" || page.After != "" {
+			return nil, errf(http.StatusBadRequest, "bad_request", "before and after (event ids) do not go with sort and cursors")
+		}
+		pg.idCast = "bigint"
+		return s.lifecycleEventsPage(ctx, p, t, owner, pg)
+	}
 	limit := 100
 	if n, err := strconv.Atoi(page.Limit); err == nil && n > 0 && n <= 1000 {
 		limit = n
@@ -599,7 +624,7 @@ func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable,
 	sc := p.scope()
 	out := &lifecycleEventsOutput{}
 	out.Body.Events = []LifecycleEvent{}
-	err := s.db.Tx(ctx, sc, func(tx pgx.Tx) error {
+	err = s.db.Tx(ctx, sc, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, type, data, count, created_at, last_at FROM `+t.table+`
 			WHERE `+t.owner+` = $1 AND ($2::bigint IS NULL OR id < $2) AND ($4::bigint IS NULL OR id > $4)
 			ORDER BY id DESC LIMIT $3`, owner, before, limit, after)
@@ -617,6 +642,69 @@ func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable,
 			out.Body.Events = append(out.Body.Events, ev)
 			return nil
 		})
+		return err
+	})
+	return out, err
+}
+
+// lifecycleEventsPage is a page of an owner's events in a sort key's
+// order, keyed by (value, id), under the same scope as lifecycleEvents.
+func (s *Server) lifecycleEventsPage(ctx context.Context, p Principal, t eventTable, owner string, pg *paging) (*lifecycleEventsOutput, error) {
+	out := &lifecycleEventsOutput{}
+	out.Body.Events = []LifecycleEvent{}
+	err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
+		read := func(cond func(q *sqlArgs, expr string) string, order string, limit int) ([]LifecycleEvent, []keyRow, error) {
+			q := &sqlArgs{[]any{owner}}
+			expr := "(" + pg.sk.expr + ")"
+			where := t.owner + ` = $1`
+			if c := cond(q, expr); c != "" {
+				where += " AND " + c
+			}
+			rows, err := tx.Query(ctx, `SELECT id, type, data, count, created_at, last_at, id::text AS key_id, `+expr+`::text AS key_value FROM `+t.table+`
+				WHERE `+where+` ORDER BY `+order+` LIMIT `+strconv.Itoa(limit), q.list...)
+			if err != nil {
+				return nil, nil, err
+			}
+			var evs []LifecycleEvent
+			var keys []keyRow
+			var e LifecycleEvent
+			var last time.Time
+			var k keyRow
+			_, err = pgx.ForEachRow(rows, []any{&e.ID, &e.Type, &e.Data, &e.Count, &e.Time, &last, &k.ID, &k.V}, func() error {
+				ev := e
+				if ev.Count > 1 {
+					at := last
+					ev.LastTime = &at
+				}
+				evs, keys = append(evs, ev), append(keys, k)
+				return nil
+			})
+			return evs, keys, err
+		}
+		expr := "(" + pg.sk.expr + ")"
+		evs, keys, err := read(func(q *sqlArgs, expr string) string {
+			if pg.cursor == nil {
+				return ""
+			}
+			return pg.where(expr, "id", q.arg)
+		}, pg.order(expr, "id", pg.mode == "before"), pg.limit+1)
+		if err != nil {
+			return err
+		}
+		if len(evs) > pg.limit {
+			evs = evs[:pg.limit]
+		}
+		if pg.mode == "before" {
+			slices.Reverse(evs)
+		}
+		_, next, prev, self, err := pg.pageLinks(keys, "", func(first keyRow) (bool, error) {
+			if pg.cursor == nil {
+				return false, nil
+			}
+			ahead, _, err := read(func(q *sqlArgs, expr string) string { return pg.beforeWhere(expr, "id", first, q.arg) }, "id", 1)
+			return len(ahead) > 0, err
+		})
+		out.Body.Events, out.Body.Next, out.Body.Prev, out.Body.Page = evs, next, prev, self
 		return err
 	})
 	return out, err

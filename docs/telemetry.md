@@ -65,6 +65,48 @@ reordered report cannot lower a peak.
 
 Plus `lastHeartbeat`, which is updated with every heartbeat.
 
+### Operational state and launch outcome
+
+A host's `state` is operational: what the scheduler, the provisioner, the
+reapers, token checks and cost work act on. `terminated` means the host is
+gone from all of them, whatever ended it. How luxd's *launch* of a
+provisioned host went is recorded apart, in `launch`:
+
+| `launch.outcome` | Meaning |
+| --- | --- |
+| `requested` | luxd asked the provider; no answer recorded yet. |
+| `launched` | The provider started an instance (`finishedAt`: when it answered). The host may since have ended the usual ways; its `stateReason` says which (never registered, lost, gone at the provider, drained). |
+| `failed` | The provider refused (`error`: its message). No instance ever existed: the host is `terminated` operationally (its one-use token revoked, as before), but reports no `terminateRequested` or `terminated` time and has no uptime or host cost. The console shows it as "Launch failed", and `GET /v1/hosts?state=launch_failed` lists these (`state=terminated` then lists the others). |
+| `abandoned` | No answer was ever recorded (luxd stopped mid-launch) and the row was written off; an instance found later by its tags is an orphan and is terminated. |
+
+Hosts that registered themselves have no `launch`. Migration 039 filled in
+history only where it is unambiguous: a terminated provisioned host whose
+reason starts `launch failed:` and that never had an instance id or a
+registration is `failed` (its reason text is kept); one with an instance id
+is `launched`; everything else was left without an outcome.
+
+## Lists: sort and pages
+
+`GET /v1/hosts`, `GET /v1/runs` and `GET /v1/pools/{name}/events` page when
+asked to (`sort`, `dir`, `limit`, or a cursor): keyset pages over (the sort
+column's value, id), in any sortable column's order, with missing values
+last in either direction. A response carries `next`, `prev` and `page`
+cursors, sent back as `?next=`, `?prev=` and `?at=` (`at` re-reads the page
+from its first row, so a refresh never moves a reader to another page).
+Values that grow with time (uptime, runtime, placement time) are sorted at
+the clock the first page was read at, which the cursors carry. Hosts also
+take `offset` for numbered pages and return `total` and `offset`. Without
+any of these, each list answers as it always has (hosts: every one, by
+name; Runs: newest first with `before` and `limit`; events: by id with
+`before`/`after`).
+
+A Run carries its **placement time**: for each placement, from when the Run
+needed a host (it was created, or its previous placement ended, or it was
+resumed) until that placement's workload started, summed over its
+placements (`placementSeconds` = `placementWaitSeconds`, waiting for a host,
++ `placementStartSeconds`, starting on it). While a Run waits or starts it
+counts up (`placing`).
+
 What happened to a host, and to its pool, is also an event log of its own
 (`lux hosts events <host>`, `lux pools events <pool>`; see the
 [CLI](cli.md#hosts-and-pools)): each event is written in the transaction

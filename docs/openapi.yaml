@@ -455,6 +455,9 @@ components:
         lastHeartbeat:
           format: date-time
           type: string
+        launch:
+          $ref: "#/components/schemas/HostLaunch"
+          description: How luxd's launch of it went; absent for a host that registered itself, or one from before launches were recorded.
         liveRuns:
           format: int64
           type: integer
@@ -495,6 +498,7 @@ components:
             type:
               - string
               - "null"
+          description: "Its lifecycle. A host whose launch failed has no terminateRequested or terminated: no instance ever ran."
           type: object
         versions:
           additionalProperties: {}
@@ -579,6 +583,28 @@ components:
           description: The host's id.
           type: string
       type: object
+    HostLaunch:
+      additionalProperties: false
+      properties:
+        error:
+          description: The provider's error, for a failed launch.
+          type: string
+        finishedAt:
+          description: When the provider answered (launched or failed).
+          format: date-time
+          type: string
+        outcome:
+          description: "requested: asked, no answer yet; launched: an instance started (it may since have ended, never registered or disappeared: see the host's state and reason); failed: the provider refused, no instance ever existed; abandoned: no answer was ever recorded and the row was written off."
+          enum:
+            - requested
+            - launched
+            - failed
+            - abandoned
+          type: string
+        requestedAt:
+          format: date-time
+          type: string
+      type: object
     HostList:
       additionalProperties: false
       properties:
@@ -588,6 +614,23 @@ components:
           type:
             - array
             - "null"
+        next:
+          description: "Paged lists: the next page's cursor (?next=)."
+          type: string
+        offset:
+          description: "Paged lists: how many matching hosts come before this page's first, in its order."
+          format: int64
+          type: integer
+        page:
+          description: "Paged lists: this page's own cursor (?at=), to read it again in place."
+          type: string
+        prev:
+          description: "Paged lists: the previous page's cursor (?prev=)."
+          type: string
+        total:
+          description: "Paged lists: how many hosts match."
+          format: int64
+          type: integer
       type: object
     HostPlacement:
       additionalProperties: false
@@ -725,10 +768,28 @@ components:
           type:
             - array
             - "null"
+        next:
+          description: "Paged lists (sort or a cursor): the next page's cursor (?next=)."
+          type: string
+        page:
+          description: "Paged lists: this page's own cursor (?at=), to read it again in place."
+          type: string
+        prev:
+          description: "Paged lists: the previous page's cursor (?prev=)."
+          type: string
       type: object
     ListRunsBody:
       additionalProperties: false
       properties:
+        next:
+          description: "Paged lists: the next page's cursor (?next=)."
+          type: string
+        page:
+          description: "Paged lists: this page's own cursor (?at=), to read it again in place."
+          type: string
+        prev:
+          description: "Paged lists: the previous page's cursor (?prev=)."
+          type: string
         runs:
           items:
             $ref: "#/components/schemas/Run"
@@ -1380,12 +1441,27 @@ components:
           type: object
         name:
           type: string
+        placementSeconds:
+          description: "Time spent placing the Run, summed over its placements: for each, from when the Run needed a host (created, or its previous placement ending) until that placement's workload started. A Run still being placed counts up to the time of the response (placing). waitSeconds + startSeconds."
+          format: double
+          type: number
+        placementStartSeconds:
+          description: The part spent starting on the host (assigned until the workload started, or the placement ended without starting).
+          format: double
+          type: number
+        placementWaitSeconds:
+          description: The part of placementSeconds spent waiting for a host (needing one until assigned).
+          format: double
+          type: number
         placements:
           items:
             $ref: "#/components/schemas/RunPlacement"
           type:
             - array
             - "null"
+        placing:
+          description: "The Run is being placed now: waiting for a host, or starting on one; placementSeconds grows from the response's time on."
+          type: boolean
         pool:
           description: The current name of the pool the Run is bound to (spec.placement.pool is the name it was submitted with).
           type: string
@@ -2711,6 +2787,45 @@ paths:
           schema:
             description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
             type: string
+        - description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+          explode: false
+          in: query
+          name: sort
+          schema:
+            description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+            type: string
+        - description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+          explode: false
+          in: query
+          name: dir
+          schema:
+            description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+            enum:
+              - asc
+              - desc
+              - ""
+            type: string
+        - description: "The page after this one: a page's next cursor."
+          explode: false
+          in: query
+          name: next
+          schema:
+            description: "The page after this one: a page's next cursor."
+            type: string
+        - description: "The page before this one: a page's prev cursor."
+          explode: false
+          in: query
+          name: prev
+          schema:
+            description: "The page before this one: a page's prev cursor."
+            type: string
+        - description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
+          explode: false
+          in: query
+          name: at
+          schema:
+            description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
+            type: string
         - description: true to include terminated hosts.
           explode: false
           in: query
@@ -2727,12 +2842,37 @@ paths:
           schema:
             description: Only this pool's hosts.
             type: string
-        - description: "Only hosts in this state: provisioning, ready, draining, lost or terminated."
+        - description: "Only hosts in this state: provisioning, ready, draining, lost or terminated; or launch_failed, the terminated hosts whose launch the provider refused (terminated then means the others)."
           explode: false
           in: query
           name: state
           schema:
-            description: "Only hosts in this state: provisioning, ready, draining, lost or terminated."
+            description: "Only hosts in this state: provisioning, ready, draining, lost or terminated; or launch_failed, the terminated hosts whose launch the provider refused (terminated then means the others)."
+            type: string
+        - description: "live: hosts not terminated; ended: terminated ones (launch failures included). Implies all."
+          explode: false
+          in: query
+          name: lifecycle
+          schema:
+            description: "live: hosts not terminated; ended: terminated ones (launch failures included). Implies all."
+            enum:
+              - live
+              - ended
+              - ""
+            type: string
+        - description: "Paged lists: hosts per page, 1 to 500 (default 25)."
+          explode: false
+          in: query
+          name: limit
+          schema:
+            description: "Paged lists: hosts per page, 1 to 500 (default 25)."
+            type: string
+        - description: "Paged lists: skip this many hosts (a numbered page), instead of a cursor."
+          explode: false
+          in: query
+          name: offset
+          schema:
+            description: "Paged lists: skip this many hosts (a numbered page), instead of a cursor."
             type: string
       responses:
         "200":
@@ -3055,6 +3195,45 @@ paths:
             description: "At most this many events: 1 to 1000, default 100."
             examples:
               - "100"
+            type: string
+        - description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+          explode: false
+          in: query
+          name: sort
+          schema:
+            description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+            type: string
+        - description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+          explode: false
+          in: query
+          name: dir
+          schema:
+            description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+            enum:
+              - asc
+              - desc
+              - ""
+            type: string
+        - description: "The page after this one: a page's next cursor."
+          explode: false
+          in: query
+          name: next
+          schema:
+            description: "The page after this one: a page's next cursor."
+            type: string
+        - description: "The page before this one: a page's prev cursor."
+          explode: false
+          in: query
+          name: prev
+          schema:
+            description: "The page before this one: a page's prev cursor."
+            type: string
+        - description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
+          explode: false
+          in: query
+          name: at
+          schema:
+            description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
             type: string
       responses:
         "200":
@@ -3566,6 +3745,45 @@ paths:
             examples:
               - "100"
             type: string
+        - description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+          explode: false
+          in: query
+          name: sort
+          schema:
+            description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+            type: string
+        - description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+          explode: false
+          in: query
+          name: dir
+          schema:
+            description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+            enum:
+              - asc
+              - desc
+              - ""
+            type: string
+        - description: "The page after this one: a page's next cursor."
+          explode: false
+          in: query
+          name: next
+          schema:
+            description: "The page after this one: a page's next cursor."
+            type: string
+        - description: "The page before this one: a page's prev cursor."
+          explode: false
+          in: query
+          name: prev
+          schema:
+            description: "The page before this one: a page's prev cursor."
+            type: string
+        - description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
+          explode: false
+          in: query
+          name: at
+          schema:
+            description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
+            type: string
         - description: The pool's name.
           in: path
           name: name
@@ -3736,6 +3954,45 @@ paths:
           schema:
             description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
             type: string
+        - description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+          explode: false
+          in: query
+          name: sort
+          schema:
+            description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+            type: string
+        - description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+          explode: false
+          in: query
+          name: dir
+          schema:
+            description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+            enum:
+              - asc
+              - desc
+              - ""
+            type: string
+        - description: "The page after this one: a page's next cursor."
+          explode: false
+          in: query
+          name: next
+          schema:
+            description: "The page after this one: a page's next cursor."
+            type: string
+        - description: "The page before this one: a page's prev cursor."
+          explode: false
+          in: query
+          name: prev
+          schema:
+            description: "The page before this one: a page's prev cursor."
+            type: string
+        - description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
+          explode: false
+          in: query
+          name: at
+          schema:
+            description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
+            type: string
         - description: Only Runs in these states (comma-separated).
           explode: false
           in: query
@@ -3777,12 +4034,12 @@ paths:
           schema:
             description: "Only Runs created before this time (RFC 3339): the next page after a list's last Run."
             type: string
-        - description: "At most this many Runs, newest first: 1 to 1000, default 100."
+        - description: "At most this many Runs, newest first: 1 to 1000, default 100. Paged lists (sort or a cursor): 1 to 200, default 50."
           explode: false
           in: query
           name: limit
           schema:
-            description: "At most this many Runs, newest first: 1 to 1000, default 100."
+            description: "At most this many Runs, newest first: 1 to 1000, default 100. Paged lists (sort or a cursor): 1 to 200, default 50."
             examples:
               - "100"
             type: string
