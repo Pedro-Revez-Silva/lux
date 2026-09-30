@@ -32,9 +32,8 @@ func (s *Server) reaperLoop(ctx context.Context) {
 
 // aliveGap is the longest luxd may go without recording itself alive
 // before the time counts as a gap: a sixth of the lease (or a couple of
-// ticks). A shorter one is safe as is: a runner cut off that long waits
-// no longer than that to reconnect (its backoff doubles from 0.5s), and a
-// heartbeat interval (a third of the lease) more to renew, within a lease.
+// ticks). Every luxd should share LUX_LEASE and LUX_TICK, or they judge
+// gaps differently.
 func (s *Server) aliveGap() time.Duration {
 	return max(s.cfg.LeaseDuration/6, 2*s.cfg.Tick)
 }
@@ -64,16 +63,21 @@ func (s *Server) aliveLoop(ctx context.Context) {
 // recordAlive records this instant, and returns the gap it ends, if any.
 // The row lock makes two luxds back at once agree on one resumption, and
 // clock_timestamp() is taken after it, so a wait for the lock is not a gap.
-// The row is put back if missing (a restore without it).
+// A record that cannot be made within the gap gives up (a stalled one would
+// itself look like a gap to every luxd).
 func (s *Server) recordAlive(ctx context.Context) (gap *time.Duration, err error) {
+	ctx, cancel := context.WithTimeout(ctx, s.aliveGap())
+	defer cancel()
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO luxd_alive DEFAULT VALUES ON CONFLICT DO NOTHING`); err != nil {
-			return err
-		}
-		return tx.QueryRow(ctx, `UPDATE luxd_alive n SET at = greatest(o.at, o.now),
+		err := tx.QueryRow(ctx, `UPDATE luxd_alive n SET at = greatest(o.at, o.now),
 				resumed_at = CASE WHEN o.at < o.now - $1::interval THEN o.now ELSE n.resumed_at END
 			FROM (SELECT at, clock_timestamp() AS now FROM luxd_alive FOR UPDATE) o
 			RETURNING CASE WHEN o.at < o.now - $1::interval THEN o.now - o.at END`, interval(s.aliveGap())).Scan(&gap)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Put back (a restore without it): no gap to tell.
+			_, err = tx.Exec(ctx, `INSERT INTO luxd_alive (at) VALUES (clock_timestamp()) ON CONFLICT DO NOTHING`)
+		}
+		return err
 	})
 	return gap, err
 }

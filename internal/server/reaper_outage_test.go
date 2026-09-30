@@ -9,7 +9,7 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-func hostAndPlacement(t *testing.T, s *Server, ctx context.Context) (host, placement string) {
+func hostAndPlacement(ctx context.Context, t *testing.T, s *Server) (host, placement string) {
 	t.Helper()
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT h.state, p.state FROM hosts h JOIN placements p ON p.host_id = h.id WHERE h.id = 'h1'`).Scan(&host, &placement)
@@ -19,7 +19,7 @@ func hostAndPlacement(t *testing.T, s *Server, ctx context.Context) (host, place
 	return host, placement
 }
 
-func reapHeartbeats(t *testing.T, s *Server, ctx context.Context) {
+func reapHeartbeats(ctx context.Context, t *testing.T, s *Server) {
 	t.Helper()
 	if err := s.reapLeases(ctx); err != nil {
 		t.Fatal(err)
@@ -42,8 +42,8 @@ func TestGapIsNotHeldAgainstHosts(t *testing.T) {
 	execSQL(t, s, ctx, `UPDATE luxd_alive SET at = now() - interval '1 hour'`)
 
 	// A reap before any luxd is back (one stalled across the gap).
-	reapHeartbeats(t, s, ctx)
-	if h, p := hostAndPlacement(t, s, ctx); h != "ready" || p != "running" {
+	reapHeartbeats(ctx, t, s)
+	if h, p := hostAndPlacement(ctx, t, s); h != "ready" || p != "running" {
 		t.Fatalf("during the gap: host %q, placement %q; want ready, running", h, p)
 	}
 
@@ -54,8 +54,8 @@ func TestGapIsNotHeldAgainstHosts(t *testing.T) {
 	if gap == nil || gap.Minutes() < 59 {
 		t.Fatalf("gap = %v, want about an hour", gap)
 	}
-	reapHeartbeats(t, s, ctx)
-	if h, p := hostAndPlacement(t, s, ctx); h != "ready" || p != "running" {
+	reapHeartbeats(ctx, t, s)
+	if h, p := hostAndPlacement(ctx, t, s); h != "ready" || p != "running" {
 		t.Fatalf("just after the gap: host %q, placement %q; want ready, running", h, p)
 	}
 
@@ -64,8 +64,8 @@ func TestGapIsNotHeldAgainstHosts(t *testing.T) {
 	if gap, err := s.recordAlive(ctx); err != nil || gap != nil {
 		t.Fatalf("recordAlive again: gap %v, err %v; want no gap", gap, err)
 	}
-	reapHeartbeats(t, s, ctx)
-	if h, p := hostAndPlacement(t, s, ctx); h != "lost" || p != "lost" {
+	reapHeartbeats(ctx, t, s)
+	if h, p := hostAndPlacement(ctx, t, s); h != "lost" || p != "lost" {
 		t.Fatalf("a lease after the gap: host %q, placement %q; want lost, lost", h, p)
 	}
 }
@@ -81,8 +81,8 @@ func TestNoRecordNoGap(t *testing.T) {
 	if err != nil || gap != nil {
 		t.Fatalf("first record: gap %v, err %v; want no gap", gap, err)
 	}
-	reapHeartbeats(t, s, ctx)
-	if h, _ := hostAndPlacement(t, s, ctx); h != "lost" {
+	reapHeartbeats(ctx, t, s)
+	if h, _ := hostAndPlacement(ctx, t, s); h != "lost" {
 		t.Fatalf("host silent an hour, no earlier record: %q, want lost", h)
 	}
 }

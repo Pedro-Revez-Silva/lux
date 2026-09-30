@@ -49,6 +49,7 @@ func (c *conn) wsURL() string {
 func (c *conn) loop(ctx context.Context) {
 	backoff := 500 * time.Millisecond
 	for ctx.Err() == nil {
+		start := time.Now()
 		var err error
 		if c.r.cfg.ForcePoll {
 			err = c.pollLoop(ctx)
@@ -63,15 +64,17 @@ func (c *conn) loop(ctx context.Context) {
 			return
 		}
 		c.log.Warn("disconnected from luxd", "err", err)
+		// A connection that lasted starts the backoff over: a luxd restart
+		// is met within a second, not after the longest wait.
+		if time.Since(start) > proto.MaxReconnectWait {
+			backoff = 500 * time.Millisecond
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(backoff):
 		}
 		backoff = min(backoff*2, proto.MaxReconnectWait)
-		if err == nil {
-			backoff = 500 * time.Millisecond
-		}
 	}
 }
 
@@ -129,25 +132,6 @@ func (c *conn) wsSession(ctx context.Context) error {
 	}()
 	c.log.Info("connected to luxd", "host", w.HostID, "live", len(w.Live))
 	c.r.onWelcome(ctx, w)
-	// A luxd gone without a word (its machine died, a load balancer
-	// dropped it) leaves a connection open that nothing arrives on: a ping
-	// unanswered ends it, so the runner reaches another luxd in time.
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(proto.MaxReconnectWait):
-			}
-			pctx, cancel := context.WithTimeout(ctx, proto.MaxReconnectWait)
-			err := ws.Ping(pctx)
-			cancel()
-			if err != nil {
-				ws.CloseNow()
-				return
-			}
-		}
-	}()
 
 	for {
 		var f proto.Frame

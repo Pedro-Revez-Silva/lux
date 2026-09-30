@@ -446,6 +446,12 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 		pl.ID, interval(s.scaleDownAfter(pl))).Scan(&st.active); err != nil {
 		return err
 	}
+	// A runner silent only because no luxd could hear it is no sign its
+	// host is gone (heartbeatsHeard).
+	heard, err := s.heartbeatsHeard(ctx, tx)
+	if err != nil {
+		return err
+	}
 	rows, err := tx.Query(ctx, `SELECT h.id, coalesce(h.provider_id, ''), coalesce(h.launch_template, $5), h.state, h.draining,
 			EXISTS (SELECT 1 FROM placements p WHERE p.host_id = h.id AND p.state IN `+livePlacementStates+`),
 			EXISTS (SELECT 1 FROM blobs b WHERE b.host_id = h.id AND b.location = 'host'),
@@ -453,12 +459,12 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 			h.provision_requested_at < now() - $4::interval,
 			coalesce(h.lost_at < now() - $6::interval, false),
 			h.tagged AND h.provision_requested_at < now() - $8::interval
-			  AND coalesce(h.last_heartbeat < now() - $7::interval, true)
+			  AND (coalesce(h.last_heartbeat < now() - $7::interval, true) AND $9 OR h.last_heartbeat IS NULL)
 		FROM hosts h
 		WHERE h.pool_id = $1 AND $2::text IS NOT DISTINCT FROM h.tenant_id AND h.provision_requested_at IS NOT NULL
 		  AND h.state <> 'terminated'
 		ORDER BY coalesce(h.last_placement_ended_at, h.registered_at, h.created_at)`,
-		pl.ID, pl.TenantID, interval(s.scaleDownAfter(pl)), interval(s.cfg.LaunchTimeout), pl.Template, interval(s.cfg.LostGrace), interval(s.cfg.LeaseDuration), interval(s.cfg.ListingLag))
+		pl.ID, pl.TenantID, interval(s.scaleDownAfter(pl)), interval(s.cfg.LaunchTimeout), pl.Template, interval(s.cfg.LostGrace), interval(s.cfg.LeaseDuration), interval(s.cfg.ListingLag), heard)
 	if err != nil {
 		return err
 	}
