@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"math"
-	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -249,6 +248,13 @@ func defaultConfig() config {
 // loadConfig reads path (or LUX_CONFIG, or defaultConfigPath if it exists)
 // over the defaults, then the environment over that, and checks the result.
 func loadConfig(path string) (config, error) {
+	c, _, err := loadConfigFile(path)
+	return c, err
+}
+
+// loadConfigFile is loadConfig that also says which file it read: empty
+// when none was (the default path absent, the environment alone).
+func loadConfigFile(path string) (config, string, error) {
 	c := defaultConfig()
 	named := path != ""
 	if !named {
@@ -257,22 +263,77 @@ func loadConfig(path string) (config, error) {
 	if !named {
 		path = defaultConfigPath
 	}
+	read := ""
 	b, err := os.ReadFile(path)
 	switch {
 	case err == nil:
+		read = path
 		warnReadable(path)
-		dec := toml.NewDecoder(bytes.NewReader(b))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&c); err != nil {
-			return c, fmt.Errorf("%s: %s", path, tomlError(err))
+		if err := decodeConfig(b, &c); err != nil {
+			return c, read, fmt.Errorf("%s: %s", path, tomlError(err))
 		}
 	case named || !errors.Is(err, fs.ErrNotExist):
-		return c, err
+		return c, read, err
+	}
+	for _, r := range retiredKeys {
+		if r.env != "" && os.Getenv(r.env) != "" {
+			warn("retired: %s; remove it", r.env)
+		}
 	}
 	if err := applyEnv(reflect.ValueOf(&c).Elem()); err != nil {
-		return c, err
+		return c, read, err
 	}
-	return c, c.check()
+	return c, read, c.check()
+}
+
+// retiredKey is a setting a release removed. It is accepted, ignored and
+// warned about for one more release, so a configuration written for the
+// previous release still loads: then it leaves this list and becomes an
+// unknown key.
+type retiredKey struct {
+	toml string // dotted: "s3.old_key"
+	env  string // "LUX_S3_OLD_KEY"; empty if it had none
+}
+
+var retiredKeys = []retiredKey{}
+
+// decodeConfig decodes b strictly, except for retired keys: when they are
+// the only unknown keys, it warns about each and decodes again without
+// them counting.
+func decodeConfig(b []byte, c *config) error {
+	fresh := *c
+	dec := toml.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	err := dec.Decode(c)
+	var strict *toml.StrictMissingError
+	if !errors.As(err, &strict) {
+		return err
+	}
+	var unknown []toml.DecodeError
+	var retired []string
+	for _, e := range strict.Errors {
+		key := strings.Join(e.Key(), ".")
+		if slices.ContainsFunc(retiredKeys, func(r retiredKey) bool { return r.toml == key }) {
+			retired = append(retired, key)
+		} else {
+			unknown = append(unknown, e)
+		}
+	}
+	if len(unknown) > 0 {
+		return &toml.StrictMissingError{Errors: unknown}
+	}
+	for _, key := range retired {
+		warn("retired: %s; remove it", key)
+	}
+	*c = fresh
+	return toml.NewDecoder(bytes.NewReader(b)).Decode(c)
+}
+
+// stderr is where warnings go.
+var stderr io.Writer = os.Stderr
+
+func warn(format string, args ...any) {
+	fmt.Fprintf(stderr, "luxd: warning: "+format+"\n", args...)
 }
 
 // applyEnv sets every field whose env variable is set (and not empty).
@@ -488,8 +549,8 @@ func (c config) check() error {
 		if strings.HasPrefix(p.Domain, ".") || strings.HasPrefix(p.Domain, "*") || strings.Contains(p.Domain, "/") || !strings.Contains(p.Domain, ".") {
 			problems = append(problems, fmt.Sprintf("preview.domain (LUX_PREVIEW_DOMAIN) %q: want a domain, e.g. lux.example.com", p.Domain))
 		}
-		if _, _, err := net.SplitHostPort(p.Listen); err != nil {
-			problems = append(problems, fmt.Sprintf("preview.listen (LUX_PREVIEW_LISTEN) %q: want host:port", p.Listen))
+		if err := checkListen(p.Listen); err != nil {
+			problems = append(problems, fmt.Sprintf("preview.listen (LUX_PREVIEW_LISTEN) %q: %v", p.Listen, err))
 		}
 		if p.Listen == c.Listen {
 			problems = append(problems, "preview.listen must differ from listen: the preview listener only ever proxies")
@@ -548,7 +609,7 @@ func tomlError(err error) string {
 // database password or S3 secret (both better in the environment).
 func warnReadable(path string) {
 	if st, err := os.Stat(path); err == nil && st.Mode().Perm()&0o077 != 0 {
-		fmt.Fprintf(os.Stderr, "luxd: warning: others can read %s (mode %v); if it holds secrets, chmod 600 it or set them in the environment\n", path, st.Mode().Perm())
+		warn("others can read %s (mode %v); if it holds secrets, chmod 600 it or set them in the environment", path, st.Mode().Perm())
 	}
 }
 

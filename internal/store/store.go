@@ -33,6 +33,11 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse database url: %w", err)
 	}
+	return OpenConfig(ctx, cfg)
+}
+
+// OpenConfig connects with an already parsed configuration and pings.
+func OpenConfig(ctx context.Context, cfg *pgxpool.Config) (*Store, error) {
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err

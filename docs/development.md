@@ -56,13 +56,19 @@ The toolchain and every dependency are kept at their latest release.
 ## Releases
 
 `make dist VERSION=vX.Y.Z` (`scripts/dist.sh`) builds the contract's
-tarballs into `dist/`: `lux_<version>_linux_{arm64,amd64}.tar.gz` (`bin/luxd`,
-`bin/lux`, and `lib/lux/runner/linux-{arm64,amd64}/{lux-runner,lux-shim}` —
+tarballs into `dist/`: `lux_<version>_linux_{arm64,amd64}.tar.gz` (`FEATURES`,
+`bin/luxd`, `bin/lux`, and `lib/lux/runner/linux-{arm64,amd64}/{lux-runner,lux-shim}` —
 both runner arches in every linux tarball, so any luxd serves both),
 `lux_<version>_darwin_{arm64,amd64}.tar.gz` (CLI only), and `SHA256SUMS`
 over them. Every binary is static (`CGO_ENABLED=0`), `-trimpath`, with its
 version baked in (`lux --version`, `luxd version`). Unpacking a Linux
 tarball into `/usr/local` gives the default `runner_bin_dir` layout.
+
+`FEATURES` (the `FEATURES` array in `scripts/dist.sh`) names, one per line,
+what a deployer may rely on in this release ([Operations](operations.md#upgrading));
+`dist.sh` fails if a tarball lacks it. A feature a deployer must detect
+before using it adds a line there. Configuration changes follow
+[the compatibility rules](operations.md#configuration-compatibility).
 
 `.github/workflows/release.yml` runs `make dist` and publishes the result
 as a GitHub Release on every `v*` tag.

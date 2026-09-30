@@ -8,6 +8,8 @@
 //	luxd admin create-pool --name N --provider static|ec2 [--tenant T] [--shared] [--default] ...
 //	luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--retention-days N]
 //	luxd serve                                    run the API, scheduler and reapers
+//	luxd validate                                 check the configuration as serve would, connecting to nothing
+//	luxd check-config                             the same as validate
 //	luxd openapi                                  print the tenant API's OpenAPI spec (YAML)
 //
 // Configuration is a TOML file (--config, LUX_CONFIG, or /etc/lux/luxd.toml),
@@ -55,7 +57,23 @@ func main() {
 	cmd, args := rest[0], rest[1:]
 	var cfg config
 	switch cmd {
-	case "migrate", "admin", "serve", "check-config":
+	case "validate", "check-config":
+		if len(args) > 0 {
+			fmt.Fprintf(os.Stderr, "luxd: %s takes no arguments: %s\n", cmd, strings.Join(args, " "))
+			usage()
+		}
+		err = validate(path, os.Stdout)
+	case "serve":
+		var plan servePlan
+		if cfg, _, plan, err = loadServe(path); err != nil {
+			break
+		}
+		if len(args) > 0 {
+			err = fmt.Errorf("%s takes no arguments: %s", cmd, strings.Join(args, " "))
+			break
+		}
+		err = serve(ctx, cfg, plan)
+	case "migrate", "admin":
 		if cfg, err = loadConfig(path); err != nil {
 			break
 		}
@@ -64,14 +82,10 @@ func main() {
 			break
 		}
 		switch cmd {
-		case "check-config":
-			// loadConfig has already parsed and validated the candidate.
 		case "migrate":
 			err = migrate(ctx, cfg)
 		case "admin":
 			err = admin(ctx, cfg, args)
-		case "serve":
-			err = serve(ctx, cfg)
 		}
 	case "openapi":
 		var doc []byte
@@ -90,10 +104,14 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage: luxd [--config FILE] migrate | admin <command> | serve | check-config | openapi | version
+	fmt.Fprintln(os.Stderr, `usage: luxd [--config FILE] migrate | admin <command> | serve | validate | check-config | openapi | version
 
 Configuration: FILE (TOML), else LUX_CONFIG, else /etc/lux/luxd.toml if it
 exists; environment variables override it (docs/operations.md).
+
+validate checks everything serve checks before it connects, and connects
+to nothing; it prints "ok: FILE" (or "ok: no file"). check-config is an
+alias of validate.
 
 admin commands:
   create-tenant --name N [--max-runs N] [--max-hosts N] [--retention-days N]
@@ -119,33 +137,18 @@ func migrate(ctx context.Context, cfg config) error {
 	return err
 }
 
-func serve(ctx context.Context, c config) error {
+func serve(ctx context.Context, c config, plan servePlan) error {
 	level := slog.LevelInfo
 	if bool(c.Debug) {
 		level = slog.LevelDebug
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-	dsn, err := require(c.Database.URL, "database.url", "LUX_DATABASE_URL")
-	if err != nil {
-		return err
-	}
-	bucket, err := require(c.S3.Bucket, "s3.bucket", "LUX_S3_BUCKET")
-	if err != nil {
-		return err
-	}
-	db, err := store.Open(ctx, dsn)
+	db, err := store.OpenConfig(ctx, plan.db)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	blobs, err := blob.New(ctx, blob.Config{
-		Endpoint:       c.S3.Endpoint,
-		PublicEndpoint: c.S3.PublicEndpoint,
-		Region:         c.S3.Region,
-		Bucket:         bucket,
-		AccessKey:      c.S3.AccessKey,
-		SecretKey:      c.S3.SecretKey,
-	})
+	blobs, err := blob.New(ctx, plan.s3)
 	if err != nil {
 		return err
 	}

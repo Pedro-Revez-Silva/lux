@@ -66,7 +66,7 @@ host-test: host-unit
 	VERSION=$(or $(VERSION),v0.0.0-smoke) HOST_DIR=$(HOST_DIR) ./scripts/host-smoke.sh
 
 # Release tarballs (docs/development.md "Releases"): lux_<version>_linux_
-# {arm64,amd64}.tar.gz (luxd, lux, both runner arches' lux-runner/lux-shim),
+# {arm64,amd64}.tar.gz (FEATURES, luxd, lux, both runner arches' lux-runner/lux-shim),
 # lux_<version>_darwin_{arm64,amd64}.tar.gz (lux only), and SHA256SUMS, all
 # in dist/. Static, trimmed, versioned from VERSION (the release tag).
 dist: console

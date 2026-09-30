@@ -2,8 +2,11 @@
 # dist.sh builds the release tarballs the contract names, plus SHA256SUMS,
 # into dist/. Called by `make dist VERSION=vX.Y.Z`.
 #
-#   lux_<version>_linux_{arm64,amd64}.tar.gz   bin/{luxd,lux}, lib/lux/runner/linux-{arm64,amd64}/{lux-runner,lux-shim}
+#   lux_<version>_linux_{arm64,amd64}.tar.gz   FEATURES, bin/{luxd,lux}, lib/lux/runner/linux-{arm64,amd64}/{lux-runner,lux-shim}
 #   lux_<version>_darwin_{arm64,amd64}.tar.gz  bin/lux (CLI only)
+#
+# FEATURES lists, one per line, what this release's luxd supports that a
+# deployer must not assume of an older one (docs/operations.md, "Upgrades").
 #
 # Both runner arches go in every linux tarball (arm64 and amd64), so any
 # luxd unpacked from either serves both to runner hosts without a second
@@ -31,6 +34,8 @@ for target in $ARCHES; do
   esac
 done
 wanted() { [[ " $ARCHES " == *" $1 "* ]]; }
+# validate: `luxd validate` checks a configuration as serve would, connecting to nothing.
+FEATURES=(validate)
 
 rm -rf "$DIST"
 mkdir -p "$DIST"
@@ -56,7 +61,20 @@ for arch in arm64 amd64; do
   build linux "$arch" luxd "$work/bin/luxd"
   build linux "$arch" lux "$work/bin/lux"
   chmod +x "$work/bin/"* "$work/lib/lux/runner"/*/*
-  tar "${TAR_REPRO_FLAGS[@]}" -C "$work" -czf "$DIST/lux_${VERSION}_linux_${arch}.tar.gz" bin lib share
+  printf '%s\n' "${FEATURES[@]}" > "$work/FEATURES"
+  tarball="$DIST/lux_${VERSION}_linux_${arch}.tar.gz"
+  tar "${TAR_REPRO_FLAGS[@]}" -C "$work" -czf "$tarball" FEATURES bin lib share
+  if [ "$(tar -xzOf "$tarball" FEATURES)" != "$(printf '%s\n' "${FEATURES[@]}")" ]; then
+    echo "dist.sh: FEATURES missing from lux_${VERSION}_linux_${arch}.tar.gz" >&2
+    exit 1
+  fi
+  # Independent of FEATURES above: what the deploy reconciler looks for.
+  # Captured first: grep -q closing the pipe early would fail tar under pipefail.
+  members="$(tar -tzf "$tarball")"
+  if ! grep -qx 'FEATURES' <<<"$members" || ! grep -qx 'validate' <<<"$(tar -xzOf "$tarball" FEATURES)"; then
+    echo "dist.sh: lux_${VERSION}_linux_${arch}.tar.gz: no root FEATURES with the line validate" >&2
+    exit 1
+  fi
   rm -rf "$work"
 done
 rm -rf "${DIST:?}/lib"
