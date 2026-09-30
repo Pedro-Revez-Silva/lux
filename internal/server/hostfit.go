@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 )
@@ -63,14 +64,9 @@ func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 		constraint(kindScope, "non-shared host is used by another tenant")
 	}
 	if !chosen {
-		keys := make([]string, 0, len(r.Spec.Placement.Requires))
-		for k := range r.Spec.Placement.Requires {
-			keys = append(keys, k)
-		}
-		slices.Sort(keys)
-		for _, k := range keys {
-			v := r.Spec.Placement.Requires[k]
-			if h.Labels[k] != v {
+		requires := r.Spec.Placement.Requires
+		for _, k := range slices.Sorted(maps.Keys(requires)) {
+			if v := requires[k]; h.Labels[k] != v {
 				constraint(kindLabel, fmt.Sprintf("requires label %s=%s (host has %q)", k, v, h.Labels[k]))
 			}
 		}
