@@ -615,6 +615,23 @@ func TestCapacityReconcileScaleBlockedBusyPool(t *testing.T) {
 
 // no_fit deficits are told apart by stage and blockers, not by Run: a queue
 // of oversized Runs rotating keeps one row; a new kind of blocker adds one.
+// A row whose deficits is JSON null (written by an early build of this
+// event) neither breaks the comparison nor matches a real deficit list.
+func TestCapacityReconcileScaleBlockedNullDeficits(t *testing.T) {
+	s, pl, p := planningFixture(t, 0)
+	ctx := context.Background()
+	observePlanningHost(t, s, "old", "terminated", proto.Capacity{CPUs: 2}, map[string]string{})
+	execSQL(t, s, ctx, `INSERT INTO pool_events (pool_id, tenant_id, type, data) VALUES ('pool1','t1',$1,'{"cause":"no_fit","deficits":null}')`, evScaleBlocked)
+	execSQL(t, s, ctx, `INSERT INTO runs (id,tenant_id,pool_id,spec,state,updated_at) VALUES ('big','t1','pool1',
+		'{"resources":{"cpus":4},"placement":{"pool":"burst"}}','provisioning',now()-interval '1 hour')`)
+	for range 3 {
+		planningTick(t, s, pl, p, false)
+	}
+	if evs := events(t, s, evScaleBlocked); len(evs) != 2 || evs[1].Data["cause"] != "no_fit" {
+		t.Fatalf("scale-blocked %+v, want the old row and one new no_fit row", evs)
+	}
+}
+
 func TestCapacityReconcileScaleBlockedNoFitRotatingQueue(t *testing.T) {
 	s, pl, p := planningFixture(t, 0)
 	ctx := context.Background()

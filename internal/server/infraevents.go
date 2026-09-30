@@ -255,7 +255,7 @@ type transition struct {
 // runlessDeficits is x with "deficits" replaced by its distinct entries
 // without "run", sorted.
 func runlessDeficits(x string) string {
-	return `CASE WHEN ` + x + ` ? 'deficits' THEN ` + x + ` || jsonb_build_object('deficits',
+	return `CASE WHEN jsonb_typeof(` + x + `->'deficits') = 'array' THEN ` + x + ` || jsonb_build_object('deficits',
 		(SELECT jsonb_agg(DISTINCT e - 'run' ORDER BY e - 'run') FROM jsonb_array_elements(` + x + `->'deficits') e)) ELSE ` + x + ` END`
 }
 
