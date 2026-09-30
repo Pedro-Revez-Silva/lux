@@ -85,10 +85,14 @@ var errUpgradeFailed = errors.New("websocket upgrade failed")
 func (c *conn) wsSession(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	ws, resp, err := websocket.Dial(ctx, c.wsURL(), &websocket.DialOptions{
+	// A luxd gone without a word drops packets rather than refusing them:
+	// a dial bounded like the backoff tries again as often.
+	dctx, dcancel := context.WithTimeout(ctx, proto.MaxReconnectWait)
+	ws, resp, err := websocket.Dial(dctx, c.wsURL(), &websocket.DialOptions{
 		HTTPHeader:      http.Header{"Authorization": []string{"Bearer " + c.r.cfg.Token}},
 		CompressionMode: websocket.CompressionContextTakeover,
 	})
+	dcancel()
 	if err != nil {
 		if resp != nil && (resp.StatusCode == http.StatusUnauthorized) {
 			return fmt.Errorf("luxd rejected the host token")
@@ -106,7 +110,7 @@ func (c *conn) wsSession(ctx context.Context) error {
 		return err
 	}
 	var welcome proto.Frame
-	if err := readFrame(ctx, ws, &welcome); err != nil {
+	if err := c.readLive(ctx, ws, &welcome); err != nil {
 		return err
 	}
 	if welcome.Type != proto.MsgWelcome {
@@ -138,11 +142,29 @@ func (c *conn) wsSession(ctx context.Context) error {
 
 	for {
 		var f proto.Frame
-		if err := readFrame(ctx, ws, &f); err != nil {
+		if err := c.readLive(ctx, ws, &f); err != nil {
 			return err
 		}
 		c.dispatch(ctx, f)
 	}
+}
+
+// readLive reads a frame, giving the connection up if none comes for a
+// lease: luxd acks a heartbeat every third of one, so silence that long is
+// a luxd gone without a word (its machine died, a load balancer dropped
+// it), and the runner must reach another luxd within the lease.
+func (c *conn) readLive(ctx context.Context, ws *websocket.Conn, f *proto.Frame) error {
+	lease := time.Duration(c.r.lease.Load())
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+	rctx, cancel := context.WithTimeout(ctx, lease)
+	defer cancel()
+	err := readFrame(rctx, ws, f)
+	if err != nil && ctx.Err() == nil && rctx.Err() != nil {
+		return fmt.Errorf("nothing from luxd for %s", lease)
+	}
+	return err
 }
 
 func (c *conn) dispatch(ctx context.Context, f proto.Frame) {

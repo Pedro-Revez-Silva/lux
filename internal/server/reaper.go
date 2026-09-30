@@ -41,6 +41,13 @@ func (s *Server) aliveGap() time.Duration {
 // Postgres, and when one came back from a gap (luxd_alive). It is apart
 // from reaperLoop, so a slow reap is not taken for a gap.
 func (s *Server) aliveLoop(ctx context.Context) {
+	// Rows of luxds gone a day, once per process: each start adds one.
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `DELETE FROM luxd_alive WHERE at < now() - interval '1 day'`)
+		return err
+	}); err != nil && ctx.Err() == nil {
+		s.log.Warn("pruning luxd_alive", "err", err)
+	}
 	t := time.NewTicker(s.cfg.Tick)
 	defer t.Stop()
 	for {
@@ -62,7 +69,7 @@ func (s *Server) aliveLoop(ctx context.Context) {
 // recordAlive records this luxd alive, and returns the gap it ends, if
 // any: the time since any luxd last recorded itself. Each luxd writes only
 // its own row, so none waits on another. A record that cannot be made
-// within the gap gives up. Rows of luxds gone a day are dropped.
+// within the gap gives up.
 func (s *Server) recordAlive(ctx context.Context) (gap *time.Duration, err error) {
 	ctx, cancel := context.WithTimeout(ctx, s.aliveGap())
 	defer cancel()
@@ -76,10 +83,6 @@ func (s *Server) recordAlive(ctx context.Context) (gap *time.Duration, err error
 					resumed_at = coalesce(EXCLUDED.resumed_at, luxd_alive.resumed_at)
 			)
 			SELECT CASE WHEN gap > $2::interval THEN gap END FROM g`, instanceID, interval(s.aliveGap())).Scan(&gap)
-		if err != nil {
-			return err
-		}
-		_, err = tx.Exec(ctx, `DELETE FROM luxd_alive WHERE at < now() - interval '1 day'`)
 		return err
 	})
 	return gap, err
