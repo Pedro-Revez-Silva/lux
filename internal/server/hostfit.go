@@ -84,19 +84,105 @@ func reserveHost(h *candidateHost, r pendingRun) {
 	h.Tenants = append(h.Tenants, r.TenantID)
 }
 
-func hostFitReason(h *candidateHost, blockers []fitBlocker) string {
-	parts := make([]string, 0, len(blockers))
+// waitCapacity counts, per blocker kind, the hosts a waiting Run could
+// otherwise use (its own pool and tenancy, or its chosen host) that lack it.
+// It feeds runs.state_reason, which the tenant reads: it never names hosts
+// and never carries per-host usage, so a usage change on a host that still
+// lacks the same resource does not rewrite the reason.
+type waitCapacity struct {
+	hosts  int
+	counts [len(waitKinds)]int
+}
+
+// waitKinds is the reason's fixed order: the resource kinds, then constraints.
+var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested", "connected"}
+
+// add counts h's blockers, unless one of them rules h out for this Run on
+// pool, tenancy or chosen-host grounds: such a host is not the Run's to wait for.
+func (w *waitCapacity) add(blockers []fitBlocker) {
+	var hit [len(waitKinds)]bool
 	for _, b := range blockers {
-		if b.Resource == "" {
-			parts = append(parts, b.Reason)
+		kind := b.Resource
+		switch {
+		case kind != "":
+		case strings.HasPrefix(b.Reason, "requires label "):
+			kind = "labels"
+		case b.Reason == "host does not support nested containers":
+			kind = "nested"
+		case b.Reason == "host is not connected":
+			kind = "connected"
+		default:
+			return
+		}
+		hit[slices.Index(waitKinds[:], kind)] = true
+	}
+	w.hosts++
+	for i, h := range hit {
+		if h {
+			w.counts[i]++
+		}
+	}
+}
+
+// maxWaitReason bounds runs.state_reason for a Run waiting on capacity.
+const maxWaitReason = 512
+
+// reason is e.g. "waiting for capacity: 3 hosts in its pool lack cpus
+// (requested 4), 1 lacks memory (requested 16.0 GiB)"; "" when no host counted.
+func (w *waitCapacity) reason(r pendingRun) string {
+	if w.hosts == 0 {
+		return ""
+	}
+	res := r.Spec.Resources
+	var parts []string
+	for i, kind := range waitKinds {
+		n := w.counts[i]
+		if n == 0 {
 			continue
 		}
-		unit := ""
-		if b.Resource == "memory" || b.Resource == "disk" {
-			unit = " bytes"
+		verb := map[bool]string{true: "lacks", false: "lack"}[n == 1]
+		var what string
+		switch kind {
+		case "cpus":
+			what = fmt.Sprintf("%s cpus (requested %g)", verb, res.CPUs)
+		case "memory":
+			what = fmt.Sprintf("%s memory (requested %s)", verb, bytesText(int64(res.Memory)))
+		case "disk":
+			what = fmt.Sprintf("%s disk (requested %s)", verb, bytesText(int64(res.Disk)))
+		case "runs":
+			what = map[bool]string{true: "is at its Run limit", false: "are at their Run limit"}[n == 1]
+		case "labels":
+			what = verb + " its required labels"
+		case "nested":
+			what = map[bool]string{true: "does", false: "do"}[n == 1] + " not support nested containers"
+		case "connected":
+			what = map[bool]string{true: "is", false: "are"}[n == 1] + " not connected"
 		}
-		parts = append(parts, fmt.Sprintf("%s requested %g%s, used %g%s, capacity %g%s, available %g%s",
-			b.Resource, b.Requested, unit, b.Used, unit, b.Capacity, unit, b.Available, unit))
+		subject := fmt.Sprint(n) + " "
+		if r.PlaceOn != "" {
+			subject = ""
+		}
+		if len(parts) == 0 {
+			subject = map[bool]string{true: "1 host in its pool ", false: fmt.Sprintf("%d hosts in its pool ", n)}[n == 1]
+			if r.PlaceOn != "" {
+				subject = "its chosen host "
+			}
+		}
+		parts = append(parts, subject+what)
 	}
-	return fmt.Sprintf("waiting for host %s: %s", h.ID, strings.Join(parts, "; "))
+	return truncate("waiting for capacity: "+strings.Join(parts, ", "), maxWaitReason)
+}
+
+// bytesText is a byte count in binary units, as the CLI prints it.
+func bytesText(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }

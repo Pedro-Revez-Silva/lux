@@ -109,10 +109,6 @@ func TestHostFitResourceIdentityAndReservation(t *testing.T) {
 			t.Fatalf("JSON round trip = %+v, want %+v", decoded, b)
 		}
 	}
-	wantReason := "waiting for host h: cpus requested 2.5, used 2, capacity 4, available 2; memory requested 8192 bytes, used 10000 bytes, capacity 16384 bytes, available 6384 bytes; disk requested 4096 bytes, used 5000 bytes, capacity 8192 bytes, available 3192 bytes; runs requested 1, used 2, capacity 2, available 0"
-	if got := hostFitReason(h, want); got != wantReason {
-		t.Fatalf("reason = %q, want %q", got, wantReason)
-	}
 	r, h = fitFixture()
 	reserveHost(h, r)
 	if h.UsedCPUs != 2.5 || h.UsedMem != 8192 || h.UsedDisk != 4096 || h.UsedRuns != 1 || !reflect.DeepEqual(h.Tenants, []string{"t1"}) {
@@ -138,5 +134,33 @@ func TestHostFitMemoryIntegerBoundary(t *testing.T) {
 	h.UsedMem--
 	if got := hostFit(r, h); len(got) != 0 {
 		t.Fatalf("exact capacity: %+v", got)
+	}
+}
+
+func TestWaitCapacityReason(t *testing.T) {
+	r, _ := fitFixture()
+	r.Spec.Resources.Memory = 16 << 30
+	var w waitCapacity
+	if got := w.reason(r); got != "" {
+		t.Fatalf("no hosts: %q", got)
+	}
+	cpu := []fitBlocker{{Resource: "cpus", Requested: 2.5, Used: 3, Capacity: 4, Available: 1}}
+	w.add(cpu)
+	w.add(cpu)
+	w.add([]fitBlocker{{Resource: "cpus", Requested: 2.5, Used: 2, Capacity: 4, Available: 2}, {Resource: "memory"}})
+	w.add([]fitBlocker{{Reason: `requires label arch=arm64 (host has "amd64")`}, {Reason: "host is not connected"}})
+	// Hosts the Run could not use anyway are not counted.
+	w.add([]fitBlocker{{Reason: "host belongs to another tenant"}, {Resource: "cpus"}})
+	w.add([]fitBlocker{{Reason: "host is not in its pool pool"}})
+	w.add([]fitBlocker{{Reason: "non-shared host is used by another tenant"}, {Resource: "disk"}})
+	want := "waiting for capacity: 3 hosts in its pool lack cpus (requested 2.5), 1 lacks memory (requested 16.0 GiB), 1 lacks its required labels, 1 is not connected"
+	if got := w.reason(r); got != want {
+		t.Fatalf("reason\n got %q\nwant %q", got, want)
+	}
+	r.PlaceOn = "h"
+	var chosen waitCapacity
+	chosen.add([]fitBlocker{{Resource: "runs"}, {Reason: "host does not support nested containers"}})
+	if got := chosen.reason(r); got != "waiting for capacity: its chosen host is at its Run limit, does not support nested containers" {
+		t.Fatalf("chosen reason %q", got)
 	}
 }

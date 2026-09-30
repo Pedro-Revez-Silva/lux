@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"slices"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -347,10 +346,10 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 			r.PlaceOn = ""
 		}
 	}
-	var fitReasons []string
+	var waiting waitCapacity
 	for _, h := range hosts {
 		if blockers := hostFit(r, h); len(blockers) != 0 {
-			fitReasons = append(fitReasons, hostFitReason(h, blockers))
+			waiting.add(blockers)
 			continue
 		}
 		// A snapshot only on another host, not yet uploaded: that host must
@@ -397,9 +396,8 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 		ok = append(ok, scored{h, sc})
 	}
 	if len(ok) == 0 {
-		if reason != "waiting for snapshot upload" && len(fitReasons) > 0 {
-			slices.Sort(fitReasons)
-			reason = strings.Join(fitReasons, "; ")
+		if w := waiting.reason(r); reason != "waiting for snapshot upload" && w != "" {
+			reason = w
 		}
 		return nil, reason, nil
 	}

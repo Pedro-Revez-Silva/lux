@@ -54,7 +54,11 @@ submitted → scheduled → starting → running ─┬─▶ succeeded
 | `lost` | Its host stopped heartbeating while it was live. Resumable from the last snapshot taken *before* the lost placement. Work since then is gone. |
 
 `stateReason` explains the current state, for example `exit code 3`,
-`waiting for capacity`, or `lease expired: host stopped heartbeating`.
+`waiting for capacity: 2 hosts in its pool lack cpus (requested 4)`, or
+`lease expired: host stopped heartbeating`. A Run waiting for a host counts
+only hosts of its own pool and tenant (or its chosen host), per missing
+resource or constraint, without host names or their usage; the reason is
+at most 512 bytes.
 
 ## Volumes and snapshots
 

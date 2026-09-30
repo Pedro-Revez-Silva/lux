@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,9 +34,8 @@ func TestSchedulerFitWaitAndPlacementResources(t *testing.T) {
 		}
 		var state, reason string
 		systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r'`, nil, &state, &reason)
-		r, h := fitFixture()
-		h.Capacity = proto.Capacity{CPUs: capacity, Memory: 4096}
-		want := hostFitReason(h, hostFit(r, h))
+		// Not the host's numbers: the reason stays the same as its capacity changes.
+		want := "waiting for capacity: 1 host in its pool lacks cpus (requested 2.5), 1 lacks memory (requested 8.0 KiB)"
 		if state != StateProvisioning || reason != want {
 			t.Fatalf("Run = %s/%q, want provisioning/%q", state, reason, want)
 		}
@@ -370,5 +370,97 @@ func TestSchedulerEligibleHostsScopeAndRevalidation(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A Run's wait reason counts only hosts it could otherwise use: another
+// tenant's hosts in the same batch are neither named nor counted.
+func TestSchedulerWaitReasonTenantScope(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	s.cfg.LeaseDuration = time.Minute
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('ta', 'ta'), ('tb', 'tb')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pa', 'ta', 'pa', 'ec2'), ('pb', 'tb', 'pb', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, tenant_id, pool_id, state, capacity, last_heartbeat) VALUES
+		('a-full', 'a-full', 'ta', 'pa', 'ready', '{"cpus":1}', now()),
+		('tenant-b-secret-host', 'b', 'tb', 'pb', 'ready', '{"cpus":1}', now())`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, pool_id, spec, state) VALUES
+		('ra', 'ta', 'pa', '{"placement":{"pool":"pa"},"resources":{"cpus":2}}', 'submitted'),
+		('rb', 'tb', 'pb', '{"placement":{"pool":"pb"},"resources":{"cpus":2}}', 'submitted')`)
+	s.hub.polled("a-full")
+	s.hub.polled("tenant-b-secret-host")
+	if err := s.scheduleOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for run, host := range map[string]string{"ra": "tenant-b-secret-host", "rb": "a-full"} {
+		var reason string
+		systemScan(t, s, `SELECT state_reason FROM runs WHERE id = $1`, []any{run}, &reason)
+		if want := "waiting for capacity: 1 host in its pool lacks cpus (requested 2)"; reason != want || strings.Contains(reason, host) {
+			t.Fatalf("%s reason %q, want %q", run, reason, want)
+		}
+	}
+}
+
+// Many full hosts summarise to a bounded reason.
+func TestSchedulerWaitReasonBounded(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	s.cfg.LeaseDuration = time.Minute
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool', 't1', 'pool', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, tenant_id, pool_id, state, capacity, last_heartbeat)
+		SELECT 'full-' || i, 'full-' || i, 't1', 'pool', 'ready', '{"cpus":1,"memory":1024}', now() FROM generate_series(1, 200) i`)
+	for i := 1; i <= 200; i++ {
+		s.hub.polled(fmt.Sprintf("full-%d", i))
+	}
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, pool_id, spec, state) VALUES
+		('r', 't1', 'pool', '{"placement":{"pool":"pool","requires":{"zone":"z"}},"resources":{"cpus":2,"memory":2048,"disk":1}}', 'submitted')`)
+	if err := s.scheduleOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var reason string
+	systemScan(t, s, `SELECT state_reason FROM runs WHERE id = 'r'`, nil, &reason)
+	want := "waiting for capacity: 200 hosts in its pool lack cpus (requested 2), 200 lack memory (requested 2.0 KiB), 200 lack its required labels"
+	if reason != want || len(reason) > maxWaitReason {
+		t.Fatalf("reason (%d bytes) %q, want %q", len(reason), reason, want)
+	}
+}
+
+// Usage changing on a host that still cannot take the waiting Runs rewrites
+// neither their rows nor their events.
+func TestSchedulerWaitReasonStableAcrossUsage(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	s.cfg.LeaseDuration = time.Minute
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool', 't1', 'pool', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, tenant_id, pool_id, state, capacity, last_heartbeat)
+		VALUES ('h', 'h', 't1', 'pool', 'ready', '{"cpus":4}', now())`)
+	s.hub.polled("h")
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('live', 't1', '{}', 'running')`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources) VALUES ('p', 't1', 'live', 'h', 1, 'running', '{"cpus":3}')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, pool_id, spec, state)
+		SELECT 'w' || i, 't1', 'pool', '{"placement":{"pool":"pool"},"resources":{"cpus":2}}', 'submitted' FROM generate_series(1, 5) i`)
+	snapshot := func() (string, int) {
+		var xmins string
+		var events int
+		systemScan(t, s, `SELECT string_agg(xmin::text, ',' ORDER BY id), (SELECT count(*) FROM run_events WHERE run_id LIKE 'w%')
+			FROM runs WHERE id LIKE 'w%'`, nil, &xmins, &events)
+		return xmins, events
+	}
+	for range 2 {
+		if err := s.scheduleOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, evs := snapshot()
+	for _, cpus := range []string{`{"cpus":3.5}`, `{"cpus":2.5}`} {
+		execSQL(t, s, ctx, `UPDATE placements SET resources = $1 WHERE id = 'p'`, cpus)
+		if err := s.scheduleOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if r, e := snapshot(); r != rows || e != evs {
+			t.Fatalf("usage %s rewrote waiting Runs: rows %s→%s, events %d→%d", cpus, rows, r, evs, e)
+		}
 	}
 }
