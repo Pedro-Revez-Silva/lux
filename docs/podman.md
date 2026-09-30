@@ -84,6 +84,12 @@ workload:
   controller in `/sys/fs/cgroup` and `lux.slice` for it, then passes
   `--cgroup-parent`. (`--ulimit nproc` also works, but a cgroup is what
   lets lux end everything the build started.)
+- **`--cgroup-manager=cgroupfs`.** That cgroup is a plain cgroupfs path,
+  so the build runs under the cgroupfs manager, whatever the host's
+  `containers.conf` says. Under systemd (Fedora CoreOS's default) crun
+  turns `/lux.slice/build-<run>` into a unit name and every `RUN` step
+  fails: first `bpf pin to /sys/fs/bpf/crun/lux_slice/build-<run>_scope:
+  No such file or directory`, and systemd rejects the name past that.
 - **Cancelling a build.** SIGKILL to `podman build` can leave its current
   `RUN` step running. lux sends SIGTERM, and afterwards writes `1` to the
   build cgroup's `cgroup.kill` before removing it, so nothing outlives the

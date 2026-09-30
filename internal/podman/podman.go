@@ -45,8 +45,15 @@ func (p *Podman) cmd(ctx context.Context, args ...string) *exec.Cmd {
 //
 // Cancelling ctx sends SIGTERM, which podman build handles by stopping the
 // step under way; SIGKILL (exec's default) would leave that step running.
+//
+// The cgroup manager is cgroupfs: the runner makes a build's cgroup itself
+// (lux.slice/build-<run>) and passes its path as --cgroup-parent. Under
+// systemd, a host's default, crun would take that path for a unit name and
+// fail every RUN step ("bpf pin to /sys/fs/bpf/crun/lux_slice/...: No such
+// file or directory"; with that directory, systemd rejects the unit name).
 func (p *Podman) Build(ctx context.Context, args ...string) ([]byte, error) {
-	return p.run(ctx, []string{"_CONTAINERS_OVERLAY_DISABLE_IDMAP=yes"}, append([]string{"build"}, args...)...)
+	return p.run(ctx, []string{"_CONTAINERS_OVERLAY_DISABLE_IDMAP=yes"},
+		append([]string{"--cgroup-manager=cgroupfs", "build"}, args...)...)
 }
 
 // Run runs podman and returns stdout. Errors include stderr.
