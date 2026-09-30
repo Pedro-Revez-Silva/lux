@@ -39,7 +39,8 @@ func TestGapIsNotHeldAgainstHosts(t *testing.T) {
 	drainFixture(t, s, ctx)
 	execSQL(t, s, ctx, `UPDATE hosts SET last_heartbeat = now() - interval '1 hour'`)
 	execSQL(t, s, ctx, `UPDATE placements SET lease_expires_at = now() - interval '1 hour'`)
-	execSQL(t, s, ctx, `UPDATE luxd_alive SET at = now() - interval '1 hour'`)
+	// The last luxd heard from, an hour ago.
+	execSQL(t, s, ctx, `INSERT INTO luxd_alive (instance, at) VALUES ('luxd_old', now() - interval '1 hour')`)
 
 	// A reap before any luxd is back (one stalled across the gap).
 	reapHeartbeats(ctx, t, s)
@@ -60,7 +61,7 @@ func TestGapIsNotHeldAgainstHosts(t *testing.T) {
 	}
 
 	// A lease (and the runner's reconnect wait) since luxd came back.
-	execSQL(t, s, ctx, `UPDATE luxd_alive SET resumed_at = now() - interval '1 minute'`)
+	execSQL(t, s, ctx, `UPDATE luxd_alive SET resumed_at = now() - interval '1 minute' WHERE resumed_at IS NOT NULL`)
 	if gap, err := s.recordAlive(ctx); err != nil || gap != nil {
 		t.Fatalf("recordAlive again: gap %v, err %v; want no gap", gap, err)
 	}

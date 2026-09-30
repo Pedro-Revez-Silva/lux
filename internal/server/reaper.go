@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -60,23 +59,27 @@ func (s *Server) aliveLoop(ctx context.Context) {
 	}
 }
 
-// recordAlive records this instant, and returns the gap it ends, if any.
-// The row lock makes two luxds back at once agree on one resumption, and
-// clock_timestamp() is taken after it, so a wait for the lock is not a gap.
-// A record that cannot be made within the gap gives up (a stalled one would
-// itself look like a gap to every luxd).
+// recordAlive records this luxd alive, and returns the gap it ends, if
+// any: the time since any luxd last recorded itself. Each luxd writes only
+// its own row, so none waits on another. A record that cannot be made
+// within the gap gives up. Rows of luxds gone a day are dropped.
 func (s *Server) recordAlive(ctx context.Context) (gap *time.Duration, err error) {
 	ctx, cancel := context.WithTimeout(ctx, s.aliveGap())
 	defer cancel()
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		err := tx.QueryRow(ctx, `UPDATE luxd_alive n SET at = greatest(o.at, o.now),
-				resumed_at = CASE WHEN o.at < o.now - $1::interval THEN o.now ELSE n.resumed_at END
-			FROM (SELECT at, clock_timestamp() AS now FROM luxd_alive FOR UPDATE) o
-			RETURNING CASE WHEN o.at < o.now - $1::interval THEN o.now - o.at END`, interval(s.aliveGap())).Scan(&gap)
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Put back (a restore without it): no gap to tell.
-			_, err = tx.Exec(ctx, `INSERT INTO luxd_alive (at) VALUES (clock_timestamp()) ON CONFLICT DO NOTHING`)
+		err := tx.QueryRow(ctx, `WITH g AS (
+				SELECT clock_timestamp() AS now, clock_timestamp() - max(at) AS gap FROM luxd_alive
+			), up AS (
+				INSERT INTO luxd_alive (instance, at, resumed_at)
+				SELECT $1, now, CASE WHEN gap > $2::interval THEN now END FROM g
+				ON CONFLICT (instance) DO UPDATE SET at = EXCLUDED.at,
+					resumed_at = coalesce(EXCLUDED.resumed_at, luxd_alive.resumed_at)
+			)
+			SELECT CASE WHEN gap > $2::interval THEN gap END FROM g`, instanceID, interval(s.aliveGap())).Scan(&gap)
+		if err != nil {
+			return err
 		}
+		_, err = tx.Exec(ctx, `DELETE FROM luxd_alive WHERE at < now() - interval '1 day'`)
 		return err
 	})
 	return gap, err
@@ -85,16 +88,15 @@ func (s *Server) recordAlive(ctx context.Context) (gap *time.Duration, err error
 // heartbeatsHeard says whether a missing heartbeat, as of this
 // transaction's now(), is the runner's to answer for: not during a gap no
 // luxd recorded itself alive (every luxd stopped or hung, or Postgres
-// unreachable), nor for a lease after it plus the runner's longest wait
-// between reconnects, so its runners reach luxd again first. Checked in
-// the reaping transaction itself, so a reap stalled across a gap sees it.
+// unreachable), nor for a lease after one came back plus the runner's
+// longest wait between reconnects, so its runners reach luxd again first.
+// Checked in the reaping transaction itself, so a reap stalled across a
+// gap sees it. No record yet (older luxds only) is no gap.
 func (s *Server) heartbeatsHeard(ctx context.Context, tx pgx.Tx) (bool, error) {
 	var heard bool
-	err := tx.QueryRow(ctx, `SELECT coalesce(at >= now() - $1::interval, true) AND coalesce(resumed_at < now() - $2::interval, true)
+	err := tx.QueryRow(ctx, `SELECT coalesce(max(at) >= now() - $1::interval, true)
+			AND coalesce(max(resumed_at) < now() - $2::interval, true)
 		FROM luxd_alive`, interval(s.aliveGap()), interval(s.cfg.LeaseDuration+proto.MaxReconnectWait)).Scan(&heard)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return true, nil
-	}
 	return heard, err
 }
 

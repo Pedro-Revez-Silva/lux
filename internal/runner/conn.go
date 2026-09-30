@@ -32,6 +32,8 @@ type conn struct {
 	// fallback: reports queued for the next poll, acks to send
 	pollReports []proto.Frame
 	pollAcks    []int64
+	// welcomed: when luxd last welcomed this connection (loop's only).
+	welcomed time.Time
 }
 
 func newConn(r *Runner) *conn {
@@ -49,7 +51,7 @@ func (c *conn) wsURL() string {
 func (c *conn) loop(ctx context.Context) {
 	backoff := 500 * time.Millisecond
 	for ctx.Err() == nil {
-		start := time.Now()
+		c.welcomed = time.Time{}
 		var err error
 		if c.r.cfg.ForcePoll {
 			err = c.pollLoop(ctx)
@@ -66,7 +68,7 @@ func (c *conn) loop(ctx context.Context) {
 		c.log.Warn("disconnected from luxd", "err", err)
 		// A connection that lasted starts the backoff over: a luxd restart
 		// is met within a second, not after the longest wait.
-		if time.Since(start) > proto.MaxReconnectWait {
+		if !c.welcomed.IsZero() && time.Since(c.welcomed) > proto.MaxReconnectWait {
 			backoff = 500 * time.Millisecond
 		}
 		select {
@@ -130,6 +132,7 @@ func (c *conn) wsSession(ctx context.Context) error {
 		// drops, and nothing could reach these again.
 		c.r.streams.endAll()
 	}()
+	c.welcomed = time.Now()
 	c.log.Info("connected to luxd", "host", w.HostID, "live", len(w.Live))
 	c.r.onWelcome(ctx, w)
 
@@ -332,6 +335,7 @@ func (c *conn) pollLoop(ctx context.Context) error {
 			if f.Type == proto.MsgWelcome {
 				var w proto.Welcome
 				_ = json.Unmarshal(f.Data, &w)
+				c.welcomed = time.Now()
 				c.log.Info("polling luxd", "host", w.HostID)
 				c.r.onWelcome(ctx, w)
 				first = false
