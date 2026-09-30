@@ -56,9 +56,9 @@ submitted → scheduled → starting → running ─┬─▶ succeeded
 `stateReason` explains the current state, for example `exit code 3`,
 `waiting for capacity: 2 hosts in its pool lack cpus (requested 4)`, or
 `lease expired: host stopped heartbeating`. A Run waiting for a host counts
-only hosts of its own pool and tenant (or its chosen host), per missing
-resource or constraint, without host names or their usage; the reason is
-at most 512 bytes.
+only hosts of its own pool and tenant (or its chosen host) that the luxd
+writing the reason is connected to, per missing resource or constraint,
+without host names or their usage; the reason is at most 512 bytes.
 
 ## Volumes and snapshots
 

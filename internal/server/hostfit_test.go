@@ -148,12 +148,15 @@ func TestWaitCapacityReason(t *testing.T) {
 	w.add(cpu)
 	w.add(cpu)
 	w.add([]fitBlocker{{Resource: "cpus", Requested: 2.5, Used: 2, Capacity: 4, Available: 2}, {Resource: "memory"}})
-	w.add([]fitBlocker{{Reason: `requires label arch=arm64 (host has "amd64")`}, {Reason: "host is not connected"}})
-	// Hosts the Run could not use anyway are not counted.
+	w.add([]fitBlocker{{Reason: `requires label arch=arm64 (host has "amd64")`}})
+	// Hosts the Run could not use anyway are not counted, nor are hosts this
+	// luxd does not reach (another may: the reason must not depend on which
+	// luxd wrote it).
+	w.add([]fitBlocker{{Reason: "host is not connected"}, {Resource: "cpus"}})
 	w.add([]fitBlocker{{Reason: "host belongs to another tenant"}, {Resource: "cpus"}})
 	w.add([]fitBlocker{{Reason: "host is not in its pool pool"}})
 	w.add([]fitBlocker{{Reason: "non-shared host is used by another tenant"}, {Resource: "disk"}})
-	want := "waiting for capacity: 3 hosts in its pool lack cpus (requested 2.5), 1 lacks memory (requested 16.0 GiB), 1 lacks its required labels, 1 is not connected"
+	want := "waiting for capacity: 3 hosts in its pool lack cpus (requested 2.5), 1 lacks memory (requested 16.0 GiB), 1 lacks its required labels"
 	if got := w.reason(r); got != want {
 		t.Fatalf("reason\n got %q\nwant %q", got, want)
 	}

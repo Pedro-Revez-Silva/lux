@@ -95,10 +95,12 @@ type waitCapacity struct {
 }
 
 // waitKinds is the reason's fixed order: the resource kinds, then constraints.
-var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested", "connected"}
+var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested"}
 
 // add counts h's blockers, unless one of them rules h out for this Run on
-// pool, tenancy or chosen-host grounds: such a host is not the Run's to wait for.
+// pool, tenancy or chosen-host grounds, or h is not connected to this luxd
+// (another may hold it, so counting it would make the reason depend on
+// which luxd wrote it): such a host is not the Run's to wait for here.
 func (w *waitCapacity) add(blockers []fitBlocker) {
 	var hit [len(waitKinds)]bool
 	for _, b := range blockers {
@@ -109,8 +111,6 @@ func (w *waitCapacity) add(blockers []fitBlocker) {
 			kind = "labels"
 		case b.Reason == "host does not support nested containers":
 			kind = "nested"
-		case b.Reason == "host is not connected":
-			kind = "connected"
 		default:
 			return
 		}
@@ -155,8 +155,6 @@ func (w *waitCapacity) reason(r pendingRun) string {
 			what = verb + " its required labels"
 		case "nested":
 			what = map[bool]string{true: "does", false: "do"}[n == 1] + " not support nested containers"
-		case "connected":
-			what = map[bool]string{true: "is", false: "are"}[n == 1] + " not connected"
 		}
 		subject := fmt.Sprint(n) + " "
 		if r.PlaceOn != "" {
