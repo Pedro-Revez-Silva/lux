@@ -114,6 +114,15 @@ test("LogView renders escapes as styled spans, and its text copies without them"
   expect(text).toContain("fail: done");
 });
 
+test("LogView inverse swaps explicit layers and uses row defaults for stdout and stderr", () => {
+  for (const stream of ["stdout", "stderr"] as const) {
+    const html = renderToStaticMarkup(<LogView lines={[{ stream, text: "explicit default", spans: [{ text: "explicit", fg: 1, bg: 4, flags: ANSI_INVERSE }, { text: "default", flags: ANSI_INVERSE }] }]} />);
+    expect(html).toContain(`class="logline logline-${stream}"`);
+    expect(html).toContain('<span style="color:var(--ansi-bg-blue);background:var(--ansi-red)">explicit</span>');
+    expect(html).toContain('<span style="color:var(--bg-inset);background:var(--logline-fg)">default</span>');
+  }
+});
+
 test("LogView uses a line's decoded spans as given", () => {
   const html = renderToStaticMarkup(<>{logLineContent({ stream: "stdout", text: "ab", spans: [{ text: "a", fg: 2 }, { text: "b" }] })}</>);
   expect(html).toBe('<span style="color:var(--ansi-green)">a</span>b');
