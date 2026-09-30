@@ -129,8 +129,6 @@ type Server struct {
 	// wakeups wake followers of Run events (wakeups.go).
 	wakeups *wakeups
 	kick    chan struct{}
-	// alive: when aliveLoop last recorded this luxd alive (unix nanos).
-	alive atomic.Int64
 	// lastAliveCheck: when the provisioner last asked providers which
 	// hosts still exist.
 	lastAliveCheck time.Time
