@@ -89,10 +89,11 @@ function top(rows: CostSummaryRow[], group: string): TopRow[] {
 
 function TopTable({ rows, name, id, onClick, loading, empty }: { rows: TopRow[]; name: (key: string) => ReactNode; id?: (key: string) => ReactNode; onClick?: (key: string) => void; loading: boolean; empty: string }) {
   const cols: Column<TopRow>[] = [
-    { key: "name", header: "Name", cell: (r) => name(r.key), lead: true },
+    { key: "name", header: "Name", cell: (r) => name(r.key), sortValue: (r) => r.key, lead: true },
     // Not optional: the card is narrower than Table's breakpoint, and the id is what a name supports.
-    ...(id ? [{ key: "id", header: "Id", cell: (r: TopRow) => id(r.key), mono: true, width: 190 }] : []),
-    { key: "amount", header: "Cost", cell: (r) => <Money amount={r.amount} currency={r.currency} />, align: "right", mono: true, width: 110 },
+    ...(id ? [{ key: "id", header: "Id", cell: (r: TopRow) => id(r.key), sortValue: (r: TopRow) => r.key, mono: true, width: 190 }] : []),
+    // Ordering only: the figure is formatted from the string.
+    { key: "amount", header: "Cost", cell: (r) => <Money amount={r.amount} currency={r.currency} />, sortValue: (r) => Number(r.amount), align: "right", mono: true, width: 110 },
   ];
   return <Table columns={cols} rows={rows} rowKey={(r) => `${r.currency}:${r.key}`} loading={loading} loadingRows={3} onRowClick={onClick ? (r) => onClick(r.key) : undefined} empty={empty} dense />;
 }

@@ -49,9 +49,9 @@ func TestSnapshotOwnerUpgrade(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"037_snapshot_records", "038_pool_id", "039_luxd_alive"}
+			want := []string{"037_snapshot_records", "038_pool_id", "039_luxd_alive", "040_launch_outcome", "041_pool_samples", "042_dashboard_indexes"}
 			if from == "030_servers" {
-				want = []string{"031_pool_template_tags", "032_default_pool", "033_run_pool_owner", "034_pool_host_events", "035_snapshot_refused", "037_snapshot_records", "038_pool_id", "039_luxd_alive"}
+				want = []string{"031_pool_template_tags", "032_default_pool", "033_run_pool_owner", "034_pool_host_events", "035_snapshot_refused", "037_snapshot_records", "038_pool_id", "039_luxd_alive", "040_launch_outcome", "041_pool_samples", "042_dashboard_indexes"}
 			}
 			if !slices.Equal(done, want) {
 				t.Fatalf("migration order from %s: got %v, want %v", from, done, want)

@@ -48,8 +48,21 @@ def test_a_failed_launch_is_retried(lux, ec2):
     assert "InsufficientInstanceCapacity" in failed[0]["data"]["error"], failed
     assert "RequestID" not in failed[0]["data"]["error"], failed
     assert "(×" in lux.run("pools", "events", "burst").stdout
+    # Each refused launch is a terminated host whose launch failed: no
+    # instance, no terminated time; the list filters them apart.
+    refused = lux.json("hosts", "ls", "--state", "launch_failed")
+    assert refused, refused
+    for h in refused:
+        assert h["launch"]["outcome"] == "failed", h
+        assert "InsufficientInstanceCapacity" in h["launch"]["error"], h
+        assert h["launch"].get("finishedAt"), h
+        assert not h.get("providerId") and not h["times"].get("terminated"), h
+    assert "launch failed" in lux.run("hosts", "ls", "--state", "launch_failed").stdout
     ec2.fail_launches = False
     lux.wait_state(run_id, "succeeded", timeout=120)
+    launched = [h for h in lux.json("hosts", "ls", "--all") if h["pool"] == "burst" and h.get("providerId")]
+    assert launched and all(h["launch"]["outcome"] == "launched" for h in launched), launched
+    assert {h["id"] for h in refused}.isdisjoint({h["id"] for h in launched}), (refused, launched)
 
 
 def test_a_purged_instance_does_not_write_off_the_others(lux, ec2):

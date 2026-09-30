@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Badge, Button, Card, ConnectionBadge, CrumbSep, DEFAULT_FONT_SIZE, EmptyState, formatDuration, IconButton, IdChip, LinkButton, PageHeader, StatePill, Terminal, TerminalOverlay, useTheme, type ConnectionStatus, type TerminalHandle, type TerminalSize } from "@lux/design-system";
-import { IconChevronLeft, IconExternal, IconMinus, IconMoon, IconPlus, IconRefresh, IconSun, IconTerminal, IconWarning } from "@lux/design-system/icons";
+import { Badge, Button, Card, ConnectionBadge, CrumbSep, DEFAULT_FONT_SIZE, EmptyState, formatDuration, IconButton, IdChip, LinkButton, PageHeader, SegmentedControl, StatePill, Terminal, TerminalOverlay, useTerminalScheme, type ConnectionStatus, type TerminalHandle, type TerminalSchemePref, type TerminalSize } from "@lux/design-system";
+import { IconChevronLeft, IconExternal, IconMinus, IconPlus, IconRefresh, IconTerminal, IconWarning } from "@lux/design-system/icons";
 import { errorText, EXEC_RUN_STATES, isApiError, openExec, SHELL_COMMAND, TERMINAL_RUN_STATES, useSession, type ExecSession, type Run } from "../../api/index.ts";
 import { href, Link, scoped, useSearch } from "../router.tsx";
 import { ButtonLink, ErrorBlock, HostLink, PageSkeleton, RunLink, runPath, useRun } from "./common.tsx";
@@ -32,6 +32,12 @@ interface Shell {
 
 export const terminalPath = (id: string) => `${runPath(id)}/terminal`;
 
+const SCHEMES: { value: TerminalSchemePref; label: string; title: string }[] = [
+  { value: "auto", label: "Match console", title: "Solarized light or dark, as the console theme is" },
+  { value: "light", label: "Solarized light", title: "This terminal only; the console theme stays in the top bar" },
+  { value: "dark", label: "Solarized dark", title: "This terminal only; the console theme stays in the top bar" },
+];
+
 /**
  * /runs/:id/terminal: a shell in the Run's container, over the exec
  * WebSocket. The header says which run, on which host, as whom; the
@@ -40,7 +46,9 @@ export const terminalPath = (id: string) => `${runPath(id)}/terminal`;
  */
 export function TerminalPage({ id }: { id: string }) {
   const session = useSession();
-  const { resolved, toggle } = useTheme();
+  // The terminal's own colours: changing them repaints this terminal in
+  // place (same shell, same scrollback), never the console.
+  const scheme = useTerminalScheme();
   const search = useSearch();
   const q = useRun(id, { active: 5000, settled: 15_000, liveActive: 30_000, liveSettled: 60_000 });
   const run = q.data;
@@ -190,9 +198,7 @@ export function TerminalPage({ id }: { id: string }) {
                   <IconPlus size={15} />
                 </IconButton>
               </div>
-              <IconButton label={resolved === "dark" ? "Switch to light theme" : "Switch to dark theme"} title="Switch theme (the terminal follows: Solarized dark / light)" onClick={toggle}>
-                {resolved === "dark" ? <IconSun size={16} /> : <IconMoon size={16} />}
-              </IconButton>
+              <SegmentedControl label="Terminal colours" value={scheme.pref} onChange={scheme.set} options={SCHEMES} />
               <span className="btn-sep" aria-hidden="true" />
               <Button icon={<IconRefresh size={15} />} onClick={reconnect} disabled={shell.status === "connecting"} title="Ends this shell and opens a new one">
                 Reconnect
@@ -213,6 +219,7 @@ export function TerminalPage({ id }: { id: string }) {
         <Terminal
           ref={term}
           fontSize={fontSize}
+          scheme={scheme.resolved}
           disabled={!connected}
           onData={onData}
           onResize={onResize}

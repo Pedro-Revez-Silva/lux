@@ -455,6 +455,9 @@ components:
         lastHeartbeat:
           format: date-time
           type: string
+        launch:
+          $ref: "#/components/schemas/HostLaunch"
+          description: How luxd's launch of it went; absent for a host that registered itself, or one from before launches were recorded.
         liveRuns:
           format: int64
           type: integer
@@ -495,6 +498,7 @@ components:
             type:
               - string
               - "null"
+          description: "Its lifecycle. A host whose launch failed has no terminateRequested or terminated: no instance ever ran."
           type: object
         versions:
           additionalProperties: {}
@@ -579,6 +583,28 @@ components:
           description: The host's id.
           type: string
       type: object
+    HostLaunch:
+      additionalProperties: false
+      properties:
+        error:
+          description: The provider's error, for a failed launch.
+          type: string
+        finishedAt:
+          description: When the provider answered (launched or failed).
+          format: date-time
+          type: string
+        outcome:
+          description: "requested: asked, no answer yet; launched: an instance started (it may since have ended, never registered or disappeared: see the host's state and reason); failed: the provider refused, no instance ever existed; abandoned: no answer was ever recorded and the row was written off."
+          enum:
+            - requested
+            - launched
+            - failed
+            - abandoned
+          type: string
+        requestedAt:
+          format: date-time
+          type: string
+      type: object
     HostList:
       additionalProperties: false
       properties:
@@ -588,6 +614,23 @@ components:
           type:
             - array
             - "null"
+        next:
+          description: "Paged lists: the next page's cursor (?next=)."
+          type: string
+        offset:
+          description: "Paged lists: how many matching hosts come before this page's first, in its order."
+          format: int64
+          type: integer
+        page:
+          description: "Paged lists: this page's own cursor (?at=), to read it again in place."
+          type: string
+        prev:
+          description: "Paged lists: the previous page's cursor (?prev=)."
+          type: string
+        total:
+          description: "Paged lists: how many hosts match."
+          format: int64
+          type: integer
       type: object
     HostPlacement:
       additionalProperties: false
@@ -725,10 +768,28 @@ components:
           type:
             - array
             - "null"
+        next:
+          description: "Paged lists (sort or a cursor): the next page's cursor (?next=)."
+          type: string
+        page:
+          description: "Paged lists: this page's own cursor (?at=), to read it again in place."
+          type: string
+        prev:
+          description: "Paged lists: the previous page's cursor (?prev=)."
+          type: string
       type: object
     ListRunsBody:
       additionalProperties: false
       properties:
+        next:
+          description: "Paged lists: the next page's cursor (?next=)."
+          type: string
+        page:
+          description: "Paged lists: this page's own cursor (?at=), to read it again in place."
+          type: string
+        prev:
+          description: "Paged lists: the previous page's cursor (?prev=)."
+          type: string
         runs:
           items:
             $ref: "#/components/schemas/Run"
@@ -881,6 +942,14 @@ components:
           description: A message for the workload once it runs again.
         to:
           description: The host to move to (id or name); by default, any other.
+          type: string
+      type: object
+    MoneyAmount:
+      additionalProperties: false
+      properties:
+        amount:
+          type: string
+        currency:
           type: string
       type: object
     Network:
@@ -1045,6 +1114,102 @@ components:
           description: Keep warmHosts only while the pool is in use (a Run placed or ended within scaleDownAfter, or one waiting); an idle pool scales down to minHosts.
           type: boolean
       type: object
+    PoolCost:
+      additionalProperties: false
+      properties:
+        basis:
+          type: string
+        families:
+          items:
+            $ref: "#/components/schemas/CostFamilyInfo"
+          type:
+            - array
+            - "null"
+        from:
+          format: date-time
+          type: string
+        hostSeries:
+          description: "Operators: host time per bucket, allocated and idle."
+          items:
+            $ref: "#/components/schemas/PoolHostTime"
+          type:
+            - array
+            - "null"
+        hosts:
+          description: "Operators: host time per host in the range, allocated and idle."
+          items:
+            $ref: "#/components/schemas/PoolHostTime"
+          type:
+            - array
+            - "null"
+        idle:
+          description: "Operators: host time no Run reserved, per currency. Not part of totals."
+          items:
+            $ref: "#/components/schemas/MoneyAmount"
+          type:
+            - array
+            - "null"
+        interval:
+          type: string
+        poolId:
+          type: string
+        series:
+          description: The same by family and bucket; a bucket without a row is no cost reported, not zero.
+          items:
+            $ref: "#/components/schemas/PoolCostPoint"
+          type:
+            - array
+            - "null"
+        to:
+          format: date-time
+          type: string
+        topRuns:
+          description: The costliest Runs, up to 10 per currency, costliest first.
+          items:
+            $ref: "#/components/schemas/PoolTopRun"
+          type:
+            - array
+            - "null"
+        totals:
+          description: The Runs' cost on the pool in the range, per currency.
+          items:
+            $ref: "#/components/schemas/MoneyAmount"
+          type:
+            - array
+            - "null"
+      type: object
+    PoolCostPoint:
+      additionalProperties: false
+      properties:
+        amount:
+          type: string
+        at:
+          format: date-time
+          type: string
+        currency:
+          type: string
+        family:
+          type: string
+      type: object
+    PoolHostTime:
+      additionalProperties: false
+      properties:
+        allocated:
+          description: Host time reserved by Runs (their compute cost comes from it).
+          type: string
+        at:
+          format: date-time
+          type: string
+        currency:
+          type: string
+        hostId:
+          type: string
+        hostName:
+          type: string
+        unallocated:
+          description: "Host time no Run reserved: idle."
+          type: string
+      type: object
     PoolList:
       additionalProperties: false
       properties:
@@ -1054,6 +1219,191 @@ components:
           type:
             - array
             - "null"
+      type: object
+    PoolMetrics:
+      additionalProperties: false
+      properties:
+        from:
+          format: date-time
+          type: string
+        historyFrom:
+          description: "The pool's first sample at this resolution: before it, no history (a gap, not zero)."
+          format: date-time
+          type: string
+        now:
+          $ref: "#/components/schemas/PoolNow"
+        poolId:
+          type: string
+        resolution:
+          format: int64
+          type: integer
+        samples:
+          items:
+            $ref: "#/components/schemas/PoolSample"
+          type:
+            - array
+            - "null"
+        to:
+          format: date-time
+          type: string
+      type: object
+    PoolNow:
+      additionalProperties: false
+      properties:
+        allocatedCpus:
+          format: double
+          type: number
+        allocatedMemory:
+          format: int64
+          type: integer
+        capacityCpus:
+          format: double
+          type: number
+        capacityMemory:
+          format: int64
+          type: integer
+        hosts:
+          additionalProperties:
+            format: int64
+            type: integer
+          type: object
+        lastLaunchError:
+          type: string
+        lastLaunchFailure:
+          format: date-time
+          type: string
+        launchFailures:
+          description: Launches the provider refused in the range.
+          format: int64
+          type: integer
+        oldestQueuedAt:
+          format: date-time
+          type: string
+        queued:
+          format: int64
+          type: integer
+        running:
+          format: int64
+          type: integer
+      type: object
+    PoolSample:
+      additionalProperties: false
+      properties:
+        allocatedCpus:
+          format: double
+          type: number
+        allocatedMemory:
+          format: int64
+          type: integer
+        at:
+          format: date-time
+          type: string
+        capacityCpus:
+          format: double
+          type: number
+        capacityMemory:
+          format: int64
+          type: integer
+        finished:
+          format: int64
+          type: integer
+        hosts:
+          additionalProperties:
+            format: int64
+            type: integer
+          description: Hosts by state.
+          type: object
+        launchFailures:
+          format: int64
+          type: integer
+        launches:
+          format: int64
+          type: integer
+        queued:
+          format: int64
+          type: integer
+        running:
+          format: int64
+          type: integer
+        started:
+          format: int64
+          type: integer
+      type: object
+    PoolStats:
+      additionalProperties: false
+      properties:
+        allocatedCpus:
+          description: "Cores its live placements hold (a tenant: its own)."
+          format: double
+          type: number
+        capacityCpus:
+          description: Cores of its ready and draining hosts.
+          format: double
+          type: number
+        cost:
+          description: "The cost of the Runs on it in the range, per currency; empty: none reported."
+          items:
+            $ref: "#/components/schemas/MoneyAmount"
+          type:
+            - array
+            - "null"
+        hosts:
+          additionalProperties:
+            format: int64
+            type: integer
+          description: Hosts not terminated, by state.
+          type: object
+        id:
+          type: string
+        launchFailures:
+          description: Launches the provider refused in the range.
+          format: int64
+          type: integer
+        runsHourly:
+          description: The same per hour of the range, oldest first.
+          items:
+            format: int64
+            type: integer
+          type:
+            - array
+            - "null"
+        runsStarted:
+          description: "Runs first started in the range (a tenant: its own)."
+          format: int64
+          type: integer
+      type: object
+    PoolStatsList:
+      additionalProperties: false
+      properties:
+        basis:
+          type: string
+        from:
+          format: date-time
+          type: string
+        pools:
+          items:
+            $ref: "#/components/schemas/PoolStats"
+          type:
+            - array
+            - "null"
+        to:
+          format: date-time
+          type: string
+      type: object
+    PoolTopRun:
+      additionalProperties: false
+      properties:
+        amount:
+          type: string
+        currency:
+          type: string
+        estimate:
+          description: Part of it may still change (estimate lines).
+          type: boolean
+        id:
+          type: string
+        name:
+          type: string
       type: object
     Port:
       additionalProperties: false
@@ -1380,12 +1730,27 @@ components:
           type: object
         name:
           type: string
+        placementSeconds:
+          description: "Time spent placing the Run, summed over its placements: for each, from when the Run needed a host (created, or its previous placement ending) until that placement's workload started. A Run still being placed counts up to the time of the response (placing). waitSeconds + startSeconds."
+          format: double
+          type: number
+        placementStartSeconds:
+          description: The part spent starting on the host (assigned until the workload started, or the placement ended without starting).
+          format: double
+          type: number
+        placementWaitSeconds:
+          description: The part of placementSeconds spent waiting for a host (needing one until assigned).
+          format: double
+          type: number
         placements:
           items:
             $ref: "#/components/schemas/RunPlacement"
           type:
             - array
             - "null"
+        placing:
+          description: "The Run is being placed now: waiting for a host, or starting on one; placementSeconds grows from the response's time on."
+          type: boolean
         pool:
           description: The current name of the pool the Run is bound to (spec.placement.pool is the name it was submitted with).
           type: string
@@ -2711,6 +3076,45 @@ paths:
           schema:
             description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
             type: string
+        - description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+          explode: false
+          in: query
+          name: sort
+          schema:
+            description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+            type: string
+        - description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+          explode: false
+          in: query
+          name: dir
+          schema:
+            description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+            enum:
+              - asc
+              - desc
+              - ""
+            type: string
+        - description: "The page after this one: a page's next cursor."
+          explode: false
+          in: query
+          name: next
+          schema:
+            description: "The page after this one: a page's next cursor."
+            type: string
+        - description: "The page before this one: a page's prev cursor."
+          explode: false
+          in: query
+          name: prev
+          schema:
+            description: "The page before this one: a page's prev cursor."
+            type: string
+        - description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
+          explode: false
+          in: query
+          name: at
+          schema:
+            description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
+            type: string
         - description: true to include terminated hosts.
           explode: false
           in: query
@@ -2727,12 +3131,44 @@ paths:
           schema:
             description: Only this pool's hosts.
             type: string
-        - description: "Only hosts in this state: provisioning, ready, draining, lost or terminated."
+        - description: Only the hosts of the pool with this id (names repeat across owners).
+          explode: false
+          in: query
+          name: poolId
+          schema:
+            description: Only the hosts of the pool with this id (names repeat across owners).
+            type: string
+        - description: "Only hosts in this state: provisioning, ready, draining, lost or terminated; or launch_failed, the terminated hosts whose launch the provider refused (terminated then means the others)."
           explode: false
           in: query
           name: state
           schema:
-            description: "Only hosts in this state: provisioning, ready, draining, lost or terminated."
+            description: "Only hosts in this state: provisioning, ready, draining, lost or terminated; or launch_failed, the terminated hosts whose launch the provider refused (terminated then means the others)."
+            type: string
+        - description: "live: hosts not terminated; ended: terminated ones (launch failures included). Implies all."
+          explode: false
+          in: query
+          name: lifecycle
+          schema:
+            description: "live: hosts not terminated; ended: terminated ones (launch failures included). Implies all."
+            enum:
+              - live
+              - ended
+              - ""
+            type: string
+        - description: Hosts per page, 1 to 500 (default 25). limit alone (or offset alone) pages the list too, newest first (sort=created).
+          explode: false
+          in: query
+          name: limit
+          schema:
+            description: Hosts per page, 1 to 500 (default 25). limit alone (or offset alone) pages the list too, newest first (sort=created).
+            type: string
+        - description: "Paged lists: skip this many hosts (a numbered page), instead of a cursor; with next, prev or at it is a 400."
+          explode: false
+          in: query
+          name: offset
+          schema:
+            description: "Paged lists: skip this many hosts (a numbered page), instead of a cursor; with next, prev or at it is a 400."
             type: string
       responses:
         "200":
@@ -3055,6 +3491,45 @@ paths:
             description: "At most this many events: 1 to 1000, default 100."
             examples:
               - "100"
+            type: string
+        - description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+          explode: false
+          in: query
+          name: sort
+          schema:
+            description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+            type: string
+        - description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+          explode: false
+          in: query
+          name: dir
+          schema:
+            description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+            enum:
+              - asc
+              - desc
+              - ""
+            type: string
+        - description: "The page after this one: a page's next cursor."
+          explode: false
+          in: query
+          name: next
+          schema:
+            description: "The page after this one: a page's next cursor."
+            type: string
+        - description: "The page before this one: a page's prev cursor."
+          explode: false
+          in: query
+          name: prev
+          schema:
+            description: "The page before this one: a page's prev cursor."
+            type: string
+        - description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
+          explode: false
+          in: query
+          name: at
+          schema:
+            description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
             type: string
       responses:
         "200":
@@ -3457,6 +3932,72 @@ paths:
       summary: Create or update a pool
       tags:
         - pools
+  /v1/pools/stats:
+    get:
+      description: |-
+        Per pool the caller sees (as GET /v1/pools): hosts by state, CPU allocated of capacity (ready and draining hosts), Runs first started in the range with an hourly count, launches the provider refused in the range, and the cost of the Runs on it in the range, per currency (list prices; never summed across currencies; absent: none reported, not zero). A tenant's figures on a shared platform pool are its own Runs', allocation and cost; hosts and capacity are the pool's.
+
+        Needs the `read` scope.
+      operationId: poolStats
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: "The range, back from now: a Go duration or days (7d). Default 24h."
+          explode: false
+          in: query
+          name: since
+          schema:
+            description: "The range, back from now: a Go duration or days (7d). Default 24h."
+            examples:
+              - 24h
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PoolStatsList"
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Every pool's figures, in one read
+      tags:
+        - pools
   /v1/pools/{name}:
     delete:
       description: |-
@@ -3524,6 +4065,135 @@ paths:
       summary: Remove a pool
       tags:
         - pools
+  /v1/pools/{name}/cost:
+    get:
+      description: |-
+        List prices, per currency, never summed across currencies. `series`: the cost of the Runs on it by family per hour (day for ranges over 7 days): compute on its hosts, and other families of Runs bound to it. `topRuns`: its costliest Runs in the range. Operators not narrowed to a tenant also get the pool's host time: `hosts` (per host, allocated to Runs and idle) and `hostSeries`; idle time is apart from the Runs' cost, never added to it. A tenant sees only its own Runs' cost.
+
+        Needs the `read` scope.
+      operationId: poolCost
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: The pool's name.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The pool's name.
+            type: string
+        - description: Which pool of that name (as for its events).
+          explode: false
+          in: query
+          name: owner
+          schema:
+            description: Which pool of that name (as for its events).
+            enum:
+              - platform
+              - tenant
+              - ""
+            type: string
+        - description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+          explode: false
+          in: query
+          name: since
+          schema:
+            description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+            examples:
+              - 24h
+            type: string
+        - description: The start (RFC 3339), instead of since.
+          explode: false
+          in: query
+          name: from
+          schema:
+            description: The start (RFC 3339), instead of since.
+            type: string
+        - description: The end (RFC 3339); default now.
+          explode: false
+          in: query
+          name: to
+          schema:
+            description: The end (RFC 3339); default now.
+            type: string
+        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+          explode: false
+          in: query
+          name: res
+          schema:
+            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            type: string
+        - description: "Buckets of series: hour (default) or day."
+          explode: false
+          in: query
+          name: interval
+          schema:
+            description: "Buckets of series: hour (default) or day."
+            enum:
+              - hour
+              - day
+              - ""
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PoolCost"
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: What a pool cost
+      tags:
+        - pools
+        - costs
   /v1/pools/{name}/events:
     get:
       description: |-
@@ -3565,6 +4235,45 @@ paths:
             description: "At most this many events: 1 to 1000, default 100."
             examples:
               - "100"
+            type: string
+        - description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+          explode: false
+          in: query
+          name: sort
+          schema:
+            description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+            type: string
+        - description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+          explode: false
+          in: query
+          name: dir
+          schema:
+            description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+            enum:
+              - asc
+              - desc
+              - ""
+            type: string
+        - description: "The page after this one: a page's next cursor."
+          explode: false
+          in: query
+          name: next
+          schema:
+            description: "The page after this one: a page's next cursor."
+            type: string
+        - description: "The page before this one: a page's prev cursor."
+          explode: false
+          in: query
+          name: prev
+          schema:
+            description: "The page before this one: a page's prev cursor."
+            type: string
+        - description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
+          explode: false
+          in: query
+          name: at
+          schema:
+            description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
             type: string
         - description: The pool's name.
           in: path
@@ -3631,6 +4340,124 @@ paths:
       summary: List a pool's events
       tags:
         - pools
+  /v1/pools/{name}/metrics:
+    get:
+      description: |-
+        Now: hosts by state, capacity and what live placements hold, Runs running and queued, launch failures in the range. Over time: the pool's samples (by its id: a rename keeps them, and a pool removed and set again under its name is the same pool, whose history continues) of the same, with starts, finishes and launches per sample. Samples begin when luxd started taking them (historyFrom); earlier is a gap, not zero. A tenant's Runs and allocation are its own.
+
+        Needs the `read` scope.
+      operationId: poolMetrics
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: The pool's name.
+          in: path
+          name: name
+          required: true
+          schema:
+            description: The pool's name.
+            type: string
+        - description: Which pool of that name (as for its events).
+          explode: false
+          in: query
+          name: owner
+          schema:
+            description: Which pool of that name (as for its events).
+            enum:
+              - platform
+              - tenant
+              - ""
+            type: string
+        - description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+          explode: false
+          in: query
+          name: since
+          schema:
+            description: "How far back from now: a Go duration or a number of days (7d). Default 1h."
+            examples:
+              - 24h
+            type: string
+        - description: The start (RFC 3339), instead of since.
+          explode: false
+          in: query
+          name: from
+          schema:
+            description: The start (RFC 3339), instead of since.
+            type: string
+        - description: The end (RFC 3339); default now.
+          explode: false
+          in: query
+          name: to
+          schema:
+            description: The end (RFC 3339); default now.
+            type: string
+        - description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+          explode: false
+          in: query
+          name: res
+          schema:
+            description: "Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PoolMetrics"
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: A pool now, and over time
+      tags:
+        - pools
+        - history
   /v1/pools/{name}/rename:
     post:
       description: |-
@@ -3736,6 +4563,45 @@ paths:
           schema:
             description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
             type: string
+        - description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+          explode: false
+          in: query
+          name: sort
+          schema:
+            description: Sort by this column (the list's sort keys); with it, or with a cursor, the list is paged.
+            type: string
+        - description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+          explode: false
+          in: query
+          name: dir
+          schema:
+            description: "asc or desc; default: the column's first direction (text ascending, numbers and times descending). Missing values sort last either way."
+            enum:
+              - asc
+              - desc
+              - ""
+            type: string
+        - description: "The page after this one: a page's next cursor."
+          explode: false
+          in: query
+          name: next
+          schema:
+            description: "The page after this one: a page's next cursor."
+            type: string
+        - description: "The page before this one: a page's prev cursor."
+          explode: false
+          in: query
+          name: prev
+          schema:
+            description: "The page before this one: a page's prev cursor."
+            type: string
+        - description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
+          explode: false
+          in: query
+          name: at
+          schema:
+            description: "This page again, from its first row: a page's page cursor (a refresh that stays on the page)."
+            type: string
         - description: Only Runs in these states (comma-separated).
           explode: false
           in: query
@@ -3770,19 +4636,19 @@ paths:
             type:
               - array
               - "null"
-        - description: "Only Runs created before this time (RFC 3339): the next page after a list's last Run."
+        - description: "Only Runs created before this time (RFC 3339): the next page after a list's last Run. Unpaged lists only: with sort or a cursor it is a 400."
           explode: false
           in: query
           name: before
           schema:
-            description: "Only Runs created before this time (RFC 3339): the next page after a list's last Run."
+            description: "Only Runs created before this time (RFC 3339): the next page after a list's last Run. Unpaged lists only: with sort or a cursor it is a 400."
             type: string
-        - description: "At most this many Runs, newest first: 1 to 1000, default 100."
+        - description: "Unpaged lists: at most this many Runs, newest first, 1 to 1000 (default 100; a value out of range is ignored). Paged lists (sort or a cursor): Runs per page, 1 to 200 (default 50; out of range is a 400). limit alone does not page."
           explode: false
           in: query
           name: limit
           schema:
-            description: "At most this many Runs, newest first: 1 to 1000, default 100."
+            description: "Unpaged lists: at most this many Runs, newest first, 1 to 1000 (default 100; a value out of range is ignored). Paged lists (sort or a cursor): Runs per page, 1 to 200 (default 50; out of range is a 400). limit alone does not page."
             examples:
               - "100"
             type: string

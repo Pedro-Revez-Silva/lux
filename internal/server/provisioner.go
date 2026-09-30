@@ -227,7 +227,7 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 		return err
 	}
 	for _, id := range st.abandoned {
-		s.markTerminated(ctx, id, "launch never completed")
+		s.markAbandoned(ctx, id)
 	}
 
 	// Every ProviderCheckEvery (provider API limits), the provider's view of the
@@ -563,7 +563,9 @@ func (s *Server) recordProviderID(ctx context.Context, poolID, hostID, pid strin
 			return err
 		}
 		var name string
-		err = tx.QueryRow(ctx, `UPDATE hosts SET provider_id = $2 WHERE id = $1 AND provider_id IS NULL AND state <> 'terminated'
+		// Launched, though when the provider answered was never recorded.
+		err = tx.QueryRow(ctx, `UPDATE hosts SET provider_id = $2, launch_outcome = 'launched'
+			WHERE id = $1 AND provider_id IS NULL AND state <> 'terminated'
 			RETURNING name`, hostID, pid).Scan(&name)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -737,8 +739,8 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 			tokenID, pl.TenantID, pl.ID, ids.Hash(token)); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool_id, token_id, name, state, provision_requested_at, launch_template, tagged)
-			VALUES ($1, $2, $3, $4, $5, 'provisioning', now(), $6, true)`,
+		_, err := tx.Exec(ctx, `INSERT INTO hosts (id, tenant_id, pool_id, token_id, name, state, provision_requested_at, launch_template, tagged, launch_outcome)
+			VALUES ($1, $2, $3, $4, $5, 'provisioning', now(), $6, true, 'requested')`,
 			hostID, pl.TenantID, pl.ID, tokenID, name, pl.Template)
 		if err != nil {
 			return err
@@ -763,7 +765,13 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 	l, launchErr := prov.Launch(ctx, pl.Template, tags, env)
 	if launchErr != nil {
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			// Operationally terminated, as before (token revoked, no longer
+			// counted); its launch outcome says no instance ever existed.
 			if err := s.terminateTx(ctx, tx, hostID, "launch failed: "+truncate(launchErr.Error(), 200), false); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE hosts SET launch_outcome = 'failed', launch_finished_at = now(), launch_error = $2
+				WHERE id = $1`, hostID, providerErrorText(launchErr)); err != nil {
 				return err
 			}
 			return poolRepeatEvent(ctx, tx, pl.ID, evLaunchFailed, map[string]any{"host": hostID, "error": providerErrorText(launchErr)}, "host")
@@ -782,7 +790,8 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE hosts SET provider_id = $2,
-				instance_type = nullif($3, ''), zone = nullif($4, ''), market = nullif($5, '')
+				instance_type = nullif($3, ''), zone = nullif($4, ''), market = nullif($5, ''),
+				launch_outcome = 'launched', launch_finished_at = now()
 			WHERE id = $1`, hostID, l.ProviderID, l.InstanceType, l.Zone, l.Market); err != nil {
 			return err
 		}
@@ -895,6 +904,25 @@ func (s *Server) drainForScaleDown(ctx context.Context, hostID string) (bool, er
 
 func (s *Server) markTerminated(ctx context.Context, hostID, reason string) {
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return s.markTerminatedTx(ctx, tx, hostID, reason)
+	})
+	if err != nil {
+		s.log.Warn("mark terminated", "host", hostID, "err", err)
+		return
+	}
+	s.hub.Disconnect(hostID)
+}
+
+// markAbandoned writes off a host whose launch never recorded an answer:
+// terminated, as markTerminated, with launch outcome abandoned (its host
+// row is locked first, as terminateTx would, before any event).
+func (s *Server) markAbandoned(ctx context.Context, hostID string) {
+	const reason = "launch never completed"
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE hosts SET launch_outcome = 'abandoned'
+			WHERE id = $1 AND launch_outcome = 'requested' AND provider_id IS NULL`, hostID); err != nil {
+			return err
+		}
 		return s.markTerminatedTx(ctx, tx, hostID, reason)
 	})
 	if err != nil {

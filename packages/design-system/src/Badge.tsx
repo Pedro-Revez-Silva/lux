@@ -52,7 +52,7 @@ export function StatePill({ kind, state, activity, exitCode, compact, className 
   const detail = act ?? (kind === "server" && state === "exited" && exitCode != null ? `code ${exitCode}` : null);
   const label = detail ? `${style.label} · ${detail}` : style.label;
   const live = style.live && act !== "idle";
-  const cls = ["pill", `pill-${hue}`, live ? "pill-live" : "", compact ? "pill-compact" : "", className ?? ""].join(" ").trim();
+  const cls = ["pill", `pill-${hue}`, style.outline ? "pill-outline" : "", live ? "pill-live" : "", compact ? "pill-compact" : "", className ?? ""].join(" ").trim();
   return (
     <span className={cls} title={label} data-state={state}>
       <span className="pill-dot" aria-hidden="true" />

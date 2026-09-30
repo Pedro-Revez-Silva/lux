@@ -1,9 +1,9 @@
 import { useMemo } from "react";
-import { Card, formatBytes, formatCount, IdChip, PageHeader, Table, type Column } from "@lux/design-system";
+import { Card, formatBytes, formatCount, IdChip, PageHeader, Table, type Column, RelativeTime } from "@lux/design-system";
 import { api, useQuery, type Tenant } from "../../api/index.ts";
 import { go } from "../router.tsx";
 import { useScope } from "../scope.tsx";
-import { ErrorBlock, ErrorStrip, RelativeTime, UsageBar } from "./common.tsx";
+import { ErrorBlock, ErrorStrip, UsageBar } from "./common.tsx";
 
 export function Tenants() {
   const scope = useScope();

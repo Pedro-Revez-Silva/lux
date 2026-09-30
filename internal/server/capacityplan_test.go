@@ -164,16 +164,27 @@ func TestCapacityReconcileProviderGoneBeforePlan(t *testing.T) {
 }
 
 // A warm start whose launch never recorded its instance id, past the launch
-// timeout, is written off and replaced in the same pass, without a provider
-// check.
+// timeout, is written off as abandoned and replaced in the same pass,
+// without a provider check. A stale row whose instance id was recorded
+// was launched: written off, it stays launched.
 func TestCapacityReconcileAbandonedWarmStart(t *testing.T) {
 	s, pl, p := planningFixture(t, 0)
 	pl.Warm = 1
-	execSQL(t, s, context.Background(), `INSERT INTO hosts (id,name,tenant_id,pool_id,state,provision_requested_at,launch_template,tagged)
-		VALUES ('abandoned','abandoned','t1','pool1','provisioning',now()-interval '1 day','{"version":1}',true)`)
+	execSQL(t, s, context.Background(), `INSERT INTO hosts (id,name,tenant_id,pool_id,state,provision_requested_at,launch_template,tagged,launch_outcome)
+		VALUES ('abandoned','abandoned','t1','pool1','provisioning',now()-interval '1 day','{"version":1}',true,'requested')`)
 	planningTick(t, s, pl, p, false)
 	if state := queryOne[string](t, s, `SELECT state FROM hosts WHERE id='abandoned'`); state != "terminated" || p.calls != 1 {
 		t.Fatalf("abandoned start %s, %d launches; want terminated and 1", state, p.calls)
+	}
+	if o := queryOne[string](t, s, `SELECT launch_outcome FROM hosts WHERE id='abandoned'`); o != "abandoned" {
+		t.Fatalf("abandoned start's launch outcome %s, want abandoned", o)
+	}
+	// The writer's guard: a launched host is never relabelled.
+	execSQL(t, s, context.Background(), `INSERT INTO hosts (id,name,tenant_id,pool_id,state,provision_requested_at,provider_id,launch_template,tagged,launch_outcome)
+		VALUES ('launched','launched','t1','pool1','provisioning',now()-interval '1 day','i-x','{"version":1}',true,'launched')`)
+	s.markAbandoned(context.Background(), "launched")
+	if got := queryOne[string](t, s, `SELECT state || '/' || launch_outcome FROM hosts WHERE id='launched'`); got != "terminated/launched" {
+		t.Fatalf("a launched host written off: %s, want terminated/launched", got)
 	}
 }
 

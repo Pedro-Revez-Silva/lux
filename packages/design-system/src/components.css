@@ -266,6 +266,119 @@
   --pill-fg: var(--st-violet-fg);
   --pill-dot: var(--st-violet-dot);
 }
+/* An outcome, not a state it held (a launch that failed): its hue as a ring. */
+.pill-outline {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--pill-dot);
+}
+
+/* ---------- SegmentedControl ---------- */
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--bg-surface);
+  flex: none;
+}
+.segmented-opt {
+  height: var(--control-h-sm);
+  padding: 0 var(--sp-5);
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.segmented-md .segmented-opt {
+  height: var(--control-h);
+}
+.segmented-opt:last-child {
+  border-right: 0;
+}
+.segmented-opt:hover {
+  background: var(--bg-subtle);
+}
+.segmented-opt.is-on {
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+  font-weight: var(--weight-medium);
+}
+.segmented-opt:focus-visible {
+  outline: none;
+  box-shadow: inset var(--focus-ring);
+}
+
+/* ---------- Pagination ---------- */
+.pager {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--pad-card);
+  border-top: 1px solid var(--border-soft);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+.pager-grow {
+  flex: 1;
+}
+.pager-pages {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.pager-page {
+  min-width: 28px;
+  height: var(--control-h-sm);
+  padding: 0 var(--sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--fg-secondary);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.pager-page:hover {
+  background: var(--bg-subtle);
+}
+.pager-page.is-on {
+  border-color: var(--border-strong);
+  background: var(--bg-surface);
+  color: var(--fg);
+  font-weight: var(--weight-semibold);
+}
+.pager-page:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.pager-gap {
+  padding: 0 var(--sp-2);
+}
+.input.pager-size {
+  height: var(--control-h-sm);
+  font-size: var(--text-sm);
+  padding: 0 var(--sp-3);
+}
+
+/* ---------- RelativeTime, DurationCell ---------- */
+.rel-time,
+.duration[tabindex] {
+  border-bottom: 1px dotted var(--border-strong);
+  cursor: default;
+}
+.duration.is-live {
+  color: var(--fg);
+}
+.duration.is-warn {
+  color: var(--warn-fg);
+}
+.table td:has(.rel-time),
+.table td:has(.duration[tabindex]) {
+  overflow: visible;
+}
 
 /* ---------- Tooltip ---------- */
 .tip-anchor {
@@ -886,6 +999,10 @@ a.idchip-text:hover {
 .table th.is-sortable {
   cursor: pointer;
 }
+.table th.is-sortable:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
 .table th.is-sortable:hover {
   color: var(--fg);
 }
@@ -900,13 +1017,14 @@ a.idchip-text:hover {
 }
 .th-sort {
   display: inline-flex;
-  color: var(--fg-secondary);
+  color: var(--accent);
+  font-size: 11px;
 }
 .th-sort-idle {
-  opacity: 0;
+  color: var(--fg-faint);
 }
 .table th:hover .th-sort-idle {
-  opacity: 0.5;
+  color: var(--fg-muted);
 }
 .table td {
   height: var(--row-h);
@@ -917,6 +1035,13 @@ a.idchip-text:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   background: var(--bg-surface);
+}
+/* A row's icon actions (IconButton size sm), right-aligned in a narrow last column. */
+.table .row-actions {
+  display: inline-flex;
+  gap: var(--sp-1);
+  justify-content: flex-end;
+  vertical-align: middle;
 }
 .table-dense td {
   height: var(--row-h-dense);
@@ -1297,20 +1422,36 @@ a.idchip-text:hover {
 .timeline-bar.is-live {
   background: repeating-linear-gradient(135deg, var(--tl-color) 0 6px, color-mix(in srgb, var(--tl-color) 70%, var(--bg-surface)) 6px 12px);
 }
-.timeline-bar.tone-neutral {
+.timeline-bar.tone-neutral,
+.timeline-point.tone-neutral {
   --tl-color: var(--st-neutral-dot);
 }
-.timeline-bar.tone-accent {
+.timeline-bar.tone-accent,
+.timeline-point.tone-accent {
   --tl-color: var(--accent);
 }
-.timeline-bar.tone-teal {
+.timeline-bar.tone-teal,
+.timeline-point.tone-teal {
   --tl-color: var(--st-teal-dot);
 }
-.timeline-bar.tone-amber {
+.timeline-bar.tone-amber,
+.timeline-point.tone-amber {
   --tl-color: var(--st-amber-dot);
 }
-.timeline-bar.tone-red {
+.timeline-bar.tone-red,
+.timeline-point.tone-red {
   --tl-color: var(--st-red-dot);
+}
+/* A point stage: an instant, drawn as a dot centred on it. */
+.timeline-point {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--tl-color);
+  box-shadow: 0 0 0 2px var(--bg-surface);
 }
 .timeline-dur {
   position: absolute;
@@ -1617,6 +1758,17 @@ a.idchip-text:hover {
 }
 .term:focus-within {
   box-shadow: var(--focus-ring);
+}
+/* The frame's colours follow the terminal's own scheme (Terminal's scheme
+   prop), set on the element, never on html: the rest of the page keeps the
+   console theme. Values are terminalThemes.ts's Solarized. */
+.term[data-term-scheme="light"] {
+  --term-bg: #fdf6e3;
+  --term-scrollbar: #93a1a1;
+}
+.term[data-term-scheme="dark"] {
+  --term-bg: #002b36;
+  --term-scrollbar: #586e75;
 }
 .term-screen {
   flex: 1;

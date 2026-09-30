@@ -303,6 +303,7 @@ func (s *Server) routes(api huma.API) {
 		OperationID: "listPools", Method: http.MethodGet, Path: "/v1/pools", Tags: []string{"pools"},
 		Summary: "List pools", Description: "The tenant's pools and the platform pools it can use. Operators: every pool.",
 	}, "read", s.listPools)
+	s.poolRoutes(api)
 	register(s, api, huma.Operation{
 		OperationID: "listPoolEvents", Method: http.MethodGet, Path: "/v1/pools/{name}/events", Tags: []string{"pools"},
 		Summary: "List a pool's events",
@@ -438,8 +439,13 @@ type Run struct {
 	FinishedAt     *time.Time       `json:"finishedAt,omitempty"`
 	RuntimeSeconds float64          `json:"runtimeSeconds" doc:"Seconds its placements have spent running, summed: each from reaching running to exiting or being lost; one still running counts up to the time of the response."`
 	RuntimeSince   *time.Time       `json:"runtimeSince,omitempty" doc:"When the placement still running started, if one is: runtimeSeconds grows from the response's time on."`
-	Placements     []Placement      `json:"placements,omitempty"`
-	Usage          *RunUsage        `json:"usage,omitempty"`
+	// Placement time: what getting the Run onto a host and started took.
+	PlacementSeconds      float64     `json:"placementSeconds" doc:"Time spent placing the Run, summed over its placements: for each, from when the Run needed a host (created, or its previous placement ending) until that placement's workload started. A Run still being placed counts up to the time of the response (placing). waitSeconds + startSeconds."`
+	PlacementWaitSeconds  float64     `json:"placementWaitSeconds" doc:"The part of placementSeconds spent waiting for a host (needing one until assigned)."`
+	PlacementStartSeconds float64     `json:"placementStartSeconds" doc:"The part spent starting on the host (assigned until the workload started, or the placement ended without starting)."`
+	Placing               bool        `json:"placing,omitempty" doc:"The Run is being placed now: waiting for a host, or starting on one; placementSeconds grows from the response's time on."`
+	Placements            []Placement `json:"placements,omitempty"`
+	Usage                 *RunUsage   `json:"usage,omitempty"`
 	// Resume: on GET /v1/runs/{id} of a stopped, lost or failed Run, what
 	// a resume would take.
 	Resume *Resumability `json:"resume,omitempty"`
@@ -510,7 +516,8 @@ type RunUsage struct {
 // Select runColumns FROM runsFrom.
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
-	coalesce(rh.name, ''), coalesce(rp.host_id, ''), coalesce(rpool.name, ''), coalesce(r.pool_id, ''), rr.seconds, rr.since`
+	coalesce(rh.name, ''), coalesce(rp.host_id, ''), coalesce(rpool.name, ''), coalesce(r.pool_id, ''), rr.seconds, rr.since,
+	rpt.wait, rpt.start, rpt.placing`
 
 // runsFrom: a Run with its tenant, its current placement's host, and its
 // runtime (rr). Runtime is the sum over its placements of started_at
@@ -519,20 +526,62 @@ const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.
 // and so does a terminal one missing ended_at, rather than growing forever.
 // since is when the live one started. Per Run, one scan of placements
 // (run_id, epoch).
-const runsFrom = `runs r JOIN tenants rt ON rt.id = r.tenant_id
-	LEFT JOIN placements rp ON rp.run_id = r.id AND rp.epoch = r.current_epoch
-	LEFT JOIN hosts rh ON rh.id = rp.host_id
-	LEFT JOIN pools rpool ON rpool.id = r.pool_id
-	CROSS JOIN LATERAL (SELECT
-			coalesce(sum(extract(epoch FROM coalesce(p.ended_at, CASE WHEN p.state IN ` + livePlacementStates + ` THEN now() ELSE p.started_at END) - p.started_at)), 0)::float8 AS seconds,
+var runsFrom = runsFromAt("now()")
+
+// runsFromAt is runsFrom with its clock (what live runtimes and placement
+// times count to) at now: a paged list sorts by the clock its first page
+// was read at.
+func runsFromAt(now string) string {
+	return `runs r ` + runTenantJoin + runHostJoin + runPoolJoin + runRuntimeJoin(now) + runPlacementJoin(now)
+}
+
+// The joins of runsFrom, one per alias, so a paged list's keys read only
+// what their sort value needs (runSortKeys' from).
+const (
+	runTenantJoin = ` JOIN tenants rt ON rt.id = r.tenant_id`
+	runHostJoin   = ` LEFT JOIN placements rp ON rp.run_id = r.id AND rp.epoch = r.current_epoch
+	LEFT JOIN hosts rh ON rh.id = rp.host_id`
+	runPoolJoin = ` LEFT JOIN pools rpool ON rpool.id = r.pool_id`
+)
+
+func runRuntimeJoin(now string) string {
+	return ` CROSS JOIN LATERAL (SELECT
+			coalesce(sum(greatest(0, extract(epoch FROM coalesce(p.ended_at, CASE WHEN p.state IN ` + livePlacementStates + ` THEN ` + now + ` ELSE p.started_at END) - p.started_at))), 0)::float8 AS seconds,
 			max(p.started_at) FILTER (WHERE p.ended_at IS NULL AND p.state IN ` + livePlacementStates + `) AS since
 		FROM placements p WHERE p.run_id = r.id AND p.started_at IS NOT NULL) rr`
+}
+
+func runPlacementJoin(now string) string {
+	return ` CROSS JOIN LATERAL (` + placementTimeSQL(now) + `) rpt`
+}
+
+// placementTimeSQL is a lateral over the Run r's placements (one scan of
+// (run_id, epoch)): wait, the seconds each spent needing a host (from its
+// needed_since, else the previous placement's end, else the Run's
+// creation, until assigned) plus, while the Run is queued now, the wait
+// since it last needed one; start, the seconds from assignment until its
+// workload started, else until luxd saw it running (started_at: runners
+// that never report the workload's start), else until it ended; one still
+// starting counts to now. placing: either is still counting. now is the
+// clock (a cursor's, when a page sorts by it).
+func placementTimeSQL(now string) string {
+	return `SELECT
+			coalesce(sum(greatest(0, extract(epoch FROM x.created_at - x.req))), 0)::float8
+				+ CASE WHEN r.state IN ` + queuedRunStates + ` THEN greatest(0, extract(epoch FROM ` + now + ` - coalesce(r.needs_host_since, max(x.ended_at), r.created_at)))::float8 ELSE 0 END AS wait,
+			coalesce(sum(greatest(0, extract(epoch FROM coalesce(x.workload_started_at, x.started_at, x.ended_at,
+				CASE WHEN x.state IN ` + livePlacementStates + ` THEN ` + now + ` ELSE x.created_at END) - x.created_at))), 0)::float8 AS start,
+			r.state IN ` + queuedRunStates + ` OR coalesce(bool_or(x.workload_started_at IS NULL AND x.started_at IS NULL AND x.ended_at IS NULL AND x.state IN ` + livePlacementStates + `), false) AS placing
+		FROM (SELECT p.created_at, p.ended_at, p.workload_started_at, p.started_at, p.state,
+				coalesce(p.needed_since, lag(p.ended_at) OVER (ORDER BY p.epoch), r.created_at) AS req
+			FROM placements p WHERE p.run_id = r.id) x`
+}
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
 		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
-		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince)
+		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince, &r.PlacementWaitSeconds, &r.PlacementStartSeconds, &r.Placing)
+	r.PlacementSeconds = r.PlacementWaitSeconds + r.PlacementStartSeconds
 	return &r, err
 }
 
@@ -599,8 +648,8 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 			return err
 		}
 		stored.Placement.Pool = rp.Name
-		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_id)
-			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8)`,
+		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_id, needs_host_since)
+			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now())`,
 			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID)
 		if err != nil {
 			return err
@@ -698,12 +747,13 @@ func nonNilMap(m map[string]string) map[string]string {
 
 type listRunsInput struct {
 	TenantQuery
+	PageQuery
 	State     string   `query:"state" doc:"Only Runs in these states (comma-separated)." example:"running,stopped"`
 	Resumable bool     `query:"resumable" doc:"Only Runs resume accepts: stopped, lost or failed, except one whose only snapshot report was refused."`
 	Host      string   `query:"host" doc:"Only Runs with a placement (any epoch) on this host, by id or name."`
 	Label     []string `query:"label,explode" doc:"Only Runs with this label (key=value); repeat to require several."`
-	Before    string   `query:"before" doc:"Only Runs created before this time (RFC 3339): the next page after a list's last Run."`
-	Limit     string   `query:"limit" doc:"At most this many Runs, newest first: 1 to 1000, default 100." example:"100"`
+	Before    string   `query:"before" doc:"Only Runs created before this time (RFC 3339): the next page after a list's last Run. Unpaged lists only: with sort or a cursor it is a 400."`
+	Limit     string   `query:"limit" doc:"Unpaged lists: at most this many Runs, newest first, 1 to 1000 (default 100; a value out of range is ignored). Paged lists (sort or a cursor): Runs per page, 1 to 200 (default 50; out of range is a 400). limit alone does not page." example:"100"`
 }
 
 // Resolve reads every label as given: huma drops them all when the first
@@ -720,6 +770,29 @@ type listRunsOutput struct {
 
 type listRunsBody struct {
 	Runs []*Run `json:"runs"`
+	Next string `json:"next,omitempty" doc:"Paged lists: the next page's cursor (?next=)."`
+	Prev string `json:"prev,omitempty" doc:"Paged lists: the previous page's cursor (?prev=)."`
+	Page string `json:"page,omitempty" doc:"Paged lists: this page's own cursor (?at=), to read it again in place."`
+}
+
+// runSortKeys: GET /v1/runs' sort keys. cost is the total in the first of
+// its currencies (as totals list them), a Run with no cost reported yet
+// last, read once per Run by one grouped read of cost_lines; runtime is
+// missing for a Run that never ran.
+var runSortKeys = map[string]sortKey{
+	"created":    {expr: `r.created_at`, cast: "timestamptz", first: "desc", notNull: true},
+	"id":         {expr: `r.id`, cast: "text", first: "asc", notNull: true},
+	"name":       {expr: `coalesce(nullif(r.name, ''), r.id)`, cast: "text", first: "asc", notNull: true},
+	"tenant":     {expr: `rt.name`, cast: "text", first: "asc", notNull: true, from: runTenantJoin},
+	"state":      {expr: `array_position(ARRAY['submitted', 'scheduled', 'provisioning', 'starting', 'running', 'stopping', 'stopped', 'resuming', 'succeeded', 'failed', 'cancelled', 'lost'], r.state)`, cast: "bigint", first: "asc"},
+	"host":       {expr: `rh.name`, cast: "text", first: "asc", from: runHostJoin},
+	"pool":       {expr: `rpool.name`, cast: "text", first: "asc", from: runPoolJoin},
+	"adapter":    {expr: `r.spec->'workload'->>'adapter'`, cast: "text", first: "asc"},
+	"runtime":    {expr: `CASE WHEN rr.seconds > 0 OR rr.since IS NOT NULL THEN rr.seconds END`, cast: "float8", first: "desc", from: runRuntimeJoin("{now}")},
+	"placements": {expr: `r.current_epoch`, cast: "bigint", first: "desc", notNull: true},
+	"placement":  {expr: `rpt.wait + rpt.start`, cast: "float8", first: "desc", notNull: true, from: runPlacementJoin("{now}")},
+	"cost": {expr: `rc.amount`, cast: "numeric", first: "desc", from: ` LEFT JOIN (SELECT DISTINCT ON (cl.run_id) cl.run_id, sum(cl.amount) AS amount
+		FROM cost_lines cl GROUP BY cl.run_id, cl.currency ORDER BY cl.run_id, cl.currency) rc ON rc.run_id = r.id`},
 }
 
 // listRuns lists the Runs the caller sees (an operator: every tenant's,
@@ -749,6 +822,16 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 		k, v, _ := strings.Cut(l, "=")
 		where = append(where, "r.labels @> "+arg(map[string]string{k: v}))
 	}
+	pg, paged, err := resolvePaging(in.PageQuery, runSortKeys, "created", in.Limit, 50, 200)
+	if err != nil {
+		return nil, err
+	}
+	if paged {
+		if in.Before != "" {
+			return nil, errf(http.StatusBadRequest, "bad_request", "before does not go with sort and cursors")
+		}
+		return s.listRunsPage(ctx, p, pg, where, args)
+	}
 	if in.Before != "" {
 		t, err := time.Parse(time.RFC3339Nano, in.Before)
 		if err != nil {
@@ -761,7 +844,7 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 		limit = n
 	}
 	runs := []*Run{}
-	err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
+	err = s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
 		// The page is chosen first, so runsFrom's joins and runtime
 		// aggregate run for its rows only, not for every Run matched.
 		rows, err := tx.Query(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.id IN (SELECT r.id FROM runs r WHERE `+
@@ -787,6 +870,72 @@ func (s *Server) listRuns(ctx context.Context, in *listRunsInput) (*listRunsOutp
 	}
 	out := &listRunsOutput{}
 	out.Body.Runs = runs
+	return out, nil
+}
+
+// listRunsPage is a page of GET /v1/runs in any sort key's order, keyed by
+// (value, id). The page's ids and sort values are read first, at the
+// cursor's clock; then its rows, at now, for display.
+func (s *Server) listRunsPage(ctx context.Context, p Principal, pg *paging, where []string, base []any) (*listRunsOutput, error) {
+	out := &listRunsOutput{}
+	out.Body.Runs = []*Run{}
+	err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
+		stamp, err := pageClock(ctx, tx, pg)
+		if err != nil {
+			return err
+		}
+		filter := strings.Join(where, " AND ")
+		// keys reads the page's keys, one past its end; with ahead, whether
+		// any row precedes ahead, existence only: an order there can lead the
+		// planner away from the predicate's own plan.
+		keys := func(ahead *keyRow) ([]keyRow, error) {
+			q, from, expr := pg.keySource(`runs r`, stamp, base)
+			cond, limit := filter, pg.limit+1
+			if ahead != nil {
+				cond += " AND " + pg.beforeWhere(expr, "r.id", *ahead, q.arg)
+				limit = 1
+			} else {
+				if pg.cursor != nil {
+					cond += " AND " + pg.where(expr, "r.id", q.arg)
+				}
+				cond += " ORDER BY " + pg.order(expr, "r.id", pg.mode == "before")
+			}
+			rows, err := tx.Query(ctx, `SELECT r.id AS key_id, `+expr+`::text AS key_value FROM `+from+` WHERE `+cond+` LIMIT `+strconv.Itoa(limit), q.list...)
+			if err != nil {
+				return nil, err
+			}
+			return pgx.CollectRows(rows, pgx.RowToStructByPos[keyRow])
+		}
+		found, err := keys(nil)
+		if err != nil {
+			return err
+		}
+		page, next, prev, self, err := pg.pageLinks(found, stamp, func(first keyRow) (bool, error) {
+			if pg.cursor == nil {
+				return false, nil
+			}
+			ahead, err := keys(&first)
+			return len(ahead) > 0, err
+		})
+		if err != nil {
+			return err
+		}
+		out.Body.Next, out.Body.Prev, out.Body.Page = next, prev, self
+		ids := pageIDs(page)
+		rows, err := tx.Query(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.id = ANY($1)`, ids)
+		if err != nil {
+			return err
+		}
+		loaded, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (*Run, error) { return scanRun(row) })
+		if err != nil {
+			return err
+		}
+		out.Body.Runs = inPageOrder(ids, loaded, func(r *Run) string { return r.ID })
+		return s.listRunCosts(ctx, tx, out.Body.Runs)
+	})
+	if err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -1519,10 +1668,20 @@ type Host struct {
 	Zone          *string               `json:"zone,omitempty" doc:"The availability zone the provider launched it in."`
 	Market        *string               `json:"market,omitempty" enum:"on-demand,spot" doc:"on-demand or spot, as the provider launched it."`
 	LastHeartbeat *time.Time            `json:"lastHeartbeat,omitempty"`
-	Times         map[string]*time.Time `json:"times"`
+	Times         map[string]*time.Time `json:"times" doc:"Its lifecycle. A host whose launch failed has no terminateRequested or terminated: no instance ever ran."`
+	Launch        *HostLaunch           `json:"launch,omitempty" doc:"How luxd's launch of it went; absent for a host that registered itself, or one from before launches were recorded."`
 	// Placements: on GET /v1/hosts/{id} only, its live placements (the
 	// caller's; every tenant's for an operator).
 	Placements []HostPlacement `json:"placements,omitempty"`
+}
+
+// HostLaunch is a provisioned host's launch, apart from its state: a host
+// the provider refused is operationally terminated, with outcome failed.
+type HostLaunch struct {
+	Outcome     string     `json:"outcome" enum:"requested,launched,failed,abandoned" doc:"requested: asked, no answer yet; launched: an instance started (it may since have ended, never registered or disappeared: see the host's state and reason); failed: the provider refused, no instance ever existed; abandoned: no answer was ever recorded and the row was written off."`
+	RequestedAt *time.Time `json:"requestedAt,omitempty"`
+	FinishedAt  *time.Time `json:"finishedAt,omitempty" doc:"When the provider answered (launched or failed)."`
+	Error       string     `json:"error,omitempty" doc:"The provider's error, for a failed launch."`
 }
 
 // HostPlacement is a live placement, seen from its host.
@@ -1553,68 +1712,274 @@ const visiblePlacements = "($1 = '' OR pl.tenant_id = $1)"
 
 // Select hostColumns FROM hostsFrom ($1: the principal's tenant id, for
 // which of its placements count).
-const hostColumns = `h.id, h.name, coalesce(ht.name, ''), coalesce(hp.name, ''), coalesce(h.pool_id, ''), h.state, h.state_reason,
+const hostColumns = `h.id, h.name, coalesce(ht.name, ''), coalesce(hp.name, ''), coalesce(h.pool_id, ''), h.state, ` + hostStateReason + `,
 	h.draining, h.labels, h.capacity, h.versions, h.tenant_id IS NULL,
 	hl.n, jsonb_build_object('cpus', hl.cpus, 'memory', hl.mem, 'disk', hl.disk),
 	h.provider_id, h.instance_type, h.zone, h.market, h.last_heartbeat,
 	h.provision_requested_at, h.provisioned_at, h.registered_at, h.first_placement_at, h.last_placement_ended_at,
-	h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at`
+	h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at,
+	h.launch_outcome, h.launch_finished_at, ` + hostLaunchError + ``
 
-const hostsFrom = `hosts h LEFT JOIN tenants ht ON ht.id = h.tenant_id LEFT JOIN pools hp ON hp.id = h.pool_id
-	CROSS JOIN LATERAL (SELECT count(*) AS n, coalesce(sum((pl.resources->>'cpus')::float8), 0) AS cpus,
+// hostSeesProviderError, for SQL on hosts h with $1 as visibleHosts: a
+// platform host's provider error (account ids, role ARNs) is only for a
+// principal that sees platform events ($1 empty: an operator not narrowed to
+// a tenant), as for its pool.launch_failed events.
+const hostSeesProviderError = `(h.tenant_id IS NOT NULL OR $1 = '')`
+
+const hostLaunchError = `CASE WHEN ` + hostSeesProviderError + ` THEN coalesce(h.launch_error, '') ELSE '' END`
+
+// hostStateReason: the provisioner writes "launch failed: <provider error>"
+// as a failed launch's reason, so it is redacted under the same rule.
+const hostStateReason = `CASE WHEN h.launch_outcome = 'failed' AND NOT ` + hostSeesProviderError + ` THEN 'launch failed' ELSE h.state_reason END`
+
+const hostsFrom = `hosts h` + hostTenantJoin + hostPoolJoin + hostLoadJoin
+
+// The joins of hostsFrom, so a paged list's keys and counts read only what
+// their sort value and filter need (hostSortKeys' from). hl is only read for
+// ready and draining hosts' sort values.
+const (
+	hostTenantJoin = ` LEFT JOIN tenants ht ON ht.id = h.tenant_id`
+	hostPoolJoin   = ` LEFT JOIN pools hp ON hp.id = h.pool_id`
+	hostLoadJoin   = ` CROSS JOIN LATERAL (SELECT count(*) AS n, coalesce(sum((pl.resources->>'cpus')::float8), 0) AS cpus,
 		coalesce(sum((pl.resources->>'memory')::int8), 0) AS mem, coalesce(sum((pl.resources->>'disk')::int8), 0) AS disk
 		FROM placements pl WHERE pl.host_id = h.id AND pl.state IN ` + livePlacementStates + ` AND ` + visiblePlacements + `) hl`
+	// The same for a sort value, which is NULL unless ready or draining:
+	// a one-time filter skips the scan for every other host.
+	hostLoadSortJoin = ` CROSS JOIN LATERAL (SELECT count(*) AS n, coalesce(sum((pl.resources->>'cpus')::float8), 0) AS cpus,
+		coalesce(sum((pl.resources->>'memory')::int8), 0) AS mem
+		FROM placements pl WHERE h.state IN ('ready', 'draining') AND pl.host_id = h.id AND pl.state IN ` + livePlacementStates + ` AND ` + visiblePlacements + `) hl`
+)
 
 func scanHost(row pgx.Row) (Host, error) {
 	var h Host
-	var t [10]*time.Time
-	if err := row.Scan(&h.ID, &h.Name, &h.Tenant, &h.Pool, &h.PoolID, &h.State, &h.StateReason, &h.Draining, &h.Labels, &h.Capacity, &h.Versions,
-		&h.Platform, &h.LiveRuns, &h.Allocated, &h.ProviderID, &h.InstanceType, &h.Zone, &h.Market, &h.LastHeartbeat,
-		&t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7], &t[8], &t[9]); err != nil {
+	d := hostScanDest(&h)
+	if err := row.Scan(d.fields...); err != nil {
 		return h, err
 	}
-	h.Times = map[string]*time.Time{
-		"provisionRequested": t[0], "provisioned": t[1], "registered": t[2], "firstPlacement": t[3],
-		"lastPlacementEnded": t[4], "drainRequested": t[5], "terminateRequested": t[6], "terminated": t[7],
-		"lost": t[8], "created": t[9],
-	}
+	d.finish()
 	return h, nil
+}
+
+// hostDest is where a row of hostColumns is scanned, and finish fills in
+// what is derived from it.
+type hostDest struct {
+	fields []any
+	finish func()
+}
+
+func hostScanDest(h *Host) hostDest {
+	var t [10]*time.Time
+	var outcome *string
+	var launched *time.Time
+	var launchErr string
+	fields := []any{&h.ID, &h.Name, &h.Tenant, &h.Pool, &h.PoolID, &h.State, &h.StateReason, &h.Draining, &h.Labels, &h.Capacity, &h.Versions,
+		&h.Platform, &h.LiveRuns, &h.Allocated, &h.ProviderID, &h.InstanceType, &h.Zone, &h.Market, &h.LastHeartbeat,
+		&t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7], &t[8], &t[9], &outcome, &launched, &launchErr}
+	return hostDest{fields, func() {
+		h.Times = map[string]*time.Time{
+			"provisionRequested": t[0], "provisioned": t[1], "registered": t[2], "firstPlacement": t[3],
+			"lastPlacementEnded": t[4], "drainRequested": t[5], "terminateRequested": t[6], "terminated": t[7],
+			"lost": t[8], "created": t[9],
+		}
+		if outcome != nil {
+			h.Launch = &HostLaunch{Outcome: *outcome, RequestedAt: t[0], FinishedAt: launched, Error: launchErr}
+			if *outcome == launchFailed && h.State == "terminated" {
+				// Its row was closed, but no instance ever ran to terminate.
+				h.Times["terminateRequested"], h.Times["terminated"] = nil, nil
+			}
+		}
+	}}
 }
 
 type listHostsInput struct {
 	TenantQuery
-	All   string `query:"all" doc:"true to include terminated hosts." example:"true"`
-	Pool  string `query:"pool" doc:"Only this pool's hosts."`
-	State string `query:"state" doc:"Only hosts in this state: provisioning, ready, draining, lost or terminated."`
+	PageQuery
+	All       string `query:"all" doc:"true to include terminated hosts." example:"true"`
+	Pool      string `query:"pool" doc:"Only this pool's hosts."`
+	PoolID    string `query:"poolId" doc:"Only the hosts of the pool with this id (names repeat across owners)."`
+	State     string `query:"state" doc:"Only hosts in this state: provisioning, ready, draining, lost or terminated; or launch_failed, the terminated hosts whose launch the provider refused (terminated then means the others)."`
+	Lifecycle string `query:"lifecycle" enum:"live,ended," doc:"live: hosts not terminated; ended: terminated ones (launch failures included). Implies all."`
+	Limit     string `query:"limit" doc:"Hosts per page, 1 to 500 (default 25). limit alone (or offset alone) pages the list too, newest first (sort=created)."`
+	Offset    string `query:"offset" doc:"Paged lists: skip this many hosts (a numbered page), instead of a cursor; with next, prev or at it is a 400."`
 }
 
 type listHostsOutput struct {
 	Body struct {
-		Hosts []Host `json:"hosts"`
+		Hosts  []Host `json:"hosts"`
+		Total  *int   `json:"total,omitempty" doc:"Paged lists: how many hosts match."`
+		Offset *int   `json:"offset,omitempty" doc:"Paged lists: how many matching hosts come before this page's first, in its order."`
+		Next   string `json:"next,omitempty" doc:"Paged lists: the next page's cursor (?next=)."`
+		Prev   string `json:"prev,omitempty" doc:"Paged lists: the previous page's cursor (?prev=)."`
+		Page   string `json:"page,omitempty" doc:"Paged lists: this page's own cursor (?at=), to read it again in place."`
 	} `nameHint:"HostList"`
 }
 
+// launchFailed is hosts.launch_outcome of a launch the provider refused.
+const launchFailed = "failed"
+
+// hostFailedSQL: the host row h is a launch the provider refused.
+const hostFailedSQL = `(h.state = 'terminated' AND h.launch_outcome IS NOT DISTINCT FROM 'failed')`
+
+// hostSortKeys: GET /v1/hosts' sort keys. A launch-failed host has no
+// terminated time and no uptime (no instance ran): they sort last.
+var hostSortKeys = map[string]sortKey{
+	"name":       {expr: `h.name`, cast: "text", first: "asc", notNull: true},
+	"id":         {expr: `h.id`, cast: "text", first: "asc", notNull: true},
+	"tenant":     {expr: `ht.name`, cast: "text", first: "asc", from: hostTenantJoin},
+	"pool":       {expr: `hp.name`, cast: "text", first: "asc", from: hostPoolJoin},
+	"state":      {expr: `CASE WHEN ` + hostFailedSQL + ` THEN 6 ELSE array_position(ARRAY['provisioning', 'ready', 'draining', 'lost', 'terminated'], h.state) END`, cast: "bigint", first: "asc"},
+	"runs":       {expr: `CASE WHEN h.state IN ('ready', 'draining') THEN hl.n END`, cast: "bigint", first: "desc", from: hostLoadSortJoin},
+	"cpu":        {expr: `CASE WHEN h.state IN ('ready', 'draining') AND (h.capacity->>'cpus')::float8 > 0 THEN hl.cpus / (h.capacity->>'cpus')::float8 END`, cast: "float8", first: "desc", from: hostLoadSortJoin},
+	"memory":     {expr: `CASE WHEN h.state IN ('ready', 'draining') AND (h.capacity->>'memory')::float8 > 0 THEN hl.mem / (h.capacity->>'memory')::float8 END`, cast: "float8", first: "desc", from: hostLoadSortJoin},
+	"created":    {expr: `h.created_at`, cast: "timestamptz", first: "desc", notNull: true},
+	"terminated": {expr: `CASE WHEN NOT ` + hostFailedSQL + ` THEN h.terminated_at END`, cast: "timestamptz", first: "desc"},
+	"uptime":     {expr: `CASE WHEN NOT ` + hostFailedSQL + ` THEN extract(epoch FROM coalesce(h.terminated_at, {now}) - h.created_at) END`, cast: "float8", first: "desc"},
+	"heartbeat":  {expr: `h.last_heartbeat`, cast: "timestamptz", first: "desc"},
+}
+
 // listHosts lists hosts by name: a tenant's own and the platform's, or
-// every host for an operator.
+// every host for an operator. With sort, a cursor or limit it is paged
+// (listHostsPage); without, it is the whole list, as it always was.
 func (s *Server) listHosts(ctx context.Context, in *listHostsInput) (*listHostsOutput, error) {
 	p := principal(ctx)
-	hosts := []Host{}
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT `+hostColumns+` FROM `+hostsFrom+`
-			WHERE `+visibleHosts+` AND ($2 OR h.state <> 'terminated') AND ($3 = '' OR hp.name = $3) AND ($4 = '' OR h.state = $4)
-			ORDER BY h.name, h.id`, p.TenantID, in.All == "true" || in.State == "terminated", in.Pool, in.State)
-		if err != nil {
+	out := &listHostsOutput{}
+	out.Body.Hosts = []Host{}
+	args := []any{p.TenantID}
+	arg := func(v any) string {
+		args = append(args, v)
+		return "$" + strconv.Itoa(len(args))
+	}
+	where := []string{visibleHosts}
+	switch in.Lifecycle {
+	case "live":
+		where = append(where, "h.state <> 'terminated'")
+	case "ended":
+		where = append(where, "h.state = 'terminated'")
+	case "":
+		if in.All != "true" && in.State != "terminated" && in.State != "launch_failed" {
+			where = append(where, "h.state <> 'terminated'")
+		}
+	default:
+		return nil, errf(http.StatusBadRequest, "bad_request", "lifecycle: live or ended")
+	}
+	if in.Pool != "" {
+		// Not hp.name: a filter on hosts h alone, so a page's count
+		// reads hosts only.
+		where = append(where, "h.pool_id IN (SELECT id FROM pools WHERE name = "+arg(in.Pool)+")")
+	}
+	if in.PoolID != "" {
+		where = append(where, "h.pool_id = "+arg(in.PoolID))
+	}
+	switch in.State {
+	case "":
+	case "launch_failed":
+		where = append(where, hostFailedSQL)
+	case "terminated":
+		where = append(where, "h.state = 'terminated' AND NOT "+hostFailedSQL)
+	default:
+		where = append(where, "h.state = "+arg(in.State))
+	}
+	pq := in.PageQuery
+	if pq == (PageQuery{Dir: pq.Dir}) && (in.Limit != "" || in.Offset != "") {
+		// limit or offset alone pages too, newest first (a dir alone is ignored).
+		pq = PageQuery{Sort: "created"}
+	}
+	pg, paged, err := resolvePaging(pq, hostSortKeys, "created", in.Limit, 25, 500)
+	if err != nil {
+		return nil, err
+	}
+	if in.Offset != "" && paged && pg.cursor != nil {
+		return nil, errf(http.StatusBadRequest, "bad_request", "offset does not go with next, prev or at")
+	}
+	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if !paged {
+			rows, err := tx.Query(ctx, `SELECT `+hostColumns+` FROM `+hostsFrom+` WHERE `+strings.Join(where, " AND ")+` ORDER BY h.name, h.id`, args...)
+			if err != nil {
+				return err
+			}
+			out.Body.Hosts, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (Host, error) { return scanHost(row) })
 			return err
 		}
-		hosts, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (Host, error) { return scanHost(row) })
-		return err
+		return listHostsPage(ctx, tx, pg, in.Offset, where, args, out)
 	})
 	if err != nil {
 		return nil, err
 	}
-	out := &listHostsOutput{}
-	out.Body.Hosts = hosts
 	return out, nil
+}
+
+// listHostsPage reads one page of hosts, the count of all that match and
+// how many precede the page, in one transaction. base holds the filter's
+// placeholders; the filter reads hosts h alone. As listRunsPage, the page's
+// ids and sort values come first, from hosts h and only the joins the sort
+// key needs; then its rows, by id.
+func listHostsPage(ctx context.Context, tx pgx.Tx, pg *paging, offset string, where []string, base []any, out *listHostsOutput) error {
+	stamp, err := pageClock(ctx, tx, pg)
+	if err != nil {
+		return err
+	}
+	filter := strings.Join(where, " AND ")
+	var total int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM hosts h WHERE `+filter, base...).Scan(&total); err != nil {
+		return err
+	}
+	skip := 0
+	if offset != "" && pg.cursor == nil {
+		n, err := strconv.Atoi(offset)
+		if err != nil || n < 0 {
+			return errf(http.StatusBadRequest, "bad_request", "offset: a count of hosts")
+		}
+		skip = n
+	}
+	q, from, expr := pg.keySource(`hosts h`, stamp, base)
+	keyed := filter
+	if pg.cursor != nil {
+		keyed += " AND " + pg.where(expr, "h.id", q.arg)
+	}
+	rows, err := tx.Query(ctx, `SELECT h.id AS key_id, `+expr+`::text AS key_value FROM `+from+` WHERE `+keyed+
+		` ORDER BY `+pg.order(expr, "h.id", pg.mode == "before")+` LIMIT `+strconv.Itoa(pg.limit+1)+` OFFSET `+strconv.Itoa(skip), q.list...)
+	if err != nil {
+		return err
+	}
+	keys, err := pgx.CollectRows(rows, pgx.RowToStructByPos[keyRow])
+	if err != nil {
+		return err
+	}
+	// How many matching hosts come before the page's first, in its order:
+	// its offset, and whether there is a previous page.
+	before := skip
+	countBefore := func(first keyRow) error {
+		c, from, expr := pg.keySource(`hosts h`, stamp, base)
+		return tx.QueryRow(ctx, `SELECT count(*) FROM `+from+` WHERE `+filter+` AND `+pg.beforeWhere(expr, "h.id", first, c.arg), c.list...).Scan(&before)
+	}
+	page, next, prev, self, err := pg.pageLinks(keys, stamp, func(first keyRow) (bool, error) {
+		if pg.cursor == nil {
+			return skip > 0, nil
+		}
+		err := countBefore(first)
+		return before > 0, err
+	})
+	if err != nil {
+		return err
+	}
+	if pg.mode == "before" && len(page) > 0 {
+		if err := countBefore(page[0]); err != nil {
+			return err
+		}
+	}
+	ids := pageIDs(page)
+	// $1 stays the principal's tenant: hostsFrom's placements read it.
+	rows, err = tx.Query(ctx, `SELECT `+hostColumns+` FROM `+hostsFrom+` WHERE h.id = ANY($2)`, base[0], ids)
+	if err != nil {
+		return err
+	}
+	loaded, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Host, error) { return scanHost(row) })
+	if err != nil {
+		return err
+	}
+	hosts := inPageOrder(ids, loaded, func(h Host) string { return h.ID })
+	out.Body.Hosts, out.Body.Total, out.Body.Offset, out.Body.Next, out.Body.Prev, out.Body.Page = hosts, &total, &before, next, prev, self
+	return nil
 }
 
 // HostPath names a host, by id or name.

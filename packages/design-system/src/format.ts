@@ -23,13 +23,14 @@ export function formatRate(n: number | null | undefined): string {
   return n == null ? MISSING : `${formatBytes(n)}/s`;
 }
 
-/** Duration in seconds → "1h 12m", "3.2s", "450ms". Two largest units. */
+/** Duration in seconds → "1h 12m", "3.2s", "450ms"; zero is "0s". Two largest units. */
 export function formatDuration(seconds: number | null | undefined): string {
   if (seconds == null || !Number.isFinite(seconds)) return MISSING;
   const neg = seconds < 0;
   let s = Math.abs(seconds);
   let out: string;
-  if (s < 1) out = `${Math.round(s * 1000)}ms`;
+  if (s === 0) out = "0s";
+  else if (s < 1) out = `${Math.round(s * 1000)}ms`;
   else if (s < 60) out = `${trimZeros(s.toFixed(1))}s`;
   else {
     const parts: string[] = [];
@@ -85,6 +86,14 @@ export function formatTimestamp(when: Date | number | string | null | undefined,
   const p = (x: number) => String(x).padStart(2, "0");
   const base = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
   return opts.seconds === false ? base : `${base}:${p(d.getSeconds())}`;
+}
+
+/** Absolute local timestamp with its time zone, "2026-09-24 14:03:11 GMT+1": the exact time behind a relative one. */
+export function formatTimestampZone(when: Date | number | string | null | undefined): string {
+  const t = toMillis(when);
+  if (t == null) return MISSING;
+  const zone = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" }).formatToParts(new Date(t)).find((p) => p.type === "timeZoneName")?.value;
+  return zone ? `${formatTimestamp(t)} ${zone}` : formatTimestamp(t);
 }
 
 /** Time only, "14:03:11". Used on chart axes for short ranges. */

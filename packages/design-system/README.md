@@ -10,7 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
-bun run test           # bun test: money rounding, y scale, family colours, CostFigure, Table columns, EventTable (src/*.test.ts*)
+bun run test           # bun test: money rounding, y scale, family colours, CostFigure, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme (src/*.test.ts*)
 ```
 
 ## Using it
@@ -90,6 +90,21 @@ gallery/            the gallery app (index.html, Gallery.tsx, fake data)
   gets a `~` prefix, never a colour, with the status spelled out in its
   Tooltip (`CostFigure`); `~` is what `lux ls` prints too.
 
+## Terminal scheme
+
+The terminal's colours are its own. `useTerminalScheme()` reads and sets
+the choice, "auto" (Match console: the console's resolved theme), "light"
+or "dark" (Solarized), persisted in `localStorage["lux.terminal.theme"]`
+(`TERMINAL_THEME_KEY`; anything else reads as auto). Outside React,
+`readTerminalScheme()` reads it and `setTerminalScheme(pref)` stores it
+and updates every mounted hook; a change in another tab (a `storage`
+event on that key) reaches this one. Pass its `resolved` to `Terminal`'s
+`scheme`: the terminal updates xterm's theme in place (no remount, so the
+connection, scrollback and selection stay) and sets its frame colours on
+`.term[data-term-scheme]`. It never writes `lux.theme` or
+`html[data-theme]`, and never changes a global token: the console theme
+stays the top bar's.
+
 ## Density
 
 Two settings, switched from the console's top bar (the rows icon) and persisted in
@@ -126,11 +141,48 @@ Page widths (`src/layout.css`): `.page` (detail), `.page-list` (tables), `.page-
 4 by container width), `.grid-2`, `.grid-3` (collapse to one column under
 900px of content).
 
-Tables (`Table`): `table-layout: fixed`; columns with a `width` keep it and
+Tables (`Table`): every column that has a `sortValue` (client sort) or
+`sortable: true` (server sort) sorts. Its header is focusable (Enter or
+Space sorts, as a click does), sets `aria-sort` and shows ↕, or ↑ / ↓ on
+the sorted column; clicking it again reverses. The first click sorts text
+A→Z and numbers, times and durations largest (newest) first
+(`firstSortDir`; `sortFirst` overrides). Missing values sort last in both
+directions (`sortRows`). A small, unpaged table sorts its loaded rows
+(`defaultSort`, or controlled `sort`); a paged one passes
+`sortMode="server"`, `sort` and `onSortChange` and fetches the page in that
+order, so a sorted page is the whole list sorted, never the visible rows
+re-ordered. `footer` holds its `Pagination`.
+
+`Pagination` has two modes. Count (`mode="count"`): "1–25 of 1,284 hosts",
+numbered pages (first, last, the current and its neighbours: `pageList`)
+and a page size, where the server counts the whole result; an empty result
+reads "0–0 of 0". Cursor (`mode="cursor"`):
+"Page 3 · runs 101–150", First / Previous / Next in the current sort
+order and a page size, where an exact total is costly or keeps moving
+(runs, events). First is on whenever the page is past 1, even when the
+server gave that page no previous one. `busy` keeps the buttons in place
+but inert. The page owns the cursors; a refresh re-reads the page it
+is on and never moves the reader to another. The sort in words beside the
+range comes from the columns: `sortInWords(columns, sort)` reads the
+sorted column's `label` (or its header, when that is text) and its
+`sortKind` (`time`: newest/oldest first, `number`: largest/smallest first,
+`text`: A→Z / Z→A; right-aligned columns default to number):
+"Created, newest first". `eventSortInWords(sort)` is the same for an
+EventTable's columns.
+
+Table helpers: `isSortable(column)`, `firstSortDir(column, rows)`,
+`nextSort(sort, column, rows)` (the sort after a header click: the other
+direction on the sorted column, else its first direction), `sortRows`,
+`dropsOptional`. Row actions: icon buttons (`IconButton size="sm"`) in a
+`span.row-actions` in a narrow, header-less last column (the Pools list:
+Make default `IconStar`, Rename `IconPencil`).
+
+`table-layout: fixed`; columns with a `width` keep it and
 the rest share the remainder. `lead` marks the name column, `optional`
 columns drop out when the table's container is under 1100px, or when with
-them a column without a width would get under 140px (a State pill beside a
-Cost column at 1100–1300px reads whole; `dropsOptional`). Below the
+them the table would not fit: a column without a width would get under
+140px, or, when every column has one, their sum is wider than the container
+(`dropsOptional`). Below the
 table's minimum width (the column widths, or `minWidth`) it scrolls sideways
 with the first column pinned.
 
@@ -148,7 +200,7 @@ All in `src/tokens.css`.
 | State hues | `--st-{neutral,blue,teal,green,amber,red,violet}-{fg,bg,dot}` |
 | Chart | `--chart-1` … `--chart-8` (fixed order; cost families map onto them, compute is `--chart-1`), `--chart-grid` `--chart-axis` `--chart-label` `--chart-cursor`, `--chart-h`; unallocated cost uses `--st-neutral-dot` |
 | Logs | `--log-stderr-bg` `--log-stderr-fg` `--log-line-hover` |
-| Terminal | `--term-bg` `--term-scrollbar` (the frame around the screen; the screen's palette is `terminalThemes.ts`) |
+| Terminal | `--term-bg` `--term-scrollbar` (the frame around the screen, following the console theme; a Terminal with a `scheme` sets its own on `.term[data-term-scheme]`; the screen's palette is `terminalThemes.ts`) |
 | Type | `--font-sans` `--font-mono`, `--text-{xs,sm,md,lg,xl,2xl,3xl}` (density-dependent), `--leading-{tight,normal}`, `--weight-{normal,medium,semibold}` |
 | Spacing | `--sp-1` … `--sp-9` (2, 4, 6, 8, 12, 16, 24, 32, 48px); density-dependent `--gap` `--gap-lg` `--pad-page` `--pad-card` `--pad-cell` |
 | Radius | `--radius-{sm,md,lg,pill}` (3, 5, 8px, pill) |
@@ -166,7 +218,14 @@ State mapping (`src/states.ts`):
 | violet | idle | | |
 | green | succeeded | ready | ready |
 | amber | stopping | draining, terminating | unreachable |
-| red | lost, failed | lost | exited |
+| red | lost, failed | lost, launch failed (outline) | exited |
+
+`launch_failed` is not a state luxd sets: a host's operational state stays
+`terminated` (cleanup, tokens and costs treat it as gone), and its launch
+outcome (`launch.outcome`, from GET /v1/hosts) says the provider refused
+the launch. `hostDisplayState(host)` maps the two to the pill the console
+shows: a red outline, "Launch failed", apart from a Terminated host that
+ran and from a Lost one.
 
 Cost status (`costStatusStyle`, `CostStatusBadge`): the `status` of
 `GET /v1/runs/{id}/cost`, as a Badge whose Tooltip says what it means (and,
@@ -197,19 +256,42 @@ Logo (the star, 16–32px; the detailed mark is `docs/brand/lux.svg`),
 Button, IconButton, LinkButton (an anchor styled as a Button), Badge,
 StatePill (run, host and server states; ServerStateMark is the server
 shorthand), ConnectionBadge,
-StatTile, Sparkline, Card, Table, Tabs,
+StatTile, Sparkline, Card, Table, Pagination, Tabs, SegmentedControl (one
+of a few choices as joined buttons, a radio group), RelativeTime ("3h ago",
+the exact date, time and zone in a Tooltip; every table's times),
+DurationCell (a duration with how it was measured in a Tooltip, a live one
+in the foreground, a slow one in the warn tone),
 Tooltip, Select, TenantPicker, TimeRangePicker, TimeSeriesChart (uPlot, with
 optional vertical `marks`; height from `--chart-h` unless given), Timeline
-(placement waterfall), EventTable (a lifecycle event log: Run, pool, host), LogView, Terminal (xterm.js in the LogView's frame,
-Solarized inside via `terminalThemes`, following the console theme; a
-transport-agnostic handle: `write`, `onData`, `onResize`) with
+(placement waterfall: a stage is a bar from `start` to `end`, striped while
+it has no `end`; a `point: true` stage is an instant, a dot at `start` with
+its clock time and no duration, and it never extends the axis past itself;
+`note` follows the label, the whole label is in its title), EventTable (a lifecycle event log: Run, pool, host;
+every column sorts, and with `onSortChange`, `sort` and a `footer`
+Pagination it is a server-paged, server-sorted table), LogView, Terminal (xterm.js in the LogView's frame,
+Solarized inside via `terminalThemes`; `scheme` light or dark, else the
+console theme; a transport-agnostic handle: `write`, `onData`, `onResize`) with
 TerminalOverlay (the card over a dimmed screen), ServerList / ServerRow (a
 run's servers: state, URL, start/stop/restart/remove, an expandable log the
 caller renders),
 KeyValue, IdChip, Code, PageHeader (with optional breadcrumbs; CrumbSep),
 SectionHeader, ConfirmDialog, Dialog (a form modal), Toast (`useToast`),
-EmptyState, Spinner, Skeleton. Hooks: `useTheme`, `useDensity`, `useCopy`. All exported
+EmptyState, Spinner, Skeleton. Hooks: `useTheme`, `useDensity`, `useTerminalScheme`, `useNow` (the shared
+clock relative times tick on), `useCopy`. All exported
 from `src/index.ts` with typed props; icons from `@lux/design-system/icons`.
+
+Formatting and utility classes used beside the components:
+
+| Export / class | What |
+| --- | --- |
+| `formatTimestamp(t)`, `formatTimestampZone(t)` | "2026-09-30 22:38:08", and the same with the browser's zone name: the hover text of an exact time (`RelativeTime`, the launch-failed host's times) |
+| `formatDuration(s)` | "1h 12m", "3.2s", "450ms", "0s" for zero; a negative figure keeps its sign, so callers clamp what cannot be negative |
+| `rangeText(range)` | a `TIME_RANGES` value in running text: "last 24 hours" |
+| `.pill-outline` | the outlined pill variant (`StatePill` for launch failed): the hue on the border, no fill |
+| `.text-danger` | a figure in the danger colour beside its label (a non-zero failure count in a table) |
+| `.spark-row` | an inline `Sparkline` with its figure, in a table cell |
+| `.row-actions` | a table row's icon buttons, right-aligned (above) |
+| `.field`, `.field-label` | a labelled value or control, the label above it (a form field; the launch-failed host's provider error) |
 
 Cost additions (`src/Cost.tsx`, `format.ts`, `states.ts`; gallery section
 "costs"):

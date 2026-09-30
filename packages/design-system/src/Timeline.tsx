@@ -11,6 +11,8 @@ export interface TimelineStage {
   /** Hue: setup stages are neutral, the workload is teal, teardown is amber, failures red. */
   tone?: "neutral" | "accent" | "teal" | "amber" | "red";
   note?: string;
+  /** An instant, not a span: a dot at start, no duration, and end is ignored. */
+  point?: boolean;
 }
 
 export interface TimelineProps {
@@ -21,11 +23,15 @@ export interface TimelineProps {
   labelWidth?: number;
 }
 
-/** Horizontal waterfall of lifecycle stages. Each row is one stage; bars share one time axis. */
+/**
+ * Horizontal waterfall of lifecycle stages. Each row is one stage; bars
+ * share one time axis. A point stage is a dot at its instant: the axis
+ * reaches it, never past it.
+ */
 export function Timeline({ stages, now = Date.now(), labelWidth = 150 }: TimelineProps) {
   const [hoverKey, setHoverKey] = useState<string | null>(null);
   const starts = stages.map((s) => s.start).filter((v): v is number => v != null);
-  const ends = stages.map((s) => s.end ?? (s.start != null ? now : null)).filter((v): v is number => v != null);
+  const ends = stages.map((s) => (s.point ? s.start : (s.end ?? (s.start != null ? now : null)))).filter((v): v is number => v != null);
   if (starts.length === 0) return <div className="timeline timeline-empty muted">No lifecycle events yet.</div>;
   const t0 = Math.min(...starts);
   const t1 = Math.max(...ends, t0 + 1000);
@@ -49,9 +55,10 @@ export function Timeline({ stages, now = Date.now(), labelWidth = 150 }: Timelin
       </div>
       {stages.map((s) => {
         const started = s.start != null;
-        const end = s.end ?? (started ? now : null);
+        const point = !!s.point && started;
+        const end = point ? s.start! : (s.end ?? (started ? now : null));
         const dur = started && end != null ? (end - s.start!) / 1000 : null;
-        const inProgress = started && s.end == null;
+        const inProgress = started && !point && s.end == null;
         const tone = s.tone ?? "neutral";
         const active = hoverKey === s.key;
         return (
@@ -61,7 +68,7 @@ export function Timeline({ stages, now = Date.now(), labelWidth = 150 }: Timelin
               onMouseEnter={() => setHoverKey(s.key)}
               onMouseLeave={() => setHoverKey(null)}
             >
-              <div className="timeline-label">
+              <div className="timeline-label" title={s.note ? `${s.label} · ${s.note}` : s.label}>
                 {s.label}
                 {s.note && <span className="timeline-note muted"> · {s.note}</span>}
               </div>
@@ -69,15 +76,16 @@ export function Timeline({ stages, now = Date.now(), labelWidth = 150 }: Timelin
                 {ticks.map((t) => (
                   <span key={t} className="timeline-grid" style={{ left: pct(t0 + t) }} />
                 ))}
-                {started && (
+                {point && <span className={`timeline-point tone-${tone}`} style={{ left: pct(s.start!) }} title={`${s.label}: ${formatTimestamp(s.start!)}`} />}
+                {started && !point && (
                   <span
                     className={["timeline-bar", `tone-${tone}`, inProgress ? "is-live" : ""].join(" ").trim()}
                     style={{ left: pct(s.start!), width: `calc(${pct(end!)} - ${pct(s.start!)})` }}
                     title={`${s.label}: ${formatClock(s.start!)} → ${inProgress ? "now" : formatClock(end!)} (${formatDuration(dur)})`}
                   />
                 )}
-                <span className="timeline-dur mono" style={{ left: started ? `calc(${pct(end!)} + 6px)` : 0 }}>
-                  {started ? (inProgress ? `${formatDuration(dur)}…` : formatDuration(dur)) : "not yet"}
+                <span className="timeline-dur mono" style={{ left: started ? `calc(${pct(end!)} + ${point ? 10 : 6}px)` : 0 }}>
+                  {point ? formatClock(s.start!) : started ? (inProgress ? `${formatDuration(dur)}…` : formatDuration(dur)) : "not yet"}
                 </span>
               </div>
             </div>

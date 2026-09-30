@@ -1,7 +1,7 @@
 import { useMemo } from "react";
-import { Card, ColorKey, compareMoney, CostStatusBadge, EmptyState, familyColor, familyDisplay, formatDuration, formatTimestamp, KeyValue, ListPriceNote, Money, MoneyList, Table, Tooltip, type Column } from "@lux/design-system";
+import { Card, ColorKey, compareMoney, CostStatusBadge, EmptyState, familyColor, familyDisplay, formatDuration, formatTimestamp, KeyValue, ListPriceNote, Money, MoneyList, Table, Tooltip, type Column, RelativeTime } from "@lux/design-system";
 import { api, isRunActive, useQuery, type CostLine, type CostTotal, type Run, type RunCost as RunCostData } from "../../api/index.ts";
-import { ErrorBlock, ErrorStrip, RelativeTime } from "./common.tsx";
+import { ErrorBlock, ErrorStrip } from "./common.tsx";
 
 /** The Run's cost: totals per currency, a row per family, and its lines by item. */
 export function RunCost({ run }: { run: Run }) {

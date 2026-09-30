@@ -20,6 +20,13 @@ import (
 // the store tests do; skipped otherwise.
 func testServer(t *testing.T) *Server {
 	t.Helper()
+	return testServerWith(t, "")
+}
+
+// testServerWith is testServer on a database created with opts (CREATE
+// DATABASE's clauses, e.g. a collation).
+func testServerWith(t *testing.T, opts string) *Server {
+	t.Helper()
 	admin := os.Getenv("LUX_TEST_PG")
 	if admin == "" {
 		t.Skip("LUX_TEST_PG not set")
@@ -30,7 +37,7 @@ func testServer(t *testing.T) *Server {
 		t.Skipf("postgres unreachable: %v", err)
 	}
 	name := "lux_unit_" + ids.New("")[1:]
-	if _, err := conn.Exec(ctx, "CREATE DATABASE "+name); err != nil {
+	if _, err := conn.Exec(ctx, "CREATE DATABASE "+name+" "+opts); err != nil {
 		t.Fatal(err)
 	}
 	cfg := conn.Config()
@@ -127,6 +134,98 @@ func TestRollupHistory(t *testing.T) {
 	}
 	if len(hours) != 1 || !hours[0].at.Equal(hour) || hours[0].start != 4 || hours[0].cpu != 30 || hours[0].mem != 250 {
 		t.Fatalf("hour rollup: %+v", hours)
+	}
+}
+
+// The rollup's table-wide lower bound skips nothing: a key whose newest
+// bucket lags another key's is still rolled up, in the rollup that follows
+// and in the next hour's; a sample committed late into the newest rolled-up
+// minute is still read (pb's hour h0, rolled up before it, keeps its value).
+func TestRollupAcrossKeys(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	h0 := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
+	h1 := h0.Add(time.Hour)
+	insert := func(rows ...any) {
+		t.Helper()
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			for i := 0; i < len(rows); i += 3 {
+				if _, err := tx.Exec(ctx, `INSERT INTO pool_samples (pool_id, tenant_id, res, at, running, started) VALUES ($1, '', 0, $2, $3, 1)`,
+					rows[i], rows[i+1], rows[i+2]); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	type bucket struct {
+		pool    string
+		res     int
+		at      time.Time
+		running int
+		started int
+	}
+	read := func() []bucket {
+		t.Helper()
+		var got []bucket
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			rows, _ := tx.Query(ctx, `SELECT pool_id, res, at, running, started FROM pool_samples WHERE res > 0 ORDER BY res, pool_id, at`)
+			var err error
+			got, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (bucket, error) {
+				var b bucket
+				return b, r.Scan(&b.pool, &b.res, &b.at, &b.running, &b.started)
+			})
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO pools (id, name, provider) VALUES ('pa', 'a', 'static'), ('pb', 'b', 'static')`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m := func(h time.Time, min int, sec int) time.Time {
+		return h.Add(time.Duration(min)*time.Minute + time.Duration(sec)*time.Second)
+	}
+	// pb's samples stop after its first minute; pa's go on for two more.
+	insert("pa", m(h0, 0, 0), 2, "pa", m(h0, 0, 30), 4, "pa", m(h0, 1, 0), 6, "pa", m(h0, 2, 0), 8,
+		"pb", m(h0, 0, 0), 10)
+	if err := s.rollupHistory(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// A sample of pb committed late, at the start of pa's newest rolled-up
+	// minute: the table-wide bound is that instant, inclusive, so it is read.
+	insert("pb", m(h0, 2, 0), 40)
+	// Next hour pb has more minutes than pa.
+	insert("pa", m(h1, 0, 0), 1,
+		"pb", m(h1, 0, 0), 20, "pb", m(h1, 1, 0), 30)
+	for range 2 {
+		if err := s.rollupHistory(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []bucket{
+		{"pa", 60, m(h0, 0, 0), 3, 2}, {"pa", 60, m(h0, 1, 0), 6, 1}, {"pa", 60, m(h0, 2, 0), 8, 1}, {"pa", 60, m(h1, 0, 0), 1, 1},
+		{"pb", 60, m(h0, 0, 0), 10, 1}, {"pb", 60, m(h0, 2, 0), 40, 1}, {"pb", 60, m(h1, 0, 0), 20, 1}, {"pb", 60, m(h1, 1, 0), 30, 1},
+		{"pa", 3600, h0, 6, 4}, {"pa", 3600, h1, 1, 1},
+		{"pb", 3600, h0, 10, 1}, {"pb", 3600, h1, 25, 2},
+	}
+	got := read()
+	if len(got) != len(want) {
+		t.Fatalf("buckets:\n got %v\nwant %v", got, want)
+	}
+	for i := range want {
+		g, w := got[i], want[i]
+		if g.pool != w.pool || g.res != w.res || !g.at.Equal(w.at) || g.running != w.running || g.started != w.started {
+			t.Fatalf("bucket %d:\n got %+v\nwant %+v", i, g, w)
+		}
 	}
 }
 
