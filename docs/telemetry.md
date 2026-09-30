@@ -80,16 +80,29 @@ Runs independently.
 
 **Where new-host capacity comes from.** Only hosts luxd launched for the
 same pool and the same tenant, that have registered, and whose launch
-template is exactly the pool's current one count as observations. The
-expected capacity of a new host is, per resource (`cpus`, `memory`,
-`disk`, `runs`), the smallest value those hosts reported, and its labels
-are those every observation shares with the same value. A reported `0`
+template is exactly the pool's current one count as observations, and of
+those only the latest 8 by registration time, terminated ones included.
+The expected capacity of a new host is, per resource (`cpus`, `memory`,
+`disk`, `runs`), the smallest value those 8 reported, and its labels
+are those every one of them shares with the same value. A reported `0`
 means that resource is unlimited on that host; the expectation is
 unlimited only when every observation reported `0`, otherwise the
 smallest non-zero value wins. With no observation (a new pool, or a
 changed template) the capacity is unknown, which is never taken as
 unlimited: luxd launches one host to learn it, and none while a host of
 the current template is already starting.
+
+**Probe hosts.** The pool's template names an EC2 launch template, and
+the instance type behind its `$Default` version can change without the
+pool's template changing. The expectation then still describes the old
+instance type until 8 newer hosts register. When a Run fits no expected
+new host (a resource or a label), no host of the current template is
+starting, and none has registered since the Run entered `provisioning`,
+the pool launches one *probe* host (`pool.scale_up` with `probe: true`),
+as it does for unknown capacity. Once the probe registers, the Runs that
+were waiting are older than it, so it is at most one probe per group of
+Runs that began waiting together; if the probe is no larger, those Runs
+stay unmet and `pool.scale_blocked` says so.
 
 **Planning order.** Each Run is tried against:
 
@@ -124,6 +137,15 @@ adds the plan; rows written before planning have none of these:
 | `exhausted` | Per actual host (`host`, `stage` `ready` or `starting`): the first Run it could not fit and why. |
 | `ineligible` | Ready hosts the scheduler skips: `draining`, `no heartbeat`, `heartbeat stale`. |
 | `omitted` | Entries left out of `deficits` and `exhausted`, each capped at 8; `ineligible` is capped at 8 too. |
+| `probe` | `true` when the one host launched is a probe (above). |
+
+**`pool.scale_blocked`** is written on a pass that leaves Runs unmet and
+launches nothing: no new host fits them, `--max` or the tenant's host
+quota is reached, or a probe or bootstrap host is still starting. It
+carries `waiting`, `total`, `max` and the same plan fields as
+`pool.scale_up` (`ready` through `omitted`). A pool stuck this way repeats
+it every pass, and repeats fold into one row, counted like a failing
+launch's.
 
 A blocker is either a resource, with `resource` (`cpus`, `memory`, `disk`
 or `runs`), `requested`, `used`, `capacity` and `available`

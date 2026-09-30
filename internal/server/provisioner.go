@@ -266,6 +266,9 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	if pl.Max > 0 {
 		want = min(want, pl.Max-st.total)
 	}
+	if want <= 0 && st.plan.Unmet > 0 {
+		s.scaleBlocked(ctx, pl, &st)
+	}
 	up := scaleUp(pl, &st, warm, want)
 	for i := range max(want, 0) {
 		if i > 0 {
@@ -293,11 +296,34 @@ func scaleUp(pl poolRow, st *poolState, warm, want int) map[string]any {
 	case st.demand == 0:
 		reason = "warm"
 	}
-	return map[string]any{"hosts": want, "reason": reason, "waiting": st.demand, "warm": warm, "min": pl.Min, "max": pl.Max,
-		"total": st.total, "idle": st.idle, "provisioning": st.provisioning,
-		"ready": st.plan.Ready, "future": st.plan.Future, "planned": st.plan.Planned, "unmet": st.plan.Unmet,
-		"blocked": st.plan.Blocked, "unknown": st.plan.Unknown, "expected": st.plan.Expected,
-		"deficits": st.plan.Deficits, "exhausted": st.plan.Exhausted, "ineligible": st.plan.Ineligible, "omitted": st.plan.Omitted}
+	d := map[string]any{"hosts": want, "reason": reason, "waiting": st.demand, "warm": warm, "min": pl.Min, "max": pl.Max,
+		"total": st.total, "idle": st.idle, "provisioning": st.provisioning}
+	maps.Copy(d, st.plan.summary())
+	if st.plan.Probe {
+		d["probe"] = true
+	}
+	return d
+}
+
+// summary is the plan's bounded evidence, shared by pool.scale_up and
+// pool.scale_blocked.
+func (p *capacityPlan) summary() map[string]any {
+	return map[string]any{"ready": p.Ready, "future": p.Future, "planned": p.Planned, "unmet": p.Unmet,
+		"blocked": p.Blocked, "unknown": p.Unknown, "expected": p.Expected,
+		"deficits": p.Deficits, "exhausted": p.Exhausted, "ineligible": p.Ineligible, "omitted": p.Omitted}
+}
+
+// scaleBlocked records why Runs the plan could not cover launch nothing (no
+// new host fits them, or max or quota stops it). A pool that stays stuck
+// folds each pass into one row.
+func (s *Server) scaleBlocked(ctx context.Context, pl poolRow, st *poolState) {
+	d := st.plan.summary()
+	d["waiting"], d["total"], d["max"] = st.demand, st.total, pl.Max
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return poolRepeatEvent(ctx, tx, pl.ID, evScaleBlocked, d)
+	}); err != nil {
+		s.log.Warn("recording a blocked scale-up", "pool", pl.Name, "err", err)
+	}
 }
 
 // evCapacityDecision records the planner's verdict on one actual host.

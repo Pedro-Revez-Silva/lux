@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/marcioapm/lux/internal/proto"
@@ -18,6 +19,7 @@ type capacityPlan struct {
 	Unmet            int    `json:"unmet"`   // Capacity-eligible Runs not covered by ready, existing-start, or planned capacity.
 	Blocked          int    `json:"blocked"` // Runs excluded before capacity simulation; they never trigger launches.
 	Unknown          string `json:"unknown,omitempty"`
+	Probe            bool   `json:"probe,omitempty"` // One host launched to re-observe capacity no expected host fits.
 	hostDecisions    map[string]map[string]any
 	NewHosts         int              `json:"newHosts"`
 	Expected         *hostExpectation `json:"expected"`
@@ -106,23 +108,36 @@ func finiteMinimum[T ~int | ~int64 | ~float64](a, b T) T {
 	return min(a, b)
 }
 
-func (s *Server) hostExpectation(ctx context.Context, tx pgx.Tx, pl poolRow) (*hostExpectation, error) {
-	rows, err := tx.Query(ctx, `SELECT capacity, labels FROM hosts
+// expectationWindow is how many of the latest registrations (per pool, tenant
+// and exact template) the new-host expectation is taken from, so a changed
+// $Default instance type ages out after that many newer hosts register.
+const expectationWindow = 8
+
+// hostExpectation also returns the latest registration time of that window,
+// which bounds probe launches (see planCapacity).
+func (s *Server) hostExpectation(ctx context.Context, tx pgx.Tx, pl poolRow) (*hostExpectation, time.Time, error) {
+	var latest time.Time
+	// id only breaks registered_at ties; the top-N sort never orders the
+	// pool's whole history.
+	rows, err := tx.Query(ctx, `SELECT capacity, labels, registered_at FROM hosts
 		WHERE pool_id = $1 AND tenant_id IS NOT DISTINCT FROM $2::text
 		  AND provision_requested_at IS NOT NULL AND registered_at IS NOT NULL
-		  AND launch_template = $3::jsonb ORDER BY id`, pl.ID, pl.TenantID, pl.Template)
+		  AND launch_template = $3::jsonb ORDER BY registered_at DESC, id DESC LIMIT $4`,
+		pl.ID, pl.TenantID, pl.Template, expectationWindow)
 	if err != nil {
-		return nil, err
+		return nil, latest, err
 	}
 	defer rows.Close()
 	var expected *hostExpectation
 	for rows.Next() {
 		var capacity proto.Capacity
 		var labels map[string]string
-		if err := rows.Scan(&capacity, &labels); err != nil {
-			return nil, err
+		var registered time.Time
+		if err := rows.Scan(&capacity, &labels, &registered); err != nil {
+			return nil, latest, err
 		}
 		if expected == nil {
+			latest = registered
 			expected = &hostExpectation{Capacity: capacity, Labels: labels}
 		} else {
 			c := &expected.Capacity
@@ -138,7 +153,7 @@ func (s *Server) hostExpectation(ctx context.Context, tx pgx.Tx, pl poolRow) (*h
 		}
 		expected.Observations++
 	}
-	return expected, rows.Err()
+	return expected, latest, rows.Err()
 }
 
 func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capacityPlan, error) {
@@ -175,28 +190,35 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 		evidence(r, "", "prerequisite", []fitBlocker{{Reason: reason}})
 	}
 	var err error
-	plan.Expected, err = s.hostExpectation(ctx, tx, pl)
+	var lastRegistered time.Time
+	plan.Expected, lastRegistered, err = s.hostExpectation(ctx, tx, pl)
 	if err != nil {
 		return plan, err
 	}
 	if plan.Expected == nil {
 		plan.Unknown = "no registered host observations for current template"
 	}
+	// updated_at is when the Run entered provisioning: setRunState stamps it,
+	// and while it waits only state_reason and place_on change, neither of
+	// which touches updated_at.
 	rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, snapshot_id,
-		jsonb_array_length(secrets) > 0, coalesce(place_on, ''), coalesce(avoid_host, ''), pool_id
+		jsonb_array_length(secrets) > 0, coalesce(place_on, ''), coalesce(avoid_host, ''), pool_id, updated_at
 		FROM runs WHERE pool_id = $1 AND state = 'provisioning' AND NOT cancel_requested
 		ORDER BY updated_at, id`, pl.ID)
 	if err != nil {
 		return plan, err
 	}
 	var runs []pendingRun
+	waitingSince := map[string]time.Time{}
 	for rows.Next() {
 		var r pendingRun
-		if err := rows.Scan(&r.ID, &r.TenantID, &r.State, &r.Spec, &r.SnapshotID, &r.HasSecrets, &r.PlaceOn, &r.AvoidHost, &r.PoolID); err != nil {
+		var since time.Time
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.State, &r.Spec, &r.SnapshotID, &r.HasSecrets, &r.PlaceOn, &r.AvoidHost, &r.PoolID, &since); err != nil {
 			rows.Close()
 			return plan, err
 		}
 		runs = append(runs, r)
+		waitingSince[r.ID] = since
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -266,6 +288,7 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 		}
 	}
 	usedStarting := map[string]bool{}
+	probe := false
 	reserve := func(hosts []*candidateHost, r pendingRun, isReady bool) bool {
 		for _, h := range hosts {
 			stage := "starting"
@@ -351,6 +374,12 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 		h := virtual("")
 		if blockers := hostFit(r, h); len(blockers) != 0 {
 			evidence(r, "", "new_host", blockers)
+			// The expectation may be stale ($Default moved to a larger
+			// instance type): a Run that has seen no current-template host
+			// register since it began waiting may justify one probe.
+			if waitingSince[r.ID].After(lastRegistered) {
+				probe = true
+			}
 			continue
 		}
 		reserveHost(h, r)
@@ -359,11 +388,18 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 		plan.Planned++
 		plan.Unmet--
 	}
-	if plan.Expected == nil && plan.Unmet > 0 && len(startingIDs) == 0 {
+	// Unknown capacity bootstraps one host; a stale expectation probes with
+	// one. Either waits for any current-template start to register first, and
+	// a probe is bounded per waiting cohort: once it registers, the Runs are
+	// older than it. Planned new hosts already serve as the probe.
+	bootstrap := plan.Expected == nil && plan.Unmet > 0
+	probe = probe && plan.NewHosts == 0
+	if (bootstrap || probe) && len(startingIDs) == 0 {
 		plan.NewHosts = 1
+		plan.Probe = probe
 	}
 	plan.reservedStarting = len(usedStarting)
-	if plan.Expected == nil && plan.Unmet > 0 && len(startingIDs) > 0 {
+	if bootstrap && len(startingIDs) > 0 {
 		plan.reservedStarting = 1
 	}
 	return plan, nil

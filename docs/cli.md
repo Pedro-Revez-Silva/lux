@@ -188,7 +188,8 @@ the default mark is `isDefault`: marking a pool records it on that pool,
 and on the pool that was the default before, which loses it),
 `pool.renamed` (`from`, `to`), `pool.retired` (removed: `lux pools rm`) and `pool.restored` (set again
 after it was removed; a pool keeps its events across both), and
-`pool.provider_error`. A host's are `host.registered`, `host.ready`,
+`pool.provider_error`, and `pool.scale_blocked` (Runs wait but no host
+is launched, with the capacity plan saying why). A host's are `host.registered`, `host.ready`,
 `host.placement_assigned`, `host.placement_ended` (with the Run's
 outcome), `host.capacity_decision` (the capacity planner's verdict on the
 host, when it changes), `host.drain_requested` (its cause), `host.lost`,

@@ -98,6 +98,7 @@ import (
 // provider call).
 const (
 	evScaleUp          = "pool.scale_up"
+	evScaleBlocked     = "pool.scale_blocked"
 	evLaunchRequested  = "pool.launch_requested"
 	evLaunchFailed     = "pool.launch_failed"
 	evHostLaunched     = "pool.host_launched"
@@ -124,7 +125,7 @@ const (
 // poolRetry: the events a pool writes on every provisioner tick while a
 // launch keeps failing. A repeat within an unbroken run of them is folded
 // into the earlier row (see collapse) instead of adding one.
-var poolRetry = []string{evScaleUp, evLaunchRequested, evLaunchFailed, evPoolProviderErr}
+var poolRetry = []string{evScaleUp, evScaleBlocked, evLaunchRequested, evLaunchFailed, evPoolProviderErr}
 
 // hostRetry: a terminate the provider keeps refusing.
 var hostRetry = []string{evHostProviderErr}

@@ -124,6 +124,20 @@ func TestEventLineCapacity(t *testing.T) {
 				"plan: 0 ready, 0 future, 0 planned, 1 unmet, 0 blocked; " +
 				"new host capacity unknown: no registered host observations for current template; " +
 				"deficits: r1 new host [new host capacity unknown]"},
+		{"blocked scale-up", "pool.scale_blocked",
+			`{"waiting":1,"total":0,"max":2,"ready":0,"future":0,"planned":0,"unmet":1,"blocked":0,
+			  "expected":{"capacity":{"cpus":2,"memory":0,"disk":0,"runs":0},"observations":1},
+			  "deficits":[{"run":"r1","stage":"new_host","blockers":[{"resource":"cpus","requested":4,"used":0,"capacity":2,"available":2}]}]}`,
+			"no host launched: 1 waiting, had 0, max 2; plan: 0 ready, 0 future, 0 planned, 1 unmet, 0 blocked; " +
+				"new host cpus 2, memory unlimited, disk unlimited, runs unlimited from 1 observation(s); " +
+				"deficits: r1 new host [cpus requested 4, used 0, capacity 2, available 2]"},
+		{"probe scale-up", "pool.scale_up",
+			`{"hosts":1,"reason":"waiting runs","waiting":1,"warm":0,"min":0,"max":0,"total":0,"idle":0,"provisioning":0,
+			  "ready":0,"future":0,"planned":0,"unmet":1,"blocked":0,"probe":true,
+			  "expected":{"capacity":{"cpus":2,"memory":0,"disk":0,"runs":0},"observations":1}}`,
+			"+1 host(s) for waiting runs: 1 waiting, warm 0, min 0, max 0; had 0 (0 idle, 0 provisioning); " +
+				"plan: 0 ready, 0 future, 0 planned, 1 unmet, 0 blocked; probe: one host to re-observe capacity no expected host fits; " +
+				"new host cpus 2, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)"},
 		{"exhausted host", "host.capacity_decision",
 			`{"pool":"burst","stage":"ready","decision":"exhausted","blockers":[
 			  {"resource":"disk","requested":10737418240,"used":107374182400,"capacity":107374182400,"available":0},

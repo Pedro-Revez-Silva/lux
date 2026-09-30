@@ -131,6 +131,7 @@ function capacity(c: Obj, resource: string): string {
 function capacityPlan(d: Obj): string {
   const n = (k: string) => (typeof d[k] === "number" ? String(d[k]) : "0");
   const parts = [`plan: ${n("ready")} ready, ${n("future")} future, ${n("planned")} planned, ${n("unmet")} unmet, ${n("blocked")} blocked`];
+  if (d.probe === true) parts.push("probe: one host to re-observe capacity no expected host fits");
   const expected = d.expected == null ? undefined : obj(d.expected);
   if (expected) {
     const c = obj(expected.capacity);
@@ -167,6 +168,8 @@ export function infraEventSummary(e: LifecycleEvent): string {
       // Rows written before capacity planning carry no plan counts.
       return "ready" in d ? `${line}; ${capacityPlan(d)}` : line;
     }
+    case "pool.scale_blocked":
+      return `no host launched: ${s("waiting")} waiting, had ${s("total")}, max ${s("max")}; ${capacityPlan(d)}`;
     case "host.capacity_decision": {
       const head = `${s("decision")} (${s("stage").replaceAll("_", " ")}) in pool ${s("pool")}`;
       const why = blockers(d.blockers) || s("reason");

@@ -59,6 +59,16 @@ new-host capacity it assumed and sampled blockers), and `lux hosts events
 <host>` shows `host.capacity_decision` when the planner's verdict on that
 host changes. The console's pool and host pages show the same lines. See
 [Telemetry](telemetry.md#capacity-planning) for what each field means.
+A pass that launches nothing while Runs stay unmet writes
+`pool.scale_blocked` with the same plan.
+
+The capacity a new host is expected to have comes from the latest 8 hosts
+that registered from the pool's exact current template. Moving the EC2
+launch template's `$Default` to another instance type does not change the
+pool's template, so the old observations age out as 8 new hosts register;
+a Run too large for the old size gets one probe host meanwhile. Editing
+the pool's template (`lux pools set`) starts from no observations at once:
+the pool launches one host to learn the new capacity.
 
 ## Acting
 

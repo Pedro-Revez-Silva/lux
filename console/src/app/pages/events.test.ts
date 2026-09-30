@@ -92,3 +92,29 @@ test("a placement shows its resources when it has them", () => {
   );
   expect(infra("host.placement_assigned", { run: "r1", epoch: 1, host: "h1" })).toBe("r1 epoch 1 on h1");
 });
+
+test("a blocked scale-up says why no host was launched", () => {
+  const data = {
+    waiting: 1, total: 0, max: 2, ready: 0, future: 0, planned: 0, unmet: 1, blocked: 0,
+    expected: { capacity: { cpus: 2, memory: 0, disk: 0, runs: 0 }, observations: 1 },
+    deficits: [{ run: "r1", stage: "new_host", blockers: [{ resource: "cpus", requested: 4, used: 0, capacity: 2, available: 2 }] }],
+  };
+  expect(infra("pool.scale_blocked", data)).toBe(
+    "no host launched: 1 waiting, had 0, max 2; plan: 0 ready, 0 future, 0 planned, 1 unmet, 0 blocked; " +
+      "new host cpus 2, memory unlimited, disk unlimited, runs unlimited from 1 observation(s); " +
+      "deficits: r1 new host [cpus requested 4, used 0, capacity 2, available 2]",
+  );
+});
+
+test("a probe scale-up says it is one", () => {
+  const data = {
+    hosts: 1, reason: "waiting runs", waiting: 1, warm: 0, min: 0, max: 0, total: 0, idle: 0, provisioning: 0,
+    ready: 0, future: 0, planned: 0, unmet: 1, blocked: 0, probe: true,
+    expected: { capacity: { cpus: 2, memory: 0, disk: 0, runs: 0 }, observations: 1 },
+  };
+  expect(infra("pool.scale_up", data)).toBe(
+    "+1 host for waiting runs: 1 waiting, warm 0, min 0, max 0; had 0 (0 idle, 0 provisioning); " +
+      "plan: 0 ready, 0 future, 0 planned, 1 unmet, 0 blocked; probe: one host to re-observe capacity no expected host fits; " +
+      "new host cpus 2, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)",
+  );
+});

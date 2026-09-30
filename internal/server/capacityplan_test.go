@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/marcioapm/lux/internal/proto"
@@ -431,5 +432,117 @@ func TestCapacityReconcileFailureRetriesOneBootstrap(t *testing.T) {
 	}
 	if p.calls != 3 {
 		t.Fatalf("successful bootstrap must stop further demand launches, got %d", p.calls)
+	}
+}
+
+// staleExpectation: one Run needing 4 CPUs, and a 2-CPU observation of the
+// current template registered before the Run began waiting.
+func staleExpectation(t *testing.T) (*Server, poolRow, *planningProvider) {
+	t.Helper()
+	s, pl, p := planningFixture(t, 1)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET spec='{"resources":{"cpus":4},"placement":{"pool":"burst"}}'`)
+	observePlanningHost(t, s, "old", "terminated", proto.Capacity{CPUs: 2}, map[string]string{})
+	execSQL(t, s, ctx, `UPDATE hosts SET registered_at=now()-interval '1 day' WHERE id='old'`)
+	return s, pl, p
+}
+
+func registerProbe(t *testing.T, s *Server, id string, capacity proto.Capacity) {
+	t.Helper()
+	execSQL(t, s, context.Background(), `UPDATE hosts SET state='ready',registered_at=now(),last_heartbeat=now(),capacity=$2 WHERE id=$1`, id, capacity)
+	s.hub.polled(id)
+}
+
+func TestCapacityReconcileStaleExpectationProbesOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cpus   float64
+		placed int
+	}{{"larger", 8, 1}, {"same", 2, 0}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, pl, p := staleExpectation(t)
+			for range 3 {
+				planningTick(t, s, pl, p, false)
+			}
+			if p.calls != 1 {
+				t.Fatalf("stale expectation launched %d, want one probe", p.calls)
+			}
+			up := events(t, s, evScaleUp)
+			if len(up) != 1 || up[0].Data["probe"] != true {
+				t.Fatalf("scale-up %+v, want one probe", up)
+			}
+			registerProbe(t, s, p.hosts[0], proto.Capacity{CPUs: tc.cpus})
+			for range 3 {
+				planningTick(t, s, pl, p, false)
+			}
+			if p.calls != 1 {
+				t.Fatalf("after the probe registered: %d launches, want 1", p.calls)
+			}
+			if err := s.scheduleOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if got := queryOne[int](t, s, `SELECT count(*) FROM placements WHERE host_id=$1`, p.hosts[0]); got != tc.placed {
+				t.Fatalf("placed %d on the probe, want %d", got, tc.placed)
+			}
+		})
+	}
+}
+
+// With want 0 and unmet Runs, the pool says why it does not scale; a stuck
+// pool folds its passes into one row.
+func TestCapacityReconcileScaleBlockedFolds(t *testing.T) {
+	s, pl, p := planningFixture(t, 1)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET spec='{"resources":{"cpus":4},"placement":{"pool":"burst"}}'`)
+	// Registered after the Run began waiting: no probe is due.
+	observePlanningHost(t, s, "old", "terminated", proto.Capacity{CPUs: 2}, map[string]string{})
+	s.providerError(ctx, poolEvents, "pool1", "list", "", errors.New("throttled"))
+	for range 3 {
+		planningTick(t, s, pl, p, false)
+	}
+	if p.calls != 0 {
+		t.Fatalf("launched %d", p.calls)
+	}
+	evs := events(t, s, evScaleBlocked)
+	if len(evs) != 1 || evs[0].Count != 3 {
+		t.Fatalf("scale-blocked rows %+v, want one with count 3", evs)
+	}
+	var want map[string]any
+	if err := json.Unmarshal([]byte(`{"waiting":1,"total":0,"max":0,
+		"ready":0,"future":0,"planned":0,"unmet":1,"blocked":0,"unknown":"",
+		"expected":{"capacity":{"cpus":2,"memory":0,"disk":0,"runs":0},"observations":1},
+		"deficits":[{"run":"r0","stage":"new_host","blockers":[{"resource":"cpus","requested":4,"used":0,"capacity":2,"available":2}]}],
+		"exhausted":null,"ineligible":[],"omitted":0}`), &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(evs[0].Data, want) {
+		t.Fatalf("scale-blocked data\n got %v\nwant %v", evs[0].Data, want)
+	}
+	// A stuck pool's provider errors and its blocked passes are one retry
+	// loop: a repeated error folds across the blocked row written after it.
+	s.providerError(ctx, poolEvents, "pool1", "list", "", errors.New("throttled"))
+	if evs := events(t, s, evPoolProviderErr); len(evs) != 1 || evs[0].Count != 2 {
+		t.Fatalf("provider-error rows %+v, want one with count 2", evs)
+	}
+}
+
+// Only the latest expectationWindow registrations count: an older, smaller
+// instance type ages out.
+func TestCapacityReconcileExpectationWindowAgesOut(t *testing.T) {
+	s, pl, p := planningFixture(t, 1)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `UPDATE runs SET spec='{"resources":{"cpus":4},"placement":{"pool":"burst"}}'`)
+	observePlanningHost(t, s, "old", "terminated", proto.Capacity{CPUs: 2}, map[string]string{})
+	execSQL(t, s, ctx, `UPDATE hosts SET registered_at=now()-interval '1 day' WHERE id='old'`)
+	for i := range expectationWindow {
+		observePlanningHost(t, s, fmt.Sprintf("new%d", i), "terminated", proto.Capacity{CPUs: 8}, map[string]string{})
+	}
+	planningTick(t, s, pl, p, false)
+	up := events(t, s, evScaleUp)
+	if p.calls != 1 || len(up) != 1 || up[0].Data["planned"] != 1.0 || up[0].Data["probe"] != nil {
+		t.Fatalf("launched %d with %+v, want one planned host", p.calls, up)
+	}
+	if got := up[0].Data["expected"].(map[string]any); got["observations"] != float64(expectationWindow) || got["capacity"].(map[string]any)["cpus"] != 8.0 {
+		t.Fatalf("expected %v", got)
 	}
 }

@@ -99,6 +99,8 @@ func eventLine(e server.LifecycleEvent) string {
 		if _, planned := d["ready"]; planned {
 			line += capacityPlanText(d)
 		}
+	case "pool.scale_blocked":
+		line = fmt.Sprintf("no host launched: %s waiting, had %s, max %s", s("waiting"), s("total"), s("max")) + capacityPlanText(d)
 	case "host.capacity_decision":
 		line = fmt.Sprintf("%s (%s) in pool %s", s("decision"), strings.ReplaceAll(s("stage"), "_", " "), s("pool"))
 		if b := blockersText(d["blockers"]); b != "" {
@@ -187,6 +189,9 @@ func capacityPlanText(d map[string]any) string {
 	}
 	parts := []string{fmt.Sprintf("plan: %s ready, %s future, %s planned, %s unmet, %s blocked",
 		num("ready"), num("future"), num("planned"), num("unmet"), num("blocked"))}
+	if d["probe"] == true {
+		parts = append(parts, "probe: one host to re-observe capacity no expected host fits")
+	}
 	if exp, ok := d["expected"].(map[string]any); ok {
 		c, _ := exp["capacity"].(map[string]any)
 		parts = append(parts, fmt.Sprintf("new host %s, %s, %s, %s from %s observation(s)",
