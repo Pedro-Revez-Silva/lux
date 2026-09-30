@@ -117,10 +117,11 @@ func (s *Server) idleDecisions(ctx context.Context, tx pgx.Tx, pl poolRow, plan 
 		return nil
 	}
 	// A decided host may be outside this pool (a chosen host in another pool,
-	// or moved since): it is retracted too, under its current pool's name.
+	// the platform's included, or moved since): it is retracted too, under
+	// its current pool's name. stale holds only ids this pool decided on.
 	rows, err := tx.Query(ctx, `SELECT h.id, CASE h.state WHEN 'provisioning' THEN 'starting' ELSE h.state END, COALESCE(p.name, '')
 		FROM hosts h LEFT JOIN pools p ON p.id = h.pool_id
-		WHERE h.id = ANY($1) AND h.tenant_id IS NOT DISTINCT FROM $2::text AND h.state <> 'terminated'`,
+		WHERE h.id = ANY($1) AND (h.tenant_id IS NULL OR h.tenant_id IS NOT DISTINCT FROM $2::text) AND h.state <> 'terminated'`,
 		stale, pl.TenantID)
 	if err != nil {
 		return err
