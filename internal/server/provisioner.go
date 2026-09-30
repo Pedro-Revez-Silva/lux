@@ -638,7 +638,7 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 			h.provision_requested_at < now() - $4::interval,
 			coalesce(h.lost_at < now() - $6::interval, false),
 			h.tagged AND h.provision_requested_at < now() - $8::interval
-			  AND coalesce(h.last_heartbeat < now() - $7::interval, true)
+			  AND (h.last_heartbeat IS NULL OR (h.last_heartbeat < now() - $7::interval AND `+s.heardSQL()+`))
 		FROM hosts h
 		WHERE h.pool_id = $1 AND $2::text IS NOT DISTINCT FROM h.tenant_id AND h.provision_requested_at IS NOT NULL
 		  AND h.state <> 'terminated'

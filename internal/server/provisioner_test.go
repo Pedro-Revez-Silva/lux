@@ -47,3 +47,36 @@ func TestPoolStateHoldsBackADrainingHostWithALivePlacement(t *testing.T) {
 		t.Error("a draining, idle host (its placement exited) is not in terminate")
 	}
 }
+
+// A provisioned host whose runner is silent only because no luxd could hear
+// it (a gap in luxd_alive) is not settled: an incomplete listing must not
+// get it terminated. Once heartbeats are heard again, silence counts.
+func TestPoolStateSilentHostNotSettledAfterAGap(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO pools (id, tenant_id, name, provider) VALUES ('pool1', 't1', 'burst', 'ec2')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provider_id, provision_requested_at, tagged, last_heartbeat)
+		VALUES ('h1', 't1', 'h1', 'pool1', 'ready', 'i-123', now() - interval '1 hour', true, now() - interval '10 minutes')`)
+	execSQL(t, s, ctx, `INSERT INTO luxd_alive (instance, at, resumed_at) VALUES ('luxd_a', now(), now())`)
+	pl := poolRow{ID: "pool1", Name: "burst", Provider: "ec2", TenantID: new("t1")}
+	settled := func() bool {
+		t.Helper()
+		var st poolState
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return s.poolState(ctx, tx, pl, &st) }); err != nil {
+			t.Fatal(err)
+		}
+		i := slices.IndexFunc(st.existing, func(h hostRef) bool { return h.ID == "h1" })
+		if i < 0 {
+			t.Fatal("h1 missing from existing")
+		}
+		return st.existing[i].Settled
+	}
+	if settled() {
+		t.Error("just after a gap: a silent host is settled; want not")
+	}
+	execSQL(t, s, ctx, `UPDATE luxd_alive SET resumed_at = now() - interval '10 minutes'`)
+	if !settled() {
+		t.Error("long after a gap: a silent host is not settled; want settled")
+	}
+}

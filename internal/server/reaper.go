@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -29,13 +30,99 @@ func (s *Server) reaperLoop(ctx context.Context) {
 	}
 }
 
+// aliveEvery is how often luxd records itself alive: a sixth of the lease,
+// at most every 5s (the default 30s lease), at least every tick.
+func (s *Server) aliveEvery() time.Duration {
+	return max(min(s.cfg.LeaseDuration/6, 5*time.Second), s.cfg.Tick)
+}
+
+// aliveGap is the longest luxd may go without recording itself alive
+// before the time counts as a gap: two records missed, a third of the
+// lease. A shorter outage needs no allowance: runners reconnect within a
+// second of a luxd that restarted, and renew within a heartbeat interval.
+// Every luxd should share LUX_LEASE and LUX_TICK, or they judge gaps
+// differently.
+func (s *Server) aliveGap() time.Duration {
+	return 2 * s.aliveEvery()
+}
+
+// aliveLoop records, every aliveEvery, that a luxd is running and reaches
+// Postgres, and when one came back from a gap (luxd_alive). It is apart
+// from reaperLoop, so a slow reap is not taken for a gap.
+func (s *Server) aliveLoop(ctx context.Context) {
+	// Rows of luxds gone a day, once per process: each start adds one.
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// The newest row stays: it is the evidence of a gap longer than
+		// the day, until recordAlive has ended that gap.
+		_, err := tx.Exec(ctx, `DELETE FROM luxd_alive WHERE at < now() - interval '1 day'
+			AND at < (SELECT max(at) FROM luxd_alive)`)
+		return err
+	}); err != nil && ctx.Err() == nil {
+		s.log.Warn("pruning luxd_alive", "err", err)
+	}
+	// The first record at once: a luxd back from a gap says so before its
+	// first reap.
+	t := time.NewTicker(s.aliveEvery())
+	defer t.Stop()
+	for {
+		gap, err := s.recordAlive(ctx)
+		switch {
+		case err != nil && ctx.Err() == nil:
+			s.log.Warn("recording luxd alive", "err", err)
+		case err == nil && gap != nil:
+			s.log.Warn("no luxd heard heartbeats for a while: no host or lease is lost for it", "gap", gap.Round(time.Millisecond))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// recordAlive records this luxd alive, and returns the gap it ends, if
+// any: the time since any luxd last recorded itself. Each luxd writes only
+// its own row, so none waits on another. A record that cannot be made
+// within the gap gives up.
+func (s *Server) recordAlive(ctx context.Context) (gap *time.Duration, err error) {
+	ctx, cancel := context.WithTimeout(ctx, s.aliveGap())
+	defer cancel()
+	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `WITH g AS (
+				SELECT clock_timestamp() AS now, nullif(clock_timestamp() - max(at) > $2::interval, false) AS gapped,
+					clock_timestamp() - max(at) AS gap FROM luxd_alive
+			), up AS (
+				INSERT INTO luxd_alive (instance, at, resumed_at)
+				SELECT $1, now, CASE WHEN gapped THEN now END FROM g
+				ON CONFLICT (instance) DO UPDATE SET at = EXCLUDED.at,
+					resumed_at = coalesce(EXCLUDED.resumed_at, luxd_alive.resumed_at)
+			)
+			SELECT CASE WHEN gapped THEN gap END FROM g`, instanceID, interval(s.aliveGap())).Scan(&gap)
+		return err
+	})
+	return gap, err
+}
+
+// heardSQL is a condition: a missing heartbeat, at this instant, is the
+// runner's to answer for. Not during a gap no luxd recorded itself alive
+// (every luxd stopped or hung, or Postgres unreachable), nor for a lease
+// after one came back plus the runner's longest wait between reconnects,
+// so its runners reach luxd again first. No record yet is no gap. It is
+// part of every staleness test, and clock_timestamp() rather than now(),
+// so a test re-run after lock waits sees a gap during them.
+func (s *Server) heardSQL() string {
+	return fmt.Sprintf(`coalesce((SELECT max(at) >= clock_timestamp() - '%s'::interval
+			AND coalesce(max(resumed_at) < clock_timestamp() - '%s'::interval, true) FROM luxd_alive), true)`,
+		interval(s.aliveGap()), interval(s.cfg.LeaseDuration+proto.MaxReconnectWait))
+}
+
 // reapLeases: a placement whose lease expired is lost.
 func (s *Server) reapLeases(ctx context.Context) error {
 	var n int
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		// Discover candidates without locking placements; renewal may win before
 		// the Run lock, so check expiry again after acquiring it.
-		expired, err := livePlacements(ctx, tx, "p.lease_expires_at < now()")
+		expired, err := livePlacements(ctx, tx, "p.lease_expires_at < now() AND "+s.heardSQL())
 		if err != nil {
 			return err
 		}
@@ -49,7 +136,7 @@ func (s *Server) reapLeases(ctx context.Context) error {
 		if err := lockCostHosts(ctx, tx, runs); err != nil {
 			return err
 		}
-		expired, err = livePlacements(ctx, tx, "p.lease_expires_at < now() AND p.run_id = ANY($1)", runs)
+		expired, err = livePlacements(ctx, tx, "p.lease_expires_at < now() AND p.run_id = ANY($1) AND "+s.heardSQL(), runs)
 		if err != nil {
 			return err
 		}
@@ -82,7 +169,7 @@ func (s *Server) reapHosts(ctx context.Context) error {
 	var lost []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id FROM hosts
-			WHERE state IN ('ready', 'draining') AND last_heartbeat < now() - $1::interval
+			WHERE state IN ('ready', 'draining') AND last_heartbeat < now() - $1::interval AND `+s.heardSQL()+`
 			ORDER BY id`, interval(s.cfg.LeaseDuration))
 		if err != nil {
 			return err
@@ -144,7 +231,7 @@ func (s *Server) reapHosts(ctx context.Context) error {
 		for _, host := range candidates {
 			if err := tx.QueryRow(ctx, `UPDATE hosts SET state = 'lost', lost_at = now(), state_reason = 'missed heartbeats'
 				WHERE id = $1 AND state IN ('ready', 'draining')
-				  AND last_heartbeat < now() - $2::interval
+				  AND last_heartbeat < now() - $2::interval AND `+s.heardSQL()+`
 				RETURNING id`, host, interval(s.cfg.LeaseDuration)).Scan(&host); err != nil {
 				if err == pgx.ErrNoRows {
 					continue

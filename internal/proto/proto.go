@@ -18,6 +18,10 @@ import (
 // Version of the runner protocol. luxd refuses runners that do not match.
 const Version = 1
 
+// MaxReconnectWait is the longest a runner waits between attempts to reach
+// luxd; luxd allows for it after an outage.
+const MaxReconnectWait = 10 * time.Second
+
 // Frame is the envelope for every message in either direction.
 type Frame struct {
 	Type  string `json:"type"`

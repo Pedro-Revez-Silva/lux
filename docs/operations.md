@@ -117,7 +117,7 @@ under a timeout. `luxd check-config` is an alias of `validate`.
 | `LUX_S3_PUBLIC_ENDPOINT` | = endpoint | The endpoint presigned URLs are signed for, if runners and clients reach S3 by another name. |
 | `LUX_S3_REGION` | `us-east-1` | |
 | `LUX_S3_ACCESS_KEY`, `LUX_S3_SECRET_KEY` | AWS chain | Only luxd holds S3 credentials. |
-| `LUX_LEASE` | `30s` | A host that misses heartbeats this long is lost, along with its live placements. Runners heartbeat every third of it. It is also how long a Run with secrets waits for a luxd that holds their values (after a restart, say) before it stops, to be resumed with them. |
+| `LUX_LEASE` | `30s` | A host that misses heartbeats this long is lost, along with its live placements. At least 3s. Runners heartbeat every third of it, and drop a connection that is silent for two of those. Time no luxd could hear them (every luxd stopped, frozen whole, or cut off from Postgres) is not held against them: nothing is lost for missed heartbeats during it, nor for a lease (plus 10s) after a luxd is back, so a running Run survives a deploy or an outage of any length, and a host that died meanwhile is lost soon after. Other timers (`LUX_LAUNCH_TIMEOUT`, `LUX_LOST_GRACE`) still count it. It is also how long a Run with secrets waits for a luxd that holds their values (after a restart, say) before it stops, to be resumed with them. |
 | `LUX_TICK` | `1s` | Scheduler and reaper interval. |
 | `LUX_DEFAULT_CPUS`, `LUX_DEFAULT_MEMORY`, `LUX_DEFAULT_DISK`, `LUX_DEFAULT_PIDS` | `2`, `8Gi`, `20Gi`, `1024` | Resources a Run gets when its spec sets none. |
 | `LUX_PROVIDER_CHECK_EVERY` | `1m` | How often each EC2 pool's instances are listed (orphans terminated, vanished hosts written off). Mind the provider's API limits. |
