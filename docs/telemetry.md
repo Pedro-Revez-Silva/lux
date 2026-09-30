@@ -61,7 +61,7 @@ reordered report cannot lower a peak.
 | `drainRequested` | Draining was requested. |
 | `terminateRequested` | luxd asked the provider to terminate it. |
 | `terminated` | The provider confirmed. |
-| `lost` | It missed heartbeats for a whole lease period. |
+| `lost` | It missed heartbeats for a whole lease period (not counting time no luxd could hear it: see `LUX_LEASE` in [operations](operations.md)). |
 
 Plus `lastHeartbeat`, which is updated with every heartbeat.
 

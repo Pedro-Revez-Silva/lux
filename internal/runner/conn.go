@@ -32,6 +32,8 @@ type conn struct {
 	// fallback: reports queued for the next poll, acks to send
 	pollReports []proto.Frame
 	pollAcks    []int64
+	// welcomed: when luxd last welcomed this connection (loop's only).
+	welcomed time.Time
 }
 
 func newConn(r *Runner) *conn {
@@ -47,8 +49,10 @@ func (c *conn) wsURL() string {
 
 // loop keeps a connection up until ctx ends.
 func (c *conn) loop(ctx context.Context) {
-	backoff := 500 * time.Millisecond
+	const minBackoff = 500 * time.Millisecond
+	backoff := minBackoff
 	for ctx.Err() == nil {
+		c.welcomed = time.Time{}
 		var err error
 		if c.r.cfg.ForcePoll {
 			err = c.pollLoop(ctx)
@@ -63,15 +67,17 @@ func (c *conn) loop(ctx context.Context) {
 			return
 		}
 		c.log.Warn("disconnected from luxd", "err", err)
+		// A connection that lasted starts the backoff over: a luxd restart
+		// is met within a second, not after the longest wait.
+		if !c.welcomed.IsZero() && time.Since(c.welcomed) > proto.MaxReconnectWait {
+			backoff = minBackoff
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(backoff):
 		}
-		backoff = min(backoff*2, 10*time.Second)
-		if err == nil {
-			backoff = 500 * time.Millisecond
-		}
+		backoff = min(backoff*2, proto.MaxReconnectWait)
 	}
 }
 
@@ -80,10 +86,14 @@ var errUpgradeFailed = errors.New("websocket upgrade failed")
 func (c *conn) wsSession(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	ws, resp, err := websocket.Dial(ctx, c.wsURL(), &websocket.DialOptions{
+	// A luxd gone without a word drops packets rather than refusing them:
+	// a dial bounded like the backoff tries again as often.
+	dctx, dcancel := context.WithTimeout(ctx, proto.MaxReconnectWait)
+	ws, resp, err := websocket.Dial(dctx, c.wsURL(), &websocket.DialOptions{
 		HTTPHeader:      http.Header{"Authorization": []string{"Bearer " + c.r.cfg.Token}},
 		CompressionMode: websocket.CompressionContextTakeover,
 	})
+	dcancel()
 	if err != nil {
 		if resp != nil && (resp.StatusCode == http.StatusUnauthorized) {
 			return fmt.Errorf("luxd rejected the host token")
@@ -101,7 +111,7 @@ func (c *conn) wsSession(ctx context.Context) error {
 		return err
 	}
 	var welcome proto.Frame
-	if err := readFrame(ctx, ws, &welcome); err != nil {
+	if err := c.readLive(ctx, ws, &welcome); err != nil {
 		return err
 	}
 	if welcome.Type != proto.MsgWelcome {
@@ -127,16 +137,33 @@ func (c *conn) wsSession(ctx context.Context) error {
 		// drops, and nothing could reach these again.
 		c.r.streams.endAll()
 	}()
+	c.welcomed = time.Now()
 	c.log.Info("connected to luxd", "host", w.HostID, "live", len(w.Live))
 	c.r.onWelcome(ctx, w)
 
 	for {
 		var f proto.Frame
-		if err := readFrame(ctx, ws, &f); err != nil {
+		if err := c.readLive(ctx, ws, &f); err != nil {
 			return err
 		}
 		c.dispatch(ctx, f)
 	}
+}
+
+// readLive reads a frame, giving the connection up if none comes for two
+// heartbeat intervals (two thirds of a lease): luxd acks each heartbeat, so
+// silence that long is a luxd gone without a word (its machine died, a
+// load balancer dropped it), and a third of the lease is left to reach
+// another luxd before it runs out.
+func (c *conn) readLive(ctx context.Context, ws *websocket.Conn, f *proto.Frame) error {
+	silence := 2 * c.r.heartbeatEvery()
+	rctx, cancel := context.WithTimeout(ctx, silence)
+	defer cancel()
+	err := readFrame(rctx, ws, f)
+	if err != nil && ctx.Err() == nil && rctx.Err() != nil {
+		return fmt.Errorf("nothing from luxd for %s", silence)
+	}
+	return err
 }
 
 func (c *conn) dispatch(ctx context.Context, f proto.Frame) {
@@ -322,13 +349,19 @@ func (c *conn) pollLoop(ctx context.Context) error {
 			req["hello"] = hello
 		}
 		var resp proto.PollResponse
-		if err := c.r.api.postJSON(ctx, "/runner/v1/poll?name="+c.r.cfg.Name, req, &resp); err != nil {
+		// Bounded like a reconnect attempt: a luxd gone without a word must
+		// not hold the runner past the grace luxd allows after a gap.
+		pctx, pcancel := context.WithTimeout(ctx, proto.MaxReconnectWait)
+		err := c.r.api.postJSON(pctx, "/runner/v1/poll?name="+c.r.cfg.Name, req, &resp)
+		pcancel()
+		if err != nil {
 			return err
 		}
 		for _, f := range resp.Replies {
 			if f.Type == proto.MsgWelcome {
 				var w proto.Welcome
 				_ = json.Unmarshal(f.Data, &w)
+				c.welcomed = time.Now()
 				c.log.Info("polling luxd", "host", w.HostID)
 				c.r.onWelcome(ctx, w)
 				first = false
