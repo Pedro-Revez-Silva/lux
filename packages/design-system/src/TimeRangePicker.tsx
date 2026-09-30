@@ -11,6 +11,12 @@ export const TIME_RANGES: { value: TimeRange; label: string }[] = [
   { value: "30d", label: "Last 30 days" },
 ];
 
+/** A range in running text: "last 24 hours" (a value not in TIME_RANGES as given). */
+export function rangeText(range: string): string {
+  const t = TIME_RANGES.find((x) => x.value === range);
+  return t ? t.label.toLowerCase() : range;
+}
+
 export interface TimeRangePickerProps {
   value: TimeRange;
   onChange: (r: TimeRange) => void;

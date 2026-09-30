@@ -898,12 +898,16 @@ func TestRecoveredLaunchOfARemovedPoolIsDrained(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
 	infraFixture(t, s, ctx)
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, token_id, tagged)
-		VALUES ('h2', 't1', 'burst-h2', 'pool1', 'provisioning', now(), 'tok1', true)`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, provision_requested_at, token_id, tagged, launch_outcome)
+		VALUES ('h2', 't1', 'burst-h2', 'pool1', 'provisioning', now(), 'tok1', true, 'requested')`)
 	execSQL(t, s, ctx, `UPDATE pools SET retired = true WHERE id = 'pool1'`)
 	s.recordProviderID(ctx, "pool1", "h2", "i-lost")
 	if !queryOne[bool](t, s, `SELECT draining AND provider_id = 'i-lost' FROM hosts WHERE id = 'h2'`) {
 		t.Fatal("the recovered host of a removed pool is not drained")
+	}
+	// Recovered by its tag: launched, with no answer time recorded.
+	if got := queryOne[string](t, s, `SELECT launch_outcome || '/' || (launch_finished_at IS NULL) FROM hosts WHERE id = 'h2'`); got != "launched/true" {
+		t.Fatalf("recovered launch: %s, want launched/true", got)
 	}
 	if n := len(events(t, s, evDrainRequested)); n != 1 {
 		t.Fatalf("%d host.drain_requested events, want 1", n)

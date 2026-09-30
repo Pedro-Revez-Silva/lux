@@ -243,3 +243,14 @@ export const IconTrash = (p: IconProps) => (
     <path d="M6.7 7v4M9.3 7v4" />
   </Icon>
 );
+export const IconStar = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M8 2.5l1.7 3.5 3.8.5-2.8 2.6.7 3.8L8 11.1l-3.4 1.8.7-3.8-2.8-2.6 3.8-.5z" />
+  </Icon>
+);
+export const IconPencil = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M10.5 3l2.5 2.5L6 12.5H3.5V10z" />
+    <path d="M9 4.5l2.5 2.5" />
+  </Icon>
+);

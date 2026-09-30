@@ -139,7 +139,7 @@ lux artifacts <run> [--download DIR]
 ## Hosts and pools
 
 ```bash
-lux hosts ls [--all] [--pool P] [--state S]
+lux hosts ls [--all] [--pool P] [--state S]   # --state launch_failed: hosts whose launch the provider refused (STATE "launch failed")
 lux hosts get <host>            # lifecycle, capacity, allocation, live Runs
 lux hosts drain <host> [--force-evict]   # admin: no new Runs; without --force-evict its live Runs finish where they are
 lux hosts price <host> --hourly-price 0.40 --currency USD   # admin: a static host's flat price, from now on

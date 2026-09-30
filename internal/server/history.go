@@ -153,6 +153,9 @@ func (s *Server) sampleSystem(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if err := samplePools(ctx, tx, from); err != nil {
+			return err
+		}
 		stored, err = s.sampleControl(ctx, tx, host)
 		return err
 	})
@@ -164,6 +167,76 @@ func (s *Server) sampleSystem(ctx context.Context) error {
 	return err
 }
 
+// samplePools writes, in sampleSystem's transaction and at its instant and
+// window, one sample per pool (tenant ”) and one per tenant with Runs or
+// placements on it. Each table is read once, grouped by pool (and tenant):
+// never a query per pool, host or Run. A pool is sampled while it is live,
+// or retired with hosts or Runs still on it.
+func samplePools(ctx context.Context, tx pgx.Tx, from time.Time) error {
+	_, err := tx.Exec(ctx, `
+		WITH w AS (SELECT $1::timestamptz AS since, now() - interval '1 minute' AS until),
+		host_state AS (
+			SELECT pool_id, jsonb_object_agg(state, n) AS hosts, sum(cpus) AS cpus, sum(mem)::bigint AS mem FROM (
+				SELECT h.pool_id, h.state, count(*) AS n,
+					coalesce(sum((h.capacity->>'cpus')::float8) FILTER (WHERE h.state IN ('ready', 'draining')), 0) AS cpus,
+					coalesce(sum((h.capacity->>'memory')::int8) FILTER (WHERE h.state IN ('ready', 'draining')), 0) AS mem
+				FROM hosts h WHERE h.pool_id IS NOT NULL AND h.state <> 'terminated' GROUP BY h.pool_id, h.state) x
+			GROUP BY pool_id
+		),
+		alloc AS (
+			SELECT h.pool_id, coalesce(pl.tenant_id, '') AS id, coalesce(sum((pl.resources->>'cpus')::float8), 0) AS cpus,
+				coalesce(sum((pl.resources->>'memory')::int8), 0)::bigint AS mem
+			FROM placements pl JOIN hosts h ON h.id = pl.host_id
+			WHERE pl.state IN `+livePlacementStates+` AND h.pool_id IS NOT NULL
+			GROUP BY GROUPING SETS ((h.pool_id, pl.tenant_id), (h.pool_id))
+		),
+		runs_by AS (
+			SELECT pool_id, coalesce(tenant_id, '') AS id, count(*) FILTER (WHERE state = 'running') AS running,
+				count(*) FILTER (WHERE state IN `+queuedRunStates+`) AS queued
+			FROM runs WHERE pool_id IS NOT NULL AND (state = 'running' OR state IN `+queuedRunStates+`)
+			GROUP BY GROUPING SETS ((pool_id, tenant_id), (pool_id))
+		),
+		flow AS (
+			SELECT r.pool_id, coalesce(r.tenant_id, '') AS id,
+				count(*) FILTER (WHERE r.first_started_at > w.since AND r.first_started_at <= w.until) AS started,
+				count(*) FILTER (WHERE r.finished_at > w.since AND r.finished_at <= w.until) AS finished
+			FROM runs r, w
+			WHERE r.pool_id IS NOT NULL AND (r.first_started_at > w.since AND r.first_started_at <= w.until OR r.finished_at > w.since AND r.finished_at <= w.until)
+			GROUP BY GROUPING SETS ((r.pool_id, r.tenant_id), (r.pool_id))
+		),
+		-- Launches requested in the last day: hosts_launch_requested bounds
+		-- the scan; a failure answered in the window was requested within it.
+		launch AS (
+			SELECT h.pool_id,
+				count(*) FILTER (WHERE h.provision_requested_at > w.since AND h.provision_requested_at <= w.until) AS launches,
+				count(*) FILTER (WHERE h.launch_outcome = 'failed' AND h.launch_finished_at > w.since AND h.launch_finished_at <= w.until) AS failures
+			FROM hosts h, w
+			WHERE h.provision_requested_at > $1::timestamptz - interval '1 day' AND h.pool_id IS NOT NULL
+			GROUP BY h.pool_id
+		),
+		keys AS (
+			SELECT p.id AS pool_id, '' AS id FROM pools p
+			WHERE NOT p.retired OR EXISTS (SELECT 1 FROM host_state hs WHERE hs.pool_id = p.id) OR EXISTS (SELECT 1 FROM runs_by rb WHERE rb.pool_id = p.id)
+			UNION SELECT pool_id, id FROM alloc UNION SELECT pool_id, id FROM runs_by UNION SELECT pool_id, id FROM flow
+		)
+		INSERT INTO pool_samples (pool_id, tenant_id, res, at, window_end, hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem,
+			running, queued, started, finished, launches, launch_failures)
+		SELECT k.pool_id, k.id, 0, now(), (SELECT until FROM w),
+			CASE WHEN k.id = '' THEN coalesce(hs.hosts, '{}') ELSE '{}' END,
+			CASE WHEN k.id = '' THEN coalesce(hs.cpus, 0) ELSE 0 END, CASE WHEN k.id = '' THEN coalesce(hs.mem, 0) ELSE 0 END,
+			coalesce(a.cpus, 0), coalesce(a.mem, 0), coalesce(rb.running, 0), coalesce(rb.queued, 0),
+			coalesce(f.started, 0), coalesce(f.finished, 0),
+			CASE WHEN k.id = '' THEN coalesce(l.launches, 0) ELSE 0 END, CASE WHEN k.id = '' THEN coalesce(l.failures, 0) ELSE 0 END
+		FROM keys k
+		LEFT JOIN host_state hs ON hs.pool_id = k.pool_id
+		LEFT JOIN alloc a ON a.pool_id = k.pool_id AND a.id = k.id
+		LEFT JOIN runs_by rb ON rb.pool_id = k.pool_id AND rb.id = k.id
+		LEFT JOIN flow f ON f.pool_id = k.pool_id AND f.id = k.id
+		LEFT JOIN launch l ON l.pool_id = k.pool_id
+		ON CONFLICT DO NOTHING`, from)
+	return err
+}
+
 // rollupHistory folds each resolution's complete buckets into the next,
 // once, and deletes what has outlived its retention.
 func (s *Server) rollupHistory(ctx context.Context) error {
@@ -171,14 +244,14 @@ func (s *Server) rollupHistory(ctx context.Context) error {
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		for i := 1; i < len(rs); i++ {
 			from, to := rs[i-1].res, rs[i].res
-			for _, q := range []string{rollupHosts, rollupPlacements, rollupSystem, rollupControl, rollupControlDisks} {
+			for _, q := range []string{rollupHosts, rollupPlacements, rollupSystem, rollupPools, rollupControl, rollupControlDisks} {
 				if _, err := tx.Exec(ctx, q, from, to); err != nil {
 					return err
 				}
 			}
 		}
 		for _, r := range rs {
-			for _, t := range []string{"host_samples", "placement_samples", "system_samples", "control_samples", "control_disk_samples"} {
+			for _, t := range []string{"host_samples", "placement_samples", "system_samples", "pool_samples", "control_samples", "control_disk_samples"} {
 				if _, err := tx.Exec(ctx, `DELETE FROM `+t+` WHERE res = $1::int AND at < now() - $2::interval`, r.res, interval(r.keep)); err != nil {
 					return err
 				}
@@ -195,9 +268,18 @@ func (s *Server) rollupHistory(ctx context.Context) error {
 // take the maximum (counters only grow), flows are summed. A process's
 // counter is the exception: it starts again when the process does, so a
 // bucket keeps its last reading, and that reading's start (procRow.columns).
+//
+// rollupSince's first bound is table-wide: the newest target bucket of any
+// key. Every key is rolled up by one statement to one cutoff, so no key has
+// an unrolled source row older than that bucket's start, and ON CONFLICT
+// absorbs that one bucket read again. It must stay an uncorrelated
+// `(SELECT coalesce(max(..)))`: that form is an index condition on
+// (res, at), so a rollup reads only the rows since the last one instead of
+// running the per-key subquery for every row still in retention.
 const (
 	rollupBucket = `to_timestamp(floor(extract(epoch FROM at) / $2::int) * $2::int)`
-	rollupSince  = `at >= coalesce((SELECT max(d.at) + make_interval(secs => $2::int) FROM %s d WHERE d.res = $2::int AND %s), '-infinity')
+	rollupSince  = `at >= (SELECT coalesce(max(g.at), '-infinity') FROM %[1]s g WHERE g.res = $2::int)
+		AND at >= coalesce((SELECT max(d.at) + make_interval(secs => $2::int) FROM %[1]s d WHERE d.res = $2::int AND %[2]s), '-infinity')
 		AND at < to_timestamp(floor(extract(epoch FROM now() - interval '1 minute') / $2::int) * $2::int)`
 )
 
@@ -220,6 +302,15 @@ var (
 			(array_agg(hosts ORDER BY at DESC))[1], avg(cap_cpus), avg(cap_mem)::bigint, avg(alloc_cpus), avg(alloc_mem)::bigint
 		FROM system_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "system_samples", "d.tenant_id = s.tenant_id") + `
 		GROUP BY tenant_id, 3 ON CONFLICT DO NOTHING`
+	// A pool's levels are averaged, its hosts by state the bucket's last,
+	// its flows (starts, finishes, launches) summed.
+	rollupPools = `INSERT INTO pool_samples (pool_id, tenant_id, res, at, hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem, running, queued,
+			started, finished, launches, launch_failures)
+		SELECT pool_id, tenant_id, $2::int, ` + rollupBucket + `, (array_agg(hosts ORDER BY at DESC))[1], avg(cap_cpus), avg(cap_mem)::bigint,
+			avg(alloc_cpus), avg(alloc_mem)::bigint, round(avg(running))::int, round(avg(queued))::int,
+			sum(started)::int, sum(finished)::int, sum(launches)::int, sum(launch_failures)::int
+		FROM pool_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "pool_samples", "d.pool_id = s.pool_id AND d.tenant_id = s.tenant_id") + `
+		GROUP BY pool_id, tenant_id, 4 ON CONFLICT DO NOTHING`
 	// The control host, per luxd process (on its machine): CPU a counter,
 	// memory and connections levels, totals (cores, memory, disk) their
 	// maximum; the database size and disk use the bucket's mean; luxd's

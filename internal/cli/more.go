@@ -335,7 +335,7 @@ every host, with a TENANT column (--tenant: what that tenant sees).`,
 	}
 	ls.Flags().BoolVar(&all, "all", false, "include terminated hosts")
 	ls.Flags().StringVar(&pool, "pool", "", "only this pool's hosts")
-	ls.Flags().StringVar(&state, "state", "", "only hosts in this state (provisioning, ready, draining, lost, terminated)")
+	ls.Flags().StringVar(&state, "state", "", "only hosts in this state (provisioning, ready, draining, lost, terminated, or launch_failed)")
 	get := &cobra.Command{
 		Use:   "get <host>",
 		Short: "Show a host (by id or name), its lifecycle and its live Runs",
@@ -426,6 +426,9 @@ provider. Your own hosts; operators, any host.`,
 }
 
 func hostState(h server.Host) string {
+	if h.State == "terminated" && h.Launch != nil && h.Launch.Outcome == "failed" {
+		return "launch failed"
+	}
 	if h.Draining && h.State != "draining" {
 		return h.State + " (draining)"
 	}

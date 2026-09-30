@@ -124,6 +124,12 @@ export interface Run {
   runtimeSeconds: number;
   /** When the placement still running started; set while one is. */
   runtimeSince?: string;
+  /** Placement time: per placement, from needing a host until its workload started, summed (wait + start). */
+  placementSeconds: number;
+  placementWaitSeconds: number;
+  placementStartSeconds: number;
+  /** Still being placed: placementSeconds counts up from the response. */
+  placing?: boolean;
   placements?: Placement[];
   usage?: RunUsage;
   resume?: Resumability;
@@ -428,10 +434,21 @@ export interface Host {
   market?: "on-demand" | "spot";
   lastHeartbeat?: string;
   times: Record<HostTimeKey, string | null>;
+  /** How luxd's launch of it went (provisioned hosts); failed: the provider refused and no instance ran. */
+  launch?: HostLaunch;
   placements?: HostPlacement[];
 }
 
+export interface HostLaunch {
+  outcome: "requested" | "launched" | "failed" | "abandoned";
+  requestedAt?: string;
+  finishedAt?: string;
+  error?: string;
+}
+
 export interface Pool {
+  /** The pool's immutable id (a rename keeps it). */
+  id: string;
   name: string;
   tenant?: string;
   provider: string;
@@ -616,7 +633,7 @@ export interface MigrateRequest {
   input?: { text: string };
 }
 
-export interface RunListParams {
+export interface RunListParams extends PageParams {
   state?: string[];
   resumable?: boolean;
   host?: string;
@@ -625,10 +642,33 @@ export interface RunListParams {
   limit?: number;
 }
 
-export interface HostListParams {
+export interface HostListParams extends PageParams {
   all?: boolean;
   pool?: string;
+  poolId?: string;
   state?: string;
+  lifecycle?: "live" | "ended";
+  limit?: number;
+  offset?: number;
+}
+
+/** A paged list's order and where to read: a response's cursors, sent back. */
+export interface PageParams {
+  sort?: string;
+  dir?: "asc" | "desc";
+  next?: string;
+  prev?: string;
+  at?: string;
+}
+
+/** A page of a paged list: its rows and cursors (and, for hosts, the count). */
+export interface Page<T> {
+  rows: T[];
+  next?: string;
+  prev?: string;
+  page?: string;
+  total?: number;
+  offset?: number;
 }
 
 /** Run states that never change again. */
@@ -643,4 +683,79 @@ export const EXEC_RUN_STATES = new Set(["running"]);
 /** Still changing: worth polling. */
 export function isRunActive(state: string): boolean {
   return !TERMINAL_RUN_STATES.has(state) && state !== "stopped" && state !== "lost";
+}
+
+/** GET /v1/pools/stats: one pool's figures over the range (a tenant: its own Runs, allocation and cost). */
+export interface PoolStats {
+  id: string;
+  hosts: Record<string, number>;
+  capacityCpus: number;
+  allocatedCpus: number;
+  runsStarted: number;
+  runsHourly: number[];
+  launchFailures: number;
+  /** Per currency; empty: nothing reported, not zero. */
+  cost: MoneyTotal[];
+}
+
+export interface PoolSample {
+  at: string;
+  hosts?: Record<string, number>;
+  capacityCpus: number;
+  capacityMemory: number;
+  allocatedCpus: number;
+  allocatedMemory: number;
+  running: number;
+  queued: number;
+  started: number;
+  finished: number;
+  launches: number;
+  launchFailures: number;
+}
+
+export interface PoolMetrics {
+  poolId: string;
+  from: string;
+  to: string;
+  resolution: number;
+  /** The pool's first sample: before it there is no history. */
+  historyFrom?: string;
+  now: {
+    hosts: Record<string, number>;
+    capacityCpus: number;
+    capacityMemory: number;
+    allocatedCpus: number;
+    allocatedMemory: number;
+    running: number;
+    queued: number;
+    oldestQueuedAt?: string;
+    launchFailures: number;
+    lastLaunchFailure?: string;
+    lastLaunchError?: string;
+  };
+  samples: PoolSample[];
+}
+
+export interface PoolHostTime {
+  at?: string;
+  hostId?: string;
+  hostName?: string;
+  currency: string;
+  allocated: string;
+  unallocated: string;
+}
+
+export interface PoolCost {
+  poolId: string;
+  from: string;
+  to: string;
+  basis: string;
+  interval: "hour" | "day";
+  totals: MoneyTotal[];
+  series: { at: string; family: string; currency: string; amount: string }[];
+  families?: { family: string; displayName?: string; color?: string }[];
+  topRuns: { id: string; name?: string; currency: string; amount: string; estimate: boolean }[];
+  idle?: MoneyTotal[];
+  hostSeries?: PoolHostTime[];
+  hosts?: PoolHostTime[];
 }

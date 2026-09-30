@@ -191,3 +191,23 @@ func TestPoolsRename(t *testing.T) {
 		}
 	}
 }
+
+// A terminated host whose launch the provider refused reads "launch
+// failed"; one launched and later terminated reads terminated.
+func TestHostState(t *testing.T) {
+	for _, c := range []struct {
+		h    server.Host
+		want string
+	}{
+		{server.Host{State: "terminated", Launch: &server.HostLaunch{Outcome: "failed"}}, "launch failed"},
+		{server.Host{State: "terminated", Launch: &server.HostLaunch{Outcome: "launched"}}, "terminated"},
+		{server.Host{State: "terminated"}, "terminated"},
+		{server.Host{State: "provisioning", Launch: &server.HostLaunch{Outcome: "requested"}}, "provisioning"},
+		{server.Host{State: "ready", Draining: true}, "ready (draining)"},
+		{server.Host{State: "draining", Draining: true}, "draining"},
+	} {
+		if got := hostState(c.h); got != c.want {
+			t.Errorf("%+v: %q, want %q", c.h, got, c.want)
+		}
+	}
+}

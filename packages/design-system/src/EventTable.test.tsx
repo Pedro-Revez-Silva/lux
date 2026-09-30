@@ -80,18 +80,20 @@ describe("EventTable in a DOM", () => {
 
   test("narrow, without its # column, newest first all the same", async () => {
     const { types, headers } = await mount(events, 700);
-    expect(headers()).not.toContain("#");
+    expect(headers().some((h) => h?.startsWith("#"))).toBe(false);
     expect(types()).toEqual(["pool.launch_failed", "pool.scale_up", "pool.placement"]);
   });
 
-  test("Time sorts by when each happened, not by id", async () => {
+  test("Time sorts by when each happened, not by id: newest first, then oldest", async () => {
     // Ids and times in different orders: 7 is newest by id, oldest by time.
     const { el, types } = await mount(events, 1400);
-    const time = [...el.querySelectorAll("thead th")].find((th) => th.textContent === "Time") as HTMLElement;
+    const time = [...el.querySelectorAll("thead th")].find((th) => th.textContent?.startsWith("Time")) as HTMLElement;
     await act(async () => time.click());
-    expect(types()).toEqual(["pool.launch_failed", "pool.scale_up", "pool.placement"]);
-    await act(async () => time.click());
+    expect(time.getAttribute("aria-sort")).toBe("descending");
     expect(types()).toEqual(["pool.placement", "pool.scale_up", "pool.launch_failed"]);
+    await act(async () => time.click());
+    expect(time.getAttribute("aria-sort")).toBe("ascending");
+    expect(types()).toEqual(["pool.launch_failed", "pool.scale_up", "pool.placement"]);
   });
 
   test("cleanup leaves no container and the real clientWidth", () => {

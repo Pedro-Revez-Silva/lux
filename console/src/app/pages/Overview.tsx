@@ -1,4 +1,4 @@
-import { Card, formatBytes, formatCores, formatCount, formatDuration, formatElapsed, PageHeader, SectionHeader, StatTile, TimeSeriesChart } from "@lux/design-system";
+import { Card, formatBytes, formatCores, formatCount, formatDuration, formatElapsed, PageHeader, rangeText, SectionHeader, StatTile, TimeSeriesChart } from "@lux/design-system";
 import { api, useNow } from "../../api/index.ts";
 import { go } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
@@ -10,7 +10,6 @@ import { OverviewCost } from "./OverviewCost.tsx";
 /** What the Queued tile counts. */
 const QUEUED = ["submitted", "resuming", "provisioning"];
 
-const RANGE_LABEL: Record<string, string> = { "1h": "the last hour", "6h": "the last 6 hours", "24h": "the last 24 hours", "7d": "the last 7 days", "30d": "the last 30 days" };
 
 export function Overview() {
   const scope = useScope();
@@ -38,7 +37,7 @@ export function Overview() {
 
   return (
     <div className="page page-wide">
-      <PageHeader title="Overview" description={<span>{where} · charts over {RANGE_LABEL[scope.range] ?? scope.range}</span>} />
+      <PageHeader title="Overview" description={<span>{where} · charts over the {rangeText(scope.range)}</span>} />
       {status.error && !st && <ErrorBlock error={status.error} onRetry={status.refetch} />}
       {status.error && st && <ErrorStrip error={`Showing stale numbers: the last refresh failed (${status.error}).`} />}
       <div className="grid grid-stats">

@@ -1,9 +1,10 @@
 import { useMemo } from "react";
-import { Badge, Button, Card, formatBytes, formatCores, HOST_STATE_LIST, PageHeader, Select, Table, Tooltip, type Column } from "@lux/design-system";
+import { Badge, Button, Card, DurationCell, formatBytes, formatCores, HOST_STATE_LIST, hostDisplayState, PageHeader, Pagination, RelativeTime, SegmentedControl, Select, Table, Tooltip, useNow, type Column } from "@lux/design-system";
 import { api, type Host } from "../../api/index.ts";
+import { usePaged } from "../paged.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip, HostLink, hostPath, hostRunsPath, IdLink, RelativeTime, StateCell, UsageBar } from "./common.tsx";
+import { DASH, ErrorBlock, ErrorStrip, HostLink, hostPath, hostRunsPath, IdLink, StateCell, UsageBar } from "./common.tsx";
 
 /**
  * A host's live Run count. The cap (lux-runner --max-runs) is rarely what
@@ -22,91 +23,179 @@ function LiveRuns({ host: h, wholeHost }: { host: Host; wholeHost: boolean }) {
   );
 }
 
+const up = (h: Host) => h.state === "ready" || h.state === "draining";
+const launchFailed = (h: Host) => hostDisplayState(h) === "launch_failed";
+
+/**
+ * Uptime: created to terminated, or to now while the host is up; none for a
+ * launch that failed (no instance ever ran).
+ */
+function HostUptime({ host: h }: { host: Host }) {
+  const now = useNow();
+  if (launchFailed(h)) return <DurationCell seconds={null} missing="Never launched: no instance ran" />;
+  const created = Date.parse(h.times.created ?? "");
+  if (!Number.isFinite(created)) return DASH;
+  const ended = h.times.terminated ? Date.parse(h.times.terminated) : null;
+  const secs = ((ended ?? now) - created) / 1000;
+  return <DurationCell seconds={Math.max(0, secs)} live={ended == null} tip={ended == null ? "Created → now (still up)" : "Created → terminated"} />;
+}
+
+const STATES = [...HOST_STATE_LIST];
+const LIFECYCLE = [
+  { value: "live", label: "Live", title: "Hosts not terminated" },
+  { value: "all", label: "All" },
+  { value: "ended", label: "Ended", title: "Terminated hosts, launch failures included" },
+] as const;
+type Lifecycle = (typeof LIFECYCLE)[number]["value"];
+
+/** The URL's lifecycle; the older ?all=true reads as All. */
+function lifecycleOf(params: URLSearchParams): Lifecycle {
+  const v = params.get("lifecycle");
+  if (v === "all" || params.get("all") === "true") return "all";
+  if (v === "ended") return "ended";
+  return "live";
+}
+
+/** The API's lifecycle. Live with a state filter is left to the server's default, which lets ?state=terminated or launch_failed through. */
+function lifecycleParam(lifecycle: Lifecycle, state: string): "live" | "ended" | undefined {
+  if (lifecycle === "ended") return "ended";
+  if (lifecycle === "live" && !state) return "live";
+  return undefined;
+}
+
 export function Hosts() {
-  const { showTenant } = useScope();
-  // Filters live in the URL, so a filtered list is a link.
   const params = useSearchParams();
   const pool = params.get("pool") ?? "";
+  return <HostsList pool={pool} />;
+}
+
+/**
+ * The hosts table with its filters and pager: the Hosts page, or one
+ * pool's hosts (fixed, by id: the pool page's Hosts tab).
+ */
+export function HostsList({ pool, poolId, embedded }: { pool: string; poolId?: string; embedded?: boolean }) {
+  const { showTenant, tenant, apiTenant } = useScope();
+  // Filters live in the URL, so a filtered list is a link.
+  const params = useSearchParams();
   const state = params.get("state") ?? "";
-  const all = params.get("all") === "true";
+  const lifecycle = lifecycleOf(params);
   const setPool = (v: string) => setSearchParams({ pool: v || null });
   const setState = (v: string) => setSearchParams({ state: v || null });
-  const setAll = (v: boolean) => setSearchParams({ all: v ? "true" : null });
-  const q = useScopedQuery(`hosts:${pool}:${state}:${all}`, (t, s) => api.hosts(t, { pool: pool || undefined, state: state || undefined, all }, s), { interval: 5000 });
-  const pools = useScopedQuery("pools", api.pools, { interval: 60_000 });
+  const setLifecycle = (v: Lifecycle) => setSearchParams({ lifecycle: v === "live" ? null : v, all: null });
+  const view = `${tenant}|${pool}|${poolId ?? ""}|${state}|${lifecycle}`;
+  const q = usePaged<Host>(
+    "hosts",
+    view,
+    (req, s) =>
+      api.hostsPage(apiTenant, { ...req, pool: poolId ? undefined : pool || undefined, poolId, state: state || undefined, all: lifecycle === "all" || undefined, lifecycle: lifecycleParam(lifecycle, state) }, s),
+    { defaultSort: { key: "created", dir: "desc" }, defaultSize: 25, interval: 5000 },
+  );
+  // The pool filter's options and the allocation summary (over every live
+  // host, not the page): the Hosts page's only; the pool page has its own.
+  const pools = useScopedQuery("pools", api.pools, { interval: 60_000, enabled: !embedded });
+  const live = useScopedQuery("hosts-live", (t, s) => api.hosts(t, {}, s), { interval: 15_000, enabled: !embedded });
 
   const poolOptions = useMemo(() => {
     const names = new Set<string>((pools.data ?? []).map((p) => p.name));
-    for (const h of q.data ?? []) names.add(h.pool);
     return [{ value: "", label: "Any pool", text: "Any pool" }, ...[...names].sort().map((n) => ({ value: n, label: n, text: n }))];
-  }, [pools.data, q.data]);
+  }, [pools.data]);
 
   const cols = useMemo<Column<Host>[]>(() => {
-    const c: Column<Host>[] = [
-      { key: "name", header: "Host", cell: (h) => <HostLink id={h.id} name={h.name} />, sortValue: (h) => h.name, lead: true, width: 170 },
-    ];
-    if (showTenant) c.push({ key: "tenant", header: "Tenant", cell: (h) => (h.platform ? <span className="muted">platform</span> : h.tenant || DASH), sortValue: (h) => (h.platform ? "" : h.tenant), width: 120, optional: true });
+    const c: Column<Host>[] = [{ key: "name", header: "Host", cell: (h) => <HostLink id={h.id} name={h.name} />, sortable: true, lead: true, width: 180 }];
+    if (showTenant) c.push({ key: "tenant", header: "Tenant", cell: (h) => (h.platform ? <span className="muted">platform</span> : h.tenant || DASH), sortable: true, width: 120, optional: true });
     c.push(
-      { key: "pool", header: "Pool", cell: (h) => h.pool, sortValue: (h) => h.pool, width: 110 },
+      { key: "pool", header: "Pool", cell: (h) => h.pool, sortable: true, width: 110 },
       {
         key: "state",
         header: "State",
         cell: (h) => (
-          <StateCell kind="host" state={h.state} reason={h.stateReason}>
+          <StateCell kind="host" state={hostDisplayState(h)} reason={launchFailed(h) ? h.launch?.error : h.stateReason}>
             {h.stateReason?.startsWith("evicting") ? <Badge tone="danger">evicting</Badge> : h.draining && h.state !== "draining" && <Badge tone="warn">draining</Badge>}
           </StateCell>
         ),
-        sortValue: (h) => h.state,
+        sortable: true,
       },
-      { key: "runs", header: "Live runs", cell: (h) => <LiveRuns host={h} wholeHost={!h.platform || showTenant} />, sortValue: (h) => h.liveRuns, align: "right", mono: true, width: 96 },
-      { key: "cpu", header: "CPU", cell: (h) => <UsageBar used={h.allocated.cpus ?? 0} total={h.capacity.cpus} unit="cores" />, sortValue: (h) => (h.capacity.cpus ? (h.allocated.cpus ?? 0) / h.capacity.cpus : 0), width: 150 },
-      { key: "mem", header: "Memory", cell: (h) => <UsageBar used={h.allocated.memory ?? 0} total={h.capacity.memory} unit="bytes" />, sortValue: (h) => (h.capacity.memory ? (h.allocated.memory ?? 0) / h.capacity.memory : 0), width: 150 },
-      { key: "id", header: "Id", cell: (h) => <IdLink value={h.id} to={hostPath(h.id)} />, sortValue: (h) => h.id, mono: true, width: 210, optional: true },
-      { key: "hb", header: "Heartbeat", cell: (h) => <RelativeTime at={h.lastHeartbeat} />, sortValue: (h) => (h.lastHeartbeat ? Date.parse(h.lastHeartbeat) : null), align: "right", width: 100 },
+      { key: "runs", header: "Live runs", cell: (h) => (up(h) ? <LiveRuns host={h} wholeHost={!h.platform || showTenant} /> : DASH), sortable: true, align: "right", mono: true, width: 100 },
+      { key: "cpu", header: "CPU", cell: (h) => (up(h) ? <UsageBar used={h.allocated.cpus ?? 0} total={h.capacity.cpus} unit="cores" /> : DASH), sortable: true, sortFirst: "desc", width: 150, optional: true },
+      { key: "memory", header: "Memory", cell: (h) => (up(h) ? <UsageBar used={h.allocated.memory ?? 0} total={h.capacity.memory} unit="bytes" /> : DASH), sortable: true, sortFirst: "desc", width: 160, optional: true },
+      { key: "id", header: "Id", cell: (h) => <IdLink value={h.id} to={hostPath(h.id)} />, sortable: true, mono: true, width: 210, optional: true },
+      { key: "created", header: "Created", cell: (h) => <RelativeTime at={h.times.created} label="Created" />, sortable: true, sortFirst: "desc", width: 104 },
+      { key: "terminated", header: "Terminated", cell: (h) => <RelativeTime at={h.times.terminated} label="Terminated" />, sortable: true, sortFirst: "desc", width: 116 },
+      { key: "uptime", header: "Uptime", cell: (h) => <HostUptime host={h} />, sortable: true, align: "right", mono: true, width: 96 },
+      { key: "heartbeat", header: "Heartbeat", cell: (h) => <RelativeTime at={h.lastHeartbeat} label="Last heartbeat" />, sortable: true, sortFirst: "desc", align: "right", width: 104 },
     );
     return c;
   }, [showTenant]);
 
-  const hosts = q.data ?? [];
   const totals = useMemo(() => {
-    const t = { cpus: 0, capCpus: 0, mem: 0, capMem: 0 };
-    for (const h of hosts) {
-      if (h.state !== "ready" && h.state !== "draining") continue;
+    const t = { n: 0, cpus: 0, capCpus: 0, mem: 0, capMem: 0 };
+    for (const h of live.data ?? []) {
+      t.n++;
+      if (!up(h)) continue;
       t.cpus += h.allocated.cpus ?? 0;
       t.capCpus += h.capacity.cpus;
       t.mem += h.allocated.memory ?? 0;
       t.capMem += h.capacity.memory;
     }
     return t;
-  }, [hosts]);
+  }, [live.data]);
 
+  const filtered = (!embedded && pool !== "") || state !== "" || lifecycle !== "live";
+  const rows = q.rows;
+  const table = (
+    <Card flush>
+      <ErrorStrip error={rows.length > 0 ? q.error : null} />
+      {q.error && rows.length === 0 && !q.loading ? (
+        <ErrorBlock error={q.error} onRetry={q.refetch} />
+      ) : (
+        <Table
+          columns={cols}
+          rows={rows}
+          rowKey={(h) => h.id}
+          loading={q.loading}
+          sortMode="server"
+          sort={q.sort}
+          onSortChange={q.setSort}
+          onRowClick={(h) => go(hostPath(h.id))}
+          empty="No hosts match these filters."
+          footer={q.total != null && q.total > 0 ? <Pagination mode="count" page={q.page} pageSize={q.size} total={q.total} noun="hosts" onPage={q.goto} onPageSize={q.setSize} /> : undefined}
+        />
+      )}
+    </Card>
+  );
+  const filters = (
+    <div className="filters">
+      {!embedded && <Select size="sm" prefix="Pool" value={pool} onChange={setPool} options={poolOptions} width={150} searchable={poolOptions.length > 8} />}
+      <Select size="sm" prefix="State" value={state} onChange={setState} options={[{ value: "", label: "Any state", text: "Any state" }, ...STATES.map((s) => ({ value: s, label: s === "launch_failed" ? "launch failed" : s, text: s }))]} width={170} />
+      <SegmentedControl label="Lifecycle" value={lifecycle} onChange={setLifecycle} options={LIFECYCLE} />
+      {filtered && (
+        <Button size="sm" variant="ghost" onClick={() => setSearchParams({ pool: embedded ? pool : null, state: null, all: null, lifecycle: null })}>
+          Clear
+        </Button>
+      )}
+    </div>
+  );
+  if (embedded) {
+    return (
+      <div className="stack">
+        {filters}
+        {table}
+      </div>
+    );
+  }
   return (
     <div className="page page-list">
       <PageHeader
         title="Hosts"
-        description={<span>{hosts.length} hosts · ready and draining: {formatCores(totals.cpus)} of {formatCores(totals.capCpus)} CPU, {formatBytes(totals.mem)} of {formatBytes(totals.capMem)} memory allocated</span>}
+        description={
+          <span>
+            {q.total != null ? `${q.total.toLocaleString()} ${filtered ? "matching " : ""}hosts · ` : ""}
+            {totals.n} live · ready and draining: {formatCores(totals.cpus)} of {formatCores(totals.capCpus)} CPU, {formatBytes(totals.mem)} of {formatBytes(totals.capMem)} memory allocated
+          </span>
+        }
       />
-      <div className="filters">
-        <Select size="sm" prefix="Pool" value={pool} onChange={setPool} options={poolOptions} width={150} searchable={poolOptions.length > 8} />
-        <Select size="sm" prefix="State" value={state} onChange={setState} options={[{ value: "", label: "Any state", text: "Any state" }, ...HOST_STATE_LIST.map((s) => ({ value: s, label: s, text: s }))]} width={150} />
-        <label className="check">
-          <input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} />
-          Include terminated
-        </label>
-        {(pool || state || all) && (
-          <Button size="sm" variant="ghost" onClick={() => setSearchParams({ pool: null, state: null, all: null })}>
-            Clear
-          </Button>
-        )}
-      </div>
-      <Card flush>
-        <ErrorStrip error={hosts.length > 0 ? q.error : null} />
-        {q.error && hosts.length === 0 && !q.loading ? (
-          <ErrorBlock error={q.error} onRetry={q.refetch} />
-        ) : (
-          <Table columns={cols} rows={hosts} rowKey={(h) => h.id} loading={q.loading} defaultSort={{ key: "name", dir: "asc" }} onRowClick={(h) => go(hostPath(h.id))} empty="No hosts match these filters." />
-        )}
-      </Card>
+      {filters}
+      {table}
     </div>
   );
 }

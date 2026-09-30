@@ -354,22 +354,36 @@ def test_runs_list_shows_runtime_and_placements(page, env, lux, runners, hosts):
     page.sign_in(lux.api_key, "/runs")
     page.set_viewport_size({"width": 1800, "height": 900})
     headers = page.locator("table thead th")
-    expect(headers.filter(has_text=re.compile(r"^Runtime$"))).to_have_count(1, timeout=15_000)
-    placements = headers.filter(has_text=re.compile(r"^Placements$"))
+    runtime = page.get_by_role("columnheader", name="Runtime", exact=True)
+    expect(runtime).to_have_count(1, timeout=15_000)
+    placements = page.get_by_role("columnheader", name="Placements", exact=True)
     expect(placements).to_have_count(1)
     expect(placements.locator("[title]")).to_have_attribute("title", "Times this Run has been placed on a host")
-    expect(headers.filter(has_text=re.compile(r"^Epoch$"))).to_have_count(0)
-    texts = [t.strip() for t in headers.all_inner_texts()]
-    runtime_col, placements_col = texts.index("Runtime"), texts.index("Placements")
+    placement_time = page.get_by_role("columnheader", name="Placement time", exact=True)
+    expect(placement_time).to_have_count(1)
+    expect(page.get_by_role("columnheader", name="Epoch", exact=True)).to_have_count(0)
+    # Every column sorts, on the server; the list opens newest first.
+    for h in (runtime, placements, placement_time):
+        expect(h).to_have_attribute("aria-sort", "none")
+    expect(page.get_by_role("columnheader", name="Created", exact=True)).to_have_attribute("aria-sort", "descending")
+    # The sort arrow is aria-hidden: a header's text is its name and the arrow.
+    texts = [re.sub(r"\s*[↑↓↕]$", "", t.strip()) for t in headers.all_inner_texts()]
+    runtime_col, placements_col, placement_time_col = texts.index("Runtime"), texts.index("Placements"), texts.index("Placement time")
 
     def cell(run_name, col):
         row = page.get_by_role("row").filter(has=page.get_by_role("link", name=run_name, exact=True))
         return row.locator("td").nth(col)
     expect(cell(name, runtime_col)).to_have_text(re.compile(r"^\d+(\.\d+)?(ms|s)$|^\d+[mhd]( \d+[smh])?$"))
     expect(cell(name, placements_col)).to_have_text("1")
-    # Never placed: no runtime, no placement.
+    expect(cell(name, placement_time_col)).to_have_text(re.compile(r"^\d+(\.\d+)?(ms|s)$|^\d+[mhd]( \d+[smh])?$"))
+    # Never placed: no runtime, no placement; it is still waiting for one.
     expect(cell(never_name, runtime_col)).to_have_text("–")
     expect(cell(never_name, placements_col)).to_have_text("0")
+    expect(cell(never_name, placement_time_col)).to_have_text(re.compile(r"…$"))
+    # Sorting by Runtime asks the server and marks the header.
+    runtime.click()
+    expect(runtime).to_have_attribute("aria-sort", "descending")
+    expect(page.get_by_text("Runtime, largest first")).to_have_count(1, timeout=15_000)
     assert not page.errors, page.errors
     lux.run("cancel", never)
 
@@ -616,6 +630,8 @@ def test_pools_page_makes_a_pool_the_default(page, lux):
         old_row = page.get_by_role("row").filter(has_text=old)
         new_row = page.get_by_role("row").filter(has_text=new)
         expect(old_row.get_by_text("Default", exact=True)).to_be_visible(timeout=15_000)
+        # Settings carries the provider (there is no Provider column).
+        expect(old_row.get_by_text("static hosts", exact=True)).to_have_count(1)
         assert old_row.get_by_role("button", name="Make default").count() == 0
         new_row.get_by_role("button", name="Make default").click()
         dialog = page.get_by_role("dialog")
@@ -641,8 +657,12 @@ def test_pool_page_shows_its_settings_and_events(page, tenant_factory):
     page.sign_in(a.api_key, "/pools")
     page.get_by_role("link", name=name, exact=True).click()
     page.wait_for_url(re.compile(rf"/pools/{name}$"), timeout=10_000)
+    # Settings are on the Hosts tab, events on the Events tab.
+    page.get_by_role("tab", name="Hosts").click()
+    page.wait_for_url(re.compile(rf"/pools/{name}\?tab=hosts$"), timeout=10_000)
     expect(page.get_by_role("heading", name="Settings", exact=True)).to_have_count(1, timeout=15_000)
     expect(page.get_by_text("min 0 · warm 0 · max 3")).to_have_count(1, timeout=15_000)
+    page.get_by_role("tab", name="Events").click()
     rows = page.locator("tr", has_text="pool.config_changed")
     expect(rows).to_have_count(2, timeout=15_000)
     # Newest first: the second change leads.
@@ -682,7 +702,9 @@ def test_platform_pool_page_is_reachable_beside_a_tenant_pool_of_its_name(page, 
     expect(rows).to_have_count(2, timeout=15_000)
     rows.filter(has_text="platform").get_by_role("link", name=name, exact=True).click()
     page.wait_for_url(re.compile(rf"/pools/{name}\?owner=platform$"), timeout=10_000)
+    page.goto(env.luxd_url + f"/pools/{name}?owner=platform&tab=hosts")
     expect(page.get_by_text("min 0 · warm 0 · max 7")).to_have_count(1, timeout=15_000)
+    page.goto(env.luxd_url + f"/pools/{name}?owner=platform&tab=events")
     events = page.locator("tr", has_text="pool.config_changed")
     expect(events).to_have_count(1, timeout=15_000)
     expect(events.first).to_contain_text("maxHosts –→7")
@@ -692,7 +714,10 @@ def test_platform_pool_page_is_reachable_beside_a_tenant_pool_of_its_name(page, 
     expect(tenant_row).to_have_count(1, timeout=15_000)
     tenant_row.get_by_role("link", name=name, exact=True).click()
     page.wait_for_url(re.compile(rf"/pools/{name}\?tenant="), timeout=10_000)
+    tenant_url = page.url
+    page.goto(tenant_url + "&tab=hosts")
     expect(page.get_by_text("min 0 · warm 0 · max 2")).to_have_count(1, timeout=15_000)
+    page.goto(tenant_url + "&tab=events")
     expect(page.locator("tr", has_text="pool.config_changed").first).to_contain_text("maxHosts –→2", timeout=15_000)
     assert not page.errors, page.errors
 
@@ -708,98 +733,70 @@ def _add_pool_events(env, tenant_id: str, pool: str, n: int, tag: str):
 def _event_tags(card) -> list[str]:
     """The tags of the placement events the card lists, top to bottom."""
     return card.evaluate("""c => [...c.querySelectorAll('tbody tr')]
-        .map(tr => (/((?:old|mid|late|new)-\\d+) epoch/.exec(tr.textContent) || [])[1])
+        .map(tr => (/((?:old|new)-\\d+) epoch/.exec(tr.textContent) || [])[1])
         .filter(Boolean)""")
 
 
-def _expected(*batches: tuple[str, int]) -> list[str]:
-    """Every tag added, oldest batch first, as the card lists them: newest first."""
-    return [f"{tag}-{i}" for tag, n in reversed(batches) for i in range(n, 0, -1)]
-
-
-def _events_card(page, key: str, name: str):
-    page.sign_in(key, f"/pools/{name}")
-    return page.locator(".card", has=page.get_by_role("heading", name="Events", exact=True))
-
-
-def _load_every_older(card):
-    button = card.get_by_role("button", name="Load older events")
-    while button.count() > 0:
-        n = card.locator("tbody tr").count()
-        button.click()
-        expect(card.locator("tbody tr")).not_to_have_count(n, timeout=15_000)
-
-
-def test_pool_events_keep_every_event_as_new_ones_arrive_above_older_pages(page, env, tenant_factory):
-    """With older pages loaded, new events push some off the polled newest
-    page: the page reads them back, so none goes missing between the two."""
+def test_pool_events_pages_stay_put_as_new_events_arrive(page, env, tenant_factory):
+    """Pool events are server pages in the sort chosen (newest first). A
+    page past the first keeps its rows while new events arrive above it (its
+    refresh re-reads it in place), and Next / Previous from there cover every
+    event exactly once."""
     a = tenant_factory()
     name = f"busy-{a.tenant_id[-6:]}"
     a.run("pools", "set", name, "--provider", "static")
-    _add_pool_events(env, a.tenant_id, name, 1100, "old")
-    card = _events_card(page, a.api_key, name)
-    expect(card.get_by_text(re.compile(r"^1000 events"))).to_have_count(1, timeout=15_000)
-    _load_every_older(card)
-    expect(card.get_by_text(re.compile(r"^1101 events"))).to_have_count(1, timeout=15_000)
+    _add_pool_events(env, a.tenant_id, name, 120, "old")
+    page.sign_in(a.api_key, f"/pools/{name}?tab=events")
+    card = page.locator(".card", has=page.get_by_role("heading", name="Events", exact=True))
+    pager = card.get_by_role("navigation", name="Pages")
+    # The pool's own created event is the oldest: 121 in all.
+    expect(pager).to_contain_text("Page 1 · events 1–50", timeout=15_000)
+    expect(pager).to_contain_text("Time, newest first")
+    assert _event_tags(card) == [f"old-{i}" for i in range(120, 70, -1)]
+    pager.get_by_role("button", name="Next ›").click()
+    expect(pager).to_contain_text("Page 2 · events 51–100", timeout=15_000)
+    page2 = [f"old-{i}" for i in range(70, 20, -1)]
+    expect(card.locator("tbody tr").first).to_contain_text("old-70 epoch", timeout=15_000)
+    assert _event_tags(card) == page2
     _add_pool_events(env, a.tenant_id, name, 30, "new")
-    card.get_by_role("button", name="Refresh").click()
-    expect(card.get_by_text(re.compile(r"^1131 events"))).to_have_count(1, timeout=15_000)
-    assert _event_tags(card) == _expected(("old", 1100), ("new", 30))
-    assert not page.errors, page.errors
+    # One poll (15s) re-reads page 2 in place, from its own cursor.
+    with page.expect_response(lambda r: f"/pools/{name}/events" in r.url and "at=" in r.url, timeout=25_000):
+        pass
+    expect(pager).to_contain_text("Page 2 · events 51–100")
+    expect(card.locator("tbody tr").first).to_contain_text("old-70 epoch")
+    expect(card.locator("tbody tr").last).to_contain_text("old-21 epoch")
+    assert _event_tags(card) == page2
+    # Previous from page 3 reads the same page 2 back.
+    pager.get_by_role("button", name="Next ›").click()
+    expect(pager).to_contain_text("Page 3", timeout=15_000)
+    expect(card.locator("tbody tr").first).to_contain_text("old-20 epoch", timeout=15_000)
+    pager.get_by_role("button", name="‹ Previous").click()
+    expect(pager).to_contain_text("Page 2 · events 51–100", timeout=15_000)
+    expect(card.locator("tbody tr").first).to_contain_text("old-70 epoch", timeout=15_000)
+    assert _event_tags(card) == page2
 
-
-def test_pool_events_read_back_a_burst_before_older_pages_are_loaded(page, env, tenant_factory):
-    """More than a page arrives between two reads of the newest page, before
-    any older page is loaded: the events between the two pages are read
-    back, and "load older" then continues below the first page, so every
-    event is listed once, in order."""
-    a = tenant_factory()
-    name = f"burst-{a.tenant_id[-6:]}"
-    a.run("pools", "set", name, "--provider", "static")
-    _add_pool_events(env, a.tenant_id, name, 1100, "old")
-    card = _events_card(page, a.api_key, name)
-    expect(card.get_by_text(re.compile(r"^1000 events"))).to_have_count(1, timeout=15_000)
-    _add_pool_events(env, a.tenant_id, name, 1030, "new")
-    card.get_by_role("button", name="Refresh").click()
-    # The new page (new-31..new-1030), the gap read back (new-1..new-30),
-    # the first page (old-101..old-1100).
-    expect(card.get_by_text(re.compile(r"^2030 events"))).to_have_count(1, timeout=15_000)
-    _load_every_older(card)
-    expect(card.get_by_text(re.compile(r"^2131 events"))).to_have_count(1, timeout=15_000)
-    assert _event_tags(card) == _expected(("old", 1100), ("new", 1030))
-    assert not page.errors, page.errors
-
-
-def test_pool_events_keep_reading_a_gap_while_the_stream_moves(page, env, tenant_factory):
-    """Events keep arriving while a gap larger than a page is read back: a
-    refresh landing mid-read adds a gap above, the read in flight carries
-    on (no request is repeated), and in the end every event is there once."""
-    a = tenant_factory()
-    name = f"stream-{a.tenant_id[-6:]}"
-    a.run("pools", "set", name, "--provider", "static")
-    _add_pool_events(env, a.tenant_id, name, 1100, "old")
-    gap_requests: list[str] = []
-    page.on("request", lambda r: "after=" in r.url and gap_requests.append(r.url))
-    held, holding = [], [True]
-    page.route(re.compile(r"/events\?.*after="), lambda route: held.append(route) if holding[0] else route.continue_())
-    card = _events_card(page, a.api_key, name)
-    expect(card.get_by_text(re.compile(r"^1000 events"))).to_have_count(1, timeout=15_000)
-    # 2500 more: a new newest page over a gap of 1500, read a page at a time.
-    _add_pool_events(env, a.tenant_id, name, 2500, "mid")
-    card.get_by_role("button", name="Refresh").click()
-    wait_until(lambda: (page.wait_for_timeout(50), len(held) == 1)[1], timeout=15, message="the first gap read")
-    # While it is in flight, 1200 more, and another refresh: a gap above.
-    _add_pool_events(env, a.tenant_id, name, 1200, "late")
-    card.get_by_role("button", name="Refresh").click()
-    expect(card.get_by_text(re.compile(r"^3000 events"))).to_have_count(1, timeout=15_000)
-    # The read in flight was not abandoned for the new gap: still the one request.
-    assert len(held) == 1, [r.request.url for r in held]
-    holding[0] = False
-    held[0].continue_()
-    # old-101 and up, all of it: 1000 + 2500 + 1200.
-    expect(card.get_by_text(re.compile(r"^4700 events"))).to_have_count(1, timeout=30_000)
-    assert len(gap_requests) == len(set(gap_requests)), gap_requests
-    _load_every_older(card)
-    expect(card.get_by_text(re.compile(r"^4801 events"))).to_have_count(1, timeout=15_000)
-    assert _event_tags(card) == _expected(("old", 1100), ("mid", 2500), ("late", 1200))
+    def walk(button: str, n: int) -> list[list[str]]:
+        """This page and the n - 1 that button leads to, each one's tags."""
+        pages = []
+        for i in range(n):
+            if i:
+                before = _event_tags(card)
+                pager.get_by_role("button", name=button).click()
+                wait_until(lambda: _event_tags(card) != before, 15, 0.1, f"{button} did not change the page")
+            pages.append(_event_tags(card))
+        return pages
+    # From the top (the new events lead it), Next to the end and Previous
+    # back: every event exactly once, in order, the same pages both ways.
+    pager.get_by_role("button", name="« First").click()
+    expect(pager).to_contain_text("Page 1 · events 1–50", timeout=15_000)
+    expect(card.locator("tbody tr").first).to_contain_text("new-30 epoch", timeout=15_000)
+    forward = walk("Next ›", 4)
+    expect(pager).to_contain_text("Page 4 · events 151–151")
+    expect(pager.get_by_role("button", name="Next ›")).to_be_disabled()
+    expect(card.locator("tbody tr").first).to_contain_text("created:")
+    tags = [t for p in forward for t in p]
+    assert tags == [f"new-{i}" for i in range(30, 0, -1)] + [f"old-{i}" for i in range(120, 0, -1)], tags
+    backward = walk("‹ Previous", 4)
+    expect(pager).to_contain_text("Page 1 · events 1–50")
+    assert backward == forward[::-1], backward
     assert not page.errors, page.errors

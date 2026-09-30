@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { formatMoney, formatMoneyExact, moneyIsRounded } from "./format.ts";
+import { formatDuration, formatMoney, formatMoneyExact, moneyIsRounded } from "./format.ts";
 
 // The same cases as TestMoney in internal/cli/costs_test.go: one rounding
 // rule for the console and the CLI; only the currency's placement differs.
@@ -46,4 +46,9 @@ test("formatMoneyExact shows every digit; moneyIsRounded says when that differs"
   expect(moneyIsRounded("1.2843")).toBe(false);
   expect(moneyIsRounded("2")).toBe(false);
   expect(moneyIsRounded("abc")).toBe(false);
+});
+
+test("formatDuration: zero is 0s; under a second in ms; two largest units", () => {
+  expect([0, 0.45, 42.9, 161, 7322].map(formatDuration)).toEqual(["0s", "450ms", "42.9s", "2m 41s", "2h 2m"]);
+  expect(formatDuration(null)).toBe("–");
 });

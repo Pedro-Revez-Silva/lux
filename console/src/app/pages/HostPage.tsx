@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
-import { Badge, Button, Card, ConfirmDialog, formatBytes, formatCores, formatRelative, formatTimestamp, IdChip, KeyValue, PageHeader, StatePill, Table, TimeSeriesChart, Timeline, useToast, type Column, type TimelineStage } from "@lux/design-system";
+import { Badge, Button, Card, Code, ConfirmDialog, formatBytes, formatCores, formatDuration, formatRelative, formatTimestamp, formatTimestampZone, hostDisplayState, IdChip, KeyValue, PageHeader, RelativeTime, StatePill, Table, TimeSeriesChart, Timeline, useToast, type Column, type TimelineStage } from "@lux/design-system";
 import { api, errorText, useNow, useQuery, type Host, type HostPlacement, type HostTimeKey, type Run } from "../../api/index.ts";
 import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, poolPath, RelativeTime, RunLink, RunNameLink, runColumns, runPath, useSeries } from "./common.tsx";
+import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, poolPath, RunLink, RunNameLink, runColumns, runPath, useSeries } from "./common.tsx";
 import { HostCost } from "./HostCost.tsx";
 import { InfraEvents } from "./InfraEvents.tsx";
 import { ProcessCards, runnerProcesses } from "./ProcessCards.tsx";
@@ -53,6 +53,7 @@ export function HostPage({ id }: { id: string }) {
   }
 
   if (!h) return <PageSkeleton />;
+  if (hostDisplayState(h) === "launch_failed") return <LaunchFailedHost host={h} />;
 
   // A draining host with a live run can still be force-evicted; one with
   // none has nothing left for a drain action to do (a plain drain only
@@ -172,6 +173,71 @@ export function HostPage({ id }: { id: string }) {
   );
 }
 
+/**
+ * A host whose launch the provider refused: no instance ran, so there is
+ * no terminate time, no usage and no host cost; what there is, is the
+ * launch and its error.
+ */
+function LaunchFailedHost({ host: h }: { host: Host }) {
+  const scope = useScope();
+  const l = h.launch!;
+  const took = l.requestedAt && l.finishedAt ? (Date.parse(l.finishedAt) - Date.parse(l.requestedAt)) / 1000 : null;
+  return (
+    <div className="page">
+      <PageHeader
+        title={h.name}
+        badges={
+          <>
+            <StatePill kind="host" state="launch_failed" />
+            {h.platform && <Badge outline>platform</Badge>}
+          </>
+        }
+        description={
+          <>
+            <IdChip value={h.id} />
+            {h.tenant && <span>tenant {h.tenant}</span>}
+            <span>
+              pool <Link to={poolPath(h.pool, { platform: h.platform, tenant: scope.showTenant ? h.tenant : undefined })}>{h.pool}</Link>
+            </span>
+            <span>created {formatTimestamp(h.times.created)}</span>
+            <span>no instance was started, so there is no terminate time and no host cost</span>
+          </>
+        }
+      />
+      <Card title="Launch" subtitle="its recorded outcome, not parsed from the state reason">
+        <div className="stack">
+          <KeyValue
+            columns={3}
+            items={[
+              { key: "Outcome", value: "Launch failed" },
+              { key: "Requested", value: l.requestedAt ? <span title={formatTimestampZone(l.requestedAt)}>{formatTimestamp(l.requestedAt)}</span> : DASH },
+              { key: "Failed", value: l.finishedAt ? <span title={formatTimestampZone(l.finishedAt)}>{formatTimestamp(l.finishedAt)}{took != null ? ` (${formatDuration(took)})` : ""}</span> : DASH },
+              { key: "Provider instance", value: <span className="muted">– none</span> },
+            ]}
+          />
+          {l.error && (
+            <div className="field">
+              <span className="field-label">Provider error</span>
+              <Code>{l.error}</Code>
+            </div>
+          )}
+        </div>
+      </Card>
+      <Card title="Timeline">
+        <Timeline
+          stages={[
+            { key: "requested", label: "Launch requested", start: l.requestedAt ? Date.parse(l.requestedAt) : null, end: l.finishedAt ? Date.parse(l.finishedAt) : null, tone: "accent" },
+            { key: "failed", label: "Launch failed", note: "host row closed, its one-use token revoked", start: l.finishedAt ? Date.parse(l.finishedAt) : null, point: true, tone: "red" },
+          ]}
+        />
+      </Card>
+      {(!h.platform || (scope.operator && !scope.apiTenant)) && (
+        <InfraEvents queryKey={`host-events:${h.id}@${scope.tenant}`} page={(q, s) => api.hostEvents(h.id, scope.apiTenant, q, s)} interval={15_000} subtitle="what was recorded on the host" />
+      )}
+    </div>
+  );
+}
+
 const HOST_TIMES: { key: HostTimeKey; label: string; tone: TimelineStage["tone"] }[] = [
   { key: "created", label: "Created", tone: "neutral" },
   { key: "provisionRequested", label: "Provision requested", tone: "neutral" },
@@ -198,14 +264,14 @@ function hostStages(h: Host): TimelineStage[] {
 
 function PlacementsTable({ placements, loading, tenant }: { placements: HostPlacement[]; loading: boolean; tenant: boolean }) {
   const cols = useMemo<Column<HostPlacement>[]>(() => {
-    const c: Column<HostPlacement>[] = [{ key: "name", header: "Run", cell: (p) => <RunNameLink id={p.runId} name={p.runName} />, lead: true, width: "24%" }];
-    c.push({ key: "run", header: "Id", cell: (p) => <RunLink id={p.runId} />, mono: true, width: 190, optional: true });
-    if (tenant) c.push({ key: "tenant", header: "Tenant", cell: (p) => p.tenant, width: 120 });
+    const c: Column<HostPlacement>[] = [{ key: "name", header: "Run", cell: (p) => <RunNameLink id={p.runId} name={p.runName} />, sortValue: (p) => p.runName || p.runId, lead: true, width: "24%" }];
+    c.push({ key: "run", header: "Id", cell: (p) => <RunLink id={p.runId} />, sortValue: (p) => p.runId, mono: true, width: 190, optional: true });
+    if (tenant) c.push({ key: "tenant", header: "Tenant", cell: (p) => p.tenant, sortValue: (p) => p.tenant, width: 120 });
     c.push(
-      { key: "epoch", header: "Epoch", cell: (p) => p.epoch, align: "right", mono: true, width: 72 },
-      { key: "state", header: "Placement", cell: (p) => <span className="secondary">{p.state}</span>, width: 120 },
-      { key: "res", header: "Resources", cell: (p) => `${formatCores(p.resources.cpus ?? 0)} · ${formatBytes(p.resources.memory ?? 0)}`, mono: true },
-      { key: "since", header: "Since", cell: (p) => <RelativeTime at={p.since} />, align: "right", width: 110 },
+      { key: "epoch", header: "Epoch", cell: (p) => p.epoch, sortValue: (p) => p.epoch, align: "right", mono: true, width: 72 },
+      { key: "state", header: "Placement", cell: (p) => <span className="secondary">{p.state}</span>, sortValue: (p) => p.state, width: 120 },
+      { key: "res", header: "Resources", cell: (p) => `${formatCores(p.resources.cpus ?? 0)} · ${formatBytes(p.resources.memory ?? 0)}`, sortValue: (p) => p.resources.cpus, sortFirst: "desc", mono: true },
+      { key: "since", header: "Since", cell: (p) => <RelativeTime at={p.since} />, sortValue: (p) => Date.parse(p.since), align: "right", width: 110 },
     );
     return c;
   }, [tenant]);

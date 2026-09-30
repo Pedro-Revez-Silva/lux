@@ -19,14 +19,20 @@ export type RunState =
   | "cancelled"
   | "lost";
 
-/** Host states luxd sets (draining is also a flag on a host in another state). */
-export type HostState = "provisioning" | "ready" | "draining" | "lost" | "terminated";
+/**
+ * Host states luxd sets (draining is also a flag on a host in another
+ * state), and launch_failed: a terminated host whose launch the provider
+ * refused (its launch outcome), shown apart from one that ran and ended.
+ */
+export type HostState = "provisioning" | "ready" | "draining" | "lost" | "terminated" | "launch_failed";
 
 export interface StateStyle {
   hue: StateHue;
   label: string;
   /** Animated dot: the thing is alive and changing. */
   live?: boolean;
+  /** Drawn as an outline in its hue: an outcome rather than a state it held. */
+  outline?: boolean;
 }
 
 const RUN_STATES: Record<RunState, StateStyle> = {
@@ -50,7 +56,13 @@ const HOST_STATES: Record<HostState, StateStyle> = {
   draining: { hue: "amber", label: "Draining", live: true },
   lost: { hue: "red", label: "Lost" },
   terminated: { hue: "neutral", label: "Terminated" },
+  launch_failed: { hue: "red", label: "Launch failed", outline: true },
 };
+
+/** The state a host row shows: launch_failed for a terminated host whose launch failed, else its state. */
+export function hostDisplayState(h: { state: string; launch?: { outcome?: string | null } | null }): string {
+  return h.state === "terminated" && h.launch?.outcome === "failed" ? "launch_failed" : h.state;
+}
 
 /** States of a Run's server (a named port, optionally with a command lux starts). */
 export type ServerState = "stopped" | "starting" | "ready" | "unreachable" | "exited";

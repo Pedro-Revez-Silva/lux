@@ -450,8 +450,10 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	}
 	epoch := r.Epoch + 1
 	placementID := ids.New(ids.Placement)
-	_, err := tx.Exec(ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, lease_expires_at)
-		VALUES ($1, $2, $3, $4, $5, 'assigned', $6, now() + $7::interval)`,
+	// needed_since: when the Run started needing this placement (placement
+	// time, GET /v1/runs); the Run no longer waits once it is assigned.
+	_, err := tx.Exec(ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources, lease_expires_at, needed_since)
+		VALUES ($1, $2, $3, $4, $5, 'assigned', $6, now() + $7::interval, (SELECT needs_host_since FROM runs WHERE id = $3))`,
 		placementID, r.TenantID, r.ID, h.ID, epoch, r.Spec.Resources,
 		// Generous first lease: pulling or building the image can be slow,
 		// and heartbeats renew it once the runner has the placement.
@@ -460,7 +462,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE runs SET current_epoch = $2, state = 'scheduled', state_reason = '', pending_input = NULL,
-			place_on = NULL, avoid_host = NULL,
+			place_on = NULL, avoid_host = NULL, needs_host_since = NULL,
 			first_scheduled_at = coalesce(first_scheduled_at, now()), updated_at = now()
 		WHERE id = $1`, r.ID, epoch); err != nil {
 		return err
@@ -586,7 +588,7 @@ func (s *Server) requestResume(ctx context.Context, tx pgx.Tx, tenantID, runID s
 	// treat its blobs as those of a terminal Run. Without input, it keeps
 	// what was pending (a migration's).
 	_, err := tx.Exec(ctx, `UPDATE runs SET state = 'resuming', state_reason = $3, pending_input = coalesce($2, pending_input), updated_at = now(),
-			exit_code = NULL, finished_at = NULL
+			exit_code = NULL, finished_at = NULL, needs_host_since = now()
 		WHERE id = $1`, runID, in, why)
 	if err != nil {
 		return err

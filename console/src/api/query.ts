@@ -1,8 +1,8 @@
 // A small polling query hook. One in-flight request at a time, refetch on an
-// interval (paused while the tab is hidden) and on invalidate(), cancelled on
-// unmount or when the key changes. No cache: pages are short-lived and the
-// API is local.
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+// interval (paused while the tab is hidden, skipped while a fetch is in
+// flight) and on invalidate(), cancelled on unmount or when the key changes.
+// No cache: pages are short-lived and the API is local.
+import { useCallback, useEffect, useRef, useState } from "react";
 import { errorText } from "./client.ts";
 import { useLiveStatus } from "./live.ts";
 
@@ -62,6 +62,7 @@ export function useQuery<T>(key: string, fn: (signal: AbortSignal) => Promise<T>
   // and whether one is owed once the in-flight fetch lands (rather than
   // aborting it, so a burst of events cannot starve a slow request).
   const last = useRef(0);
+  const lastDur = useRef(0);
   const pending = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inFlight = useRef(false);
   const owed = useRef(false);
@@ -72,7 +73,8 @@ export function useQuery<T>(key: string, fn: (signal: AbortSignal) => Promise<T>
     ctrl.current = c;
     if (pending.current != null) clearTimeout(pending.current);
     pending.current = null;
-    last.current = Date.now();
+    const started = Date.now();
+    last.current = started;
     owed.current = false;
     inFlight.current = true;
     setFetching(true);
@@ -86,6 +88,7 @@ export function useQuery<T>(key: string, fn: (signal: AbortSignal) => Promise<T>
       setError(errorText(e));
     } finally {
       if (!c.signal.aborted) {
+        lastDur.current = Date.now() - started;
         inFlight.current = false;
         setLoading(false);
         setFetching(false);
@@ -105,7 +108,9 @@ export function useQuery<T>(key: string, fn: (signal: AbortSignal) => Promise<T>
         pending.current = null;
         void run();
       },
-      Math.max(0, last.current + COALESCE_MS - Date.now()),
+      // A slow query waits twice its own duration from its last start, so a
+      // stream of events keeps it at most half busy.
+      Math.max(0, last.current + Math.max(COALESCE_MS, 2 * lastDur.current) - Date.now()),
     );
   }, [run]);
 
@@ -142,8 +147,13 @@ export function useQuery<T>(key: string, fn: (signal: AbortSignal) => Promise<T>
   useEffect(() => {
     if (!enabled) return;
     let timer: ReturnType<typeof setInterval> | undefined;
+    // A tick while a fetch is in flight is skipped, not an abort: a request
+    // slower than the interval still lands.
+    const tick = () => {
+      if (!inFlight.current) void run();
+    };
     const start = () => {
-      if (interval > 0 && timer == null) timer = setInterval(() => void run(), interval);
+      if (interval > 0 && timer == null) timer = setInterval(tick, interval);
     };
     const stop = () => {
       if (timer != null) clearInterval(timer);
@@ -152,7 +162,7 @@ export function useQuery<T>(key: string, fn: (signal: AbortSignal) => Promise<T>
     const onVis = () => {
       if (document.hidden) stop();
       else {
-        void run();
+        tick();
         start();
       }
     };
@@ -167,37 +177,5 @@ export function useQuery<T>(key: string, fn: (signal: AbortSignal) => Promise<T>
   return { data, error, loading, fetching, refetch: run, setData };
 }
 
-/** One shared clock per interval, so many cells ticking cost one timer. */
-const clocks = new Map<number, { now: number; listeners: Set<() => void>; timer?: ReturnType<typeof setInterval> }>();
-
-function clock(ms: number) {
-  let c = clocks.get(ms);
-  if (!c) {
-    c = { now: Date.now(), listeners: new Set() };
-    clocks.set(ms, c);
-  }
-  return c;
-}
-
-/** Re-render every `ms` so relative times stay fresh. Returns Date.now(). */
-export function useNow(ms = 10_000): number {
-  const c = clock(ms);
-  const subscribe = useCallback(
-    (cb: () => void) => {
-      if (c.listeners.size === 0) {
-        c.now = Date.now();
-        c.timer = setInterval(() => {
-          c.now = Date.now();
-          c.listeners.forEach((l) => l());
-        }, ms);
-      }
-      c.listeners.add(cb);
-      return () => {
-        c.listeners.delete(cb);
-        if (c.listeners.size === 0) clearInterval(c.timer);
-      };
-    },
-    [c, ms],
-  );
-  return useSyncExternalStore(subscribe, () => c.now);
-}
+// The shared clock lives in the design system, beside RelativeTime.
+export { useNow } from "@lux/design-system";

@@ -488,12 +488,28 @@ type EventPage struct {
 type lifecycleEventsOutput struct {
 	Body struct {
 		Events []LifecycleEvent `json:"events"`
+		Next   string           `json:"next,omitempty" doc:"Paged lists (sort or a cursor): the next page's cursor (?next=)."`
+		Prev   string           `json:"prev,omitempty" doc:"Paged lists: the previous page's cursor (?prev=)."`
+		Page   string           `json:"page,omitempty" doc:"Paged lists: this page's own cursor (?at=), to read it again in place."`
 	} `nameHint:"LifecycleEventList"`
+}
+
+// eventSortKeys: the sort keys of a pool's or host's events. time is when
+// it (first) happened; detail is its type, then its data as JSON text (a
+// grouping by kind, not the order of a console's summary). It is one text
+// value for the keyset, in byte order: chr(1) sorts below every character
+// of a type, so it orders as (type, data::text).
+var eventSortKeys = map[string]sortKey{
+	"time":   {expr: `created_at`, cast: "timestamptz", first: "desc", notNull: true},
+	"id":     {expr: `id`, cast: "bigint", first: "desc", notNull: true},
+	"type":   {expr: `type`, cast: "text", first: "asc", notNull: true},
+	"detail": {expr: `(type || chr(1) || data::text) COLLATE "C"`, cast: "text", first: "asc", notNull: true},
 }
 
 type listPoolEventsInput struct {
 	TenantQuery
 	EventPage
+	PageQuery
 	Name  string `path:"name" doc:"The pool's name."`
 	Owner string `query:"owner" enum:"platform,tenant" doc:"Which pool of that name: the platform's, or a tenant's (the caller's, or with ?tenant= that tenant's). Omitted: a tenant's own pool, else the platform's; for an operator not narrowed with ?tenant=, a name two pools share is ambiguous (409)."`
 }
@@ -502,6 +518,7 @@ type listHostEventsInput struct {
 	HostPath
 	TenantQuery
 	EventPage
+	PageQuery
 }
 
 // seesPlatformEvents: platform pools' and hosts' events name other
@@ -511,43 +528,56 @@ func (p Principal) seesPlatformEvents() bool { return p.Operator && p.TenantID =
 
 func (s *Server) listPoolEvents(ctx context.Context, in *listPoolEventsInput) (*lifecycleEventsOutput, error) {
 	p := principal(ctx)
-	var poolID string
+	var pool namedPool
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		// Unless owner says which, a tenant's own pool shadows the
-		// platform's of the same name, as for its Runs. An operator not
-		// narrowed to a tenant sees every tenant's pool: a name two of
-		// them share is ambiguous.
-		rows, err := tx.Query(ctx, `SELECT id, tenant_id IS NULL FROM pools
-			WHERE name = $2
-			  AND CASE $3 WHEN 'platform' THEN tenant_id IS NULL
-			              WHEN 'tenant' THEN tenant_id IS NOT NULL AND ($1 = '' OR tenant_id = $1)
-			              ELSE $1 = '' OR tenant_id = $1 OR tenant_id IS NULL END
-			ORDER BY tenant_id NULLS LAST, retired LIMIT 2`, p.TenantID, in.Name, in.Owner)
-		if err != nil {
+		var err error
+		if pool, err = resolveNamedPool(ctx, tx, p, in.Name, in.Owner); err != nil {
 			return err
 		}
-		type found struct {
-			ID       string
-			Platform bool
-		}
-		pools, err := pgx.CollectRows(rows, pgx.RowToStructByPos[found])
-		switch {
-		case err != nil:
-			return err
-		case len(pools) == 0:
-			return errNotFound
-		case len(pools) > 1 && p.TenantID == "":
-			return errf(http.StatusConflict, "ambiguous", "more than one pool is named %s: use ?owner=platform, or ?tenant=", in.Name)
-		case pools[0].Platform && !p.seesPlatformEvents():
+		if pool.Platform && !p.seesPlatformEvents() {
 			return errf(http.StatusForbidden, "forbidden", "a platform pool's events are the operators'")
 		}
-		poolID = pools[0].ID
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return s.lifecycleEvents(ctx, p, poolEvents, poolID, in.EventPage)
+	return s.lifecycleEvents(ctx, p, poolEvents, pool.ID, in.EventPage, in.PageQuery)
+}
+
+// namedPool is the pool a request names: its immutable id, and whose it is.
+type namedPool struct {
+	ID       string
+	Platform bool
+	TenantID *string
+}
+
+// resolveNamedPool is the pool a request names, by name and owner, as the
+// principal sees it: unless owner says which, a tenant's own pool shadows
+// the platform's of the same name, as for its Runs; an operator not
+// narrowed to a tenant sees every tenant's pool, and a name two of them
+// share is ambiguous. A live pool wins over a retired one of the name.
+// (pools_name is unique per owner and name, so today there is at most one.)
+func resolveNamedPool(ctx context.Context, tx pgx.Tx, p Principal, name, owner string) (namedPool, error) {
+	rows, err := tx.Query(ctx, `SELECT id, tenant_id IS NULL, tenant_id FROM pools
+		WHERE name = $2
+		  AND CASE $3 WHEN 'platform' THEN tenant_id IS NULL
+		              WHEN 'tenant' THEN tenant_id IS NOT NULL AND ($1 = '' OR tenant_id = $1)
+		              ELSE $1 = '' OR tenant_id = $1 OR tenant_id IS NULL END
+		ORDER BY tenant_id NULLS LAST, retired LIMIT 2`, p.TenantID, name, owner)
+	if err != nil {
+		return namedPool{}, err
+	}
+	pools, err := pgx.CollectRows(rows, pgx.RowToStructByPos[namedPool])
+	switch {
+	case err != nil:
+		return namedPool{}, err
+	case len(pools) == 0:
+		return namedPool{}, errNotFound
+	case len(pools) > 1 && p.TenantID == "":
+		return namedPool{}, errf(http.StatusConflict, "ambiguous", "more than one pool is named %s: use ?owner=platform, or ?tenant=", name)
+	}
+	return pools[0], nil
 }
 
 func (s *Server) listHostEvents(ctx context.Context, in *listHostEventsInput) (*lifecycleEventsOutput, error) {
@@ -571,13 +601,27 @@ func (s *Server) listHostEvents(ctx context.Context, in *listHostEventsInput) (*
 	if err != nil {
 		return nil, err
 	}
-	return s.lifecycleEvents(ctx, p, hostEvents, hostID, in.EventPage)
+	return s.lifecycleEvents(ctx, p, hostEvents, hostID, in.EventPage, in.PageQuery)
 }
 
 // lifecycleEvents reads a page of an owner's events, newest first. A
 // tenant, or an operator narrowed to one, reads under that tenant's scope:
 // row-level security holds even if the checks before are wrong.
-func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable, owner string, page EventPage) (*lifecycleEventsOutput, error) {
+func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable, owner string, page EventPage, pq PageQuery) (*lifecycleEventsOutput, error) {
+	pg, paged, err := resolvePaging(pq, eventSortKeys, "time", page.Limit, 50, 1000)
+	if err != nil {
+		return nil, err
+	}
+	if paged {
+		if page.Before != "" || page.After != "" {
+			return nil, errf(http.StatusBadRequest, "bad_request", "before and after (event ids) do not go with sort and cursors")
+		}
+		pg.idCast = "bigint"
+		if err := pg.checkIDCast(); err != nil {
+			return nil, err
+		}
+		return s.lifecycleEventsPage(ctx, p, t, owner, pg)
+	}
 	limit := 100
 	if n, err := strconv.Atoi(page.Limit); err == nil && n > 0 && n <= 1000 {
 		limit = n
@@ -599,7 +643,7 @@ func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable,
 	sc := p.scope()
 	out := &lifecycleEventsOutput{}
 	out.Body.Events = []LifecycleEvent{}
-	err := s.db.Tx(ctx, sc, func(tx pgx.Tx) error {
+	err = s.db.Tx(ctx, sc, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, type, data, count, created_at, last_at FROM `+t.table+`
 			WHERE `+t.owner+` = $1 AND ($2::bigint IS NULL OR id < $2) AND ($4::bigint IS NULL OR id > $4)
 			ORDER BY id DESC LIMIT $3`, owner, before, limit, after)
@@ -617,6 +661,70 @@ func (s *Server) lifecycleEvents(ctx context.Context, p Principal, t eventTable,
 			out.Body.Events = append(out.Body.Events, ev)
 			return nil
 		})
+		return err
+	})
+	return out, err
+}
+
+// lifecycleEventsPage is a page of an owner's events in a sort key's
+// order, keyed by (value, id), under the same scope as lifecycleEvents.
+func (s *Server) lifecycleEventsPage(ctx context.Context, p Principal, t eventTable, owner string, pg *paging) (*lifecycleEventsOutput, error) {
+	out := &lifecycleEventsOutput{}
+	out.Body.Events = []LifecycleEvent{}
+	err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
+		// read reads the page's events and keys, one past its end; with
+		// ahead, whether any event precedes ahead (existence only, unordered).
+		read := func(ahead *keyRow) ([]LifecycleEvent, []keyRow, error) {
+			q, from, expr := pg.keySource(t.table, "", []any{owner})
+			where, limit := t.owner+` = $1`, pg.limit+1
+			if ahead != nil {
+				where += " AND " + pg.beforeWhere(expr, "id", *ahead, q.arg)
+				limit = 1
+			} else {
+				if pg.cursor != nil {
+					where += " AND " + pg.where(expr, "id", q.arg)
+				}
+				where += " ORDER BY " + pg.order(expr, "id", pg.mode == "before")
+			}
+			rows, err := tx.Query(ctx, `SELECT id, type, data, count, created_at, last_at, id::text AS key_id, `+expr+`::text AS key_value FROM `+from+`
+				WHERE `+where+` LIMIT `+strconv.Itoa(limit), q.list...)
+			if err != nil {
+				return nil, nil, err
+			}
+			var evs []LifecycleEvent
+			var keys []keyRow
+			var e LifecycleEvent
+			var last time.Time
+			var k keyRow
+			_, err = pgx.ForEachRow(rows, []any{&e.ID, &e.Type, &e.Data, &e.Count, &e.Time, &last, &k.ID, &k.V}, func() error {
+				ev := e
+				if ev.Count > 1 {
+					at := last
+					ev.LastTime = &at
+				}
+				evs, keys = append(evs, ev), append(keys, k)
+				return nil
+			})
+			return evs, keys, err
+		}
+		evs, keys, err := read(nil)
+		if err != nil {
+			return err
+		}
+		if len(evs) > pg.limit {
+			evs = evs[:pg.limit]
+		}
+		if pg.mode == "before" {
+			slices.Reverse(evs)
+		}
+		_, next, prev, self, err := pg.pageLinks(keys, "", func(first keyRow) (bool, error) {
+			if pg.cursor == nil {
+				return false, nil
+			}
+			ahead, _, err := read(&first)
+			return len(ahead) > 0, err
+		})
+		out.Body.Events, out.Body.Next, out.Body.Prev, out.Body.Page = evs, next, prev, self
 		return err
 	})
 	return out, err

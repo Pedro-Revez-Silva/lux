@@ -1,7 +1,7 @@
 // Small pieces shared by pages: error/loading blocks, links, the runs table
 // columns, chart series builders and lookups.
 import { useMemo, useRef, type ReactNode } from "react";
-import { Button, CostFigure, EmptyState, formatDuration, formatPercent, formatRelative, formatTimestamp, formatUnit, IdChip, KeyValue, LinkButton, Skeleton, SkeletonLines, StatePill, Tooltip, type ChartMark, type Column, type LinkButtonProps, type Unit } from "@lux/design-system";
+import { Button, CostFigure, DurationCell, EmptyState, formatDuration, formatPercent, formatUnit, IdChip, KeyValue, LinkButton, RelativeTime, RUN_STATE_LIST, Skeleton, SkeletonLines, StatePill, type ChartMark, type Column, type LinkButtonProps, type RunState, type Unit } from "@lux/design-system";
 import { api, isRunActive, useNow, useQuery, type QueryState, type Run, type Sample } from "../../api/index.ts";
 import { Link, linkTo, useSearch } from "../router.tsx";
 
@@ -138,42 +138,69 @@ export function StateCell({ kind, state, activity, reason, children }: { kind: "
   );
 }
 
-/** "3m ago" with the timestamp in a tooltip; re-renders itself as time passes. */
-export function RelativeTime({ at }: { at: string | null | undefined }) {
-  const now = useNow();
-  if (!at) return DASH;
-  return (
-    <Tooltip content={formatTimestamp(at)}>
-      <span>{formatRelative(at, now)}</span>
-    </Tooltip>
-  );
-}
-
 /**
- * Shared columns of a runs table. The name leads; the id is a quiet mono
- * column beside it. Name and state share the flexible width.
+ * Shared columns of a runs table. The name leads and takes the width left
+ * (at least the table's 140px), so an operator's list fits 1000px; every
+ * other width is fixed: State fits its widest pill, each header its text
+ * and sort arrow. Id, Adapter and Placements drop first when the container
+ * is narrow. Every column sorts: the loaded rows by
+ * default, or, with server, the server's order (the keys are GET /v1/runs'
+ * sort keys).
  */
-export function runColumns({ tenant, host = true, adapter = true, cost = false }: { tenant: boolean; host?: boolean; adapter?: boolean; cost?: boolean }): Column<Run>[] {
+export function runColumns({ tenant, host = true, adapter = true, cost = false, placement = false }: { tenant: boolean; host?: boolean; adapter?: boolean; cost?: boolean; placement?: boolean }): Column<Run>[] {
   const c: Column<Run>[] = [
-    { key: "name", header: "Run", cell: (r) => <RunNameLink id={r.id} name={r.name} />, sortValue: (r) => r.name || r.id, lead: true, width: "22%" },
-    { key: "id", header: "Id", cell: (r) => <RunLink id={r.id} />, sortValue: (r) => r.id, mono: true, width: 200, optional: true },
+    { key: "name", header: "Run", cell: (r) => <RunNameLink id={r.id} name={r.name} />, sortValue: (r) => r.name || r.id, sortKind: "text", lead: true },
+    { key: "id", header: "Id", cell: (r) => <RunLink id={r.id} />, sortValue: (r) => r.id, sortKind: "text", mono: true, width: 170, optional: true },
   ];
-  if (tenant) c.push({ key: "tenant", header: "Tenant", cell: (r) => r.tenant, sortValue: (r) => r.tenant, width: 120 });
-  c.push({ key: "state", header: "State", cell: (r) => <StateCell kind="run" state={r.state} activity={r.activity} reason={r.stateReason} />, sortValue: (r) => r.state });
-  if (host) c.push({ key: "host", header: "Host", cell: (r) => (r.hostId ? <HostLink id={r.hostId} name={r.host} /> : DASH), sortValue: (r) => r.host, width: 150 });
-  c.push({ key: "pool", header: "Pool", cell: (r) => r.pool || DASH, sortValue: (r) => r.pool });
-  if (adapter) c.push({ key: "adapter", header: "Adapter", cell: (r) => <span className="secondary">{r.spec.workload.adapter}</span>, sortValue: (r) => r.spec.workload.adapter, width: 110, optional: true });
+  if (tenant) c.push({ key: "tenant", header: "Tenant", cell: (r) => r.tenant, sortValue: (r) => r.tenant, sortKind: "text", width: 96 });
+  c.push({ key: "state", header: "State", cell: (r) => <StateCell kind="run" state={r.state} activity={r.activity} reason={r.stateReason} />, sortValue: (r) => RUN_STATE_LIST.indexOf(r.state as RunState), sortFirst: "asc", sortKind: "text", width: 130 });
+  if (host) c.push({ key: "host", header: "Host", cell: (r) => (r.hostId ? <HostLink id={r.hostId} name={r.host} /> : DASH), sortValue: (r) => r.host, sortKind: "text", width: 110 });
+  c.push({ key: "pool", header: "Pool", cell: (r) => r.pool || DASH, sortValue: (r) => r.pool, sortKind: "text", width: 90 });
+  if (adapter) c.push({ key: "adapter", header: "Adapter", cell: (r) => <span className="secondary">{r.spec.workload.adapter}</span>, sortValue: (r) => r.spec.workload.adapter, sortKind: "text", width: 104, optional: true });
   c.push(
-    { key: "runtime", header: "Runtime", cell: (r) => <RuntimeCell run={r} />, sortValue: (r) => r.runtimeSeconds, align: "right", mono: true, width: 90 },
+    { key: "runtime", header: "Runtime", cell: (r) => <RuntimeCell run={r} />, sortValue: (r) => (r.runtimeSince || r.runtimeSeconds ? r.runtimeSeconds : null), sortKind: "number", align: "right", mono: true, width: 96 },
     // The API field is epoch: it goes up by one per placement. A title, not
     // a Tooltip: table headers clip overflow.
-    { key: "epoch", header: <span title="Times this Run has been placed on a host">Placements</span>, cell: (r) => r.epoch, sortValue: (r) => r.epoch, align: "right", mono: true, width: 116, optional: true },
+    { key: "placements", header: <span title="Times this Run has been placed on a host">Placements</span>, label: "Placements", cell: (r) => r.epoch, sortValue: (r) => r.epoch, sortKind: "number", align: "right", mono: true, width: 112, optional: true },
   );
-  if (cost) c.push({ key: "cost", header: "Cost", cell: (r) => <RunCostCell run={r} />, sortValue: (r) => costSortValue(r), align: "right", mono: true, width: 120 });
-  c.push(
-    { key: "created", header: "Created", cell: (r) => <RelativeTime at={r.createdAt} />, sortValue: (r) => Date.parse(r.createdAt), align: "right", width: 104 },
-  );
+  if (placement)
+    c.push({
+      key: "placement",
+      header: <span title="Getting the Run onto a host and started, summed over its placements">Placement time</span>,
+      label: "Placement time",
+      cell: (r) => <PlacementTimeCell run={r} />,
+      sortValue: (r) => r.placementSeconds,
+      sortKind: "number",
+      align: "right",
+      mono: true,
+      width: 144,
+    });
+  if (cost) c.push({ key: "cost", header: "Cost", cell: (r) => <RunCostCell run={r} />, sortValue: (r) => costSortValue(r), sortKind: "number", align: "right", mono: true, width: 96 });
+  c.push({ key: "created", header: "Created", cell: (r) => <RelativeTime at={r.createdAt} label="Created" />, sortValue: (r) => Date.parse(r.createdAt), sortKind: "time", align: "right", width: 96 });
   return c;
+}
+
+/** Placement time over this many seconds reads in the warn tone. */
+const SLOW_PLACEMENT_S = 300;
+
+/**
+ * Placement time (placementSeconds): waiting for a host plus starting on
+ * it, over every placement. A Run still being placed counts up with "…";
+ * the Tooltip splits the two.
+ */
+export function PlacementTimeCell({ run }: { run: Run }) {
+  const total = Math.max(0, run.placementSeconds + useExtrapolated(run, !!run.placing));
+  const n = Math.max(1, run.epoch + (run.placing && !run.hostId ? 1 : 0));
+  const tip = [
+    `${n} placement${n === 1 ? "" : "s"}`,
+    `waiting for a host ${formatDuration(Math.max(0, run.placementWaitSeconds))}`,
+    `starting ${formatDuration(Math.max(0, run.placementStartSeconds))}`,
+    run.placing ? "so far: still being placed" : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  if (!run.placing && total === 0 && run.epoch === 0) return DASH;
+  return <DurationCell seconds={total} live={run.placing} ellipsis={run.placing} warn={total > SLOW_PLACEMENT_S} tip={tip} />;
 }
 
 // Extrapolate from the first render of each response object, not from
@@ -186,20 +213,30 @@ const runSeenAt = new WeakMap<Run, number>();
 const RUNTIME_EXTRAPOLATE_MS = 60_000;
 
 /**
- * Time the Run's placements have spent running, summed (runtimeSeconds);
- * ticks on the shared clock while a placement runs (runtimeSince). An en
- * dash for a Run that has never run.
+ * Seconds to add to a figure of this response while it is still growing
+ * (growing): the time since the response was first rendered, up to
+ * RUNTIME_EXTRAPOLATE_MS. Re-renders on the shared clock.
  */
-function RuntimeCell({ run }: { run: Run }) {
-  useNow(); // re-render on the shared clock
+function useExtrapolated(run: Run, growing: boolean): number {
+  useNow();
   const now = Date.now();
   let seen = runSeenAt.get(run);
   if (seen === undefined) {
     seen = now;
     runSeenAt.set(run, now);
   }
+  return growing ? Math.min(now - seen, RUNTIME_EXTRAPOLATE_MS) / 1000 : 0;
+}
+
+/**
+ * Time the Run's placements have spent running, summed (runtimeSeconds);
+ * ticks on the shared clock while a placement runs (runtimeSince). An en
+ * dash for a Run that has never run; never below zero.
+ */
+export function RuntimeCell({ run }: { run: Run }) {
+  const grow = useExtrapolated(run, !!run.runtimeSince);
   if (!run.runtimeSince && !run.runtimeSeconds) return DASH;
-  const secs = run.runtimeSeconds + (run.runtimeSince ? Math.min(now - seen, RUNTIME_EXTRAPOLATE_MS) / 1000 : 0);
+  const secs = Math.max(0, run.runtimeSeconds + grow);
   return <span>{formatDuration(secs >= 1 ? Math.floor(secs) : secs)}</span>;
 }
 
@@ -208,7 +245,7 @@ function RunCostCell({ run }: { run: Run }) {
   return <CostFigure status={run.cost?.status ?? "pending"} totals={run.cost?.totals} />;
 }
 
-/** Sort by the first currency's total; rows without one sort together. */
+/** Sort by the first currency's total; rows without one sort last. */
 function costSortValue(r: Run): number | null {
   const t = r.cost?.totals[0];
   // Ordering only: the displayed figure is formatted from the string.
@@ -282,9 +319,13 @@ export function changeMarks(samples: Sample[] | undefined, key: (s: Sample) => s
   return out;
 }
 
-/** "3.5 / 8 cores" style ratio text. */
-function ratioText(used: number | null | undefined, total: number | null | undefined, unit: Unit): string {
-  return `${formatUnit(used, unit)} / ${formatUnit(total, unit)}`;
+/** "3.5 / 8 cores": the unit once when both figures carry the same one ("4 GiB / 16 GiB" otherwise stays). */
+export function ratioText(used: number | null | undefined, total: number | null | undefined, unit: Unit): string {
+  const u = formatUnit(used, unit);
+  const t = formatUnit(total, unit);
+  const [uNum, uUnit] = u.split(" ");
+  const tUnit = t.split(" ")[1];
+  return uUnit && uUnit === tUnit ? `${uNum} / ${t}` : `${u} / ${t}`;
 }
 
 /** Thin allocation bar: used over total, with the ratio as its label. */
