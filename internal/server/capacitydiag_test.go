@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -127,9 +129,11 @@ func TestHostDecisionAppendsOnlyOnChange(t *testing.T) {
 	if len(got) != 2 || got[1]["decision"] != "reserved" {
 		t.Fatalf("decisions %+v, want blocked then reserved", got)
 	}
-	// Only hosts the pass considered get decisions: here the one start launched on the first pass.
-	if n := queryOne[int](t, s, `SELECT count(*) FROM host_events WHERE type=$1 AND host_id <> 'full'`, evCapacityDecision); n != 1 {
-		t.Fatalf("%d decisions on other hosts, want 1 (the start)", n)
+	// The start launched on the first pass was reserved for the Run until
+	// "full" took it back; then it is idle.
+	start := hostDecisions(t, s, p.hosts[0])
+	if len(start) != 2 || start[0]["decision"] != "reserved" || start[1]["decision"] != "idle" {
+		t.Fatalf("start decisions %+v, want reserved then idle", start)
 	}
 }
 
@@ -213,5 +217,52 @@ func TestConcurrentHostDecisions(t *testing.T) {
 	}
 	if n := len(hostDecisions(t, s, "h1")); n != 3 {
 		t.Fatalf("a reversion to blocked must append: %d decisions", n)
+	}
+}
+
+// Once no waiting work considers a host, its latest decision becomes idle,
+// written once.
+func TestHostDecisionIdleOnceDemandClears(t *testing.T) {
+	s, pl, p := planningFixture(t, 1)
+	observePlanningHost(t, s, "full", "ready", proto.Capacity{CPUs: 1}, map[string]string{})
+	livePlacement(t, s, "full", `{"cpus":1}`)
+	planningTick(t, s, pl, p, false)
+	execSQL(t, s, context.Background(), `UPDATE runs SET state='cancelled' WHERE id='r0'`)
+	for range 3 {
+		planningTick(t, s, pl, p, false)
+	}
+	got := hostDecisions(t, s, "full")
+	if len(got) != 2 || got[0]["decision"] != "blocked" || !reflect.DeepEqual(got[1], map[string]any{"pool": "burst", "stage": "ready", "decision": "idle"}) {
+		t.Fatalf("decisions %+v, want blocked then one idle", got)
+	}
+	// The start launched for the Run was never decided on: nothing to retract.
+	if got := hostDecisions(t, s, p.hosts[0]); len(got) != 0 {
+		t.Fatalf("start decisions %+v", got)
+	}
+}
+
+// A pass records at most maxHostDecisions hosts; the window rotates, so every
+// host of a larger pool gets its decision within two passes.
+func TestHostDecisionWindowRotates(t *testing.T) {
+	s, pl, p := planningFixture(t, 1)
+	ctx := context.Background()
+	for i := range 40 {
+		id := fmt.Sprintf("full-%02d", i)
+		observePlanningHost(t, s, id, "ready", proto.Capacity{CPUs: 1}, map[string]string{})
+		livePlacement(t, s, id, `{"cpus":1}`)
+	}
+	// Enough hosts are starting that no launch adds a 41st host.
+	execSQL(t, s, ctx, `UPDATE runs SET spec='{"resources":{"cpus":1},"placement":{"pool":"burst"}}'`)
+	pl.Max = 40
+	counts := []int{}
+	for range 2 {
+		planningTick(t, s, pl, p, false)
+		counts = append(counts, queryOne[int](t, s, `SELECT count(*) FROM host_events WHERE type=$1`, evCapacityDecision))
+	}
+	if counts[0] != maxHostDecisions || counts[1] != 40 {
+		t.Fatalf("decisions after each pass %v, want [32 40]", counts)
+	}
+	if n := queryOne[int](t, s, `SELECT count(DISTINCT host_id) FROM host_events WHERE type=$1`, evCapacityDecision); n != 40 {
+		t.Fatalf("%d hosts decided, want 40", n)
 	}
 }

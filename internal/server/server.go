@@ -132,6 +132,9 @@ type Server struct {
 	// lastAliveCheck: when the provisioner last asked providers which
 	// hosts still exist.
 	lastAliveCheck time.Time
+	// decisionCursor: per pool id, the last host whose capacity decision
+	// the provisioner recorded (recordHostDecisions); provisioner goroutine only.
+	decisionCursor map[string]string
 	// deployment identifies this lux database in provider tags, so two
 	// deployments sharing a cloud account never take each other's
 	// instances for orphans (read by the provisioner).

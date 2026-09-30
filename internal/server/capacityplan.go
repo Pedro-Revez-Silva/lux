@@ -64,6 +64,31 @@ func (s *Server) ineligibleReadyHosts(ctx context.Context, tx pgx.Tx, pl poolRow
 	return err
 }
 
+// idleDecisions adds decision "idle" for the pool's live hosts this plan did
+// not consider whose latest decision says otherwise, so a verdict from past
+// demand does not stay the latest. The lookup reads each host's latest
+// events through its (host_id, id) index, bounded like hostDecisionEvent's.
+func (s *Server) idleDecisions(ctx context.Context, tx pgx.Tx, pl poolRow, plan *capacityPlan) error {
+	rows, err := tx.Query(ctx, `SELECT h.id, CASE h.state WHEN 'provisioning' THEN 'starting' ELSE h.state END FROM hosts h
+		WHERE h.pool_id = $1 AND h.tenant_id IS NOT DISTINCT FROM $2::text AND h.state <> 'terminated'
+		  AND (SELECT l.data->>'decision' FROM (SELECT e.id, e.type, e.data FROM host_events e
+				WHERE e.host_id = h.id AND (e.host_id, e.id) <= (h.id, 9223372036854775807)
+				ORDER BY e.host_id DESC, e.id DESC LIMIT $4) l
+			WHERE l.type = $3 ORDER BY l.id DESC LIMIT 1) <> 'idle'`,
+		pl.ID, pl.TenantID, evCapacityDecision, decisionWindow)
+	if err != nil {
+		return err
+	}
+	type stale struct{ ID, Stage string }
+	hosts, err := pgx.CollectRows(rows, pgx.RowToStructByPos[stale])
+	for _, h := range hosts {
+		if _, considered := plan.hostDecisions[h.ID]; !considered {
+			plan.hostDecisions[h.ID] = map[string]any{"stage": h.Stage, "decision": "idle"}
+		}
+	}
+	return err
+}
+
 type planDeficit struct {
 	Run      string        `json:"run"`
 	Host     string        `json:"host,omitempty"`
@@ -398,6 +423,9 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow) (capac
 		if _, blocked := blockedHosts[id]; !blocked {
 			plan.hostDecisions[id] = map[string]any{"stage": stage, "decision": "reserved"}
 		}
+	}
+	if err := s.idleDecisions(ctx, tx, pl, &plan); err != nil {
+		return plan, err
 	}
 	// Unknown capacity bootstraps one host; a stale expectation probes with
 	// one. Either waits for any current-template start to register first, and

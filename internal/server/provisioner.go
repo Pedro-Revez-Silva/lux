@@ -332,15 +332,28 @@ const evCapacityDecision = "host.capacity_decision"
 // maxHostDecisions bounds host-decision transactions per pool pass.
 const maxHostDecisions = 32
 
+// decisionWindow is how many of a host's latest events the decision lookups
+// read: a decision older than that is re-recorded once, which is still accurate.
+const decisionWindow = 4 * foldWindow
+
 // recordHostDecisions appends a host's capacity decision only when it differs
 // from that host's latest one. Each host uses its own transaction after the
 // planning transaction commits, so no row lock is held. The exclusive stream
 // lock precedes the read, which keeps concurrent writers from both appending
 // the same change.
+//
+// A pass records at most maxHostDecisions hosts, in id order starting after
+// the last host the previous pass of this pool recorded, wrapping around, so
+// on a larger pool every host is recorded within a few passes.
 func (s *Server) recordHostDecisions(ctx context.Context, pl poolRow, decisions map[string]map[string]any) {
 	hosts := slices.Sorted(maps.Keys(decisions))
 	if len(hosts) > maxHostDecisions {
-		hosts = hosts[:maxHostDecisions]
+		start, _ := slices.BinarySearch(hosts, s.decisionCursor[pl.ID]+"\x00")
+		hosts = slices.Concat(hosts[start:], hosts[:start])[:maxHostDecisions]
+		if s.decisionCursor == nil {
+			s.decisionCursor = map[string]string{}
+		}
+		s.decisionCursor[pl.ID] = hosts[len(hosts)-1]
 	}
 	for _, id := range hosts {
 		data := maps.Clone(decisions[id])
@@ -362,7 +375,7 @@ func hostDecisionEvent(ctx context.Context, tx pgx.Tx, hostID string, data map[s
 	var same bool
 	err := tx.QueryRow(ctx, `SELECT data = $3::jsonb FROM (SELECT id, type, data FROM host_events
 			WHERE host_id = $1 ORDER BY host_id DESC, id DESC LIMIT $4) latest
-		WHERE type = $2 ORDER BY id DESC LIMIT 1`, hostID, evCapacityDecision, data, 4*foldWindow).Scan(&same)
+		WHERE type = $2 ORDER BY id DESC LIMIT 1`, hostID, evCapacityDecision, data, decisionWindow).Scan(&same)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}

@@ -155,13 +155,18 @@ containers; a label mismatch is `required labels do not match`, without
 the label values).
 
 **`host.capacity_decision`** is the planner's verdict on one actual host,
-written only when it differs from that host's previous one (at most 32
-hosts per pool pass): `pool`; `stage` (`ready` or `starting`); `decision`
+written only when it differs from that host's previous one: `pool`;
+`stage` (`ready` or `starting`); `decision`
 `reserved` (it holds simulated Runs and every Run tried on it fit),
 `exhausted` (it holds some, and at least one other Run did not fit),
-`blocked` (it holds none) or `ineligible` (with
+`blocked` (it holds none), `idle` (no waiting Run considered it this
+pass, after an earlier decision that was not `idle`) or `ineligible` (with
 `reason`, as above); and `blockers` for `exhausted` and `blocked`: those of
-the first Run that did not fit, in queue order.
+the first Run that did not fit, in queue order. A pass records at most 32
+hosts per pool, in host id order starting after the last host the previous
+pass recorded and wrapping around, so on a larger pool each host's
+decision lands within a few passes (after a luxd restart the rotation
+starts again from the first id).
 
 `pool.placement` and `host.placement_assigned` carry the Run's requested
 `resources` (`cpus`, `memory` and `disk` in bytes, `pids`).
