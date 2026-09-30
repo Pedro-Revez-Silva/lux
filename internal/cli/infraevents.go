@@ -100,7 +100,16 @@ func eventLine(e server.LifecycleEvent) string {
 			line += capacityPlanText(d)
 		}
 	case "pool.scale_blocked":
-		line = fmt.Sprintf("no host launched: %s waiting, had %s, max %s", s("waiting"), s("total"), s("max")) + capacityPlanText(d)
+		line = "no host launched: "
+		switch s("cause") {
+		case "max":
+			line += fmt.Sprintf("at max %s (%s more wanted); ", s("max"), s("wanted"))
+		case "quota":
+			line += fmt.Sprintf("tenant host quota reached (%s more wanted); ", s("wanted"))
+		case "no_fit":
+			line += "no new host fits the unmet runs; "
+		}
+		line += fmt.Sprintf("%s waiting, had %s, max %s", s("waiting"), s("total"), s("max")) + capacityPlanText(d)
 	case "host.capacity_decision":
 		line = fmt.Sprintf("%s (%s) in pool %s", s("decision"), strings.ReplaceAll(s("stage"), "_", " "), s("pool"))
 		if b := blockersText(d["blockers"]); b != "" {

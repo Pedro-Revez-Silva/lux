@@ -131,6 +131,23 @@ func TestEventLineCapacity(t *testing.T) {
 			"no host launched: 1 waiting, had 0, max 2; plan: 0 ready, 0 starting, 0 planned, 1 unmet, 0 blocked; " +
 				"new host cpus 2, memory unlimited, disk unlimited, runs unlimited from 1 observation(s); " +
 				"deficits: r1 new host [cpus requested 4, used 0, capacity 2, available 2]"},
+		{"blocked: no new host fits", "pool.scale_blocked",
+			`{"cause":"no_fit","waiting":1,"total":0,"max":2,"ready":0,"starting":0,"planned":0,"unmet":1,"blocked":0,
+			  "expected":{"capacity":{"cpus":2,"memory":0,"disk":0,"runs":0},"observations":1},
+			  "deficits":[{"run":"r1","stage":"new_host","blockers":[{"resource":"cpus","requested":4,"used":0,"capacity":2,"available":2}]}]}`,
+			"no host launched: no new host fits the unmet runs; 1 waiting, had 0, max 2; plan: 0 ready, 0 starting, 0 planned, 1 unmet, 0 blocked; " +
+				"new host cpus 2, memory unlimited, disk unlimited, runs unlimited from 1 observation(s); " +
+				"deficits: r1 new host [cpus requested 4, used 0, capacity 2, available 2]"},
+		{"blocked at max", "pool.scale_blocked",
+			`{"cause":"max","wanted":3,"waiting":20,"total":1,"max":1,"ready":0,"starting":0,"planned":20,"unmet":0,"blocked":0,
+			  "expected":{"capacity":{"cpus":8,"memory":0,"disk":0,"runs":0},"observations":1},"deficits":[],"exhausted":[],"ineligible":[]}`,
+			"no host launched: at max 1 (3 more wanted); 20 waiting, had 1, max 1; plan: 0 ready, 0 starting, 20 planned, 0 unmet, 0 blocked; " +
+				"new host cpus 8, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)"},
+		{"blocked by quota", "pool.scale_blocked",
+			`{"cause":"quota","wanted":1,"waiting":1,"total":1,"max":0,"ready":0,"starting":0,"planned":1,"unmet":0,"blocked":0,
+			  "expected":{"capacity":{"cpus":8,"memory":0,"disk":0,"runs":0},"observations":1},"deficits":[],"exhausted":[],"ineligible":[]}`,
+			"no host launched: tenant host quota reached (1 more wanted); 1 waiting, had 1, max 0; plan: 0 ready, 0 starting, 1 planned, 0 unmet, 0 blocked; " +
+				"new host cpus 8, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)"},
 		{"probe scale-up", "pool.scale_up",
 			`{"hosts":1,"reason":"waiting runs","waiting":1,"warm":0,"min":0,"max":0,"total":0,"idle":0,"provisioning":0,
 			  "ready":0,"starting":0,"planned":0,"unmet":1,"blocked":0,"probe":true,

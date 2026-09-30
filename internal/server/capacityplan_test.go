@@ -521,7 +521,7 @@ func TestCapacityReconcileScaleBlockedOnce(t *testing.T) {
 		t.Fatalf("scale-blocked rows %+v, want one", evs)
 	}
 	var want map[string]any
-	if err := json.Unmarshal([]byte(`{"waiting":1,"total":0,"max":0,
+	if err := json.Unmarshal([]byte(`{"cause":"no_fit","waiting":1,"total":0,"max":0,
 		"ready":0,"starting":0,"planned":0,"unmet":1,"blocked":0,"unknown":"",
 		"expected":{"capacity":{"cpus":2,"memory":0,"disk":0,"runs":0},"observations":1},
 		"deficits":[{"run":"r0","stage":"new_host","blockers":[{"resource":"cpus","requested":4,"used":0,"capacity":2,"available":2}]}],
@@ -575,6 +575,66 @@ func TestCapacityReconcileScaleBlockedBusyPool(t *testing.T) {
 	if len(evs) != 2 || evs[1].Data["unmet"] != 2.0 {
 		t.Fatalf("scale-blocked rows %+v, want a second with unmet 2", evs)
 	}
+}
+
+// --max and the tenant's host quota stopping a scale-up are recorded once,
+// with how many hosts were wanted.
+func TestCapacityReconcileScaleBlockedCause(t *testing.T) {
+	for _, tc := range []struct {
+		cause  string
+		wanted float64
+	}{{"max", 3}, {"quota", 3}} {
+		t.Run(tc.cause, func(t *testing.T) {
+			s, pl, p := planningFixture(t, 20)
+			ctx := context.Background()
+			observePlanningHost(t, s, "history", "terminated", proto.Capacity{Runs: 8}, map[string]string{})
+			observePlanningHost(t, s, "full", "ready", proto.Capacity{Runs: 1}, map[string]string{})
+			// An older template's host: not an observation of new hosts.
+			execSQL(t, s, ctx, `UPDATE hosts SET launch_template='{"version":0}' WHERE id='full'`)
+			livePlacement(t, s, "full", `{"cpus":1}`)
+			if tc.cause == "max" {
+				pl.Max = 1
+			} else {
+				execSQL(t, s, ctx, `UPDATE tenants SET max_hosts=1 WHERE id='t1'`)
+			}
+			for range 3 {
+				planningTick(t, s, pl, p, false)
+			}
+			if p.calls != 0 {
+				t.Fatalf("launched %d", p.calls)
+			}
+			evs := events(t, s, evScaleBlocked)
+			if len(evs) != 1 {
+				t.Fatalf("scale-blocked rows %+v, want one", evs)
+			}
+			d := evs[0].Data
+			if d["cause"] != tc.cause || d["wanted"] != tc.wanted || d["planned"] != 20.0 || d["unmet"] != 0.0 {
+				t.Fatalf("scale-blocked %+v, want cause %s wanted %v", d, tc.cause, tc.wanted)
+			}
+		})
+	}
+}
+
+// A pool whose Runs fit its ready host, and a pass that launches, record no
+// blocked scale-up.
+func TestCapacityReconcileScaleBlockedAbsent(t *testing.T) {
+	t.Run("healthy", func(t *testing.T) {
+		s, pl, p := planningFixture(t, 1)
+		observePlanningHost(t, s, "fits", "ready", proto.Capacity{CPUs: 4}, map[string]string{})
+		for range 3 {
+			planningTick(t, s, pl, p, false)
+		}
+		if evs := events(t, s, evScaleBlocked); p.calls != 0 || len(evs) != 0 {
+			t.Fatalf("launched %d, scale-blocked %+v", p.calls, evs)
+		}
+	})
+	t.Run("launching", func(t *testing.T) {
+		s, pl, p := planningFixture(t, 3)
+		planningTick(t, s, pl, p, false)
+		if evs := events(t, s, evScaleBlocked); p.calls != 1 || len(evs) != 0 {
+			t.Fatalf("launched %d, scale-blocked %+v", p.calls, evs)
+		}
+	})
 }
 
 // Only the latest expectationWindow registrations count: an older, smaller

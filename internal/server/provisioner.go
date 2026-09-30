@@ -262,14 +262,13 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	warm := s.warm(pl, &st)
 	warmStarting := max(0, st.provisioning-st.plan.reservedStarting)
 	warmDeficit := max(0, warm-(st.idle-st.plan.reservedIdle)-warmStarting)
-	want := max(pl.Min-st.total, st.plan.NewHosts+warmDeficit)
+	needed := max(pl.Min-st.total, st.plan.NewHosts+warmDeficit)
+	want := needed
 	if pl.Max > 0 {
 		want = min(want, pl.Max-st.total)
 	}
-	if want <= 0 && st.plan.Unmet > 0 {
-		s.scaleBlocked(ctx, pl, &st)
-	}
 	up := scaleUp(pl, &st, warm, want)
+	launched, quota := 0, false
 	for i := range max(want, 0) {
 		if i > 0 {
 			if ok, err := s.provisionLease(ctx); err != nil || !ok {
@@ -277,13 +276,47 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 			}
 			up = nil // recorded with the first launch
 		}
-		if err := s.launch(ctx, prov, pl, up); errors.Is(err, errPoolRetired) {
+		err := s.launch(ctx, prov, pl, up)
+		if errors.Is(err, errPoolRetired) {
 			return nil
-		} else if err != nil {
+		}
+		if errors.Is(err, errHostQuota) {
+			quota = true
+			break
+		}
+		if err != nil {
 			return err
+		}
+		launched++
+	}
+	if launched == 0 {
+		if cause := blockedCause(pl, &st, needed, quota); cause != "" {
+			s.scaleBlocked(ctx, pl, &st, cause, needed)
 		}
 	}
 	return nil
+}
+
+// Why a pass that launched nothing did not: the tenant's host quota, --max
+// clipping the hosts the plan or warm wanted, or unmet Runs no new host fits.
+const (
+	causeQuota = "quota"
+	causeMax   = "max"
+	causeNoFit = "no_fit"
+)
+
+// blockedCause is "" when nothing is blocked: nothing was wanted, or the
+// pass waits for a bootstrap or probe host already starting.
+func blockedCause(pl poolRow, st *poolState, needed int, quota bool) string {
+	switch {
+	case quota:
+		return causeQuota
+	case pl.Max > 0 && needed > 0 && needed > pl.Max-st.total:
+		return causeMax
+	case st.plan.Unmet > 0:
+		return causeNoFit
+	}
+	return ""
 }
 
 // scaleUp is a pool.scale_up event's data: how many hosts and why, with
@@ -318,14 +351,18 @@ func (p *capacityPlan) summary() map[string]any {
 // pass that recorded it but does not tell two states apart; a scale-up ends
 // the state.
 var scaleBlockedEvent = transition{typ: evScaleBlocked,
-	volatile: []string{"ready", "starting", "exhausted", "ineligible", "omitted", "waiting", "total"},
+	volatile: []string{"ready", "starting", "exhausted", "ineligible", "omitted", "waiting", "total", "wanted"},
 	endedBy:  []string{evScaleUp}}
 
-// scaleBlocked records why Runs the plan could not cover launch nothing (no
-// new host fits them, or max or quota stops it).
-func (s *Server) scaleBlocked(ctx context.Context, pl poolRow, st *poolState) {
+// scaleBlocked records why a pass launched nothing while hosts were wanted
+// or Runs stay unmet (blockedCause); wanted is how many hosts the plan,
+// warm and min asked for.
+func (s *Server) scaleBlocked(ctx context.Context, pl poolRow, st *poolState, cause string, wanted int) {
 	d := st.plan.summary()
-	d["waiting"], d["total"], d["max"] = st.demand, st.total, pl.Max
+	d["waiting"], d["total"], d["max"], d["cause"] = st.demand, st.total, pl.Max, cause
+	if cause != causeNoFit {
+		d["wanted"] = wanted
+	}
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		return transitionEvent(ctx, tx, poolEvents, pl.ID, scaleBlockedEvent, d)
 	}); err != nil {
@@ -668,7 +705,7 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 	})
 	var he *HTTPError
 	if errors.As(err, &he) && he.Code == "quota_exceeded" {
-		return nil // at the tenant's host quota: Runs wait
+		return errHostQuota // Runs wait; the pass records why
 	}
 	if err != nil {
 		return err
@@ -720,6 +757,10 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 // errPoolRetired: launch found its pool removed since the pass read it,
 // and launched nothing.
 var errPoolRetired = errors.New("pool retired")
+
+// errHostQuota: launch found the pool's tenant at its host quota, and
+// launched nothing.
+var errHostQuota = errors.New("tenant host quota reached")
 
 // lockPoolRetired locks a pool's row FOR SHARE (the first lock of the lock
 // order in infraevents.go: a removal's FOR NO KEY UPDATE waits for it and

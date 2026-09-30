@@ -149,6 +149,20 @@ function capacityPlan(d: Obj): string {
   return parts.join("; ");
 }
 
+/** Why a blocked scale-up launched nothing; rows written before causes have none. */
+function blockedCause(d: Obj, s: (k: string) => string): string {
+  switch (d.cause) {
+    case "max":
+      return `at max ${s("max")} (${s("wanted")} more wanted); `;
+    case "quota":
+      return `tenant host quota reached (${s("wanted")} more wanted); `;
+    case "no_fit":
+      return "no new host fits the unmet runs; ";
+    default:
+      return "";
+  }
+}
+
 /** A placement's requested resources, when its event has them. */
 function resources(v: unknown): string {
   const r = obj(v);
@@ -169,7 +183,7 @@ export function infraEventSummary(e: LifecycleEvent): string {
       return "ready" in d ? `${line}; ${capacityPlan(d)}` : line;
     }
     case "pool.scale_blocked":
-      return `no host launched: ${s("waiting")} waiting, had ${s("total")}, max ${s("max")}; ${capacityPlan(d)}`;
+      return `no host launched: ${blockedCause(d, s)}${s("waiting")} waiting, had ${s("total")}, max ${s("max")}; ${capacityPlan(d)}`;
     case "host.capacity_decision": {
       const head = `${s("decision")} (${s("stage").replaceAll("_", " ")}) in pool ${s("pool")}`;
       const why = blockers(d.blockers) || s("reason");

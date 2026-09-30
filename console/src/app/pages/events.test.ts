@@ -106,6 +106,23 @@ test("a blocked scale-up says why no host was launched", () => {
   );
 });
 
+test("a blocked scale-up names its cause", () => {
+  const expected = { capacity: { cpus: 8, memory: 0, disk: 0, runs: 0 }, observations: 1 };
+  const plan = { ready: 0, starting: 0, unmet: 0, blocked: 0, expected, deficits: [], exhausted: [], ineligible: [] };
+  expect(infra("pool.scale_blocked", { ...plan, cause: "max", wanted: 3, waiting: 20, total: 1, max: 1, planned: 20 })).toBe(
+    "no host launched: at max 1 (3 more wanted); 20 waiting, had 1, max 1; plan: 0 ready, 0 starting, 20 planned, 0 unmet, 0 blocked; " +
+      "new host cpus 8, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)",
+  );
+  expect(infra("pool.scale_blocked", { ...plan, cause: "quota", wanted: 1, waiting: 1, total: 1, max: 0, planned: 1 })).toBe(
+    "no host launched: tenant host quota reached (1 more wanted); 1 waiting, had 1, max 0; plan: 0 ready, 0 starting, 1 planned, 0 unmet, 0 blocked; " +
+      "new host cpus 8, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)",
+  );
+  expect(infra("pool.scale_blocked", { ...plan, cause: "no_fit", waiting: 1, total: 0, max: 2, planned: 0, unmet: 1 })).toBe(
+    "no host launched: no new host fits the unmet runs; 1 waiting, had 0, max 2; plan: 0 ready, 0 starting, 0 planned, 1 unmet, 0 blocked; " +
+      "new host cpus 8, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)",
+  );
+});
+
 test("a probe scale-up says it is one", () => {
   const data = {
     hosts: 1, reason: "waiting runs", waiting: 1, warm: 0, min: 0, max: 0, total: 0, idle: 0, provisioning: 0,

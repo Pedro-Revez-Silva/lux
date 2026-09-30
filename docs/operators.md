@@ -59,8 +59,9 @@ new-host capacity it assumed and sampled blockers), and `lux hosts events
 <host>` shows `host.capacity_decision` when the planner's verdict on that
 host changes. The console's pool and host pages show the same lines. See
 [Telemetry](telemetry.md#capacity-planning) for what each field means.
-A pass that launches nothing while Runs stay unmet writes
-`pool.scale_blocked` with the same plan.
+A pass that launches nothing while hosts are wanted or Runs stay unmet
+writes `pool.scale_blocked` with its cause (`--max`, the tenant's host
+quota, or no new host fits) and the same plan, once per stuck state.
 
 The capacity a new host is expected to have comes from the latest 8 hosts
 that registered from the pool's exact current template. Moving the EC2

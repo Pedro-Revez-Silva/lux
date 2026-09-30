@@ -139,16 +139,19 @@ adds the plan; rows written before planning have none of these:
 | `omitted` | Entries left out of `deficits` and `exhausted`, each capped at 8; `ineligible` is capped at 8 too. |
 | `probe` | `true` when the one host launched is a probe (above). |
 
-**`pool.scale_blocked`** is written on a pass that leaves Runs unmet and
-launches nothing: no new host fits them, `--max` or the tenant's host
-quota is reached, or a probe or bootstrap host is still starting. It
+**`pool.scale_blocked`** is written on a pass that launches nothing while
+hosts are wanted or Runs stay unmet. `cause` says why: `max` (`--max`
+stops the hosts the plan, warm or `--min` wanted), `quota` (the tenant's
+host quota is reached) or `no_fit` (unmet Runs that no new host fits), or
+a probe or bootstrap host is still starting. For `max` and `quota`,
+`wanted` is how many hosts the pool asked for. It
 carries `waiting`, `total`, `max` and the same plan fields as
 `pool.scale_up` (`ready` through `omitted`). It records a state, not each
 pass: a pool that stays stuck writes it once, and again only when why it
-is stuck changes (`unmet`, `blocked`, `planned`, `max`, `expected`,
+is stuck changes (`cause`, `unmet`, `blocked`, `planned`, `max`, `expected`,
 `unknown`, or the deficits' Runs and blockers) or after a scale-up. The
 usage-derived fields (`ready`, `starting`, `exhausted`, `ineligible`,
-`omitted`, `waiting`, `total`) are those of the pass that wrote the row.
+`omitted`, `waiting`, `total`, `wanted`) are those of the pass that wrote the row.
 
 A blocker is either a resource, with `resource` (`cpus`, `memory`, `disk`
 or `runs`), `requested`, `used`, `capacity` and `available`
