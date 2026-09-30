@@ -79,6 +79,9 @@ import (
 //     id (recordProviderID alike).
 //   - terminateRequested, terminateTx, providerError: after their one host
 //     row (terminateTx: its copies and token too).
+//   - scaleBlocked (pool.scale_blocked, a fold) and hostDecisionEvent
+//     (host.capacity_decision, exclusive only when the decision changed):
+//     each in a transaction of its own that takes no other lock.
 //
 // A fold takes its stream exclusive after every other lock its transaction
 // takes (launch writes its host row, then folds; a failed launch
