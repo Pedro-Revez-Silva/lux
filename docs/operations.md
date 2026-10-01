@@ -253,9 +253,11 @@ Host requirements:
   upgrade that drops the switch: run it before upgrading hosts.
 - nftables (the runner owns the `inet lux` table; see
   [egress](runspec.md#network-egress)).
-- For nested containers, `lux-runner --nested`: the host needs `/dev/fuse`
-  and `/dev/net/tun`. The runner then labels the host `nested=true`; that
-  label cannot be set with `--label` or a host token.
+- For nested containers, `lux-runner --nested` (or `LUX_NESTED=true`): the
+  host needs `/dev/fuse` and `/dev/net/tun`. The runner then labels the host
+  `nested=true`; that label cannot be set with `--label` or a host token.
+  `LUX_NESTED` accepts only `true` or `false`; anything else stops the
+  runner.
 
 ```bash
 LUX_URL=https://luxd.example LUX_HOST_TOKEN=luxh_… lux-runner --name host-a
@@ -525,7 +527,33 @@ with an unrecognized value is refused, not left to fail at boot:
 | --- | --- | --- |
 | `ignition` (default) | An Ignition v3.4.0 config for Fedora CoreOS. | The default: no packages to install, fastest boot. |
 | `script` | A `#!/bin/bash` script cloud-init runs. | A stock Fedora Cloud, Ubuntu, Debian or AL2023 AMI. |
-| `env` | Plain `KEY=value` lines (`LUX_URL`, `LUX_HOST_TOKEN`, `LUX_HOST_NAME`, `LUX_EC2_IMDS`). | A custom AMI with its own boot script, from before self-update. |
+| `env` | Plain `KEY=value` lines (`LUX_URL`, `LUX_HOST_TOKEN`, `LUX_HOST_NAME`, `LUX_EC2_IMDS`, and `LUX_NESTED` for a nested pool). | A custom AMI with its own boot script, from before self-update. |
+
+### Nested containers on an EC2 pool
+
+`"nestedContainers": true` in an ec2 template starts every host the pool
+launches from then on with `lux-runner --nested`: user data sets
+`LUX_NESTED=true` in `/etc/lux/runner.env` (every format, including
+`env`, whose own boot script must pass it on). It is off by default, a
+JSON boolean (anything else is refused when the pool is set), and only for
+ec2 pools: a static host offers nested containers with its own flag.
+
+```bash
+lux pools set burst --provider ec2 --max 10 \
+  --template '{"region":"eu-west-1","launchTemplate":"lux-runner","nestedContainers":true}'
+```
+
+- The AMI must provide `/dev/fuse` and `/dev/net/tun` (Fedora CoreOS does).
+  A runner without them exits instead of registering, so a wrong AMI shows
+  as launches that never become ready rather than nested Runs placed on
+  hosts that cannot run them.
+- Capacity planning counts a future host as nested-capable only when the
+  current template opts in, never from the labels of hosts launched
+  earlier. A Run with `sandbox.nestedContainers` on a pool without it waits
+  with "host does not support nested containers" and launches nothing.
+- Hosts that already run keep what they registered with. Changing the
+  template is a new template, so the pool scales on it as for any template
+  edit; replace (drain) existing hosts to apply it to them.
 
 Every format's token is single-use per host and revoked when the host is
 terminated. A static host (outside any pool) uses the same script as

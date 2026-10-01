@@ -209,3 +209,28 @@ func TestBootstrapWithNoLuxURLExitsNonZeroWithTheMessage(t *testing.T) {
 		t.Errorf("bootstrap.sh with no LUX_URL: output %q, want it to mention LUX_URL is required", out)
 	}
 }
+
+// LUX_NESTED is written only for a nested-capable pool, and the runner
+// accepts exactly "true" (on), "" and "false" (off): a typo must not boot a
+// host that silently lacks what its pool promises.
+func TestNestedEnv(t *testing.T) {
+	if got := (Env{URL: "u", HostToken: "t"}).Lines(); strings.Contains(got, "LUX_NESTED") {
+		t.Errorf("default env carries LUX_NESTED: %q", got)
+	}
+	if got := (Env{URL: "u", HostToken: "t", Nested: true}).Lines(); !strings.Contains(got, "LUX_NESTED=true\n") {
+		t.Errorf("nested env lacks LUX_NESTED=true: %q", got)
+	}
+	if s := Script(Env{URL: "u", HostToken: "t", Nested: true}); !strings.Contains(s, "export LUX_NESTED='true'\n") {
+		t.Errorf("script does not export LUX_NESTED: %s", s[:200])
+	}
+	for v, want := range map[string]bool{"": false, "false": false, "true": true} {
+		if got, err := NestedFromEnv(v); err != nil || got != want {
+			t.Errorf("NestedFromEnv(%q) = %v, %v; want %v", v, got, err, want)
+		}
+	}
+	for _, v := range []string{"1", "yes", "TRUE", "True", " true"} {
+		if _, err := NestedFromEnv(v); err == nil {
+			t.Errorf("NestedFromEnv(%q) accepted", v)
+		}
+	}
+}

@@ -15,12 +15,14 @@ import (
 // Env is what a runner needs to reach luxd and register. URL and
 // HostToken are the only ones every launch needs; HostName defaults to
 // the hostname when empty (a static host, or a launch that left it out);
-// EC2IMDS is empty outside EC2.
+// EC2IMDS is empty outside EC2. Nested starts the runner with --nested
+// (LUX_NESTED=true): set only for a pool whose template opts in.
 type Env struct {
 	URL       string
 	HostToken string
 	HostName  string
 	EC2IMDS   string
+	Nested    bool
 }
 
 // pairs are Env's fields as KEY, value, only the ones set: the order
@@ -36,7 +38,24 @@ func (e Env) pairs() [][2]string {
 	add("LUX_HOST_TOKEN", e.HostToken)
 	add("LUX_HOST_NAME", e.HostName)
 	add("LUX_EC2_IMDS", e.EC2IMDS)
+	if e.Nested {
+		add("LUX_NESTED", "true")
+	}
 	return out
+}
+
+// NestedFromEnv reads LUX_NESTED, which a pool's user data sets for a
+// nested-capable template: "" and "false" are off, "true" is on, anything
+// else is refused so a typo cannot silently start a host without the
+// capability its pool promises.
+func NestedFromEnv(v string) (bool, error) {
+	switch v {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	}
+	return false, fmt.Errorf("LUX_NESTED=%q: want true or false", v)
 }
 
 // Lines renders KEY=value lines: the "env" userData format (for a custom

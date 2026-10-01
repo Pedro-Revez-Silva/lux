@@ -2,6 +2,7 @@ package ec2
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -134,4 +135,83 @@ func TestLaunchReturnsInstanceFacts(t *testing.T) {
 	if fmt.Sprint(markets) != "[ spot]" {
 		t.Errorf("requested markets %q, want on-demand (none) then spot", markets)
 	}
+}
+
+// The runner env a pool's instances boot with: LUX_NESTED=true only when the
+// template opts in, and a caller's own LUX_NESTED never leaks through a
+// template that does not.
+func TestLaunchUserDataCarriesNestedOnlyForAnOptedInTemplate(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_PROFILE", "")
+	var userData string
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		raw, _ := base64.StdEncoding.DecodeString(r.PostForm.Get("UserData"))
+		userData = string(raw)
+		w.Header().Set("Content-Type", "text/xml")
+		fmt.Fprint(w, `<RunInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><reservationId>r-1</reservationId>`+
+			`<instancesSet><item><instanceId>i-0abc</instanceId><instanceType>m8g.2xlarge</instanceType>`+
+			`<placement><availabilityZone>eu-north-1a</availabilityZone></placement>`+
+			`<instanceState><code>0</code><name>pending</name></instanceState></item></instancesSet></RunInstancesResponse>`)
+	}))
+	defer fake.Close()
+	launch := func(template string, env map[string]string) string {
+		t.Helper()
+		if _, err := New(fake.URL).Launch(context.Background(), json.RawMessage(template), nil, env); err != nil {
+			t.Fatal(err)
+		}
+		return userData
+	}
+	base := map[string]string{"LUX_URL": "http://10.0.1.10:7070", "LUX_HOST_TOKEN": "luxh_x", "LUX_HOST_NAME": "h"}
+	for _, format := range []string{"env", "script", "ignition"} {
+		on := decodedUserData(t, launch(`{"launchTemplate":"lt-1","userData":"`+format+`","nestedContainers":true}`, base))
+		if !strings.Contains(on, "LUX_NESTED") || !strings.Contains(on, "true") {
+			t.Errorf("%s: an opted-in template's user data lacks LUX_NESTED=true", format)
+		}
+		if format == "env" && !strings.Contains(on, "LUX_NESTED=true\n") {
+			t.Errorf("env: %q", on)
+		}
+		off := decodedUserData(t, launch(`{"launchTemplate":"lt-1","userData":"`+format+`"}`, map[string]string{"LUX_URL": "u", "LUX_HOST_TOKEN": "t", "LUX_NESTED": "true"}))
+		if strings.Contains(off, "LUX_NESTED") {
+			t.Errorf("%s: a template without nestedContainers boots nested hosts", format)
+		}
+	}
+}
+
+// decodedUserData is user data with Ignition's embedded runner.env decoded,
+// so every format can be searched as text.
+func decodedUserData(t *testing.T, ud string) string {
+	t.Helper()
+	var cfg struct {
+		Storage struct {
+			Files []struct {
+				Path     string `json:"path"`
+				Contents struct {
+					Source string `json:"source"`
+				} `json:"contents"`
+			} `json:"files"`
+		} `json:"storage"`
+	}
+	if json.Unmarshal([]byte(ud), &cfg) != nil {
+		return ud
+	}
+	for _, f := range cfg.Storage.Files {
+		if f.Path == "/etc/lux/runner.env" {
+			data, ok := strings.CutPrefix(f.Contents.Source, "data:;base64,")
+			if !ok {
+				t.Fatalf("runner.env source is not a base64 data URL: %.40s", f.Contents.Source)
+			}
+			raw, err := base64.StdEncoding.DecodeString(data)
+			if err != nil {
+				t.Fatalf("runner.env source: %v", err)
+			}
+			return string(raw)
+		}
+	}
+	t.Fatal("ignition config has no /etc/lux/runner.env")
+	return ""
 }

@@ -63,6 +63,11 @@ type Template struct {
 	// doc. Validated when the pool is set (internal/server), so an unknown
 	// value is refused there, not here at launch time.
 	UserData string `json:"userData"`
+	// NestedContainers starts every host's runner with --nested, so the pool
+	// offers sandbox.nestedContainers. The launch template's AMI must provide
+	// /dev/fuse and /dev/net/tun (Fedora CoreOS does); a runner without them
+	// exits rather than register. Validated when the pool is set.
+	NestedContainers bool `json:"nestedContainers"`
 }
 
 type Provider struct {
@@ -115,13 +120,7 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 	if err != nil {
 		return none, err
 	}
-	// Every instance's runner watches for spot interruptions (on-demand
-	// instances simply never get one).
-	env = maps.Clone(env)
-	if env["LUX_EC2_IMDS"] == "" {
-		env["LUX_EC2_IMDS"] = "http://169.254.169.254"
-	}
-	ud, err := renderUserData(t.UserData, env)
+	ud, err := renderUserData(t.UserData, runnerEnv(t, env))
 	if err != nil {
 		return none, err
 	}
@@ -247,8 +246,27 @@ func isNotFound(err error) bool {
 
 // renderUserData builds the instance's user data in the pool's chosen
 // format (hostboot.ValidUserData is checked when the pool is set).
+// runnerEnv is env plus what the template decides about every instance's
+// runner: it watches for spot interruptions (on-demand instances simply
+// never get one), and it offers nested containers only when the template
+// opts in.
+func runnerEnv(t Template, env map[string]string) map[string]string {
+	env = maps.Clone(env)
+	if env["LUX_EC2_IMDS"] == "" {
+		env["LUX_EC2_IMDS"] = "http://169.254.169.254"
+	}
+	delete(env, "LUX_NESTED")
+	if t.NestedContainers {
+		env["LUX_NESTED"] = "true"
+	}
+	return env
+}
+
 func renderUserData(format string, env map[string]string) ([]byte, error) {
-	he := hostboot.Env{URL: env["LUX_URL"], HostToken: env["LUX_HOST_TOKEN"], HostName: env["LUX_HOST_NAME"], EC2IMDS: env["LUX_EC2_IMDS"]}
+	he := hostboot.Env{
+		URL: env["LUX_URL"], HostToken: env["LUX_HOST_TOKEN"], HostName: env["LUX_HOST_NAME"],
+		EC2IMDS: env["LUX_EC2_IMDS"], Nested: env["LUX_NESTED"] == "true",
+	}
 	return hostboot.Render(format, he)
 }
 

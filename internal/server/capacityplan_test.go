@@ -139,6 +139,47 @@ func TestCapacityReconcileConservativeHistoryAndIncompatibleRuns(t *testing.T) {
 		t.Fatalf("four compatible runs need two hosts, got %d", p.calls)
 	}
 }
+
+// A nested Run's new host comes from the template, not from old hosts'
+// labels: an opted-in template plans one for it, a template without the
+// opt-in plans none however its history is labelled, and turning it off
+// stops nested Runs from counting on a future host.
+func TestCapacityReconcileNestedComesFromTheTemplate(t *testing.T) {
+	nestedRun := `{"sandbox":{"nestedContainers":true},"resources":{"cpus":1,"memory":10,"disk":10},"placement":{"pool":"burst"}}`
+	setup := func(t *testing.T, template string, history map[string]string) (*Server, poolRow, *planningProvider) {
+		t.Helper()
+		s, pl, p := planningFixture(t, 1)
+		pl.Template = json.RawMessage(template)
+		execSQL(t, s, context.Background(), `UPDATE pools SET template=$1 WHERE id='pool1'`, pl.Template)
+		execSQL(t, s, context.Background(), `UPDATE runs SET spec=$1 WHERE id='r0'`, nestedRun)
+		execSQL(t, s, context.Background(), `INSERT INTO hosts (id,name,tenant_id,pool_id,state,provider_id,provision_requested_at,registered_at,last_heartbeat,launch_template,capacity,labels)
+ VALUES ('history','history','t1','pool1','terminated','history',now(),now(),now(),$1,$2,$3)`, pl.Template, proto.Capacity{CPUs: 4, Memory: 100, Disk: 100, Runs: 4}, history)
+		return s, pl, p
+	}
+	t.Run("opted in", func(t *testing.T) {
+		s, pl, p := setup(t, `{"version":1,"nestedContainers":true}`, map[string]string{})
+		planningTick(t, s, pl, p, false)
+		if p.calls != 1 {
+			t.Fatalf("a nested Run on an opted-in template launched %d hosts, want 1", p.calls)
+		}
+	})
+	t.Run("not opted in, history labelled nested", func(t *testing.T) {
+		s, pl, p := setup(t, `{"version":1}`, map[string]string{"nested": "true"})
+		for range 3 {
+			planningTick(t, s, pl, p, false)
+		}
+		if p.calls != 0 {
+			t.Fatalf("a template without nestedContainers launched %d hosts for a nested Run", p.calls)
+		}
+	})
+	t.Run("not ec2", func(t *testing.T) {
+		pl := poolRow{Provider: "static", Template: json.RawMessage(`{"nestedContainers":true}`)}
+		if templateOffersNested(pl) {
+			t.Fatal("a non-ec2 pool's template offered nested containers")
+		}
+	})
+}
+
 func TestCapacityReconcileTemplateEditColdBootstrap(t *testing.T) {
 	s, pl, p := planningFixture(t, 6)
 	observePlanningHost(t, s, "history", "terminated", proto.Capacity{CPUs: 6}, map[string]string{})

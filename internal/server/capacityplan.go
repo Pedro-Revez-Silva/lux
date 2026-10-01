@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -185,6 +187,19 @@ func finiteMinimum[T ~int | ~int64 | ~float64](a, b T) T {
 	return min(a, b)
 }
 
+// templateOffersNested: the pool's runners start with --nested
+// (template.nestedContainers, an ec2 template's opt-in). A malformed
+// template offers nothing.
+func templateOffersNested(pl poolRow) bool {
+	if pl.Provider != "ec2" || len(pl.Template) == 0 {
+		return false
+	}
+	var t struct {
+		NestedContainers bool `json:"nestedContainers"`
+	}
+	return json.Unmarshal(pl.Template, &t) == nil && t.NestedContainers
+}
+
 // expectationWindow is how many of the latest registrations (per pool, tenant
 // and exact template) the new-host expectation is taken from, so a changed
 // $Default instance type ages out after that many newer hosts register.
@@ -301,11 +316,21 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 	if err != nil {
 		return plan, err
 	}
+	nested := templateOffersNested(pl)
 	virtual := func(id string) *candidateHost {
 		h := &candidateHost{ID: id, TenantID: pl.TenantID, PoolID: pl.ID, Pool: pl.Name, Shared: pl.Shared && pl.TenantID == nil, Retired: pl.Retired, Connected: true}
 		if plan.Expected != nil {
 			h.Capacity = plan.Expected.Capacity
-			h.Labels = plan.Expected.Labels
+			h.Labels = maps.Clone(plan.Expected.Labels)
+		}
+		// Whether a future host offers nested containers is the current
+		// template's decision, never an older host's label.
+		if h.Labels == nil {
+			h.Labels = map[string]string{}
+		}
+		delete(h.Labels, "nested")
+		if nested {
+			h.Labels["nested"] = "true"
 		}
 		return h
 	}

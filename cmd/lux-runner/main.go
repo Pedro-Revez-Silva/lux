@@ -48,7 +48,12 @@ func main() {
 	flag.StringVar(&cfg.ProviderID, "provider-id", os.Getenv("LUX_PROVIDER_ID"), "cloud instance id, for provisioned hosts")
 	flag.BoolVar(&cfg.ForcePoll, "poll", false, "use HTTP polling instead of a WebSocket")
 	flag.StringVar(&cfg.EC2IMDS, "ec2-imds", os.Getenv("LUX_EC2_IMDS"), "EC2 instance metadata URL to watch for spot interruptions (http://169.254.169.254 on EC2; empty: off)")
-	flag.BoolVar(&cfg.Nested, "nested", false, "offer nested containers (needs /dev/fuse and /dev/net/tun)")
+	nestedDefault, err := hostboot.NestedFromEnv(os.Getenv("LUX_NESTED"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "lux-runner:", err)
+		os.Exit(2)
+	}
+	flag.BoolVar(&cfg.Nested, "nested", nestedDefault, "offer nested containers (needs /dev/fuse and /dev/net/tun; default from LUX_NESTED=true)")
 	flag.DurationVar(&cfg.HostTTL, "host-ttl", 24*time.Hour, "how long to keep local snapshot copies after upload, and images lux pulled or built after their last use")
 	flag.Float64Var(&cfg.ImageDiskHigh, "image-disk-high", 80, "percent use of the disk holding Podman's storage over which lux's unused images are removed, least recently used first (0: off)")
 	showVersion := flag.Bool("version", false, "print the version")

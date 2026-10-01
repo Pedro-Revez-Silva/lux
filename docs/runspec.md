@@ -299,7 +299,9 @@ Hosts remove the images lux put there once they go unused:
 
 `sandbox.nestedContainers: true` lets the workload run containers itself,
 with rootless Podman or rootless Docker inside its container. The Run is
-placed only on hosts started with `lux-runner --nested`. Its image must
+placed only on hosts started with `lux-runner --nested`: a static host's
+own flag, or an EC2 pool whose template sets `"nestedContainers": true`
+(see [operations](operations.md#ec2-pools)). Its image must
 have the engine (Podman, or `dockerd-rootless` with RootlessKit and
 `slirp4netns`), `fuse-overlayfs`, and `newuidmap`/`newgidmap`, and the
 workload user needs `/etc/subuid` and `/etc/subgid` entries.

@@ -2645,6 +2645,16 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 				return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "template.userData %q: want ignition, script or env", ud)
 			}
 		}
+		// A JSON boolean only: "true" or 1 would read as false at launch and
+		// leave nested Runs waiting on hosts that never offer it.
+		if raw, present := pl.Template["nestedContainers"]; present {
+			if _, isBool := raw.(bool); !isBool {
+				return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "template.nestedContainers must be true or false, got %T", raw)
+			}
+		}
+	} else if _, present := pl.Template["nestedContainers"]; present {
+		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool",
+			"template.nestedContainers is for ec2 pools; a static host offers nested containers with lux-runner --nested")
 	}
 	if err := ValidPoolPrice(pl.Provider, pl.HourlyPrice, pl.Currency); err != nil {
 		return nil, err
