@@ -147,15 +147,12 @@ func TestCapacityReconcileConservativeHistoryAndIncompatibleRuns(t *testing.T) {
 // registration without nesting is evidence against the template: see
 // TestCapacityReconcileNestedTemplateHostsWithoutNesting.)
 func TestCapacityReconcileNestedComesFromTheTemplate(t *testing.T) {
-	nestedRun := `{"sandbox":{"nestedContainers":true},"resources":{"cpus":1,"memory":10,"disk":10},"placement":{"pool":"burst"}}`
 	setup := func(t *testing.T, template string, history map[string]string) (*Server, poolRow, *planningProvider) {
 		t.Helper()
 		s, pl, p := planningFixture(t, 1)
-		pl.Template = json.RawMessage(template)
-		execSQL(t, s, context.Background(), `UPDATE pools SET template=$1 WHERE id='pool1'`, pl.Template)
-		execSQL(t, s, context.Background(), `UPDATE runs SET spec=$1 WHERE id='r0'`, nestedRun)
-		execSQL(t, s, context.Background(), `INSERT INTO hosts (id,name,tenant_id,pool_id,state,provider_id,provision_requested_at,registered_at,last_heartbeat,launch_template,capacity,labels)
- VALUES ('history','history','t1','pool1','terminated','history',now(),now(),now(),$1,$2,$3)`, pl.Template, proto.Capacity{CPUs: 4, Memory: 100, Disk: 100, Runs: 4}, history)
+		setPoolTemplate(t, s, &pl, template)
+		execSQL(t, s, context.Background(), `UPDATE runs SET spec=$1 WHERE id='r0'`, nestedPlanRun)
+		observeTemplateHost(t, s, "history", "terminated", template, "0 seconds", history)
 		return s, pl, p
 	}
 	t.Run("opted in", func(t *testing.T) {
