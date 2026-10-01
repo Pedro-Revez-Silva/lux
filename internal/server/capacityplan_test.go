@@ -143,7 +143,9 @@ func TestCapacityReconcileConservativeHistoryAndIncompatibleRuns(t *testing.T) {
 // A nested Run's new host comes from the template, not from old hosts'
 // labels: an opted-in template plans one for it, a template without the
 // opt-in plans none however its history is labelled, and turning it off
-// stops nested Runs from counting on a future host.
+// stops nested Runs from counting on a future host. (A current-template
+// registration without nesting is evidence against the template: see
+// TestCapacityReconcileNestedTemplateHostsWithoutNesting.)
 func TestCapacityReconcileNestedComesFromTheTemplate(t *testing.T) {
 	nestedRun := `{"sandbox":{"nestedContainers":true},"resources":{"cpus":1,"memory":10,"disk":10},"placement":{"pool":"burst"}}`
 	setup := func(t *testing.T, template string, history map[string]string) (*Server, poolRow, *planningProvider) {
@@ -157,7 +159,7 @@ func TestCapacityReconcileNestedComesFromTheTemplate(t *testing.T) {
 		return s, pl, p
 	}
 	t.Run("opted in", func(t *testing.T) {
-		s, pl, p := setup(t, `{"version":1,"nestedContainers":true}`, map[string]string{})
+		s, pl, p := setup(t, `{"version":1,"nestedContainers":true}`, map[string]string{"nested": "true"})
 		planningTick(t, s, pl, p, false)
 		if p.calls != 1 {
 			t.Fatalf("a nested Run on an opted-in template launched %d hosts, want 1", p.calls)
@@ -176,6 +178,187 @@ func TestCapacityReconcileNestedComesFromTheTemplate(t *testing.T) {
 		pl := poolRow{Provider: "static", Template: json.RawMessage(`{"nestedContainers":true}`)}
 		if templateOffersNested(pl) {
 			t.Fatal("a non-ec2 pool's template offered nested containers")
+		}
+	})
+}
+
+const nestedPlanRun = `{"sandbox":{"nestedContainers":true},"resources":{"cpus":1,"memory":10,"disk":10},"placement":{"pool":"burst"}}`
+
+// setPoolTemplate points the pool (row and pl) at template.
+func setPoolTemplate(t *testing.T, s *Server, pl *poolRow, template string) {
+	t.Helper()
+	pl.Template = json.RawMessage(template)
+	execSQL(t, s, context.Background(), `UPDATE pools SET template=$1 WHERE id='pool1'`, pl.Template)
+}
+
+// observeTemplateHost records a host of template in pool1, registered
+// age ago (a Postgres interval).
+func observeTemplateHost(t *testing.T, s *Server, id, state, template, age string, labels map[string]string) {
+	t.Helper()
+	execSQL(t, s, context.Background(), `INSERT INTO hosts (id,name,tenant_id,pool_id,state,provider_id,provision_requested_at,registered_at,last_heartbeat,launch_template,capacity,labels)
+ VALUES ($1,$1,'t1','pool1',$2,$1,now(),now()-$4::interval,now(),$3,$5,$6)`, id, state, template, age, proto.Capacity{CPUs: 4, Memory: 100, Disk: 100, Runs: 4}, labels)
+	if state == "ready" {
+		s.hub.polled(id)
+	}
+}
+
+// A nested Run on a pool whose template cannot offer nesting launches
+// nothing: no cold bootstrap, no stale-expectation probe, and not after the
+// template is turned off; ordinary demand still launches, and a nested host
+// already running still serves.
+func TestCapacityReconcileIncompatibleNestedDemandLaunchesNothing(t *testing.T) {
+	setup := func(t *testing.T, runs int) (*Server, poolRow, *planningProvider) {
+		t.Helper()
+		s, pl, p := planningFixture(t, runs)
+		execSQL(t, s, context.Background(), `UPDATE runs SET spec=$1, updated_at=now()`, nestedPlanRun)
+		return s, pl, p
+	}
+	ticks := func(t *testing.T, s *Server, pl poolRow, p *planningProvider, want int) {
+		t.Helper()
+		for range 4 {
+			planningTick(t, s, pl, p, false)
+		}
+		if p.calls != want {
+			t.Fatalf("launched %d hosts, want %d", p.calls, want)
+		}
+	}
+	t.Run("cold", func(t *testing.T) {
+		s, pl, p := setup(t, 2)
+		ticks(t, s, pl, p, 0)
+		evs := events(t, s, evScaleBlocked)
+		if len(evs) != 1 || evs[0].Data["cause"] != causeNoFit {
+			t.Fatalf("scale-blocked %+v, want one no_fit", evs)
+		}
+		blockers := evs[0].Data["deficits"].([]any)[0].(map[string]any)["blockers"].([]any)
+		if reason := blockers[0].(map[string]any)["reason"]; reason != "pool template does not offer nested containers" {
+			t.Fatalf("blocker reason %q", reason)
+		}
+	})
+	t.Run("history older than the Run", func(t *testing.T) {
+		s, pl, p := setup(t, 2)
+		observeTemplateHost(t, s, "history", "terminated", `{"version":1}`, "1 hour", map[string]string{})
+		ticks(t, s, pl, p, 0)
+	})
+	t.Run("template turned off", func(t *testing.T) {
+		s, pl, p := setup(t, 2)
+		setPoolTemplate(t, s, &pl, `{"version":1,"nestedContainers":true}`)
+		observeTemplateHost(t, s, "history", "terminated", string(pl.Template), "1 hour", map[string]string{"nested": "true"})
+		setPoolTemplate(t, s, &pl, `{"version":1,"nestedContainers":false}`)
+		ticks(t, s, pl, p, 0)
+	})
+	t.Run("ordinary demand beside it", func(t *testing.T) {
+		s, pl, p := setup(t, 2)
+		execSQL(t, s, context.Background(), `UPDATE runs SET spec='{"resources":{"cpus":1,"memory":10,"disk":10},"placement":{"pool":"burst"}}' WHERE id='r1'`)
+		ticks(t, s, pl, p, 1)
+		registerProbe(t, s, p.hosts[0], proto.Capacity{CPUs: 4, Memory: 100, Disk: 100, Runs: 4})
+		ticks(t, s, pl, p, 1)
+		if err := s.scheduleOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := queryOne[string](t, s, `SELECT string_agg(run_id, ',') FROM placements WHERE host_id=$1`, p.hosts[0]); got != "r1" {
+			t.Fatalf("placed %q on the ordinary host, want r1 only", got)
+		}
+	})
+	t.Run("nested host ready after the opt-out", func(t *testing.T) {
+		s, pl, p := setup(t, 1)
+		setPoolTemplate(t, s, &pl, `{"version":1,"nestedContainers":true}`)
+		observeTemplateHost(t, s, "nested", "ready", string(pl.Template), "1 hour", map[string]string{"nested": "true"})
+		setPoolTemplate(t, s, &pl, `{"version":1}`)
+		ticks(t, s, pl, p, 0)
+		if err := s.scheduleOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := queryOne[int](t, s, `SELECT count(*) FROM placements WHERE host_id='nested'`); got != 1 {
+			t.Fatalf("placed %d on the ready nested host, want 1", got)
+		}
+	})
+}
+
+// An opted-in template whose hosts register without nested containers
+// stops planning nested bursts on it: one bounded probe at most, then a
+// capability blocker; ordinary Runs still use those hosts, and a template
+// edit plans afresh.
+func TestCapacityReconcileNestedTemplateHostsWithoutNesting(t *testing.T) {
+	setup := func(t *testing.T) (*Server, poolRow, *planningProvider) {
+		t.Helper()
+		s, pl, p := planningFixture(t, 0)
+		setPoolTemplate(t, s, &pl, `{"version":1,"nestedContainers":true}`)
+		// Seen before the Runs: the burst is sized from a 4-Run host.
+		observeTemplateHost(t, s, "history", "terminated", string(pl.Template), "2 hours", map[string]string{"nested": "true"})
+		for i := range 12 {
+			execSQL(t, s, context.Background(), `INSERT INTO runs (id,tenant_id,pool_id,spec,state,updated_at) VALUES ($1,'t1','pool1',$2,'provisioning',now()-interval '1 hour')`,
+				fmt.Sprintf("n%d", i), nestedPlanRun)
+		}
+		return s, pl, p
+	}
+	// waves reconciles, registering each launch without nested containers.
+	waves := func(t *testing.T, s *Server, pl poolRow, p *planningProvider, n int) {
+		t.Helper()
+		for range n {
+			planningTick(t, s, pl, p, false)
+			for _, id := range p.hosts {
+				execSQL(t, s, context.Background(), `UPDATE hosts SET state='ready',registered_at=now(),last_heartbeat=now(),capacity=$2,labels='{}'
+					WHERE id=$1 AND state='provisioning'`, id, proto.Capacity{CPUs: 4, Memory: 100, Disk: 100, Runs: 4})
+				s.hub.polled(id)
+			}
+		}
+	}
+	t.Run("bounded", func(t *testing.T) {
+		s, pl, p := setup(t)
+		waves(t, s, pl, p, 6)
+		if p.calls != 3 {
+			t.Fatalf("launched %d hosts over six waves, want the first burst of 3 and nothing after", p.calls)
+		}
+		evs := events(t, s, evScaleBlocked)
+		if len(evs) == 0 {
+			t.Fatal("no scale-blocked event for the capability mismatch")
+		}
+		blockers := evs[len(evs)-1].Data["deficits"].([]any)[0].(map[string]any)["blockers"].([]any)
+		if reason := blockers[0].(map[string]any)["reason"]; reason != "current template's hosts registered without nested containers" {
+			t.Fatalf("blocker reason %q", reason)
+		}
+		// Those hosts still serve ordinary Runs.
+		execSQL(t, s, context.Background(), `INSERT INTO runs (id,tenant_id,pool_id,spec,state) VALUES ('plain','t1','pool1','{"resources":{"cpus":1,"memory":10,"disk":10},"placement":{"pool":"burst"}}','provisioning')`)
+		waves(t, s, pl, p, 2)
+		if p.calls != 3 {
+			t.Fatalf("an ordinary Run launched more hosts: %d", p.calls)
+		}
+		if err := s.scheduleOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := queryOne[int](t, s, `SELECT count(*) FROM placements WHERE run_id='plain'`); got != 1 {
+			t.Fatalf("the ordinary Run placed %d times, want 1", got)
+		}
+		if got := queryOne[int](t, s, `SELECT count(*) FROM placements WHERE run_id LIKE 'n%'`); got != 0 {
+			t.Fatalf("%d nested Runs placed on hosts without nesting", got)
+		}
+	})
+	t.Run("a Run newer than the evidence probes once", func(t *testing.T) {
+		s, pl, p := setup(t)
+		waves(t, s, pl, p, 2)
+		before := p.calls
+		execSQL(t, s, context.Background(), `INSERT INTO runs (id,tenant_id,pool_id,spec,state,updated_at) VALUES ('late','t1','pool1',$1,'provisioning',now())`, nestedPlanRun)
+		waves(t, s, pl, p, 4)
+		if got := p.calls - before; got != 1 {
+			t.Fatalf("a nested Run newer than the last registration launched %d hosts, want one probe", got)
+		}
+	})
+	t.Run("template edit recovers", func(t *testing.T) {
+		s, pl, p := setup(t)
+		waves(t, s, pl, p, 3)
+		before := p.calls
+		setPoolTemplate(t, s, &pl, `{"version":2,"nestedContainers":true}`)
+		planningTick(t, s, pl, p, false)
+		if p.calls != before+1 {
+			t.Fatalf("the edited template launched %d hosts, want one bootstrap", p.calls-before)
+		}
+		id := p.hosts[len(p.hosts)-1]
+		execSQL(t, s, context.Background(), `UPDATE hosts SET state='ready',registered_at=now(),last_heartbeat=now(),capacity=$2,labels='{"nested":"true"}' WHERE id=$1`,
+			id, proto.Capacity{CPUs: 4, Memory: 100, Disk: 100, Runs: 4})
+		s.hub.polled(id)
+		planningTick(t, s, pl, p, false)
+		if got := p.calls - before; got != 3 {
+			t.Fatalf("after the edited template's host registered nested: %d launches, want 3 (12 Runs, 4 a host)", got)
 		}
 	})
 }

@@ -3,6 +3,7 @@ package hostboot
 import (
 	"encoding/base64"
 	"encoding/json"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -225,9 +226,6 @@ func TestNestedEnv(t *testing.T) {
 	if got := (Env{URL: "u", HostToken: "t", Nested: true}).Lines(); !strings.Contains(got, "LUX_NESTED=true\n") {
 		t.Errorf("nested env lacks LUX_NESTED=true: %q", got)
 	}
-	if s := Script(Env{URL: "u", HostToken: "t", Nested: true}); !strings.Contains(s, "export LUX_NESTED='true'\n") {
-		t.Errorf("script does not export LUX_NESTED: %s", s[:200])
-	}
 	for v, want := range map[string]bool{"": false, "false": false, "true": true} {
 		if got, err := NestedFromEnv(v); err != nil || got != want {
 			t.Errorf("NestedFromEnv(%q) = %v, %v; want %v", v, got, err, want)
@@ -236,6 +234,88 @@ func TestNestedEnv(t *testing.T) {
 	for _, v := range []string{"1", "yes", "TRUE", "True", " true"} {
 		if _, err := NestedFromEnv(v); err == nil {
 			t.Errorf("NestedFromEnv(%q) accepted", v)
+		}
+	}
+}
+
+// bootRunnerEnv runs script under bash with its fixed paths moved into a
+// temp root and podman, nft, git and systemctl stubbed, then returns the
+// /etc/lux/runner.env it wrote, parsed. environ is added to a bare env.
+func bootRunnerEnv(t *testing.T, script string, environ ...string) map[string]string {
+	t.Helper()
+	root := t.TempDir()
+	stubs := filepath.Join(root, "stubs")
+	for _, dir := range []string{stubs, root + "/etc/systemd/system", root + InstallDir, root + "/sys/fs/cgroup"} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(root+"/sys/fs/cgroup/cgroup.controllers", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{"podman": "echo 5.2.0", "nft": "exit 0", "git": "exit 0", "systemctl": "exit 0"} {
+		if err := os.WriteFile(filepath.Join(stubs, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixed := []string{"/etc/", InstallDir, "/sys/fs/cgroup/"}
+	var pairs []string
+	for _, p := range fixed {
+		pairs = append(pairs, p, root+p)
+	}
+	script = strings.NewReplacer(pairs...).Replace(script)
+	for _, p := range fixed {
+		if strings.Count(script, p) != strings.Count(script, root+p) {
+			t.Fatalf("the script still names %s outside the temp root", p)
+		}
+	}
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = append([]string{"PATH=" + stubs + ":/usr/bin:/bin", "HOME=" + root}, environ...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("running the script: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(root + "/etc/lux/runner.env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			t.Fatalf("runner.env line %q is not KEY=value", line)
+		}
+		got[k] = v
+	}
+	return got
+}
+
+// systemd starts the runner from /etc/lux/runner.env, not from the
+// script's environment: what the script writes there is what the runner
+// gets. LUX_NESTED=true survives next to the memory; an ordinary template
+// and anything but exactly "true" leave it out.
+func TestScriptPersistsNestedAndMemoryToRunnerEnv(t *testing.T) {
+	base := map[string]string{"LUX_URL": "http://luxd", "LUX_HOST_TOKEN": "luxh_x", "LUX_HOST_NAME": "h", "LUX_RUNNER_MEMORY": "68719476736"}
+	with := func(k, v string) map[string]string {
+		m := maps.Clone(base)
+		m[k] = v
+		return m
+	}
+	env := Env{URL: "http://luxd", HostToken: "luxh_x", HostName: "h", Memory: "68719476736"}
+	nested := env
+	nested.Nested = true
+	if got, want := bootRunnerEnv(t, Script(nested)), with("LUX_NESTED", "true"); !maps.Equal(got, want) {
+		t.Errorf("nested template: runner.env %v, want %v", got, want)
+	}
+	if got := bootRunnerEnv(t, Script(env)); !maps.Equal(got, base) {
+		t.Errorf("ordinary template: runner.env %v, want %v", got, base)
+	}
+	for _, v := range []string{"true", "false", "TRUE"} {
+		want := base
+		if v == "true" {
+			want = with("LUX_NESTED", "true")
+		}
+		if got := bootRunnerEnv(t, Bootstrap(), "LUX_URL=http://luxd", "LUX_HOST_TOKEN=luxh_x", "LUX_HOST_NAME=h", "LUX_RUNNER_MEMORY=68719476736", "LUX_NESTED="+v); !maps.Equal(got, want) {
+			t.Errorf("bootstrap.sh with LUX_NESTED=%s: runner.env %v, want %v", v, got, want)
 		}
 	}
 }

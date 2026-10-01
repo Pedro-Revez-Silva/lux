@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -169,20 +170,64 @@ func TestLaunchUserDataCarriesNestedOnlyForAnOptedInTemplate(t *testing.T) {
 		}
 		return userData
 	}
-	base := map[string]string{"LUX_URL": "http://10.0.1.10:7070", "LUX_HOST_TOKEN": "luxh_x", "LUX_HOST_NAME": "h"}
+	base := map[string]string{"LUX_URL": "http://10.0.1.10:7070", "LUX_HOST_TOKEN": "luxh_x", "LUX_HOST_NAME": "h", "LUX_RUNNER_MEMORY": "68719476736"}
+	with := func(k, v string) map[string]string {
+		m := maps.Clone(base)
+		m[k] = v
+		return m
+	}
 	for _, format := range []string{"env", "script", "ignition"} {
-		on := decodedUserData(t, launch(`{"launchTemplate":"lt-1","userData":"`+format+`","nestedContainers":true}`, base))
-		if !strings.Contains(on, "LUX_NESTED") || !strings.Contains(on, "true") {
-			t.Errorf("%s: an opted-in template's user data lacks LUX_NESTED=true", format)
-		}
-		if format == "env" && !strings.Contains(on, "LUX_NESTED=true\n") {
-			t.Errorf("env: %q", on)
-		}
-		off := decodedUserData(t, launch(`{"launchTemplate":"lt-1","userData":"`+format+`"}`, map[string]string{"LUX_URL": "u", "LUX_HOST_TOKEN": "t", "LUX_NESTED": "true"}))
-		if strings.Contains(off, "LUX_NESTED") {
-			t.Errorf("%s: a template without nestedContainers boots nested hosts", format)
+		for _, c := range []struct {
+			name, nested string // nested: the template's nestedContainers, "" for absent
+			caller       map[string]string
+			want         string // LUX_NESTED in the runner env, "" for absent
+		}{
+			{"opted in", "true", base, "true"},
+			{"opted in, caller says false", "true", with("LUX_NESTED", "false"), "true"},
+			{"absent, caller says true", "", with("LUX_NESTED", "true"), ""},
+			{"false, caller says true", "false", with("LUX_NESTED", "true"), ""},
+		} {
+			template := `{"launchTemplate":"lt-1","userData":"` + format + `"`
+			if c.nested != "" {
+				template += `,"nestedContainers":` + c.nested
+			}
+			got := runnerEnvOf(t, format, launch(template+"}", c.caller))
+			if v, ok := got["LUX_NESTED"]; v != c.want || ok != (c.want != "") {
+				t.Errorf("%s, %s: LUX_NESTED=%q (set %v), want %q", format, c.name, v, ok, c.want)
+			}
+			if got["LUX_RUNNER_MEMORY"] != "68719476736" || got["LUX_URL"] != base["LUX_URL"] {
+				t.Errorf("%s, %s: runner env lost the memory or URL: %v", format, c.name, got)
+			}
 		}
 	}
+}
+
+// runnerEnvOf is the runner env user data in format carries, key to value:
+// env's lines, script's exports, or Ignition's decoded runner.env.
+func runnerEnvOf(t *testing.T, format, ud string) map[string]string {
+	t.Helper()
+	text := ud
+	if format == "ignition" {
+		text = decodedUserData(t, ud)
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(text, "\n") {
+		if format == "script" {
+			var ok bool
+			if line, ok = strings.CutPrefix(line, "export "); !ok {
+				continue
+			}
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || !strings.HasPrefix(k, "LUX_") {
+			continue
+		}
+		if format == "script" {
+			v = strings.TrimSuffix(strings.TrimPrefix(v, "'"), "'")
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // decodedUserData is user data with Ignition's embedded runner.env decoded,
