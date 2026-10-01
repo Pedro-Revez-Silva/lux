@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -49,6 +51,9 @@ type hostExpectation struct {
 	Capacity     proto.Capacity    `json:"capacity"`
 	Labels       map[string]string `json:"-"`
 	Observations int               `json:"observations"`
+	// nestedMismatch: the newest registration lacked nested=true, and so
+	// did the one before it, if any (see planCapacity).
+	nestedMismatch bool
 }
 
 const planSampleSize = 8
@@ -185,6 +190,19 @@ func finiteMinimum[T ~int | ~int64 | ~float64](a, b T) T {
 	return min(a, b)
 }
 
+// templateOffersNested: the pool's runners start with --nested
+// (template.nestedContainers, an ec2 template's opt-in). A malformed
+// template offers nothing.
+func templateOffersNested(pl poolRow) bool {
+	if pl.Provider != "ec2" || len(pl.Template) == 0 {
+		return false
+	}
+	var t struct {
+		NestedContainers bool `json:"nestedContainers"`
+	}
+	return json.Unmarshal(pl.Template, &t) == nil && t.NestedContainers
+}
+
 // expectationWindow is how many of the latest registrations (per pool, tenant
 // and exact template) the new-host expectation is taken from, so a changed
 // $Default instance type ages out after that many newer hosts register.
@@ -207,17 +225,24 @@ func (s *Server) hostExpectation(ctx context.Context, tx pgx.Tx, pl poolRow) (*h
 	}
 	defer rows.Close()
 	var expected *hostExpectation
-	for rows.Next() {
+	var newestNested [2]bool // nested=true of the two newest, newest first.
+	for i := 0; rows.Next(); i++ {
 		var capacity proto.Capacity
 		var labels map[string]string
 		var registered time.Time
 		if err := rows.Scan(&capacity, &labels, &registered); err != nil {
 			return nil, latest, err
 		}
-		if expected == nil {
+		if i == 0 {
 			latest = registered
 		}
+		if i < len(newestNested) {
+			newestNested[i] = labels["nested"] == "true"
+		}
 		expected = expected.observe(capacity, labels)
+	}
+	if expected != nil {
+		expected.nestedMismatch = !newestNested[0] && (expected.Observations == 1 || !newestNested[1])
 	}
 	return expected, latest, rows.Err()
 }
@@ -360,11 +385,33 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 	if err != nil {
 		return plan, err
 	}
+	// Whether a future host offers nested containers is the current
+	// template's decision, never an older host's label; but registrations
+	// of the current template without them (a custom AMI that drops
+	// LUX_NESTED) stop its later hosts counting as nested. No single
+	// registration flips that either way: the newest must lack nested=true
+	// and so must the one before it, unless it is the only one (a broken
+	// template's bootstrap). One outlier after a nested host thus does not
+	// starve nested Runs, and one late nested host (an older launch
+	// registering last) clears it for at most one burst, plus one host if
+	// that burst registers one host at a time; its first two registrations
+	// without nesting re-establish it. A template edit starts its own
+	// observations.
+	nested := templateOffersNested(pl)
+	nestedMismatch := nested && plan.Expected != nil && plan.Expected.nestedMismatch
+	nested = nested && !nestedMismatch
 	virtual := func(id string) *candidateHost {
 		h := &candidateHost{ID: id, TenantID: pl.TenantID, PoolID: pl.ID, Pool: pl.Name, Shared: pl.Shared && pl.TenantID == nil, Retired: pl.Retired, Connected: true}
 		if plan.Expected != nil {
 			h.Capacity = plan.Expected.Capacity
-			h.Labels = plan.Expected.Labels
+			h.Labels = maps.Clone(plan.Expected.Labels)
+		}
+		if h.Labels == nil {
+			h.Labels = map[string]string{}
+		}
+		delete(h.Labels, "nested")
+		if nested {
+			h.Labels["nested"] = "true"
 		}
 		return h
 	}
@@ -375,6 +422,7 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 		}
 	}
 	probe := false
+	bootstrap := false
 	// reserve fits r on the first of hosts it fits; hosts are at stage, or
 	// "planned" for a new host (no id).
 	reserve := func(hosts []*candidateHost, r pendingRun, stage string) bool {
@@ -424,11 +472,27 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 			unsatisfied(r, "waiting for its chosen host")
 			continue
 		}
+		// No future host of this template can serve a nested Run: it neither
+		// bootstraps nor probes, except that a mismatch keeps the bounded
+		// probe so a fixed $Default launch template is seen.
+		if r.Spec.Sandbox.NestedContainers && !nested {
+			plan.Unmet++
+			reason := "pool template does not offer nested containers"
+			if nestedMismatch {
+				reason = "current template's hosts registered without nested containers"
+				if waitingSince[r.ID].After(lastRegistered) {
+					probe = true
+				}
+			}
+			deficit(r, "new_host", []fitBlocker{{Kind: kindNested, Reason: reason}})
+			continue
+		}
 		if reserve(future, r, "starting") {
 			continue
 		}
 		if plan.Expected == nil {
 			plan.Unmet++
+			bootstrap = true
 			deficit(r, "new_host", []fitBlocker{{Reason: "new host capacity unknown"}})
 			continue
 		}
@@ -468,7 +532,6 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 	// one. Either waits for any current-template start to register first, and
 	// a probe is bounded per waiting cohort: once it registers, the Runs are
 	// older than it. Planned new hosts already serve as the probe.
-	bootstrap := plan.Expected == nil && plan.Unmet > 0
 	probe = probe && plan.NewHosts == 0
 	if (bootstrap || probe) && len(startingIDs) == 0 {
 		plan.NewHosts = 1

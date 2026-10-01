@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -45,6 +47,37 @@ func TestPutPoolRejectsUnknownUserData(t *testing.T) {
 	static := poolIn(Pool{Name: "burst3", Provider: "static", Template: map[string]any{"userData": "nonsense"}})
 	if _, err := s.putPool(ctx, static); err != nil {
 		t.Fatalf("a static pool's template.userData was checked: %v", err)
+	}
+}
+
+// template.nestedContainers is an ec2 pool's JSON boolean: a string or a
+// number would read as false at launch and strand nested Runs, and a static
+// pool's hosts get it from lux-runner --nested, not from the pool.
+func TestPutPoolValidatesNestedContainers(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx = context.WithValue(ctx, principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+	for i, v := range []any{"true", 1, nil, map[string]any{}} {
+		bad := poolIn(Pool{Name: fmt.Sprintf("bad%d", i), Provider: "ec2", Template: map[string]any{"nestedContainers": v}})
+		if _, err := s.putPool(ctx, bad); err == nil || !strings.Contains(err.Error(), "nestedContainers must be true or false") {
+			t.Errorf("nestedContainers %#v: err %v", v, err)
+		}
+	}
+	for i, v := range []bool{true, false} {
+		good := poolIn(Pool{Name: fmt.Sprintf("good%d", i), Provider: "ec2", Template: map[string]any{"nestedContainers": v}})
+		if _, err := s.putPool(ctx, good); err != nil {
+			t.Errorf("nestedContainers %v refused: %v", v, err)
+		}
+	}
+	static := poolIn(Pool{Name: "static", Provider: "static", Template: map[string]any{"nestedContainers": true}})
+	if _, err := s.putPool(ctx, static); err == nil || !strings.Contains(err.Error(), "is for ec2 pools") {
+		t.Errorf("a static pool's nestedContainers: err %v", err)
 	}
 }
 

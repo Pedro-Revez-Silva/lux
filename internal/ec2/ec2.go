@@ -66,6 +66,11 @@ type Template struct {
 	// doc. Validated when the pool is set (internal/server), so an unknown
 	// value is refused there, not here at launch time.
 	UserData string `json:"userData"`
+	// NestedContainers starts every host's runner with --nested, so the pool
+	// offers sandbox.nestedContainers. The launch template's AMI must provide
+	// /dev/fuse and /dev/net/tun (Fedora CoreOS does); a runner without them
+	// exits rather than register. Validated when the pool is set.
+	NestedContainers bool `json:"nestedContainers"`
 }
 
 type Provider struct {
@@ -133,12 +138,7 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 	if err != nil {
 		return none, err
 	}
-	// Every instance's runner watches for spot interruptions (on-demand
-	// instances simply never get one).
-	env = maps.Clone(env)
-	if env["LUX_EC2_IMDS"] == "" {
-		env["LUX_EC2_IMDS"] = "http://169.254.169.254"
-	}
+	env = runnerEnv(t, env)
 	// The runner offers the machine's gross memory, which Runs ask in. Only
 	// a template naming its type says it before the launch; without it the
 	// runner offers its MemTotal.
@@ -302,11 +302,29 @@ func (p *Provider) instanceMemory(ctx context.Context, c *awsec2.Client, region,
 	return mem, nil
 }
 
+// runnerEnv is env plus what the template decides about every instance's
+// runner: it watches for spot interruptions (on-demand instances simply
+// never get one), and it offers nested containers only when the template
+// opts in.
+func runnerEnv(t Template, env map[string]string) map[string]string {
+	env = maps.Clone(env)
+	if env["LUX_EC2_IMDS"] == "" {
+		env["LUX_EC2_IMDS"] = "http://169.254.169.254"
+	}
+	delete(env, "LUX_NESTED")
+	if t.NestedContainers {
+		env["LUX_NESTED"] = "true"
+	}
+	return env
+}
+
 // renderUserData builds the instance's user data in the pool's chosen
 // format (hostboot.ValidUserData is checked when the pool is set).
 func renderUserData(format string, env map[string]string) ([]byte, error) {
-	he := hostboot.Env{URL: env["LUX_URL"], HostToken: env["LUX_HOST_TOKEN"], HostName: env["LUX_HOST_NAME"],
-		EC2IMDS: env["LUX_EC2_IMDS"], Memory: env["LUX_RUNNER_MEMORY"]}
+	he := hostboot.Env{
+		URL: env["LUX_URL"], HostToken: env["LUX_HOST_TOKEN"], HostName: env["LUX_HOST_NAME"],
+		EC2IMDS: env["LUX_EC2_IMDS"], Memory: env["LUX_RUNNER_MEMORY"], Nested: env["LUX_NESTED"] == "true",
+	}
 	return hostboot.Render(format, he)
 }
 
