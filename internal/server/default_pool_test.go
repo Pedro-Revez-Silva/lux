@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -619,8 +620,37 @@ func TestMarkerOnlyBodyFromTheEarlierCLI(t *testing.T) {
 		t.Fatalf("defaults %v after clearing", got)
 	}
 
+	// A Pool read back and sent again carries the read-only host size: it
+	// is ignored, and GET still says the size a's hosts registered with.
+	execSQL(t, s, context.Background(), `INSERT INTO hosts (id, name, tenant_id, pool_id, state, capacity, provision_requested_at, registered_at, launch_template, instance_type)
+		SELECT 'h1', 'h1', tenant_id, id, 'ready', '{"cpus":4,"memory":17179869184,"disk":0}', now(), now(), template, 'm7i.xlarge' FROM pools WHERE name = 'a'`)
+	readBack := json.RawMessage(`{"name":"a","isDefault":true,"hostSize":{"cpus":8,"memory":34359738368,"disk":0},"hostSizeFrom":"history","instanceType":"c7a.2xlarge"}`)
+	if code, body := call(t, s, keys["t1"], "POST", "/v1/pools", readBack); code != http.StatusOK {
+		t.Fatalf("a marker with the read-only host size: %d %s", code, body)
+	}
+	var template string
+	systemScan(t, s, `SELECT provider, max_hosts, template::text FROM pools WHERE name = 'a'`, nil, &provider, &maxHosts, &template)
+	if got := defaultPools(t, s); got["t1"] != "a" || provider != "ec2" || maxHosts != 3 || template != "{}" {
+		t.Fatalf("defaults %v, provider %q, maxHosts %d, template %s; want a marked and unchanged", got, provider, maxHosts, template)
+	}
+	code, body := call(t, s, keys["t1"], "GET", "/v1/pools", nil)
+	var list struct{ Pools []Pool }
+	if code != http.StatusOK || json.Unmarshal([]byte(body), &list) != nil {
+		t.Fatalf("list pools: %d %s", code, body)
+	}
+	i := slices.IndexFunc(list.Pools, func(p Pool) bool { return p.Name == "a" })
+	if i < 0 {
+		t.Fatalf("no pool a in %s", body)
+	}
+	if a := list.Pools[i]; a.HostSize == nil || *a.HostSize != (HostSize{CPUs: 4, Memory: 16 << 30}) || a.HostSizeFrom != HostSizeFromRunning || a.InstanceType != "m7i.xlarge" {
+		t.Fatalf("host size %+v from %q, type %q; want a's registered 4 CPUs, 16 GiB, running, m7i.xlarge", a.HostSize, a.HostSizeFrom, a.InstanceType)
+	}
+	if code, body := call(t, s, keys["t1"], "POST", "/v1/pools", clear); code != http.StatusOK {
+		t.Fatalf("clearing again: %d %s", code, body)
+	}
+
 	withMax := json.RawMessage(`{"name":"a","provider":"","minHosts":0,"maxHosts":3,"warmHosts":0,"scaleDownAfter":"0s","shared":false,"platform":false,"isDefault":true}`)
-	code, body := call(t, s, keys["t1"], "POST", "/v1/pools", withMax)
+	code, body = call(t, s, keys["t1"], "POST", "/v1/pools", withMax)
 	if code != http.StatusUnprocessableEntity || !strings.Contains(body, "maxHosts") {
 		t.Fatalf("a marker with maxHosts 3: %d %s, want 422 naming maxHosts", code, body)
 	}

@@ -49,9 +49,9 @@ func TestSnapshotOwnerUpgrade(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"037_snapshot_records", "038_pool_id", "039_luxd_alive", "040_launch_outcome", "041_pool_samples", "042_dashboard_indexes", "043_run_input_events", "044_run_input_events_backfill", "045_event_cover", "046_event_type"}
+			want := []string{"037_snapshot_records", "038_pool_id", "039_luxd_alive", "040_launch_outcome", "041_pool_samples", "042_dashboard_indexes", "043_run_input_events", "044_run_input_events_backfill", "045_event_cover", "046_event_type", "047_placement_memory_limit", "048_hosts_pool_registered"}
 			if from == "030_servers" {
-				want = []string{"031_pool_template_tags", "032_default_pool", "033_run_pool_owner", "034_pool_host_events", "035_snapshot_refused", "037_snapshot_records", "038_pool_id", "039_luxd_alive", "040_launch_outcome", "041_pool_samples", "042_dashboard_indexes", "043_run_input_events", "044_run_input_events_backfill", "045_event_cover", "046_event_type"}
+				want = []string{"031_pool_template_tags", "032_default_pool", "033_run_pool_owner", "034_pool_host_events", "035_snapshot_refused", "037_snapshot_records", "038_pool_id", "039_luxd_alive", "040_launch_outcome", "041_pool_samples", "042_dashboard_indexes", "043_run_input_events", "044_run_input_events_backfill", "045_event_cover", "046_event_type", "047_placement_memory_limit", "048_hosts_pool_registered"}
 			}
 			if !slices.Equal(done, want) {
 				t.Fatalf("migration order from %s: got %v, want %v", from, done, want)

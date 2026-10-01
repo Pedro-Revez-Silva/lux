@@ -286,6 +286,9 @@ type Status struct {
 	// containerStarted, workloadStarted, exited.
 	Times map[string]int64 `json:"times,omitempty"`
 	Usage *Usage           `json:"usage,omitempty"`
+	// MemoryLimit is the container's memory limit in bytes, once it has
+	// one: the Run's resources.memory scaled to the host's share.
+	MemoryLimit int64 `json:"memoryLimit,omitempty"`
 }
 
 // AdapterEvent reports what the adapter learned from the workload.

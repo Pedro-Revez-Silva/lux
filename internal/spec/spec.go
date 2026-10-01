@@ -253,6 +253,7 @@ type Resources struct {
 
 type Placement struct {
 	Pool     string            `json:"pool,omitempty" yaml:"pool,omitempty" doc:"The pool to run in. Empty: the tenant's default pool, else the platform's, else the pool named default; resolved at submit and stored."`
+	PoolID   string            `json:"poolId,omitempty" yaml:"poolId,omitempty" doc:"The pool to run in, by its id (pool_…), which a rename keeps: the tenant's pool with that id, else the platform's. An id no such pool has is refused at submit (422 unknown_pool). Not with pool; at submit, pool is set to that pool's name."`
 	Requires map[string]string `json:"requires,omitempty" yaml:"requires,omitempty"`
 	Prefers  map[string]string `json:"prefers,omitempty" yaml:"prefers,omitempty"`
 }

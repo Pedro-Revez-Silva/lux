@@ -503,6 +503,7 @@ type Placement struct {
 	NetRxBytes         *int64     `json:"netRxBytes,omitempty"`
 	NetTxBytes         *int64     `json:"netTxBytes,omitempty"`
 	SnapshotBytes      *int64     `json:"snapshotBytes,omitempty"`
+	MemoryLimit        *int64     `json:"memoryLimit,omitempty" doc:"Bytes: the container's memory limit, the Run's resources.memory scaled to its host's share (MemTotal less the runner's headroom, over the memory the host offers). Absent until the container starts, and for placements from before luxd recorded it."`
 }
 
 // RunUsage rolls placements up: peaks are maxima, totals are sums.
@@ -618,6 +619,11 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 			}
 		}
 	}
+	if sp.Placement.Pool != "" && sp.Placement.PoolID != "" {
+		// Checked here, not in Normalize: the stored spec carries both.
+		return nil, invalidSpec(&spec.ValidationError{Problems: []string{
+			"placement: name the pool by pool or poolId, not both"}})
+	}
 	if err := sp.Normalize(s.cfg.Defaults); err != nil {
 		return nil, invalidSpec(err)
 	}
@@ -654,7 +660,7 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		// The Run is bound to its pool's id: every later placement stays
 		// in that pool whatever the default becomes or the pool is called.
 		// The spec keeps the name as resolved now.
-		rp, err := resolvePool(ctx, tx, p.TenantID, stored.Placement.Pool)
+		rp, err := resolvePool(ctx, tx, p.TenantID, stored.Placement.Pool, stored.Placement.PoolID)
 		if err != nil {
 			return err
 		}
@@ -961,7 +967,7 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 		rows, err := tx.Query(ctx, `SELECT p.epoch, p.host_id, h.name, p.state, p.exit_code, p.exit_reason, p.stop_reason,
 				p.created_at, p.accepted_at, p.image_ready_at, p.volumes_restored_at, p.container_started_at, p.workload_started_at,
 				p.stop_requested_at, p.exited_at, p.snapshot_done_at, p.uploaded_at,
-				p.peak_memory_bytes, p.peak_disk_bytes, p.peak_pids, p.cpu_seconds, p.net_rx_bytes, p.net_tx_bytes, p.snapshot_bytes
+				p.peak_memory_bytes, p.peak_disk_bytes, p.peak_pids, p.cpu_seconds, p.net_rx_bytes, p.net_tx_bytes, p.snapshot_bytes, p.memory_limit
 			FROM placements p JOIN hosts h ON h.id = p.host_id WHERE p.run_id = $1 ORDER BY p.epoch`, id)
 		if err != nil {
 			return err
@@ -973,7 +979,7 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 			if err := rows.Scan(&pl.Epoch, &pl.Host, &pl.HostName, &pl.State, &pl.ExitCode, &pl.ExitReason, &pl.StopReason,
 				&pl.AssignedAt, &pl.AcceptedAt, &pl.ImageReadyAt, &pl.VolumesRestoredAt, &pl.ContainerStartedAt, &pl.WorkloadStartedAt,
 				&pl.StopRequestedAt, &pl.ExitedAt, &pl.SnapshotDoneAt, &pl.UploadedAt,
-				&pl.PeakMemoryBytes, &pl.PeakDiskBytes, &pl.PeakPids, &pl.CPUSeconds, &pl.NetRxBytes, &pl.NetTxBytes, &pl.SnapshotBytes); err != nil {
+				&pl.PeakMemoryBytes, &pl.PeakDiskBytes, &pl.PeakPids, &pl.CPUSeconds, &pl.NetRxBytes, &pl.NetTxBytes, &pl.SnapshotBytes, &pl.MemoryLimit); err != nil {
 				return err
 			}
 			run.Placements = append(run.Placements, pl)
@@ -2375,6 +2381,46 @@ type Pool struct {
 	Currency    string `json:"currency,omitempty" doc:"The currency of hourlyPrice (ISO 4217); both or neither." example:"USD"`
 	// IsDefault: nil in a request leaves the mark as it is.
 	IsDefault *bool `json:"isDefault,omitempty" doc:"Runs whose spec names no pool go to this pool (the tenant's; a platform default serves tenants without one). At most one per tenant: marking one clears the tenant's previous default. On create or update, omitted leaves the mark as it is. A body without provider changes only the mark of an existing pool: besides name and isDefault its fields must be absent or zero (\"\", 0, false, null, {}); any other value needs provider."`
+	// HostSize, HostSizeFrom and InstanceType are read-only: a request's
+	// are ignored (poolReadOnly).
+	HostSize     *HostSize `json:"hostSize,omitempty" readOnly:"true" doc:"The capacity the pool's hosts register with, as the scheduler plans new hosts: the minimum of each resource over the latest 8 registrations (for an ec2 pool, of its current template), so a pool scaled to zero still has one. Runs ask in these terms: a Run's resources.memory is a share of hostSize.memory. Absent when no host ever registered in the pool."`
+	HostSizeFrom string    `json:"hostSizeFrom,omitempty" readOnly:"true" enum:"running,history" doc:"running: the pool has at least one ready or draining host now; history: hostSize comes only from hosts that have gone. Absent with hostSize."`
+	InstanceType string    `json:"instanceType,omitempty" readOnly:"true" doc:"The provider's instance type of the latest host hostSize is taken from; absent for static hosts and with hostSize." example:"c7a.8xlarge"`
+}
+
+// HostSize is a host's capacity as it registers: CPUs, and bytes of
+// memory and disk (disk 0: the host reserves none).
+type HostSize struct {
+	CPUs   float64 `json:"cpus" doc:"CPUs."`
+	Memory int64   `json:"memory" doc:"Bytes of memory: the machine's gross memory, in which Runs ask."`
+	Disk   int64   `json:"disk" doc:"Bytes of disk reserved for Runs; 0 when the host reserves none."`
+}
+
+// Pool.HostSizeFrom values.
+const (
+	HostSizeFromRunning = "running"
+	HostSizeFromHistory = "history"
+)
+
+// poolReadOnly are the Pool fields luxd reports and a request cannot set.
+var poolReadOnly = []string{"platform", "hostSize", "hostSizeFrom", "instanceType"}
+
+// withHostSizes sets each of pools' host size, from one query.
+func withHostSizes(ctx context.Context, tx pgx.Tx, pools []Pool) error {
+	ids := make([]string, len(pools))
+	for i, pl := range pools {
+		ids[i] = pl.ID
+	}
+	sizes, err := poolHostSizes(ctx, tx, ids)
+	if err != nil {
+		return err
+	}
+	for i := range pools {
+		if s, ok := sizes[pools[i].ID]; ok {
+			pools[i].HostSize, pools[i].HostSizeFrom, pools[i].InstanceType = &s.Size, s.From, s.InstanceType
+		}
+	}
+	return nil
 }
 
 // poolInput is putPool's body: a Pool (its schema too, newAPI), decoded
@@ -2402,7 +2448,7 @@ func (pl *Pool) markerOnly() (bool, []string) {
 	v := reflect.ValueOf(*pl)
 	for i, f := range reflect.VisibleFields(v.Type()) {
 		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
-		if name == "name" || name == "isDefault" || name == "platform" {
+		if name == "name" || name == "isDefault" || slices.Contains(poolReadOnly, name) {
 			continue
 		}
 		fv := v.Field(i)
@@ -2453,7 +2499,10 @@ func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutpu
 			}
 			pools = append(pools, pl)
 		}
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return withHostSizes(ctx, tx, pools)
 	})
 	if err != nil {
 		return nil, err
@@ -2545,9 +2594,20 @@ func (rp resolvedPool) ownerLabel() string {
 // the submitting tenant's scope: the named one, else the tenant's default,
 // else the platform's, else "default". A default is that pool row; a name
 // is the tenant's pool of that name, else the platform's, as hosts and
-// provisioning have always preferred.
-func resolvePool(ctx context.Context, tx pgx.Tx, tenantID, pool string) (resolvedPool, error) {
+// provisioning have always preferred. A poolID is the tenant's active pool
+// with that id, else the platform's; none is a 422 unknown_pool, since a
+// Run bound to no pool would wait for one forever.
+func resolvePool(ctx context.Context, tx pgx.Tx, tenantID, pool, poolID string) (resolvedPool, error) {
 	rp := resolvedPool{Name: pool, From: poolFromSpec}
+	if poolID != "" {
+		err := tx.QueryRow(ctx, `SELECT name, tenant_id IS NULL FROM pools
+			WHERE id = $1 AND NOT retired AND (tenant_id = $2 OR tenant_id IS NULL)`, poolID, tenantID).Scan(&rp.Name, &rp.Platform)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return rp, errf(http.StatusUnprocessableEntity, "unknown_pool", "no pool has id %s", poolID)
+		}
+		rp.ID = &poolID
+		return rp, err
+	}
 	if pool == "" {
 		var id, name, from *string
 		if err := tx.QueryRow(ctx, `SELECT pool_id, pool, pool_from FROM lux_default_pool()`).Scan(&id, &name, &from); err != nil {

@@ -209,10 +209,11 @@ const expectationWindow = 8
 // which bounds probe launches (see planCapacity).
 func (s *Server) hostExpectation(ctx context.Context, tx pgx.Tx, pl poolRow) (*hostExpectation, time.Time, error) {
 	var latest time.Time
-	// id only breaks registered_at ties; the top-N sort never orders the
-	// pool's whole history.
+	// hosts_pool_registered serves the order, id only breaking ties. The
+	// tenant test is spelled out: IS NOT DISTINCT FROM is estimated at one
+	// row, and the planner then reads the pool's whole history instead.
 	rows, err := tx.Query(ctx, `SELECT capacity, labels, registered_at FROM hosts
-		WHERE pool_id = $1 AND tenant_id IS NOT DISTINCT FROM $2::text
+		WHERE pool_id = $1 AND (tenant_id = $2::text OR tenant_id IS NULL AND $2::text IS NULL)
 		  AND provision_requested_at IS NOT NULL AND registered_at IS NOT NULL
 		  AND launch_template = $3::jsonb ORDER BY registered_at DESC, id DESC LIMIT $4`,
 		pl.ID, pl.TenantID, pl.Template, expectationWindow)
@@ -230,22 +231,80 @@ func (s *Server) hostExpectation(ctx context.Context, tx pgx.Tx, pl poolRow) (*h
 		}
 		if expected == nil {
 			latest = registered
-			expected = &hostExpectation{Capacity: capacity, Labels: labels}
-		} else {
-			c := &expected.Capacity
-			c.CPUs = finiteMinimum(c.CPUs, capacity.CPUs)
-			c.Memory = finiteMinimum(c.Memory, capacity.Memory)
-			c.Disk = finiteMinimum(c.Disk, capacity.Disk)
-			c.Runs = finiteMinimum(c.Runs, capacity.Runs)
-			for k, v := range expected.Labels {
-				if other, ok := labels[k]; !ok || other != v {
-					delete(expected.Labels, k)
-				}
-			}
 		}
-		expected.Observations++
+		expected = expected.observe(capacity, labels)
 	}
 	return expected, latest, rows.Err()
+}
+
+// observe folds one more registration, newest first, into e (nil before
+// the first): the minimum of each capacity, and the labels all share.
+func (e *hostExpectation) observe(capacity proto.Capacity, labels map[string]string) *hostExpectation {
+	if e == nil {
+		e = &hostExpectation{Capacity: capacity, Labels: labels}
+	} else {
+		c := &e.Capacity
+		c.CPUs = finiteMinimum(c.CPUs, capacity.CPUs)
+		c.Memory = finiteMinimum(c.Memory, capacity.Memory)
+		c.Disk = finiteMinimum(c.Disk, capacity.Disk)
+		c.Runs = finiteMinimum(c.Runs, capacity.Runs)
+		for k, v := range e.Labels {
+			if other, ok := labels[k]; !ok || other != v {
+				delete(e.Labels, k)
+			}
+		}
+	}
+	e.Observations++
+	return e
+}
+
+// poolHostSizes is the size of each pool's hosts, as the planner expects
+// them (hostExpectation: the minimum of each resource over the latest
+// expectationWindow registrations, for a provisioned pool of its current
+// template), for pools as listed to clients. One query for all of poolIDs;
+// a pool no host ever registered in is absent.
+func poolHostSizes(ctx context.Context, tx pgx.Tx, poolIDs []string) (map[string]poolHostSize, error) {
+	rows, err := tx.Query(ctx, `SELECT p.id, h.capacity, coalesce(h.instance_type, ''),
+			EXISTS (SELECT 1 FROM hosts l WHERE l.pool_id = p.id AND l.state IN ('ready', 'draining'))
+		FROM pools p CROSS JOIN LATERAL (SELECT capacity, instance_type, registered_at, id FROM hosts
+			WHERE pool_id = p.id AND (tenant_id = p.tenant_id OR tenant_id IS NULL AND p.tenant_id IS NULL)
+			  AND registered_at IS NOT NULL
+			  AND (p.provider = 'static' OR provision_requested_at IS NOT NULL AND launch_template = p.template)
+			ORDER BY registered_at DESC, id DESC LIMIT $2) h
+		WHERE p.id = ANY($1) ORDER BY p.id, h.registered_at DESC, h.id DESC`, poolIDs, expectationWindow)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	expected := map[string]*hostExpectation{}
+	out := map[string]poolHostSize{}
+	for rows.Next() {
+		var id, instanceType string
+		var capacity proto.Capacity
+		var live bool
+		if err := rows.Scan(&id, &capacity, &instanceType, &live); err != nil {
+			return nil, err
+		}
+		if _, seen := out[id]; !seen {
+			from := HostSizeFromHistory
+			if live {
+				from = HostSizeFromRunning
+			}
+			out[id] = poolHostSize{From: from, InstanceType: instanceType}
+		}
+		expected[id] = expected[id].observe(capacity, nil)
+	}
+	for id, e := range expected {
+		size := out[id]
+		size.Size = HostSize{CPUs: e.Capacity.CPUs, Memory: e.Capacity.Memory, Disk: e.Capacity.Disk}
+		out[id] = size
+	}
+	return out, rows.Err()
+}
+
+type poolHostSize struct {
+	Size               HostSize
+	From, InstanceType string
 }
 
 // planCapacity plans the pool's waiting Runs; idle is the pool's idle ready

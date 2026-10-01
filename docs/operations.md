@@ -283,7 +283,9 @@ curl -fsS https://luxd.example/runner/v1/bootstrap.sh | sudo env \
 | `--data-dir` | `/var/lib/lux` | Run state and local snapshot copies. |
 | `--shim` | `/usr/local/bin/lux-shim` | The shim binary to mount into containers. |
 | `--label k=v` | | Host labels, matched by `placement.requires` and `prefers`. Also `LUX_LABELS=k=v,…`. |
-| `--max-runs`, `--cpus`, `--memory` | 16, all, all | Capacity offered to the scheduler. |
+| `--max-runs`, `--cpus` | 16, all | Capacity offered to the scheduler. |
+| `--memory` | MemTotal | The machine's gross memory, offered to the scheduler: Runs ask in these terms and get their share after headroom ([how](concepts.md#memory-the-hosts-terms-scaled-to-what-linux-sees)). An EC2 host luxd launches gets its instance type's memory. Also `LUX_RUNNER_MEMORY`. |
+| `--memory-headroom` | 512 MiB | Bytes of MemTotal kept from Runs for the kernel and the host. Each Run's container gets `resources.memory × min(1, (MemTotal − headroom) / --memory)`. The runner refuses to start if it leaves nothing. Also `LUX_RUNNER_MEMORY_HEADROOM`. |
 | `--disk` | not reserved | Bytes of disk the scheduler reserves Runs' `resources.disk` from. Without it, disk is not reserved (Runs still stop at their own limit). Set it to the space under `/var/lib/containers`, more to overcommit. |
 | `--usage-every` | `15s` | How often each Run's disk use is sampled, and its disk limit checked. |
 | `--host-ttl` | `24h` | How long uploaded local copies are kept, and images lux pulled or built after their last use ([images on hosts](runspec.md#images-on-hosts)). |
@@ -511,7 +513,10 @@ What an instance needs:
   wherever images, git remotes and model APIs live, and an instance
   profile if the runner needs one (it doesn't hold S3 credentials).
 - luxd needs EC2 permissions for `RunInstances` (with the launch template
-  and `CreateTags`), `TerminateInstances` and `DescribeInstances`, plus
+  and `CreateTags`), `TerminateInstances`, `DescribeInstances` and
+  `DescribeInstanceTypes` (a template's `instanceType`'s memory, passed to
+  the runner as `LUX_RUNNER_MEMORY`; without it the launch still goes
+  ahead, logged, and the host offers its MemTotal), plus
   `pricing:GetProducts` for on-demand prices and
   `ec2:DescribeSpotPriceHistory` for spot prices, from its standard AWS
   configuration (environment or instance role). Both pricing actions are
@@ -527,7 +532,7 @@ with an unrecognized value is refused, not left to fail at boot:
 | --- | --- | --- |
 | `ignition` (default) | An Ignition v3.4.0 config for Fedora CoreOS. | The default: no packages to install, fastest boot. |
 | `script` | A `#!/bin/bash` script cloud-init runs. | A stock Fedora Cloud, Ubuntu, Debian or AL2023 AMI. |
-| `env` | Plain `KEY=value` lines (`LUX_URL`, `LUX_HOST_TOKEN`, `LUX_HOST_NAME`, `LUX_EC2_IMDS`, and `LUX_NESTED` for a nested pool). | A custom AMI with its own boot script, from before self-update. |
+| `env` | Plain `KEY=value` lines (`LUX_URL`, `LUX_HOST_TOKEN`, `LUX_HOST_NAME`, `LUX_EC2_IMDS`, `LUX_RUNNER_MEMORY` when luxd knows the instance type's memory, and `LUX_NESTED` for a nested pool). | A custom AMI with its own boot script, from before self-update. |
 
 ### Nested containers on an EC2 pool
 

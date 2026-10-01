@@ -1,6 +1,6 @@
-"""A fake EC2 for the test suite: an HTTP server speaking the three EC2
-Query API calls lux uses (RunInstances, TerminateInstances,
-DescribeInstances), where an instance is a simulated host container that
+"""A fake EC2 for the test suite: an HTTP server speaking the EC2 Query API
+calls lux uses (RunInstances, TerminateInstances, DescribeInstances,
+DescribeInstanceTypes), where an instance is a simulated host container that
 boots lux-runner from its user data, as a real instance's AMI would.
 
 luxd's EC2 provider is pointed at it with LUX_EC2_ENDPOINT, so the real
@@ -17,6 +17,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 from xml.sax.saxutils import escape
+
+from env import RUNNER_MEMORY
 
 NS = "http://ec2.amazonaws.com/doc/2016-11-15/"
 
@@ -79,6 +81,10 @@ class FakeEC2:
         self.no_boot = False  # launched instances never start a runner
         self.lose_reply = False
         self.notices: dict[str, dict] = {}  # id → spot instance-action
+        # What DescribeInstanceTypes says every type has (0: it fails). As
+        # much as the harness's runners offer by default, so a launched
+        # host packs as a static one does.
+        self.type_memory_mib = RUNNER_MEMORY >> 20
         self.server = ThreadingHTTPServer((env.gateway, 0), self._handler())
         self.url = f"http://{env.gateway}:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -231,9 +237,18 @@ class FakeEC2:
         if self.no_boot:
             return
         e = inst["env"]
-        # The instance's metadata endpoint is this fake's, per instance.
+        # The instance's metadata endpoint is this fake's, per instance. The
+        # runner.env's memory, as the unit's environment would give it.
+        memory = ["--memory", e["LUX_RUNNER_MEMORY"]] if e.get("LUX_RUNNER_MEMORY") else []
         host.start_runner(self.env, e["LUX_HOST_TOKEN"], "--provider-id", iid, "--ec2-imds", f"{self.url}/imds/{iid}",
-                          name=name, url=e.get("LUX_URL"))
+                          *memory, name=name, url=e.get("LUX_URL"))
+
+    def _DescribeInstanceTypes(self, q):
+        if not self.type_memory_mib:
+            raise FakeError("UnauthorizedOperation", "not authorized to perform ec2:DescribeInstanceTypes (fake)")
+        items = "".join(f"<item><instanceType>{escape(t)}</instanceType><memoryInfo><sizeInMiB>{self.type_memory_mib}"
+                        f"</sizeInMiB></memoryInfo></item>" for t in _list(q, "InstanceType"))
+        return f'<DescribeInstanceTypesResponse xmlns="{NS}"><instanceTypeSet>{items}</instanceTypeSet></DescribeInstanceTypesResponse>'
 
     def _TerminateInstances(self, q):
         ids = _list(q, "InstanceId")

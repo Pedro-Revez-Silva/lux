@@ -15,13 +15,16 @@ import (
 // Env is what a runner needs to reach luxd and register. URL and
 // HostToken are the only ones every launch needs; HostName defaults to
 // the hostname when empty (a static host, or a launch that left it out);
-// EC2IMDS is empty outside EC2. Nested starts the runner with --nested
-// (LUX_NESTED=true): set only for a pool whose template opts in.
+// EC2IMDS is empty outside EC2. Memory is the machine's gross memory in
+// bytes (the runner's --memory), when the provider knows it. Nested starts
+// the runner with --nested (LUX_NESTED=true): set only for a pool whose
+// template opts in.
 type Env struct {
 	URL       string
 	HostToken string
 	HostName  string
 	EC2IMDS   string
+	Memory    string
 	Nested    bool
 }
 
@@ -38,6 +41,7 @@ func (e Env) pairs() [][2]string {
 	add("LUX_HOST_TOKEN", e.HostToken)
 	add("LUX_HOST_NAME", e.HostName)
 	add("LUX_EC2_IMDS", e.EC2IMDS)
+	add("LUX_RUNNER_MEMORY", e.Memory)
 	if e.Nested {
 		add("LUX_NESTED", "true")
 	}

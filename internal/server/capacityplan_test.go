@@ -883,3 +883,63 @@ func TestCapacityReconcileExpectationWindowAgesOut(t *testing.T) {
 		t.Fatalf("expected %v", got)
 	}
 }
+
+// GET /v1/pools says each pool's host size as the planner expects it: the
+// minimum over the latest registrations of its current template, from
+// hosts gone too (a pool scaled to zero), and the latest host's type.
+func TestListPoolsHostSize(t *testing.T) {
+	s, _, _ := planningFixture(t, 0)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO pools (id,tenant_id,name,provider) VALUES ('empty','t1','empty','ec2'), ('fixed','t1','fixed','static')`)
+	sizes := func() map[string]Pool {
+		t.Helper()
+		list, err := s.listPools(tenantCtx("t1"), &TenantQuery{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]Pool{}
+		for _, p := range list.Body.Pools {
+			out[p.Name] = p
+		}
+		return out
+	}
+	if got := sizes(); got["burst"].HostSize != nil || got["empty"].HostSize != nil || got["burst"].HostSizeFrom != "" {
+		t.Fatalf("host sizes before any host: %+v", got)
+	}
+
+	observePlanningHost(t, s, "old", "terminated", proto.Capacity{CPUs: 4, Memory: 8 << 30, Disk: 80 << 30}, map[string]string{})
+	execSQL(t, s, ctx, `UPDATE hosts SET registered_at=now()-interval '2 day', instance_type='m7i.xlarge' WHERE id='old'`)
+	observePlanningHost(t, s, "gone", "terminated", proto.Capacity{CPUs: 8, Memory: 32 << 30, Disk: 60 << 30}, map[string]string{})
+	execSQL(t, s, ctx, `UPDATE hosts SET registered_at=now()-interval '1 day', instance_type='m7i.2xlarge' WHERE id='gone'`)
+	// Another template's host (the pool's template changed since): not counted.
+	observePlanningHost(t, s, "stale", "terminated", proto.Capacity{CPUs: 1, Memory: 1 << 30}, map[string]string{})
+	execSQL(t, s, ctx, `UPDATE hosts SET launch_template='{"version":0}', instance_type='t3.micro' WHERE id='stale'`)
+	got := sizes()["burst"]
+	want := HostSize{CPUs: 4, Memory: 8 << 30, Disk: 60 << 30}
+	if got.HostSize == nil || *got.HostSize != want || got.HostSizeFrom != HostSizeFromHistory || got.InstanceType != "m7i.2xlarge" {
+		t.Fatalf("scaled to zero: %+v %q %q, want %+v from history, m7i.2xlarge", got.HostSize, got.HostSizeFrom, got.InstanceType, want)
+	}
+
+	observePlanningHost(t, s, "live", "ready", proto.Capacity{CPUs: 8, Memory: 32 << 30, Disk: 60 << 30}, map[string]string{})
+	execSQL(t, s, ctx, `UPDATE hosts SET instance_type='c7a.2xlarge' WHERE id='live'`)
+	got = sizes()["burst"]
+	if got.HostSize == nil || *got.HostSize != want || got.HostSizeFrom != HostSizeFromRunning || got.InstanceType != "c7a.2xlarge" {
+		t.Fatalf("with a live host: %+v %q %q", got.HostSize, got.HostSizeFrom, got.InstanceType)
+	}
+	// Past the window, the old small host no longer counts.
+	for i := range expectationWindow - 2 {
+		observePlanningHost(t, s, fmt.Sprintf("new%d", i), "terminated", proto.Capacity{CPUs: 8, Memory: 32 << 30, Disk: 60 << 30}, map[string]string{})
+	}
+	if got := sizes()["burst"]; *got.HostSize != (HostSize{CPUs: 8, Memory: 32 << 30, Disk: 60 << 30}) {
+		t.Fatalf("after the window: %+v", got.HostSize)
+	}
+
+	// A static pool: any registered host, whatever its template.
+	execSQL(t, s, ctx, `INSERT INTO hosts (id,name,tenant_id,pool_id,state,registered_at,capacity) VALUES ('s1','s1','t1','fixed','ready',now(),'{"cpus":2,"memory":4096,"disk":0}')`)
+	if got := sizes()["fixed"]; got.HostSize == nil || *got.HostSize != (HostSize{CPUs: 2, Memory: 4096}) || got.HostSizeFrom != HostSizeFromRunning || got.InstanceType != "" {
+		t.Fatalf("static pool: %+v", got)
+	}
+	if got := sizes()["empty"]; got.HostSize != nil {
+		t.Fatalf("a pool without hosts: %+v", got.HostSize)
+	}
+}
