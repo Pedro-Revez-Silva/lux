@@ -422,7 +422,7 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 		}
 	}
 	probe := false
-	incapable := 0 // Unmet nested Runs no future host can serve.
+	bootstrap := false
 	// reserve fits r on the first of hosts it fits; hosts are at stage, or
 	// "planned" for a new host (no id).
 	reserve := func(hosts []*candidateHost, r pendingRun, stage string) bool {
@@ -477,7 +477,6 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 		// probe so a fixed $Default launch template is seen.
 		if r.Spec.Sandbox.NestedContainers && !nested {
 			plan.Unmet++
-			incapable++
 			reason := "pool template does not offer nested containers"
 			if nestedMismatch {
 				reason = "current template's hosts registered without nested containers"
@@ -493,6 +492,7 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 		}
 		if plan.Expected == nil {
 			plan.Unmet++
+			bootstrap = true
 			deficit(r, "new_host", []fitBlocker{{Reason: "new host capacity unknown"}})
 			continue
 		}
@@ -532,7 +532,6 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 	// one. Either waits for any current-template start to register first, and
 	// a probe is bounded per waiting cohort: once it registers, the Runs are
 	// older than it. Planned new hosts already serve as the probe.
-	bootstrap := plan.Expected == nil && plan.Unmet > incapable
 	probe = probe && plan.NewHosts == 0
 	if (bootstrap || probe) && len(startingIDs) == 0 {
 		plan.NewHosts = 1
