@@ -32,7 +32,8 @@ func (s *Server) runnerRoutes(mux *http.ServeMux) {
 
 // serveBootstrap is GET /runner/v1/bootstrap.sh: the boot script a static
 // host runs to install lux-runner as a systemd service. It takes
-// LUX_URL, LUX_HOST_TOKEN, LUX_HOST_NAME and LUX_EC2_IMDS from its own
+// LUX_URL, LUX_HOST_TOKEN, LUX_HOST_NAME, LUX_EC2_IMDS and
+// LUX_RUNNER_MEMORY from its own
 // environment (unauthenticated here: it carries no secret, only how to
 // find one).
 func (s *Server) serveBootstrap(w http.ResponseWriter, r *http.Request) error {

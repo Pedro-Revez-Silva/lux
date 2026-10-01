@@ -66,6 +66,9 @@ S3_CONTAINER_PORT = 9000
 # Images every host has preloaded, so no test waits on a registry.
 ALPINE_IMAGE = "docker.io/library/alpine:3.24.2"
 PRELOAD_IMAGES = [ALPINE_IMAGE]
+# The memory every test runner offers (--memory), whatever the machine: a
+# 16 GB CI runner fits as many 8 GiB Runs as a workstation.
+RUNNER_MEMORY = 64 << 30
 
 LABEL = "lux-e2e"
 
@@ -219,6 +222,19 @@ class Host:
     def podman(self, *args: str, check: bool = True) -> str:
         return self.exec("podman", *args, check=check)
 
+    def memory_limit(self, requested: int, offered: int = 0, headroom: int = 512 << 20) -> int:
+        """The container memory limit a runner here gives a Run asking
+        `requested` bytes when it offers `offered` (the harness's
+        RUNNER_MEMORY by default): its share of MemTotal less headroom,
+        never more than asked, in whole pages."""
+        offered = offered or RUNNER_MEMORY
+        kb = next(l.split()[1] for l in self.exec("cat", "/proc/meminfo").splitlines() if l.startswith("MemTotal:"))
+        allocatable = int(kb) * 1024 - headroom
+        if allocatable >= offered:
+            return requested
+        page = int(self.exec("getconf", "PAGESIZE").strip())
+        return max(requested * allocatable // offered // page * page, 1)
+
     def start_runner(self, env: "TestEnvironment", token: str, *extra: str, name: str | None = None,
                      url: str | None = None) -> subprocess.Popen:
         """Start lux-runner inside this host, logging to <log dir>/<host>/runner.log."""
@@ -243,7 +259,7 @@ class Host:
                 # offers the whole machine, and a 16 GB CI runner fits one
                 # Run at the 8 GiB default where a workstation fits several.
                 # A test's own --cpus or --memory, later, wins.
-                "--cpus", "16", "--memory", str(64 << 30),
+                "--cpus", "16", "--memory", str(RUNNER_MEMORY),
                 *extra,
             ],
             stdout=log,

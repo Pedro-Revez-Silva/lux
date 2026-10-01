@@ -74,6 +74,7 @@ timeout: 4h                     # running time, over all placements; unset: no l
 
 placement:
   pool: default                 # omitted: the tenant's default pool (see Rules)
+  # poolId: pool_…              # or the pool by id, which a rename keeps; not with pool
   requires: { arch: amd64 }     # host labels that must match
   prefers: { region: eu-west-1 }
 
@@ -108,8 +109,11 @@ artifacts:
   supply every secret again.
 - Volume paths must be absolute. `/.lux` is reserved.
 - **Resources** are what a Run gets and what the scheduler reserves on its
-  host: `cpus` (a CPU quota; `0.5` is half a CPU), `memory` (the limit,
-  with no swap beyond it), `disk` (what it may write: its container's
+  host: `cpus` (a CPU quota; `0.5` is half a CPU), `memory` (what the Run
+  asks for, in its host's terms, the machine's gross memory; the
+  container's limit, with no swap beyond it, is this × the host's factor,
+  [MemTotal less headroom over what the host offers](concepts.md#memory-the-hosts-terms-scaled-to-what-linux-sees),
+  and a placement reports it as `memoryLimit`), `disk` (what it may write: its container's
   writable layer plus its state volumes), `pids` (processes). They default
   to **2 CPUs, 8 GiB of memory, 20 GiB of disk and 1024 processes**, and an
   operator can change the defaults (`LUX_DEFAULT_CPUS`,
@@ -139,6 +143,13 @@ artifacts:
   `platform`, absent when no pool has the name). A named pool, `default`
   included, is used as it is: the tenant's pool of that name if it has
   one, else the platform's.
+- `placement.poolId` names the pool by its id (`pool_…`, the `id` of
+  `GET /v1/pools`), which a rename does not change: the tenant's pool with
+  that id, else the platform's. luxd writes that pool's current name into
+  `placement.pool` of the stored spec (`poolFrom` `spec`). An id that no
+  such pool has (none, another tenant's, a removed pool) is refused at
+  submit with 422 `unknown_pool`; the Run is not created. A spec that sets
+  both `pool` and `poolId` is refused with 422 `invalid_spec`.
 
 ## Images
 

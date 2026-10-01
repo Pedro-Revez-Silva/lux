@@ -64,7 +64,7 @@ def test_container_is_hardened(lux, runners, hosts):
     assert "NoNewPrivs:\t1" in out, out
     uid_map = next(l for l in out.splitlines() if l.strip().startswith("0 "))
     assert int(uid_map.split()[1]) > 0, "container root must not be host root"
-    assert str(256 * 1024 * 1024) in out
+    assert str(hosts[0].memory_limit(256 * 1024 * 1024)) in out
     assert "100" in out.split()
 
 
@@ -146,20 +146,42 @@ def test_scopes_are_enforced(env, lux):
 def test_resource_defaults_and_requests_reach_the_container(lux, runners, hosts):
     """A Run without resources gets the defaults (2 CPUs, 8 GiB, 1024
     processes); one that asks gets what it asked for — as the container's
-    own cgroup limits."""
+    own cgroup limits, its memory scaled to the host's share (the harness's
+    runners offer 64 GiB, more than the machine's MemTotal less headroom)."""
     runners.start(hosts[0])
     show = "cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max"
     default = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", show))
     lux.wait_state(default, "succeeded")
     out = lux.logs(default).split()  # cpu.max is "<quota> <period>"
-    assert out[:2] == ["200000", "100000"] and int(out[2]) == 8 << 30 and int(out[3]) == 1024, out
+    assert out[:2] == ["200000", "100000"] and int(out[2]) == hosts[0].memory_limit(8 << 30) and int(out[3]) == 1024, out
     spec = lux.get(default)["spec"]["resources"]
     assert spec["cpus"] == 2 and spec["memory"] == 8 << 30 and spec["pids"] == 1024, spec
 
     asked = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", show, resources={"cpus": 0.5, "memory": "512Mi", "pids": 64}))
     lux.wait_state(asked, "succeeded")
     out = lux.logs(asked).split()
-    assert out[:2] == ["50000", "100000"] and int(out[2]) == 512 << 20 and int(out[3]) == 64, out
+    assert out[:2] == ["50000", "100000"] and int(out[2]) == hosts[0].memory_limit(512 << 20) and int(out[3]) == 64, out
+    assert lux.get(asked)["placements"][0]["memoryLimit"] == int(out[2])
+
+
+def test_memory_is_the_hosts_share(lux, runners, hosts):
+    """A host offering exactly what Linux sees less the headroom gives a Run
+    all it asked; offering twice that, half."""
+    kb = next(l.split()[1] for l in hosts[0].exec("cat", "/proc/meminfo").splitlines() if l.startswith("MemTotal:"))
+    allocatable = int(kb) * 1024 - (512 << 20)
+    show = "cat /sys/fs/cgroup/memory.max"
+    runners.start(hosts[0], "--memory", str(allocatable))
+    whole = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", show, resources={"memory": "512Mi"}))
+    lux.wait_state(whole, "succeeded")
+    assert int(lux.logs(whole).split()[0]) == 512 << 20
+    runners.stop(hosts[0])
+    runners.start(hosts[0], "--memory", str(2 * allocatable))
+    half = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", show, resources={"memory": "512Mi"}))
+    lux.wait_state(half, "succeeded")
+    assert int(lux.logs(half).split()[0]) == 256 << 20
+    # The placement says the limit its container got.
+    assert lux.get(whole)["placements"][0]["memoryLimit"] == 512 << 20
+    assert lux.get(half)["placements"][0]["memoryLimit"] == 256 << 20
 
 
 def test_a_run_over_its_disk_limit_is_stopped_and_fails(lux, runners, hosts):

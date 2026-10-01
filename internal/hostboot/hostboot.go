@@ -15,12 +15,14 @@ import (
 // Env is what a runner needs to reach luxd and register. URL and
 // HostToken are the only ones every launch needs; HostName defaults to
 // the hostname when empty (a static host, or a launch that left it out);
-// EC2IMDS is empty outside EC2.
+// EC2IMDS is empty outside EC2. Memory is the machine's gross memory in
+// bytes (the runner's --memory), when the provider knows it.
 type Env struct {
 	URL       string
 	HostToken string
 	HostName  string
 	EC2IMDS   string
+	Memory    string
 }
 
 // pairs are Env's fields as KEY, value, only the ones set: the order
@@ -36,6 +38,7 @@ func (e Env) pairs() [][2]string {
 	add("LUX_HOST_TOKEN", e.HostToken)
 	add("LUX_HOST_NAME", e.HostName)
 	add("LUX_EC2_IMDS", e.EC2IMDS)
+	add("LUX_RUNNER_MEMORY", e.Memory)
 	return out
 }
 

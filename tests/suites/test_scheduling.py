@@ -187,3 +187,16 @@ def test_a_run_naming_no_pool_goes_to_the_tenants_default(lux, runners, hosts):
             lux.run("cancel", r, check=False)
         for pool in ("arm64", "other"):
             lux.run("pools", "rm", pool, check=False)
+
+
+def test_a_run_naming_an_unknown_pool_id_is_refused(lux):
+    """placement.poolId that no pool of the tenant or the platform has:
+    422 unknown_pool at submit, and no Run is created."""
+    import requests
+    before = {r["id"] for r in lux.api("/v1/runs").json()["runs"]}
+    spec = generic(ALPINE_IMAGE, "true", placement={"poolId": "pool_doesnotexist0"})
+    r = requests.post(f"{lux.env.luxd_url}/v1/runs", json=spec, timeout=10,
+                      headers={"Authorization": f"Bearer {lux.api_key}"})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"] == {"code": "unknown_pool", "message": "no pool has id pool_doesnotexist0"}, r.text
+    assert {r["id"] for r in lux.api("/v1/runs").json()["runs"]} == before

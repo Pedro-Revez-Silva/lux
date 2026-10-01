@@ -213,10 +213,13 @@ resource "aws_iam_role_policy" "control_luxd" {
         }
       },
       {
-        Sid      = "DescribeInstances"
-        Effect   = "Allow"
-        Action   = "ec2:DescribeInstances"
-        Resource = "*" # DescribeInstances does not support resource-level permissions.
+        Sid    = "DescribeInstances"
+        Effect = "Allow"
+        Action = [
+          "ec2:DescribeInstances",
+          "ec2:DescribeInstanceTypes", # a launched runner's --memory: its type's memory
+        ]
+        Resource = "*" # Neither action supports resource-level permissions.
       },
       {
         Sid    = "ReadPrices"

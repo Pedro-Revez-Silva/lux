@@ -210,7 +210,7 @@ func serve(ctx context.Context, c config, plan servePlan) error {
 				"ec2": ec2.NewPrices(c.Costs.Compute.PricingRegion, c.Costs.Compute.PricingEndpoint, c.EC2.Endpoint),
 			},
 		},
-		Providers: providers(c),
+		Providers: providers(c, log),
 		ConsoleAuth: server.ConsoleAuth{
 			Mode:            c.Console.Auth,
 			CFTeam:          c.Console.CloudflareAccess.Team,

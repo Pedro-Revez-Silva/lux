@@ -192,3 +192,18 @@ def test_a_build_has_the_runs_process_limit(lux, runners, hosts):
     spec["resources"] = {"pids": 64}
     run = lux.wait_state(lux.submit(spec), "failed")
     assert "fork" in run["stateReason"], run
+
+
+def test_a_build_has_the_runs_scaled_memory(lux, runners, hosts):
+    """RUN steps get the Run's memory as its container does: scaled to the
+    host's share (the harness's runners offer more than MemTotal). A step
+    shares the host's cgroup namespace, so its own cgroup is the path
+    /proc/self/cgroup names below /sys/fs/cgroup, not /sys/fs/cgroup."""
+    runners.start(hosts[0])
+    cf = (f"FROM {ALPINE_IMAGE}\n"
+          "RUN cat \"/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max\" > /build-memory\n")
+    run_id = lux.submit(built(cf, "cat", "/build-memory", resources={"memory": "512Mi"}))
+    lux.wait_state(run_id, "succeeded")
+    limit = hosts[0].memory_limit(512 << 20)
+    assert limit < 512 << 20, "the harness host does not scale memory; the test proves nothing"
+    assert int(lux.logs(run_id).strip()) == limit, lux.logs(run_id)

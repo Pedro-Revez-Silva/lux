@@ -17,6 +17,7 @@ set -euo pipefail
 : "${LUX_HOST_TOKEN:?LUX_HOST_TOKEN is required}"
 LUX_HOST_NAME="${LUX_HOST_NAME:-$(hostname)}"
 LUX_EC2_IMDS="${LUX_EC2_IMDS:-}"
+LUX_RUNNER_MEMORY="${LUX_RUNNER_MEMORY:-}"
 
 echo "lux: bootstrapping $LUX_HOST_NAME against $LUX_URL"
 
@@ -53,6 +54,7 @@ umask 077
   printf 'LUX_HOST_TOKEN=%s\n' "$LUX_HOST_TOKEN"
   printf 'LUX_HOST_NAME=%s\n' "$LUX_HOST_NAME"
   [ -n "$LUX_EC2_IMDS" ] && printf 'LUX_EC2_IMDS=%s\n' "$LUX_EC2_IMDS"
+  [ -n "$LUX_RUNNER_MEMORY" ] && printf 'LUX_RUNNER_MEMORY=%s\n' "$LUX_RUNNER_MEMORY"
 } > /etc/lux/runner.env
 chmod 0600 /etc/lux/runner.env
 
