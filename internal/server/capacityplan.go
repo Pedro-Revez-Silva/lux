@@ -51,8 +51,9 @@ type hostExpectation struct {
 	Capacity     proto.Capacity    `json:"capacity"`
 	Labels       map[string]string `json:"-"`
 	Observations int               `json:"observations"`
-	// latestNested: the newest registration offered nested containers.
-	latestNested bool
+	// nestedMismatch: the newest registration lacked nested=true, and so
+	// did the one before it, if any (see planCapacity).
+	nestedMismatch bool
 }
 
 const planSampleSize = 8
@@ -224,22 +225,24 @@ func (s *Server) hostExpectation(ctx context.Context, tx pgx.Tx, pl poolRow) (*h
 	}
 	defer rows.Close()
 	var expected *hostExpectation
-	latestNested := false
-	for rows.Next() {
+	var newestNested [2]bool // nested=true of the two newest, newest first.
+	for i := 0; rows.Next(); i++ {
 		var capacity proto.Capacity
 		var labels map[string]string
 		var registered time.Time
 		if err := rows.Scan(&capacity, &labels, &registered); err != nil {
 			return nil, latest, err
 		}
-		if expected == nil {
+		if i == 0 {
 			latest = registered
-			latestNested = labels["nested"] == "true"
+		}
+		if i < len(newestNested) {
+			newestNested[i] = labels["nested"] == "true"
 		}
 		expected = expected.observe(capacity, labels)
 	}
 	if expected != nil {
-		expected.latestNested = latestNested
+		expected.nestedMismatch = !newestNested[0] && (expected.Observations == 1 || !newestNested[1])
 	}
 	return expected, latest, rows.Err()
 }
@@ -383,12 +386,19 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 		return plan, err
 	}
 	// Whether a future host offers nested containers is the current
-	// template's decision, never an older host's label; but once the newest
-	// current-template registration came up without them, its later hosts
-	// are not counted on to have them either (a custom AMI that drops
-	// LUX_NESTED). A template edit starts its own observations.
+	// template's decision, never an older host's label; but registrations
+	// of the current template without them (a custom AMI that drops
+	// LUX_NESTED) stop its later hosts counting as nested. No single
+	// registration flips that either way: the newest must lack nested=true
+	// and so must the one before it, unless it is the only one (a broken
+	// template's bootstrap). One outlier after a nested host thus does not
+	// starve nested Runs, and one late nested host (an older launch
+	// registering last) clears it for at most one burst, plus one host if
+	// that burst registers one host at a time; its first two registrations
+	// without nesting re-establish it. A template edit starts its own
+	// observations.
 	nested := templateOffersNested(pl)
-	nestedMismatch := nested && plan.Expected != nil && !plan.Expected.latestNested
+	nestedMismatch := nested && plan.Expected != nil && plan.Expected.nestedMismatch
 	nested = nested && !nestedMismatch
 	virtual := func(id string) *candidateHost {
 		h := &candidateHost{ID: id, TenantID: pl.TenantID, PoolID: pl.ID, Pool: pl.Name, Shared: pl.Shared && pl.TenantID == nil, Retired: pl.Retired, Connected: true}

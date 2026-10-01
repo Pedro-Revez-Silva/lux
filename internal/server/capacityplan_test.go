@@ -361,6 +361,83 @@ func TestCapacityReconcileNestedTemplateHostsWithoutNesting(t *testing.T) {
 			t.Fatalf("after the edited template's host registered nested: %d launches, want 3 (12 Runs, 4 a host)", got)
 		}
 	})
+	// register marks ids ready with a 4-Run capacity and labels.
+	register := func(t *testing.T, s *Server, labels string, ids ...string) {
+		t.Helper()
+		for _, id := range ids {
+			execSQL(t, s, context.Background(), `UPDATE hosts SET state='ready',registered_at=now(),last_heartbeat=now(),capacity=$2,labels=$3 WHERE id=$1`,
+				id, proto.Capacity{CPUs: 4, Memory: 100, Disk: 100, Runs: 4}, labels)
+			s.hub.polled(id)
+		}
+	}
+	ticks := func(t *testing.T, s *Server, pl poolRow, p *planningProvider, n, want int) {
+		t.Helper()
+		for range n {
+			planningTick(t, s, pl, p, false)
+		}
+		if p.calls != want {
+			t.Fatalf("launched %d hosts, want %d", p.calls, want)
+		}
+	}
+	schedule := func(t *testing.T, s *Server) {
+		t.Helper()
+		if err := s.scheduleOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("one outlier after a nested host does not starve", func(t *testing.T) {
+		s, pl, p := setup(t)
+		observeTemplateHost(t, s, "healthy", "ready", string(pl.Template), "2 hours", map[string]string{"nested": "true"})
+		observeTemplateHost(t, s, "outlier", "ready", string(pl.Template), "30 minutes", map[string]string{})
+		// 12 Runs, 4 on the healthy host: two hosts for the other 8, and no
+		// more while they start.
+		ticks(t, s, pl, p, 4, 2)
+		register(t, s, `{"nested":"true"}`, p.hosts...)
+		ticks(t, s, pl, p, 2, 2)
+		schedule(t, s)
+		if got := queryOne[int](t, s, `SELECT count(*) FROM placements WHERE run_id LIKE 'n%'`); got != 12 {
+			t.Fatalf("placed %d nested Runs, want 12", got)
+		}
+		if got := queryOne[int](t, s, `SELECT count(*) FROM placements pl JOIN hosts h ON h.id = pl.host_id
+			WHERE pl.run_id LIKE 'n%' AND h.labels->>'nested' IS DISTINCT FROM 'true'`); got != 0 {
+			t.Fatalf("%d nested Runs placed on hosts without nesting", got)
+		}
+	})
+	t.Run("a late nested registration gives at most one more burst", func(t *testing.T) {
+		s, pl, p := setup(t)
+		observeTemplateHost(t, s, "b1", "ready", string(pl.Template), "40 minutes", map[string]string{})
+		observeTemplateHost(t, s, "b2", "ready", string(pl.Template), "30 minutes", map[string]string{})
+		ticks(t, s, pl, p, 2, 0)
+		// A launch from before b1 and b2 registers nested last.
+		observeTemplateHost(t, s, "late", "ready", string(pl.Template), "0 seconds", map[string]string{"nested": "true"})
+		execSQL(t, s, context.Background(), `UPDATE hosts SET provision_requested_at=now()-interval '2 hours' WHERE id='late'`)
+		// 4 Runs on it, one burst of two hosts for the other 8.
+		ticks(t, s, pl, p, 3, 2)
+		register(t, s, `{}`, p.hosts...)
+		ticks(t, s, pl, p, 4, 2)
+	})
+	t.Run("a nested probe recovers the same template", func(t *testing.T) {
+		s, pl, p := setup(t)
+		waves(t, s, pl, p, 2)
+		incapable := append([]string(nil), p.hosts...)
+		if len(incapable) != 3 {
+			t.Fatalf("first burst launched %d, want 3", len(incapable))
+		}
+		execSQL(t, s, context.Background(), `INSERT INTO runs (id,tenant_id,pool_id,spec,state,updated_at) VALUES ('late','t1','pool1',$1,'provisioning',now())`, nestedPlanRun)
+		ticks(t, s, pl, p, 2, 4)
+		register(t, s, `{"nested":"true"}`, p.hosts[3])
+		// 13 Runs, 4 on the probe: three more hosts for the other 9.
+		ticks(t, s, pl, p, 3, 7)
+		register(t, s, `{"nested":"true"}`, p.hosts[4:]...)
+		ticks(t, s, pl, p, 2, 7)
+		schedule(t, s)
+		if got := queryOne[int](t, s, `SELECT count(*) FROM placements WHERE run_id = 'late' OR run_id LIKE 'n%'`); got != 13 {
+			t.Fatalf("placed %d nested Runs, want 13", got)
+		}
+		if got := queryOne[int](t, s, `SELECT count(*) FROM placements WHERE host_id = ANY($1)`, incapable); got != 0 {
+			t.Fatalf("%d Runs placed on the hosts registered without nesting", got)
+		}
+	})
 }
 
 func TestCapacityReconcileTemplateEditColdBootstrap(t *testing.T) {

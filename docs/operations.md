@@ -556,12 +556,17 @@ lux pools set burst --provider ec2 --max 10 \
   current template opts in, never from the labels of hosts launched
   earlier. A Run with `sandbox.nestedContainers` on a pool without it waits
   with "host does not support nested containers" and launches nothing.
-- Once the newest host of the current template registers without nested
-  containers (an `env`-format AMI that does not pass `LUX_NESTED` on, say),
-  nested Runs stop counting on its future hosts: they wait with "current
-  template's hosts registered without nested containers", and only a Run
-  that began waiting after that registration launches one probe host. Fix
-  the AMI or launch template and edit the pool template to plan afresh.
+- Once the two newest hosts of the current template register without
+  nested containers (or the only one so far does: an `env`-format AMI that
+  does not pass `LUX_NESTED` on, say), nested Runs stop counting on its
+  future hosts: they wait with "current template's hosts registered without
+  nested containers", and only a Run that began waiting after the last
+  registration launches one probe host. One host without nesting after a
+  nested one does not stop nested launches. A nested host registering last
+  (a slow launch from before the change) resumes them for at most one
+  burst (plus one host if that burst's hosts register one at a time), and
+  its first two hosts without nesting stop them again. Fix the AMI or
+  launch template and edit the pool template to plan afresh.
 - Hosts that already run keep what they registered with. Changing the
   template is a new template, so the pool scales on it as for any template
   edit; replace (drain) existing hosts to apply it to them.
