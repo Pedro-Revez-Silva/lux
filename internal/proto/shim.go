@@ -153,19 +153,39 @@ const (
 // Event types the shim writes as ch=event records. The runner forwards the
 // lux.* ones to luxd as adapter events; all are visible in the output.
 const (
-	EvSession    = "lux.session"    // {"sessionId"}
-	EvActivity   = "lux.activity"   // {"activity": "idle" | "busy"}
-	EvInputAck   = "lux.input"      // {"requestId", "text"?, "truncated"?, "error"?}; the first prompt's id is "prompt"
-	EvInit       = "lux.init"       // {"phase": "start" | "done", "exitCode"?}
-	EvWorkload   = "lux.workload"   // {"phase": "start", "pid"}
-	EvStop       = "lux.stop"       // {"reason"}
-	EvBeforeStop = "lux.beforeStop" // {"phase": "start"|"done", "exitCode", "timedOut"}
-	EvWarning    = "lux.warning"    // {"message"}
-	EvArtifact   = "lux.artifact"   // {"path"}
+	EvSession  = "lux.session"  // {"sessionId"}
+	EvActivity = "lux.activity" // {"activity": "idle" | "busy"}
+	// EvInputAck is an input's first answer, exactly one per request id:
+	//   {"requestId", "phase":"accepted", "lands":"next_step"|"next_turn", "receipt", "text"?, "truncated"?}
+	//   {"requestId", "phase":"failed", "error", "text"?}   (never accepted)
+	// A consumer that reads only requestId and error sees what it did before
+	// phases existed. The first prompt's id is "prompt".
+	EvInputAck = "lux.input"
+	// EvInputConsumed: an accepted input with receipt is in the context of
+	// the agent's model step. {"requestId"}; at most once per request id.
+	EvInputConsumed = "lux.input.consumed"
+	// EvInputFailed: an accepted input the agent will never read (the Run
+	// stopped first, or the agent dropped it). {"requestId", "error"}; at
+	// most once per request id, never after EvInputConsumed.
+	EvInputFailed = "lux.input.failed"
+	EvInit        = "lux.init"       // {"phase": "start" | "done", "exitCode"?}
+	EvWorkload    = "lux.workload"   // {"phase": "start", "pid"}
+	EvStop        = "lux.stop"       // {"reason"}
+	EvBeforeStop  = "lux.beforeStop" // {"phase": "start"|"done", "exitCode", "timedOut"}
+	EvWarning     = "lux.warning"    // {"message"}
+	EvArtifact    = "lux.artifact"   // {"path"}
 	// EvServer is a server process's start or exit, a ch=server record
 	// naming the server: {"phase": "start"|"exit", "gen", "pid"?,
 	// "exitCode"?, "error"?}.
 	EvServer = "lux.server"
+)
+
+// Input phases: lux.input's phase (accepted, failed), and
+// AdapterEvent.InputProgress's (consumed, failed).
+const (
+	InputAccepted = "accepted"
+	InputConsumed = "consumed"
+	InputFailed   = "failed"
 )
 
 // ExitInfo is the shim's account of how the workload ended.

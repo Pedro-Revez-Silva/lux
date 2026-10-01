@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marcioapm/lux/internal/adapter"
 	"github.com/marcioapm/lux/internal/proto"
 )
 
@@ -119,9 +121,9 @@ func TestOutputEndLine(t *testing.T) {
 	}
 }
 
-// An input ack repeats what was delivered, capped, and redacts secrets in
-// it like all output.
-func TestInputAck(t *testing.T) {
+// An input's records repeat what was delivered, capped, and redact secrets
+// in it like all output; each phase is recorded once per request id.
+func TestInputRecords(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "out.jsonl")
 	red := NewRedactor(map[string]string{"TOKEN": "s3cr3t-value"})
 	out, err := OpenOutput(path, red)
@@ -129,43 +131,130 @@ func TestInputAck(t *testing.T) {
 		t.Fatal(err)
 	}
 	k := &sink{s: &Shim{out: out, red: red}}
-	k.InputAck(proto.Input{RequestID: "prompt", Text: "use s3cr3t-value please"}, nil)
-	k.InputAck(proto.Input{RequestID: "big", Text: strings.Repeat("x", maxAckedText+10)}, nil)
-	k.InputAck(proto.Input{RequestID: "raw", Raw: []byte("raw bytes\n")}, nil)
+	next := adapter.Delivery{Lands: adapter.LandsNextStep, Receipt: true}
+	k.InputAccepted(proto.Input{RequestID: "prompt", Text: "use s3cr3t-value please"}, next)
+	k.InputAccepted(proto.Input{RequestID: "big", Text: strings.Repeat("x", maxAckedText+10)}, adapter.Delivery{Lands: adapter.LandsNextTurn})
+	k.InputAccepted(proto.Input{RequestID: "raw", Raw: []byte("raw bytes\n")}, next)
 	// A secret straddling the cut: redacted whole before cutting.
-	k.InputAck(proto.Input{RequestID: "edge", Text: strings.Repeat("y", maxAckedText-5) + "s3cr3t-value"}, nil)
-	k.InputAck(proto.Input{}, nil) // no request id: nothing to ack
+	k.InputAccepted(proto.Input{RequestID: "edge", Text: strings.Repeat("y", maxAckedText-5) + "s3cr3t-value"}, next)
+	k.InputAccepted(proto.Input{}, next) // no request id: nothing to record
+	k.InputConsumed("prompt")
+	// Reported again (an adapter re-reading a redelivered event): not recorded.
+	k.InputAccepted(proto.Input{RequestID: "prompt", Text: "again"}, next)
+	k.InputConsumed("prompt")
+	k.InputFailed(proto.Input{RequestID: "prompt", Text: "x"}, errors.New("late"))
+	k.InputFailed(proto.Input{RequestID: "bad", Text: "x"}, errors.New("refused"))
+	k.InputFailed(proto.Input{RequestID: "bad", Text: "x"}, errors.New("again"))
+	k.InputFailed(proto.Input{RequestID: "raw", Text: "x"}, errors.New("dropped"))
+	k.InputFailed(proto.Input{RequestID: "raw", Text: "x"}, errors.New("dropped again"))
+	k.InputConsumed("raw")
 	out.Close()
 
-	type ack struct {
-		RequestID string `json:"requestId"`
-		Text      string `json:"text"`
-		Truncated bool   `json:"truncated"`
+	recs := inputRecords(t, path)
+	if len(recs) != 7 {
+		t.Fatalf("got %d records: %+v", len(recs), recs)
 	}
+	for i, typ := range []string{"lux.input", "lux.input", "lux.input", "lux.input", "lux.input.consumed", "lux.input", "lux.input.failed"} {
+		if recs[i].Type != typ {
+			t.Errorf("record %d is %s, want %s: %+v", i, recs[i].Type, typ, recs[i])
+		}
+	}
+	if r := recs[0]; r.RequestID != "prompt" || r.Phase != "accepted" || r.Lands != "next_step" || r.Receipt == nil || !*r.Receipt ||
+		r.Text != "use [REDACTED:TOKEN] please" || r.Truncated {
+		t.Errorf("prompt accepted: %+v", r)
+	}
+	if r := recs[1]; len(r.Text) != maxAckedText || !r.Truncated || r.Lands != "next_turn" || r.Receipt == nil || *r.Receipt {
+		t.Errorf("big: %d bytes, %+v", len(r.Text), r.Lands)
+	}
+	if recs[2].Text != "raw bytes\n" {
+		t.Errorf("raw: %+v", recs[2])
+	}
+	if strings.Contains(recs[3].Text, "s3cr") || strings.Contains(recs[3].Text, "[REDA") || !recs[3].Truncated {
+		t.Errorf("edge keeps part of a secret: …%q", recs[3].Text[len(recs[3].Text)-30:])
+	}
+	if r := recs[4]; r.RequestID != "prompt" || r.Phase != "" || r.Text != "" || r.Receipt != nil {
+		t.Errorf("consumed: %+v", r)
+	}
+	if r := recs[5]; r.RequestID != "bad" || r.Phase != "failed" || r.Error != "refused" {
+		t.Errorf("failed before accepted: %+v", r)
+	}
+	if r := recs[6]; r.RequestID != "raw" || r.Phase != "" || r.Error != "dropped" || r.Text != "" {
+		t.Errorf("failed after accepted: %+v", r)
+	}
+}
+
+type inputRec struct {
+	Type      string
+	RequestID string `json:"requestId"`
+	Phase     string `json:"phase"`
+	Lands     string `json:"lands"`
+	Receipt   *bool  `json:"receipt"`
+	Text      string `json:"text"`
+	Truncated bool   `json:"truncated"`
+	Error     string `json:"error"`
+}
+
+// inputRecords are the lux.input* event records in an output file.
+func inputRecords(t *testing.T, path string) []inputRec {
+	t.Helper()
+	var recs []inputRec
+	for _, r := range readRecords(t, path) {
+		var ev struct {
+			Type string   `json:"type"`
+			Data inputRec `json:"data"`
+		}
+		if r.Ch == "event" && json.Unmarshal(r.Event, &ev) == nil && strings.HasPrefix(ev.Type, "lux.input") {
+			ev.Data.Type = ev.Type
+			recs = append(recs, ev.Data)
+		}
+	}
+	return recs
+}
+
+// A consumer that knows only the lux.input record and ignores its phase
+// (the shape before phases existed; today's dude and older runners) sees
+// one answer per input: one success for an input accepted then consumed,
+// or accepted then failed, and one failure for an input that failed
+// before it was accepted.
+func TestInputRecordsForPhaseBlindConsumers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	out, err := OpenOutput(path, NewRedactor(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := &sink{s: &Shim{out: out, red: NewRedactor(nil)}}
+	receipt := adapter.Delivery{Lands: adapter.LandsNextStep, Receipt: true}
+	k.InputAccepted(proto.Input{RequestID: "read", Text: "a"}, receipt)
+	k.InputConsumed("read")
+	k.InputAccepted(proto.Input{RequestID: "dropped", Text: "b"}, receipt)
+	k.InputFailed(proto.Input{RequestID: "dropped", Text: "b"}, errors.New("the Run stopped before the agent read it"))
+	k.InputFailed(proto.Input{RequestID: "refused", Text: "c"}, errors.New("refused"))
+	out.Close()
+
+	// The decoding of lux.input in the runner's tailEvents at 2dabfca
+	// (internal/runner/placement.go:1012), which reads requestId and error
+	// and knows no phase: an error is a failure, anything else a delivery.
+	type ack struct{ id, err string }
 	var acks []ack
 	for _, r := range readRecords(t, path) {
 		var ev struct {
 			Type string `json:"type"`
-			Data ack    `json:"data"`
+			Data struct {
+				RequestID string `json:"requestId"`
+				Error     string `json:"error"`
+			} `json:"data"`
 		}
-		if r.Ch == "event" && json.Unmarshal(r.Event, &ev) == nil && ev.Type == proto.EvInputAck {
-			acks = append(acks, ev.Data)
+		if r.Ch != "event" || json.Unmarshal(r.Event, &ev) != nil {
+			continue
+		}
+		switch ev.Type {
+		case "lux.input":
+			acks = append(acks, ack{ev.Data.RequestID, ev.Data.Error})
 		}
 	}
-	if len(acks) != 4 {
-		t.Fatalf("got %d acks: %+v", len(acks), acks)
-	}
-	if acks[0].RequestID != "prompt" || acks[0].Text != "use [REDACTED:TOKEN] please" || acks[0].Truncated {
-		t.Errorf("prompt ack: %+v", acks[0])
-	}
-	if len(acks[1].Text) != maxAckedText || !acks[1].Truncated {
-		t.Errorf("big ack: %d bytes, truncated=%v", len(acks[1].Text), acks[1].Truncated)
-	}
-	if acks[2].Text != "raw bytes\n" {
-		t.Errorf("raw ack: %+v", acks[2])
-	}
-	if strings.Contains(acks[3].Text, "s3cr") || strings.Contains(acks[3].Text, "[REDA") || !acks[3].Truncated {
-		t.Errorf("edge ack keeps part of a secret: …%q", acks[3].Text[len(acks[3].Text)-30:])
+	want := []ack{{"read", ""}, {"dropped", ""}, {"refused", "refused"}}
+	if fmt.Sprint(acks) != fmt.Sprint(want) {
+		t.Fatalf("phase-blind acks %v, want %v", acks, want)
 	}
 }
 

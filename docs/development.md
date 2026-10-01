@@ -193,17 +193,27 @@ what its protocol can do (`Caps`). `tests/suites/test_agents.py` takes a
 
 Tests assert from capabilities, never from an agent's name. For example,
 input sent mid-turn joins the running turn only where
-`caps.steer_joins_turn` (Codex). **Adding an agent is one `Harness` entry**
+`caps.steer_joins_turn` (Codex, OpenCode, Claude Code when a tool call
+follows), and a `lux.input.consumed` receipt is expected only where
+`caps.steer_receipt`. **Adding an agent is one `Harness` entry**
 (plus a `lux-fake` protocol mode if it speaks a new protocol). Every
 existing test then covers it. Use `@harnesses(pred)` to limit a test to
 the agents it concerns.
 
 `lux-fake` speaks all three protocols: ACP by default, Claude Code's
 stream-json (`-p --input-format stream-json …`), and Codex's app-server
-(`app-server`). It follows a script from the prompt (`write f text`,
+(`app-server`), with the steering behaviour each real agent has: a prompt
+sent during a turn is read after the script line running when it came
+(the next step), with Claude Code's `command_lifecycle` frames, Codex's
+`userMessage` items, and OpenCode's event bus and `prompt_async` (`lux-fake
+acp --port <p>`). It follows a script from the prompt (`write f text`,
 `sleep 5`, `history`, …; see `cmd/lux-fake/main.go`), keeps a transcript on
 a state volume, and resumes from it. Its ACP replies stream in chunks
-without line breaks, as real agents' do.
+without line breaks, as real agents' do. `sh <command>` runs a command as
+the agent's shell tool, reported as each protocol reports a real one
+(Claude Code's `Bash` tool_use and tool_result, Codex's
+`commandExecution` item, OpenCode's `execute` tool_call), so the steering
+tests assert the same tool events on fake and real variants.
 
 ### EC2 pools: fake by default, real nightly
 
@@ -238,7 +248,7 @@ makes the harness build the agents' images):
 
 | Agent | Variables |
 | --- | --- |
-| Claude Code | `LUX_TEST_ANTHROPIC_API_KEY`, optional `LUX_TEST_ANTHROPIC_BASE_URL` |
+| Claude Code | `LUX_TEST_ANTHROPIC_API_KEY`, optional `LUX_TEST_ANTHROPIC_BASE_URL`, `LUX_TEST_CLAUDE_MODEL` (default `haiku`) |
 | Codex | `LUX_TEST_OPENAI_API_KEY`, optional `LUX_TEST_OPENAI_BASE_URL`, `LUX_TEST_CODEX_MODEL` |
 | OpenCode | `LUX_TEST_OPENCODE_AUTH` (an `auth.json`), `LUX_TEST_OPENCODE_CONFIG` (an `opencode.json`), `LUX_TEST_OPENCODE_MODEL` (`provider/model`) |
 

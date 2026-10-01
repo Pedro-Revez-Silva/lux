@@ -50,6 +50,8 @@ export function eventSummary(e: Event): string {
       return d.interrupt === true && !str(d.text) ? "interrupt" : `input: ${str(d.text) ?? `${typeof d.rawBytes === "number" ? d.rawBytes : 0} raw bytes`}`;
     case "input.delivered":
       return `input delivered${str(d.text) ? `: ${str(d.text)}` : ""}`;
+    case "input.consumed":
+      return `input read by the agent: ${str(d.requestId) ?? "?"}`;
     case "input.failed":
       return `input failed: ${str(d.error) ?? "?"}`;
     case "stop.requested":

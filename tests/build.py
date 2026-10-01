@@ -60,10 +60,10 @@ def _build_image(tag: str, files: dict[str, Path], containerfile: Path, args: di
     with tempfile.TemporaryDirectory() as ctx:
         for name, src in files.items():
             dst = Path(ctx) / name
-            try:
-                os.link(src, dst)  # hard link: agent binaries are ~200MB
-            except OSError:
-                shutil.copy(src, dst)
+            if src.is_dir():
+                shutil.copytree(src, dst, copy_function=_link_or_copy)
+            else:
+                _link_or_copy(src, dst)
         shutil.copy(containerfile, Path(ctx) / "Containerfile")
         cmd = ["docker", "build", "-q", "-t", tag, "-f", "Containerfile"]
         for k, v in (args or {}).items():
@@ -72,6 +72,13 @@ def _build_image(tag: str, files: dict[str, Path], containerfile: Path, args: di
             print(f"{tag} build failed", file=sys.stderr)
             sys.exit(1)
     print(f"  {tag} built")
+
+
+def _link_or_copy(src, dst) -> None:
+    try:
+        os.link(src, dst)  # hard link: agent binaries are ~200MB
+    except OSError:
+        shutil.copy(src, dst)
 
 
 def build_fake_image(fake_binary: Path | None) -> str | None:
@@ -124,7 +131,8 @@ AGENTS = {
 
 def _codex_native() -> str | None:
     """The codex npm package's launcher is a Node script; the native binary
-    it runs, for this machine's architecture, is what goes in the image."""
+    it runs, for this machine's architecture, is what goes in the image,
+    with the rest of its vendor directory (build_agent_images)."""
     launcher = shutil.which("codex")
     if not launcher:
         return None
@@ -155,7 +163,14 @@ def build_agent_images(selected: bool) -> dict[str, str | None]:
             print(f"  {name}: no native {name} binary installed; its real-agent suite will skip")
             continue
         tag = f"localhost/lux-{name}:test"
-        _build_image(tag, {name: Path(os.path.realpath(exe))}, TESTS_DIR / "images" / "agent" / "Containerfile",
-                     {"BIN": name})
+        exe = Path(os.path.realpath(exe))
+        if name == "codex":
+            # Codex runs its shell tool through codex-code-mode-host, found
+            # next to its binary, and sandboxes with codex-resources/bwrap:
+            # without them every command fails to start. The whole vendor
+            # directory goes in, in its layout.
+            _build_image(tag, {"codex-vendor": exe.parent.parent}, TESTS_DIR / "images" / "agent" / "Containerfile.codex")
+        else:
+            _build_image(tag, {name: exe}, TESTS_DIR / "images" / "agent" / "Containerfile", {"BIN": name})
         images[name] = tag
     return images

@@ -945,7 +945,7 @@ func (p *placement) sendStop(ctx context.Context, reason string) {
 
 func (p *placement) input(ctx context.Context, in proto.Input) {
 	if err := p.sendShim(proto.ShimMsg{Type: proto.ShimInput, Input: &in}); err != nil {
-		go p.report(ctx, proto.MsgAdapterEvent, proto.AdapterEvent{InputAck: in.RequestID, InputError: "workload not reachable: " + err.Error()})
+		go p.report(ctx, proto.MsgAdapterEvent, proto.AdapterEvent{InputAck: in.RequestID, InputPhase: proto.InputFailed, InputError: "workload not reachable: " + err.Error()})
 	}
 }
 
@@ -998,6 +998,8 @@ func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 			Text      string `json:"text"`
 			Truncated bool   `json:"truncated"`
 			Phase     string `json:"phase"`
+			Lands     string `json:"lands"`
+			Receipt   bool   `json:"receipt"`
 		}
 		_ = json.Unmarshal(ev.Data, &d)
 		var ae *proto.AdapterEvent
@@ -1010,7 +1012,12 @@ func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 		case proto.EvActivity:
 			ae = &proto.AdapterEvent{Activity: d.Activity}
 		case proto.EvInputAck:
-			ae = &proto.AdapterEvent{InputAck: d.RequestID, InputError: d.Error, InputText: d.Text, InputTruncated: d.Truncated}
+			ae = &proto.AdapterEvent{InputAck: d.RequestID, InputPhase: d.Phase, InputError: d.Error, InputText: d.Text,
+				InputTruncated: d.Truncated, InputLands: d.Lands, InputReceipt: d.Receipt}
+		case proto.EvInputConsumed:
+			ae = &proto.AdapterEvent{InputProgress: &proto.InputProgress{RequestID: d.RequestID, Phase: proto.InputConsumed}}
+		case proto.EvInputFailed:
+			ae = &proto.AdapterEvent{InputProgress: &proto.InputProgress{RequestID: d.RequestID, Phase: proto.InputFailed, Error: d.Error}}
 		case proto.EvWorkload:
 			if d.Phase == "start" {
 				p.mark("workloadStarted")

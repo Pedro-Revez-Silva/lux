@@ -43,11 +43,29 @@ hand-written examples, unless noted otherwise.
 - **Transcript path convention**: `~/.claude/projects/<cwd with every "/" replaced by
   "-">/<session-id>.jsonl`. Confirmed both by listing the filesystem and by reading
   `system.init.memory_paths.auto` (same directory, `/memory/` suffix). (verified by running)
-- **Native turn queueing**: writing a second `user` stdin line while a turn is still in
-  progress does NOT error or get dropped — Claude Code queues it and runs it as an
-  automatic follow-up turn once the first completes (`result.queued_turn_count` and a
-  second `result` event appear). No client-side queue is needed for this case.
-  (verified by running)
+- **A second `user` line during a turn** does not error and is not dropped. Where it is
+  read depends on what follows (verified by running, 2026-09-30, 2.1.280, 3/3 each; also
+  2.1.285 and 2.1.207):
+  - **A tool boundary follows** (the line arrives while a tool runs, or while the model
+    streams a step that ends in a tool call): the line is folded into the running turn
+    and read at the model's next step, right after the tool result. The running tool is
+    not cancelled. One `result` ends the turn (`num_turns` counts the extra steps).
+  - **No tool call follows** (the model's final step): the turn ends with its `result`,
+    and the line then runs as the next turn, with its own `result`.
+- **Message lifecycle** (`msg_lifecycle_v1` in `capabilities`): a user line that carries
+  a client `"uuid"` gets `command_lifecycle` frames on stdout:
+  ```json
+  {"type":"command_lifecycle","command_uuid":"2cab161d-3112-402a-9835-67c1c284f828","state":"queued","uuid":"…","session_id":"…"}
+  ```
+  `state` is `queued` (it entered the command queue), `started` (it drained into a turn:
+  the model's next step has it; for a folded line, 2–7 ms after the tool result),
+  `completed`, `cancelled`, `discarded` or `refused`. A line without a `uuid` gets
+  none. In a folded turn the order is: steer `completed`, `result`, first prompt
+  `completed`. (verified by running)
+- **`"priority"` on a user line**: `"now"` aborts the running turn at its next tool
+  boundary (`result` with `terminal_reason: "aborted_tools"`, the first prompt
+  `cancelled`), then runs the line as a new turn; `"later"` holds it until the turn
+  ends. Neither is how lux steers. (verified by running)
 - **Interrupt** is a control-plane request over the same stdin, not a signal:
   ```json
   {"type":"control_request","request_id":"req-1","request":{"subtype":"interrupt"}}
@@ -139,6 +157,17 @@ hand-written examples, unless noted otherwise.
   Sent against a genuinely in-progress turn (mid-count in a "count slowly 1 to 40" task),
   it returned a success result — confirming Codex supports native mid-turn steering, as
   assumed in the adapter design. (verified by running)
+  - The result is `{"turnId":…}`. With `"clientUserMessageId":"<id>"` (also on
+    `turn/start`), the input's `userMessage` item carries `"clientId":"<id>"`
+    (`null` without one). From 0.155 its `item/started` comes when the model's next
+    step reads it (6–42 ms after the running tool's `item/completed`, 3/3 on 0.155.1,
+    1/1 on 0.159.2); on 0.144.1 it came at admission, while the tool still ran.
+    `initialize`'s `userAgent` is `<client name>/<codex version> (…)`. (verified by
+    running)
+  - Errors (`-32600`, 0.155.1 and 0.159.2): `"no active turn to steer"` when no turn
+    runs; ``"expected active turn id `X` but found `Y`"`` when another does. A steer
+    accepted into a turn that is then interrupted is never emitted as an item: it is
+    dropped. (verified by running, without a model)
 - **`turn/interrupt`**: `{"method":"turn/interrupt","params":{"threadId":...,"turnId":...}}`
   against an in-progress turn produces a final turn state of `"status":"interrupted"`,
   distinct from `"completed"` — a clean signal for the adapter to classify the turn
@@ -226,10 +255,35 @@ OpenCode-specific behavior.
   OpenCode session state directly (rather than only through the ACP wire protocol) needs a
   SQLite reader, not a JSONL tail. (verified by running — filesystem/DB inspected directly)
 - **Sending a second `session/prompt` while one is still active**: the ACP spec does not
-  define this case (see §4). Empirically, OpenCode does **not** error or merge the two —
-  it appears to serialize them: the first prompt's RPC id gets its own `result` (with its
-  own `stopReason`) before the second prompt's turn begins. This is an implementation
-  behavior of OpenCode specifically, not a spec guarantee. (verified by running)
+  define this case (see §4). OpenCode joins it to the running agent loop: the prompt is
+  stored as a user message at once, the loop reads it at its next step (after the
+  running tool, which is not cancelled), and **both RPCs resolve together** when the
+  loop ends, with the same `stopReason` and `usage` (and each its own
+  `userMessageId`). One `session.idle` on the bus, none between them. Nothing on ACP
+  stdio says when the second prompt was read. (verified by running, 2026-09-30, 1.18.31
+  5/5; also 1.18.33 and 1.18.21. This corrects an earlier note here that OpenCode
+  serialises the two.) The binary shows why: ACP `prompt` calls the legacy
+  `SessionPrompt.prompt`, which saves the message and calls `ensureRunning`; the loop
+  reloads messages every step and continues while the newest assistant message's
+  `parentID` is not the newest user message.
+- **`opencode acp --port <p> [--hostname 127.0.0.1]`** also serves OpenCode's HTTP API
+  from the same process, on the same sessions. Two parts of it matter here (verified by
+  running, 1.18.31, 3/3 each):
+  - `GET /event` (server-sent events) is the bus. A model step is an assistant
+    `message.updated` whose `info.parentID` is the user message it answers;
+    `session.status` (`busy`/`idle`) and `session.idle` mark the loop.
+  - `POST /session/{id}/prompt_async` with `{"messageID":"msg_…","parts":[{"type":"text","text":…}]}`
+    (204) stores the message **under that id** and joins it to the running ACP loop,
+    exactly as a second `session/prompt` does. The first assistant `message.updated`
+    whose `parentID` is that id is the step that read it (0.13–0.22 s after the tool
+    result). The id must be an OpenCode ascending id (`msg_` + 12 hex digits of
+    `unix_ms × 0x1000 + counter` + 14 base62 characters): OpenCode orders messages by
+    id. An ACP `session/prompt`'s own `messageId` is **not** the stored id.
+  - Never the v2 API (`POST /api/session/{id}/prompt`) on a session ACP drives: it
+    starts a second, concurrent loop, which runs the steer while the ACP turn's tool
+    still runs, and the ACP turn never sees it (0/3).
+  - The server comes up shortly after ACP answers `session/new`: a client must wait
+    for `/event` before relying on it.
 - `session/cancel` while a turn is genuinely in-progress was not cleanly isolated in
   testing (timing meant both test prompts had completed before cancel was sent) — its
   effect on OpenCode specifically is documented for ACP generally (see §4) but not
