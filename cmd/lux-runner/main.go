@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -34,6 +35,21 @@ func (l labels) Set(v string) error {
 	return nil
 }
 
+// envBytes is a flag's default from the environment: name's value as a
+// byte count, or def when unset. A value that is not one stops the runner.
+func envBytes(name string, def int64) int64 {
+	v := os.Getenv(name)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "lux-runner: %s=%q: want a number of bytes\n", name, v)
+		os.Exit(2)
+	}
+	return n
+}
+
 func main() {
 	cfg := runner.Config{Labels: labels{}}
 	flag.StringVar(&cfg.Name, "name", "", "host name (default: hostname)")
@@ -42,7 +58,8 @@ func main() {
 	flag.Var(labels(cfg.Labels), "label", "host label key=value (repeatable)")
 	flag.IntVar(&cfg.MaxRuns, "max-runs", 0, "maximum concurrent Runs (default 16)")
 	flag.Float64Var(&cfg.CPUs, "cpus", 0, "CPUs to offer (default: all)")
-	memory := flag.Int64("memory", 0, "bytes of memory to offer (default: all)")
+	flag.Int64Var(&cfg.Memory, "memory", envBytes("LUX_RUNNER_MEMORY", 0), "bytes of memory to offer: the machine's gross memory, in which Runs ask; each gets its share of MemTotal less --memory-headroom (default: MemTotal). Also LUX_RUNNER_MEMORY")
+	flag.Int64Var(&cfg.MemoryHeadroom, "memory-headroom", envBytes("LUX_RUNNER_MEMORY_HEADROOM", runner.DefaultMemoryHeadroom), "bytes of MemTotal kept from Runs for the kernel and the host. Also LUX_RUNNER_MEMORY_HEADROOM")
 	flag.DurationVar(&cfg.UsageEvery, "usage-every", 0, "how often disk use is sampled and the disk limit checked (default 15s)")
 	flag.Int64Var(&cfg.Disk, "disk", 0, "bytes of disk to reserve for Runs, from their resources.disk (default: not reserved)")
 	flag.StringVar(&cfg.ProviderID, "provider-id", os.Getenv("LUX_PROVIDER_ID"), "cloud instance id, for provisioned hosts")
@@ -57,9 +74,8 @@ func main() {
 		fmt.Println(version.Version)
 		return
 	}
-	cfg.Memory = *memory
-	if cfg.UsageEvery < 0 || cfg.Disk < 0 || cfg.Memory < 0 || cfg.CPUs < 0 {
-		fmt.Fprintln(os.Stderr, "lux-runner: --usage-every, --disk, --memory and --cpus must not be negative")
+	if cfg.UsageEvery < 0 || cfg.Disk < 0 || cfg.Memory < 0 || cfg.MemoryHeadroom < 0 || cfg.CPUs < 0 {
+		fmt.Fprintln(os.Stderr, "lux-runner: --usage-every, --disk, --memory, --memory-headroom and --cpus must not be negative")
 		os.Exit(2)
 	}
 	// A provisioned host gets its name from luxd (user data).

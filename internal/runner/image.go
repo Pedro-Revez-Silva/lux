@@ -200,7 +200,7 @@ func (p *placement) build(ctx context.Context, sp spec.RunSpec, cf, tag string, 
 	// Whatever the build started goes with it, however it ended: a
 	// cancelled podman build can leave its RUN step running.
 	defer cg.remove()
-	mem := fmt.Sprintf("%d", int64(sp.Resources.Memory))
+	mem := fmt.Sprintf("%d", p.r.mem.limit(int64(sp.Resources.Memory)))
 	args := append(containment(true), "--quiet", "--pull=never", "--isolation=oci",
 		"--layers=false", "--no-cache",
 		"--timestamp=0", // no build-time dates in the image: rebuilds match when the steps do

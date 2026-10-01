@@ -204,7 +204,30 @@ hosts of the same pool and tenant, launched from exactly the pool's current
 template, reported. Before any such host has registered, that capacity is
 unknown, and the pool launches one host to learn it. The simulation is a
 reservation for sizing only; the scheduler still places each Run on its
-own. See [Telemetry](telemetry.md#capacity-planning).
+own. See [Telemetry](telemetry.md#capacity-planning). `GET /v1/pools`
+says that size as each pool's `hostSize` (with `hostSizeFrom` and the
+latest host's `instanceType`), also for a pool scaled to zero.
+
+### Memory: the host's terms, scaled to what Linux sees
+
+A host offers memory in the machine's own terms: its gross size
+(`lux-runner --memory`; an EC2 host launched by luxd offers its instance
+type's memory). Runs ask in those terms, and the scheduler packs them
+against it. Linux never sees all of a machine, and the kernel needs some of
+what it does see, so each runner scales every Run's memory by one factor,
+computed once at start:
+
+```
+factor = min(1, (MemTotal − headroom) / offered)
+```
+
+`headroom` is `lux-runner --memory-headroom` (512 MiB by default). The
+container's limit (`--memory`, with no swap beyond it) is
+`floor(resources.memory × factor)`, and a placement reports it as
+`memoryLimit`. A 32 GiB machine whose Linux sees 30.5 GiB leaves 30 GiB
+after headroom: two Runs asking 16 GiB each fill it, and each gets 15 GiB.
+Every Run pays the kernel's share in proportion. A host offering no more
+than MemTotal less headroom is not scaled.
 
 ## Tenants and keys
 

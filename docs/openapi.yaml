@@ -699,6 +699,22 @@ components:
           format: int64
           type: integer
       type: object
+    HostSize:
+      additionalProperties: false
+      properties:
+        cpus:
+          description: CPUs.
+          format: double
+          type: number
+        disk:
+          description: Bytes of disk reserved for Runs; 0 when the host reserves none.
+          format: int64
+          type: integer
+        memory:
+          description: "Bytes of memory: the machine's gross memory, in which Runs ask."
+          format: int64
+          type: integer
+      type: object
     HostSummary:
       additionalProperties: false
       properties:
@@ -1072,6 +1088,9 @@ components:
         pool:
           description: "The pool to run in. Empty: the tenant's default pool, else the platform's, else the pool named default; resolved at submit and stored."
           type: string
+        poolId:
+          description: "The pool to run in, by its id (pool_…), which a rename keeps: the tenant's pool with that id, else the platform's. An id no such pool has is refused at submit (422 unknown_pool). Not with pool; at submit, pool is set to that pool's name."
+          type: string
         prefers:
           additionalProperties:
             type: string
@@ -1089,6 +1108,17 @@ components:
           examples:
             - USD
           type: string
+        hostSize:
+          $ref: "#/components/schemas/HostSize"
+          description: "The capacity the pool's hosts register with, as the scheduler plans new hosts: the minimum of each resource over the latest 8 registrations (for an ec2 pool, of its current template), so a pool scaled to zero still has one. Runs ask in these terms: a Run's resources.memory is a share of hostSize.memory. Absent when no host ever registered in the pool."
+          readOnly: true
+        hostSizeFrom:
+          description: "running: the pool has at least one ready or draining host now; history: hostSize comes only from hosts that have gone. Absent with hostSize."
+          enum:
+            - running
+            - history
+          readOnly: true
+          type: string
         hourlyPrice:
           description: "Static pools: the default hourly price of hosts registering into the pool, a decimal string with up to 9 fractional digits. Copied to each host when it first registers; changing it does not reprice existing hosts. Refused for ec2 pools, which the provider prices."
           examples:
@@ -1096,6 +1126,12 @@ components:
           type: string
         id:
           description: The pool's immutable identity; unchanged by rename.
+          readOnly: true
+          type: string
+        instanceType:
+          description: The provider's instance type of the latest host hostSize is taken from; absent for static hosts and with hostSize.
+          examples:
+            - c7a.8xlarge
           readOnly: true
           type: string
         isDefault:
@@ -1933,6 +1969,10 @@ components:
         imageReadyAt:
           format: date-time
           type: string
+        memoryLimit:
+          description: "Bytes: the container's memory limit, the Run's resources.memory scaled to its host's share (MemTotal less the runner's headroom, over the memory the host offers). Absent until the container starts, and for placements from before luxd recorded it."
+          format: int64
+          type: integer
         netRxBytes:
           format: int64
           type: integer

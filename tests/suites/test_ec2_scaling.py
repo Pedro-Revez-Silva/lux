@@ -12,7 +12,7 @@ import pytest
 
 from conftest import fake_only, generic
 from ec2_helpers import _clean, ec2_hosts, pool, pool_events  # noqa: F401 (_clean is an autouse fixture)
-from env import ALPINE_IMAGE, wait_until
+from env import ALPINE_IMAGE, RUNNER_MEMORY, wait_until
 
 pytestmark = pytest.mark.ec2
 
@@ -111,6 +111,29 @@ def test_template_tags_are_kept_and_lux_tags_are_reserved(lux, ec2):
     # The pool as listed saves back unchanged (no stored lux:* tag).
     [stored] = [p for p in lux.json("pools", "ls") if p["name"] == "burst"]
     assert stored["template"]["tags"] == {"team": "platform"}, stored["template"]
+
+
+def test_a_launched_host_offers_its_instance_types_memory(lux, ec2):
+    """A template naming its instance type launches a host offering that
+    type's memory (DescribeInstanceTypes), which Runs ask in; when the
+    lookup fails the launch goes ahead without it (the host offers its own:
+    in the harness, RUNNER_MEMORY)."""
+    fake_only(ec2)
+    ec2.type_memory_mib = 48 << 10
+    pool(lux, ec2, min=1, max=1)
+    [host] = wait_until(lambda: ec2_hosts(lux), 120, 0.3, "no host registered")
+    assert host["capacity"]["memory"] == 48 * GiB, host["capacity"]
+    assert ec2.calls.count("DescribeInstanceTypes") == 1, ec2.calls
+    lux.run("pools", "rm", "burst")
+    wait_until(lambda: not ec2.running(), 90, 0.3, "the host was not terminated")
+
+    # A type luxd has not looked up yet (it keeps each type's answer).
+    ec2.type_memory_mib = 0
+    pool(lux, ec2, min=1, max=1, template={**ec2.template, "instanceType": "m7i.xlarge"})
+    [host] = wait_until(lambda: ec2_hosts(lux), 120, 0.3, "no host registered without the type's memory")
+    [inst] = ec2.running()
+    assert "LUX_RUNNER_MEMORY" not in inst["env"], inst["env"]
+    assert host["capacity"]["memory"] == RUNNER_MEMORY, host["capacity"]
 
 
 def test_max_hosts_is_respected(lux, ec2):

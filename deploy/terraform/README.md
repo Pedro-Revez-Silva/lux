@@ -70,7 +70,8 @@ separate private repo should hold the real values and state.
   is set at launch; a pool rename changes none), `ec2:TerminateInstances` conditioned on
   `lux:managed=true` and a `lux:host` tag (set only by luxd at launch; the
   control host carries no `lux:*` tag, and a postcondition refuses one
-  arriving through `default_tags`), `ec2:DescribeInstances`, S3 on its own
+  arriving through `default_tags`), `ec2:DescribeInstances`,
+  `ec2:DescribeInstanceTypes`, S3 on its own
   buckets, and `ssm:GetParameter(s)` under its own prefix, on the tunnel
   token's parameter, and on the config repo deploy key's parameter when
   one is set — nothing else. The SSM agent gets an inline copy of

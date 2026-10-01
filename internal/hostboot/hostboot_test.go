@@ -16,6 +16,11 @@ func TestEnvLinesOmitsEmptyFields(t *testing.T) {
 	if got != want {
 		t.Errorf("Lines() = %q, want %q", got, want)
 	}
+	got = Env{URL: "http://10.0.1.10:7070", HostToken: "luxh_x", Memory: "68719476736"}.Lines()
+	want = "LUX_URL=http://10.0.1.10:7070\nLUX_HOST_TOKEN=luxh_x\nLUX_RUNNER_MEMORY=68719476736\n"
+	if got != want {
+		t.Errorf("Lines() = %q, want %q", got, want)
+	}
 }
 
 func TestValidUserData(t *testing.T) {

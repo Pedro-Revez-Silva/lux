@@ -136,10 +136,11 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 			volumes_restored_at  = coalesce(volumes_restored_at, $4),
 			container_started_at = coalesce(container_started_at, $5),
 			workload_started_at  = coalesce(workload_started_at, $6),
-			exited_at            = coalesce(exited_at, $7)
+			exited_at            = coalesce(exited_at, $7),
+			memory_limit         = coalesce(memory_limit, nullif($8::bigint, 0))
 		WHERE run_id = $1 AND epoch = $2`, runID, epoch,
 		msToTime(t["imageReady"]), msToTime(t["volumesRestored"]), msToTime(t["containerStarted"]),
-		msToTime(t["workloadStarted"]), msToTime(t["exited"]))
+		msToTime(t["workloadStarted"]), msToTime(t["exited"]), st.MemoryLimit)
 	if err != nil {
 		return err
 	}

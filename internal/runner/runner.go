@@ -44,7 +44,11 @@ type Config struct {
 	Labels  map[string]string
 	MaxRuns int
 	CPUs    float64
-	Memory  int64
+	// Memory is the memory offered to the scheduler: the machine's gross
+	// size, in which Runs ask. Their containers get their share of
+	// MemTotal - MemoryHeadroom (memoryScale).
+	Memory         int64
+	MemoryHeadroom int64
 	// Disk offered for Runs' writable layers and volumes, reserved by the
 	// scheduler from their resources.disk (0: not reserved; each Run's
 	// limit still applies).
@@ -113,6 +117,8 @@ type Runner struct {
 	// hashed once at startup (a self-update replaces the file, not this
 	// process, so the hash is stable for the process's life).
 	runnerSHA256, shimSHA256 string
+	// mem scales a Run's resources.memory to its container's limit.
+	mem memoryScale
 }
 
 // mountpoint is where a volume's data is on this host. It never changes for
@@ -142,9 +148,15 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 	if cfg.CPUs == 0 {
 		cfg.CPUs = float64(runtime.NumCPU())
 	}
+	total := memTotal()
 	if cfg.Memory == 0 {
-		cfg.Memory = memTotal()
+		cfg.Memory = total
 	}
+	mem, err := newMemoryScale(total, cfg.MemoryHeadroom, cfg.Memory)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("memory", "memTotal", total, "headroom", cfg.MemoryHeadroom, "capacity", cfg.Memory, "factor", mem.factor())
 	if cfg.UsageEvery == 0 {
 		cfg.UsageEvery = 15 * time.Second
 	}
@@ -171,6 +183,7 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 		control:    newSerialQueues(),
 		streams:    streams{m: map[string]*stream{}},
 		git:        gitws.New(cfg.DataDir),
+		mem:        mem,
 	}
 	r.api = newAPI(cfg.URL, cfg.Token, cfg.Name)
 	r.conn = newConn(r)

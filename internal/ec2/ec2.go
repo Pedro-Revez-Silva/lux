@@ -37,9 +37,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -70,11 +73,26 @@ type Provider struct {
 	clients  map[string]*awsec2.Client
 	// next subnet per pool: launches spread across the pool's subnets.
 	next map[string]int
+	// memory is each instance type's memory in bytes, per region, as
+	// DescribeInstanceTypes gave it: fixed for a type, so asked once.
+	memory map[[2]string]int64
+	// memoryFailed is when each type's lookup last failed: within
+	// memoryRetryAfter of it, launches go ahead without asking again.
+	memoryFailed map[[2]string]time.Time
+	// memoryTimeout bounds one lookup, which runs before RunInstances.
+	memoryTimeout time.Duration
+	log           *slog.Logger
 }
 
+const (
+	memoryLookupTimeout = 5 * time.Second
+	memoryRetryAfter    = 10 * time.Minute
+)
+
 // New builds the provider. endpoint overrides the EC2 endpoint (tests).
-func New(endpoint string) *Provider {
-	return &Provider{endpoint: endpoint, clients: map[string]*awsec2.Client{}, next: map[string]int{}}
+func New(endpoint string, log *slog.Logger) *Provider {
+	return &Provider{endpoint: endpoint, clients: map[string]*awsec2.Client{}, next: map[string]int{},
+		memory: map[[2]string]int64{}, memoryFailed: map[[2]string]time.Time{}, memoryTimeout: memoryLookupTimeout, log: log}
 }
 
 func (p *Provider) client(ctx context.Context, region string) (*awsec2.Client, error) {
@@ -120,6 +138,16 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 	env = maps.Clone(env)
 	if env["LUX_EC2_IMDS"] == "" {
 		env["LUX_EC2_IMDS"] = "http://169.254.169.254"
+	}
+	// The runner offers the machine's gross memory, which Runs ask in. Only
+	// a template naming its type says it before the launch; without it the
+	// runner offers its MemTotal.
+	if t.InstanceType != "" && env["LUX_RUNNER_MEMORY"] == "" {
+		if mem, err := p.instanceMemory(ctx, c, t.Region, t.InstanceType); err != nil {
+			p.log.Warn("ec2: instance type memory unknown; the host offers its MemTotal", "instanceType", t.InstanceType, "err", err)
+		} else {
+			env["LUX_RUNNER_MEMORY"] = strconv.FormatInt(mem, 10)
+		}
 	}
 	ud, err := renderUserData(t.UserData, env)
 	if err != nil {
@@ -245,10 +273,40 @@ func isNotFound(err error) bool {
 	return errors.As(err, &ae) && ae.ErrorCode() == "InvalidInstanceID.NotFound"
 }
 
+// instanceMemory is instanceType's memory in bytes (DescribeInstanceTypes'
+// MemoryInfo.SizeInMiB), asked once per region and type for the process,
+// within memoryTimeout, and not again for memoryRetryAfter after a failure.
+func (p *Provider) instanceMemory(ctx context.Context, c *awsec2.Client, region, instanceType string) (int64, error) {
+	key := [2]string{region, instanceType}
+	if mem, ok := p.memory[key]; ok {
+		return mem, nil
+	}
+	if at, ok := p.memoryFailed[key]; ok && time.Since(at) < memoryRetryAfter {
+		return 0, fmt.Errorf("ec2 DescribeInstanceTypes failed %s ago; not asked again before %s", time.Since(at).Round(time.Second), memoryRetryAfter)
+	}
+	ctx, cancel := context.WithTimeout(ctx, p.memoryTimeout)
+	defer cancel()
+	out, err := c.DescribeInstanceTypes(ctx, &awsec2.DescribeInstanceTypesInput{
+		InstanceTypes: []types.InstanceType{types.InstanceType(instanceType)},
+	})
+	if err == nil && (len(out.InstanceTypes) != 1 || out.InstanceTypes[0].MemoryInfo == nil || aws.ToInt64(out.InstanceTypes[0].MemoryInfo.SizeInMiB) <= 0) {
+		err = errors.New("no memory in the reply")
+	}
+	if err != nil {
+		p.memoryFailed[key] = time.Now()
+		return 0, fmt.Errorf("ec2 DescribeInstanceTypes: %w", err)
+	}
+	delete(p.memoryFailed, key)
+	mem := aws.ToInt64(out.InstanceTypes[0].MemoryInfo.SizeInMiB) << 20
+	p.memory[key] = mem
+	return mem, nil
+}
+
 // renderUserData builds the instance's user data in the pool's chosen
 // format (hostboot.ValidUserData is checked when the pool is set).
 func renderUserData(format string, env map[string]string) ([]byte, error) {
-	he := hostboot.Env{URL: env["LUX_URL"], HostToken: env["LUX_HOST_TOKEN"], HostName: env["LUX_HOST_NAME"], EC2IMDS: env["LUX_EC2_IMDS"]}
+	he := hostboot.Env{URL: env["LUX_URL"], HostToken: env["LUX_HOST_TOKEN"], HostName: env["LUX_HOST_NAME"],
+		EC2IMDS: env["LUX_EC2_IMDS"], Memory: env["LUX_RUNNER_MEMORY"]}
 	return hostboot.Render(format, he)
 }
 
