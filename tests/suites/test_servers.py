@@ -57,7 +57,9 @@ def test_a_server_runs_and_is_reachable(lux, runners, hosts, fake_image):
     sv = add(lux, run_id, "web", 8080, "--env", "GREETING=hi", "--", "sh", "-c",
              "echo $GREETING from $(id -un); exec lux-fake serve 8080 hello-web")
     assert sv["state"] == "starting" and sv["port"] == 8080 and sv["command"][0] == "sh", sv
-    assert sv["url"].startswith("https://web-" + run_id.removeprefix("run_") + "." + PREVIEW_DOMAIN), sv
+    # Its URL is built from its own id: <name>-<8 of its id>.
+    assert sv["id"].startswith("srv_") and sv["url"] == f"https://web-{sv['id'][4:12]}.{PREVIEW_DOMAIN}", sv
+    assert sv["lifetime"] == "run" and sv["wake"] == "never", sv
     sv = wait_server(lux, run_id, "web", "ready")
     assert sv["readySince"] and sv["epoch"] == 1, sv
     # A server's port is reachable by its name, like network.ports.
@@ -158,7 +160,7 @@ def http_forward_fails(lux, run_id: str, name: str) -> bool:
         p.wait(timeout=10)
 
 
-def test_servers_stop_with_a_migration_and_spec_servers_start_again(operator, lux, runners, hosts, fake_image):
+def test_servers_stop_with_a_migration_and_start_again(operator, lux, runners, hosts, fake_image):
     runners.start(hosts[0])
     runners.start(hosts[1])
     spec = idle(fake_image)
@@ -168,15 +170,22 @@ def test_servers_stop_with_a_migration_and_spec_servers_start_again(operator, lu
     assert wait_server(lux, run_id, "app", "ready")["fromSpec"]
     lux.run("server", "add", run_id, "extra", "8081", "--", *serve(8081))
     wait_server(lux, run_id, "extra", "ready")
+    # Stopped by request: it stays stopped on the next placement.
+    lux.run("server", "add", run_id, "down", "8082", "--", *serve(8082))
+    wait_server(lux, run_id, "down", "ready")
+    lux.run("server", "stop", run_id, "down")
     operator.json("migrate", run_id, "--wait", timeout=200)
-    # The runtime server stopped with the move and stays so; the spec's
-    # starts again on the new placement.
-    extra = server(lux, run_id, "extra")
-    assert extra["state"] == "stopped" and extra["stopReason"] == "migrated" and extra["stoppedEpoch"] == 1, extra
+    # Every server stopped with the move; every one that was up (the
+    # spec's, and the one added at runtime) starts again on the new
+    # placement.
     app = wait_server(lux, run_id, "app", "ready")
     assert app["epoch"] == 2, app
+    extra = wait_server(lux, run_id, "extra", "ready")
+    assert extra["epoch"] == 2, extra
+    down = server(lux, run_id, "down")
+    assert down["state"] == "stopped" and down["stopReason"] == "stopped", down
     stopped = [e for e in lux.events(run_id, "server.state") if e["data"]["state"] == "stopped"]
-    assert {e["data"]["name"] for e in stopped} == {"app", "extra"}, stopped
+    assert {e["data"]["name"] for e in stopped} == {"app", "extra", "down"}, stopped
     # And it is reachable on its new host.
     local = free_port()
     p = lux.popen("port-forward", run_id, "app", str(local))
@@ -281,12 +290,16 @@ def test_lux_shell_without_bash(lux, runners, hosts):
 
 class Preview:
     """Requests to luxd's preview listener, as a browser would make them
-    to https://<server>-<suffix>.<domain> (Host header, no DNS)."""
+    to https://<server host>.<domain> (Host header, no DNS)."""
 
-    def __init__(self, env, run_id: str, name: str):
+    def __init__(self, env, host: str):
         self.base = f"http://{env.gateway}:{env.preview_port}"
-        self.host = f"{name}-{run_id.removeprefix('run_')}.{PREVIEW_DOMAIN}"
+        self.host = host
         self.cookie = ""
+
+    @classmethod
+    def of(cls, lux, run_id: str, name: str) -> "Preview":
+        return cls(lux.env, server(lux, run_id, name)["hostname"])
 
     def get(self, path: str = "/", html: bool = True, **kw) -> requests.Response:
         headers = {"Host": self.host, **kw.pop("headers", {})}
@@ -312,7 +325,7 @@ def test_preview(lux, runners, hosts, fake_image):
     run_id = lux.submit(idle(fake_image))
     lux.wait_state(run_id, "running")
     lux.run("server", "add", run_id, "web", "8080", "--", *serve(8080, "hello-preview"))
-    pv = Preview(lux.env, run_id, "web")
+    pv = Preview.of(lux, run_id, "web")
     # Not signed in: a page goes to sign in at luxd; anything else is 401.
     r = pv.get("/a?b=1")
     assert r.status_code == 302, r.status_code
@@ -350,23 +363,22 @@ def test_preview(lux, runners, hosts, fake_image):
     # Exited: with its code.
     lux.run("server", "add", run_id, "dies", "9000", "--", "sh", "-c", "echo oops >&2; exit 7")
     wait_server(lux, run_id, "dies", "exited")
-    dies = Preview(lux.env, run_id, "dies")
+    dies = Preview.of(lux, run_id, "dies")
     dies.cookie = ""
     sign_in(lux, dies, run_id)
     r = dies.get("/")
     assert "Server exited" in r.text and "<code>7</code>" in r.text and "oops" in r.text, r.text
-    # A host that is no preview, and one of no server.
-    assert "No such preview" in requests.get(pv.base, headers={"Host": f"nothing.{PREVIEW_DOMAIN}"}, timeout=10).text
-    nosuch = Preview(lux.env, run_id, "nosuch")
-    sign_in(lux, nosuch, run_id)
-    assert nosuch.get("/").status_code == 404
+    # A host of no server (deleted, or never was), and one not a preview's.
+    r = requests.get(pv.base, headers={"Host": f"nothing.{PREVIEW_DOMAIN}"}, timeout=10)
+    assert r.status_code == 404 and "This preview is gone" in r.text, r.text
+    assert "No such preview" in requests.get(pv.base, headers={"Host": "nothing.example.org"}, timeout=10).text
     # The listener serves nothing of luxd's own.
     assert requests.get(pv.base + "/v1/whoami", headers={"Host": f"x.{PREVIEW_DOMAIN}",
                         "Authorization": f"Bearer {lux.api_key}"}, timeout=10).status_code == 404
     # The Run stops: the page says so.
     lux.run("stop", run_id, "--wait", timeout=120)
     r = pv.get("/")
-    assert "not running" in r.text, r.text
+    assert "Not running" in r.text, r.text
     lux.run("cancel", run_id)
 
 
@@ -376,7 +388,7 @@ def test_preview_holds_a_starting_server(lux, runners, hosts, fake_image):
     lux.wait_state(run_id, "running")
     # Up after a second: a request made meanwhile waits for it.
     lux.run("server", "add", run_id, "slow", "8080", "--", "sh", "-c", "sleep 1; exec lux-fake serve 8080 finally")
-    pv = Preview(lux.env, run_id, "slow")
+    pv = Preview.of(lux, run_id, "slow")
     sign_in(lux, pv, run_id)
     r = pv.get("/")
     assert r.status_code == 200 and "finally" in r.text, (r.status_code, r.text)

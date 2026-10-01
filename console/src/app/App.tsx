@@ -14,6 +14,8 @@ import { TerminalPage } from "./pages/TerminalPage.tsx";
 import { PreviewAuth } from "./pages/PreviewAuth.tsx";
 import { parsePreviewUrl } from "./pages/previewTarget.ts";
 import { Hosts } from "./pages/Hosts.tsx";
+import { Servers } from "./pages/Servers.tsx";
+import { ServerPage } from "./pages/ServerPage.tsx";
 import { HostPage } from "./pages/HostPage.tsx";
 import { Pools } from "./pages/Pools.tsx";
 import { PoolPage } from "./pages/PoolPage.tsx";
@@ -47,6 +49,8 @@ const ROUTES: Route[] = [
       reason: "Your session has expired or this tab has no key yet. A terminal needs a key with the run scope for this run's tenant.",
     }),
   },
+  { pattern: "/servers", title: "Servers", render: () => <Servers /> },
+  { pattern: "/servers/:id", title: "Server", render: (p) => <ServerPage id={p.id!} /> },
   { pattern: "/hosts", title: "Hosts", render: () => <Hosts /> },
   { pattern: "/hosts/:id", title: "Host", render: (p) => <HostPage id={p.id!} /> },
   { pattern: "/pools", title: "Pools", render: () => <Pools /> },
@@ -61,8 +65,8 @@ const ROUTES: Route[] = [
       const t = parsePreviewUrl(search.get("to"));
       if ("error" in t) return {};
       return {
-        next: { icon: <IconExternal size={15} />, text: <>Then you will continue to the preview of <span className="mono">{t.server}</span> on <IdChip value={t.runId} /></> },
-        reason: "A preview needs a key that can read its run.",
+        next: { icon: <IconExternal size={15} />, text: <>Then you will continue to the preview at <span className="mono">{t.url.hostname}</span></> },
+        reason: "A preview needs a key that can read its server.",
       };
     },
   },

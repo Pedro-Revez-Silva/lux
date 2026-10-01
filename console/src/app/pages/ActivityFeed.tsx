@@ -5,6 +5,7 @@ import { Link } from "../router.tsx";
 import { useScope } from "../scope.tsx";
 import { ErrorStrip, runPath } from "./common.tsx";
 import { eventSummary } from "./events.ts";
+import { serverPath } from "./serverText.ts";
 
 /** What an event line says, in plain words. */
 function line(e: FeedEvent): string {
@@ -38,6 +39,7 @@ function line(e: FeedEvent): string {
 }
 
 interface Group {
+  /** The Run's id, or a server's (srv_…) for an event of a server attached to none. */
   runId: string;
   tenant: string;
   events: FeedEvent[];
@@ -48,8 +50,9 @@ function groupByRun(events: FeedEvent[]): Group[] {
   const out: Group[] = [];
   for (const e of events) {
     const last = out[out.length - 1];
-    if (last && last.runId === e.runId) last.events.push(e);
-    else out.push({ runId: e.runId, tenant: e.tenant, events: [e] });
+    const key = e.runId ?? e.serverId ?? "";
+    if (last && last.runId === key) last.events.push(e);
+    else out.push({ runId: key, tenant: e.tenant, events: [e] });
   }
   return out;
 }
@@ -71,7 +74,7 @@ export function ActivityFeed() {
             <Fragment key={g.events[0]!.id}>
               <section className="feed-group">
                 <div className="feed-run">
-                  <Link to={runPath(g.runId)} className="feed-run-name mono" title={g.runId}>
+                  <Link to={g.runId.startsWith("srv_") ? serverPath(g.runId) : runPath(g.runId)} className="feed-run-name mono" title={g.runId}>
                     {g.runId}
                   </Link>
                   <span className="feed-run-meta">

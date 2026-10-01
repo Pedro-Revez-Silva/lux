@@ -24,6 +24,12 @@ export interface ServerInfo {
   /** The placement it stopped in; null if it never started. */
   stoppedEpoch?: number | null;
   url?: string | null;
+  /** The server's own id (srv_…), when it has one. */
+  id?: string;
+  /** request: it wakes on request (its owner is asked); never: it runs only while its Run does. */
+  wake?: string;
+  /** run: it ends with the Run; owner: kept until its owner deletes it. */
+  lifetime?: string;
 }
 
 export interface ServerRowProps {
@@ -37,6 +43,10 @@ export interface ServerRowProps {
   onStop?: (s: ServerInfo) => void;
   onRestart?: (s: ServerInfo) => void;
   onRemove?: (s: ServerInfo) => void;
+  /** Detach it from the Run (for an owner server, instead of removing it). */
+  onDetach?: (s: ServerInfo) => void;
+  /** Where its own page is (the name links there). */
+  hrefFor?: (s: ServerInfo) => string | undefined;
   /** The log pane under the row, once opened (the row owns the toggle; the caller owns the fetch). */
   renderLog?: (s: ServerInfo) => ReactNode;
   /** Start with the log open. */
@@ -66,7 +76,7 @@ function sinceText(s: ServerInfo, now: number): string {
 }
 
 /** One server: name and port, state with how long, its URL to copy or open, and what can be done to it. */
-export function ServerRow({ server: s, runRunning, now = Date.now(), busy, onStart, onStop, onRestart, onRemove, renderLog, defaultOpen = false }: ServerRowProps) {
+export function ServerRow({ server: s, runRunning, now = Date.now(), busy, onStart, onStop, onRestart, onRemove, onDetach, hrefFor, renderLog, defaultOpen = false }: ServerRowProps) {
   const [open, setOpen] = useState(defaultOpen);
   const { copied, copy } = useCopy(s.url ?? "");
   const live = s.state === "ready";
@@ -77,8 +87,21 @@ export function ServerRow({ server: s, runRunning, now = Date.now(), busy, onSta
     <li className={["server-row", open ? "is-open" : ""].join(" ").trim()}>
       <div className="server-main">
         <div className="server-name">
-          <span className="server-name-text mono">{s.name}</span>
+          {hrefFor?.(s) ? (
+            <a className="server-name-text mono name-link" href={hrefFor(s)}>
+              {s.name}
+            </a>
+          ) : (
+            <span className="server-name-text mono">{s.name}</span>
+          )}
           <span className="server-port mono">:{s.port}</span>
+          {(s.wake || s.lifetime) && (
+            <span className="server-tags">
+              {s.wake === "request" && <span className="server-tag" title="Its owner is asked to bring a Run up when someone opens it">wakes on request</span>}
+              {s.lifetime === "owner" && <span className="server-tag" title="Kept when the run finishes, until its owner deletes it">owner deletes</span>}
+              {s.lifetime === "run" && <span className="server-tag is-quiet" title="Deleted when the run succeeds or is cancelled">ends with this run</span>}
+            </span>
+          )}
         </div>
         <div className="server-mid">
           <div className="server-state">
@@ -134,10 +157,16 @@ export function ServerRow({ server: s, runRunning, now = Date.now(), busy, onSta
               </Button>
             )
           )}
-          {onRemove && (
-            <IconButton size="sm" label={`Remove ${s.name}`} disabled={busy} onClick={() => onRemove(s)}>
-              <IconTrash size={13} />
-            </IconButton>
+          {onDetach && s.lifetime === "owner" ? (
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => onDetach(s)}>
+              Detach
+            </Button>
+          ) : (
+            onRemove && (
+              <IconButton size="sm" label={`Remove ${s.name}`} disabled={busy} onClick={() => onRemove(s)}>
+                <IconTrash size={13} />
+              </IconButton>
+            )
           )}
         </div>
       </div>

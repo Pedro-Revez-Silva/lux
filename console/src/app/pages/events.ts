@@ -24,6 +24,7 @@ function poolNote(d: Record<string, unknown>): string {
 
 export function eventSummary(e: Event): string {
   const d = e.data ?? {};
+  const server = str(d.name) ?? "server";
   switch (e.type) {
     case "state": {
       const parts = [str(d.state) ?? "?"];
@@ -67,6 +68,30 @@ export function eventSummary(e: Event): string {
       const added = Array.isArray(d.addedRepositories) && d.addedRepositories.length > 0 ? ` · adding ${d.addedRepositories.join(", ")}` : "";
       return `by ${str(d.by) ?? "?"}${added}`;
     }
+    case "server.wake_requested":
+      return `${server}: wake asked of its owner by ${str(d.by) ?? "?"} at ${str(d.path) ?? "/"}`;
+    case "server.idle":
+      return `${server}: idle, no request for ${str(d.idleAfter) ?? "?"}`;
+    case "server.state": {
+      const code = typeof d.exitCode === "number" ? ` (exit ${d.exitCode}${str(d.error) ? `: ${str(d.error)}` : ""})` : "";
+      return `${server} ${str(d.state) ?? "?"}${str(d.stopReason) ? ` · ${str(d.stopReason)}` : ""}${code}`;
+    }
+    case "server.created":
+    case "server.added":
+    case "server.updated":
+      return `${server} by ${str(d.by) ?? "?"}`;
+    case "server.attached":
+      return `${server} attached to ${str(d.runId) ?? "?"}`;
+    case "server.detached":
+      return `${server} detached from ${str(d.from) ?? "?"} (${str(d.reason) ?? "?"})`;
+    case "server.deleted":
+    case "server.removed":
+    case "server.expired":
+      return `${server} ${e.type.slice(7)}${str(d.reason) ? ` (${str(d.reason)})` : ""}`;
+    case "git.sync":
+      return d.status === "failed"
+        ? `${str(d.repo) ?? "?"} not synced to ${str(d.ref) ?? "?"}: ${str(d.error) ?? "?"}`
+        : `${str(d.repo) ?? "?"} ${str(d.status) ?? "?"} ${(str(d.from) ?? "").slice(0, 7)} → ${(str(d.to) ?? "").slice(0, 7)}${d.dirty === true ? " (tracked changes saved as refs/lux/pre-sync)" : ""}`;
     case "git.clone":
       return d.status === "failed"
         ? `${str(d.repo) ?? "?"} not cloned: ${str(d.error) ?? "?"}`

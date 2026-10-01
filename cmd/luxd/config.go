@@ -123,6 +123,10 @@ type config struct {
 		Listen           string   `toml:"listen" env:"LUX_PREVIEW_LISTEN"`
 		Auth             string   `toml:"auth" env:"LUX_PREVIEW_AUTH"`
 		HoldFor          duration `toml:"hold_for" env:"LUX_PREVIEW_HOLD_FOR"`
+		Scheme           string   `toml:"scheme" env:"LUX_PREVIEW_SCHEME"`
+		PublicPort       int      `toml:"public_port" env:"LUX_PREVIEW_PUBLIC_PORT"`
+		ActivityEvery    duration `toml:"activity_every" env:"LUX_PREVIEW_ACTIVITY_EVERY"`
+		IdleCheck        duration `toml:"idle_check" env:"LUX_PREVIEW_IDLE_CHECK"`
 		CloudflareAccess struct {
 			AUD string `toml:"aud" env:"LUX_PREVIEW_CF_ACCESS_AUD"`
 		} `toml:"cloudflare_access"`
@@ -242,6 +246,9 @@ func defaultConfig() config {
 	c.Console.Auth = "key"
 	c.Preview.Listen = "127.0.0.1:7071"
 	c.Preview.HoldFor.Duration = 20 * time.Second
+	c.Preview.Scheme = "https"
+	c.Preview.ActivityEvery.Duration = 30 * time.Second
+	c.Preview.IdleCheck.Duration = 5 * time.Second
 	return c
 }
 
@@ -583,6 +590,23 @@ func (c config) check() error {
 		}
 		if p.HoldFor.Duration < 0 {
 			problems = append(problems, "preview.hold_for (LUX_PREVIEW_HOLD_FOR) must not be negative")
+		}
+		switch p.Scheme {
+		case "https":
+		case "http":
+			// Only for a domain browsers keep on this machine: a preview's
+			// cookie and content would otherwise cross a network in clear.
+			if d := strings.ToLower(p.Domain); d != "localhost" && !strings.HasSuffix(d, ".localhost") {
+				problems = append(problems, "preview.scheme (LUX_PREVIEW_SCHEME) http is only for a domain under localhost (a local demo)")
+			}
+		default:
+			problems = append(problems, fmt.Sprintf("preview.scheme (LUX_PREVIEW_SCHEME) %q: want https or http", p.Scheme))
+		}
+		if p.PublicPort < 0 || p.PublicPort > 65535 {
+			problems = append(problems, "preview.public_port (LUX_PREVIEW_PUBLIC_PORT): want 0-65535")
+		}
+		if p.ActivityEvery.Duration <= 0 || p.IdleCheck.Duration <= 0 {
+			problems = append(problems, "preview.activity_every and preview.idle_check must be positive")
 		}
 	}
 	if len(problems) > 0 {

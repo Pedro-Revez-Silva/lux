@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -15,7 +16,7 @@ import (
 //	/          text/html: <text> (default "hello from lux-fake"), and the host it was asked for
 //	/headers   the request's headers, as JSON
 //	/cookie    sets cookies, one with Domain=, and says so
-//	/events    server-sent events: three, a second apart
+//	/events    server-sent events, a second apart: ?n= of them (default 3)
 //	/exit      exits the process with code 3, after a line on stderr
 func serve(args []string) {
 	if len(args) < 1 {
@@ -44,12 +45,20 @@ func serve(args []string) {
 	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		f, _ := w.(http.Flusher)
-		for i := range 3 {
+		n, err := strconv.Atoi(r.URL.Query().Get("n"))
+		if err != nil || n < 1 {
+			n = 3
+		}
+		for i := range n {
 			fmt.Fprintf(w, "data: tick %d\n\n", i)
 			if f != nil {
 				f.Flush()
 			}
-			time.Sleep(time.Second)
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(time.Second):
+			}
 		}
 	})
 	mux.HandleFunc("/exit", func(w http.ResponseWriter, r *http.Request) {

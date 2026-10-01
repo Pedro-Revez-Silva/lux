@@ -307,8 +307,8 @@ func TestSnapshotReportRefusedEndsRunWithoutResume(t *testing.T) {
 			execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, stop_reason)
 				VALUES ('pb2', 't2', 'rb', 'hb', 2, 'stopping', $1)`, c.stop)
 			execSQL(t, s, ctx, `UPDATE runs SET current_epoch = 2 WHERE id = 'rb'`)
-			execSQL(t, s, ctx, `INSERT INTO run_servers (tenant_id, run_id, name, port, command, state, epoch)
-				VALUES ('t2', 'rb', 'web', 3000, '["serve"]', 'ready', 2)`)
+			execSQL(t, s, ctx, `INSERT INTO run_servers (id, tenant_id, run_id, name, port, command, state, epoch)
+				VALUES ('srv_webwebwebwebwebw', 't2', 'rb', 'web', 3000, '["serve"]', 'ready', 2)`)
 
 			sd := snapshotB("snapB2", 2)
 			if c.refused {

@@ -80,7 +80,7 @@ func TestOwnedOperationsHaveTheirOwner(t *testing.T) {
 				continue
 			}
 			_, owned := op.Metadata[ownerKey]
-			want := strings.HasPrefix(path, "/v1/runs/{") || strings.HasPrefix(path, "/v1/artifacts/{")
+			want := strings.HasPrefix(path, "/v1/runs/{") || strings.HasPrefix(path, "/v1/artifacts/{") || strings.HasPrefix(path, "/v1/servers/{")
 			if owned != want {
 				t.Errorf("%s %s: owned %v, want %v", op.Method, path, owned, want)
 			}

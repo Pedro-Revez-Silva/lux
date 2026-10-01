@@ -75,6 +75,28 @@ const SERVER_STATES: Record<ServerState, StateStyle> = {
   exited: { hue: "red", label: "Exited" },
 };
 
+/**
+ * A server's state as the tenant's server list shows it (GET /v1/servers):
+ * derived from its process, its Run and an open wake.
+ */
+export type ServedState = "ready" | "waking" | "asleep" | "stopped" | "unreachable" | "exited" | "no answer";
+
+const SERVED_STATES: Record<ServedState, StateStyle> = {
+  ready: { hue: "green", label: "Ready" },
+  waking: { hue: "blue", label: "Waking", live: true },
+  asleep: { hue: "violet", label: "Asleep" },
+  stopped: { hue: "neutral", label: "Stopped" },
+  unreachable: { hue: "amber", label: "Unreachable", live: true },
+  exited: { hue: "red", label: "Exited" },
+  "no answer": { hue: "amber", label: "No answer", outline: true },
+};
+
+export const SERVED_STATE_LIST = Object.keys(SERVED_STATES) as ServedState[];
+
+export function servedStateStyle(state: string): StateStyle {
+  return SERVED_STATES[state as ServedState] ?? { ...UNKNOWN, label: state };
+}
+
 export const RUN_STATE_LIST = Object.keys(RUN_STATES) as RunState[];
 export const HOST_STATE_LIST = Object.keys(HOST_STATES) as HostState[];
 export const SERVER_STATE_LIST = Object.keys(SERVER_STATES) as ServerState[];

@@ -10,7 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
-bun run test           # bun test: money rounding, y scale, family colours, CostFigure, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme (src/*.test.ts*)
+bun run test           # bun test: idle countdown and server states, money rounding, y scale, family colours, CostFigure, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme (src/*.test.ts*)
 ```
 
 ## Using it
@@ -46,7 +46,9 @@ src/
   components.css    component styles (one section per component)
   layout.css        page widths, grids, stacks, name links
   format.ts         bytes, durations, relative time, cores, percentages, money
-  states.ts         run/host state -> hue family + label; cost status; cost family -> chart slot
+  states.ts         run/host/server state -> hue family + label (a server's process: ServerStateMark;
+                    a server as the tenant's list shows it, asleep/waking/no answer: ServedStateMark);
+                    cost status; cost family -> chart slot
   theme.ts          theme and density: toggles, persistence, cssVar()
   icons.tsx         the icon set
   *.tsx             components
@@ -254,8 +256,11 @@ colour that changes between views is not.
 
 Logo (the star, 16–32px; the detailed mark is `docs/brand/lux.svg`),
 Button, IconButton, LinkButton (an anchor styled as a Button), Badge,
-StatePill (run, host and server states; ServerStateMark is the server
-shorthand), ConnectionBadge,
+StatePill (run, host and server states; ServerStateMark is the shorthand
+for a server's process, ServedStateMark for a server as the tenant's list
+shows it: ready, waking, asleep, stopped, unreachable, exited, no answer),
+IdleCountdown ("Idle in 7:42 · 10m after the last request"; `formatCountdown`),
+ConnectionBadge,
 StatTile, Sparkline, Card, Table, Pagination, Tabs, SegmentedControl (one
 of a few choices as joined buttons, a radio group), RelativeTime ("3h ago",
 the exact date, time and zone in a Tooltip; every table's times),
@@ -273,8 +278,9 @@ not sort: the server sorts by #, time and type only), LogView, Terminal (xterm.j
 Solarized inside via `terminalThemes`; `scheme` light or dark, else the
 console theme; a transport-agnostic handle: `write`, `onData`, `onResize`) with
 TerminalOverlay (the card over a dimmed screen), ServerList / ServerRow (a
-run's servers: state, URL, start/stop/restart/remove, an expandable log the
-caller renders),
+run's servers: state, URL, wake and lifetime tags, start/stop/restart/remove
+or, for a server kept after its run, detach; `hrefFor` links a name to its
+own page; an expandable log the caller renders),
 KeyValue, IdChip, Code, PageHeader (with optional breadcrumbs; CrumbSep),
 SectionHeader, ConfirmDialog, Dialog (a form modal), Toast (`useToast`),
 EmptyState, Spinner, Skeleton. Hooks: `useTheme`, `useDensity`, `useTerminalScheme`, `useNow` (the shared

@@ -44,9 +44,12 @@ import {
   sortRows,
   SectionHeader,
   Select,
+  SERVED_STATE_LIST,
   SERVER_STATE_LIST,
+  ServedStateMark,
   ServerList,
   ServerStateMark,
+  IdleCountdown,
   Skeleton,
   SkeletonLines,
   solarized,
@@ -76,7 +79,7 @@ import {
   type TimeRange,
 } from "../src/index.ts";
 import { IconDots, IconInfo, IconMinus, IconMoon, IconPencil, IconPlus, IconRefresh, IconRows, IconRowsLoose, IconStar, IconSun, IconTerminal, IconWarning } from "../src/icons.tsx";
-import { fakeAnsiLogs, fakeCostLines, fakeCostSeries, fakeHosts, fakeLogs, fakeMultilineLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeShellScript, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
+import { fakeAnsiLogs, fakeCostLines, fakeCostSeries, fakeHosts, fakeLogs, fakeMultilineLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeServersWakeable, fakeShellScript, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
 
 function Section({ id, title, children, note }: { id: string; title: string; note?: ReactNode; children: ReactNode }) {
   return (
@@ -608,6 +611,18 @@ function States() {
         ))}
         <ServerStateMark state="exited" exitCode={1} />
         <ServerStateMark state="ready" compact />
+      </div>
+      <h3 className="sg-h3">A server as the tenant's list shows it (ServedStateMark)</h3>
+      <div className="sg-row">
+        {SERVED_STATE_LIST.map((s) => (
+          <ServedStateMark key={s} state={s} />
+        ))}
+      </div>
+      <h3 className="sg-h3">Idle countdown (IdleCountdown)</h3>
+      <div className="sg-row">
+        <IdleCountdown idleAt={new Date(NOW + 462_000).toISOString()} idleAfter="10m" now={NOW} />
+        <IdleCountdown idleAt={new Date(NOW - 1000).toISOString()} idleAfter="10m" now={NOW} />
+        <IdleCountdown idleAt={null} now={NOW} />
       </div>
       <h3 className="sg-h3">Connection (ConnectionBadge)</h3>
       <div className="sg-row">
@@ -1172,6 +1187,9 @@ function Servers() {
         <div className="stack">
           <Card title="After a migration" subtitle="every server stopped by the move; the run is not running yet" flush>
             <ServerList servers={fakeServersMigrated} runRunning={false} now={NOW} onStart={() => {}} onStop={() => {}} renderLog={renderLog} />
+          </Card>
+          <Card title="Wakeable and kept servers" subtitle="wake and lifetime tags; an owner server detaches instead of being removed" flush>
+            <ServerList servers={fakeServersWakeable} runRunning now={NOW} onStop={() => {}} onRestart={() => {}} onRemove={() => {}} onDetach={() => {}} hrefFor={(s) => `#server-${s.id}`} />
           </Card>
           <Card title="Started by hand, no previews configured" flush>
             <ServerList servers={[fakeServerManual]} runRunning now={NOW} onStop={() => {}} onRemove={() => {}} />

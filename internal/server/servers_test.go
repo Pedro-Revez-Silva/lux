@@ -24,29 +24,26 @@ import (
 )
 
 func TestParsePreviewHost(t *testing.T) {
-	const suffix = "k3jq7x2mfa9vbn4z"
-	valid := strings.Replace(suffix, "9", "2", 1) // base32: no 9
 	for _, c := range []struct {
-		host, name, run string
-		ok              bool
+		host, rel string
+		ok        bool
 	}{
-		{"web-" + valid + ".lux.example.com", "web", "run_" + valid, true},
-		{"WEB-" + valid + ".Lux.Example.com.", "web", "run_" + valid, true},
-		{"web-" + valid + ".lux.example.com:443", "web", "run_" + valid, true},
-		{"my-app-" + valid + ".lux.example.com", "my-app", "run_" + valid, true},
-		{"web-" + suffix + ".lux.example.com", "", "", false}, // 9 is not base32
-		{"web-" + valid + ".other.com", "", "", false},
-		{"a.web-" + valid + ".lux.example.com", "", "", false},
-		{"web" + valid + ".lux.example.com", "", "", false},
-		{"-" + valid + ".lux.example.com", "", "", false},
-		{"web--" + valid + ".lux.example.com", "", "", false},
-		{"web-short.lux.example.com", "", "", false},
-		{"lux.example.com", "", "", false},
-		{"x.lux.example.com.evil.com", "", "", false},
+		{"web-k3jq7x2m.lux.example.com", "web-k3jq7x2m", true},
+		{"WEB-K3jq7x2m.Lux.Example.com.", "web-k3jq7x2m", true},
+		{"web-k3jq7x2m.lux.example.com:443", "web-k3jq7x2m", true},
+		{"web.t123.p9.lux.example.com", "web.t123.p9", true},
+		{"web.other.com", "", false},
+		{"lux.example.com", "", false},
+		{".lux.example.com", "", false},
+		{"-web.lux.example.com", "", false},
+		{"web-.lux.example.com", "", false},
+		{"a..b.lux.example.com", "", false},
+		{"we_b.lux.example.com", "", false},
+		{"x.lux.example.com.evil.com", "", false},
 	} {
-		name, run, ok := parsePreviewHost(c.host, "lux.example.com")
-		if ok != c.ok || name != c.name || run != c.run {
-			t.Errorf("%s: got %q %q %v, want %q %q %v", c.host, name, run, ok, c.name, c.run, c.ok)
+		rel, ok := parsePreviewHost(c.host, "lux.example.com")
+		if ok != c.ok || rel != c.rel {
+			t.Errorf("%s: got %q %v, want %q %v", c.host, rel, ok, c.rel, c.ok)
 		}
 	}
 }
@@ -54,7 +51,7 @@ func TestParsePreviewHost(t *testing.T) {
 func TestPreviewCookie(t *testing.T) {
 	p := &previews{key: []byte("0123456789abcdef0123456789abcdef")}
 	now := time.Now()
-	u := previewUser{RunID: "run_x", TenantID: "t1", User: "a@b.c", Exp: now.Add(time.Hour).Unix()}
+	u := previewUser{ServerID: "srv_x", TenantID: "t1", User: "a@b.c", Exp: now.Add(time.Hour).Unix()}
 	v := p.sign(u)
 	if got, ok := p.verify(v, now); !ok || got != u {
 		t.Fatalf("verify: %+v %v", got, ok)
@@ -63,7 +60,7 @@ func TestPreviewCookie(t *testing.T) {
 		t.Fatal("an expired cookie verified")
 	}
 	payload, sig, _ := strings.Cut(v, ".")
-	forged := previewUser{RunID: "run_other", TenantID: "t1", User: "a@b.c", Exp: u.Exp}
+	forged := previewUser{ServerID: "srv_other", TenantID: "t1", User: "a@b.c", Exp: u.Exp}
 	b, _ := json.Marshal(forged)
 	for _, bad := range []string{
 		"", "x", payload, payload + ".", "." + sig,
@@ -254,7 +251,8 @@ func TestServerLifecycle(t *testing.T) {
 	}
 	var sv RunServer
 	_ = json.Unmarshal(w.Body.Bytes(), &sv)
-	if sv.State != ServerStarting || sv.URL == nil || *sv.URL != "https://web-aaaaaaaaaaaaaaaa.lux.example.com" || sv.Epoch == nil || *sv.Epoch != 1 {
+	if sv.State != ServerStarting || sv.URL == nil || *sv.URL != "https://web-"+sv.ID[4:12]+".lux.example.com" || sv.Epoch == nil || *sv.Epoch != 1 ||
+		!strings.HasPrefix(sv.ID, "srv_") || sv.Lifetime != LifetimeRun || sv.Wake != WakeNever {
 		t.Fatalf("added: %+v", sv)
 	}
 	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/servers", map[string]any{"name": "web", "port": 1}); w.Code != http.StatusConflict ||
@@ -508,27 +506,27 @@ func TestTickets(t *testing.T) {
 	if !strings.HasPrefix(tk.Ticket, "tkt_") || tk.RunID != r1 || time.Until(tk.ExpiresAt) > time.Minute+time.Second {
 		t.Fatalf("ticket: %+v", tk)
 	}
-	if _, err := s.redeemTicket(ctx, tk.Ticket, r1, TicketPreview); err == nil {
+	if _, err := s.redeemTicket(ctx, tk.Ticket, ticketFor{runID: r1}, TicketPreview); err == nil {
 		t.Fatal("redeemed as another kind")
 	}
-	if _, err := s.redeemTicket(ctx, tk.Ticket, "run_bbbbbbbbbbbbbbbb", TicketExec); err == nil {
+	if _, err := s.redeemTicket(ctx, tk.Ticket, ticketFor{runID: "run_bbbbbbbbbbbbbbbb"}, TicketExec); err == nil {
 		t.Fatal("redeemed for another run")
 	}
-	p, err := s.redeemTicket(ctx, tk.Ticket, r1, TicketExec)
+	p, err := s.redeemTicket(ctx, tk.Ticket, ticketFor{runID: r1}, TicketExec)
 	if err != nil || p.TenantID != "t1" || p.KeyID != "k1" || !p.Can("run") {
 		t.Fatalf("redeem: %+v %v", p, err)
 	}
-	if _, err := s.redeemTicket(ctx, tk.Ticket, r1, TicketExec); err == nil {
+	if _, err := s.redeemTicket(ctx, tk.Ticket, ticketFor{runID: r1}, TicketExec); err == nil {
 		t.Fatal("redeemed twice")
 	}
 	old := mint(TicketExec)
 	execSQL(t, s, ctx, `UPDATE stream_tickets SET expires_at = now() - interval '1 second' WHERE token_hash = $1`, ids.Hash(old.Ticket))
-	if _, err := s.redeemTicket(ctx, old.Ticket, r1, TicketExec); err == nil {
+	if _, err := s.redeemTicket(ctx, old.Ticket, ticketFor{runID: r1}, TicketExec); err == nil {
 		t.Fatal("redeemed expired")
 	}
 	revoked := mint(TicketExec)
 	execSQL(t, s, ctx, `UPDATE api_keys SET revoked_at = now() WHERE id = 'k1'`)
-	if _, err := s.redeemTicket(ctx, revoked.Ticket, r1, TicketExec); err == nil {
+	if _, err := s.redeemTicket(ctx, revoked.Ticket, ticketFor{runID: r1}, TicketExec); err == nil {
 		t.Fatal("redeemed after its key was revoked")
 	}
 	execSQL(t, s, ctx, `UPDATE api_keys SET revoked_at = NULL WHERE id = 'k1'`)
@@ -672,7 +670,7 @@ func TestPreviewProxy(t *testing.T) {
 	defer app.Close()
 	fakeRunner(t, s, strings.TrimPrefix(app.URL, "http://"))
 
-	host := "web-aaaaaaaaaaaaaaaa.lux.example.com"
+	host := "web-aaaaaaaa.lux.example.com"
 	do := func(method, path string, hdr http.Header) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, "https://"+host+path, nil)
 		for k, v := range hdr {
@@ -682,13 +680,21 @@ func TestPreviewProxy(t *testing.T) {
 		s.preview.ServeHTTP(w, req)
 		return w
 	}
-	// Unknown host: the unknown page.
+	// Unknown host: gone (or never was); one not under the domain: unknown.
 	req := httptest.NewRequest(http.MethodGet, "https://nothing.lux.example.com/", nil)
 	rec := httptest.NewRecorder()
 	s.preview.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "No such preview") {
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "This preview is gone") {
 		t.Fatalf("unknown: %d %s", rec.Code, rec.Body)
 	}
+	req = httptest.NewRequest(http.MethodGet, "https://lux.example.org/", nil)
+	rec = httptest.NewRecorder()
+	s.preview.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "No such preview") {
+		t.Fatalf("not a preview host: %d %s", rec.Code, rec.Body)
+	}
+	execSQL(t, s, ctx, `INSERT INTO run_servers (id, host, tenant_id, run_id, name, port, state, stop_reason)
+		VALUES ('srv_aaaaaaaaaaaaaaaa', 'web-aaaaaaaa', 't1', $1, 'web', 3000, 'stopped', 'migrated')`, r1)
 	// Not signed in: a browser is sent to sign in; anything else, 401.
 	w := do(http.MethodGet, "/a?b=c", http.Header{"Accept": {"text/html"}})
 	if loc := w.Header().Get("Location"); w.Code != http.StatusFound ||
@@ -736,11 +742,7 @@ func TestPreviewProxy(t *testing.T) {
 	}
 	signed := http.Header{"Cookie": {cookie.Name + "=" + cookie.Value + "; mine=1"}}
 
-	// No such server yet: unknown. Stopped: its page.
-	if w := do(http.MethodGet, "/", signed); w.Code != http.StatusNotFound {
-		t.Fatalf("no server: %d", w.Code)
-	}
-	execSQL(t, s, ctx, `INSERT INTO run_servers (tenant_id, run_id, name, port, state, stop_reason) VALUES ('t1', $1, 'web', 3000, 'stopped', 'migrated')`, r1)
+	// Stopped: its page.
 	if w := do(http.MethodGet, "/", signed); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "Server stopped") ||
 		!strings.Contains(w.Body.String(), "migrated") || w.Header().Get("X-Lux-Preview") != "status" {
 		t.Fatalf("stopped: %d %s", w.Code, w.Body)
@@ -801,19 +803,21 @@ func TestPreviewProxy(t *testing.T) {
 	if err != nil || last == nil || time.Since(*last) > time.Minute {
 		t.Fatalf("lastRequestAt: %v %v", last, err)
 	}
-	// A cookie for another Run's host is not this one's.
-	other := "web-bbbbbbbbbbbbbbbb.lux.example.com"
+	// A cookie for another server's host is not this one's.
+	execSQL(t, s, ctx, `INSERT INTO run_servers (id, host, tenant_id, run_id, name, port, state)
+		VALUES ('srv_bbbbbbbbbbbbbbbb', 'web.other', 't1', $1, 'other', 3001, 'ready')`, r1)
+	other := "web.other.lux.example.com"
 	req = httptest.NewRequest(http.MethodGet, "https://"+other+"/", nil)
 	req.Header.Set("Cookie", cookie.Name+"="+cookie.Value)
 	req.Header.Set("Accept", "text/html")
 	rec = httptest.NewRecorder()
 	s.preview.ServeHTTP(rec, req)
 	if rec.Code != http.StatusFound {
-		t.Fatalf("another run's host: %d", rec.Code)
+		t.Fatalf("another server's host: %d", rec.Code)
 	}
 	// The Run stops: its page.
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped'`)
-	if w := do(http.MethodGet, "/", signed); !strings.Contains(w.Body.String(), "not running") {
+	if w := do(http.MethodGet, "/", signed); !strings.Contains(w.Body.String(), "Not running") {
 		t.Fatalf("run stopped: %d %s", w.Code, w.Body)
 	}
 }
@@ -830,7 +834,8 @@ func TestPreviewWebSocket(t *testing.T) {
 	if err := s.preview.init(ctx); err != nil {
 		t.Fatal(err)
 	}
-	execSQL(t, s, ctx, `INSERT INTO run_servers (tenant_id, run_id, name, port, state) VALUES ('t1', $1, 'web', 3000, 'ready')`, r1)
+	execSQL(t, s, ctx, `INSERT INTO run_servers (id, host, tenant_id, run_id, name, port, state, ready_since)
+		VALUES ('srv_aaaaaaaaaaaaaaaa', 'web-aaaaaaaa', 't1', $1, 'web', 3000, 'ready', now())`, r1)
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 		if err != nil {
@@ -849,9 +854,9 @@ func TestPreviewWebSocket(t *testing.T) {
 	}))
 	defer app.Close()
 	fakeRunner(t, s, strings.TrimPrefix(app.URL, "http://"))
-	cookie := s.preview.sign(previewUser{RunID: r1, TenantID: "t1", User: "ci", Exp: time.Now().Add(time.Hour).Unix()})
+	cookie := s.preview.sign(previewUser{ServerID: "srv_aaaaaaaaaaaaaaaa", TenantID: "t1", User: "ci", Exp: time.Now().Add(time.Hour).Unix()})
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Host = "web-aaaaaaaaaaaaaaaa.lux.example.com"
+		r.Host = "web-aaaaaaaa.lux.example.com"
 		s.preview.ServeHTTP(w, r)
 	}))
 	defer front.Close()
@@ -887,7 +892,8 @@ func TestPreviewSlowReader(t *testing.T) {
 	if err := s.preview.init(ctx); err != nil {
 		t.Fatal(err)
 	}
-	execSQL(t, s, ctx, `INSERT INTO run_servers (tenant_id, run_id, name, port, state) VALUES ('t1', $1, 'web', 3000, 'ready')`, r1)
+	execSQL(t, s, ctx, `INSERT INTO run_servers (id, host, tenant_id, run_id, name, port, state, ready_since)
+		VALUES ('srv_aaaaaaaaaaaaaaaa', 'web-aaaaaaaa', 't1', $1, 'web', 3000, 'ready', now())`, r1)
 	body := make([]byte, 24<<20)
 	for i := range body {
 		body[i] = byte(i * 7 / 5)
@@ -897,9 +903,9 @@ func TestPreviewSlowReader(t *testing.T) {
 	}))
 	defer app.Close()
 	fakeRunner(t, s, strings.TrimPrefix(app.URL, "http://"))
-	cookie := s.preview.sign(previewUser{RunID: r1, TenantID: "t1", User: "ci", Exp: time.Now().Add(time.Hour).Unix()})
+	cookie := s.preview.sign(previewUser{ServerID: "srv_aaaaaaaaaaaaaaaa", TenantID: "t1", User: "ci", Exp: time.Now().Add(time.Hour).Unix()})
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Host = "web-aaaaaaaaaaaaaaaa.lux.example.com"
+		r.Host = "web-aaaaaaaa.lux.example.com"
 		s.preview.ServeHTTP(w, r)
 	}))
 	defer front.Close()

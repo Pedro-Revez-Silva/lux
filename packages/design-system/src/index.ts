@@ -10,6 +10,7 @@ export * from "./Dialog.tsx";
 export * from "./EmptyState.tsx";
 export * from "./EventTable.tsx";
 export * from "./IdChip.tsx";
+export * from "./IdleCountdown.tsx";
 export * from "./KeyValue.tsx";
 export * from "./LogView.tsx";
 export * from "./Logo.tsx";

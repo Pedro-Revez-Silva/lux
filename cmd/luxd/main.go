@@ -220,11 +220,15 @@ func serve(ctx context.Context, c config, plan servePlan) error {
 		},
 		AllowedOrigins: c.Console.AllowedOrigins,
 		Preview: server.PreviewConfig{
-			Domain:  c.Preview.Domain,
-			Listen:  c.Preview.Listen,
-			Auth:    c.Preview.Auth,
-			HoldFor: c.Preview.HoldFor.Duration,
-			CFAud:   c.Preview.CloudflareAccess.AUD,
+			Domain:        c.Preview.Domain,
+			Listen:        c.Preview.Listen,
+			Auth:          c.Preview.Auth,
+			HoldFor:       c.Preview.HoldFor.Duration,
+			CFAud:         c.Preview.CloudflareAccess.AUD,
+			Scheme:        c.Preview.Scheme,
+			PublicPort:    c.Preview.PublicPort,
+			ActivityEvery: c.Preview.ActivityEvery.Duration,
+			IdleCheck:     c.Preview.IdleCheck.Duration,
 		},
 	}, db, blobs, log)
 	return srv.Run(ctx)

@@ -34,6 +34,14 @@ from env import TestEnvironment  # noqa: E402
 TESTS_DIR = Path(__file__).resolve().parent
 
 
+def local_previews(port: int) -> dict[str, str]:
+    """luxd's settings for previews on lux.localhost: browsers resolve
+    *.localhost to this machine without DNS, and keep a host-only cookie
+    there over http (preview.scheme http is allowed only under localhost)."""
+    return {"LUX_PREVIEW_DOMAIN": "lux.localhost", "LUX_PREVIEW_SCHEME": "http",
+            "LUX_PREVIEW_LISTEN": f"127.0.0.1:{port}", "LUX_PREVIEW_PUBLIC_PORT": str(port)}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the lux end-to-end suite")
     parser.add_argument("--infra-only", action="store_true", help="only check the environment itself")
@@ -45,6 +53,9 @@ def main() -> None:
     parser.add_argument("--down", nargs="?", const="", metavar="ENV_JSON", help="take a detached --serve down")
     parser.add_argument("--image", action="append", default=[], metavar="REF",
                         help="with --serve: preload an image from the local Docker into every host (repeatable)")
+    parser.add_argument("--preview-local", type=int, default=0, metavar="PORT",
+                        help="with --serve: previews a browser on this machine reaches without DNS, "
+                             "http://<host>.lux.localhost:PORT (listening on 127.0.0.1:PORT)")
     parser.add_argument("-j", "--jobs", type=int, default=1,
                         help="environments to run suites in, in parallel (each its own luxd, database, hosts)")
     parser.add_argument("--shard", default="", metavar="N/M",
@@ -93,6 +104,8 @@ def main() -> None:
     env = TestEnvironment(n_hosts=args.hosts)
     env.binaries = binaries
     env.extra["images"] = images
+    if args.preview_local:
+        env.extra["luxd_env"] = local_previews(args.preview_local)
     print(f"run id:   {env.run_id}")
     print(f"logs:     {env.log_dir}")
 

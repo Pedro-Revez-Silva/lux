@@ -24,9 +24,11 @@ type Whoami struct {
 	// ConsoleAuth is luxd's console auth: key or cloudflare-access.
 	ConsoleAuth string   `json:"consoleAuth"`
 	Scopes      []string `json:"scopes"`
-	// PreviewDomain: the console signs people in to
-	// https://<server>-<run>.<PreviewDomain> only.
-	PreviewDomain *string `json:"previewDomain" nullable:"true" doc:"The preview listener's domain (preview URLs are https://<server>-<run suffix>.<domain>); null when previews are off, or signed in to through Cloudflare Access rather than a ticket."`
+	// PreviewDomain: the console signs people in to hosts under
+	// PreviewDomain only, with PreviewScheme and PreviewPort.
+	PreviewDomain *string `json:"previewDomain" nullable:"true" doc:"The preview listener's domain (preview URLs are <scheme>://<server host>.<domain>); null when previews are off, or signed in to through Cloudflare Access rather than a ticket."`
+	PreviewScheme string  `json:"previewScheme,omitempty" enum:"https,http" doc:"With previewDomain: the scheme of preview URLs (http only for a local demo domain under localhost)."`
+	PreviewPort   int     `json:"previewPort,omitempty" doc:"With previewDomain: the port in preview URLs, if not the scheme's."`
 }
 
 type whoamiOutput struct {
@@ -42,6 +44,8 @@ func (s *Server) whoami(ctx context.Context, _ *struct{}) (*whoamiOutput, error)
 	if s.previewTickets() {
 		d := s.cfg.Preview.Domain
 		w.PreviewDomain = &d
+		w.PreviewScheme = cmp.Or(s.cfg.Preview.Scheme, "https")
+		w.PreviewPort = s.cfg.Preview.PublicPort
 	}
 	if !p.Operator {
 		w.TenantID = p.TenantID

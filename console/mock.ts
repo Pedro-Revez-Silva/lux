@@ -17,14 +17,23 @@ const previewDomain = process.env.MOCK_PREVIEW ?? "lux.example.dev";
 const now = () => new Date().toISOString();
 const ago = (s: number) => new Date(Date.now() - s * 1000).toISOString();
 
-type Server = Record<string, unknown> & { name: string; port: number; state: string; command: string[] | null };
+type Server = Record<string, unknown> & { id: string; name: string; port: number; state: string; command: string[] | null };
 const servers: Server[] = [
-  { name: "web", port: 3000, command: ["sh", "-c", "npm run dev -- --host 0.0.0.0 --port 3000"], workdir: "apps/web", env: {}, fromSpec: true, state: "ready", since: ago(12 * 60), readySince: ago(12 * 60), stopReason: null, stoppedEpoch: null, epoch: 3 },
-  { name: "api", port: 8080, command: ["sh", "-c", "go run ./cmd/api --port 8080 --dev"], workdir: "services/api", env: {}, fromSpec: true, state: "exited", exitCode: 1, error: "listen tcp :8080: bind: address already in use", since: ago(14 * 60), readySince: null, stopReason: null, stoppedEpoch: null, epoch: 3 },
-  { name: "storybook", port: 6006, command: ["sh", "-c", "npm run storybook -- --ci --port 6006"], workdir: "apps/web", env: {}, fromSpec: false, state: "stopped", since: ago(40 * 60), readySince: null, stopReason: null, stoppedEpoch: null, epoch: 3 },
+  { id: "srv_mockwebaaaaaaaaa", wake: "request", lifetime: "owner", labels: { pr: "412" }, name: "web", port: 3000, command: ["sh", "-c", "npm run dev -- --host 0.0.0.0 --port 3000"], workdir: "apps/web", env: {}, fromSpec: true, state: "ready", since: ago(12 * 60), readySince: ago(12 * 60), stopReason: null, stoppedEpoch: null, epoch: 3 },
+  { id: "srv_mockapibbbbbbbbb", wake: "never", lifetime: "run", labels: {}, name: "api", port: 8080, command: ["sh", "-c", "go run ./cmd/api --port 8080 --dev"], workdir: "services/api", env: {}, fromSpec: true, state: "exited", exitCode: 1, error: "listen tcp :8080: bind: address already in use", since: ago(14 * 60), readySince: null, stopReason: null, stoppedEpoch: null, epoch: 3 },
+  { id: "srv_mockstorycccccccc", wake: "never", lifetime: "run", labels: {}, name: "storybook", port: 6006, command: ["sh", "-c", "npm run storybook -- --ci --port 6006"], workdir: "apps/web", env: {}, fromSpec: false, state: "stopped", since: ago(40 * 60), readySince: null, stopReason: null, stoppedEpoch: null, epoch: 3 },
 ];
 if (runState !== "running") for (const s of servers) Object.assign(s, { state: "stopped", stopReason: "migrated", since: ago(31 * 60), readySince: null, stoppedEpoch: 3 });
-const withUrl = (s: Server) => ({ ...s, url: previewDomain ? `https://${s.name}-${RUN_ID.slice(4)}.${previewDomain}` : null });
+const hostOf = (s: Server) => (previewDomain ? `${s.name}-${String(s.id).slice(4, 12)}.${previewDomain}` : null);
+const withUrl = (s: Server) => ({ ...s, hostname: hostOf(s), url: hostOf(s) ? `https://${hostOf(s)}` : null });
+// GET /v1/servers' shape: the run's servers plus one asleep, unattached.
+const asleep: Server = { id: "srv_mocksleepddddddd", name: "web-pr-398", port: 3000, command: ["pnpm", "dev"], state: "stopped", wake: "request", lifetime: "owner", labels: { pr: "398" }, since: ago(3 * 86400) };
+const served = (s: Server, attached: boolean) => {
+  const w = withUrl(s);
+  const state = !attached ? (s.wake === "request" ? "asleep" : "stopped") : s.state === "ready" ? "ready" : s.state === "starting" ? "waking" : s.state === "exited" ? "exited" : s.state === "unreachable" ? "unreachable" : s.wake === "request" ? "asleep" : "stopped";
+  return { ...w, state, process: s.state, desired: "up", workdir: s.workdir ?? "", env: {}, afterSync: null, idleAfter: "10m0s", wakeTimeout: "5m0s", expireAfter: s.lifetime === "owner" ? "720h0m0s" : null, owner: "key_mock", runId: attached ? RUN_ID : null, runName: attached ? "agent-refactor-42" : undefined, runState: attached ? runState : undefined, fromSpec: false, lastRequestAt: s.state === "ready" ? ago(18) : null, idleAt: s.state === "ready" ? new Date(Date.now() + 462_000).toISOString() : undefined, wakes: 3, epoch: attached ? 3 : null, stopReason: null, readySince: s.readySince ?? null, createdAt: ago(2 * 86400), updatedAt: ago(3600) };
+};
+const allServed = () => [...servers.map((s) => served(s, true)), served(asleep, false)];
 
 const run = () => ({
   id: RUN_ID,
@@ -131,12 +140,29 @@ async function api(req: Request, srv: Srv): Promise<Response> {
     if (p === "/v1/tenants") return json({ tenants: [{ id: "ten_acme", name: "acme", retentionDays: 30, activeRuns: 1, runs: 12, hosts: 2, storedBytes: 0, createdAt: ago(86400) }] });
     if (p === "/v1/runs") return json({ runs: [run()] });
     if (p === `/v1/runs/${RUN_ID}`) return json(run());
+    if (p === "/v1/servers") {
+      const host = u.searchParams.get("hostname");
+      const list = allServed().filter((x) => !host || x.hostname === host);
+      const counts: Record<string, number> = {};
+      for (const x of list) counts[x.state] = (counts[x.state] ?? 0) + 1;
+      return json({ servers: list, counts });
+    }
+    const sm = p.match(/^\/v1\/servers\/(srv_[a-z0-9]+)(?:\/(events|log|tickets|attach|detach|start|stop|restart))?$/);
+    if (sm) {
+      const x = allServed().find((y) => y.id === sm[1]);
+      if (!x) return notFound(`server ${sm[1]}`);
+      if (sm[2] === "events") return json({ events: [{ id: 1, serverId: x.id, type: "server.created", data: { name: x.name, by: "key_mock" }, time: ago(2 * 86400) }, { id: 2, serverId: x.id, type: "server.wake_requested", data: { name: x.name, by: "ada@example.com", path: "/goals" }, time: ago(60) }] });
+      if (sm[2] === "log") return json({ lines: fakeLog(x as unknown as Server) });
+      if (sm[2] === "tickets") return json({ ticket: "tkt_mock", kind: "preview", serverId: x.id, expiresAt: new Date(Date.now() + 60_000).toISOString() }, 201);
+      if (req.method === "DELETE") return new Response(null, { status: 204 });
+      return json(x);
+    }
     if (p === `/v1/runs/${RUN_ID}/tickets`) return json({ ticket: "tkt_mock", kind: ((await req.json()) as { kind: string }).kind, runId: RUN_ID, expiresAt: new Date(Date.now() + 60_000).toISOString() }, 201);
     if (p === `/v1/runs/${RUN_ID}/servers`) {
       if (req.method === "POST") {
         const body = (await req.json()) as Server;
         if (servers.some((s) => s.name === body.name)) return json({ error: { code: "name_taken", message: `server ${body.name} exists` } }, 409);
-        const s: Server = { ...body, command: body.command ?? null, fromSpec: false, state: body.command && body.start !== false && runState === "running" ? "starting" : "stopped", since: now(), readySince: null, stopReason: null, stoppedEpoch: null, epoch: 3 };
+        const s: Server = { ...body, id: `srv_mock${body.name.replace(/[^a-z0-9]/g, "")}zzzzzzzz`.slice(0, 20), wake: "never", lifetime: body.lifetime ?? "run", command: body.command ?? null, fromSpec: false, state: body.command && body.start !== false && runState === "running" ? "starting" : "stopped", since: now(), readySince: null, stopReason: null, stoppedEpoch: null, epoch: 3 };
         servers.push(s);
         return json(withUrl(s), 201);
       }

@@ -16,23 +16,13 @@ func remote(t *testing.T) (string, string) {
 	root := t.TempDir()
 	work := filepath.Join(root, "work")
 	bare := filepath.Join(root, "remote.git")
-	run := func(dir string, args ...string) string {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-		return strings.TrimSpace(string(out))
-	}
 	os.MkdirAll(work, 0o755)
-	run(work, "init", "-q", "-b", "main")
+	gitRun(t, work, "init", "-q", "-b", "main")
 	os.WriteFile(filepath.Join(work, "a.txt"), []byte("one\n"), 0o644)
-	run(work, "add", "-A")
-	run(work, "commit", "-qm", "one")
-	run(root, "clone", "-q", "--bare", work, bare)
-	return bare, run(work, "rev-parse", "HEAD")
+	gitRun(t, work, "add", "-A")
+	gitRun(t, work, "commit", "-qm", "one")
+	gitRun(t, root, "clone", "-q", "--bare", work, bare)
+	return bare, gitRun(t, work, "rev-parse", "HEAD")
 }
 
 func TestMaterializeIsIdempotentAndKeepsWork(t *testing.T) {

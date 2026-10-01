@@ -236,6 +236,12 @@ export const fakeServers: ServerInfo[] = [
   { name: "storybook", port: 6006, command: ["sh", "-c", "npm run storybook -- --ci --port 6006"], state: "stopped", url: `https://storybook-${PREVIEW}` },
 ];
 
+/** A preview run's servers: one that wakes on request and outlives the run, one that ends with it. */
+export const fakeServersWakeable: ServerInfo[] = [
+  { id: "srv_01j8k3x9aaaaaaaa", name: "web-pr-412", port: 3000, command: ["pnpm", "dev", "--host", "0.0.0.0"], state: "ready", since: iso(NOW - 41_000), readySince: iso(NOW - 41_000), url: "https://web-pr-412-k3x9.preview.lux.example.dev", wake: "request", lifetime: "owner" },
+  { id: "srv_2qa7bbbbbbbbbbbb", name: "storybook", port: 6006, command: ["pnpm", "storybook", "--ci"], state: "ready", since: iso(NOW - 3 * 3600_000), readySince: iso(NOW - 3 * 3600_000), url: "https://storybook-2qa7.preview.lux.example.dev", wake: "never", lifetime: "run" },
+];
+
 /** The same run after the api server died: the port was taken. */
 export const fakeServersExited: ServerInfo[] = [
   fakeServers[0]!,

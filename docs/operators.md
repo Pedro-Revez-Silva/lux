@@ -201,52 +201,83 @@ Other ways to sign in can be added as further `console.auth` values.
 
 ### Previews
 
-luxd can serve a Run's servers ([concepts](concepts.md#servers)) at
-`https://<server>-<run suffix>.<domain>`, e.g.
-`https://web-k3jq7x2mfa9vbn4z.lux.example.com`, through a listener of its
-own that only ever proxies:
+luxd can serve servers ([concepts](concepts.md#servers)) at
+`https://<hostname>`, a name under its preview domain
+(`web-k3x9ab2c.lux.example.com`, or one their owner chose:
+`web.t123.p9.lux.example.com`; [concepts](concepts.md#servers) has the
+rules). It reaches the server wherever its Run is now, through a listener
+of luxd's own that only ever proxies:
 
 ```toml
 [preview]
 domain = "lux.example.com"       # LUX_PREVIEW_DOMAIN; empty: off (servers' url is null)
 listen = "127.0.0.1:7071"        # LUX_PREVIEW_LISTEN
 auth = ""                        # LUX_PREVIEW_AUTH: cloudflare-access | ticket; empty: as the console
-hold_for = "20s"                 # LUX_PREVIEW_HOLD_FOR
+hold_for = "20s"                 # LUX_PREVIEW_HOLD_FOR (servers that do not wake on request)
+scheme = "https"                 # LUX_PREVIEW_SCHEME: http only for a domain under localhost
+public_port = 0                  # LUX_PREVIEW_PUBLIC_PORT: the port in preview URLs (0: the scheme's)
+activity_every = "30s"           # LUX_PREVIEW_ACTIVITY_EVERY: lastRequestAt writes (idle precision)
+idle_check = "5s"                # LUX_PREVIEW_IDLE_CHECK: how often idle and expired servers are looked for
 [preview.cloudflare_access]
 aud = ""                         # LUX_PREVIEW_CF_ACCESS_AUD (team: console.cloudflare_access.team)
 ```
 
-- **DNS and TLS:** a wildcard `*.<domain>` to the listener (with the
+**Preview URLs changed once.** Before servers were their own resources, a
+server's URL was `<name>-<run suffix>.<domain>`, and changed whenever its
+Run did. Since migration 049 it is the server's own, stable for its life;
+an existing server's URL changed once, to `<name>-<8 of its id>.<domain>`,
+and the old one answers "This preview is gone". Preview cookies and
+tickets are per server: a browser signs in once per server.
+
+- **DNS and TLS:** a wildcard to the listener for every level owners use:
+  `*.<domain>`, and `*.*.<domain>` if they choose deeper names (with the
   Cloudflare tunnel, `deploy/terraform/cloudflare` makes the record, the
   ingress rule and, with `preview_certificate_pack`, the certificate:
-  Universal SSL does not cover `*.lux.example.com`).
+  Universal SSL does not cover `*.lux.example.com`, and an advanced
+  certificate covers one level per wildcard).
 - **Auth, `cloudflare-access`:** an Access application on `*.<domain>`
   (the terraform module's `preview_access_*`) whose AUD is
   `preview.cloudflare_access.aud`. luxd verifies the token itself and lets
-  in operators and the default tenant's users for that tenant's Runs, as
-  the console does. Needs `console.auth = "cloudflare-access"`.
+  in operators and the default tenant's users for that tenant's servers,
+  as the console does. Needs `console.auth = "cloudflare-access"`.
 - **Auth, `ticket`** (the default in key mode): a browser without a
   preview cookie that asks for a page is sent to
   `{public_url}/preview-auth?to=<the URL>`. The console there (signed in)
-  checks that the URL is https on the standard port and its host is exactly
-  `<server>-<run>.<domain>` of this luxd's preview domain (from
-  `GET /v1/whoami`'s `previewDomain`), mints a preview ticket and sends
-  the browser to `https://<host>/.lux/auth?ticket=…&to=<path>`, where luxd
-  sets the cookie and redirects to the path. Other requests without a
-  cookie get 401. Without `preview.domain`, or when previews sign in
-  through Cloudflare Access, luxd mints no preview tickets (409
-  `previews_off`) and whoami's `previewDomain` is null.
+  checks that the URL's host is under this luxd's preview domain, with
+  its scheme and port (`GET /v1/whoami`'s `previewDomain`,
+  `previewScheme`, `previewPort`), finds the server of that hostname
+  (`GET /v1/servers?hostname=`), mints a preview ticket for it
+  (`POST /v1/servers/{id}/tickets`) and sends the browser to
+  `<url>/.lux/auth?ticket=…&to=<path>`, where luxd sets the cookie and
+  redirects to the path. A ticket minted for a Run
+  (`POST /v1/runs/{id}/tickets`, kind `preview`) signs in to any server
+  attached to it. Other requests without a cookie get 401. Without
+  `preview.domain`, or when previews sign in through Cloudflare Access,
+  luxd mints no preview tickets (409 `previews_off`) and whoami's
+  `previewDomain` is null.
 - **Routing:** a ready server of a running Run is proxied, over a tunnel
   stream to its current placement: HTTP, WebSockets and server-sent
-  events. A request to a starting server, or to a Run on its way to
-  running, waits up to `hold_for`. Otherwise a small status page that
-  refreshes every 5 seconds says why: unknown preview, server stopped
-  (and why), exited (with its code), the Run stopped, moving, or
-  starting.
+  events. A server that **wakes on request** with no Run serving it gets
+  the waking page at once ([waking on
+  request](concepts.md#waking-on-request)); the page polls `/.lux/wait`.
+  Its variants: waiting for a host, moving, no answer (with "Ask again", a
+  form posting to `/.lux/wake`), did not start (its exit code, last stderr
+  line, a link to its log in the console), gone (404). A server that does
+  not wake: a request to it starting, or to its Run on its way to running,
+  waits up to `hold_for`; otherwise a small status page says why (not
+  running, stopped, exited, moving, starting). `/.lux/…` paths are luxd's
+  on every preview host, never the server's.
+- **Previews on this machine** (a demo): `scheme = "http"` with a domain
+  under `localhost` (`lux.localhost`), which browsers resolve to this
+  machine without DNS, and `public_port` the listener's port. The cookie
+  is then `lux_preview` (host-only, `HttpOnly`, `SameSite=Lax`, not
+  `Secure`): browsers keep no `__Host-` cookie over http. luxd refuses
+  `http` for any other domain.
 - **One luxd:** the proxy reaches a Run's host through that host's
   connection, which is to one luxd; the listener of another luxd shows the
   server as not answering. Run previews through the luxd your runners
-  connect to.
+  connect to. Wakes and idleness are decided in the database, so any luxd
+  may serve the waking page.
 - **Throughput:** proxied bytes travel as base64 JSON frames over the
   runner's WebSocket. A tunnel is flow controlled: the runner sends at
   most 4 MiB ahead of what luxd has passed on, so a slow client slows the

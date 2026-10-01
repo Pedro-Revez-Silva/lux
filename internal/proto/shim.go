@@ -74,6 +74,8 @@ type ShimConfig struct {
 	// Services the shim proxies (header values are secret names); their
 	// values stay in the shim's memory.
 	Services []spec.Service `json:"services,omitempty"`
+	// Sync: checkouts to move before init (a resume's sync).
+	Sync *SyncArgs `json:"sync,omitempty"`
 }
 
 // ShimServicesDir holds each service's socket (a tmpfs of its own).
@@ -131,6 +133,8 @@ type ShimMsg struct {
 	// servers: the ones to run now (with a command); any other the shim
 	// runs is stopped.
 	Servers []ServerSpec `json:"servers,omitempty"`
+	// sync
+	Sync *SyncArgs `json:"sync,omitempty"`
 	// replies
 	Error string `json:"error,omitempty"`
 	OK    bool   `json:"ok,omitempty"`
@@ -148,6 +152,9 @@ const (
 	ShimStream = "stream"
 	// ShimServers reconciles the servers' processes to the set given.
 	ShimServers = "servers"
+	// ShimSync answers EvSyncFallback: Sync holds the retry's repositories
+	// (nil: no retry).
+	ShimSync = "sync"
 )
 
 // Event types the shim writes as ch=event records. The runner forwards the
@@ -168,12 +175,17 @@ const (
 	// stopped first, or the agent dropped it). {"requestId", "error"}; at
 	// most once per request id, never after EvInputConsumed.
 	EvInputFailed = "lux.input.failed"
-	EvInit        = "lux.init"       // {"phase": "start" | "done", "exitCode"?}
-	EvWorkload    = "lux.workload"   // {"phase": "start", "pid"}
-	EvStop        = "lux.stop"       // {"reason"}
-	EvBeforeStop  = "lux.beforeStop" // {"phase": "start"|"done", "exitCode", "timedOut"}
-	EvWarning     = "lux.warning"    // {"message"}
-	EvArtifact    = "lux.artifact"   // {"path"}
+	EvInit        = "lux.init" // {"phase": "start" | "done", "exitCode"?}
+	EvSync        = "lux.sync" // {"results": [SyncResult]}: the checkouts moved before init
+	// EvSyncFallback: before init, these checkouts lack their bundle's base
+	// ({"repos": [name]}); the shim waits for a ShimSync with whole-history
+	// bundles for them.
+	EvSyncFallback = "lux.sync.fallback"
+	EvWorkload     = "lux.workload"   // {"phase": "start", "pid"}
+	EvStop         = "lux.stop"       // {"reason"}
+	EvBeforeStop   = "lux.beforeStop" // {"phase": "start"|"done", "exitCode", "timedOut"}
+	EvWarning      = "lux.warning"    // {"message"}
+	EvArtifact     = "lux.artifact"   // {"path"}
 	// EvServer is a server process's start or exit, a ch=server record
 	// naming the server: {"phase": "start"|"exit", "gen", "pid"?,
 	// "exitCode"?, "error"?}.
@@ -196,4 +208,81 @@ type ExitInfo struct {
 	Reason  string `json:"reason"`
 	Message string `json:"message,omitempty"`
 	LastSeq int64  `json:"lastSeq"`
+}
+
+// SyncArgs is `lux-shim sync`'s argument: checkouts to move, each to a
+// commit in a bundle the runner fetched (git.sync, docs/runspec.md#git).
+type SyncArgs struct {
+	Repos []SyncRepo `json:"repos"`
+}
+
+// Failed is every repository's sync failed with msg.
+func (a SyncArgs) Failed(msg string) []SyncResult {
+	var out []SyncResult
+	for _, r := range a.Repos {
+		out = append(out, SyncResult{Repo: r.Name, Ref: r.Ref, To: r.Commit, Status: "failed", Error: msg})
+	}
+	return out
+}
+
+// SyncRepo is one checkout to move. Base, when set, is the bundle's
+// prerequisite: the bundle holds only the history after it.
+type SyncRepo struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Ref    string `json:"ref"`
+	Commit string `json:"commit"`
+	Branch string `json:"branch,omitempty"`
+	Bundle string `json:"bundle"`
+	Base   string `json:"base,omitempty"`
+}
+
+// SyncResult is one checkout's sync, as its git.sync event reports it.
+// Status: up-to-date, fast-forward, reset (tracked files changed or the
+// histories diverged: tracked files are the ref's now, untracked and
+// ignored ones kept, what was there saved as refs/lux/pre-sync), failed
+// (the checkout as it was, or where git stopped in a reset, with
+// refs/lux/pre-sync holding what was there). MissingBase: failed because
+// the checkout lacks the bundle's Base (the runner retries once with the
+// whole history); FullBundle: this result is that retry's.
+type SyncResult struct {
+	Repo        string `json:"repo"`
+	Ref         string `json:"ref"`
+	From        string `json:"from,omitempty"`
+	To          string `json:"to,omitempty"`
+	Status      string `json:"status"`
+	Dirty       bool   `json:"dirty,omitempty"`
+	Diverged    bool   `json:"diverged,omitempty"`
+	Saved       string `json:"saved,omitempty"`
+	Error       string `json:"error,omitempty"`
+	MissingBase bool   `json:"missingBase,omitempty"`
+	FullBundle  bool   `json:"fullBundle,omitempty"`
+}
+
+// MissingBase names the repositories whose sync failed for want of the
+// bundle's base.
+func MissingBase(results []SyncResult) []string {
+	var names []string
+	for _, r := range results {
+		if r.Status == "failed" && r.MissingBase {
+			names = append(names, r.Repo)
+		}
+	}
+	return names
+}
+
+// MergeSyncRetry replaces each result retried with a whole-history bundle
+// by the retry's, marked FullBundle.
+func MergeSyncRetry(results, retried []SyncResult) []SyncResult {
+	out := make([]SyncResult, len(results))
+	copy(out, results)
+	for _, r := range retried {
+		r.FullBundle = true
+		for i := range out {
+			if out[i].Repo == r.Repo {
+				out[i] = r
+			}
+		}
+	}
+	return out
 }

@@ -138,10 +138,18 @@ func (s *Server) routes(api huma.API) {
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "run", s.pushRun)
 	register(s, api, huma.Operation{
+		OperationID: "syncRun", Method: http.MethodPost, Path: "/v1/runs/{id}/sync", Tags: []string{"runs"},
+		Summary: "Move a running Run's checkouts to new commits",
+		Description: "The runner fetches each ref through the host's mirror, and the checkout moves as on a resume's sync (see resume): " +
+			"each repository is a git.sync event, then sync.done. Servers with afterSync run it and restart once a checkout moved; the others keep running.",
+		DefaultStatus: http.StatusAccepted,
+		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
+	}, "run", s.syncRun)
+	register(s, api, huma.Operation{
 		OperationID: "runDiff", Method: http.MethodGet, Path: "/v1/runs/{id}/diff", Tags: []string{"runs"},
 		Summary: "What a running Run changed in its repositories",
 		Description: "Per repository, from its base to its working tree: committed, staged, unstaged and untracked (not ignored) changes, " +
-			"computed now in the Run's container. `base=clone` (default) diffs from the commit the repository was cloned at, `base=head` from its HEAD. " +
+			"computed now in the Run's container. `base=clone` (default) diffs from the commit the repository was cloned at, or last synced to (`lux sync`, a resume's sync), `base=head` from its HEAD. " +
 			"Untracked files are cut at 32 KiB each, or 8 KiB each if the whole diff would pass 1 MiB, and binary ones are named only: " +
 			"such a patch is `truncated` and does not apply as it is. A diff over 16 MiB is refused (502 `diff_failed`).\n\n" +
 			"Only while the Run is running: otherwise 409 `run_not_running`. 404 `no_diff` when the Run has no repositories. " +
@@ -205,6 +213,7 @@ func (s *Server) routes(api huma.API) {
 	}, "read", s.mintTicket)
 
 	// Servers.
+	s.serverRoutes(api)
 	register(s, api, huma.Operation{
 		OperationID: "listServers", Method: http.MethodGet, Path: "/v1/runs/{id}/servers", Tags: []string{"servers"},
 		Summary: "List a Run's servers", Errors: []int{http.StatusNotFound},
@@ -236,7 +245,7 @@ func (s *Server) routes(api huma.API) {
 	}
 	register(s, api, huma.Operation{
 		OperationID: "removeServer", Method: http.MethodDelete, Path: "/v1/runs/{id}/servers/{name}", Tags: []string{"servers"},
-		Summary: "Remove a server", Description: "Stops it first.",
+		Summary: "Remove a server", Description: "Stops it first. A server of lifetime owner is not the Run's to remove: 409 lifetime_owner (detach or delete it through /v1/servers/{id}).",
 		DefaultStatus: http.StatusNoContent,
 		Errors:        []int{http.StatusNotFound, http.StatusConflict},
 	}, "run", s.removeServer)
@@ -341,11 +350,13 @@ func (s *Server) routes(api huma.API) {
 	}, "read", s.systemHistory)
 	register(s, api, huma.Operation{
 		OperationID: "eventFeed", Method: http.MethodGet, Path: "/v1/events", Tags: []string{"runs"},
-		Summary: "Every Run's events, as they happen",
-		Description: "Server-sent events: one `lux` event per Run event, oldest first, each with its id (`id:`, and resume with Last-Event-ID or `after`). " +
+		Summary: "Every Run's and server's events, as they happen",
+		Description: "Server-sent events: one `lux` event per Run or server event, oldest first, each with its id (`id:`, and resume with Last-Event-ID or `after`). " +
+			"A server's event (server.created, updated, deleted, attached, detached, state, wake_requested, idle, expired) carries `serverId`, and in `data` its id, name, host, hostname, url, labels and runId; " +
+			"`runId` is null only for one of a server attached to no Run. " +
 			"From now, from `after`, or the `last` N; with `follow=false` the stream ends after what is there now.",
 		Responses: map[string]*huma.Response{"200": {Description: "OK", Content: map[string]*huma.MediaType{"text/event-stream": {Schema: sseEvents(
-			sseEvent("lux", "A Run's event.", schemaRef[FeedEvent](api)),
+			sseEvent("lux", "A Run's or a server's event.", schemaRef[FeedEvent](api)),
 			sseEvent("error", "The stream failed.", schemaRef[outputError](api)),
 		)}}}},
 	}, "read", streamed(s, s.serveFeed))
@@ -678,7 +689,7 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		if err := addEvent(ctx, tx, p.TenantID, id, 0, "submitted", ev); err != nil {
 			return err
 		}
-		if err := insertSpecServers(ctx, tx, p.TenantID, id, sp); err != nil {
+		if err := insertSpecServers(ctx, tx, p.TenantID, id, p.Actor(), sp); err != nil {
 			return err
 		}
 		created = true
@@ -1089,11 +1100,12 @@ func (s *Server) resumability(ctx context.Context, tenantID string, run *Run) (*
 }
 
 type Event struct {
-	ID    int64          `json:"id"`
-	Epoch *int           `json:"epoch,omitempty"`
-	Type  string         `json:"type"`
-	Data  map[string]any `json:"data"`
-	Time  time.Time      `json:"time"`
+	ID       int64          `json:"id"`
+	ServerID string         `json:"serverId,omitempty" doc:"A server's event: its id (the server.* events)."`
+	Epoch    *int           `json:"epoch,omitempty"`
+	Type     string         `json:"type"`
+	Data     map[string]any `json:"data"`
+	Time     time.Time      `json:"time"`
 }
 
 type listEventsInput struct {
@@ -1125,7 +1137,7 @@ func (s *Server) events(ctx context.Context, tenantID, runID string, after int64
 		if err := requireRun(ctx, tx, runID); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT id, epoch, type, data, created_at FROM run_events
+		rows, err := tx.Query(ctx, `SELECT id, coalesce(server_id, ''), epoch, type, data, created_at FROM run_events
 			WHERE run_id = $1 AND id > $2 ORDER BY id LIMIT 1000`, runID, after)
 		if err != nil {
 			return err
@@ -1133,9 +1145,10 @@ func (s *Server) events(ctx context.Context, tenantID, runID string, after int64
 		defer rows.Close()
 		for rows.Next() {
 			var e Event
-			if err := rows.Scan(&e.ID, &e.Epoch, &e.Type, &e.Data, &e.Time); err != nil {
+			if err := rows.Scan(&e.ID, &e.ServerID, &e.Epoch, &e.Type, &e.Data, &e.Time); err != nil {
 				return err
 			}
+			s.eventDetail(&e)
 			events = append(events, e)
 		}
 		return rows.Err()
@@ -1315,6 +1328,7 @@ type resumeRequest struct {
 	FromSnapshot string           `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost)."`
 	To           string           `json:"to,omitempty" doc:"Operators: place it on this host (id or name), and nowhere else."`
 	Resources    *resumeResources `json:"resources,omitempty" doc:"Change what the Run gets from now on (e.g. more disk after it went over)."`
+	Sync         []proto.SyncRef  `json:"sync,omitempty" doc:"Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha) before init, through the host's mirror: tracked files become the ref's, untracked and ignored ones are kept. Each is a git.sync event; the Run goes on after a failed one, its checkout as it was (or, if a reset failed half-way, where git stopped, with refs/lux/pre-sync holding what was there)."`
 }
 
 type resumeGit struct {
@@ -1449,6 +1463,14 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			id, newRefs, placeOn); err != nil {
 			return err
 		}
+		if err := checkSync(sp, req.Sync); err != nil {
+			return err
+		}
+		if len(req.Sync) > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE runs SET pending_sync = $2 WHERE id = $1`, id, req.Sync); err != nil {
+				return err
+			}
+		}
 		if r := req.Resources; r != nil && r.Disk != 0 {
 			if r.Disk < 0 {
 				return errf(http.StatusUnprocessableEntity, "invalid_request", "resources.disk must not be negative")
@@ -1489,8 +1511,11 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		for _, r := range adding {
 			names = append(names, r.Name)
 		}
-		if err := addEvent(ctx, tx, p.TenantID, id, 0, "resume.requested", map[string]any{
-			"requestId": req.RequestID, "by": p.Actor(), "addedRepositories": names}); err != nil {
+		ev := map[string]any{"requestId": req.RequestID, "by": p.Actor(), "addedRepositories": names}
+		if len(req.Sync) > 0 {
+			ev["sync"] = req.Sync
+		}
+		if err := addEvent(ctx, tx, p.TenantID, id, 0, "resume.requested", ev); err != nil {
 			return err
 		}
 		return s.requestResume(ctx, tx, p.TenantID, id, in, why)
@@ -1597,6 +1622,71 @@ func (s *Server) pushRun(ctx context.Context, in *pushRunInput) (*requestIDOutpu
 		return nil, err
 	}
 	if err := s.systemEnqueue(ctx, hostID, id, epoch, proto.MsgPush, msg); err != nil {
+		return nil, err
+	}
+	s.hub.Notify(hostID)
+	return accepted(msg.RequestID), nil
+}
+
+// checkSync: every repo a spec's repository, every ref given, each repo
+// once.
+func checkSync(sp spec.RunSpec, refs []proto.SyncRef) error {
+	seen := map[string]bool{}
+	for _, r := range refs {
+		known := sp.Git != nil && slices.ContainsFunc(sp.Git.Repositories, func(x spec.Repository) bool { return x.Name == r.Repo })
+		switch {
+		case !known:
+			return errf(http.StatusUnprocessableEntity, "invalid_request", "sync: the run has no repository %q", r.Repo)
+		case r.Ref == "" || strings.HasPrefix(r.Ref, "-") || strings.ContainsAny(r.Ref, " \x00\n"):
+			return errf(http.StatusUnprocessableEntity, "invalid_request", "sync[%s]: a branch, tag or sha", r.Repo)
+		case seen[r.Repo]:
+			return errf(http.StatusUnprocessableEntity, "invalid_request", "sync: %q twice", r.Repo)
+		}
+		seen[r.Repo] = true
+	}
+	return nil
+}
+
+type syncRunInput struct {
+	RunPath
+	Body struct {
+		RequestID string          `json:"requestId,omitempty"`
+		Sync      []proto.SyncRef `json:"sync" doc:"Repositories to move: repo (the spec's name) and ref (branch, tag or sha)."`
+	}
+}
+
+// syncRun is POST /v1/runs/{id}/sync: a running Run's checkouts move to
+// new commits, as on a resume's sync. Once one has moved, its servers
+// with afterSync run it and restart; the others keep running.
+func (s *Server) syncRun(ctx context.Context, in *syncRunInput) (*requestIDOutput, error) {
+	p := principal(ctx)
+	msg := proto.Sync{RequestID: cmp.Or(in.Body.RequestID, ids.New("sync")), Repos: in.Body.Sync}
+	if len(msg.Repos) == 0 {
+		return nil, errf(http.StatusUnprocessableEntity, "invalid_request", "sync: at least one {repo, ref}")
+	}
+	var hostID string
+	var epoch int
+	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		var state string
+		var sp spec.RunSpec
+		if err := tx.QueryRow(ctx, `SELECT state, current_epoch, spec FROM runs WHERE id = $1`, in.ID).Scan(&state, &epoch, &sp); err != nil {
+			return err
+		}
+		if err := checkSync(sp, msg.Repos); err != nil {
+			return err
+		}
+		if state != StateRunning {
+			return errf(http.StatusConflict, "not_running", "run is %s: sync a running Run, or resume it with sync", state)
+		}
+		if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, in.ID, epoch).Scan(&hostID); err != nil {
+			return err
+		}
+		return addEvent(ctx, tx, p.TenantID, in.ID, epoch, "sync.requested", map[string]any{"requestId": msg.RequestID, "by": p.Actor(), "sync": msg.Repos})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := s.systemEnqueue(ctx, hostID, in.ID, epoch, proto.MsgSync, msg); err != nil {
 		return nil, err
 	}
 	s.hub.Notify(hostID)

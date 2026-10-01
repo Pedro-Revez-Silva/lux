@@ -1,8 +1,9 @@
 import { useRef, useState } from "react";
-import { Button, Card, ConfirmDialog, Dialog, EmptyState, isServerUp, LogView, ServerList, useToast, type LogLine, type ServerInfo } from "@lux/design-system";
+import { Button, Card, ConfirmDialog, Dialog, EmptyState, isServerUp, LogView, ServedStateMark, ServerList, useToast, type LogLine, type ServerInfo } from "@lux/design-system";
 import { IconPlus, IconRefresh } from "@lux/design-system/icons";
-import { api, errorText, EXEC_RUN_STATES, invalidate, isApiError, TERMINAL_RUN_STATES, useNow, useQuery, type Run, type Server, type ServerInput } from "../../api/index.ts";
+import { api, errorText, EXEC_RUN_STATES, invalidate, isApiError, TERMINAL_RUN_STATES, useNow, useQuery, type Lifetime, type Run, type Server, type ServerInput } from "../../api/index.ts";
 import { ErrorStrip } from "./common.tsx";
+import { serverPath } from "./serverText.ts";
 
 const LOG_TAIL = 200;
 const LOG_H = 240;
@@ -15,10 +16,11 @@ export function RunServers({ run, refetch, fetching, error }: { run: Run; refetc
   const servers = run.servers ?? [];
   const [busy, setBusy] = useState<string[]>([]);
   const [adding, setAdding] = useState(false);
+  const [attaching, setAttaching] = useState(false);
   const [removing, setRemoving] = useState<Server | null>(null);
   const refresh = () => invalidate(`run:${run.id}`);
 
-  const act = async (label: string, s: ServerInfo, fn: () => Promise<Server | void>) => {
+  const act = async (label: string, s: ServerInfo, fn: () => Promise<unknown>) => {
     setBusy((b) => [...b, s.name]);
     try {
       await fn();
@@ -33,7 +35,7 @@ export function RunServers({ run, refetch, fetching, error }: { run: Run; refetc
 
   const note = (
     <>
-      Servers stop when the run stops or moves host; spec servers start again with it, added ones do not. Output streams into the run's output as <span className="mono">server:&lt;name&gt;</span>.
+      A run's servers come back on every placement (resume, migration, or a resume after a lost host) unless someone stopped them. What a server is and how it is reached lives on its own page. Output streams into the run's output as <span className="mono">server:&lt;name&gt;</span>.
       {servers.some((s) => s.url) ? " URLs open through the preview domain, for people allowed to read this run." : servers.length > 0 ? " Previews are not configured on this luxd: reach a server from a shell, or with lux port-forward." : ""}
     </>
   );
@@ -48,6 +50,9 @@ export function RunServers({ run, refetch, fetching, error }: { run: Run; refetc
           <>
             <Button size="sm" variant="ghost" icon={<IconRefresh size={13} />} loading={fetching} onClick={() => void refetch()}>
               Refresh
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setAttaching(true)} disabled={TERMINAL_RUN_STATES.has(run.state)}>
+              Attach server…
             </Button>
             <Button size="sm" icon={<IconPlus size={13} />} onClick={() => setAdding(true)} disabled={TERMINAL_RUN_STATES.has(run.state)}>
               Add server
@@ -65,11 +70,24 @@ export function RunServers({ run, refetch, fetching, error }: { run: Run; refetc
           onStop={(s) => void act("Stopped", s, () => api.stopServer(run.id, s.name))}
           onRestart={(s) => void act("Restarted", s, () => api.restartServer(run.id, s.name))}
           onRemove={(s) => setRemoving(servers.find((x) => x.name === s.name) ?? null)}
+          onDetach={(s) => s.id && void act("Detached", s, () => api.detachServer(s.id!))}
+          hrefFor={(s) => (s.id ? serverPath(s.id) : undefined)}
           renderLog={(s) => <ServerLog runId={run.id} server={s} />}
           note={note}
           empty={<EmptyState compact title="No servers" description="Add one to expose a port of this run, with a command lux starts for you, or declare them in the spec under workload.servers." action={<Button size="sm" icon={<IconPlus size={13} />} onClick={() => setAdding(true)}>Add server</Button>} />}
         />
       </Card>
+      {attaching && (
+        <AttachServerDialog
+          run={run}
+          onDone={(name) => {
+            setAttaching(false);
+            toast({ title: `Attached ${name}`, description: running ? "starting" : "it starts with the run's next placement", tone: "success" });
+            refresh();
+          }}
+          onCancel={() => setAttaching(false)}
+        />
+      )}
       {adding && (
         <AddServerDialog
           run={run}
@@ -85,7 +103,7 @@ export function RunServers({ run, refetch, fetching, error }: { run: Run; refetc
       <ConfirmDialog
         open={removing != null}
         title={`Remove ${removing?.name ?? "server"}?`}
-        description={removing?.fromSpec ? "It is declared in the spec: it comes back on the run's next start unless the spec changes. A running process is stopped first." : "Its record and URL go away; a running process is stopped first."}
+        description={removing?.fromSpec ? "It is declared in the spec: it comes back with the run only if the spec changes. A running process is stopped first." : "Its record and URL go away; a running process is stopped first."}
         confirmLabel="Remove"
         tone="danger"
         loading={removing != null && busy.includes(removing.name)}
@@ -149,6 +167,7 @@ function AddServerDialog({ run, taken, onDone, onCancel }: { run: Run; taken: st
   const [workdir, setWorkdir] = useState("");
   const [env, setEnv] = useState("");
   const [start, setStart] = useState(true);
+  const [lifetime, setLifetime] = useState<Lifetime>("run");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const running = EXEC_RUN_STATES.has(run.state);
@@ -173,6 +192,7 @@ function AddServerDialog({ run, taken, onDone, onCancel }: { run: Run; taken: st
     }
     if (workdir.trim()) body.workdir = workdir.trim();
     if (Object.keys(envParsed.env).length) body.env = envParsed.env;
+    if (lifetime !== "run") body.lifetime = lifetime;
     setBusy(true);
     try {
       onDone(await api.addServer(run.id, body));
@@ -215,6 +235,71 @@ function AddServerDialog({ run, taken, onDone, onCancel }: { run: Run; taken: st
           <input type="checkbox" checked={start} onChange={(e) => set(setStart)(e.target.checked)} />
           Start it now{!running ? " (the run is not running: it starts with it)" : ""}
         </label>
+      )}
+      <fieldset className="field">
+        <span className="field-label">Lifetime</span>
+        <label className="check">
+          <input type="radio" name="lifetime" checked={lifetime === "run"} onChange={() => set(setLifetime)("run")} />
+          Ends with this run
+        </label>
+        <label className="check">
+          <input type="radio" name="lifetime" checked={lifetime === "owner"} onChange={() => set(setLifetime)("owner")} />
+          Keep after the run: it stays, detached, until someone deletes it or attaches it to another run
+        </label>
+      </fieldset>
+      {error && <div className="error-strip">{error}</div>}
+    </Dialog>
+  );
+}
+
+/**
+ * Attach one of the tenant's unattached servers to this run: a running run
+ * starts its command now, a stopped one at its next placement. A server
+ * another run serves is not offered (attaching it is refused, 409 attached).
+ */
+function AttachServerDialog({ run, onDone, onCancel }: { run: Run; onDone: (name: string) => void; onCancel: () => void }) {
+  const q = useQuery(`servers-unattached`, (signal) => api.servers(undefined, {}, signal));
+  const free = (q.data?.servers ?? []).filter((s) => s.runId == null);
+  const [pick, setPick] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async () => {
+    const s = free.find((x) => x.id === pick);
+    if (!s) return;
+    setBusy(true);
+    try {
+      await api.attachServer(s.id, run.id);
+      onDone(s.name);
+    } catch (e) {
+      setError(isApiError(e) && e.code === "attached" ? "Another run serves it now: detach it there first." : errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog
+      open
+      title="Attach a server"
+      description="Attach one of the tenant's unattached servers to this run. A running run starts its command now; a stopped one on its next placement."
+      confirmLabel="Attach"
+      loading={busy}
+      disabled={!pick || busy}
+      onConfirm={() => void submit()}
+      onCancel={onCancel}
+      width={560}
+    >
+      {q.error && <div className="error-strip">{q.error}</div>}
+      {free.length === 0 && !q.loading ? (
+        <EmptyState compact title="No unattached servers" description="A server is attached to at most one run. Detach one from its run first, or create one (lux server create)." />
+      ) : (
+        <div className="stack stack-tight">
+          {free.map((s) => (
+            <label key={s.id} className="check">
+              <input type="radio" name="attach" checked={pick === s.id} onChange={() => setPick(s.id)} />
+              <span className="mono">{s.name}</span> <ServedStateMark state={s.state} compact /> <span className="muted">{s.state} · :{s.port}{s.hostname ? ` · ${s.hostname}` : ""}</span>
+            </label>
+          ))}
+        </div>
       )}
       {error && <div className="error-strip">{error}</div>}
     </Dialog>

@@ -48,9 +48,11 @@ type Shim struct {
 	adapter adapter.Adapter
 	user    *userInfo
 
-	mu        sync.Mutex
-	started   bool
-	startCh   chan proto.ShimMsg
+	mu      sync.Mutex
+	started bool
+	startCh chan proto.ShimMsg
+	// syncCh: the runner's ShimSync, the retry of a sync before init.
+	syncCh    chan *proto.SyncArgs
 	delivered map[string]bool
 	// inputPhases: what has been recorded of each input, by request id
 	// (sink.advance).
@@ -110,6 +112,7 @@ func Main() int {
 		cfg:       cfg,
 		red:       NewRedactor(nil),
 		startCh:   make(chan proto.ShimMsg, 1),
+		syncCh:    make(chan *proto.SyncArgs, 1),
 		delivered: map[string]bool{},
 		streams:   map[int]chan syscall.WaitStatus{},
 		groups:    map[int]bool{},
@@ -181,6 +184,9 @@ func (s *Shim) run() int {
 		return s.fail("start-failed", "secrets: "+err.Error())
 	}
 
+	if s.cfg.Sync != nil {
+		s.syncBeforeInit(env)
+	}
 	if strings.TrimSpace(s.cfg.Init) != "" {
 		code, err := s.runInit(env)
 		if err != nil || code != 0 {
@@ -420,6 +426,11 @@ func (s *Shim) handleConn(c net.Conn) {
 			s.stop(m.Reason, time.Duration(m.GraceSec*float64(time.Second)))
 		case proto.ShimServers:
 			s.setServers(m.Servers)
+		case proto.ShimSync:
+			select {
+			case s.syncCh <- m.Sync:
+			default:
+			}
 		case proto.ShimStream:
 			// The connection is the stream's from now on.
 			if m.Stream != nil {

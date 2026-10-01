@@ -76,6 +76,10 @@ type placement struct {
 	srvSet *proto.Servers
 	// diffing: a live diff is under way (diff.go).
 	diffing bool
+	// sync: the checkouts the shim moves before init (sync.go);
+	// syncRetryFailed: those its whole-history retry could not bundle.
+	sync            *proto.SyncArgs
+	syncRetryFailed []proto.SyncResult
 	// memoryLimit: the container's memory limit, once this placement
 	// started it (0 when re-adopted).
 	memoryLimit int64
@@ -324,6 +328,12 @@ func (p *placement) run(ctx context.Context) {
 	if err := p.materializeRepos(startCtx, sp, p.user); err != nil {
 		fail("git", err)
 		return
+	}
+	// A resume's sync: fetched now, applied by the shim before init.
+	var syncFailed []proto.SyncResult
+	p.sync, syncFailed = p.prepareSync(startCtx, sp, a.Sync, "", false)
+	for _, res := range syncFailed {
+		p.reportSync(startCtx, res, "")
 	}
 
 	if p.pendingStop() != "" {
@@ -801,6 +811,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec) error 
 	if sp.Init != nil {
 		cfg.Init = sp.Init.Script
 	}
+	cfg.Sync = p.sync
 	if b := sp.Workload.BeforeStop; b != nil {
 		cfg.BeforeStop = b.Command
 		cfg.BeforeStopTimeoutSec = b.Timeout.Seconds()
@@ -1032,6 +1043,11 @@ func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 			ae = &proto.AdapterEvent{InputProgress: &proto.InputProgress{RequestID: d.RequestID, Phase: proto.InputConsumed}}
 		case proto.EvInputFailed:
 			ae = &proto.AdapterEvent{InputProgress: &proto.InputProgress{RequestID: d.RequestID, Phase: proto.InputFailed, Error: d.Error}}
+		case proto.EvSync:
+			p.onSyncRecord(ctx, ev.Data)
+		case proto.EvSyncFallback:
+			// Off the tailer: bundling takes long, and records keep coming.
+			go p.onSyncFallback(ctx, ev.Data)
 		case proto.EvWorkload:
 			if d.Phase == "start" {
 				p.mark("workloadStarted")

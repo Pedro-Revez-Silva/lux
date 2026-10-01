@@ -1,22 +1,20 @@
 // The destination of /preview-auth?to=…, apart from the page so it can be
 // tested without a DOM.
 
-/** A run id's suffix: 16 lowercase alphanumerics (luxd mints a-z2-7; it validates the ticket against the host's run). */
-const SUFFIX_RE = /^[a-z0-9]{16}$/;
+/** A DNS label, as luxd accepts in a preview host name. */
+const LABEL_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
 export interface PreviewTarget {
   /** The full URL the person was headed to. */
   url: URL;
-  /** The server's name on the host. */
-  server: string;
-  /** The run the host names, "run_" + suffix. */
-  runId: string;
+  /** Its host name (lower case, no trailing dot): a server's hostname. */
+  hostname: string;
 }
 
 /**
- * The shape of a preview URL: https, with a host `<server>-<runsuffix>.<domain>`
- * (split at the last '-'), whatever the domain. Enough to say where sign-in
- * continues to; never enough to hand a ticket to (parsePreviewTarget is).
+ * The shape of a preview URL: http(s), with a host of at least two labels.
+ * Enough to say where sign-in continues to; never enough to hand a ticket to
+ * (parsePreviewTarget is).
  */
 export function parsePreviewUrl(to: string | null): PreviewTarget | { error: string } {
   if (!to) return { error: "No destination: this page needs ?to=<preview url>." };
@@ -26,30 +24,39 @@ export function parsePreviewUrl(to: string | null): PreviewTarget | { error: str
   } catch {
     return { error: `Not a URL: ${to}` };
   }
-  if (url.protocol !== "https:") return { error: "Previews are served over https only." };
-  const [label = "", ...domain] = url.hostname.split(".");
-  const dash = label.lastIndexOf("-");
-  const server = label.slice(0, dash);
-  const suffix = label.slice(dash + 1);
-  if (dash <= 0 || !SUFFIX_RE.test(suffix) || domain.length === 0) return { error: `${url.hostname} is not a preview host (<server>-<run>.<domain>).` };
-  return { url, server, runId: `run_${suffix}` };
+  if (url.protocol !== "https:" && url.protocol !== "http:") return { error: "Previews are web pages: http or https." };
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (!hostname.includes(".")) return { error: `${url.hostname} is not a preview host.` };
+  return { url, hostname };
+}
+
+/** What whoami says about previews: the domain, its scheme and port. */
+export interface PreviewSettings {
+  previewDomain?: string | null;
+  previewScheme?: "https" | "http";
+  previewPort?: number;
 }
 
 /**
- * The `to` of /preview-auth, checked against luxd's preview domain (whoami's
- * previewDomain): its host must be exactly `<server>-<runsuffix>.<previewDomain>`.
- * A ticket goes to that host, so any other (a look-alike under another
- * domain) is refused: it would hand the ticket to whoever runs it.
+ * The `to` of /preview-auth, checked against luxd's preview settings
+ * (whoami): its host must be one or more DNS labels under the preview domain,
+ * with the domain's scheme and port. A ticket goes to that host, so any
+ * other (a look-alike under another domain) is refused: it would hand the
+ * ticket to whoever runs it.
  */
-export function parsePreviewTarget(to: string | null, previewDomain: string | null): PreviewTarget | { error: string } {
-  if (!previewDomain) return { error: "This lux signs no one in to previews here: previews are off, or behind Cloudflare Access." };
+export function parsePreviewTarget(to: string | null, settings: PreviewSettings | string | null): PreviewTarget | { error: string } {
+  const s: PreviewSettings = typeof settings === "string" || settings == null ? { previewDomain: settings } : settings;
+  if (!s.previewDomain) return { error: "This lux signs no one in to previews here: previews are off, or behind Cloudflare Access." };
   const t = parsePreviewUrl(to);
   if ("error" in t) return t;
-  const domain = previewDomain.toLowerCase().replace(/\.$/, "");
-  const host = t.url.hostname.replace(/\.$/, "");
-  const label = host.split(".")[0] ?? "";
-  if (t.url.port !== "") return { error: `${t.url.host}: a preview is served on the standard https port only.` };
-  if (host !== `${label}.${domain}`) return { error: `${t.url.hostname} is not one of this lux's previews (*.${domain}).` };
+  const domain = s.previewDomain.toLowerCase().replace(/\.$/, "");
+  const scheme = s.previewScheme ?? "https";
+  if (t.url.protocol !== `${scheme}:`) return { error: `Previews are served over ${scheme} only.` };
+  const port = s.previewPort ? String(s.previewPort) : "";
+  if (t.url.port !== port) return { error: `${t.url.host}: previews are served on ${port ? `port ${port}` : `the standard ${scheme} port`} only.` };
+  if (!t.hostname.endsWith(`.${domain}`)) return { error: `${t.url.hostname} is not one of this lux's previews (*.${domain}).` };
+  const rel = t.hostname.slice(0, -(domain.length + 1));
+  if (!rel.split(".").every((l) => LABEL_RE.test(l))) return { error: `${t.url.hostname} is not a preview host name.` };
   return t;
 }
 

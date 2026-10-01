@@ -8,11 +8,12 @@ import { parsePreviewTarget, parsePreviewUrl, previewAuthUrl } from "./previewTa
 
 /**
  * /preview-auth?to=…: the preview listener sends a browser here when it has
- * no cookie for the run. Signed in (App shows sign-in first otherwise), mint
- * a preview ticket for the run in the host and go back through luxd's
- * /.lux/auth on the preview host, which sets the cookie. The ticket goes
- * only to a host under luxd's own preview domain (whoami's previewDomain):
- * a `to` anywhere else is refused before anything is minted.
+ * no cookie for the server. Signed in (App shows sign-in first otherwise),
+ * find the server of the host (GET /v1/servers?hostname=), mint a preview
+ * ticket for it and go back through luxd's /.lux/auth on the preview host,
+ * which sets the cookie. The ticket goes only to a host under luxd's own
+ * preview domain, scheme and port (whoami): a `to` anywhere else is refused
+ * before anything is minted.
  */
 export function PreviewAuth() {
   const params = useSearchParams();
@@ -31,19 +32,25 @@ export function PreviewAuth() {
     setRefused(null);
     (async () => {
       const me = await api.whoami(ctrl.signal);
-      const checked = parsePreviewTarget(to, me.previewDomain ?? null);
+      const checked = parsePreviewTarget(to, me);
       if ("error" in checked) {
         if (!ctrl.signal.aborted) setRefused(checked.error);
         return;
       }
-      const t = await api.ticket(checked.runId, "preview", ctrl.signal);
+      const found = await api.servers(undefined, { hostname: checked.hostname }, ctrl.signal);
+      const sv = found.servers[0];
+      if (!sv) {
+        if (!ctrl.signal.aborted) setRefused(`No server of yours answers to ${checked.hostname}: it was deleted, or belongs to another tenant.`);
+        return;
+      }
+      const t = await api.serverTicket(sv.id, ctrl.signal);
       if (ctrl.signal.aborted) return;
       const u = previewAuthUrl(checked, t.ticket);
       setNext(u);
       window.location.replace(u);
     })().catch((e: unknown) => {
       if (ctrl.signal.aborted) return;
-      setError(isApiError(e) && e.status === 404 ? `No run ${target.runId} that this session can see.` : errorText(e));
+      setError(isApiError(e) && e.status === 404 ? `No server at ${target.hostname} that this session can see.` : errorText(e));
     });
     return () => ctrl.abort();
     // The target is derived from the query string; attempt retries.
@@ -63,12 +70,8 @@ export function PreviewAuth() {
       {error ? (
         <EmptyState
           icon={<IconWarning size={24} />}
-          title={`Cannot open the preview of ${target.server}`}
-          description={
-            <>
-              {error} The preview belongs to <span className="mono">{target.runId}</span>.
-            </>
-          }
+          title={`Cannot open ${target.hostname}`}
+          description={error}
           action={
             <Button size="sm" onClick={() => setAttempt((n) => n + 1)}>
               Try again
@@ -78,10 +81,10 @@ export function PreviewAuth() {
       ) : (
         <EmptyState
           icon={<Spinner size={20} />}
-          title={`Opening the preview of ${target.server}…`}
+          title={`Opening ${target.hostname}…`}
           description={
             <>
-              Signing you in to <span className="mono">{target.url.host}</span> for <span className="mono">{target.runId}</span>.
+              Signing you in to <span className="mono">{target.url.host}</span>.
             </>
           }
           action={

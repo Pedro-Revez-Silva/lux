@@ -17,8 +17,8 @@ func (a *app) diffCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "diff <run>",
 		Short: "Show what a running Run changed in its repositories",
-		Long: `Show each repository's diff, from the commit it was cloned at (--base clone,
-the default) or from its HEAD (--base head), to its working tree: commits,
+		Long: `Show each repository's diff, from the commit it was cloned at or last synced
+to (--base clone, the default) or from its HEAD (--base head), to its working tree: commits,
 staged, unstaged and untracked files, computed now in the Run's container.
 Only while the Run is running (otherwise exit 4); to keep a Run's changes
 past a stop, save a patch with workload.beforeStop (see docs/runspec.md).
@@ -58,7 +58,7 @@ on stderr. Exit 3: the Run has no repositories; 1: a repository's diff failed.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&base, "base", "clone", "clone: from the commit each repository was cloned at; head: from its HEAD")
+	cmd.Flags().StringVar(&base, "base", "clone", "clone: from the commit each repository was cloned at or last synced to; head: from its HEAD")
 	cmd.Flags().BoolVar(&stat, "stat", false, "per file, lines added and removed, as git diff --stat")
 	return cmd
 }

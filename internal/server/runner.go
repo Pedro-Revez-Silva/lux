@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -457,6 +458,12 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 				if err := recordImageResolved(ctx, tx, f.RunID, ev.Data); err != nil {
 					return err
 				}
+			case proto.EvSyncDone:
+				h, err := restartAfterSync(ctx, tx, tenantID, f.RunID, f.Epoch, ev.Data)
+				if err != nil {
+					return err
+				}
+				notifyHost = cmp.Or(h, notifyHost)
 			case proto.EvServerState:
 				// The runner's own account, applied to the server's state:
 				// not stored as the event it came as.

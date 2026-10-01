@@ -39,7 +39,7 @@ func (p *placement) materializeRepos(ctx context.Context, sp spec.RunSpec, user 
 		if err != nil {
 			// gitws redacts the token from git's output; the URL is scrubbed
 			// of userinfo too, should one ever get this far.
-			msg := strings.ReplaceAll(err.Error(), r.URL, gitws.Scrub(r.URL))
+			msg := scrubURL(err, r.URL)
 			if err := p.reportClone(ctx, r, map[string]any{"status": "failed", "error": msg}); err != nil {
 				return err
 			}
@@ -152,6 +152,11 @@ func (p *placement) dropRepo(name string) {
 	drop(&p.assign.Spec)
 	drop(p.state.Spec)
 	_ = writeRunState(p.dir, p.state)
+}
+
+// scrubURL is err's message with url scrubbed of userinfo.
+func scrubURL(err error, url string) string {
+	return strings.ReplaceAll(err.Error(), url, gitws.Scrub(url))
 }
 
 func (p *placement) gitRepo(r spec.Repository) gitws.Repo {

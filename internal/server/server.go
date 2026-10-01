@@ -98,8 +98,17 @@ type Config struct {
 
 // PreviewConfig is the preview listener's ([preview]).
 type PreviewConfig struct {
-	// Domain: previews are <server>-<run suffix>.<Domain>; "" is off.
+	// Domain: previews are <server host>.<Domain>; "" is off.
 	Domain string
+	// Scheme of preview URLs: https, or http for a local demo domain
+	// (localhost); "" is https. PublicPort: the port in preview URLs
+	// (0: the scheme's).
+	Scheme     string
+	PublicPort int
+	// ActivityEvery bounds how often a server's lastRequestAt is written
+	// (0: 30s), and so how precisely idle is measured. IdleCheck: how
+	// often luxd looks for idle and expired servers (0: 5s).
+	ActivityEvery, IdleCheck time.Duration
 	// Listen is the preview listener's own address.
 	Listen string
 	// Auth: cloudflare-access or ticket ("": as the console's).
@@ -304,7 +313,8 @@ func (s *Server) Run(ctx context.Context) error {
 		go func() { errc <- psrv.ListenAndServe() }()
 		s.log.Info("previews listening", "addr", s.cfg.Preview.Listen, "domain", s.cfg.Preview.Domain)
 	}
-	s.wg.Add(10)
+	s.wg.Add(11)
+	go func() { defer s.wg.Done(); s.idleLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.aliveLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.ticketReaper(ctx) }()
 	go func() { defer s.wg.Done(); s.schedulerLoop(ctx) }()

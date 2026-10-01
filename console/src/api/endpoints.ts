@@ -1,6 +1,6 @@
 // Typed calls, one per endpoint. Lists are unwrapped from their envelope.
 import { download, request } from "./client.ts";
-import type { Artifact, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, HostSummary, LifecycleEvent, MigrateRequest, Page, PageParams, Pool, PoolCost, PoolMetrics, PoolStats, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
+import type { Artifact, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, HostSummary, LifecycleEvent, MigrateRequest, Page, PageParams, Pool, PoolCost, PoolMetrics, PoolStats, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, TenantServer, TenantServerList, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
 
 type Sig = AbortSignal | undefined;
 /** Tenant scope of a list call: a tenant id or name, or undefined for all the key sees. */
@@ -43,6 +43,18 @@ export const api = {
   stopServer: (id: string, name: string) => request<Server>(`/runs/${enc(id)}/servers/${enc(name)}/stop`, { method: "POST" }),
   restartServer: (id: string, name: string) => request<Server>(`/runs/${enc(id)}/servers/${enc(name)}/restart`, { method: "POST" }),
   removeServer: (id: string, name: string) => request<void>(`/runs/${enc(id)}/servers/${enc(name)}`, { method: "DELETE" }),
+  /** The tenant's servers (state, label=k=v, wake, run, hostname filters). */
+  servers: (tenant: Scope, params: { state?: string; label?: string[]; wake?: string; run?: string; hostname?: string } = {}, signal?: Sig) =>
+    request<TenantServerList>(`/servers`, { tenant, query: params, signal }),
+  server: (id: string, signal?: Sig) => request<TenantServer>(`/servers/${enc(id)}`, { signal }),
+  deleteServer: (id: string) => request<void>(`/servers/${enc(id)}`, { method: "DELETE" }),
+  attachServer: (id: string, runId: string) => request<TenantServer>(`/servers/${enc(id)}/attach`, { method: "POST", body: { runId } }),
+  detachServer: (id: string) => request<TenantServer>(`/servers/${enc(id)}/detach`, { method: "POST" }),
+  serverAction: (id: string, action: "start" | "stop" | "restart") => request<TenantServer>(`/servers/${enc(id)}/${action}`, { method: "POST" }),
+  serverEvents: (id: string, signal?: Sig) => request<{ events: Event[] }>(`/servers/${enc(id)}/events`, { signal }).then((r) => r.events ?? []),
+  tenantServerLog: (id: string, tail = 200, signal?: Sig) => request<{ lines: ServerLogLine[] }>(`/servers/${enc(id)}/log`, { query: { tail }, signal }).then((r) => r.lines ?? []),
+  /** A preview ticket for one server (its sign-in at <url>/.lux/auth). */
+  serverTicket: (id: string, signal?: Sig) => request<StreamTicket>(`/servers/${enc(id)}/tickets`, { method: "POST", signal }),
   serverLog: (id: string, name: string, tail = 200, signal?: Sig) => request<{ lines: ServerLogLine[] }>(`/runs/${enc(id)}/servers/${enc(name)}/log`, { query: { tail }, signal }).then((r) => r.lines ?? []),
 
   hosts: (tenant: Scope, p: HostListParams = {}, signal?: Sig) => request<{ hosts: Host[] }>("/hosts", { tenant, query: { all: p.all, pool: p.pool, state: p.state }, signal }).then((r) => r.hosts),

@@ -254,3 +254,11 @@ export const IconPencil = (p: IconProps) => (
     <path d="M9 4.5l2.5 2.5" />
   </Icon>
 );
+
+/** A globe: the servers (URLs) nav item. */
+export const IconGlobe = (p: IconProps) => (
+  <Icon {...p}>
+    <circle cx="8" cy="8" r="6.25" />
+    <path d="M1.75 8h12.5M8 1.75c1.8 1.7 2.7 3.8 2.7 6.25S9.8 12.55 8 14.25C6.2 12.55 5.3 10.45 5.3 8S6.2 3.45 8 1.75Z" />
+  </Icon>
+);

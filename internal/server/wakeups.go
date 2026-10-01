@@ -10,7 +10,8 @@ import (
 
 // wakeups wake followers of Run events (the feed, output streams) when one
 // is written, by any luxd: Postgres notifies lux_events with the Run's id
-// after each insert into run_events (migration 012), and one connection
+// after each insert into run_events (migration 012; 'srv:<id>' for a
+// server with no Run, which wakes only followers of every event), and one connection
 // per luxd listens. Followers re-read under their own scope; a wake-up says
 // only "look".
 //

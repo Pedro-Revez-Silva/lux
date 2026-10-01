@@ -95,12 +95,16 @@ operators = []                     # LUX_CF_ACCESS_OPERATORS: comma-separated op
 default_tenant = ""                # LUX_CF_ACCESS_DEFAULT_TENANT: existing tenant ID or exact name (e.g. absmartly)
 
 [preview]
-# A Run's servers at https://<server>-<run suffix>.<domain>, through a
-# listener of their own (docs/operators.md#previews). Empty domain: off.
+# Servers at https://<server host>.<domain>, through a listener of their
+# own (docs/operators.md#previews). Empty domain: off.
 domain = ""                        # LUX_PREVIEW_DOMAIN, e.g. lux.example.com
 listen = "127.0.0.1:7071"          # LUX_PREVIEW_LISTEN: only ever proxies
 auth = ""                          # LUX_PREVIEW_AUTH: cloudflare-access | ticket; empty: ticket, or cloudflare-access with console.auth cloudflare-access
-hold_for = "20s"                   # LUX_PREVIEW_HOLD_FOR: how long a request to a starting server waits
+hold_for = "20s"                   # LUX_PREVIEW_HOLD_FOR: how long a request to a starting server waits (not one that wakes on request)
+scheme = "https"                   # LUX_PREVIEW_SCHEME: https; http only for a domain under localhost (a local demo)
+public_port = 0                    # LUX_PREVIEW_PUBLIC_PORT: the port in preview URLs (0: the scheme's)
+activity_every = "30s"             # LUX_PREVIEW_ACTIVITY_EVERY: how often lastRequestAt is written (idle precision)
+idle_check = "5s"                  # LUX_PREVIEW_IDLE_CHECK: how often luxd looks for idle and expired servers
 
 [preview.cloudflare_access]
 aud = ""                           # LUX_PREVIEW_CF_ACCESS_AUD: the preview Access application's AUD tag (team: console.cloudflare_access.team)

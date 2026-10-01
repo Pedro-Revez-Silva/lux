@@ -2047,3 +2047,14 @@ a.idchip-text:hover {
     flex-wrap: wrap;
   }
 }
+
+/* ---- IdleCountdown -------------------------------------------------------- */
+.idle-countdown { display: inline-flex; flex-direction: column; gap: 2px; }
+.idle-countdown-figure { font-size: var(--text-lg, 18px); font-weight: 600; font-variant-numeric: tabular-nums; }
+.idle-countdown.is-due .idle-countdown-figure { color: var(--st-amber-fg, var(--fg)); }
+.idle-countdown-note { font-size: var(--text-xs, 12px); }
+
+/* ---- ServerList: wake and lifetime tags ----------------------------------- */
+.server-tags { display: inline-flex; gap: 6px; margin-left: 8px; }
+.server-tag { font-size: var(--text-xs); color: var(--fg-secondary); border: 1px solid var(--border); border-radius: 999px; padding: 0 7px; white-space: nowrap; }
+.server-tag.is-quiet { color: var(--fg-muted); }

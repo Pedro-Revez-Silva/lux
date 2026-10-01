@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-{{if .Page.Refresh}}<meta http-equiv="refresh" content="5">{{end}}
+{{if .Page.Refresh}}<meta http-equiv="refresh" content="3">{{end}}
+{{if .Page.Waking}}<meta http-equiv="refresh" content="3;url={{.WaitURL}}">{{end}}
 <title>{{.Page.Title}} · lux preview</title>
 <style>
 /* The console's tokens (packages/design-system/src/tokens.css), copied. */
@@ -39,22 +40,43 @@ p { margin: 0 0 8px; color: var(--fg-secondary); }
 code, pre { font-family: var(--font-mono); font-size: 13px; }
 pre { margin: 10px 0 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; white-space: pre-wrap;
   word-break: break-word; color: var(--fg-secondary); }
+ol.steps { list-style: none; margin: 14px 0 6px; padding: 0; }
+ol.steps li { display: flex; align-items: center; gap: 10px; padding: 5px 0; color: var(--fg-muted); }
+ol.steps li .mark { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border); flex: none; }
+ol.steps li.done { color: var(--fg-secondary); }
+ol.steps li.done .mark { background: var(--blue-dot); border-color: var(--blue-dot); }
+ol.steps li.current { color: var(--fg); font-weight: 600; }
+ol.steps li.current .mark { border-color: var(--blue-dot); animation: pulse 1.6s ease-in-out infinite; }
+ol.steps li.failed { color: var(--fg); }
+ol.steps li.failed .mark { background: var(--amber-dot); border-color: var(--amber-dot); }
+ol.steps li .t { margin-left: auto; font-family: var(--font-mono); font-size: 12px; color: var(--fg-muted); font-weight: 400; }
+form { margin: 14px 0 0; display: flex; gap: 10px; align-items: center; }
+button, a.button { font: inherit; font-size: 14px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg-page); color: var(--fg); cursor: pointer; text-decoration: none; }
+button.primary { background: var(--blue-dot); border-color: var(--blue-dot); color: #fff; }
+.muted { color: var(--fg-muted); font-size: 13px; }
 footer { margin-top: 18px; display: flex; align-items: center; gap: 8px; color: var(--fg-muted); font-size: 12px; }
 footer svg { width: 16px; height: 16px; }
 </style>
 </head>
 <body>
 <main class="{{.Page.Tone}}">
-  <h1><span class="dot"></span>{{.Page.Title}}</h1>
+  <h1><span class="dot"></span>{{.Page.Title}}{{with .Name}} <code>{{.}}</code>{{end}}</h1>
   {{with .What}}<p>{{.}}</p>{{end}}
-  {{with .State}}<p>The Run is {{.}}: its servers run only while it runs.</p>{{end}}
+  {{with .State}}<p>Its Run is {{.}}.</p>{{end}}
   {{with .Reason}}<p>Stopped: {{.}}.</p>{{end}}
   {{if .Page.Message}}<p>{{.Page.Message}}</p>{{end}}
   {{if .Code}}<p>Exit code <code>{{.Code}}</code>.</p>{{end}}
   {{with .Error}}<pre>{{.}}</pre>{{end}}
+  {{with .LogURL}}<p><a class="button" href="{{.}}">View log</a></p>{{end}}
+  {{with .Steps}}<ol class="steps">{{range .}}<li class="{{.State}}"><span class="mark"></span>{{.Label}}<span class="t">{{.Elapsed}}</span></li>{{end}}</ol>{{end}}
+  {{with .Host}}<p class="muted">On host {{.}}.</p>{{end}}
+  {{with .Asked}}<p class="muted">Asked {{.}}.</p>{{end}}
+  {{if .AskAgain}}<form method="post" action="{{.AskAgain}}"><input type="hidden" name="to" value="{{.To}}"><button class="primary" type="submit">Ask again</button>{{with .ConsoleURL}}<a class="button" href="{{.}}">Open in lux console</a>{{end}}</form>{{end}}
+  {{if .Page.Waking}}{{with .To}}<p class="muted">You'll land on <code>{{.}}</code>.</p>{{end}}{{end}}
   <footer>
     <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 1.5Q17.3 14.7 30.5 16Q17.3 17.3 16 30.5Q14.7 17.3 1.5 16Q14.7 14.7 16 1.5Z" fill="#ffd166" stroke="#163f7a" stroke-width="1.25" stroke-linejoin="round"/><path d="M16 3Q14.8 14.8 3 16L16 16Z" fill="#fff4cc"/><path d="M29 16Q17.2 17.2 16 29L16 16Z" fill="#ff9f43"/></svg>
-    lux preview{{if .Page.Refresh}} · refreshes every 5 seconds{{end}}
+    lux preview{{if or .Page.Refresh .Page.Waking}} · refreshes every 3 seconds{{end}}
   </footer>
 </main>
 </body>

@@ -71,23 +71,34 @@ are in the linked pages.
 
 ## Previews
 
-A Run's servers can be reached at `https://<server>-<run suffix>.<preview
-domain>` ([Operators](operators.md#previews)). What protects that:
+Servers can be reached at `https://<hostname>`, a name under the preview
+domain ([Operators](operators.md#previews)). What protects that:
 
 - **Always authenticated.** Cloudflare Access with the preview
   application's own AUD, where luxd also verifies the token and checks
   the user may read the Run (an operator, or its tenant under the Access
   mapping); or, in ticket mode, a `__Host-` cookie (host-only, `Secure`,
   `HttpOnly`, `SameSite=Lax`) that luxd signs (HMAC-SHA256 with a key it
-  keeps in its database) and gives out only for a preview ticket of that
-  very Run. A cookie made from an API key lasts 12 hours and stops working
+  keeps in its database), bound to one server, and gives out only for a
+  preview ticket of that very server (or of the Run it is attached to),
+  minted by someone of its tenant. A cookie made from an API key lasts 12 hours and stops working
   (within a minute) when the key is revoked; one made by a person signed
   in through Cloudflare Access lasts 1 hour, since luxd cannot see the
   Access policy change without a fresh token. The console hands a preview
-  ticket only to a host under luxd's own preview domain
-  (`<server>-<run>.<preview domain>`, https): a `/preview-auth` link to
-  any other host is refused before a ticket is minted, so it cannot leak
-  one.
+  ticket only to a host under luxd's own preview domain, with its scheme
+  and port: a `/preview-auth` link to any other host is refused before a
+  ticket is minted, so it cannot leak one.
+- **Only people signed in wake a server.** An unauthenticated request (a
+  chat app unfurling a link, a crawler) is sent to sign in or gets 401; it
+  never emits `server.wake_requested` ([waking on
+  request](concepts.md#waking-on-request)).
+- **Hostnames are first come, first served** across tenants: a tenant can
+  take a name another would want (`web.<domain>`), never one in use.
+  Names are lower case DNS labels under the preview domain only.
+- **Over http** (allowed only under `localhost`, for a local demo:
+  [operators](operators.md#previews)): the cookie cannot be `Secure` or
+  `__Host-`; it stays host-only and `HttpOnly`, and never leaves the
+  machine.
 - **A listener of its own** (`preview.listen`) that only proxies: it never
   serves `/v1`, `/runner` or the console, so preview content never shares
   an origin with them.

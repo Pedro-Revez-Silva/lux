@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { IconButton, LiveDot, Logo, TenantPicker, TimeRangePicker, useDensity, useTheme, type Tenant } from "@lux/design-system";
-import { IconChevronLeft, IconChevronRight, IconClose, IconGrid, IconKey, IconLayers, IconLogout, IconMenu, IconMoon, IconPlay, IconRows, IconRowsLoose, IconServer, IconSliders, IconSun, IconUsers } from "@lux/design-system/icons";
+import { IconChevronLeft, IconChevronRight, IconClose, IconGlobe, IconGrid, IconKey, IconLayers, IconLogout, IconMenu, IconMoon, IconPlay, IconRows, IconRowsLoose, IconServer, IconSliders, IconSun, IconUsers } from "@lux/design-system/icons";
 import { liveLabel, signOut, useLiveState, useSession } from "../api/index.ts";
 import { isPlainClick, Link, usePath } from "./router.tsx";
 import { useScope } from "./scope.tsx";
@@ -16,6 +16,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { to: "/", label: "Overview", icon: <IconGrid />, match: (p) => p === "/" },
   { to: "/runs", label: "Runs", icon: <IconPlay />, match: (p) => p.startsWith("/runs") },
+  { to: "/servers", label: "Servers", icon: <IconGlobe />, match: (p) => p.startsWith("/servers") },
   { to: "/hosts", label: "Hosts", icon: <IconServer />, match: (p) => p.startsWith("/hosts") },
   { to: "/pools", label: "Pools", icon: <IconLayers />, match: (p) => p.startsWith("/pools") },
   { to: "/tenants", label: "Tenants", icon: <IconUsers />, match: (p) => p.startsWith("/tenants"), operator: true },

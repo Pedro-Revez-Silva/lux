@@ -404,7 +404,10 @@ class TestEnvironment:
             **({"LUX_PREVIEW_DOMAIN": PREVIEW_DOMAIN, "LUX_PREVIEW_LISTEN": f"{self.gateway}:{self.preview_port}",
                 # Ticket sign-in, whatever the console's auth (a suite
                 # that turns Access on for the console leaves previews be).
-                "LUX_PREVIEW_AUTH": "ticket", "LUX_PREVIEW_HOLD_FOR": "15s"} if self.preview_port else {}),
+                "LUX_PREVIEW_AUTH": "ticket", "LUX_PREVIEW_HOLD_FOR": "15s",
+                # Activity written and idleness checked every second, so idle
+                # tests take seconds.
+                "LUX_PREVIEW_ACTIVITY_EVERY": "1s", "LUX_PREVIEW_IDLE_CHECK": "1s"} if self.preview_port else {}),
         }
 
     # -- setup --------------------------------------------------------------

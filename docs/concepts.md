@@ -93,6 +93,11 @@ on every start, so it must be idempotent.
   reloads its conversation from its transcript on the restored volume.
 - A resume must supply the Run's **secrets** again, because lux never stores
   secret values. This also means a resume can rotate credentials.
+- A resume can **sync** repositories (`sync: [{repo, ref}]`, `lux resume
+  --sync app=main`): their restored checkouts move to the ref's commit
+  before init ([the RunSpec](runspec.md#syncing-checkouts)). A running Run
+  syncs with `POST /v1/runs/{id}/sync` (`lux sync`).
+- Attached servers start again ([Servers](#servers)).
 
 ## Secrets
 
@@ -124,6 +129,11 @@ stores them:
 
 ## Output
 
+The tenant's **event feed**, `GET /v1/events` (`lux events --all`), is
+every event of its Runs and servers as server-sent events, each with its
+id: a client resumes after a disconnect with `Last-Event-ID`. Server
+events are listed under [Servers](#servers).
+
 A placement's stdout, stderr and structured events are written by the shim
 to a file on the host. Every record has a sequence number and secrets are
 redacted before the record is written. While the placement is live, luxd
@@ -145,47 +155,121 @@ never sees them mixed into the workload's output.
 
 ## Servers
 
-A **server** is a named port of a Run, optionally with a command lux runs
-in its container ([the RunSpec](runspec.md#servers) has the fields). Its
-record outlives placements; its process does not: a placement's end (a
-stop, a migration, a lost host) stops every server with it.
+A **server** is a named URL that reaches a port in a Run, optionally with a
+command lux runs in the Run's container ([the RunSpec](runspec.md#servers)
+has the fields). It is the tenant's own resource (`srv_…`), independent of
+Runs: it is **attached** to at most one Run at a time, and outlives Runs if
+its lifetime says so. Its process does not outlive a placement: a
+placement's end (a stop, a migration, a lost host) stops it, and **every
+placement** of its Run (the first, a resume, a migration, a resume after
+`lost`) starts every attached server with a command, unless someone
+stopped it (its desired state, below).
 
 ```
-lux server add <run> web 3000 -- npm run dev -- --host 0.0.0.0 --port 3000
-lux server ls <run>
-lux server stop|start|restart|rm <run> web
+lux server add <run> web 3000 -- npm run dev -- --host 0.0.0.0 --port 3000   # a Run's (lifetime run)
+lux server create web 3000 --wake request --hostname web.pr9.<domain> -- npm run dev   # the tenant's
+lux server ls [--state asleep] [-l pr=9]       lux server ls <run>
+lux server attach srv_… <run>                  lux server detach srv_…
+lux server start|stop|restart|rm srv_…  (or <run> <name>)
 ```
 
-- **States:** `stopped` → (start) `starting` → `ready` once its port
+- **Process states** (`GET /v1/runs/{id}/servers`, and `process` on
+  `/v1/servers`): `stopped` → (start) `starting` → `ready` once its port
   accepts connections. A `ready` server whose port refuses twice in a row
   is `unreachable` (and `ready` again when it answers). A command that
   ends is `exited`, with its exit code and the last line it wrote to
   stderr (`error`). The runner checks each port every 3 seconds, from the
   host, on the container's address.
+- **Server states** (`state` on `/v1/servers`, derived from the process
+  and its Run, never stored twice): `ready` (its Run runs, its port
+  answers), `waking` (a wake asked for, its Run starting or moving, its
+  command starting), `asleep` (wakes on request, nothing serves it),
+  `stopped` (does not wake and its Run is not running, or stopped by
+  someone), `unreachable`, `exited`, `no answer` (a wake asked for longer
+  than `wakeTimeout` ago and no Run came up; the next request asks again).
+- **Desired state** is `down` once someone stops it (`stopReason:
+  stopped`) until it is started again. Otherwise `up`.
 - **Without a command**, only the port is exposed, and lux watches it
-  whenever the Run runs: once it accepts connections the server is
-  `ready`, whatever it was (whoever started the process by hand made it
-  so). There is nothing to start (409 `no_command`); stopping one stops
-  the watching until the Run's next placement.
+  whenever the Run runs: `waking` until it accepts connections, then
+  `ready`, whatever it was. There is nothing to start (409 `no_command`);
+  stopping one stops the watching until the Run's next placement.
 - **`stopReason`** says why one is `stopped`: `stopped` (asked for),
-  `run stopped`, `migrated` or `host lost` (its placement ended), with
-  `stoppedEpoch`, the placement it stopped in.
-- **On a new placement**, the spec's servers (`fromSpec`) start again;
-  servers added at runtime stay `stopped` until someone starts them.
-- **Changes:** adding, editing (`PUT`) and removing work in any state but
-  finished. Starting needs the Run `running` (409 `not_running`). An edit
-  applies at the server's next start: a running command keeps what it
-  started with.
-- **Events:** `server.added`, `server.removed` and `server.state` (name,
-  state, epoch, and exitCode and error when it exited) are the Run's
-  events.
+  `run stopped`, `migrated`, `host lost` (its placement ended) or
+  `detached`, with `stoppedEpoch`, the placement it stopped in.
+- **Attach and detach** work while the Run runs or is stopped: attached to
+  a Run on a host, the command starts now; to a stopped one, at its next
+  placement. Detaching stops the command and never touches the Run.
+  Attaching a server another Run serves is 409 `attached`.
+- **Lifetime.** `run` (the default of `lux server add`,
+  `POST /v1/runs/{id}/servers` and `workload.servers`): deleted when its
+  Run can never run again, `succeeded` or `cancelled` (a `failed` Run can
+  be resumed: its servers stay). `owner` (every server that wakes on
+  request): kept until its owner deletes it, or until `expireAfter`
+  (default 30 days) passes without a request (`server.expired`). An owner
+  server whose Run finishes for good is detached. Deleting a server
+  detaches it first; its hostname then answers 404 "This preview is
+  gone".
+- **Changes:** adding, editing (`PUT` on the Run's, `PATCH` on
+  `/v1/servers/{id}`) and removing work in any state of the Run but
+  finished. An edit applies at the server's next start. The Run API
+  removes only the Run's own servers: `DELETE /v1/runs/{id}/servers/{name}`
+  on an owner server is 409 `lifetime_owner`; detach or delete it through
+  `/v1/servers/{id}`. A change of a server that is attached or detached
+  twice while it runs is refused, 409 `conflict`: retry it.
+- **Events** go on the Run's events (when attached) and on the tenant's
+  feed, `GET /v1/events` (see [Output](#output)): `server.created`,
+  `updated`, `deleted`, `attached`, `detached`, `state`,
+  `wake_requested`, `idle`, `expired` (and the Run API's `server.added`,
+  `server.removed`). Each carries `serverId` and `runId`, its attached Run
+  (null only when attached to none; a Run's own events always have one),
+  and in `data` the server's `serverId`, `name`, `host`, `hostname`, `url`,
+  `labels` and `runId`. `GET /v1/servers/{id}/events` lists one
+  server's, a deleted server's included (its last is `server.deleted` or
+  `server.expired`); an id with none is an empty list, never 404.
 - **Ports:** `lux port-forward <run> web <local-port>` reaches a server by
   its name, as it reaches `network.ports`.
 - **Previews:** with previews configured, each server has a URL,
-  `https://<name>-<run suffix>.<preview domain>`, that reaches it from a
-  browser wherever the Run is now ([operators](operators.md#previews)).
-  `lastRequestAt` is when it was last requested (written at most every
-  30 seconds), for whoever parks idle Runs.
+  `https://<hostname>`, that reaches it from a browser wherever its Run is
+  now ([operators](operators.md#previews)). The hostname is the default,
+  `<name>-<8 characters of its id>.<domain>` (`web-k3x9ab2c.<domain>`), or,
+  for a server created with `POST /v1/servers` (`lux server create
+  --hostname`), its owner's choice: any name under the preview domain (any
+  number of labels) that no other server of any tenant has
+  (`web.t123.p9.<domain>`). It is stable for the server's life and never
+  names a Run.
+
+### Waking on request
+
+A branch preview sleeps while nobody looks and wakes when someone does.
+lux never starts, resumes or stops a Run for a server: it tells the
+server's **owner** (whatever created it: an orchestrator following the
+feed) and the owner acts.
+
+1. A signed-in request (never an unauthenticated one) to a server with
+   `wake: request` and no running Run serving it gets the **waking page**,
+   and lux emits `server.wake_requested` (`by`: the person's email or the
+   key's name, `path`) **once per wake**: until the server becomes ready,
+   or `wakeTimeout` (default 5 minutes) passes, further requests, tabs and
+   the page's own polls ask nothing more.
+2. The owner resumes the attached Run, with `sync` to bring the code
+   current (see [Resume](#resume)), or submits a Run and attaches the
+   server to it.
+3. The Run starts (its state restored), the server starts, the page drops
+   into the app at the path asked for. No request is held open meanwhile:
+   the page polls every 3 seconds.
+4. After `idleAfter` (default 10 minutes; 0: never) with no request while
+   its Run runs, lux emits `server.idle`, once per idle period (the next
+   request starts a new one). Every proxied request counts (pages, assets,
+   API calls); an open WebSocket or event stream is one request, however
+   long it stays open. The owner stops the Run; its state is snapshotted,
+   as on every stop.
+
+`lastRequestAt`, when the server was last requested, is written at most
+every `preview.activity_every` (30s by default), so idleness is that
+precise. A `wake: never` server whose Run is not running shows "not
+running", and nothing is emitted. See
+`examples/preview-orchestrator` for an owner in 300 lines, and
+[development](development.md#try-branch-previews-locally) to try it.
 
 ## Hosts and pools
 

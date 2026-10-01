@@ -61,6 +61,7 @@ type pendingRun struct {
 	SessionID     string
 	Epoch         int
 	PendingInput  json.RawMessage
+	PendingSync   []proto.SyncRef
 	ImageResolved *proto.ImageResolution
 	HasSecrets    bool
 	// PoolID: runs.pool_id, the pool it is bound to; nil until a pool of
@@ -107,7 +108,7 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 	var last cursorPos
 	var n int
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, snapshot_id, session_id, current_epoch, pending_input, image_resolved,
+		rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, snapshot_id, session_id, current_epoch, pending_input, pending_sync, image_resolved,
 				jsonb_array_length(secrets) > 0, coalesce(place_on, ''), coalesce(avoid_host, ''), pool_id, updated_at, updated_at < now() - $3::interval
 			FROM runs WHERE state IN `+queuedRunStates+` AND NOT cancel_requested
 			  AND (updated_at, id) > ($1, $2)
@@ -125,7 +126,7 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 		for rows.Next() {
 			var it item
 			r := &it.r
-			if err := rows.Scan(&r.ID, &r.TenantID, &r.State, &r.Spec, &r.SnapshotID, &r.SessionID, &r.Epoch, &r.PendingInput,
+			if err := rows.Scan(&r.ID, &r.TenantID, &r.State, &r.Spec, &r.SnapshotID, &r.SessionID, &r.Epoch, &r.PendingInput, &r.PendingSync,
 				&r.ImageResolved, &r.HasSecrets, &r.PlaceOn, &r.AvoidHost, &r.PoolID, &it.updated, &it.graceful); err != nil {
 				rows.Close()
 				return err
@@ -461,7 +462,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE runs SET current_epoch = $2, state = 'scheduled', state_reason = '', pending_input = NULL,
+	if _, err := tx.Exec(ctx, `UPDATE runs SET current_epoch = $2, state = 'scheduled', state_reason = '', pending_input = NULL, pending_sync = NULL,
 			place_on = NULL, avoid_host = NULL, needs_host_since = NULL,
 			first_scheduled_at = coalesce(first_scheduled_at, now()), updated_at = now()
 		WHERE id = $1`, r.ID, epoch); err != nil {
@@ -469,7 +470,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	}
 	// The placement is on the Run, its host and its host's pool alike.
 	// snapshotId: what its volumes start from (null: empty), the lineage
-	// its repositories' clone commits follow (gitBases).
+	// its repositories' bases follow (gitBases).
 	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID, "pool": h.Pool, "poolId": h.PoolID, "snapshotId": r.SnapshotID}); err != nil {
 		return err
 	}
@@ -481,7 +482,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 		return err
 	}
 
-	a := proto.Assign{RunID: r.ID, TenantID: r.TenantID, Epoch: epoch, Spec: r.Spec, ImageResolved: r.ImageResolved}
+	a := proto.Assign{RunID: r.ID, TenantID: r.TenantID, Epoch: epoch, Spec: r.Spec, ImageResolved: r.ImageResolved, Sync: r.PendingSync}
 	if r.SnapshotID != nil {
 		if a.GitBases, err = gitBases(ctx, tx, r.ID, epoch); err != nil {
 			return err
@@ -500,8 +501,9 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	if err := enqueue(ctx, tx, h.ID, r.ID, epoch, proto.MsgAssign, a); err != nil {
 		return err
 	}
-	// Then its servers: the spec's start on every placement.
-	if err := s.startSpecServers(ctx, tx, r.TenantID, r.ID, epoch); err != nil {
+	// Then its servers: every attached one that is up starts on every
+	// placement.
+	if err := s.startAttachedServers(ctx, tx, r.TenantID, r.ID, epoch, len(a.Sync) > 0); err != nil {
 		return err
 	}
 	reserveHost(h, r)

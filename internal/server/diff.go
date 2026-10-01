@@ -22,7 +22,7 @@ import (
 
 type diffInput struct {
 	RunPath
-	Base string `query:"base" enum:"clone,head" doc:"clone (default): from the commit each repository was cloned at. head: from its HEAD."`
+	Base string `query:"base" enum:"clone,head" doc:"clone (default): from the commit each repository was cloned at, or last synced to. head: from its HEAD."`
 	Stat bool   `query:"stat" doc:"Totals only, no patches."`
 }
 
@@ -164,20 +164,25 @@ func notRunning(runState, plState string) error {
 	return errf(http.StatusConflict, "run_not_running", "%s: its diff is available only while the Run is running; %s", what, keepAPatch)
 }
 
-// gitBases are the commits the repositories of a Run's placement at epoch
-// were cloned at: each one's latest successful git.clone in that placement,
-// else in the placement whose snapshot it restored, and so on back (a
-// resume clones only the repositories it adds). A snapshot older than the
-// latest (resume --from-snapshot) leads back through its own placement,
-// never through those after it. A placement scheduled before lineage was
-// recorded (no snapshotId) has only its own clones: an earlier
-// placement's may not be what it restored.
+// gitBases are the commits lux last knew the checkouts of a Run's placement
+// at epoch to be at: per repository, its latest successful git.clone or
+// moved git.sync (fast-forward, reset) in that placement, else in the
+// placement whose snapshot it restored, and so on back (a resume clones
+// only the repositories it adds; a snapshot keeps the synced checkout). A
+// snapshot older than the latest (resume --from-snapshot) leads back
+// through its own placement, never through those after it. A placement
+// scheduled before lineage was recorded (no snapshotId) has only its own
+// events: an earlier placement's may not be what it restored.
 func gitBases(ctx context.Context, tx pgx.Tx, runID string, epoch int) (map[string]string, error) {
 	m := map[string]string{}
 	for e := epoch; e > 0; {
-		rows, err := tx.Query(ctx, `SELECT data->>'repo', coalesce(data->>'commit', '')
-			FROM run_events WHERE run_id = $1 AND epoch = $2 AND type = $3 AND data->>'status' = 'cloned'
-			ORDER BY id DESC`, runID, e, proto.EvGitClone)
+		// The types are literals so the plan can use run_events_sync.
+		rows, err := tx.Query(ctx, `SELECT data->>'repo',
+				CASE WHEN type = 'git.clone' THEN coalesce(data->>'commit', '') ELSE coalesce(data->>'to', '') END
+			FROM run_events WHERE run_id = $1 AND epoch = $2 AND type IN ('git.clone', 'git.sync')
+			  AND ((type = 'git.clone' AND data->>'status' = 'cloned')
+			    OR (type = 'git.sync' AND data->>'status' IN ('fast-forward', 'reset') AND data->>'to' <> ''))
+			ORDER BY id DESC`, runID, e)
 		if err != nil {
 			return nil, err
 		}

@@ -351,6 +351,13 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
 		if p := r.placement(f.RunID, f.Epoch); p != nil {
 			p.setServers(ctx, sv)
 		}
+	case proto.MsgSync:
+		if p := r.placement(f.RunID, f.Epoch); p != nil {
+			var req proto.Sync
+			_ = json.Unmarshal(f.Data, &req)
+			// Off the control queue, like a push: fetching can take a while.
+			go p.syncRunning(context.WithoutCancel(ctx), req)
+		}
 	case proto.MsgPush:
 		if p := r.placement(f.RunID, f.Epoch); p != nil {
 			var req proto.Push

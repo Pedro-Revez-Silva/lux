@@ -278,6 +278,7 @@ var owners = []struct {
 }{
 	{"/v1/runs/{id}", owner{"id", `SELECT tenant_id FROM runs WHERE id = $1`}},
 	{"/v1/artifacts/{aid}", owner{"aid", `SELECT tenant_id FROM artifacts WHERE id = $1`}},
+	{"/v1/servers/{id}", owner{"id", `SELECT tenant_id FROM run_servers WHERE id = $1`}},
 }
 
 const ownerKey = "lux-owner"

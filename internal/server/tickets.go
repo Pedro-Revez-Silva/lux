@@ -45,13 +45,43 @@ type mintTicketInput struct {
 type Ticket struct {
 	Ticket    string    `json:"ticket" doc:"Single use; send it as ?ticket= (never logged by luxd)."`
 	Kind      string    `json:"kind"`
-	RunID     string    `json:"runId"`
+	RunID     string    `json:"runId,omitempty"`
+	ServerID  string    `json:"serverId,omitempty"`
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
 type ticketOutput struct {
 	Status int
 	Body   Ticket
+}
+
+// serverTicketInput mints a preview ticket for one server.
+type serverTicketInput struct {
+	ServerIDPath
+}
+
+// mintServerTicket is POST /v1/servers/{id}/tickets: a preview ticket for
+// the server's sign-in (its hostname's /.lux/auth), whether or not a Run
+// serves it.
+func (s *Server) mintServerTicket(ctx context.Context, in *serverTicketInput) (*ticketOutput, error) {
+	p := principal(ctx)
+	if !s.previewTickets() {
+		return nil, errf(http.StatusConflict, "previews_off", "this luxd signs no one in to previews with tickets (preview.domain is not set, or previews use Cloudflare Access)")
+	}
+	if _, err := s.loadTenantServer(ctx, p.TenantID, in.ID); err != nil {
+		return nil, err
+	}
+	raw := ids.Secret("tkt")
+	t := Ticket{Ticket: raw, Kind: TicketPreview, ServerID: in.ID, ExpiresAt: time.Now().Add(ticketTTL).UTC().Truncate(time.Millisecond)}
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO stream_tickets (token_hash, tenant_id, server_id, kind, principal, expires_at)
+			VALUES ($1, $2, $3, $4, $5, $6)`, ids.Hash(raw), p.TenantID, in.ID, TicketPreview, ticketPrincipal(p), t.ExpiresAt)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &ticketOutput{http.StatusCreated, t}, nil
 }
 
 func (s *Server) mintTicket(ctx context.Context, in *mintTicketInput) (*ticketOutput, error) {
@@ -105,14 +135,20 @@ func (sp storedPrincipal) principal() Principal {
 
 var errBadTicket = errf(http.StatusUnauthorized, "unauthorized", "invalid, used or expired ticket")
 
-// redeemTicket uses a ticket for runID and kind: once, before it expires,
-// and only while the key that minted it (if a key did) is not revoked.
-func (s *Server) redeemTicket(ctx context.Context, raw, runID, kind string) (Principal, error) {
+// ticketFor is what a ticket is redeemed for: a Run, or a server (a
+// preview ticket minted for the server, or for the Run it is attached to).
+type ticketFor struct{ runID, serverID string }
+
+// redeemTicket uses a ticket for its subject and kind: once, before it
+// expires, and only while the key that minted it (if a key did) is not
+// revoked.
+func (s *Server) redeemTicket(ctx context.Context, raw string, f ticketFor, kind string) (Principal, error) {
 	var sp storedPrincipal
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `UPDATE stream_tickets SET used_at = now()
-			WHERE token_hash = $1 AND run_id = $2 AND kind = $3 AND used_at IS NULL AND expires_at > now()
-			RETURNING principal`, ids.Hash(raw), runID, kind).Scan(&sp)
+			WHERE token_hash = $1 AND kind = $4 AND used_at IS NULL AND expires_at > now()
+			  AND ((run_id IS NOT NULL AND run_id = nullif($2, '')) OR (server_id IS NOT NULL AND server_id = nullif($3, '')))
+			RETURNING principal`, ids.Hash(raw), f.runID, f.serverID, kind).Scan(&sp)
 		if err != nil || sp.KeyID == "" {
 			return err
 		}
@@ -165,7 +201,7 @@ func (s *Server) streamAuth(ctx huma.Context, next func(huma.Context)) {
 		next(ctx)
 		return
 	}
-	p, err := s.redeemTicket(ctx.Context(), raw, ctx.Param("id"), TicketExec)
+	p, err := s.redeemTicket(ctx.Context(), raw, ticketFor{runID: ctx.Param("id")}, TicketExec)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

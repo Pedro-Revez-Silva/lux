@@ -61,8 +61,7 @@ func (r *Runner) diff(ctx context.Context, runID string, epoch int, base string)
 	}
 	ctx, cancel := context.WithTimeout(ctx, diffTimeout)
 	defer cancel()
-	out, err := r.pm.Run(ctx, "exec", "--user", user, "--workdir", "/", containerName(runID),
-		proto.ShimBinary, "diff", string(proto.Marshal(args)))
+	out, err := r.execShim(ctx, runID, user, "diff", args)
 	if ctx.Err() == context.DeadlineExceeded {
 		return proto.DiffResult{Error: fmt.Sprintf("the diff took longer than %s", diffTimeout)}
 	}
@@ -79,8 +78,9 @@ func (r *Runner) diff(ctx context.Context, runID string, epoch int, base string)
 	return res
 }
 
-// setGitBase records the commit a repository was cloned at, the base of
-// its live diffs, in the run state a restarted runner reads.
+// setGitBase records the commit a repository was cloned or synced to, the
+// base of its live diffs and of its next sync's bundle, in the run state a
+// restarted runner reads.
 func (p *placement) setGitBase(repo, commit string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -89,4 +89,11 @@ func (p *placement) setGitBase(repo, commit string) {
 	}
 	p.state.GitBases[repo] = commit
 	_ = writeRunState(p.dir, p.state)
+}
+
+// execShim runs `lux-shim <sub> <args as JSON>` in a Run's container as
+// user.
+func (r *Runner) execShim(ctx context.Context, runID, user, sub string, args any) ([]byte, error) {
+	return r.pm.Run(ctx, "exec", "--user", user, "--workdir", "/", containerName(runID),
+		proto.ShimBinary, sub, string(proto.Marshal(args)))
 }

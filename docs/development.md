@@ -170,6 +170,7 @@ cd tests
 uv run python run_tests.py --serve                       # up until Ctrl-C
 uv run python run_tests.py --serve --detach --hosts 3    # up in the background
 uv run python run_tests.py --serve --image ghcr.io/acme/agent:dev   # preload from local Docker
+uv run python run_tests.py --serve --preview-local 8090  # previews at http://<host>.lux.localhost:8090
 uv run python run_tests.py --down                        # take the detached one down
 ```
 
@@ -178,6 +179,59 @@ It prints and writes `env.json` in its log directory. `luxd_url` and
 and `tenant_id` are there too. `--image` (repeatable) copies an image from
 the local Docker into every host, so Runs using it never pull. The
 `lux-fake` test agent is always preloaded as `localhost/lux-fake:test`.
+
+### Try branch previews locally
+
+`scripts/demo-wake.sh` shows a branch preview end to end on one Linux
+machine: a server that sleeps while nobody looks at it, wakes on the
+branch's latest commit when someone does, and keeps its state across
+wakes. It needs what the harness needs (Docker, Go, uv; no Podman, no
+Bun: the hosts are Podman containers, and the console is not needed),
+and a browser on the same machine (Chrome, Chromium or Firefox: they
+resolve `*.localhost` to this machine without DNS).
+
+```sh
+scripts/demo-wake.sh up                 # lux (--serve --preview-local 8090), a git server, the orchestrator
+scripts/demo-wake.sh open               # prints a sign-in link: open it within 60s
+scripts/demo-wake.sh push "hello from commit B"   # a new commit on main
+scripts/demo-wake.sh status             # the server and its Run
+scripts/demo-wake.sh logs               # what the orchestrator did
+scripts/demo-wake.sh down
+```
+
+What it brings up:
+
+- `run_tests.py --serve --detach --preview-local 8090`: the dev
+  environment, with previews at `http://<host>.lux.localhost:8090`
+  ([previews on this machine](operators.md#previews); the listener on
+  `127.0.0.1:8090`).
+- The e2e suite's git server with a repository `app` (`message.txt`:
+  "hello from commit A").
+- `examples/preview-orchestrator`, a reference owner: it creates the
+  server `web.pr1.lux.localhost` (wake on request, `lux-fake app`: the
+  page shows the checkout's commit and a visit counter kept on the state
+  volume), follows `GET /v1/events`, and on `server.wake_requested`
+  resumes the server's Run with `sync: [{repo: app, ref: main}]` (the
+  first time, submits a servers-only Run and attaches the server); on
+  `server.idle`, stops the Run.
+
+Then, in the browser: open the link from `open` (it signs the browser in
+to that server and lands on `/`). The waking page shows "Asked the
+orchestrator to start it", then the Run being placed, restored, updated
+and started, and drops into the app: commit A, visit 1. Leave it for
+`DEMO_IDLE` (default `1m`): the orchestrator stops the Run. Run
+`push "hello from commit B"`, reload the page: it wakes again, on commit
+B, and the visit counter carries on (2). Pushed while the preview is up,
+`push` also syncs its Run (`lux sync`, what an owner does on a forge
+webhook), and a reload shows the new commit without a wake. A host name nothing serves
+(`http://gone.lux.localhost:8090/`) says "This preview is gone".
+
+`DEMO_PREVIEW_PORT` changes the port (8090), `DEMO_IDLE` the idle time.
+Signing in through the console's `/preview-auth` page (what a browser
+without a cookie is sent to) needs the console built (`make console`,
+Bun); `open` goes around it with a ticket. A headless walk-through with
+screenshots: `cd tests && uv run python ../scripts/demo-wake-verify.py
+/tmp/shots` (Playwright's Chromium: `uv run playwright install chromium`).
 
 ### Agent harnesses: one set of tests for every agent
 

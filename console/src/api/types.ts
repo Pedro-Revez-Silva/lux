@@ -1,5 +1,6 @@
 // Mirrors of the luxd JSON types (internal/server/*.go). Times are RFC 3339
 // strings; optional fields are omitted by the server when empty.
+import type { ServedState } from "@lux/design-system";
 
 export interface ApiErrorBody {
   error: { code: string; message: string; details?: unknown };
@@ -143,8 +144,10 @@ export interface Run {
 
 export type ServerState = "stopped" | "starting" | "ready" | "unreachable" | "exited";
 
-/** A Run's server: a named port, optionally with a command lux starts in the container. */
+/** A Run's server (GET /v1/runs/{id}/servers): a named port, optionally with a command lux starts in the container. */
 export interface Server {
+  /** The server's own id (srv_…): GET /v1/servers/{id}. */
+  id: string;
   name: string;
   port: number;
   command?: string[] | null;
@@ -162,18 +165,79 @@ export interface Server {
   /** When it last became ready. */
   readySince?: string | null;
   /** Why it is stopped. */
-  stopReason?: "stopped" | "run stopped" | "migrated" | "host lost" | null;
+  stopReason?: "stopped" | "run stopped" | "migrated" | "host lost" | "detached" | null;
   /** Placement epoch it stopped in (null if never started). */
   stoppedEpoch?: number | null;
   /** Placement epoch of the current state. */
   epoch: number;
-  /** The preview URL; null when previews are not configured. */
+  /** Its preview host name and URL; null when previews are not configured. */
+  hostname?: string | null;
   url?: string | null;
+  wake: WakeMode;
+  lifetime: Lifetime;
+  labels?: Record<string, string>;
   /** When the preview last proxied a request for it. */
   lastRequestAt?: string | null;
 }
 
-/** POST /v1/runs/{id}/servers; PUT takes the same minus name. */
+export type WakeMode = "request" | "never";
+export type Lifetime = "run" | "owner";
+
+/** A server's state on /v1/servers, derived from its process and its Run. */
+export type TenantServerState = ServedState;
+
+/** GET /v1/servers/{id}: a server of the tenant (TenantServer in internal/server/servers_api.go). */
+export interface TenantServer {
+  id: string;
+  name: string;
+  hostname: string | null;
+  url: string | null;
+  state: TenantServerState;
+  /** Its process in its Run, as GET /v1/runs/{id}/servers shows it. */
+  process: ServerState;
+  /** down: stopped by request; new placements leave it stopped. */
+  desired: "up" | "down";
+  port: number;
+  command: string[] | null;
+  workdir: string;
+  env: Record<string, string>;
+  afterSync: string[] | null;
+  labels: Record<string, string>;
+  wake: WakeMode;
+  /** Go durations ("10m0s"). */
+  idleAfter: string;
+  wakeTimeout: string;
+  lifetime: Lifetime;
+  expireAfter: string | null;
+  expiresAt?: string;
+  owner: string;
+  runId: string | null;
+  runName?: string;
+  runState?: string;
+  fromSpec: boolean;
+  exitCode?: number;
+  error?: string;
+  since: string;
+  readySince: string | null;
+  stopReason: string | null;
+  epoch: number | null;
+  lastRequestAt: string | null;
+  /** Ready: when it goes idle without another request. */
+  idleAt?: string;
+  /** The open wake: when it was asked for. */
+  wakeRequestedAt?: string;
+  wakes: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TenantServerList {
+  servers: TenantServer[];
+  /** How many of the listed (before the state filter) are in each state. */
+  counts: Partial<Record<TenantServerState, number>>;
+}
+
+/** POST /v1/runs/{id}/servers; PUT takes the same minus name, lifetime and labels. */
 export interface ServerInput {
   name: string;
   port: number;
@@ -182,6 +246,8 @@ export interface ServerInput {
   env?: Record<string, string>;
   /** Start it now; defaults to true when a command is set. */
   start?: boolean;
+  /** run (default): it ends with the run; owner: kept, detached, when the run finishes. */
+  lifetime?: Lifetime;
 }
 
 /** GET /v1/runs/{id}/servers/{name}/log: one line of the server's output. */
@@ -196,7 +262,9 @@ export interface ServerLogLine {
 export interface StreamTicket {
   ticket: string;
   kind: "exec" | "preview";
-  runId: string;
+  /** A Run's ticket; a server's (POST /v1/servers/{id}/tickets) has serverId instead. */
+  runId?: string;
+  serverId?: string;
   expiresAt: string;
 }
 
@@ -346,6 +414,8 @@ export interface HostCost {
 
 export interface Event {
   id: number;
+  /** A server's event (server.*): its id. */
+  serverId?: string;
   epoch?: number;
   type: string;
   data: Record<string, unknown>;
@@ -365,7 +435,8 @@ export interface LifecycleEvent {
 }
 
 export interface FeedEvent extends Event {
-  runId: string;
+  /** null only for an event of a server attached to no Run. */
+  runId: string | null;
   tenant: string;
 }
 
@@ -485,8 +556,12 @@ export interface WhoAmI {
   scopes: string[];
   /** key: the console needs an API key; cloudflare-access: Access signs people in. */
   consoleAuth: "key" | "cloudflare-access";
-  /** Where preview URLs are (https://<server>-<run suffix>.<previewDomain>); null when previews are off, or signed in to through Cloudflare Access. */
+  /** Where preview URLs are (<scheme>://<server host>.<previewDomain>); null when previews are off, or signed in to through Cloudflare Access. */
   previewDomain?: string | null;
+  /** With previewDomain: https, or http for a local demo domain under localhost. */
+  previewScheme?: "https" | "http";
+  /** With previewDomain: the port in preview URLs, if not the scheme's. */
+  previewPort?: number;
 }
 
 export interface Tenant {

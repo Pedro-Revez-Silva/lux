@@ -159,21 +159,25 @@ func TestDiffNonUTF8Patch(t *testing.T) {
 	}
 }
 
+func gitBasesOf(t *testing.T, s *Server, runID string, epoch int) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	var m map[string]string
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) (err error) {
+		m, err = gitBases(ctx, tx, runID, epoch)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
 // Clone bases follow the snapshot a placement restored; a placement with
 // no recorded lineage has only its own clones.
 func TestGitBases(t *testing.T) {
 	s, _ := diffFixture(t)
 	ctx := context.Background()
-	bases := func(epoch int) map[string]string {
-		var m map[string]string
-		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) (err error) {
-			m, err = gitBases(ctx, tx, "r1", epoch)
-			return err
-		}); err != nil {
-			t.Fatal(err)
-		}
-		return m
-	}
+	bases := func(epoch int) map[string]string { return gitBasesOf(t, s, "r1", epoch) }
 	if m := bases(2); m["app"] != "base-app" || len(m) != 1 {
 		t.Fatalf("epoch 2: %v", m)
 	}
@@ -191,5 +195,42 @@ func TestGitBases(t *testing.T) {
 		('t1', 'r1', 4, 'state', '{"state":"scheduled"}')`)
 	if m := bases(4); m != nil {
 		t.Fatalf("epoch 4: %v", m)
+	}
+}
+
+// A sync that moved a checkout is its base from then on, across the
+// placements that restore it, like a clone; one that did not move it is
+// not.
+func TestGitBasesFollowSyncs(t *testing.T) {
+	s, _ := diffFixture(t)
+	ctx := context.Background()
+	bases := func(epoch int) map[string]string { return gitBasesOf(t, s, "r1", epoch) }
+	// Epoch 1: cloned at base-app, synced to sync-b (fast-forward), then
+	// syncs that did not move it.
+	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES
+		('t1', 'r1', 1, 'git.sync', '{"repo": "app", "status": "fast-forward", "from": "base-app", "to": "sync-b"}'),
+		('t1', 'r1', 1, 'git.sync', '{"repo": "app", "status": "up-to-date", "from": "sync-b", "to": "sync-b"}'),
+		('t1', 'r1', 1, 'git.sync', '{"repo": "app", "status": "failed", "to": "never-c"}')`)
+	if m := bases(2); m["app"] != "sync-b" || len(m) != 1 {
+		t.Fatalf("epoch 2 after epoch 1's sync: %v", m)
+	}
+	// Epoch 2 resets app to sync-c: the base of a placement restoring
+	// epoch 2's snapshot, not of one restoring epoch 1's.
+	execSQL(t, s, ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest) VALUES ('s2', 't1', 'r1', 'p2', 2, '{}')`)
+	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES
+		('t1', 'r1', 2, 'git.sync', '{"repo": "app", "status": "reset", "from": "sync-b", "to": "sync-c"}'),
+		('t1', 'r1', 3, 'state', '{"state":"scheduled","snapshotId":"s2"}'),
+		('t1', 'r1', 4, 'state', '{"state":"scheduled","snapshotId":"s1"}')`)
+	if m := bases(3); m["app"] != "sync-c" {
+		t.Fatalf("epoch 3 restoring epoch 2: %v", m)
+	}
+	if m := bases(4); m["app"] != "sync-b" {
+		t.Fatalf("epoch 4 restoring epoch 1: %v", m)
+	}
+	// A clone after a sync in the same placement wins, being later.
+	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES
+		('t1', 'r1', 2, 'git.clone', '{"repo": "app", "status": "cloned", "commit": "reclone-d"}')`)
+	if m := bases(3); m["app"] != "reclone-d" {
+		t.Fatalf("epoch 3 after a later clone: %v", m)
 	}
 }

@@ -9,6 +9,7 @@
 //	lux-fake app-server                        Codex's app-server
 //	lux-fake plain                             a line-oriented generic workload
 //	lux-fake serve <port> [text]               a small web server (serve.go)
+//	lux-fake app <port> <checkout> <counter>   a preview's hello world (app.go)
 //
 // It keeps its conversation in a transcript under
 // $HOME/.lux-fake/<session>.jsonl and resumes from it.
@@ -67,6 +68,8 @@ func main() {
 		plain()
 	case len(os.Args) > 1 && os.Args[1] == "serve":
 		serve(os.Args[2:])
+	case len(os.Args) > 1 && os.Args[1] == "app":
+		app(os.Args[2:])
 	case slices.Contains(os.Args, "stream-json"):
 		streamJSON()
 	case slices.Contains(os.Args, "app-server"):

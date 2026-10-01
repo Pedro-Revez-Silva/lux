@@ -53,6 +53,8 @@ const (
 	// and epoch-fenced like input. The runner keeps the newest (by Rev)
 	// and reconciles to it.
 	MsgServers = "servers"
+	// MsgSync moves a running placement's checkouts to new commits.
+	MsgSync    = "sync"
 	MsgAck     = "ack" // luxd acking a runner report (reply)
 	MsgNack    = "nack"
 	MsgWelcome = "welcome"
@@ -202,9 +204,26 @@ type Assign struct {
 	// Image build resolution from an earlier placement, so rebuilds use the
 	// same pinned FROMs.
 	ImageResolved *ImageResolution `json:"imageResolved,omitempty"`
-	// GitBases: per repository, the commit an earlier placement cloned it
-	// at, for repositories this one restores rather than clones.
+	// GitBases: per repository, the commit an earlier placement cloned or
+	// last synced it to, for repositories this one restores rather than
+	// clones.
 	GitBases map[string]string `json:"gitBases,omitempty"`
+	// Sync: repositories whose restored checkout moves to a ref before init.
+	Sync []SyncRef `json:"sync,omitempty"`
+}
+
+// SyncRef asks for a repository's checkout to be moved to ref (a branch,
+// tag or sha), fetched through the host's mirror.
+type SyncRef struct {
+	Repo string `json:"repo"`
+	Ref  string `json:"ref"`
+}
+
+// Sync is MsgSync: a running placement's repositories to move. Servers
+// with afterSync restart after it (luxd sends the new set).
+type Sync struct {
+	RequestID string    `json:"requestId"`
+	Repos     []SyncRef `json:"repos"`
 }
 
 // ImageResolution is a built image as its Run's first build made it: the
@@ -358,6 +377,14 @@ const EvDiskExceeded = "disk.exceeded"
 // {repo, status: cloned | failed, commit?, error?, requestId?} (requestId:
 // the resume that added it).
 const EvGitClone = "git.clone"
+
+// EvGitSync is a repository's sync (proto.SyncResult, and requestId for a
+// sync of a running Run).
+const EvGitSync = "git.sync"
+
+// EvSyncDone ends a running Run's sync: {requestId, changed}. luxd
+// restarts the servers with afterSync when a checkout moved.
+const EvSyncDone = "sync.done"
 
 // RunEvent is a runner-side lifecycle note (image built, volumes restored,
 // rebuild differed, DNS lookup…) stored with the Run's events.

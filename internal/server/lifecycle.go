@@ -110,7 +110,10 @@ func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason 
 	if reason != "" {
 		data["reason"] = reason
 	}
-	return addEvent(ctx, tx, tenantID, runID, epoch, "state", data)
+	if err := addEvent(ctx, tx, tenantID, runID, epoch, "state", data); err != nil {
+		return err
+	}
+	return endServers(ctx, tx, tenantID, runID, state)
 }
 
 // costStates: a Run entering one of these has its costs evaluated at once

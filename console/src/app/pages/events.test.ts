@@ -135,3 +135,15 @@ test("a probe scale-up says it is one", () => {
       "new host cpus 2, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)",
   );
 });
+
+test("server events say what happened to which server, and a sync from where to where", () => {
+  const ev = (type: string, data: Record<string, unknown>) => eventSummary({ id: 1, type, data, time: "" });
+  expect(ev("server.wake_requested", { name: "web", by: "ada@example.com", path: "/goals" })).toBe("web: wake asked of its owner by ada@example.com at /goals");
+  expect(ev("server.idle", { name: "web", idleAfter: "10m0s" })).toBe("web: idle, no request for 10m0s");
+  expect(ev("server.state", { name: "web", state: "exited", exitCode: 1, error: "boom" })).toBe("web exited (exit 1: boom)");
+  expect(ev("server.detached", { name: "web", from: "run_x", reason: "run succeeded" })).toBe("web detached from run_x (run succeeded)");
+  expect(ev("server.expired", { name: "web", reason: "expired" })).toBe("web expired (expired)");
+  expect(ev("git.sync", { repo: "app", status: "reset", from: "aaaaaaaa1", to: "bbbbbbbb2", dirty: true })).toBe(
+    "app reset aaaaaaa → bbbbbbb (tracked changes saved as refs/lux/pre-sync)",
+  );
+});

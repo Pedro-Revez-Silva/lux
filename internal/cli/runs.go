@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/marcioapm/lux/internal/client"
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/server"
 	"github.com/marcioapm/lux/internal/spec"
 )
@@ -597,10 +599,45 @@ func (a *app) feed(ctx context.Context, after int64, follow bool) error {
 		if err := json.Unmarshal(ev.Data, &e); err != nil {
 			return err
 		}
-		d, _ := json.Marshal(e.Data)
-		_, err := fmt.Fprintf(a.stdout, "%s  %-10s %s  %-20s %s\n", e.Time.Local().Format("15:04:05.000"), e.Tenant, e.RunID, e.Type, d)
+		_, err := fmt.Fprintln(a.stdout, feedLine(e))
 		return err
 	})
+}
+
+// feedLine is one feed event as lux events --all prints it. A server's
+// reads as what happened to which URL; a Run's as its type and data.
+func feedLine(e server.FeedEvent) string {
+	at := e.Time.Local().Format("15:04:05.000")
+	run := "-"
+	if e.RunID != nil {
+		run = *e.RunID
+	}
+	if e.ServerID == "" {
+		d, _ := json.Marshal(e.Data)
+		return fmt.Sprintf("%s  %-10s %s  %-20s %s", at, e.Tenant, run, e.Type, d)
+	}
+	str := func(k string) string { v, _ := e.Data[k].(string); return v }
+	where := cmp.Or(str("hostname"), str("name"))
+	detail := ""
+	switch e.Type {
+	case "server.wake_requested":
+		detail = fmt.Sprintf("by %s at %s", str("by"), cmp.Or(str("path"), "/"))
+	case "server.idle":
+		detail = "no request for " + str("idleAfter")
+	case "server.state":
+		detail = str("state")
+		if r := str("stopReason"); r != "" {
+			detail += " (" + r + ")"
+		}
+		if c, ok := e.Data["exitCode"].(float64); ok {
+			detail += fmt.Sprintf(" exit %d", int(c))
+		}
+	case "server.attached", "server.created", "server.updated":
+		detail = "by " + str("by")
+	case "server.detached", "server.deleted", "server.expired", "server.removed":
+		detail = str("reason")
+	}
+	return strings.TrimRight(fmt.Sprintf("%s  %-10s %s  %-22s %s %s  %s", at, e.Tenant, run, e.Type, e.ServerID, where, detail), " ")
 }
 
 func (a *app) migrateCmd() *cobra.Command {
@@ -796,7 +833,7 @@ func parseAddRepo(v string) (spec.Repository, error) {
 
 func (a *app) resumeCmd() *cobra.Command {
 	var input, secretsFrom, fromSnapshot, to, disk, reqID string
-	var secretArgs, addRepos []string
+	var secretArgs, addRepos, syncs []string
 	var follow, wait bool
 	cmd := &cobra.Command{
 		Use:   "resume <run>",
@@ -816,7 +853,12 @@ An @ after the URL's last / names the ref (https://host/o/r.git@main);
 git@host:o/r.git has none. ref=REF says it outright. A credential's value
 is found like the other secrets'. If the clone fails the Run goes on
 without it. The request id (--request-id, or generated) is printed on
-stderr as "request <id>", and marks the repository's git.clone event.`,
+stderr as "request <id>", and marks the repository's git.clone event.
+
+--sync repo=ref moves a repository's checkout to ref (a branch, tag or sha)
+before init, fetched through the host's mirror (repeatable). Tracked files
+become the ref's; untracked and ignored ones are kept. Each is a git.sync
+event; one that fails leaves its checkout as it was.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := ctxOf(cmd)
@@ -875,6 +917,13 @@ stderr as "request <id>", and marks the repository's git.clone event.`,
 			if len(repos) > 0 {
 				req["git"] = map[string]any{"repositories": repos}
 			}
+			if len(syncs) > 0 {
+				refs, err := parseSyncs(syncs)
+				if err != nil {
+					return err
+				}
+				req["sync"] = refs
+			}
 			var out Run
 			hdr, err := a.c.DoHeader(ctx, "POST", "/v1/runs/"+args[0]+"/resume", req, &out)
 			if err != nil {
@@ -913,7 +962,104 @@ stderr as "request <id>", and marks the repository's git.clone event.`,
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait until it is running (or has ended)")
 	cmd.Flags().StringArrayVar(&addRepos, "add-repo", nil, "add a repository: name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false] (repeatable)")
 	cmd.Flags().StringVar(&reqID, "request-id", "", "names this resume (in its events and added repositories); generated if absent")
+	cmd.Flags().StringArrayVar(&syncs, "sync", nil, "repo=ref: move the repository's checkout to ref before init (repeatable)")
 	return cmd
+}
+
+// parseSyncs reads repo=ref arguments.
+func parseSyncs(args []string) ([]proto.SyncRef, error) {
+	var out []proto.SyncRef
+	for _, a := range args {
+		repo, ref, ok := strings.Cut(a, "=")
+		if !ok || repo == "" || ref == "" {
+			return nil, fmt.Errorf("%q: want repo=ref", a)
+		}
+		out = append(out, proto.SyncRef{Repo: repo, Ref: ref})
+	}
+	return out, nil
+}
+
+func (a *app) syncCmd() *cobra.Command {
+	var reqID string
+	var wait bool
+	cmd := &cobra.Command{
+		Use:   "sync <run> repo=ref...",
+		Short: "Move a running Run's checkouts to new commits",
+		Long: `Move a running Run's repositories' checkouts to refs (branches, tags or
+shas), fetched through its host's mirror, as lux resume --sync does before
+init. Servers with afterSync run it and restart once a checkout moved; the
+others keep running. With --wait, print each repository's git.sync outcome.`,
+		Args: cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := ctxOf(cmd)
+			refs, err := parseSyncs(args[1:])
+			if err != nil {
+				return err
+			}
+			var out struct {
+				RequestID string `json:"requestId"`
+			}
+			if err := a.c.Do(ctx, "POST", "/v1/runs/"+args[0]+"/sync", map[string]any{"sync": refs, "requestId": reqID}, &out); err != nil {
+				return err
+			}
+			if !wait {
+				if a.output == "json" {
+					return a.json(out)
+				}
+				fmt.Fprintln(a.stdout, "request", out.RequestID)
+				return nil
+			}
+			deadline := time.Now().Add(5 * time.Minute)
+			for time.Now().Before(deadline) {
+				var evs struct {
+					Events []server.Event `json:"events"`
+				}
+				if err := a.c.Do(ctx, "GET", "/v1/runs/"+args[0]+"/events", nil, &evs); err != nil {
+					return err
+				}
+				var results []map[string]any
+				done := false
+				for _, e := range evs.Events {
+					if e.Data["requestId"] != out.RequestID {
+						continue
+					}
+					switch e.Type {
+					case proto.EvGitSync:
+						results = append(results, e.Data)
+					case proto.EvSyncDone:
+						done = true
+					}
+				}
+				if done {
+					if a.output == "json" {
+						return a.json(results)
+					}
+					failed := false
+					for _, r := range results {
+						fmt.Fprintf(a.stdout, "%s %s %s → %s\n", r["repo"], r["status"], shortSHA(r["from"]), shortSHA(r["to"]))
+						failed = failed || r["status"] == "failed"
+					}
+					if failed {
+						return exitCode(1)
+					}
+					return nil
+				}
+				time.Sleep(time.Second)
+			}
+			return fmt.Errorf("no outcome for sync %s after 5 minutes", out.RequestID)
+		},
+	}
+	cmd.Flags().StringVar(&reqID, "request-id", "", "names this sync (in its git.sync events); generated if absent")
+	cmd.Flags().BoolVar(&wait, "wait", false, "wait for the outcome; exit 1 if a repository failed")
+	return cmd
+}
+
+func shortSHA(v any) string {
+	s, _ := v.(string)
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return orDash(s)
 }
 
 func (a *app) waitCmd() *cobra.Command {

@@ -11,11 +11,13 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// FeedEvent is a Run's event in the feed of every Run the caller sees.
+// FeedEvent is an event in the feed of every Run and server the caller
+// sees: a Run's (runId), or a server's (serverId, and runId its attached
+// Run's, null while it has none).
 type FeedEvent struct {
 	Event
-	RunID  string `json:"runId"`
-	Tenant string `json:"tenant"`
+	RunID  *string `json:"runId" nullable:"true" doc:"The Run's id. Null only for an event of a server attached to no Run."`
+	Tenant string  `json:"tenant"`
 }
 
 type feedInput struct {
@@ -39,7 +41,7 @@ const feedFallback = 5 * time.Second
 
 const feedPage = 500
 
-// serveFeed is GET /v1/events: every event of every Run the caller sees
+// serveFeed is GET /v1/events: every event of every Run and server the caller sees
 // (an operator's: all tenants, or ?tenant=), as SSE, in id order. It reads
 // when an event is written (wakeups.go), not on a timer.
 func (s *Server) serveFeed(w http.ResponseWriter, r *http.Request, in *feedInput) error {
@@ -136,14 +138,15 @@ func (s *Server) serveFeed(w http.ResponseWriter, r *http.Request, in *feedInput
 func (s *Server) feedAfter(ctx context.Context, p Principal, after int64) ([]FeedEvent, error) {
 	var evs []FeedEvent
 	err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT e.id, e.epoch, e.type, e.data, e.created_at, e.run_id, t.name
+		rows, err := tx.Query(ctx, `SELECT e.id, coalesce(e.server_id, ''), e.epoch, e.type, e.data, e.created_at, e.run_id, t.name
 			FROM run_events e JOIN tenants t ON t.id = e.tenant_id WHERE e.id > $1 ORDER BY e.id LIMIT $2`, after, feedPage)
 		if err != nil {
 			return err
 		}
 		evs, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (FeedEvent, error) {
 			var e FeedEvent
-			err := row.Scan(&e.ID, &e.Epoch, &e.Type, &e.Data, &e.Time, &e.RunID, &e.Tenant)
+			err := row.Scan(&e.ID, &e.ServerID, &e.Epoch, &e.Type, &e.Data, &e.Time, &e.RunID, &e.Tenant)
+			s.eventDetail(&e.Event)
 			return e, err
 		})
 		return err

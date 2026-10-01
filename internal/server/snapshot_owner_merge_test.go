@@ -24,8 +24,8 @@ func TestSnapshotReportRefusedMoveKeepsPoolOwner(t *testing.T) {
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, stop_reason)
 		VALUES ('p-plat', 't1', $1, 'h-plat', 1, 'stopping', 'migrate')`, id)
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopping', current_epoch = 1 WHERE id = $1`, id)
-	execSQL(t, s, ctx, `INSERT INTO run_servers (tenant_id, run_id, name, port, command, state, epoch)
-		VALUES ('t1', $1, 'web', 3000, '["serve"]', 'ready', 1)`, id)
+	execSQL(t, s, ctx, `INSERT INTO run_servers (id, tenant_id, run_id, name, port, command, state, epoch)
+		VALUES ('srv_webwebwebwebwebw', 't1', $1, 'web', 3000, '["serve"]', 'ready', 1)`, id)
 
 	report := func(snapID string) proto.Frame {
 		sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: snapID, RunID: id, Epoch: 1, Volumes: []proto.VolumeSnapshot{

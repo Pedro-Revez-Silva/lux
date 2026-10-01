@@ -18,7 +18,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"path"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -27,12 +26,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// The preview listener: https://<server>-<run suffix>.<domain> reaches a
-// Run's server, wherever the Run is now. It has its own address and only
+// The preview listener: https://<server host>.<domain> reaches a server,
+// wherever its Run is now. It has its own address and only
 // ever proxies: nothing of luxd's own (/v1, /runner, the console) is
 // served on it.
 //
@@ -44,14 +42,18 @@ import (
 
 const (
 	previewCookie = "__Host-lux_preview"
+	// previewCookieHTTP: over http (a local demo domain) a browser keeps
+	// no __Host- cookie; this one is host-only all the same.
+	previewCookieHTTP = "lux_preview"
 	// previewCookieTTL is a key's cookie's life: luxd re-checks the key
 	// (keyLive) as it goes. A person's (Cloudflare Access, no key) cannot
 	// be re-checked without their Access token, so theirs is short.
 	previewCookieTTL       = 12 * time.Hour
 	previewPersonCookieTTL = time.Hour
 	previewAuthPath        = "/.lux/auth"
-	// activityEvery bounds how often a server's lastRequestAt is written.
-	activityEvery = 30 * time.Second
+	// defaultActivityEvery bounds how often a server's lastRequestAt is
+	// written (preview.activity_every).
+	defaultActivityEvery = 30 * time.Second
 )
 
 type previews struct {
@@ -62,12 +64,10 @@ type previews struct {
 	rp   *httputil.ReverseProxy
 
 	mu       sync.Mutex
-	pending  map[serverRef]time.Time // requests not yet written
-	written  map[serverRef]time.Time // when each was last written
-	keysLive map[string]keyCheck     // api keys a cookie names: still live?
+	pending  map[string]time.Time // requests not yet written, by server id
+	written  map[string]time.Time // when each was last written
+	keysLive map[string]keyCheck  // api keys a cookie names: still live?
 }
-
-type serverRef struct{ runID, name string }
 
 type keyCheck struct {
 	live  bool
@@ -81,7 +81,7 @@ func (s *Server) previewTickets() bool {
 }
 
 func newPreviews(s *Server) *previews {
-	p := &previews{s: s, mode: s.cfg.Preview.Auth, pending: map[serverRef]time.Time{}, written: map[serverRef]time.Time{},
+	p := &previews{s: s, mode: s.cfg.Preview.Auth, pending: map[string]time.Time{}, written: map[string]time.Time{},
 		keysLive: map[string]keyCheck{}}
 	if p.mode == "" {
 		p.mode = "ticket"
@@ -132,35 +132,27 @@ func (s *Server) luxdKey(ctx context.Context, name string) ([]byte, error) {
 
 // ---- host names ------------------------------------------------------------
 
-var runSuffixRe = regexp.MustCompile(`^[a-z2-7]{16}$`)
-
-// parsePreviewHost splits <server>-<run suffix>.<domain> (at the last -)
-// into the server's name and the Run's id.
-func parsePreviewHost(host, domain string) (name, runID string, ok bool) {
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
+// parsePreviewHost is the server host a request's Host names: the part
+// before .<domain>, one or more DNS labels.
+func parsePreviewHost(host, domain string) (string, bool) {
+	host = strings.ToLower(strings.TrimSuffix(stripPort(host), "."))
+	rel, found := strings.CutSuffix(host, "."+strings.ToLower(domain))
+	if !found || rel == "" || len(host) > 253 {
+		return "", false
 	}
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	label, found := strings.CutSuffix(host, "."+strings.ToLower(domain))
-	if !found || strings.Contains(label, ".") {
-		return "", "", false
+	for _, l := range strings.Split(rel, ".") {
+		if !hostLabelRe.MatchString(l) {
+			return "", false
+		}
 	}
-	i := strings.LastIndexByte(label, '-')
-	if i < 0 {
-		return "", "", false
-	}
-	name, suffix := label[:i], label[i+1:]
-	if !spec.ValidServerName(name) || !runSuffixRe.MatchString(suffix) {
-		return "", "", false
-	}
-	return name, "run_" + suffix, true
+	return rel, true
 }
 
 // ---- the cookie ------------------------------------------------------------
 
 // previewUser is who a preview cookie (or an Access token) is for.
 type previewUser struct {
-	RunID    string `json:"r"`
+	ServerID string `json:"s"`
 	TenantID string `json:"t,omitempty"`
 	Operator bool   `json:"o,omitempty"`
 	KeyID    string `json:"k,omitempty"`
@@ -225,32 +217,90 @@ func (p *previews) keyLive(ctx context.Context, keyID string) bool {
 
 // ---- serving ---------------------------------------------------------------
 
+// Paths of the preview host that are lux's own, never the server's.
+const (
+	previewWaitPath = "/.lux/wait" // a waking page's poll: never wakes
+	previewWakePath = "/.lux/wake" // the no-answer page's "Ask again"
+)
+
 func (p *previews) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	name, runID, ok := parsePreviewHost(r.Host, p.s.cfg.Preview.Domain)
+	host, ok := parsePreviewHost(r.Host, p.s.cfg.Preview.Domain)
 	if !ok {
 		p.page(w, http.StatusNotFound, pageUnknown, nil)
 		return
 	}
-	if p.mode == "ticket" && r.URL.Path == previewAuthPath {
-		p.signIn(w, r, runID)
+	v, found, err := p.lookup(r.Context(), host)
+	if err != nil {
+		p.page(w, http.StatusBadGateway, pageError, nil)
 		return
 	}
-	user, ok := p.authenticate(r, runID)
+	if !found {
+		// Deleted, or never was: a hostname is never reused while its
+		// server lives, and nothing tells the two apart afterwards.
+		p.page(w, http.StatusNotFound, pageGone, nil)
+		return
+	}
+	if p.mode == "ticket" && r.URL.Path == previewAuthPath {
+		p.signIn(w, r, v)
+		return
+	}
+	user, ok := p.authenticate(r, v)
 	if !ok {
 		p.challenge(w, r)
 		return
 	}
-	t, err := p.route(r.Context(), w, name, runID)
+	p.touch(v.ID)
+	switch r.URL.Path {
+	case previewWaitPath:
+		p.wait(w, r, v)
+		return
+	case previewWakePath:
+		if r.Method == http.MethodPost {
+			if _, err := p.s.requestWake(r.Context(), v.ID, user.User, waitTarget(r)); err != nil {
+				p.page(w, http.StatusBadGateway, pageError, nil)
+				return
+			}
+		}
+		http.Redirect(w, r, previewWaitPath+"?to="+url.QueryEscape(waitTarget(r)), http.StatusSeeOther)
+		return
+	}
+	t, err := p.route(r.Context(), w, r, v, user)
 	if err != nil || t == nil {
 		return
 	}
-	p.touch(serverRef{runID, name})
-	ctx := context.WithValue(r.Context(), previewTargetKey{}, previewTarget{runID: runID, name: name, user: user.User, t: *t})
+	ctx := context.WithValue(r.Context(), previewTargetKey{}, previewTarget{runID: *v.RunID, name: v.Name, user: user.User, t: *t})
 	p.rp.ServeHTTP(w, r.WithContext(ctx))
 }
 
-// authenticate finds the request's user, allowed to read runID.
-func (p *previews) authenticate(r *http.Request, runID string) (previewUser, bool) {
+// waitTarget is the path a waking page drops into once the server is up:
+// ?to= of /.lux/wait and /.lux/wake, the request's own otherwise.
+func waitTarget(r *http.Request) string {
+	if r.URL.Path == previewWaitPath || r.URL.Path == previewWakePath {
+		if to := r.FormValue("to"); localPath(to) && !strings.HasPrefix(to, "/.lux/") {
+			return to
+		}
+		return "/"
+	}
+	return r.URL.RequestURI()
+}
+
+// lookup finds the server of a preview host (in a system scope: the
+// request is not authenticated yet).
+func (p *previews) lookup(ctx context.Context, host string) (serverRow, bool, error) {
+	var v serverRow
+	err := p.s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		var err error
+		v, err = scanServerRow(tx.QueryRow(ctx, serverSelect+`WHERE sv.host = $1`, host))
+		return err
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return v, false, nil
+	}
+	return v, err == nil, err
+}
+
+// authenticate finds the request's user, allowed to read the server.
+func (p *previews) authenticate(r *http.Request, v serverRow) (previewUser, bool) {
 	if p.mode == "cloudflare-access" {
 		tok := r.Header.Get("Cf-Access-Jwt-Assertion")
 		if tok == "" {
@@ -269,43 +319,48 @@ func (p *previews) authenticate(r *http.Request, runID string) (previewUser, boo
 		if err != nil {
 			return previewUser{}, false
 		}
-		u := previewUser{RunID: runID, TenantID: pr.TenantID, Operator: pr.Operator, User: email}
-		return u, p.mayRead(r.Context(), u)
+		u := previewUser{ServerID: v.ID, TenantID: pr.TenantID, Operator: pr.Operator, User: email}
+		return u, u.Operator || u.TenantID == v.TenantID
 	}
-	for _, c := range r.CookiesNamed(previewCookie) {
-		if u, ok := p.verify(c.Value, time.Now()); ok && u.RunID == runID && (u.KeyID == "" || p.keyLive(r.Context(), u.KeyID)) {
+	for _, c := range r.CookiesNamed(p.cookieName()) {
+		if u, ok := p.verify(c.Value, time.Now()); ok && u.ServerID == v.ID && (u.KeyID == "" || p.keyLive(r.Context(), u.KeyID)) {
 			return u, true
 		}
 	}
 	return previewUser{}, false
 }
 
-// mayRead: an operator, or someone of the Run's tenant.
-func (p *previews) mayRead(ctx context.Context, u previewUser) bool {
-	if u.Operator {
-		return true
+// cookieName: __Host- (Secure, host-only) over https; over http (a local
+// demo domain under localhost, previews.scheme http) a plain host-only one.
+func (p *previews) cookieName() string {
+	if p.s.cfg.Preview.Scheme == "http" {
+		return previewCookieHTTP
 	}
-	var tenant string
-	err := p.s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT tenant_id FROM runs WHERE id = $1`, u.RunID).Scan(&tenant)
-	})
-	return err == nil && tenant == u.TenantID
+	return previewCookie
 }
 
 // challenge answers a request without a user: a browser asking for a page
-// goes to sign in (ticket mode); anything else gets 401.
+// goes to sign in (ticket mode); anything else gets 401. Nothing wakes.
 func (p *previews) challenge(w http.ResponseWriter, r *http.Request) {
 	if p.mode == "ticket" && r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html") {
-		to := "https://" + r.Host + r.URL.RequestURI()
+		to := p.s.previewOrigin(stripPort(r.Host)) + r.URL.RequestURI()
 		http.Redirect(w, r, strings.TrimRight(p.s.cfg.PublicURL, "/")+"/preview-auth?to="+url.QueryEscape(to), http.StatusFound)
 		return
 	}
 	p.page(w, http.StatusUnauthorized, pageSignIn, nil)
 }
 
-// signIn is /.lux/auth?ticket=…&to=/path: a preview ticket for this host's
-// Run becomes the cookie, and the browser goes on to the path.
-func (p *previews) signIn(w http.ResponseWriter, r *http.Request, runID string) {
+func stripPort(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
+// signIn is /.lux/auth?ticket=…&to=/path: a preview ticket for this server,
+// or for the Run it is attached to (POST /v1/runs/{id}/tickets), becomes
+// the cookie, and the browser goes on to the path.
+func (p *previews) signIn(w http.ResponseWriter, r *http.Request, v serverRow) {
 	to := r.URL.Query().Get("to")
 	if to == "" {
 		to = "/"
@@ -314,8 +369,8 @@ func (p *previews) signIn(w http.ResponseWriter, r *http.Request, runID string) 
 		http.Error(w, "to must be a path", http.StatusBadRequest)
 		return
 	}
-	pr, err := p.s.redeemTicket(r.Context(), r.URL.Query().Get("ticket"), runID, TicketPreview)
-	if err != nil || !pr.Can("read") {
+	pr, err := p.s.redeemTicket(r.Context(), r.URL.Query().Get("ticket"), ticketFor{runID: strOf(v.RunID), serverID: v.ID}, TicketPreview)
+	if err != nil || !pr.Can("read") || (!pr.Operator && pr.TenantID != v.TenantID) {
 		p.page(w, http.StatusUnauthorized, pageSignIn, nil)
 		return
 	}
@@ -323,7 +378,7 @@ func (p *previews) signIn(w http.ResponseWriter, r *http.Request, runID string) 
 	if pr.KeyID == "" {
 		ttl = previewPersonCookieTTL
 	}
-	u := previewUser{RunID: runID, TenantID: pr.TenantID, Operator: pr.Operator, KeyID: pr.KeyID, User: pr.Email,
+	u := previewUser{ServerID: v.ID, TenantID: pr.TenantID, Operator: pr.Operator, KeyID: pr.KeyID, User: pr.Email,
 		Exp: time.Now().Add(ttl).Unix()}
 	if u.User == "" && pr.KeyID != "" {
 		_ = p.s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
@@ -331,8 +386,9 @@ func (p *previews) signIn(w http.ResponseWriter, r *http.Request, runID string) 
 		})
 		u.User = cmp.Or(u.User, pr.KeyID)
 	}
-	http.SetCookie(w, &http.Cookie{Name: previewCookie, Value: p.sign(u), Path: "/", MaxAge: int(ttl.Seconds()),
-		Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	secure := p.s.cfg.Preview.Scheme != "http"
+	http.SetCookie(w, &http.Cookie{Name: p.cookieName(), Value: p.sign(u), Path: "/", MaxAge: int(ttl.Seconds()),
+		Secure: secure, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	w.Header().Set("Cache-Control", "no-store")
 	http.Redirect(w, r, to, http.StatusFound)
 }
@@ -349,104 +405,123 @@ func localPath(to string) bool {
 	return err == nil && u.Scheme == "" && u.Host == "" && !strings.HasPrefix(path.Clean(u.Path), "//")
 }
 
-// previewState is what routing a request needs to know.
-type previewState struct {
-	found       bool
-	runState    string
-	moving      bool // the Run is being moved (a migration, a drain)
-	serverState string
-	stopReason  string
-	exitCode    *int
-	errText     string
+// needsWake: a wakeable server that no running (or starting) Run serves.
+func needsWake(v serverRow) bool {
+	if v.Wake != WakeRequest || v.down() {
+		return false
+	}
+	if v.RunID == nil {
+		return true
+	}
+	return v.RunState != StateRunning && !slices.Contains(startingRunStates, v.RunState) && !v.Moving
 }
 
-func (p *previews) state(ctx context.Context, runID, name string) (previewState, error) {
-	var st previewState
-	err := p.s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		var placementStop string
-		err := tx.QueryRow(ctx, `SELECT r.state, coalesce(p.stop_reason, ''), rs.state, coalesce(rs.stop_reason, ''), rs.exit_code, coalesce(rs.error, '')
-			FROM runs r JOIN run_servers rs ON rs.run_id = r.id AND rs.name = $2
-			LEFT JOIN placements p ON p.run_id = r.id AND p.epoch = r.current_epoch
-			WHERE r.id = $1`, runID, name).Scan(&st.runState, &placementStop, &st.serverState, &st.stopReason, &st.exitCode, &st.errText)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		st.found = err == nil
-		// Moving: its placement is stopping to move, or it is on its way
-		// to the next one after a move.
-		st.moving = (st.runState == StateStopping && slices.Contains(movedStops, placementStop)) ||
-			(st.stopReason == "migrated" && slices.Contains(startingRunStates, st.runState))
-		return err
-	})
-	return st, err
-}
-
-// route decides what a request gets: a target to proxy to, or (nil) a
-// status page it has already written. A starting server, or a Run on its
-// way to running, is waited for up to hold_for.
-func (p *previews) route(ctx context.Context, w http.ResponseWriter, name, runID string) (*streamTarget, error) {
+// route decides what a request gets: a target to proxy to, or (nil) a page
+// it has already written. A server that wakes on request is never held:
+// the waking page polls (/.lux/wait). One that does not keeps hold_for: a
+// starting server, or a Run on its way to running, is waited for.
+func (p *previews) route(ctx context.Context, w http.ResponseWriter, r *http.Request, v serverRow, user previewUser) (*streamTarget, error) {
 	deadline := time.Now().Add(p.s.cfg.Preview.HoldFor)
 	for {
-		woken := p.s.wakeups.next(runID)
-		st, err := p.state(ctx, runID, name)
-		if err != nil {
-			p.page(w, http.StatusBadGateway, pageError, nil)
-			return nil, err
-		}
-		if !st.found {
-			p.page(w, http.StatusNotFound, pageUnknown, nil)
-			return nil, nil
-		}
-		waiting := false
-		switch {
-		case st.runState == StateRunning && st.serverState == ServerReady:
-			t, err := p.s.resolveTarget(ctx, store.System(), "tunnel", runID, name)
+		woken := p.s.wakeups.next(strOf(v.RunID))
+		if v.RunState == StateRunning && v.State == ServerReady {
+			t, err := p.s.resolveTarget(ctx, store.System(), "tunnel", *v.RunID, v.Name)
 			if err == nil {
 				return &t, nil
 			}
 			// The host is reconnecting to this luxd, perhaps.
-			waiting = true
-			st.serverState = ServerUnreachable
-		case st.runState == StateRunning && st.serverState == ServerStarting:
-			waiting = true
-		case slices.Contains(startingRunStates, st.runState) || st.moving:
-			waiting = true
+			v.State = ServerUnreachable
 		}
+		if v.Wake == WakeRequest {
+			if needsWake(v) {
+				if _, err := p.s.requestWake(ctx, v.ID, user.User, r.URL.RequestURI()); err != nil {
+					p.page(w, http.StatusBadGateway, pageError, nil)
+					return nil, err
+				}
+			}
+			return nil, p.wakingPage(ctx, w, v.ID, r.URL.RequestURI())
+		}
+		waiting := v.RunID != nil && ((v.RunState == StateRunning && (v.State == ServerStarting || v.State == ServerUnreachable)) ||
+			slices.Contains(startingRunStates, v.RunState) || v.Moving)
 		if !waiting || !time.Now().Before(deadline) {
-			p.statusPage(w, st)
+			p.statusPage(w, v)
 			return nil, nil
 		}
 		wait(ctx, woken, min(time.Until(deadline), time.Second))
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		nv, found, err := p.lookup(ctx, v.Host)
+		if err != nil || !found {
+			p.page(w, http.StatusNotFound, pageGone, nil)
+			return nil, err
+		}
+		v = nv
 	}
+}
+
+// exitCodeText is an exit code for a page, -1 when there is none.
+func exitCodeText(code *int) string {
+	if code == nil {
+		return "-1"
+	}
+	return strconv.Itoa(*code)
+}
+
+func strOf(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// wait is /.lux/wait?to=: a waking page's poll. Into the app once ready;
+// the page again otherwise. It never wakes: after wakeTimeout the page
+// says no answer, and only a new request (or Ask again) asks again.
+func (p *previews) wait(w http.ResponseWriter, r *http.Request, v serverRow) {
+	to := waitTarget(r)
+	if v.RunState == StateRunning && v.State == ServerReady {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Redirect(w, r, to, http.StatusSeeOther)
+		return
+	}
+	if v.Wake != WakeRequest {
+		p.statusPage(w, v)
+		return
+	}
+	_ = p.wakingPage(r.Context(), w, v.ID, to)
 }
 
 // startingRunStates: a Run on its way to running.
 var startingRunStates = []string{StateSubmitted, StateScheduled, StateProvisioning, StateStarting, StateResuming}
 
-func (p *previews) statusPage(w http.ResponseWriter, st previewState) {
+// statusPage is what a server that does not wake on request shows while it
+// does not answer.
+func (p *previews) statusPage(w http.ResponseWriter, v serverRow) {
 	switch {
-	case st.moving:
+	case v.RunID == nil:
+		p.page(w, http.StatusServiceUnavailable, pageDetached, map[string]any{"Name": v.Name})
+	case v.Moving:
 		p.page(w, http.StatusServiceUnavailable, pageMoving, nil)
-	case slices.Contains(startingRunStates, st.runState):
+	case slices.Contains(startingRunStates, v.RunState):
 		p.page(w, http.StatusServiceUnavailable, pageStarting, map[string]any{"What": "The Run is starting."})
-	case st.runState != StateRunning:
-		p.page(w, http.StatusServiceUnavailable, pageRunStopped, map[string]any{"State": st.runState})
-	case st.serverState == ServerStopped:
-		p.page(w, http.StatusServiceUnavailable, pageStopped, map[string]any{"Reason": st.stopReason})
-	case st.serverState == ServerExited:
-		code := -1
-		if st.exitCode != nil {
-			code = *st.exitCode
-		}
-		p.page(w, http.StatusServiceUnavailable, pageExited, map[string]any{"Code": strconv.Itoa(code), "Error": st.errText})
-	case st.serverState == ServerUnreachable:
+	case v.RunState != StateRunning:
+		p.page(w, http.StatusServiceUnavailable, pageRunStopped, map[string]any{"Name": v.Name, "State": v.RunState})
+	case v.State == ServerStopped:
+		p.page(w, http.StatusServiceUnavailable, pageStopped, map[string]any{"Reason": strOf(v.StopReason)})
+	case v.State == ServerExited:
+		p.page(w, http.StatusServiceUnavailable, pageExited, map[string]any{"Code": exitCodeText(v.ExitCode), "Error": strOf(v.Error),
+			"LogURL": p.consoleServerURL(v.ID)})
+	case v.State == ServerUnreachable:
 		p.page(w, http.StatusBadGateway, pageUnreachable, nil)
 	default:
 		p.page(w, http.StatusServiceUnavailable, pageStarting, map[string]any{"What": "The server is starting."})
 	}
+}
+
+// consoleServerURL is the server's page in the console.
+func (p *previews) consoleServerURL(id string) string {
+	return strings.TrimRight(p.s.cfg.PublicURL, "/") + "/servers/" + id
 }
 
 // ---- the proxy -------------------------------------------------------------
@@ -471,7 +546,7 @@ func (p *previews) rewrite(pr *httputil.ProxyRequest) {
 	pr.SetXForwarded()
 	cleanPreviewHeaders(pr.Out.Header)
 	pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
-	pr.Out.Header.Set("X-Forwarded-Proto", "https")
+	pr.Out.Header.Set("X-Forwarded-Proto", cmp.Or(p.s.cfg.Preview.Scheme, "https"))
 	pr.Out.Header.Set("X-Lux-User", pt.user)
 }
 
@@ -490,7 +565,7 @@ func cleanPreviewHeaders(h http.Header) {
 			for _, c := range strings.Split(line, ";") {
 				c = strings.TrimSpace(c)
 				n, _, _ := strings.Cut(c, "=")
-				if c == "" || n == previewCookie || n == "CF_Authorization" {
+				if c == "" || n == previewCookie || n == previewCookieHTTP || n == "CF_Authorization" {
 					continue
 				}
 				keep = append(keep, c)
@@ -553,50 +628,56 @@ func (p *previews) proxyError(w http.ResponseWriter, r *http.Request, err error)
 
 // ---- activity --------------------------------------------------------------
 
-// touch notes a proxied request; its server's lastRequestAt is written at
-// most every activityEvery (at once, the first time).
-func (p *previews) touch(ref serverRef) {
+// touch notes a request to a server: every proxied request counts (pages,
+// assets, API calls), and a waking page's polls; a WebSocket's traffic
+// after its upgrade does not (it is one request). Its lastRequestAt is
+// written at most every activityEvery (at once, the first time).
+func (p *previews) touch(id string) {
 	now := time.Now()
 	p.mu.Lock()
-	p.pending[ref] = now
-	due := now.Sub(p.written[ref]) >= activityEvery
+	p.pending[id] = now
+	due := now.Sub(p.written[id]) >= p.activityEvery()
 	p.mu.Unlock()
 	if due {
 		go p.flush(context.Background(), false)
 	}
 }
 
+func (p *previews) activityEvery() time.Duration {
+	if e := p.s.cfg.Preview.ActivityEvery; e > 0 {
+		return e
+	}
+	return defaultActivityEvery
+}
+
 // flush writes what is due (everything, with all).
 func (p *previews) flush(ctx context.Context, all bool) {
 	now := time.Now()
+	every := p.activityEvery()
 	p.mu.Lock()
-	var refs []serverRef
+	var ids []string
 	var at []time.Time
-	for ref, t := range p.pending {
-		if all || now.Sub(p.written[ref]) >= activityEvery {
-			refs = append(refs, ref)
+	for id, t := range p.pending {
+		if all || now.Sub(p.written[id]) >= every {
+			ids = append(ids, id)
 			at = append(at, t)
-			p.written[ref] = now
-			delete(p.pending, ref)
+			p.written[id] = now
+			delete(p.pending, id)
 		}
 	}
-	for ref, t := range p.written {
-		if now.Sub(t) > 10*activityEvery {
-			delete(p.written, ref)
+	for id, t := range p.written {
+		if now.Sub(t) > 10*every {
+			delete(p.written, id)
 		}
 	}
 	p.mu.Unlock()
-	if len(refs) == 0 {
+	if len(ids) == 0 {
 		return
-	}
-	runs, names := make([]string, len(refs)), make([]string, len(refs))
-	for i, ref := range refs {
-		runs[i], names[i] = ref.runID, ref.name
 	}
 	err := p.s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE run_servers rs SET last_request_at = greatest(rs.last_request_at, u.at)
-			FROM unnest($1::text[], $2::text[], $3::timestamptz[]) AS u(run_id, name, at)
-			WHERE rs.run_id = u.run_id AND rs.name = u.name`, runs, names, at)
+			FROM unnest($1::text[], $2::timestamptz[]) AS u(id, at)
+			WHERE rs.id = u.id`, ids, at)
 		return err
 	})
 	if err != nil && ctx.Err() == nil {
@@ -605,7 +686,7 @@ func (p *previews) flush(ctx context.Context, all bool) {
 }
 
 func (p *previews) flushLoop(ctx context.Context) {
-	t := time.NewTicker(5 * time.Second)
+	t := time.NewTicker(min(5*time.Second, p.activityEvery()))
 	defer t.Stop()
 	for {
 		select {
@@ -628,18 +709,27 @@ var previewTmpl = template.Must(template.ParseFS(previewFS, "preview.html"))
 type previewPage struct {
 	Tone, Title, Message string
 	Refresh              bool
+	// Waking: the steps page (refreshes every 3 seconds, by its own poll).
+	Waking bool
 }
 
 var (
-	pageUnknown     = previewPage{"neutral", "No such preview", "This address is not a server of any Run.", false}
-	pageSignIn      = previewPage{"neutral", "Sign-in needed", "Open this preview from wherever you manage its Run to sign in.", false}
-	pageError       = previewPage{"red", "Something went wrong", "lux could not look this preview up. Try again in a moment.", true}
-	pageStarting    = previewPage{"blue", "Starting", "", true}
-	pageMoving      = previewPage{"violet", "Moving", "The Run is moving to another host. Its servers are stopped by the move: start them again from wherever you manage this run.", true}
-	pageRunStopped  = previewPage{"neutral", "The Run is not running", "", true}
-	pageStopped     = previewPage{"neutral", "Server stopped", "Start it from wherever you manage this run.", true}
-	pageExited      = previewPage{"red", "Server exited", "Its command ended. Start it again from wherever you manage this run.", true}
-	pageUnreachable = previewPage{"amber", "Not answering", "The server is running but does not accept connections on its port.", true}
+	pageUnknown      = previewPage{Tone: "neutral", Title: "No such preview", Message: "This address is not a server of this lux."}
+	pageGone         = previewPage{Tone: "neutral", Title: "This preview is gone", Message: "No server answers to this address any more: its owner deleted it, or it never was. Nothing will wake it."}
+	pageSignIn       = previewPage{Tone: "neutral", Title: "Sign-in needed", Message: "Open this preview from wherever you manage it to sign in."}
+	pageError        = previewPage{Tone: "red", Title: "Something went wrong", Message: "lux could not look this preview up. Try again in a moment.", Refresh: true}
+	pageStarting     = previewPage{Tone: "blue", Title: "Starting", Refresh: true}
+	pageMoving       = previewPage{Tone: "violet", Title: "Moving", Message: "The Run is moving to another host; its servers start again there.", Refresh: true}
+	pageRunStopped   = previewPage{Tone: "neutral", Title: "Not running", Message: "It does not wake on request: it runs only while its Run does.", Refresh: true}
+	pageDetached     = previewPage{Tone: "neutral", Title: "Not running", Message: "No Run serves it, and it does not wake on request.", Refresh: true}
+	pageStopped      = previewPage{Tone: "neutral", Title: "Server stopped", Message: "Start it from wherever you manage it.", Refresh: true}
+	pageExited       = previewPage{Tone: "red", Title: "Server exited", Message: "Its command ended. Start it again from wherever you manage it.", Refresh: true}
+	pageUnreachable  = previewPage{Tone: "amber", Title: "Not answering", Message: "The server is running but does not accept connections on its port.", Refresh: true}
+	pageWaking       = previewPage{Tone: "blue", Title: "Waking", Message: "This usually takes under a minute.", Waking: true}
+	pageWakingHost   = previewPage{Tone: "blue", Title: "Waking", Message: "Waiting for its owner to bring a Run up and for a host. Cold hosts take 1-3 minutes; the page keeps trying.", Waking: true}
+	pageWakingMoving = previewPage{Tone: "violet", Title: "Moving to another host", Message: "Its Run is moving; the server starts again there.", Waking: true}
+	pageNoAnswer     = previewPage{Tone: "amber", Title: "No answer from its owner", Message: "lux asked the orchestrator that owns this server to start it, and nothing started it. lux never starts a Run by itself."}
+	pageDidNotStart  = previewPage{Tone: "red", Title: "The server did not start", Message: "Its Run is up, but the command exited during start.", Refresh: false}
 )
 
 // page writes a status page; extra fills in its details.
@@ -658,8 +748,8 @@ func (p *previews) page(w http.ResponseWriter, status int, pg previewPage, extra
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Lux-Preview", "status")
 	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:")
-	if pg.Refresh {
-		h.Set("Retry-After", "5")
+	if pg.Refresh || pg.Waking {
+		h.Set("Retry-After", "3")
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(b.Bytes())

@@ -43,6 +43,13 @@ components:
             - array
             - "null"
       type: object
+    AttachInputBody:
+      additionalProperties: false
+      properties:
+        runId:
+          description: "The Run to attach it to: running (its command starts now) or not (it starts at the Run's next placement)."
+          type: string
+      type: object
     BeforeStop:
       additionalProperties: false
       properties:
@@ -283,6 +290,79 @@ components:
           description: The part from final lines.
           type: string
       type: object
+    CreateServerInput:
+      additionalProperties: false
+      properties:
+        afterSync:
+          description: argv run before the command when it starts after a repository sync.
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        command:
+          description: "argv lux runs in the attached Run's container. None: only the port is exposed."
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        env:
+          additionalProperties:
+            type: string
+          type: object
+        expireAfter:
+          description: "lifetime owner: deleted (server.expired) after this long without a request. Default 30 days; 0: never."
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
+        hostname:
+          description: "Its preview host name: under the preview domain (any number of labels), unique. Default: <name>-<8 characters of its id>.<domain>."
+          type: string
+        idleAfter:
+          description: "server.idle after this long without a request while its Run runs (default 10m; 0: never)."
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
+        labels:
+          additionalProperties:
+            type: string
+          type: object
+        lifetime:
+          description: "owner (default without runId, and for every wakeable server): kept until deleted. run: deleted when its Run finishes for good."
+          enum:
+            - run
+            - owner
+          type: string
+        name:
+          description: 1-30 of a-z, 0-9 and -, starting with a letter, not ending in -; unique among the servers of the Run it is attached to.
+          type: string
+        port:
+          format: int64
+          type: integer
+        runId:
+          description: Attach it to this Run at once.
+          type: string
+        wake:
+          description: "request: a signed-in request while no running Run serves it asks its owner for one (server.wake_requested on GET /v1/events). Default never."
+          enum:
+            - request
+            - never
+          type: string
+        wakeTimeout:
+          description: How long a wake waits for a Run to make it ready before its page says no answer (default 5m).
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
+        workdir:
+          type: string
+      type: object
     DiffFileStat:
       additionalProperties: false
       properties:
@@ -362,6 +442,9 @@ components:
         id:
           format: int64
           type: integer
+        serverId:
+          description: "A server's event: its id (the server.* events)."
+          type: string
         time:
           format: date-time
           type: string
@@ -391,6 +474,12 @@ components:
           format: int64
           type: integer
         runId:
+          description: The Run's id. Null only for an event of a server attached to no Run.
+          type:
+            - string
+            - "null"
+        serverId:
+          description: "A server's event: its id (the server.* events)."
           type: string
         tenant:
           type: string
@@ -1066,6 +1155,65 @@ components:
           format: int64
           type: integer
       type: object
+    PatchServerInput:
+      additionalProperties: false
+      properties:
+        afterSync:
+          description: "[] removes it."
+          items:
+            type: string
+          type: array
+        command:
+          description: "[] removes it (a port only)."
+          items:
+            type: string
+          type: array
+        env:
+          additionalProperties:
+            type: string
+          type: object
+        expireAfter:
+          description: "0: never."
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
+        idleAfter:
+          description: A Go duration ("4h", "90s"), or a number of seconds. Responses carry the string.
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
+        labels:
+          additionalProperties:
+            type: string
+          description: Replaces them.
+          type: object
+        lifetime:
+          enum:
+            - run
+            - owner
+          type: string
+        port:
+          format: int64
+          type: integer
+        wake:
+          enum:
+            - request
+            - never
+          type: string
+        wakeTimeout:
+          description: A Go duration ("4h", "90s"), or a number of seconds. Responses carry the string.
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
+        workdir:
+          type: string
+      type: object
     Percentiles:
       additionalProperties: false
       properties:
@@ -1732,6 +1880,13 @@ components:
           type:
             - array
             - "null"
+        sync:
+          description: "Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha) before init, through the host's mirror: tracked files become the ref's, untracked and ignored ones are kept. Each is a git.sync event; the Run goes on after a failed one, its checkout as it was (or, if a reset failed half-way, where git stopped, with refs/lux/pre-sync holding what was there)."
+          items:
+            $ref: "#/components/schemas/SyncRef"
+          type:
+            - array
+            - "null"
         to:
           description: "Operators: place it on this host (id or name), and nowhere else."
           type: string
@@ -2039,11 +2194,29 @@ components:
           format: int64
           type: integer
         fromSpec:
-          description: Declared in the spec's workload.servers (started on every start of the Run).
+          description: Declared in the spec's workload.servers.
           type: boolean
+        hostname:
+          description: Its preview host name; null when previews are not configured.
+          type:
+            - string
+            - "null"
+        id:
+          description: "The server's id (srv_…): GET /v1/servers/{id}."
+          type: string
+        labels:
+          additionalProperties:
+            type: string
+          type: object
         lastRequestAt:
-          description: When its preview URL was last requested (updated at most every 30s).
+          description: When its preview URL was last requested (written at most every preview.activity_every).
           format: date-time
+          type: string
+        lifetime:
+          description: "run: deleted when its Run finishes for good (succeeded, cancelled). owner: kept until its owner deletes it."
+          enum:
+            - run
+            - owner
           type: string
         name:
           type: string
@@ -2069,12 +2242,13 @@ components:
             - exited
           type: string
         stopReason:
-          description: "Why it is stopped: stopped by request, or its placement ended."
+          description: "Why it is stopped: stopped by request (it stays down: a new placement does not start it), its placement ended, or it was detached."
           enum:
             - stopped
             - run stopped
             - migrated
             - host lost
+            - detached
           type:
             - string
             - "null"
@@ -2089,6 +2263,11 @@ components:
           type:
             - string
             - "null"
+        wake:
+          enum:
+            - request
+            - never
+          type: string
         workdir:
           type: string
       type: object
@@ -2288,6 +2467,13 @@ components:
     Server:
       additionalProperties: false
       properties:
+        afterSync:
+          description: argv run before the command whenever it starts after a repository sync (a resume with sync, POST /v1/runs/{id}/sync), e.g. an install. Without it a sync of a running Run leaves the server running (hot reload).
+          items:
+            type: string
+          type:
+            - array
+            - "null"
         command:
           description: "argv, run with the workload's PATH, user and environment. None: only the port is exposed (something else starts the server)."
           items:
@@ -2301,7 +2487,7 @@ components:
           description: "More environment for the command (not secret: it is stored with the Run)."
           type: object
         name:
-          description: "Unique: 1-30 lowercase letters, digits and -, starting with a letter, not ending in -. Its preview URL is <name>-<run suffix>.<preview domain>."
+          description: "Unique: 1-30 lowercase letters, digits and -, starting with a letter, not ending in -. Its preview URL is <name>-<8 characters of its id>.<preview domain>."
           type: string
         port:
           description: The TCP port it listens on in the container, 1-65535 (not a service's loopback port).
@@ -2314,6 +2500,13 @@ components:
     ServerInput:
       additionalProperties: false
       properties:
+        afterSync:
+          description: argv run before the command when it starts after a repository sync.
+          items:
+            type: string
+          type:
+            - array
+            - "null"
         command:
           description: "argv, run as the workload's user with its environment. None: only the port is exposed."
           items:
@@ -2326,6 +2519,17 @@ components:
             type: string
           description: More environment for its command (not secret).
           type: object
+        labels:
+          additionalProperties:
+            type: string
+          description: "POST: free-form labels (GET /v1/servers?label=k=v)."
+          type: object
+        lifetime:
+          description: "POST: run (default): deleted when the Run finishes for good; owner: kept, detached, until deleted (DELETE /v1/servers/{id})."
+          enum:
+            - run
+            - owner
+          type: string
         name:
           description: "Unique within the Run: 1-30 of a-z, 0-9 and -, starting with a letter, not ending in -. (POST only.)"
           type: string
@@ -2533,6 +2737,27 @@ components:
           format: int64
           type: integer
       type: object
+    SyncRef:
+      additionalProperties: false
+      properties:
+        ref:
+          type: string
+        repo:
+          type: string
+      type: object
+    SyncRunInputBody:
+      additionalProperties: false
+      properties:
+        requestId:
+          type: string
+        sync:
+          description: "Repositories to move: repo (the spec's name) and ref (branch, tag or sha)."
+          items:
+            $ref: "#/components/schemas/SyncRef"
+          type:
+            - array
+            - "null"
+      type: object
     Tenant:
       additionalProperties: false
       properties:
@@ -2578,6 +2803,187 @@ components:
             - array
             - "null"
       type: object
+    TenantServer:
+      additionalProperties: false
+      properties:
+        afterSync:
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        command:
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        createdAt:
+          format: date-time
+          type: string
+        desired:
+          description: "down: stopped by request; a new placement leaves it stopped until started again."
+          enum:
+            - up
+            - down
+          type: string
+        env:
+          additionalProperties:
+            type: string
+          type: object
+        epoch:
+          format: int64
+          type:
+            - integer
+            - "null"
+        error:
+          type: string
+        exitCode:
+          format: int64
+          type: integer
+        expireAfter:
+          description: "lifetime owner: deleted after this long without a request (null: never)."
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
+          type:
+            - ""
+            - "null"
+        expiresAt:
+          format: date-time
+          type: string
+        fromSpec:
+          type: boolean
+        hostname:
+          description: Its preview host name, stable for its life; null when previews are not configured.
+          type:
+            - string
+            - "null"
+        id:
+          type: string
+        idleAfter:
+          description: "How long without a request before server.idle (0: never)."
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
+        idleAt:
+          description: "Ready: when it goes idle without another request."
+          format: date-time
+          type: string
+        labels:
+          additionalProperties:
+            type: string
+          type: object
+        lastRequestAt:
+          format: date-time
+          type:
+            - string
+            - "null"
+        lifetime:
+          enum:
+            - run
+            - owner
+          type: string
+        name:
+          type: string
+        owner:
+          description: "Who created it: a key id or a person's email."
+          type: string
+        port:
+          format: int64
+          type: integer
+        process:
+          description: The state of its process in its Run, as GET /v1/runs/{id}/servers shows it.
+          enum:
+            - stopped
+            - starting
+            - ready
+            - unreachable
+            - exited
+          type: string
+        readySince:
+          format: date-time
+          type:
+            - string
+            - "null"
+        runId:
+          description: The Run it is attached to, if any.
+          type:
+            - string
+            - "null"
+        runName:
+          type: string
+        runState:
+          type: string
+        since:
+          format: date-time
+          type: string
+        state:
+          description: "ready: its Run runs and its port answers. waking: on its way up (a wake asked for, its Run starting, its command starting). asleep: wakes on request and nothing serves it now. stopped: does not wake and its Run is not running, or stopped by someone. unreachable, exited: as the process. no answer: a wake was asked for longer than wakeTimeout ago and no Run came up; the next request asks again."
+          enum:
+            - ready
+            - waking
+            - asleep
+            - stopped
+            - unreachable
+            - exited
+            - no answer
+          type: string
+        stopReason:
+          type:
+            - string
+            - "null"
+        updatedAt:
+          format: date-time
+          type: string
+        url:
+          description: Its preview URL; null when previews are not configured.
+          type:
+            - string
+            - "null"
+        wake:
+          enum:
+            - request
+            - never
+          type: string
+        wakeRequestedAt:
+          description: "The open wake: when it was asked for."
+          format: date-time
+          type: string
+        wakeTimeout:
+          description: A Go duration ("4h", "90s"), or a number of seconds. Responses carry the string.
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
+        wakes:
+          description: How many wakes it has asked for.
+          format: int64
+          type: integer
+        workdir:
+          type: string
+      type: object
+    TenantServerList:
+      additionalProperties: false
+      properties:
+        counts:
+          additionalProperties:
+            format: int64
+            type: integer
+          description: How many of the listed (before the state filter) are in each state.
+          type: object
+        servers:
+          items:
+            $ref: "#/components/schemas/TenantServer"
+          type:
+            - array
+            - "null"
+      type: object
     Ticket:
       additionalProperties: false
       properties:
@@ -2587,6 +2993,8 @@ components:
         kind:
           type: string
         runId:
+          type: string
+        serverId:
           type: string
         ticket:
           description: Single use; send it as ?ticket= (never logged by luxd).
@@ -2659,10 +3067,20 @@ components:
         picture:
           type: string
         previewDomain:
-          description: The preview listener's domain (preview URLs are https://<server>-<run suffix>.<domain>); null when previews are off, or signed in to through Cloudflare Access rather than a ticket.
+          description: The preview listener's domain (preview URLs are <scheme>://<server host>.<domain>); null when previews are off, or signed in to through Cloudflare Access rather than a ticket.
           type:
             - string
             - "null"
+        previewPort:
+          description: "With previewDomain: the port in preview URLs, if not the scheme's."
+          format: int64
+          type: integer
+        previewScheme:
+          description: "With previewDomain: the scheme of preview URLs (http only for a local demo domain under localhost)."
+          enum:
+            - https
+            - http
+          type: string
         scopes:
           items:
             type: string
@@ -2708,7 +3126,7 @@ components:
         resume:
           $ref: "#/components/schemas/Resume"
         servers:
-          description: "Servers: named ports of the Run, each optionally with a command lux starts in the container, as the workload's user with its environment. Started on every start of the Run (a resume, a migration). More can be added while it runs (POST /v1/runs/{id}/servers)."
+          description: "Servers: named ports of the Run, each optionally with a command lux starts in the container, as the workload's user with its environment. Started on every start of the Run (a resume, a migration), like every server attached to it; deleted when it succeeds or is cancelled. More can be added while it runs (POST /v1/runs/{id}/servers) or attached (POST /v1/servers/{id}/attach)."
           items:
             $ref: "#/components/schemas/Server"
           type:
@@ -2957,7 +3375,7 @@ paths:
   /v1/events:
     get:
       description: |-
-        Server-sent events: one `lux` event per Run event, oldest first, each with its id (`id:`, and resume with Last-Event-ID or `after`). From now, from `after`, or the `last` N; with `follow=false` the stream ends after what is there now.
+        Server-sent events: one `lux` event per Run or server event, oldest first, each with its id (`id:`, and resume with Last-Event-ID or `after`). A server's event (server.created, updated, deleted, attached, detached, state, wake_requested, idle, expired) carries `serverId`, and in `data` its id, name, host, hostname, url, labels and runId; `runId` is null only for one of a server attached to no Run. From now, from `after`, or the `last` N; with `follow=false` the stream ends after what is there now.
 
         Needs the `read` scope.
       operationId: eventFeed
@@ -3005,7 +3423,7 @@ paths:
                 description: "Server-sent events: `event: <type>` and `data: <JSON>` lines, each event ended by a blank line."
                 items:
                   oneOf:
-                    - description: A Run's event.
+                    - description: A Run's or a server's event.
                       properties:
                         data:
                           $ref: "#/components/schemas/FeedEvent"
@@ -3057,7 +3475,7 @@ paths:
           description: Internal Server Error
       security:
         - apiKey: []
-      summary: Every Run's events, as they happen
+      summary: Every Run's and server's events, as they happen
       tags:
         - runs
   /v1/history:
@@ -5203,7 +5621,7 @@ paths:
   /v1/runs/{id}/diff:
     get:
       description: |-
-        Per repository, from its base to its working tree: committed, staged, unstaged and untracked (not ignored) changes, computed now in the Run's container. `base=clone` (default) diffs from the commit the repository was cloned at, `base=head` from its HEAD. Untracked files are cut at 32 KiB each, or 8 KiB each if the whole diff would pass 1 MiB, and binary ones are named only: such a patch is `truncated` and does not apply as it is. A diff over 16 MiB is refused (502 `diff_failed`).
+        Per repository, from its base to its working tree: committed, staged, unstaged and untracked (not ignored) changes, computed now in the Run's container. `base=clone` (default) diffs from the commit the repository was cloned at, or last synced to (`lux sync`, a resume's sync), `base=head` from its HEAD. Untracked files are cut at 32 KiB each, or 8 KiB each if the whole diff would pass 1 MiB, and binary ones are named only: such a patch is `truncated` and does not apply as it is. A diff over 16 MiB is refused (502 `diff_failed`).
 
         Only while the Run is running: otherwise 409 `run_not_running`. 404 `no_diff` when the Run has no repositories. One diff per Run at a time (409 `diff_busy`). 503 `diff_unsupported` when the Run's runner predates diffs.
 
@@ -5217,12 +5635,12 @@ paths:
           schema:
             description: The Run's id.
             type: string
-        - description: "clone (default): from the commit each repository was cloned at. head: from its HEAD."
+        - description: "clone (default): from the commit each repository was cloned at, or last synced to. head: from its HEAD."
           explode: false
           in: query
           name: base
           schema:
-            description: "clone (default): from the commit each repository was cloned at. head: from its HEAD."
+            description: "clone (default): from the commit each repository was cloned at, or last synced to. head: from its HEAD."
             enum:
               - clone
               - head
@@ -6231,7 +6649,7 @@ paths:
   /v1/runs/{id}/servers/{name}:
     delete:
       description: |-
-        Stops it first.
+        Stops it first. A server of lifetime owner is not the Run's to remove: 409 lifetime_owner (detach or delete it through /v1/servers/{id}).
 
         Needs the `run` scope.
       operationId: removeServer
@@ -6762,6 +7180,75 @@ paths:
       summary: Stop a Run
       tags:
         - runs
+  /v1/runs/{id}/sync:
+    post:
+      description: |-
+        The runner fetches each ref through the host's mirror, and the checkout moves as on a resume's sync (see resume): each repository is a git.sync event, then sync.done. Servers with afterSync run it and restart once a checkout moved; the others keep running.
+
+        Needs the `run` scope.
+      operationId: syncRun
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyncRunInputBody"
+        required: true
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RequestAccepted"
+          description: Accepted
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Move a running Run's checkouts to new commits
+      tags:
+        - runs
   /v1/runs/{id}/tickets:
     post:
       description: |-
@@ -6825,6 +7312,861 @@ paths:
       summary: Mint a stream ticket
       tags:
         - interactive
+  /v1/servers:
+    get:
+      description: |-
+        Newest first, with their derived state.
+
+        Needs the `read` scope.
+      operationId: listTenantServers
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+        - description: "Only servers in these states (comma-separated): ready, waking, asleep, stopped, unreachable, exited, no answer."
+          explode: false
+          in: query
+          name: state
+          schema:
+            description: "Only servers in these states (comma-separated): ready, waking, asleep, stopped, unreachable, exited, no answer."
+            type: string
+        - description: Only servers with this label (key=value); repeat to require several.
+          explode: true
+          in: query
+          name: label
+          schema:
+            description: Only servers with this label (key=value); repeat to require several.
+            items:
+              type: string
+            type:
+              - array
+              - "null"
+        - description: Only servers that wake so.
+          explode: false
+          in: query
+          name: wake
+          schema:
+            description: Only servers that wake so.
+            enum:
+              - request
+              - never
+              - ""
+            type: string
+        - description: Only servers attached to this Run.
+          explode: false
+          in: query
+          name: run
+          schema:
+            description: Only servers attached to this Run.
+            type: string
+        - description: Only the server of this hostname.
+          explode: false
+          in: query
+          name: hostname
+          schema:
+            description: Only the server of this hostname.
+            type: string
+        - description: At most this many, newest first, 1 to 1000 (default 500).
+          explode: false
+          in: query
+          name: limit
+          schema:
+            description: At most this many, newest first, 1 to 1000 (default 500).
+            format: int64
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantServerList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List the tenant's servers
+      tags:
+        - servers
+    post:
+      description: |-
+        A named URL that reaches a port in a Run, independent of Runs: attach it to one (runId, or POST .../attach), detach it, and it outlives them (lifetime owner). With wake request, a signed-in request while no running Run serves it emits server.wake_requested on GET /v1/events for its owner, once per wake; lux never starts a Run itself.
+
+        Needs the `run` scope.
+      operationId: createServer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateServerInput"
+        required: true
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantServer"
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Create a server
+      tags:
+        - servers
+  /v1/servers/{id}:
+    delete:
+      description: |-
+        Detaches it first (its command stops; its Run is untouched). Its hostname is gone from then on. 409 conflict when the server was attached or detached twice while this ran: retry.
+
+        Needs the `run` scope.
+      operationId: deleteServer
+      parameters:
+        - description: The server's id (srv_…).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The server's id (srv_…).
+            type: string
+      responses:
+        "204":
+          description: No Content
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Delete a server
+      tags:
+        - servers
+    get:
+      description: Needs the `read` scope.
+      operationId: getTenantServer
+      parameters:
+        - description: The server's id (srv_…).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The server's id (srv_…).
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantServer"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: A server
+      tags:
+        - servers
+    patch:
+      description: |-
+        What is given. Command, port, workdir, env and afterSync apply at its next start. 409 conflict when the server was attached or detached twice while this ran: retry.
+
+        Needs the `run` scope.
+      operationId: patchServer
+      parameters:
+        - description: The server's id (srv_…).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The server's id (srv_…).
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchServerInput"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantServer"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Change a server
+      tags:
+        - servers
+  /v1/servers/{id}/attach:
+    post:
+      description: |-
+        To a running Run: its command starts now. To a stopped one: at its next placement. 409 attached when another Run serves it. Its name must be free among the Run's servers (409 name_taken).
+
+        Needs the `run` scope.
+      operationId: attachServer
+      parameters:
+        - description: The server's id (srv_…).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The server's id (srv_…).
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttachInputBody"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantServer"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Attach a server to a Run
+      tags:
+        - servers
+  /v1/servers/{id}/detach:
+    post:
+      description: |-
+        Its command stops; the Run is untouched. 409 lifetime_run for a server that ends with its Run. 409 conflict when the server was attached or detached twice while this ran: retry.
+
+        Needs the `run` scope.
+      operationId: detachServer
+      parameters:
+        - description: The server's id (srv_…).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The server's id (srv_…).
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantServer"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Detach a server from its Run
+      tags:
+        - servers
+  /v1/servers/{id}/events:
+    get:
+      description: |-
+        server.* events, oldest first; the feed (GET /v1/events) carries them too. A deleted server's events are kept and listed here (ending with server.deleted or server.expired); an id with no events of this tenant's is an empty list, not 404.
+
+        Needs the `read` scope.
+      operationId: serverEvents
+      parameters:
+        - description: The server's id (srv_…).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The server's id (srv_…).
+            type: string
+        - description: Only events after this id (up to 1000 at a time).
+          explode: false
+          in: query
+          name: after
+          schema:
+            description: Only events after this id (up to 1000 at a time).
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventList"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: A server's events
+      tags:
+        - servers
+  /v1/servers/{id}/log:
+    get:
+      description: |-
+        From its attached Run, across placements; empty when attached to none.
+
+        Needs the `read` scope.
+      operationId: tenantServerLog
+      parameters:
+        - description: The server's id (srv_…).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The server's id (srv_…).
+            type: string
+        - description: The last this many lines, 1 to 5000 (default 200).
+          explode: false
+          in: query
+          name: tail
+          schema:
+            description: The last this many lines, 1 to 5000 (default 200).
+            format: int64
+            type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerLog"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: A server's recent output
+      tags:
+        - servers
+  /v1/servers/{id}/restart:
+    post:
+      description: |-
+        As it is defined now. Not running: as start. 409 conflict when the server was attached or detached twice while this ran: retry.
+
+        Needs the `run` scope.
+      operationId: restartTenantServer
+      parameters:
+        - description: The server's id (srv_…).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The server's id (srv_…).
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantServer"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Restart a server
+      tags:
+        - servers
+  /v1/servers/{id}/start:
+    post:
+      description: |-
+        Up: started now if its Run runs, else at its next placement. 409 not_attached, no_command. 409 conflict when the server was attached or detached twice while this ran: retry.
+
+        Needs the `run` scope.
+      operationId: startTenantServer
+      parameters:
+        - description: The server's id (srv_…).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The server's id (srv_…).
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantServer"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Start a server
+      tags:
+        - servers
+  /v1/servers/{id}/stop:
+    post:
+      description: |-
+        Down: its command stops, and new placements leave it stopped until it is started again. 409 conflict when the server was attached or detached twice while this ran: retry.
+
+        Needs the `run` scope.
+      operationId: stopTenantServer
+      parameters:
+        - description: The server's id (srv_…).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The server's id (srv_…).
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantServer"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Stop a server
+      tags:
+        - servers
+  /v1/servers/{id}/tickets:
+    post:
+      description: |-
+        For its preview's sign-in: `<url>/.lux/auth?ticket=...&to=/path` sets the preview cookie and goes on to the path. Single use, 60 seconds.
+
+        Needs the `read` scope.
+      operationId: mintServerTicket
+      parameters:
+        - description: The server's id (srv_…).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The server's id (srv_…).
+            type: string
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ticket"
+          description: Created
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Mint a preview ticket for a server
+      tags:
+        - servers
   /v1/status:
     get:
       description: |-

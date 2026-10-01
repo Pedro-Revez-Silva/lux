@@ -1,5 +1,5 @@
 import type { HTMLAttributes, ReactNode } from "react";
-import { hostStateStyle, runStateStyle, serverStateStyle, type StateHue } from "./states.ts";
+import { hostStateStyle, runStateStyle, servedStateStyle, serverStateStyle, type StateHue } from "./states.ts";
 
 export type BadgeTone = "neutral" | "accent" | "success" | "warn" | "danger" | "info";
 
@@ -21,7 +21,8 @@ export function Badge({ tone = "neutral", outline, mono, className, children, ..
 }
 
 export interface StatePillProps {
-  kind: "run" | "host" | "server";
+  /** server: a Run's server's process; served: a server as the tenant's list shows it (asleep, waking, …). */
+  kind: "run" | "host" | "server" | "served";
   state: string;
   /** A run's activity: "busy" or "idle" refine a running run's label (others are ignored). */
   activity?: string | null;
@@ -42,14 +43,14 @@ export function LiveDot({ hue = "teal", label = "live" }: { hue?: StateHue; labe
   );
 }
 
-const STYLES = { run: runStateStyle, host: hostStateStyle, server: serverStateStyle };
+const STYLES = { run: runStateStyle, host: hostStateStyle, server: serverStateStyle, served: servedStateStyle };
 
 /** Colored dot + label for a run, host or server state (states.ts). Never color-only. */
 export function StatePill({ kind, state, activity, exitCode, compact, className }: StatePillProps) {
   const style = STYLES[kind](state);
   const hue: StateHue = style.hue;
   const act = kind === "run" && state === "running" && (activity === "busy" || activity === "idle") ? activity : null;
-  const detail = act ?? (kind === "server" && state === "exited" && exitCode != null ? `code ${exitCode}` : null);
+  const detail = act ?? ((kind === "server" || kind === "served") && state === "exited" && exitCode != null ? `code ${exitCode}` : null);
   const label = detail ? `${style.label} · ${detail}` : style.label;
   const live = style.live && act !== "idle";
   const cls = ["pill", `pill-${hue}`, style.outline ? "pill-outline" : "", live ? "pill-live" : "", compact ? "pill-compact" : "", className ?? ""].join(" ").trim();
@@ -64,4 +65,9 @@ export function StatePill({ kind, state, activity, exitCode, compact, className 
 /** StatePill for a Run's server. */
 export function ServerStateMark(props: Omit<StatePillProps, "kind" | "activity">) {
   return <StatePill kind="server" {...props} />;
+}
+
+/** StatePill for a server as the tenant's list shows it (ready, waking, asleep, no answer, …). */
+export function ServedStateMark(props: Omit<StatePillProps, "kind" | "activity">) {
+  return <StatePill kind="served" {...props} />;
 }

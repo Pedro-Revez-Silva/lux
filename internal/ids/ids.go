@@ -20,6 +20,7 @@ const (
 	Blob      = "blob"
 	Snapshot  = "snap"
 	Artifact  = "art"
+	Server    = "srv"
 )
 
 // alphabet is lowercase base32 without padding: safe in URLs, container

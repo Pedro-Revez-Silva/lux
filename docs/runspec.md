@@ -34,11 +34,12 @@ workload:
       headers:
         - { name: Authorization, secret: TRACKER_TOKEN }  # added by lux; the workload never has it
   servers:                      # named ports, started on every start of the Run
-    - name: web                 # its preview: https://web-<run suffix>.<preview domain>
+    - name: web                 # its preview: https://web-<8 of its id>.<preview domain>
       port: 3000
       command: [sh, -c, "npm run dev -- --host 0.0.0.0 --port 3000"]   # optional
       workdir: repos/api        # optional; relative: against workdir
       env: { VITE_API_URL: "http://localhost:8080" }                   # optional, not secret
+      afterSync: [npm, ci]      # optional: run first when it starts after a sync
 
 init:
   script: npm ci                # runs before the workload, on every start
@@ -402,17 +403,16 @@ The hook runs once per placement, only after the workload has started.
 
 ## Servers
 
-A **server** is a named port of a Run, optionally with a command lux runs
-in its container. `workload.servers` declares the ones that start on
-**every start** of the Run: the first, a resume, a migration. More can be
-added, started and stopped while it runs (`lux server`, or the API: see
-[concepts](concepts.md#servers)); those do not come back by themselves
-after a stop or a move.
+A **server** is a named URL that reaches a port in a Run, optionally with a
+command lux runs in its container. `workload.servers` declares servers the
+Run owns (lifetime `run`: they go when it succeeds or is cancelled). More
+can be added while it runs, and servers of the tenant's own attached to it
+(`lux server`, the API: see [concepts](concepts.md#servers), which also
+says when they start).
 
 - `name`: 1-30 of `a-z`, `0-9` and `-`, a letter first, not ending in `-`,
-  unique in the Run. It names the server's preview URL,
-  `https://<name>-<run suffix>.<preview domain>` (the run suffix is the
-  run id without `run_`), when luxd serves previews.
+  unique in the Run. It names the server's default preview hostname
+  ([concepts](concepts.md#servers)).
 - `port`: the TCP port it listens on in the container, 1-65535, not a
   service's loopback port. It must listen on the container's address
   (`0.0.0.0`), not only on `127.0.0.1`: that is where lux reaches it.
@@ -424,6 +424,10 @@ after a stop or a move.
   `workload.workdir`. Default: the workload's.
 - `env` (optional): more environment for the command, on top of the
   workload's (secrets included). Stored with the Run: nothing secret.
+- `afterSync` (optional, needs `command`): argv run before the command
+  whenever the server starts after a [sync](#syncing-checkouts) (an
+  install when the lockfile changed, a migration); the command runs only if
+  it succeeds.
 
 The command runs once `init` is done, beside the workload and detached
 from it, in its own process group, as the workload's user. There is no
@@ -431,6 +435,24 @@ restart policy: a command that exits is `exited`, with its code and the
 last line it wrote to stderr, until someone starts it again. Its output
 is the Run's, as records with `ch: "server"` (see
 [concepts](concepts.md#output)).
+
+### A Run that only serves
+
+A preview's Run has no agent: it is its servers. The RunSpec expresses
+that already, with no special adapter: a `generic` workload that waits
+until it is stopped.
+
+```yaml
+image: { ref: ghcr.io/acme/web-dev:latest }
+workload: { adapter: generic, command: [sleep, infinity], workdir: /workspace }
+volumes: [{ name: workspace, path: /workspace, kind: state }]
+git: { repositories: [{ name: app, url: https://github.com/acme/web.git, ref: feat/x, path: /workspace/app }] }
+init: { script: "cd /workspace/app && npm ci" }
+```
+
+Init runs on every placement, then the servers start; `sleep` takes no
+input (steering it does nothing useful), and a stop ends it (SIGTERM),
+leaving the Run `stopped` and its state volume snapshotted.
 
 ## Artifacts
 
@@ -472,7 +494,8 @@ starts:
    the host's disk. A `url` that carries credentials (`https://user:tok@…`)
    is refused; use `credential:`.
 4. On a **resume**, the checkout is already on the restored volume and is
-   left exactly as the workload left it.
+   left exactly as the workload left it, unless the resume asks for a
+   [sync](#syncing-checkouts).
 
 Every clone is a `git.clone` event: `{repo, status: "cloned", commit}`, or
 `{repo, status: "failed", error}` (git's output, with the token redacted).
@@ -520,6 +543,57 @@ POST /v1/runs/{id}/resume
   `{requestId, by, addedRepositories}`.
 - Adding needs a Run that is stopped, lost or failed. While it is
   resuming, the request gets 409.
+
+### Syncing checkouts
+
+A resume can move restored checkouts to new commits (a preview woken on
+its branch's latest commit), and so can a running Run:
+
+```json
+POST /v1/runs/{id}/resume   {"secrets": [...], "sync": [{"repo": "app", "ref": "feat/x"}]}
+POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…"}]}
+```
+
+`repo` is a repository's `name` in the spec; `ref` a branch, tag or sha
+(`lux resume --sync app=feat/x`, `lux sync <run> app=feat/x [--wait]`).
+
+- **Credentials stay out.** The runner fetches the ref through the host's
+  mirror with the repository's credential and writes a bundle of the
+  commit (no credential, no remote) on the Run's runtime volume, removed
+  once the checkout has fetched it. The bundle holds only the history
+  after the commit lux last knew the checkout at (its clone or its last
+  sync); a checkout that no longer has that commit is retried once with
+  the whole history (`fullBundle: true` on its event). The
+  checkout is moved by `lux-shim sync`, as the workload's user inside the
+  container: the runner never runs git in a checkout the workload
+  controls (its hooks and config would run as root on the host).
+- **When:** on a resume, after the volumes are restored and before
+  `init`; on a running Run, at once.
+- **The image needs `git`** (the checkout moves inside the container); an
+  image without it reports every sync `failed` and the Run goes on.
+- **The rule**, per repository:
+  - already at the commit, nothing changed: `up-to-date`;
+  - no tracked file changed, and the checkout's `HEAD` is an ancestor of
+    the commit: `fast-forward` (a branch is checked out as itself, at the
+    commit; a tag or sha detached);
+  - tracked files changed, or the histories diverged: `reset`. What was
+    there is saved first as `refs/lux/pre-sync` (a stash commit of the
+    changes, or the old `HEAD`; the next reset replaces it), then tracked
+    files become the commit's.
+    **Untracked and ignored files are kept** (a database file, `node_modules`,
+    a build cache); an untracked file the commit now tracks is replaced;
+  - anything that fails: `failed` with git's message, and **the Run goes
+    on** (a resume still starts). A failure before the move (the fetch, a
+    missing checkout) leaves the checkout as it was; one during a reset
+    leaves it where git stopped, with `refs/lux/pre-sync` holding what was
+    there.
+- Each repository's outcome is a `git.sync` event: `{repo, ref, from, to,
+  status, dirty?, diverged?, saved?, error?, missingBase?, fullBundle?}` (and `requestId` for a
+  running Run's sync, which ends with `sync.done {requestId, changed}`).
+  A moved checkout is the base of `lux diff` from then on.
+- After a running Run's sync that moved a checkout, servers with
+  `afterSync` run it and restart; the others keep running (a dev server
+  reloads by itself).
 
 `lux push <run> [--wait]` pushes each repository's current commit to
 `git.push.branch`, again with the runner's credential:
