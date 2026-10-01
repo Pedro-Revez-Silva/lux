@@ -1,6 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 import { Badge, Button, Card, DurationCell, formatBytes, formatCores, HOST_STATE_LIST, hostDisplayState, PageHeader, Pagination, RelativeTime, SegmentedControl, Select, Table, Tooltip, useNow, type Column } from "@lux/design-system";
-import { api, type Host } from "../../api/index.ts";
+import { api, type Host, type HostSummary } from "../../api/index.ts";
 import { usePaged } from "../paged.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
@@ -90,10 +90,11 @@ export function HostsList({ pool, poolId, embedded }: { pool: string; poolId?: s
       api.hostsPage(apiTenant, { ...req, pool: poolId ? undefined : pool || undefined, poolId, state: state || undefined, all: lifecycle === "all" || undefined, lifecycle: lifecycleParam(lifecycle, state) }, s),
     { defaultSort: { key: "created", dir: "desc" }, defaultSize: 25, interval: 5000 },
   );
-  // The pool filter's options and the allocation summary (over every live
-  // host, not the page): the Hosts page's only; the pool page has its own.
+  // The pool filter's options and the live summary (a server-side total over
+  // every live host, not the page): the Hosts page's only; the pool page
+  // has its own.
   const pools = useScopedQuery("pools", api.pools, { interval: 60_000, enabled: !embedded });
-  const live = useScopedQuery("hosts-live", (t, s) => api.hosts(t, {}, s), { interval: 15_000, enabled: !embedded });
+  const summary = useScopedQuery("hosts-summary", api.hostSummary, { interval: 15_000, enabled: !embedded });
 
   const poolOptions = useMemo(() => {
     const names = new Set<string>((pools.data ?? []).map((p) => p.name));
@@ -126,19 +127,6 @@ export function HostsList({ pool, poolId, embedded }: { pool: string; poolId?: s
     );
     return c;
   }, [showTenant]);
-
-  const totals = useMemo(() => {
-    const t = { n: 0, cpus: 0, capCpus: 0, mem: 0, capMem: 0 };
-    for (const h of live.data ?? []) {
-      t.n++;
-      if (!up(h)) continue;
-      t.cpus += h.allocated.cpus ?? 0;
-      t.capCpus += h.capacity.cpus;
-      t.mem += h.allocated.memory ?? 0;
-      t.capMem += h.capacity.memory;
-    }
-    return t;
-  }, [live.data]);
 
   const filtered = (!embedded && pool !== "") || state !== "" || lifecycle !== "live";
   const rows = q.rows;
@@ -190,7 +178,7 @@ export function HostsList({ pool, poolId, embedded }: { pool: string; poolId?: s
         description={
           <span>
             {q.total != null ? `${q.total.toLocaleString()} ${filtered ? "matching " : ""}hosts · ` : ""}
-            {totals.n} live · ready and draining: {formatCores(totals.cpus)} of {formatCores(totals.capCpus)} CPU, {formatBytes(totals.mem)} of {formatBytes(totals.capMem)} memory allocated
+            {summaryText(summary.data, summary.error)}
           </span>
         }
       />
@@ -198,4 +186,12 @@ export function HostsList({ pool, poolId, embedded }: { pool: string; poolId?: s
       {table}
     </div>
   );
+}
+
+/** The header's live totals: a dash while the first read is pending. */
+function summaryText(s: HostSummary | undefined, error: unknown): ReactNode {
+  if (s) {
+    return `${s.live} live · ready and draining: ${formatCores(s.allocated.cpus)} of ${formatCores(s.capacity.cpus)} CPU, ${formatBytes(s.allocated.memory)} of ${formatBytes(s.capacity.memory)} memory allocated`;
+  }
+  return error ? "summary unavailable" : DASH;
 }

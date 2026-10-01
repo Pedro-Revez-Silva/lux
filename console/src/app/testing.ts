@@ -6,7 +6,11 @@ export interface FakeApi {
   restore: () => void;
 }
 
-/** Replace fetch: /v1/events streams, other paths answer answer(path) as JSON. */
+/**
+ * Replace fetch: /v1/events streams, other paths answer answer(path) as
+ * JSON. An answer may be a promise (a request that is still pending), and
+ * a Response is returned as is (an error status).
+ */
 export function fakeApi(answer: (path: string) => unknown): FakeApi {
   const calls: string[] = [];
   // API URLs are built on the page's origin (happy-dom starts at about:blank).
@@ -20,7 +24,9 @@ export function fakeApi(answer: (path: string) => unknown): FakeApi {
       const body = new ReadableStream<Uint8Array>({ start: (c) => c.enqueue(new TextEncoder().encode("event: ping\ndata: x\n\n")) });
       return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
     }
-    return new Response(JSON.stringify(answer(path)), { status: 200, headers: { "Content-Type": "application/json" } });
+    const a = await answer(path);
+    if (a instanceof Response) return a;
+    return new Response(JSON.stringify(a), { status: 200, headers: { "Content-Type": "application/json" } });
   }) as typeof fetch;
   return {
     calls,

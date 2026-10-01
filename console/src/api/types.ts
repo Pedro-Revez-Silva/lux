@@ -644,6 +644,13 @@ export interface RunListParams extends PageParams {
   limit?: number;
 }
 
+/** GET /hosts/summary: the live hosts of the caller's unfiltered host list; capacity and allocation of the ready and draining ones. */
+export interface HostSummary {
+  live: number;
+  capacity: { cpus: number; memory: number };
+  allocated: { cpus: number; memory: number };
+}
+
 export interface HostListParams extends PageParams {
   all?: boolean;
   pool?: string;

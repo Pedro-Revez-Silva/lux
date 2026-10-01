@@ -15,8 +15,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Paged lists (GET /v1/hosts, /v1/runs, /v1/pools/{name}/events with
-// sort or a cursor): keyset pages over (sort value, id), in any sortable
+// Paged lists (GET /v1/hosts, /v1/runs, /v1/pools/{name}/events,
+// /v1/hosts/{id}/events with sort or a cursor): keyset pages over (sort value, id), in any sortable
 // column's order. A response's next, prev and page cursors go back as
 // ?next=, ?prev= and ?at=. Missing values (NULL) sort last in both directions: the
 // order is (value IS NULL), value, id, all in the page's direction but the

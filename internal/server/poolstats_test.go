@@ -302,6 +302,69 @@ func TestPoolFigures(t *testing.T) {
 	}
 }
 
+// topRuns: the 10 costliest Runs per currency, summed over hours and
+// families (a family without pool_id by the Run's pool), ties broken by Run
+// id, with a cut inside a tie, each Run's name and whether it is an
+// estimate (a non-final cost line).
+func TestPoolCostTopRunsTiesAndCut(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	keys := poolFixture(t, s, ctx)
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	// Per Run: its hourly compute amounts on the shared pool, per currency.
+	usd := map[string][]string{
+		"t00": {"0.25", "0.25"}, "t01": {"0.10", "0.20"}, "t02": {"0.15", "0.15"}, "t03": {"0.30"},
+		"t04": {"0.20"}, "t05": {"0.10"}, "t06": {"0.05", "0.05"}, "t07": {"0.05"}, "t08": {"0.40"},
+		"t09": {"0.01"}, "t10": {"0.10"},
+	}
+	eur := map[string][]string{"e00": {"0.05"}, "e10": {"0.10"}}
+	for i := 1; i <= 9; i++ {
+		eur[fmt.Sprintf("e%02d", i)] = []string{fmt.Sprintf("0.0%d", i)}
+	}
+	for cur, runs := range map[string]map[string][]string{"USD": usd, "EUR": eur} {
+		for id, amounts := range runs {
+			execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, pool_id, current_epoch, name) VALUES
+				($1, 'ta', '{}', 'succeeded', 'p-shared', 1, $1 || '-n')`, id)
+			for h, amt := range amounts {
+				execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, pool_id, amount) VALUES
+					($1, 'ta', $2, 'compute', 'compute', $3, 'hp', 'p-shared', $4::numeric)`, hour.Add(-time.Duration(h)*time.Hour), id, cur, amt)
+			}
+		}
+	}
+	// t04's plugin family has no pool_id: it counts on the pool t04 is bound to.
+	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, amount) VALUES
+		($1, 'ta', 't04', 'llm', 'llm', 'USD', 0.25)`, hour)
+	// A costlier Run on another pool is not this pool's.
+	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, pool_id, amount) VALUES
+		($1, 'ta', 'ra-own', 'compute', 'compute', 'EUR', 'ha', 'p-a', 5)`, hour)
+	execSQL(t, s, ctx, `INSERT INTO cost_lines (tenant_id, run_id, source, family, item, amount, currency, period_from, period_to, final) VALUES
+		('ta', 't02', 'compute', 'compute', '', 0.30, 'USD', $1, $1, false),
+		('ta', 't03', 'compute', 'compute', '', 0.30, 'USD', $1, $1, true)`, hour)
+
+	var c costBody
+	if code := getJSON(t, s, keys["op"], "/v1/pools/shared/cost?owner=platform&since=6h", &c); code != http.StatusOK {
+		t.Fatalf("GET cost: %d", code)
+	}
+	var got []string
+	for _, r := range c.TopRuns {
+		est := ""
+		if r.Estimate {
+			est = "~"
+		}
+		got = append(got, r.Currency+" "+r.ID+"/"+r.Name+"="+est+r.Amount)
+	}
+	// ra (0.10 USD) and rb (0.30 USD, 0.05 EUR) are poolFixture's.
+	want := []string{
+		"EUR e10/e10-n=0.1", "EUR e09/e09-n=0.09", "EUR e08/e08-n=0.08", "EUR e07/e07-n=0.07", "EUR e06/e06-n=0.06",
+		"EUR e00/e00-n=0.05", "EUR e05/e05-n=0.05", "EUR rb/run-b=0.05", "EUR e04/e04-n=0.04", "EUR e03/e03-n=0.03",
+		"USD t00/t00-n=0.5", "USD t04/t04-n=0.45", "USD t08/t08-n=0.4", "USD rb/run-b=0.3", "USD t01/t01-n=0.3",
+		"USD t02/t02-n=~0.3", "USD t03/t03-n=0.3", "USD ra/run-a=0.1", "USD t05/t05-n=0.1", "USD t06/t06-n=0.1",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("top runs:\n got  %v\n want %v", got, want)
+	}
+}
+
 func money(ms []MoneyAmount) map[string]string {
 	out := map[string]string{}
 	for _, m := range ms {

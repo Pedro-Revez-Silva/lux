@@ -178,6 +178,7 @@ async function api(req: Request, srv: Srv): Promise<Response> {
     if (p === "/v1/status") return json({ runs: { running: 1 }, busy: 1, idle: 0, queued: 0, startLatency: { n: 0 }, hosts: { ready: 2 }, capacity: { cpus: 16, memory: 64 * 1024 ** 3, disk: 0, runs: 8 }, allocated: { cpus: 4, memory: 8 * 1024 ** 3, disk: 0, runs: 1 } });
     if (p === "/v1/history") return json({ from: ago(3600), to: now(), resolution: 60, samples: [] });
     if (p === "/v1/hosts") return json({ hosts: [] });
+    if (p === "/v1/hosts/summary") return json({ live: 2, capacity: { cpus: 16, memory: 64 * 1024 ** 3 }, allocated: { cpus: 4, memory: 8 * 1024 ** 3 } });
     if (p === "/v1/pools") return json({ pools: [] });
     return notFound(p);
 }

@@ -52,7 +52,9 @@ func fetchPage(t *testing.T, s *Server, key, path, field string) page {
 // so a test can change the data mid-walk. It checks, for every page, that
 // at re-reads it unchanged after between ran (changes a test makes must be
 // ahead of or behind the page), and, without between, that prev leads back
-// through the same pages. Returns every id in page order.
+// through the same pages. A page read again at its cursor has a prev
+// exactly when it had one (with between: keeps one it had). Returns every
+// id in page order.
 func walkPages(t *testing.T, s *Server, key, base, field string, between func(i int, p page)) []string {
 	t.Helper()
 	sep := "&"
@@ -80,6 +82,12 @@ func walkPages(t *testing.T, s *Server, key, base, field string, between func(i 
 			}
 			if !same {
 				t.Fatalf("%s: page %d read again at its cursor: %v, was %v", base, i, again.IDs, p.IDs)
+			}
+			// A re-read keeps the page's prev. Rows between adds ahead of a
+			// page give it one it did not have, so with between only a
+			// prev once there must stay.
+			if (again.Prev == "") != (p.Prev == "") && (between == nil || p.Prev != "") {
+				t.Fatalf("%s: page %d read again at its cursor: prev %q, was %q", base, i, again.Prev, p.Prev)
 			}
 		}
 		if p.Next == "" {
@@ -281,6 +289,110 @@ func TestHostsPagedSortEveryFamily(t *testing.T) {
 	}
 	if len(list.Hosts) != live || !slices.IsSortedFunc(list.Hosts, func(a, b struct{ ID, Name string }) int { return cmp.Compare(a.Name, b.Name) }) {
 		t.Fatalf("unpaged list: %d hosts, want %d by name", len(list.Hosts), live)
+	}
+}
+
+// GET /v1/hosts with limit and a dir but no sort pages as limit alone does:
+// by created, newest first, the dir ignored.
+func TestHostsLimitWithDirWithoutSortIsNewestFirst(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	key := operatorKey(t, s, ctx)
+	hosts := hostsFixture(t, s, ctx)
+	var ids []string
+	for id := range hosts {
+		ids = append(ids, id)
+	}
+	newest := sorted(ids, func(id string) *int64 { v := hosts[id].created.UnixMicro(); return &v }, "desc")
+	for _, q := range []string{"limit=5&dir=asc", "limit=5&dir=desc", "limit=5"} {
+		p := fetchPage(t, s, key, "/v1/hosts?all=true&"+q, "hosts")
+		if p.Total == nil {
+			t.Fatalf("%s: no total", q)
+		}
+		if !slices.Equal(p.IDs, newest[:5]) || *p.Total != len(ids) || p.Next == "" {
+			t.Errorf("%s: %v (total %d), want %v", q, p.IDs, *p.Total, newest[:5])
+		}
+		c, err := decodeCursor(p.Next)
+		if err != nil || c.Sort != "created" || c.Dir != "desc" {
+			t.Errorf("%s: next cursor %+v, want sort=created dir=desc", q, c)
+		}
+	}
+	// Its cursors carry the sort: followed without dir, the whole list.
+	if got := walkPages(t, s, key, "/v1/hosts?all=true&limit=5", "hosts", nil); !slices.Equal(got, newest) {
+		t.Errorf("limit=5 walk:\n got %v\nwant %v", got, newest)
+	}
+}
+
+// GET /v1/hosts/summary: the live hosts each caller's unfiltered host list
+// shows, and the capacity and allocation of its ready and draining ones,
+// exactly, and equal to the sums over that list's rows. A tenant counts
+// platform hosts of shared pools but only its own placements on them.
+func TestHostSummary(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	keys := poolFixture(t, s, ctx)
+	poolFixtureMore(t, s, ctx)
+	// A draining host of a's with one of a's Runs; a provisioning platform
+	// host (not counted in capacity or allocation, though a placement names
+	// it); an ended placement on hp (not live); a lost host of a's and a
+	// lost platform host with a placement of each tenant's (counted live,
+	// not in capacity or allocation).
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, capacity) VALUES
+		('hd', 'ta', 'hd', 'p-a', 'draining', '{"cpus": 4, "memory": 400}'),
+		('hprov', NULL, 'hprov', 'p-shared', 'provisioning', '{"cpus": 32, "memory": 3200}'),
+		('hlost-a', 'ta', 'hlost-a', 'p-a', 'lost', '{"cpus": 128, "memory": 12800}'),
+		('hlost-p', NULL, 'hlost-p', 'p-shared', 'lost', '{"cpus": 64, "memory": 6400}')`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state, resources) VALUES
+		('pd', 'ta', 'ra-own', 'hd', 2, 'running', '{"cpus": 1, "memory": 50}'),
+		('pprov', 'ta', 'ra', 'hprov', 2, 'assigned', '{"cpus": 5, "memory": 500}'),
+		('pend', 'tb', 'rb', 'hp', 3, 'exited', '{"cpus": 7, "memory": 700}'),
+		('plost-a', 'ta', 'ra', 'hlost-p', 3, 'running', '{"cpus": 9, "memory": 900}'),
+		('plost-b', 'tb', 'rb', 'hlost-p', 4, 'running', '{"cpus": 11, "memory": 1100}')`)
+	type sum struct {
+		Live                int
+		Capacity, Allocated HostResources
+	}
+	for who, want := range map[string]sum{
+		"a":           {6, HostResources{14, 1500}, HostResources{3, 60}},
+		"op?tenant=a": {6, HostResources{14, 1500}, HostResources{3, 60}},
+		"b":           {5, HostResources{28, 2200}, HostResources{5, 30}},
+		"op":          {8, HostResources{34, 2700}, HostResources{8, 90}},
+	} {
+		key, narrow, _ := strings.Cut(who, "?")
+		q := ""
+		if narrow != "" {
+			q = "?" + narrow
+		}
+		var got sum
+		if code := getJSON(t, s, keys[key], "/v1/hosts/summary"+q, &got); code != http.StatusOK {
+			t.Fatalf("%s: GET /v1/hosts/summary: %d", who, code)
+		}
+		if got != want {
+			t.Errorf("%s: summary %+v, want %+v", who, got, want)
+		}
+		var list struct{ Hosts []Host }
+		if code := getJSON(t, s, keys[key], "/v1/hosts"+q, &list); code != http.StatusOK {
+			t.Fatalf("%s: GET /v1/hosts: %d", who, code)
+		}
+		var rows sum
+		for _, h := range list.Hosts {
+			rows.Live++
+			if h.State == "ready" || h.State == "draining" {
+				rows.Capacity.CPUs += h.Capacity.CPUs
+				rows.Capacity.Memory += int64(h.Capacity.Memory)
+				rows.Allocated.CPUs += h.Allocated.CPUs
+				rows.Allocated.Memory += int64(h.Allocated.Memory)
+			}
+		}
+		if rows != got {
+			t.Errorf("%s: summary %+v, the list's rows sum to %+v", who, got, rows)
+		}
+	}
+	// A host named summary is still read by its id.
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state) VALUES ('hs', 'ta', 'summary', 'p-a', 'ready')`)
+	var h Host
+	if code := getJSON(t, s, keys["a"], "/v1/hosts/hs", &h); code != http.StatusOK || h.Name != "summary" {
+		t.Errorf("GET /v1/hosts/hs: %d %q", code, h.Name)
 	}
 }
 
@@ -761,27 +873,21 @@ func TestPlacementTime(t *testing.T) {
 	}
 }
 
-// A pool's events page by time (many sharing one instant), by type, and by
-// detail: type, then data, in byte order, on a database whose default
-// collation is linguistic (as glibc's en_US is; musl's compares bytes).
+// A pool's events page by time (many sharing one instant) and by type, on a
+// database whose default collation is linguistic (as glibc's en_US is;
+// musl's compares bytes).
 func TestPoolEventsPagedSort(t *testing.T) {
 	s := testServerWith(t, `TEMPLATE template0 LOCALE_PROVIDER icu ICU_LOCALE 'en-US'`)
 	ctx := context.Background()
 	key := operatorKey(t, s, ctx)
 	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider) VALUES ('pool1', 'burst', 'ec2')`)
 	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	// Types where one prefixes others, the next character '_' or a space
-	// (the separator must sort below both); data that differs by number
-	// text and by letter case (a linguistic collation puts "a" before "B",
-	// bytes the reverse). Each data is as jsonb prints it.
+	// Types where one prefixes others, the next character '_' or a space,
+	// which a linguistic collation and bytes order differently.
 	types := []string{"pool.scale", "pool.scale_up", "pool.launch_failed", "pool.scale x"}
-	datas := []string{`{}`, `{"n": 1}`, `{"n": 10}`, `{"n": 2}`, `{"host": "B"}`, `{"host": "a"}`}
-	detailOf := map[int64]string{}
 	for i := range 31 {
-		typ, data := types[i%4], datas[(i/4)%len(datas)]
-		id := queryOne[int64](t, s, `INSERT INTO pool_events (pool_id, type, data, created_at) VALUES ('pool1', $1, $2::jsonb, $3) RETURNING id`,
-			typ, data, at.Add(time.Duration(i%3)*time.Second))
-		detailOf[id] = typ + "\x01" + data
+		execSQL(t, s, ctx, `INSERT INTO pool_events (pool_id, type, data, created_at) VALUES ('pool1', $1, '{}', $2)`,
+			types[i%4], at.Add(time.Duration(i%3)*time.Second))
 	}
 	type ev struct {
 		ID   int64
@@ -815,16 +921,6 @@ func TestPoolEventsPagedSort(t *testing.T) {
 		want = sorted(pad(ids), func(id string) *string { v := byID[fmt.Sprint(mustAtoi(id))].Type; return &v }, dir)
 		if !slices.Equal(pad(got), want) {
 			t.Errorf("sort=type dir=%s:\n got %v\nwant %v", dir, pad(got), want)
-		}
-		// detail: the key built here, compared as Go strings (bytes).
-		detail := map[string]string{}
-		for _, id := range ids {
-			detail[fmt.Sprintf("%06s", id)] = detailOf[int64(mustAtoi(id))]
-		}
-		got = walkPages(t, s, key, "/v1/pools/burst/events?owner=platform&limit=4&sort=detail&dir="+dir, "events", nil)
-		want = sorted(pad(ids), func(id string) *string { v := detail[id]; return &v }, dir)
-		if !slices.Equal(pad(got), want) {
-			t.Errorf("sort=detail dir=%s:\n got %v\nwant %v", dir, pad(got), want)
 		}
 	}
 }
@@ -968,6 +1064,7 @@ func TestPagingRejects(t *testing.T) {
 		{"/v1/pools/burst/events?owner=platform&next=" + cur(pageCursor{Sort: "time", Dir: "desc", V: v("x"), ID: "1"}), "next: not a cursor"},
 		{"/v1/pools/burst/events?owner=platform&next=" + cur(pageCursor{Sort: "time", Dir: "desc", V: v("2026-09-01 12:00:00+00"), ID: "one"}), "next: not a cursor"},
 		{"/v1/pools/burst/events?owner=platform&sort=time&before=5", "before and after (event ids) do not go with sort and cursors"},
+		{"/v1/pools/burst/events?owner=platform&sort=detail", "sort: one of id, time, type"},
 	}
 	for _, c := range cases {
 		if code, msg := getError(t, s, key, c.path); code != http.StatusBadRequest || msg != c.want {

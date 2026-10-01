@@ -108,6 +108,21 @@ def _assert_unclipped(tip):
     assert hidden is None, hidden
 
 
+def _cores(n: float) -> str:
+    """The design system's formatCores: 0, 100m, 1 core, 2.5 cores."""
+
+    def trim(s: str) -> str:
+        return re.sub(r"\.?0+$", "", s) if "." in s else s
+
+    if n == 0:
+        return "0"
+    if abs(n * 1000) < 10:
+        return f"{trim(f'{n * 1000:.1f}')}m"
+    if abs(n) < 1:
+        return f"{round(n * 1000)}m"
+    return f"{trim(f'{n:.2f}')} {'core' if abs(n) == 1 else 'cores'}"
+
+
 def _parked(lux, name: str) -> str:
     """A Run that waits for a host that will never come: it stays listed."""
     return lux.submit(generic(ALPINE_IMAGE, "true", name=name, placement={"requires": {"nowhere": "yes"}}))
@@ -227,6 +242,17 @@ def test_hosts_live_runs_shows_the_count_and_the_cap_only_near_it(page, lux, run
                                        if h["name"] == hosts[0].name and h["state"] == "ready"), None),
                          30, 1, "the host never registered")
     page.sign_in(lux.api_key, "/hosts")
+    # The header's live summary, from GET /v1/hosts/summary (the same figures).
+    summary = lux.api("/v1/hosts/summary").json()
+    rows = lux.api("/v1/hosts").json()["hosts"]
+    up = [h for h in rows if h["state"] in ("ready", "draining")]
+    assert summary["live"] == len(rows), (summary, rows)
+    for part in ("capacity", "allocated"):
+        assert summary[part]["memory"] == sum(h[part].get("memory", 0) for h in up), (part, summary, rows)
+        assert summary[part]["cpus"] == pytest.approx(sum(h[part].get("cpus", 0) for h in up)), (part, summary, rows)
+    alloc, cap = summary["allocated"]["cpus"], summary["capacity"]["cpus"]
+    assert summary["live"] >= 1 and cap >= 1, summary
+    expect(page.get_by_text(re.compile(rf"\b{summary['live']} live · ready and draining: {re.escape(_cores(alloc))} of {re.escape(_cores(cap))} CPU, .+ memory allocated"))).to_be_visible(timeout=15_000)
     row = page.get_by_role("row").filter(has=page.locator(f'a[href^="/hosts/{host_id}"]'))
     link = row.locator(f'a[href^="/runs?host={host_id}"]')
     cell = row.locator("td", has=page.locator(f'a[href^="/runs?host={host_id}"]'))
@@ -675,14 +701,41 @@ def test_pool_page_shows_its_settings_and_events(page, tenant_factory):
     assert not page.errors, page.errors
 
 
-def test_host_page_shows_its_events(page, lux, runners, hosts):
+def test_host_page_shows_its_events(page, env, lux, runners, hosts):
+    """A host's events are server pages, newest first, like a pool's: its
+    own registration, and with more than a page of events, Next to the
+    older ones."""
     runners.start(hosts[0])
     host_id = wait_until(lambda: next((h["id"] for h in lux.json("hosts", "ls")
                                        if h["name"] == hosts[0].name and h["state"] == "ready"), None),
                          30, 1, "the host never registered")
     page.sign_in(lux.api_key, f"/hosts/{host_id}")
-    expect(page.get_by_role("heading", name="Events", exact=True)).to_have_count(1, timeout=15_000)
-    expect(page.locator("tr", has_text="host.registered")).to_have_count(1, timeout=15_000)
+    card = page.locator(".card", has=page.get_by_role("heading", name="Events", exact=True))
+    expect(card).to_have_count(1, timeout=15_000)
+    expect(card.locator("tr", has_text="host.registered")).to_have_count(1, timeout=15_000)
+    pager = card.get_by_role("navigation", name="Pages")
+    expect(pager).to_contain_text("Time, newest first")
+    expect(pager.get_by_role("button", name="Next ›")).to_be_disabled()
+
+    # 60 more, newer than its registration: two pages of 50.
+    with psycopg.connect(env.owner_dsn) as conn:
+        conn.execute("""INSERT INTO host_events (tenant_id, host_id, type, data)
+            SELECT h.tenant_id, h.id, 'host.placement_assigned', jsonb_build_object('run', 'hev-' || i, 'epoch', 1, 'host', 'h')
+            FROM hosts h, generate_series(1, 60) i WHERE h.id = %s ORDER BY i""", (host_id,))
+    tags = lambda: card.evaluate("""c => [...c.querySelectorAll('tbody tr')]
+        .map(tr => (/(hev-\\d+) epoch/.exec(tr.textContent) || [])[1]).filter(Boolean)""")
+    # The next poll (5s) reads the new page 1.
+    expect(pager).to_contain_text("Page 1 · events 1–50", timeout=15_000)
+    expect(card.locator("tbody tr").first).to_contain_text("hev-60 epoch", timeout=15_000)
+    assert tags() == [f"hev-{i}" for i in range(60, 10, -1)], tags()
+    expect(card.locator("tr", has_text="host.registered")).to_have_count(0)
+    pager.get_by_role("button", name="Next ›").click()
+    expect(pager).to_contain_text("Page 2 · events 51–", timeout=15_000)
+    expect(card.locator("tbody tr").first).to_contain_text("hev-10 epoch", timeout=15_000)
+    assert tags() == [f"hev-{i}" for i in range(10, 0, -1)], tags()
+    expect(card.locator("tr", has_text="host.registered")).to_have_count(1)
+    pager.get_by_role("button", name="‹ Previous").click()
+    expect(card.locator("tbody tr").first).to_contain_text("hev-60 epoch", timeout=15_000)
     assert not page.errors, page.errors
 
 

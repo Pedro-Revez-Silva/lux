@@ -268,7 +268,8 @@ it has no `end`; a `point: true` stage is an instant, a dot at `start` with
 its clock time and no duration, and it never extends the axis past itself;
 `note` follows the label, the whole label is in its title), EventTable (a lifecycle event log: Run, pool, host;
 every column sorts, and with `onSortChange`, `sort` and a `footer`
-Pagination it is a server-paged, server-sorted table), LogView, Terminal (xterm.js in the LogView's frame,
+Pagination it is a server-paged, server-sorted table, where Details does
+not sort: the server sorts by #, time and type only), LogView, Terminal (xterm.js in the LogView's frame,
 Solarized inside via `terminalThemes`; `scheme` light or dark, else the
 console theme; a transport-agnostic handle: `write`, `onData`, `onResize`) with
 TerminalOverlay (the card over a dimmed screen), ServerList / ServerRow (a

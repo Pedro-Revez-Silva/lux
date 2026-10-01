@@ -339,6 +339,7 @@ every host, with a TENANT column (--tenant: what that tenant sees).`,
 	get := &cobra.Command{
 		Use:   "get <host>",
 		Short: "Show a host (by id or name), its lifecycle and its live Runs",
+		Long:  "Show a host (by id or name), its lifecycle and its live Runs.\n\nA host named summary must be given by its id: /v1/hosts/summary is the hosts' totals.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var h server.Host

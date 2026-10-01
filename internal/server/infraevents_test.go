@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -971,5 +972,112 @@ func TestLaunchSkipsAPoolRemovedSinceThePass(t *testing.T) {
 	}
 	if n := queryOne[int](t, s, `SELECT count(*) FROM pool_events WHERE type IN ($1, $2)`, evScaleUp, evLaunchRequested); n != 0 {
 		t.Fatalf("%d scale_up/launch_requested events for a removed pool", n)
+	}
+}
+
+// The event reads hold row-level security by themselves, past the owner
+// checks the handlers make first: one owner's stream mixing t1's, t2's and
+// platform rows (which no writer produces) reads, in every shape (unpaged
+// with and without bounds, each sort both ways, next, prev and at pages,
+// and the prev probe), only t1's rows as t1, only t2's as an operator
+// narrowed to t2, and all of them as an operator.
+func TestLifecycleEventsReadOnlyTheScopesRows(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	infraFixture(t, s, ctx)
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t2', 't2')`)
+	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	owners := map[string]*string{"t1": new("t1"), "t2": new("t2"), "platform": nil}
+	whose := map[string]string{}
+	ownerOf := map[string]string{"host_events": "h1", "pool_events": "pool1"}
+	for _, tbl := range []eventTable{hostEvents, poolEvents} {
+		owner := ownerOf[tbl.table]
+		// Foreign rows at both ends of each order and between t1's.
+		for i := range 24 {
+			who := []string{"platform", "t1", "t2", "t1"}[i%4]
+			id := queryOne[int64](t, s, `INSERT INTO `+tbl.table+` (tenant_id, `+tbl.owner+`, type, data, created_at)
+				VALUES ($1, $2, $3, $4, $5) RETURNING id`, owners[who], owner, fmt.Sprintf("x.%s.%d", who, i%3),
+				map[string]any{"i": i}, at.Add(time.Duration(i%5)*time.Second))
+			whose[tbl.table+fmt.Sprint(id)] = who
+		}
+	}
+	read := func(p Principal, tbl eventTable, owner string, page EventPage, pq PageQuery) *lifecycleEventsOutput {
+		t.Helper()
+		out, err := s.lifecycleEvents(ctx, p, tbl, owner, page, pq)
+		if err != nil {
+			t.Fatalf("%+v %+v: %v", page, pq, err)
+		}
+		return out
+	}
+	for _, c := range []struct {
+		name string
+		p    Principal
+		sees map[string]bool
+	}{
+		{"t1", Principal{TenantID: "t1", Scopes: []string{"read"}}, map[string]bool{"t1": true}},
+		{"operator narrowed to t2", Principal{TenantID: "t2", Operator: true}, map[string]bool{"t2": true}},
+		{"operator", Principal{Operator: true}, map[string]bool{"t1": true, "t2": true, "platform": true}},
+	} {
+		for _, tbl := range []eventTable{hostEvents, poolEvents} {
+			owner := ownerOf[tbl.table]
+			want := 0
+			for k, who := range whose {
+				if c.sees[who] && strings.HasPrefix(k, tbl.table) {
+					want++
+				}
+			}
+			check := func(shape string, evs []LifecycleEvent) {
+				t.Helper()
+				for _, e := range evs {
+					if who := whose[tbl.table+fmt.Sprint(e.ID)]; !c.sees[who] {
+						t.Errorf("%s, %s %s: read %s's event %d", c.name, tbl.table, shape, who, e.ID)
+					}
+				}
+			}
+			all := read(c.p, tbl, owner, EventPage{Limit: "1000"}, PageQuery{}).Body.Events
+			check("unpaged", all)
+			if len(all) != want {
+				t.Errorf("%s, %s unpaged: %d events, want %d", c.name, tbl.table, len(all), want)
+			}
+			mid := fmt.Sprint(all[len(all)/2].ID)
+			check("before/after", read(c.p, tbl, owner, EventPage{Before: mid, After: fmt.Sprint(all[len(all)-1].ID - 1)}, PageQuery{}).Body.Events)
+			for _, sort := range []string{"time", "id", "type"} {
+				for _, dir := range []string{"asc", "desc"} {
+					shape := sort + " " + dir
+					pq := PageQuery{Sort: sort, Dir: dir}
+					n := 0
+					for i := 0; ; i++ {
+						pg := read(c.p, tbl, owner, EventPage{Limit: "3"}, pq)
+						check(shape, pg.Body.Events)
+						n += len(pg.Body.Events)
+						// The probe: a page has a prev exactly when it is not
+						// the first, whatever foreign rows precede it.
+						if (pg.Body.Prev != "") != (i > 0) {
+							t.Errorf("%s, %s %s page %d: prev %q", c.name, tbl.table, shape, i, pg.Body.Prev)
+						}
+						// Read again at its own cursor, a page keeps its prev: on
+						// page 1 only foreign rows can precede it, so a probe
+						// outside the caller's scope would give it one.
+						if pg.Body.Page != "" {
+							again := read(c.p, tbl, owner, EventPage{Limit: "3"}, PageQuery{From: pg.Body.Page})
+							check(shape+" at", again.Body.Events)
+							if again.Body.Prev != pg.Body.Prev {
+								t.Errorf("%s, %s %s page %d at: prev %q, was %q", c.name, tbl.table, shape, i, again.Body.Prev, pg.Body.Prev)
+							}
+						}
+						if pg.Body.Prev != "" {
+							check(shape+" prev", read(c.p, tbl, owner, EventPage{Limit: "3"}, PageQuery{Before: pg.Body.Prev}).Body.Events)
+						}
+						if pg.Body.Next == "" {
+							break
+						}
+						pq = PageQuery{After: pg.Body.Next}
+					}
+					if n != want {
+						t.Errorf("%s, %s %s: %d events over the pages, want %d", c.name, tbl.table, shape, n, want)
+					}
+				}
+			}
+		}
 	}
 }

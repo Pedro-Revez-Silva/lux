@@ -123,8 +123,8 @@ currency and never summed across currencies.
 
 ## Lists: sort and pages
 
-`GET /v1/hosts`, `GET /v1/runs` and `GET /v1/pools/{name}/events` page when
-asked to (`sort`, `dir`, `limit`, or a cursor): keyset pages over (the sort
+`GET /v1/hosts`, `GET /v1/runs`, `GET /v1/pools/{name}/events` and
+`GET /v1/hosts/{id}/events` page when asked to (`sort`, `dir`, `limit`, or a cursor): keyset pages over (the sort
 column's value, id), in any sortable column's order, with missing values
 last in either direction. A response carries `next`, `prev` and `page`
 cursors, sent back as `?next=`, `?prev=` and `?at=` (`at` re-reads the page
@@ -139,8 +139,13 @@ first); for Runs and events `limit` alone does not, and keeps its unpaged
 meaning (Runs: 1 to 1000, out of range ignored; paged: 1 to 200, out of
 range a 400). The unpaged-only parameters (`before`, events' `after`), and
 `offset` with a cursor, are 400s in a paged request. Events sort by `time`,
-`id`, `type`, or `detail`: type, then the event's data as JSON text (not
-the summary a console shows).
+`id` or `type`, each from an index, so a page costs the same however many
+events there are; there is no sort by an event's data.
+
+**Host totals.** `GET /v1/hosts/summary` is the unfiltered host list's
+totals in one read: the live hosts, and the capacity of the ready and
+draining ones against what their live placements hold (a tenant: its own),
+as a sum over `GET /v1/hosts`' rows gives them.
 
 A Run carries its **placement time**: for each placement, from when the Run
 needed a host (it was created, or its previous placement ended, or it was

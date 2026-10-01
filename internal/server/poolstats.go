@@ -454,13 +454,15 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 		if err := costRowLimit(len(b.Series)); err != nil {
 			return err
 		}
-		rows, err = tx.Query(ctx, `SELECT id, name, currency, amount::text, estimate FROM (
-				SELECT r.id, r.name, c.currency, trim_scale(sum(c.amount)) AS amount,
-					EXISTS (SELECT 1 FROM cost_lines l WHERE l.run_id = r.id AND NOT l.final) AS estimate,
-					row_number() OVER (PARTITION BY c.currency ORDER BY sum(c.amount) DESC, r.id) AS rank
-				FROM `+onPool+` JOIN runs r ON r.id = c.run_id
-				GROUP BY r.id, r.name, c.currency) x
-			WHERE rank <= 10 ORDER BY currency, rank`, pool.ID, from, to)
+		// Ranked by run id and currency first; runs and cost_lines are read
+		// for the 10 per currency kept, not for every Run in range.
+		rows, err = tx.Query(ctx, `SELECT r.id, r.name, x.currency, x.amount::text,
+				EXISTS (SELECT 1 FROM cost_lines l WHERE l.run_id = x.run_id AND NOT l.final)
+			FROM (SELECT c.run_id, c.currency, trim_scale(sum(c.amount)) AS amount,
+					row_number() OVER (PARTITION BY c.currency ORDER BY sum(c.amount) DESC, c.run_id) AS rank
+				FROM `+onPool+` GROUP BY c.run_id, c.currency) x
+			JOIN runs r ON r.id = x.run_id
+			WHERE x.rank <= 10 ORDER BY x.currency, x.rank`, pool.ID, from, to)
 		if err != nil {
 			return err
 		}

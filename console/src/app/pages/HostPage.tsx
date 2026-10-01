@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
-import { Badge, Button, Card, Code, ConfirmDialog, formatBytes, formatCores, formatDuration, formatRelative, formatTimestamp, formatTimestampZone, hostDisplayState, IdChip, KeyValue, PageHeader, RelativeTime, StatePill, Table, TimeSeriesChart, Timeline, useToast, type Column, type TimelineStage } from "@lux/design-system";
-import { api, errorText, useNow, useQuery, type Host, type HostPlacement, type HostTimeKey, type Run } from "../../api/index.ts";
+import { Badge, Button, Card, Code, ConfirmDialog, formatBytes, formatCores, formatDuration, formatRelative, formatTimestamp, formatTimestampZone, hostDisplayState, IdChip, KeyValue, PageHeader, RelativeTime, StatePill, Table, TimeSeriesChart, Timeline, useToast, type Column } from "@lux/design-system";
+import { api, errorText, useNow, useQuery, type Host, type HostPlacement, type Run } from "../../api/index.ts";
 import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, poolPath, RunLink, RunNameLink, runColumns, runPath, useSeries } from "./common.tsx";
 import { HostCost } from "./HostCost.tsx";
-import { InfraEvents } from "./InfraEvents.tsx";
+import { hostStages } from "./hostStages.ts";
+import { PagedEvents } from "./PagedEvents.tsx";
 import { ProcessCards, runnerProcesses } from "./ProcessCards.tsx";
 
 export function HostPage({ id }: { id: string }) {
@@ -142,10 +143,7 @@ export function HostPage({ id }: { id: string }) {
       {/* The host history rule: operators, and a tenant for its own host (a tenant sees no other non-platform host). */}
       {(scope.operator || !h.platform) && <HostCost id={h.id} range={scope.range} operator={scope.operator} />}
 
-      {/* A platform host's events are the operators', not narrowed to a tenant (they name other tenants' Runs). */}
-      {(!h.platform || (scope.operator && !scope.apiTenant)) && (
-        <InfraEvents queryKey={`host-events:${id}@${scope.tenant}`} page={(q, s) => api.hostEvents(id, scope.apiTenant, q, s)} interval={5000} subtitle="registration, placements, drains, termination" />
-      )}
+      <HostEvents id={id} platform={h.platform} interval={5000} subtitle="registration, placements, drains, termination" />
 
       <Card flush title="Recent runs on this host" subtitle="any epoch, newest first, up to 50" actions={<Link to={hostRunsPath(id)}>All runs on this host</Link>}>
         <ErrorStrip error={recent.error} />
@@ -231,35 +229,21 @@ function LaunchFailedHost({ host: h }: { host: Host }) {
           ]}
         />
       </Card>
-      {(!h.platform || (scope.operator && !scope.apiTenant)) && (
-        <InfraEvents queryKey={`host-events:${h.id}@${scope.tenant}`} page={(q, s) => api.hostEvents(h.id, scope.apiTenant, q, s)} interval={15_000} subtitle="what was recorded on the host" />
-      )}
+      <HostEvents id={h.id} platform={h.platform} interval={15_000} subtitle="what was recorded on the host" />
     </div>
   );
 }
 
-const HOST_TIMES: { key: HostTimeKey; label: string; tone: TimelineStage["tone"] }[] = [
-  { key: "created", label: "Created", tone: "neutral" },
-  { key: "provisionRequested", label: "Provision requested", tone: "neutral" },
-  { key: "provisioned", label: "Provisioned", tone: "accent" },
-  { key: "registered", label: "Registered", tone: "accent" },
-  { key: "firstPlacement", label: "First placement", tone: "teal" },
-  { key: "lastPlacementEnded", label: "Last placement ended", tone: "teal" },
-  { key: "drainRequested", label: "Drain requested", tone: "amber" },
-  { key: "terminateRequested", label: "Terminate requested", tone: "amber" },
-  { key: "lost", label: "Lost", tone: "red" },
-  { key: "terminated", label: "Terminated", tone: "neutral" },
-];
-
-/** Host times are instants; each stage runs from its stamp to the next one that happened. */
-function hostStages(h: Host): TimelineStage[] {
-  const stamped = HOST_TIMES.map((t) => ({ ...t, at: h.times[t.key] ? Date.parse(h.times[t.key]!) : null })).filter((t) => t.at != null && Number.isFinite(t.at));
-  stamped.sort((a, b) => a.at! - b.at!);
-  const ended = h.state === "terminated" || h.state === "lost";
-  return stamped.map((t, i) => {
-    const next = stamped[i + 1];
-    return { key: t.key, label: t.label, start: t.at, end: next ? next.at : ended ? t.at! + 1000 : null, tone: t.tone };
-  });
+/**
+ * A host's events, server-sorted cursor pages. Not refetched by live.ts:
+ * drains, readiness and loss are not Run feed events, so it keeps its poll.
+ * A platform host's events are the operators', not narrowed to a tenant
+ * (they name other tenants' Runs).
+ */
+function HostEvents({ id, platform, interval, subtitle }: { id: string; platform: boolean; interval: number; subtitle: string }) {
+  const scope = useScope();
+  if (platform && !(scope.operator && !scope.apiTenant)) return null;
+  return <PagedEvents prefix="host-events" view={`${scope.tenant}|${id}`} fetch={(req, s) => api.hostEventsPage(id, scope.apiTenant, req, s)} interval={interval} subtitle={subtitle} />;
 }
 
 function PlacementsTable({ placements, loading, tenant }: { placements: HostPlacement[]; loading: boolean; tenant: boolean }) {
