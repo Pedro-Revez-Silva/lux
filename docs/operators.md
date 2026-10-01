@@ -166,7 +166,9 @@ or load balancer you already use for luxd.
 `console.auth` (`LUX_CONSOLE_AUTH`) says how:
 
 - **`key`** (the default): the console asks for an API key, kept for the
-  browser tab's session only.
+  browser tab's session only. After luxd accepts the key, the page reloads
+  into the console, removing password-manager UI attached to the form
+  (such as Bitwarden's inline menu).
 - **`cloudflare-access`**: luxd sits behind a Cloudflare Access
   application. Configure `console.cloudflare_access.team`, `.aud`,
   `.operators` (an explicit list of operator email addresses), and

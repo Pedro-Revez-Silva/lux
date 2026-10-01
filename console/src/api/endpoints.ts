@@ -8,6 +8,8 @@ type Scope = string | undefined;
 
 export const api = {
   whoami: (signal?: Sig) => request<WhoAmI>("/whoami", { signal }),
+  // Check a key without changing the session.
+  whoamiAs: (key: string, signal?: Sig) => request<WhoAmI>("/whoami", { headers: { Authorization: `Bearer ${key}` }, signal }),
   status: (tenant: Scope, signal?: Sig) => request<Status>("/status", { tenant, signal }),
   history: (tenant: Scope, since: string, signal?: Sig) => request<History>("/history", { tenant, query: { since }, signal }),
 

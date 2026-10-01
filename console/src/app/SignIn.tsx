@@ -1,7 +1,7 @@
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Button, Logo } from "@lux/design-system";
 import { IconCloud } from "@lux/design-system/icons";
-import { signIn } from "../api/index.ts";
+import { api, errorText, isApiError, storeKey } from "../api/index.ts";
 
 /** The frame of a page shown before or beside the console proper (sign-in, a preview hand-off): one centred card under the brand. */
 export function AuthScreen({ children, as: As = "div", ...rest }: { children: ReactNode; as?: "div" | "form"; onSubmit?: (e: FormEvent) => void }) {
@@ -30,10 +30,26 @@ export interface SignInProps {
 /** Asks for an API key. Shown when there is none, or after a 401. */
 export function SignIn({ reason, next, access }: SignInProps) {
   const [key, setKey] = useState("");
-  const submit = (e: FormEvent) => {
+  const [error, setError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const busy = useRef(false);
+  const submit = async (e: FormEvent) => {
     e.preventDefault();
     const k = key.trim();
-    if (k) signIn(k);
+    if (!k || busy.current) return;
+    busy.current = true;
+    setChecking(true);
+    setError(null);
+    try {
+      await api.whoamiAs(k);
+      if (!storeKey(k)) throw new Error("This browser would not keep the key for this tab.");
+      // A new document drops password-manager UI attached to the form.
+      window.location.reload();
+    } catch (err) {
+      setError(isApiError(err) && (err.status === 401 || err.status === 403) ? "That key was not accepted. It may be mistyped, or revoked." : `Could not check that key: ${errorText(err)}. Try again.`);
+      busy.current = false;
+      setChecking(false);
+    }
   };
   return (
     <AuthScreen as="form" onSubmit={submit}>
@@ -44,18 +60,18 @@ export function SignIn({ reason, next, access }: SignInProps) {
           <span>{next.text}</span>
         </div>
       )}
-      {reason && (
+      {(error ?? reason) && (
         <div className="error-strip" role="alert">
-          {reason}
+          {error ?? reason}
         </div>
       )}
       <label className="field">
         <span className="field-label">API key</span>
-        <input className="input mono" type="password" value={key} onChange={(e) => setKey(e.target.value)} autoFocus autoComplete="off" spellCheck={false} placeholder="lux_…" />
+        <input className="input mono" type="password" value={key} onChange={(e) => setKey(e.target.value)} autoFocus autoComplete="off" spellCheck={false} placeholder="lux_…" disabled={checking} />
       </label>
       <div className="dialog-actions">
-        <Button type="submit" variant="primary" disabled={key.trim() === ""}>
-          Sign in
+        <Button type="submit" variant="primary" disabled={checking || key.trim() === ""}>
+          {checking ? "Checking…" : "Sign in"}
         </Button>
       </div>
       {access && (

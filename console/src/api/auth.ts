@@ -49,11 +49,19 @@ export function getKey(): string | null {
 }
 
 export function signIn(key: string) {
-  try {
-    sessionStorage.setItem(KEY, key);
-  } catch {}
+  storeKey(key);
   session = { ...session, key, role: "unknown", user: null };
   emit();
+}
+
+/** Keep the key for this tab's next document; false when storage refuses it. */
+export function storeKey(key: string): boolean {
+  try {
+    sessionStorage.setItem(KEY, key);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Signed in by the console auth luxd sits behind (Cloudflare Access). */
