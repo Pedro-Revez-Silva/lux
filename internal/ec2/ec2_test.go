@@ -145,30 +145,13 @@ func TestLaunchReturnsInstanceFacts(t *testing.T) {
 // template opts in, and a caller's own LUX_NESTED never leaks through a
 // template that does not.
 func TestLaunchUserDataCarriesNestedOnlyForAnOptedInTemplate(t *testing.T) {
-	t.Setenv("AWS_ACCESS_KEY_ID", "test")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
-	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
-	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
-	t.Setenv("AWS_PROFILE", "")
-	var userData string
-	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = r.ParseForm()
-		raw, _ := base64.StdEncoding.DecodeString(r.PostForm.Get("UserData"))
-		userData = string(raw)
-		w.Header().Set("Content-Type", "text/xml")
-		fmt.Fprint(w, `<RunInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><reservationId>r-1</reservationId>`+
-			`<instancesSet><item><instanceId>i-0abc</instanceId><instanceType>m8g.2xlarge</instanceType>`+
-			`<placement><availabilityZone>eu-north-1a</availabilityZone></placement>`+
-			`<instanceState><code>0</code><name>pending</name></instanceState></item></instancesSet></RunInstancesResponse>`)
-	}))
-	defer fake.Close()
+	url, _, userData := fakeEC2(t, 0)
 	launch := func(template string, env map[string]string) string {
 		t.Helper()
-		if _, err := New(fake.URL, discard).Launch(context.Background(), json.RawMessage(template), nil, env); err != nil {
+		if _, err := New(url, discard).Launch(context.Background(), json.RawMessage(template), nil, env); err != nil {
 			t.Fatal(err)
 		}
-		return userData
+		return (*userData)[len(*userData)-1]
 	}
 	base := map[string]string{"LUX_URL": "http://10.0.1.10:7070", "LUX_HOST_TOKEN": "luxh_x", "LUX_HOST_NAME": "h", "LUX_RUNNER_MEMORY": "68719476736"}
 	with := func(k, v string) map[string]string {
