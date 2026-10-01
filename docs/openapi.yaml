@@ -689,6 +689,30 @@ components:
         - hourlyPrice
         - currency
       type: object
+    HostResources:
+      additionalProperties: false
+      properties:
+        cpus:
+          format: double
+          type: number
+        memory:
+          format: int64
+          type: integer
+      type: object
+    HostSummary:
+      additionalProperties: false
+      properties:
+        allocated:
+          $ref: "#/components/schemas/HostResources"
+          description: "What live placements on the ready and draining hosts hold (a tenant: its own)."
+        capacity:
+          $ref: "#/components/schemas/HostResources"
+          description: Of the ready and draining hosts.
+        live:
+          description: Hosts not terminated.
+          format: int64
+          type: integer
+      type: object
     Image:
       additionalProperties: false
       properties:
@@ -3220,6 +3244,57 @@ paths:
       security:
         - apiKey: []
       summary: List hosts
+      tags:
+        - hosts
+  /v1/hosts/summary:
+    get:
+      description: |-
+        Over the hosts GET /v1/hosts lists without filters (not terminated, the caller's view): how many, and the capacity of the ready and draining ones against what their live placements hold (a tenant: its own placements). A host named summary is read by its id.
+
+        Needs the `read` scope.
+      operationId: hostSummary
+      parameters:
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostSummary"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Live hosts in total
       tags:
         - hosts
   /v1/hosts/{id}:

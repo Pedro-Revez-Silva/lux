@@ -87,14 +87,14 @@ export function EventTable<E extends LifecycleEventRow>({ events, summary, detai
         },
         wrap: true,
         // Loaded rows sort by their summary's text (by type when it is not
-        // text); a server-paged table by the event's data.
+        // text). A server-paged table does not sort by it: the server has no
+        // index for an event's data, so it would read every event.
         sortValue: server
           ? undefined
           : (e) => {
               const t = summary(e);
               return typeof t === "string" || typeof t === "number" ? String(t) : e.type;
             },
-        sortable: server,
         sortFirst: "asc",
       },
     );

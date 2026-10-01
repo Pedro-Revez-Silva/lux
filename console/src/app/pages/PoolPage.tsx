@@ -1,12 +1,11 @@
 import { useMemo } from "react";
-import { Badge, Card, compareMoney, EmptyState, EventTable, eventSortInWords, familyDisplay, formatBytes, formatClock, formatCores, formatCount, formatElapsed, KeyValue, ListPriceNote, Money, MoneyList, PageHeader, Pagination, rangeText, SectionHeader, StatTile, Table, Tabs, TimeSeriesChart, useNow, type Column } from "@lux/design-system";
+import { Badge, Card, compareMoney, EmptyState, familyDisplay, formatBytes, formatClock, formatCores, formatCount, formatElapsed, KeyValue, ListPriceNote, Money, MoneyList, PageHeader, rangeText, SectionHeader, StatTile, Table, Tabs, TimeSeriesChart, useNow, type Column } from "@lux/design-system";
 import { api, type Pool, type PoolCost, type PoolMetrics, type PoolOwner } from "../../api/index.ts";
-import { usePaged } from "../paged.ts";
 import { go, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip, hostPath, JsonBlock, labelsText, PageSkeleton, RunLink, RunNameLink, runPath } from "./common.tsx";
-import { infraEventSummary } from "./events.ts";
+import { DASH, ErrorBlock, ErrorStrip, hostPath, labelsText, PageSkeleton, RunLink, RunNameLink, runPath } from "./common.tsx";
 import { HostsList } from "./Hosts.tsx";
+import { PagedEvents } from "./PagedEvents.tsx";
 
 /** The Pools page's poll: this page's too. */
 const POLL = 15_000;
@@ -368,26 +367,13 @@ function PoolHostsTab({ pool }: { pool: Pool }) {
 /** A pool's events, a page at a time in the sort chosen (server-side). */
 function PoolEvents({ name, owner }: { name: string; owner?: PoolOwner }) {
   const scope = useScope();
-  const q = usePaged("pool-events", `${scope.tenant}|${name}|${owner}`, (req, s) => api.poolEventsPage(name, scope.apiTenant, owner, req, s), { defaultSort: { key: "time", dir: "desc" }, defaultSize: 50, interval: POLL });
-  // The server's key for the Details column is detail.
-  const shown = q.sort.key === "detail" ? { key: "summary", dir: q.sort.dir } : q.sort;
   return (
-    <Card flush title="Events" subtitle="scale-ups, launches, placements and releases · click a row to expand">
-      <ErrorStrip error={q.error} />
-      <EventTable
-        events={q.rows}
-        summary={infraEventSummary}
-        detail={(e) => <JsonBlock value={e.data} />}
-        loading={q.loading}
-        empty="Nothing has happened yet."
-        sort={shown}
-        onSortChange={(s) => q.setSort(s.key === "summary" ? { key: "detail", dir: s.dir } : s)}
-        footer={
-          q.rows.length > 0 || q.page > 1 ? (
-            <Pagination mode="cursor" page={q.page} count={q.rows.length} pageSize={q.size} pageSizes={[50, 100, 200]} onPageSize={q.setSize} hasPrev={q.hasPrev} hasNext={q.hasNext} onFirst={q.first} onPrev={q.prev} onNext={q.next} noun="events" sortLabel={eventSortInWords(shown)} />
-          ) : undefined
-        }
-      />
-    </Card>
+    <PagedEvents
+      prefix="pool-events"
+      view={`${scope.tenant}|${name}|${owner}`}
+      fetch={(req, s) => api.poolEventsPage(name, scope.apiTenant, owner, req, s)}
+      interval={POLL}
+      subtitle="scale-ups, launches, placements and releases"
+    />
   );
 }
