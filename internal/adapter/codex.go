@@ -31,8 +31,22 @@ type Codex struct {
 	usage     json.RawMessage
 	usageTurn string
 	queue     []proto.Input
-	ready     bool
-	stopped   bool
+	// early: inputs that arrived while turn/start was in flight; steered
+	// into the turn once its id is known.
+	early   []proto.Input
+	ready   bool
+	stopped bool
+	// receipt: this Codex emits a steer's userMessage item when the model
+	// reads it (0.155 on); older ones emit it on admission.
+	receipt bool
+	inputs  inputLedger
+	// carried: steers an ended turn left unread, in the order they came;
+	// they start the next turn, ahead of queue.
+	carried []proto.Input
+	// onSteer, if set, runs in a turn/steer's goroutine at "accepted"
+	// (before lux checks whether its turn has ended) and "done" (a test
+	// seam for interleavings).
+	onSteer func(stage, requestID string)
 }
 
 func NewCodex() *Codex { return &Codex{} }
@@ -124,16 +138,27 @@ func (c *Codex) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink 
 		c.drain()
 	}
 	<-done
+	c.mu.Lock()
+	why := unreadWhy(c.stopped)
+	c.mu.Unlock()
+	c.inputs.close(sink, why)
 	return nil
 }
 
 func (c *Codex) handshake(cfg proto.ShimConfig, sink Sink) error {
-	if _, err := c.call("initialize", map[string]any{"clientInfo": map[string]string{"name": "lux", "version": "1"}}); err != nil {
+	init, err := c.call("initialize", map[string]any{"clientInfo": map[string]string{"name": "lux", "version": "1"}})
+	if err != nil {
 		return err
 	}
+	var ir struct {
+		UserAgent string `json:"userAgent"`
+	}
+	_ = json.Unmarshal(init, &ir)
+	c.mu.Lock()
+	c.receipt = codexReceipt(ir.UserAgent)
+	c.mu.Unlock()
 	cwd := workdir(cfg)
 	var res json.RawMessage
-	var err error
 	if cfg.Resume && cfg.SessionID != "" {
 		res, err = c.call("thread/resume", map[string]any{"threadId": cfg.SessionID})
 		if err != nil {
@@ -167,22 +192,66 @@ func (c *Codex) handshake(cfg proto.ShimConfig, sink Sink) error {
 	return nil
 }
 
+// codexReceipt reports whether this Codex, named in initialize's
+// userAgent ("<client>/<version> …"), emits a steer's userMessage item
+// when the model reads it: from 0.155 on. Codex 0.144 emits it when the
+// steer is admitted, still mid-tool, so there it is no receipt.
+func codexReceipt(userAgent string) bool {
+	first, _, _ := strings.Cut(userAgent, " ")
+	_, ver, ok := strings.Cut(first, "/")
+	if !ok {
+		return false
+	}
+	var major, minor int
+	if _, err := fmt.Sscanf(ver, "%d.%d", &major, &minor); err != nil {
+		return false
+	}
+	return major > 0 || minor >= 155
+}
+
+// delivery is how an input Codex took reaches its model.
+func (c *Codex) delivery() Delivery {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return Delivery{Lands: LandsNextStep, Receipt: c.receipt}
+}
+
+// userInput is turn/start's and turn/steer's params for an input: its
+// request id goes as clientUserMessageId, which Codex echoes as the
+// userMessage item's clientId.
+func userInput(params map[string]any, in proto.Input) map[string]any {
+	params["input"] = textInput(in.Text)
+	if in.RequestID != "" {
+		params["clientUserMessageId"] = in.RequestID
+	}
+	return params
+}
+
 func (c *Codex) drain() {
 	c.mu.Lock()
-	if !c.ready || c.stopped || c.turn != "" || len(c.queue) == 0 {
+	if !c.ready || c.stopped || c.turn != "" || len(c.carried)+len(c.queue) == 0 {
 		c.mu.Unlock()
 		return
 	}
+	c.queue = append(c.carried, c.queue...)
+	c.carried = nil
 	in := c.queue[0]
 	c.queue = c.queue[1:]
+	// Input queued behind it (steers carried over from an interrupted
+	// turn) is steered into the turn it starts, not held for the next.
+	for len(c.queue) > 0 && !c.queue[0].Interrupt {
+		c.early = append(c.early, c.queue[0])
+		c.queue = c.queue[1:]
+	}
 	c.turn = "starting"
 	c.usage, c.usageTurn = nil, ""
 	thread := c.thread
 	sink := c.sink
 	c.mu.Unlock()
 	sink.Activity(false)
+	c.inputs.track(in)
 	go func() {
-		res, err := c.call("turn/start", map[string]any{"threadId": thread, "input": textInput(in.Text)})
+		res, err := c.call("turn/start", userInput(map[string]any{"threadId": thread}, in))
 		var r struct {
 			Turn struct {
 				ID string `json:"id"`
@@ -192,16 +261,38 @@ func (c *Codex) drain() {
 		c.mu.Lock()
 		if err != nil {
 			c.turn = ""
+			// Held for this turn: they start the next one instead.
+			c.queue = append(c.queue, c.early...)
+			c.early = nil
 		} else if c.turn == "starting" {
 			c.turn = r.Turn.ID
 		}
 		c.mu.Unlock()
-		sink.InputAck(in, err)
 		if err != nil {
+			c.inputs.fail(sink, in, err)
 			sink.Activity(true)
 			c.drain()
+			return
 		}
+		c.inputs.accept(sink, in, c.delivery(), r.Turn.ID)
+		c.flushEarly()
 	}()
+}
+
+// flushEarly delivers the inputs held while the turn was starting, now
+// that its id is known: steered into it, or queued if it already ended.
+func (c *Codex) flushEarly() {
+	c.mu.Lock()
+	if c.turn == "starting" {
+		c.mu.Unlock()
+		return
+	}
+	early := c.early
+	c.early = nil
+	c.mu.Unlock()
+	for _, in := range early {
+		c.Deliver(in)
+	}
 }
 
 // handleRequest answers server requests (approvals): unattended, so
@@ -256,16 +347,33 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 			usage = nil
 		}
 		c.usage, c.usageTurn = nil, ""
-		idle := len(c.queue) == 0
+		idle := len(c.queue)+len(c.carried) == 0
 		c.mu.Unlock()
 		// The turn's end, with the agent's usage as it reported it (the
 		// counterpart of acp.turn_end and claude.turn_end).
 		// Sent before idle and before the next turn starts.
 		sink.Event("codex.turn_end", withUsage(map[string]any{"status": p.Turn.Status}, usage))
+		if c.carryUnread(p.Turn.ID) {
+			idle = false
+		}
 		if idle {
 			sink.Activity(true)
 		}
 		defer c.drain() // after the turn/completed event below
+	case "item/started":
+		// A userMessage item carrying a clientId is an input of ours
+		// entering the model's context (from Codex 0.155 on; see
+		// codexReceipt).
+		var p struct {
+			Item struct {
+				Type     string  `json:"type"`
+				ClientID *string `json:"clientId"`
+			} `json:"item"`
+		}
+		_ = json.Unmarshal(m.Params, &p)
+		if p.Item.Type == "userMessage" && p.Item.ClientID != nil {
+			c.inputs.consume(sink, *p.Item.ClientID)
+		}
 	case "item/completed":
 		var p struct {
 			Item struct {
@@ -289,11 +397,18 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 }
 
 // Deliver steers a running turn natively (turn/steer), or starts a turn.
+// Input that arrives while turn/start is in flight waits for its turn id,
+// then is steered into that turn.
 func (c *Codex) Deliver(in proto.Input) {
 	c.mu.Lock()
 	turn, thread, ready := c.turn, c.thread, c.ready
+	if ready && turn == "starting" {
+		c.early = append(c.early, in)
+		c.mu.Unlock()
+		return
+	}
 	c.mu.Unlock()
-	if !ready || turn == "" || turn == "starting" {
+	if !ready || turn == "" {
 		c.mu.Lock()
 		c.queue = append(c.queue, in)
 		c.mu.Unlock()
@@ -301,16 +416,32 @@ func (c *Codex) Deliver(in proto.Input) {
 		return
 	}
 	if in.Interrupt {
-		_, _ = c.call("turn/interrupt", map[string]any{"threadId": thread, "turnId": turn})
+		_, err := c.call("turn/interrupt", map[string]any{"threadId": thread, "turnId": turn})
+		if in.Text == "" {
+			// An interrupt alone: steers the turn left unread start the
+			// next one (carryUnread).
+			if err != nil {
+				c.inputs.fail(c.sink, in, err)
+			} else {
+				// Nothing for the model to read: no receipt.
+				c.inputs.accept(c.sink, in, Delivery{Lands: LandsNextStep}, "")
+			}
+			return
+		}
 		c.mu.Lock()
 		c.queue = append([]proto.Input{in}, c.queue...)
 		c.mu.Unlock()
 		return
 	}
+	// Tracked on arrival: carried inputs keep the order they came in.
+	c.inputs.track(in)
 	go func() {
-		_, err := c.call("turn/steer", map[string]any{"threadId": thread, "expectedTurnId": turn,
-			"input": textInput(in.Text)})
+		res, err := c.call("turn/steer", userInput(map[string]any{"threadId": thread, "expectedTurnId": turn}, in))
 		if err != nil {
+			if !codexTurnGone(err) {
+				c.inputs.fail(c.sink, in, err)
+				return
+			}
 			// The turn ended meanwhile: send it as the next turn.
 			c.mu.Lock()
 			c.queue = append(c.queue, in)
@@ -318,8 +449,76 @@ func (c *Codex) Deliver(in proto.Input) {
 			c.drain()
 			return
 		}
-		c.sink.InputAck(in, nil)
+		var r struct {
+			TurnID string `json:"turnId"`
+		}
+		if json.Unmarshal(res, &r) != nil || r.TurnID == "" {
+			r.TurnID = turn
+		}
+		c.inputs.accept(c.sink, in, c.delivery(), r.TurnID)
+		if c.onSteer != nil {
+			c.onSteer("accepted", in.RequestID)
+			defer c.onSteer("done", in.RequestID)
+		}
+		// A turn that ended between the steer's result and here leaves it
+		// unread; turn/completed may already have run its check.
+		c.mu.Lock()
+		gone := c.turn != r.TurnID
+		c.mu.Unlock()
+		if gone {
+			if c.carryUnread(r.TurnID) {
+				c.drain()
+			}
+		}
 	}()
+}
+
+// codexTurnGone reports whether a turn/steer error means the turn it
+// named is no longer the active one ("no active turn to steer", "expected
+// active turn id `X` but found `Y`"): the input then starts a turn of its
+// own. Any other refusal is the input's failure.
+func codexTurnGone(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "no active turn") || strings.Contains(s, "expected active turn id")
+}
+
+// carryUnread handles the inputs steered into a turn that ended without
+// the model reading them (Codex drops a turn's pending steers when it is
+// interrupted): they start the next turn, in the order they came, under
+// the same request ids, unless the Run is stopping, where they fail. Each
+// is claimed from the ended turn atomically, so the turn/completed handler
+// and a late turn/steer result cannot both carry it. It reports whether
+// any were carried.
+func (c *Codex) carryUnread(turn string) bool {
+	if turn == "" {
+		return false
+	}
+	unread := c.inputs.claim(turn, "carried")
+	if len(unread) == 0 {
+		return false
+	}
+	c.mu.Lock()
+	stopped := c.stopped
+	var now []proto.Input
+	if !stopped {
+		c.carried = append(c.carried, unread...)
+		slices.SortStableFunc(c.carried, func(a, b proto.Input) int { return c.inputs.order(a.RequestID) - c.inputs.order(b.RequestID) })
+		if c.turn != "" {
+			// The next turn has started already: steered into it.
+			now, c.carried = c.carried, nil
+		}
+	}
+	c.mu.Unlock()
+	if stopped {
+		for _, in := range unread {
+			c.inputs.fail(c.sink, in, errStoppedUnread)
+		}
+		return false
+	}
+	for _, in := range now {
+		c.Deliver(in)
+	}
+	return true
 }
 
 func (c *Codex) Interrupt() error {

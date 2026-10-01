@@ -32,6 +32,9 @@
 //	ask                    request a permission (ACP only); reply with the outcome
 //	cd <path>              change the working directory for the lines that
 //	                       follow (and the rest of the session); reply "cwd <path>"
+//	sh <command>           run command with sh -c as the agent's shell tool,
+//	                       reported as the protocol's shell tool events
+//	                       (shell.go); a cancel kills it
 //	mcp-call <server> <tool> <text>
 //	                       call a tool on an MCP server the client configured
 //	                       (streamable HTTP), with {"text": <text>}; report it
@@ -90,23 +93,47 @@ type agent struct {
 	session string
 	cwd     string
 	cancel  chan struct{} // the running turn's; nil when idle
-	steer   []string      // extra prompts for the running turn
+	steer   []prompt      // extra prompts for the running turn
 	emit    func(text string)
+	// read reports a prompt entering the model's context, as the protocol
+	// does (Codex's userMessage item, Claude Code's command_lifecycle
+	// started): at the turn's start, and for a steer at the next step.
+	read func(p prompt)
+	// readAll, if set, reports the prompts steered in during one step
+	// entering the next step's context together (OpenCode: one assistant
+	// step, whose parent is the newest of them); else read, each.
+	readAll func(ps []prompt)
 	ask     func() string
+	// finalStepEndsTurn: a prompt steered in during the turn's last step
+	// (no tool call follows) is not read in this turn; runTurn leaves it in
+	// carry, for the next (Claude Code). Otherwise the turn reads it at
+	// its end and goes on (Codex, OpenCode).
+	finalStepEndsTurn bool
+	carry             []prompt
+	// dropped reports the steers a cancelled turn never read.
+	dropped func([]prompt)
 	// mcp: the MCP servers the client gave, by name. tool reports a tool
 	// call in the protocol's own events: started (result and err empty),
 	// then done.
 	mcp  map[string]mcpServer
 	tool func(call toolCall)
+	// shell reports a shell tool call the same way (shell.go).
+	shell func(call shellCall)
+}
+
+// prompt is a user message and the client's id for it.
+type prompt struct {
+	text, id string
 }
 
 func newAgent() *agent {
-	a := &agent{out: json.NewEncoder(os.Stdout), cwd: "."}
+	a := &agent{out: json.NewEncoder(os.Stdout), cwd: ".", read: func(prompt) {}}
 	if wd, err := os.Getwd(); err == nil {
 		a.cwd = wd
 	}
 	a.ask = func() string { return "not supported" }
 	a.tool = func(toolCall) {}
+	a.shell = func(shellCall) {}
 	return a
 }
 
@@ -192,39 +219,87 @@ func (a *agent) cancelTurn() {
 }
 
 // addSteer adds a prompt to the running turn; false if none is running.
-func (a *agent) addSteer(text string) bool {
+func (a *agent) addSteer(p prompt) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.cancel == nil {
 		return false
 	}
-	a.steer = append(a.steer, text)
+	a.steer = append(a.steer, p)
 	return true
 }
 
-// runTurn runs a prompt, then any prompts steered into the turn, and ends
-// the turn. Steers are taken and the turn ended under one lock, so a steer
-// is either run in this turn or refused (addSteer false): never lost.
-func (a *agent) runTurn(prompt string, c chan struct{}) (cancelled bool) {
-	for text := prompt; ; {
-		a.record("user", text)
-		if a.runScript(text, c) {
-			cancelled = true
-		}
+// join adds a prompt to the running turn and, under the same lock, calls
+// then; false (and then not called) if no turn is running.
+func (a *agent) join(p prompt, then func()) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cancel == nil {
+		return false
+	}
+	a.steer = append(a.steer, p)
+	then()
+	return true
+}
+
+// takeSteers returns the prompts steered into the running turn so far.
+func (a *agent) takeSteers() []prompt {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s := a.steer
+	a.steer = nil
+	return s
+}
+
+// runTurn runs a prompt, and ends the turn. Prompts steered into it are
+// read at its next step, after the script line running when they arrived
+// (as a real agent reads them after the running tool call), and run then.
+// Steers are taken and the turn ended under one lock, so a steer is either
+// run in this turn or refused (addSteer false): never lost.
+func (a *agent) runTurn(first prompt, c chan struct{}) (cancelled bool) {
+	a.read(first)
+	a.record("user", first.text)
+	cancelled = a.runScript(first.text, c)
+	for !cancelled {
 		a.mu.Lock()
-		if len(a.steer) == 0 || cancelled {
-			// Steers accepted into a cancelled turn are still part of the
-			// conversation; record them, not run them.
-			for _, t := range a.steer {
-				a.record("user", t)
-			}
+		if len(a.steer) == 0 || a.finalStepEndsTurn {
+			a.carry = append(a.carry, a.steer...)
 			a.steer, a.cancel = nil, nil
 			a.mu.Unlock()
-			return cancelled
+			return false
 		}
-		text, a.steer = a.steer[0], a.steer[1:]
 		a.mu.Unlock()
+		cancelled = a.runSteers(c)
 	}
+	// Steers accepted into a cancelled turn are dropped unread, as Codex
+	// and OpenCode drop them (Claude Code reports them cancelled).
+	a.mu.Lock()
+	dropped := a.steer
+	a.steer, a.cancel = nil, nil
+	a.mu.Unlock()
+	if a.dropped != nil {
+		a.dropped(dropped)
+	}
+	return true
+}
+
+// runSteers reads and runs the prompts steered in so far; true if the turn
+// was cancelled.
+func (a *agent) runSteers(c chan struct{}) bool {
+	steers := a.takeSteers()
+	if a.readAll != nil {
+		a.readAll(steers)
+	}
+	for _, p := range steers {
+		if a.readAll == nil {
+			a.read(p)
+		}
+		a.record("user", p.text)
+		if a.runScript(p.text, c) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *agent) path(p string) string {
@@ -258,13 +333,16 @@ func (a *agent) commit(message string) string {
 	return "committed " + sha
 }
 
-// runScript runs one prompt; true if it was cancelled.
+// runScript runs one prompt; true if it was cancelled. Prompts steered in
+// during a line are read and run after it: the next step.
 func (a *agent) runScript(script string, cancel chan struct{}) bool {
+	var lines []string
 	for _, line := range strings.Split(script, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
 		}
+	}
+	for i, line := range lines {
 		if a.runLine(line, cancel) {
 			return true
 		}
@@ -273,6 +351,12 @@ func (a *agent) runScript(script string, cancel chan struct{}) bool {
 			a.say("cancelled")
 			return true
 		default:
+		}
+		if i == len(lines)-1 && a.finalStepEndsTurn {
+			break
+		}
+		if a.runSteers(cancel) {
+			return true
 		}
 	}
 	return false
@@ -346,6 +430,8 @@ func (a *agent) runLine(line string, cancel chan struct{}) bool {
 			a.cwd = dir
 			a.say("cwd " + dir)
 		}
+	case "sh":
+		return a.runShell(rest, cancel)
 	case "http":
 		a.httpCall(rest)
 	case "mcp-call":
@@ -397,9 +483,13 @@ type rpcMsg struct {
 }
 
 // acp speaks the Agent Client Protocol. Replies stream as several chunks
-// without line breaks, as real agents' do.
+// without line breaks, as real agents' do. As OpenCode does, a
+// session/prompt sent during a turn joins it: it is read at the turn's next
+// step, and every prompt of the turn gets its result when the turn ends.
+// With --port it also serves OpenCode's HTTP server (opencode.go).
 func acp() {
 	a := newAgent()
+	oc := &opencodeServer{a: a}
 	var pmu sync.Mutex
 	pending := map[string]chan json.RawMessage{}
 	nextID := 0
@@ -445,10 +535,69 @@ func acp() {
 		}
 		rpc(map[string]any{"method": "session/update", "params": map[string]any{"sessionId": a.session, "update": u}})
 	}
+	// A shell command is OpenCode's bash tool: a pending tool_call, an
+	// in_progress update naming the command, then completed (or failed)
+	// with its output (opencode-acp-legacy-1).
+	a.shell = func(c shellCall) {
+		up := func(u map[string]any) {
+			u["toolCallId"] = c.ID
+			rpc(map[string]any{"method": "session/update", "params": map[string]any{"sessionId": a.session, "update": u}})
+		}
+		if !c.Done {
+			up(map[string]any{"sessionUpdate": "tool_call", "title": "bash", "kind": "execute", "status": "pending", "rawInput": map[string]any{}})
+			up(map[string]any{"sessionUpdate": "tool_call_update", "status": "in_progress", "kind": "execute", "title": c.Command,
+				"rawInput": map[string]any{"command": c.Command}})
+			return
+		}
+		status := "completed"
+		if c.Cancelled || c.ExitCode != 0 {
+			status = "failed"
+		}
+		up(map[string]any{"sessionUpdate": "tool_call_update", "status": status, "title": c.Command,
+			"content":   []any{map[string]any{"type": "content", "content": map[string]string{"type": "text", "text": c.Output}}},
+			"rawOutput": map[string]any{"output": c.Output, "metadata": map[string]any{"output": c.Output, "exit": c.ExitCode}}})
+	}
 	reply := func(id json.RawMessage, result any) { rpc(map[string]any{"id": id, "result": result}) }
 	fail := func(id json.RawMessage, code int, msg string) {
 		rpc(map[string]any{"id": id, "error": map[string]any{"code": code, "message": msg}})
 	}
+	// waiters: the session/prompt ids joined to the running loop (guarded
+	// by a.mu, through join).
+	var waiters []json.RawMessage
+	// Each model step reading a user message is an assistant message whose
+	// parentID is that message.
+	a.read = func(p prompt) { oc.step(p.id) }
+	a.readAll = func(ps []prompt) {
+		if len(ps) > 0 {
+			oc.step(ps[len(ps)-1].id)
+		}
+	}
+	// runLoop runs a loop for its first prompt and any joined to it, then
+	// answers every prompt of it with the same result.
+	runLoop := func(first prompt, ids []json.RawMessage) {
+		c, ok := a.startTurn()
+		for !ok {
+			// A loop is ending; the prompt starts the next one.
+			time.Sleep(20 * time.Millisecond)
+			c, ok = a.startTurn()
+		}
+		oc.status(true)
+		stop := "end_turn"
+		if a.runTurn(first, c) {
+			stop = "cancelled"
+		}
+		a.mu.Lock()
+		ids = append(ids, waiters...)
+		waiters = nil
+		a.mu.Unlock()
+		oc.status(false)
+		for _, id := range ids {
+			// Usage as OpenCode reports it (lux passes it through).
+			reply(id, map[string]any{"stopReason": stop, "usage": map[string]any{"inputTokens": 2, "outputTokens": 10, "totalTokens": 12}, "_meta": map[string]any{}})
+		}
+	}
+	oc.run = func(p prompt) { runLoop(p, nil) }
+	oc.listen(os.Args)
 	for sc := scanner(); sc.Scan(); {
 		var m rpcMsg
 		if json.Unmarshal(sc.Bytes(), &m) != nil {
@@ -497,21 +646,12 @@ func acp() {
 			}
 			reply(m.ID, map[string]any{})
 		case "session/prompt":
-			id, text := m.ID, p.Prompt.String()
-			go func() {
-				// ACP has no mid-turn message; a prompt during a turn waits.
-				c, ok := a.startTurn()
-				for !ok {
-					time.Sleep(50 * time.Millisecond)
-					c, ok = a.startTurn()
-				}
-				stop := "end_turn"
-				if a.runTurn(text, c) {
-					stop = "cancelled"
-				}
-				// Usage as OpenCode reports it (lux passes it through).
-				reply(id, map[string]any{"stopReason": stop, "usage": map[string]any{"inputTokens": 2, "outputTokens": 10, "totalTokens": 12}, "_meta": map[string]any{}})
-			}()
+			pr := prompt{text: p.Prompt.String(), id: oc.messageID()}
+			oc.stored(pr)
+			if a.join(pr, func() { waiters = append(waiters, m.ID) }) {
+				continue
+			}
+			go runLoop(pr, []json.RawMessage{m.ID})
 		case "session/cancel":
 			a.cancelTurn()
 		default:
@@ -529,13 +669,38 @@ func acp() {
 //
 //	lux-fake -p --input-format stream-json --output-format stream-json --verbose [--resume <id>]
 //
-// User messages queue and run one turn at a time, each ending with a
-// "result" event. A control_request interrupt cancels the running turn.
+// A user message sent during a turn is read at the turn's next step, after
+// the script line running when it came (a tool boundary), and the turn goes
+// on: one "result". Sent during the turn's last line (its final step, no
+// tool call after it), it runs as the next turn, as Claude Code does. A
+// line with a "uuid" gets msg_lifecycle_v1 command_lifecycle frames:
+// queued, started when read, completed (or cancelled with its turn).
+// A control_request interrupt cancels the running turn.
 // SIGINT ends the turn cleanly and exits 0, as the real CLI does in -p
 // mode. When stdin closes, queued turns
 // finish before it exits, as the real CLI does in -p mode.
 func streamJSON() {
 	a := newAgent()
+	a.finalStepEndsTurn = true
+	lifecycle := func(p prompt, state string) {
+		if p.id != "" {
+			a.send(map[string]any{"type": "command_lifecycle", "command_uuid": p.id, "state": state,
+				"uuid": fmt.Sprintf("lc-%d", time.Now().UnixNano()), "session_id": a.session})
+		}
+	}
+	var started []prompt // read in the running turn
+	a.dropped = func(ps []prompt) {
+		go func() {
+			time.Sleep(20 * time.Millisecond) // after the result
+			for _, p := range ps {
+				lifecycle(p, "cancelled")
+			}
+		}()
+	}
+	a.read = func(p prompt) {
+		started = append(started, p)
+		lifecycle(p, "started")
+	}
 	a.emit = func(s string) {
 		a.send(map[string]any{"type": "assistant", "session_id": a.session,
 			"message": map[string]any{"role": "assistant", "content": []map[string]string{{"type": "text", "text": s}}}})
@@ -557,6 +722,21 @@ func streamJSON() {
 			"content": []map[string]any{{"type": "tool_result", "tool_use_id": c.ID, "is_error": c.Err != "",
 				"content": []map[string]string{{"type": "text", "text": text}}}}}})
 	}
+	// A shell command is the Bash tool: a tool_use, then its tool_result
+	// (claude-line-uuid-2).
+	a.shell = func(c shellCall) {
+		if !c.Done {
+			a.send(map[string]any{"type": "assistant", "session_id": a.session, "message": map[string]any{"role": "assistant",
+				"content": []map[string]any{{"type": "tool_use", "id": c.ID, "name": "Bash", "input": map[string]string{"command": c.Command}}}}})
+			return
+		}
+		out := c.Output
+		if c.Cancelled {
+			out = "Interrupted"
+		}
+		a.send(map[string]any{"type": "user", "session_id": a.session, "parent_tool_use_id": nil, "message": map[string]any{"role": "user",
+			"content": []map[string]any{{"type": "tool_result", "tool_use_id": c.ID, "content": out, "is_error": c.Cancelled || c.ExitCode != 0}}}})
+	}
 	a.setMCP(claudeMCP(os.Args))
 	if i := slices.Index(os.Args, "--resume"); i >= 0 && i+1 < len(os.Args) {
 		if err := a.loadSession(os.Args[i+1]); err != nil {
@@ -567,7 +747,7 @@ func streamJSON() {
 		a.newSession()
 	}
 	a.send(map[string]any{"type": "system", "subtype": "init", "session_id": a.session, "cwd": a.cwd,
-		"capabilities": []string{"interrupt_receipt_v1"}})
+		"capabilities": []string{"interrupt_receipt_v1", "interrupt_cancel_queued_v1", "msg_lifecycle_v1"}})
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT)
@@ -577,20 +757,42 @@ func streamJSON() {
 		time.Sleep(100 * time.Millisecond)
 		os.Exit(0)
 	}()
-	turns := make(chan string, 64)
+	turns := make(chan prompt, 64)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for text := range turns {
+		next := func() (prompt, bool) {
+			a.mu.Lock()
+			if len(a.carry) > 0 {
+				p := a.carry[0]
+				a.carry = a.carry[1:]
+				a.mu.Unlock()
+				return p, true
+			}
+			a.mu.Unlock()
+			p, ok := <-turns
+			return p, ok
+		}
+		for p, ok := next(); ok; p, ok = next() {
 			c, _ := a.startTurn()
+			started = nil
 			reason := "completed"
-			if a.runTurn(text, c) {
+			if a.runTurn(p, c) {
 				reason = "aborted_streaming"
 			}
+			// Steers the turn read end with it, then its result, then the
+			// prompt that started it (as claude 2.1.280 orders them).
+			for _, s := range started[1:] {
+				lifecycle(s, "completed")
+			}
+			a.mu.Lock()
+			queued := len(turns) + len(a.carry)
+			a.mu.Unlock()
 			a.send(map[string]any{"type": "result", "subtype": "success", "session_id": a.session,
-				"terminal_reason": reason, "queued_turn_count": len(turns),
+				"terminal_reason": reason, "queued_turn_count": queued, "num_turns": len(started),
 				// Usage as Claude Code reports it on its result line.
 				"usage": map[string]any{"input_tokens": 3, "output_tokens": 9}, "total_cost_usd": 0.0001})
+			lifecycle(started[0], map[bool]string{true: "cancelled", false: "completed"}[reason != "completed"])
 		}
 	}()
 	for sc := scanner(); sc.Scan(); {
@@ -603,17 +805,25 @@ func streamJSON() {
 			Message struct {
 				Content textBlocks `json:"content"`
 			} `json:"message"`
+			UUID string `json:"uuid"`
 		}
 		if json.Unmarshal(sc.Bytes(), &m) != nil {
 			continue
 		}
 		switch m.Type {
 		case "user":
-			turns <- m.Message.Content.String()
+			p := prompt{text: m.Message.Content.String(), id: m.UUID}
+			lifecycle(p, "queued")
+			if !a.addSteer(p) {
+				turns <- p
+			}
 		case "control_request":
 			if m.Request.Subtype == "interrupt" {
 				a.cancelTurn()
 			}
+			// interrupt_cancel_queued_v1: the lines queued behind the turn
+			// are cancelled with it (command_lifecycle cancelled, after the
+			// turn's result).
 			a.send(map[string]any{"type": "control_response", "response": map[string]any{
 				"subtype": "success", "request_id": m.RequestID, "response": map[string]any{"still_queued": []string{}}}})
 		}
@@ -660,6 +870,41 @@ func appServer() {
 		}
 		a.send(map[string]any{"method": method, "params": map[string]any{"threadId": a.session, "turnId": id, "item": item}})
 	}
+	// A shell command is a commandExecution item, started, then completed
+	// with its aggregatedOutput (codex-appserver-1).
+	a.shell = func(c shellCall) {
+		turnMu.Lock()
+		id := turnID
+		turnMu.Unlock()
+		item := map[string]any{"type": "commandExecution", "id": c.ID, "command": "/bin/sh -c '" + c.Command + "'",
+			"cwd": a.cwd, "status": "inProgress", "aggregatedOutput": nil, "exitCode": nil}
+		method := "item/started"
+		if c.Done {
+			method = "item/completed"
+			item["status"], item["aggregatedOutput"], item["exitCode"] = "completed", c.Output, c.ExitCode
+			if c.Cancelled || c.ExitCode != 0 {
+				item["status"] = "failed"
+			}
+		}
+		a.send(map[string]any{"method": method, "params": map[string]any{"threadId": a.session, "turnId": id, "item": item}})
+	}
+	// A user message entering the turn is a userMessage item, started and
+	// completed, carrying the client's id (null without one). Codex 0.155
+	// emits it when the model's next step reads it.
+	a.read = func(p prompt) {
+		turnMu.Lock()
+		id := turnID
+		turnMu.Unlock()
+		var client any
+		if p.id != "" {
+			client = p.id
+		}
+		item := map[string]any{"type": "userMessage", "id": fmt.Sprintf("um-%d", time.Now().UnixNano()), "clientId": client,
+			"content": []map[string]any{{"type": "text", "text": p.text, "text_elements": []any{}}}}
+		for _, method := range []string{"item/started", "item/completed"} {
+			a.send(map[string]any{"method": method, "params": map[string]any{"threadId": a.session, "turnId": id, "item": item}})
+		}
+	}
 	a.setMCP(codexMCP(os.Args))
 	reply := func(id json.RawMessage, result any) { a.send(map[string]any{"id": id, "result": result}) }
 	fail := func(id json.RawMessage, err error) {
@@ -679,6 +924,8 @@ func appServer() {
 			TurnID         string     `json:"turnId"`
 			ExpectedTurnID string     `json:"expectedTurnId"`
 			Input          textBlocks `json:"input"`
+			// Echoed as the userMessage item's clientId.
+			ClientUserMessageID string `json:"clientUserMessageId"`
 		}
 		_ = json.Unmarshal(m.Params, &p)
 		turnMu.Lock()
@@ -686,7 +933,8 @@ func appServer() {
 		turnMu.Unlock()
 		switch m.Method {
 		case "initialize":
-			reply(m.ID, map[string]any{"userAgent": "lux-fake/1"})
+			// The real server names its version here; lux reads it.
+			reply(m.ID, map[string]any{"userAgent": "lux/0.155.1 (lux-fake)"})
 		case "thread/start":
 			if p.Cwd != "" {
 				a.cwd = p.Cwd
@@ -717,9 +965,9 @@ func appServer() {
 			turn := map[string]any{"id": id, "status": "inProgress"}
 			reply(m.ID, map[string]any{"turn": turn})
 			a.send(map[string]any{"method": "turn/started", "params": map[string]any{"threadId": a.session, "turn": turn}})
-			go func(text string) {
+			go func(first prompt) {
 				status := "completed"
-				if a.runTurn(text, c) {
+				if a.runTurn(first, c) {
 					status = "interrupted"
 				}
 				turnMu.Lock()
@@ -733,13 +981,22 @@ func appServer() {
 						"modelContextWindow": 200000}}})
 				a.send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": a.session,
 					"turn": map[string]any{"id": id, "status": status}}})
-			}(p.Input.String())
+			}(prompt{p.Input.String(), p.ClientUserMessageID})
 		case "turn/steer":
-			if current == "" || p.ExpectedTurnID != current || !a.addSteer(p.Input.String()) {
-				fail(m.ID, errors.New("expectedTurnId does not match the active turn"))
+			// The real server's errors (codex 0.155.1).
+			if current == "" {
+				fail(m.ID, errors.New("no active turn to steer"))
 				continue
 			}
-			reply(m.ID, map[string]any{})
+			if p.ExpectedTurnID != current {
+				fail(m.ID, fmt.Errorf("expected active turn id `%s` but found `%s`", p.ExpectedTurnID, current))
+				continue
+			}
+			if !a.addSteer(prompt{p.Input.String(), p.ClientUserMessageID}) {
+				fail(m.ID, errors.New("no active turn to steer"))
+				continue
+			}
+			reply(m.ID, map[string]any{"turnId": current})
 		case "turn/interrupt":
 			if p.TurnID == current {
 				a.cancelTurn()

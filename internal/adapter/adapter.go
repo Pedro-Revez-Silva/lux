@@ -16,11 +16,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"os"
 	"os/exec"
+	"slices"
 	"sync"
 	"syscall"
 
@@ -44,10 +46,29 @@ type Sink interface {
 	Stream(typ, key, text string, wrap func(text string) any)
 	Session(id string)
 	Activity(idle bool)
-	// InputAck: an input was delivered to the agent (or failed to be).
-	// The workload's first prompt is acked too, with request id "prompt".
-	InputAck(in proto.Input, err error)
+	// InputAccepted: the agent has taken an input; d says when it reads it
+	// and whether InputConsumed follows. The workload's first prompt is
+	// reported too, with request id "prompt".
+	InputAccepted(in proto.Input, d Delivery)
+	// InputConsumed: the agent's model step has the input in context.
+	InputConsumed(requestID string)
+	// InputFailed: the input was not delivered, or the agent dropped it.
+	InputFailed(in proto.Input, err error)
 }
+
+// Delivery is when an accepted input reaches the agent's model.
+type Delivery struct {
+	Lands   string // LandsNextStep | LandsNextTurn
+	Receipt bool   // an InputConsumed follows
+}
+
+const (
+	// LandsNextStep: read at the agent's next model step, possibly inside
+	// the running turn.
+	LandsNextStep = "next_step"
+	// LandsNextTurn: read only when the running turn has ended.
+	LandsNextTurn = "next_turn"
+)
 
 // Process is the workload process the shim started for an adapter.
 type Process struct {
@@ -105,8 +126,10 @@ func New(name string) (Adapter, error) {
 	switch name {
 	case "generic", "":
 		return &Generic{}, nil
-	case "acp", "opencode":
+	case "acp":
 		return NewACP(), nil
+	case "opencode":
+		return NewOpenCode(), nil
 	case "claude-code":
 		return NewClaude(), nil
 	case "codex":
@@ -163,7 +186,12 @@ func (g *Generic) Deliver(in proto.Input) {
 	if len(data) > 0 && g.proc.Stdin != nil {
 		_, err = g.proc.Stdin.Write(data)
 	}
-	g.sink.InputAck(in, err)
+	if err != nil {
+		g.sink.InputFailed(in, err)
+		return
+	}
+	// Whatever reads stdin reads it when it next reads; lux cannot tell when.
+	g.sink.InputAccepted(in, Delivery{Lands: LandsNextStep})
 }
 
 func (g *Generic) Interrupt() error {
@@ -200,6 +228,261 @@ func pump(r io.Reader, out func([]byte)) {
 }
 
 // ---- helpers --------------------------------------------------------------
+
+// inputLedger reports each input's phases in order, once each: accepted,
+// then consumed (only with a receipt), or failed. Agents can report the
+// consumption before the adapter has seen the call that accepted it return
+// (both arrive on one stream, handled by two goroutines), so a consumption
+// seen early is held until accepted.
+//
+// An input's payload is kept only while the adapter may send it again:
+// until it is accepted without a receipt, consumed, or failed. After that
+// its entry is a tombstone (request id and flags) that keeps a repeated
+// phase from being reported twice. open holds the inputs accepted with a
+// receipt and not yet read, so a turn's end does not walk the history.
+type inputLedger struct {
+	mu   sync.Mutex
+	m    map[string]*inputState
+	open map[string]*inputState
+	seq  int
+	// closed: the agent has exited (close); what is accepted from here on
+	// cannot be read.
+	closed error
+}
+
+type inputState struct {
+	in                       proto.Input
+	accepted, consumed, done bool
+	receipt                  bool
+	// early: consumed was seen before accepted.
+	early bool
+	// tag is the adapter's own note on the input (the Codex turn it was
+	// steered into).
+	tag string
+	// seq: the order inputs were first tracked or accepted in, which is
+	// the order they came in when the adapter tracks them on arrival.
+	seq int
+}
+
+func (l *inputLedger) state(id string) *inputState {
+	if l.m == nil {
+		l.m = map[string]*inputState{}
+	}
+	st := l.m[id]
+	if st == nil {
+		st = &inputState{}
+		l.m[id] = st
+	}
+	return st
+}
+
+// settled drops an input's payload once nothing will send it again.
+func (l *inputLedger) settled(st *inputState) {
+	st.in = proto.Input{RequestID: st.in.RequestID}
+	delete(l.open, st.in.RequestID)
+}
+
+// track registers an input before it is sent, so its consumption is known
+// to be ours.
+func (l *inputLedger) track(in proto.Input) {
+	if in.RequestID == "" {
+		return
+	}
+	l.mu.Lock()
+	st := l.state(in.RequestID)
+	if !st.done && !st.accepted {
+		st.in = in
+	}
+	if st.seq == 0 {
+		l.seq++
+		st.seq = l.seq
+	}
+	l.mu.Unlock()
+}
+
+func (l *inputLedger) accept(sink Sink, in proto.Input, d Delivery, tag string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if in.RequestID == "" {
+		sink.InputAccepted(in, d)
+		return
+	}
+	st := l.state(in.RequestID)
+	if st.done {
+		return
+	}
+	if st.seq == 0 {
+		l.seq++
+		st.seq = l.seq
+	}
+	if st.accepted {
+		// Sent again (carried into the next turn): only its turn changes.
+		st.tag = tag
+		return
+	}
+	st.in, st.accepted, st.receipt, st.tag = in, true, d.Receipt, tag
+	st.in.RequestID = in.RequestID
+	sink.InputAccepted(in, d)
+	switch {
+	case !st.receipt:
+		l.settled(st)
+	case st.early:
+		st.consumed, st.done = true, true
+		l.settled(st)
+		sink.InputConsumed(in.RequestID)
+	case l.closed != nil:
+		st.done = true
+		l.settled(st)
+		sink.InputFailed(in, l.closed)
+	default:
+		if l.open == nil {
+			l.open = map[string]*inputState{}
+		}
+		l.open[in.RequestID] = st
+	}
+}
+
+// consume reports that the agent read the input with this id, if it is one
+// the adapter sent and has not reported read yet. It returns whether the id
+// was known.
+func (l *inputLedger) consume(sink Sink, id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	st := l.m[id]
+	if id == "" || st == nil || st.done {
+		return st != nil
+	}
+	if !st.accepted {
+		st.early = true
+		return true
+	}
+	if st.receipt {
+		st.consumed, st.done = true, true
+		l.settled(st)
+		sink.InputConsumed(id)
+	}
+	return true
+}
+
+// pending reports whether the input is known and neither read nor failed
+// nor accepted without a receipt: something may still happen to it.
+func (l *inputLedger) pending(id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	st := l.m[id]
+	return st != nil && !st.done && !(st.accepted && !st.receipt)
+}
+
+// unreadOne reports whether the input is accepted and not yet read.
+func (l *inputLedger) unreadOne(id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	st := l.m[id]
+	return st != nil && st.accepted && !st.done
+}
+
+func (l *inputLedger) fail(sink Sink, in proto.Input, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if in.RequestID != "" {
+		st := l.state(in.RequestID)
+		if st.done {
+			return
+		}
+		st.done = true
+		st.in.RequestID = in.RequestID
+		l.settled(st)
+	}
+	sink.InputFailed(in, err)
+}
+
+// close fails every input accepted with a receipt and not read (the agent
+// has exited: nothing reads it now), drops the payloads still held, and
+// makes a later acceptance with a receipt fail at once.
+func (l *inputLedger) close(sink Sink, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.closed = err
+	for _, st := range l.sortedLocked(func(st *inputState) bool { return true }) {
+		st.done = true
+		sink.InputFailed(st.in, err)
+	}
+	for _, st := range l.m {
+		l.settled(st)
+	}
+}
+
+// order is the input's seq, 0 if unknown.
+func (l *inputLedger) order(id string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if st := l.m[id]; st != nil {
+		return st.seq
+	}
+	return 0
+}
+
+// forget drops an input the adapter will send again (as a new turn): its
+// phases start over.
+func (l *inputLedger) forget(id string) {
+	l.mu.Lock()
+	delete(l.m, id)
+	delete(l.open, id)
+	l.mu.Unlock()
+}
+
+// unread returns the inputs accepted with a receipt, not yet read, whose
+// tag is tag, in the order they came (seq).
+func (l *inputLedger) unread(tag string) []proto.Input {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return inputsOf(l.sortedLocked(func(st *inputState) bool { return st.tag == tag }))
+}
+
+// claim is unread, retagging what it returns to to under the same lock:
+// of two callers claiming one tag, only one gets each input.
+func (l *inputLedger) claim(tag, to string) []proto.Input {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	sts := l.sortedLocked(func(st *inputState) bool { return st.tag == tag })
+	for _, st := range sts {
+		st.tag = to
+	}
+	return inputsOf(sts)
+}
+
+// sortedLocked: the open inputs that match, by seq.
+func (l *inputLedger) sortedLocked(match func(*inputState) bool) []*inputState {
+	var sts []*inputState
+	for _, st := range l.open {
+		if match(st) {
+			sts = append(sts, st)
+		}
+	}
+	slices.SortFunc(sts, func(a, b *inputState) int { return a.seq - b.seq })
+	return sts
+}
+
+func inputsOf(sts []*inputState) []proto.Input {
+	out := make([]proto.Input, len(sts))
+	for i, st := range sts {
+		out[i] = st.in
+	}
+	return out
+}
+
+var (
+	errStoppedUnread = errors.New("the Run stopped before the agent read it")
+	errExitedUnread  = errors.New("the agent exited before it read it")
+)
+
+// unreadWhy is why an input the agent never read fails once it has exited.
+func unreadWhy(stopped bool) error {
+	if stopped {
+		return errStoppedUnread
+	}
+	return errExitedUnread
+}
 
 // lineWriter serializes JSON lines to a process's stdin.
 type lineWriter struct {

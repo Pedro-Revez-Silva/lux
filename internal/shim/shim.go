@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -51,8 +52,11 @@ type Shim struct {
 	started   bool
 	startCh   chan proto.ShimMsg
 	delivered map[string]bool
-	stopping  bool
-	stopWhy   string
+	// inputPhases: what has been recorded of each input, by request id
+	// (sink.advance).
+	inputPhases map[string]uint8
+	stopping    bool
+	stopWhy     string
 	// hookPgid is a running beforeStop's process group; hookBy is its
 	// deadline, set before the hook starts and only moved earlier by a
 	// shorter stop. hookDone closes when it has ended.
@@ -941,13 +945,63 @@ func (k *sink) Activity(idle bool) {
 	}
 	k.s.out.Event(proto.EvActivity, map[string]string{"activity": a})
 }
-func (k *sink) InputAck(in proto.Input, err error) {
-	if in.RequestID == "" {
+func (k *sink) InputAccepted(in proto.Input, d adapter.Delivery) {
+	if k.advance(in.RequestID, inputAnswered|inputAccepted, 0) {
+		k.input(in, proto.InputAccepted, map[string]any{"lands": d.Lands, "receipt": d.Receipt}, nil)
+	}
+}
+
+func (k *sink) InputConsumed(requestID string) {
+	if k.advance(requestID, inputEnded, inputAccepted) {
+		k.s.out.Event(proto.EvInputConsumed, map[string]string{"requestId": requestID})
+	}
+}
+
+// InputFailed is lux.input phase failed when the input was never
+// accepted, else lux.input.failed.
+func (k *sink) InputFailed(in proto.Input, err error) {
+	if k.advance(in.RequestID, inputAnswered, 0) {
+		k.input(in, proto.InputFailed, nil, err)
 		return
 	}
+	if k.advance(in.RequestID, inputEnded, inputAccepted) {
+		k.s.out.Event(proto.EvInputFailed, map[string]string{"requestId": in.RequestID, "error": err.Error()})
+	}
+}
+
+// What the shim has recorded of an input, so each record is written at
+// most once per request id whatever an adapter reports twice.
+const (
+	inputAnswered uint8 = 1 << iota // lux.input written
+	inputAccepted                   // ... as accepted
+	inputEnded                      // lux.input.consumed or lux.input.failed written
+)
+
+// advance sets bits on the input's state and reports whether that is new:
+// none of bits was set yet and every bit of need was.
+func (k *sink) advance(id string, bits, need uint8) bool {
+	if id == "" {
+		return false
+	}
+	k.s.mu.Lock()
+	defer k.s.mu.Unlock()
+	if k.s.inputPhases == nil {
+		k.s.inputPhases = map[string]uint8{}
+	}
+	st := k.s.inputPhases[id]
+	if st&bits != 0 || st&need != need {
+		return false
+	}
+	k.s.inputPhases[id] = st | bits
+	return true
+}
+
+// input writes an input's lux.input record.
+func (k *sink) input(in proto.Input, phase string, extra map[string]any, err error) {
 	// What was delivered, up to a limit (the record stream is not for
 	// whole files); secrets in it are redacted like all output.
-	d := map[string]any{"requestId": in.RequestID}
+	d := map[string]any{"requestId": in.RequestID, "phase": phase}
+	maps.Copy(d, extra)
 	text := in.Text
 	if text == "" && len(in.Raw) > 0 {
 		text = string(in.Raw)

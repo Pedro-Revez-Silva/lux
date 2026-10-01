@@ -286,19 +286,22 @@ type Artifacts struct {
 // Adapters lux knows. Each is a way to start, resume, steer and stop a
 // workload; `generic` is a plain process.
 var Adapters = map[string]AdapterInfo{
-	"generic": {},
-	"acp":     {},
+	"generic": {Steer: Steer{Lands: "next_step"}},
+	"acp":     {Steer: Steer{Lands: "next_turn"}},
 	"claude-code": {
 		DefaultCommand: []string{"claude"},
 		StatePaths:     []string{"$HOME/.claude"},
+		Steer:          Steer{Lands: "next_step", Receipt: true},
 	},
 	"codex": {
 		DefaultCommand: []string{"codex"},
 		StatePaths:     []string{"$HOME/.codex"},
+		Steer:          Steer{Lands: "next_step", Receipt: true},
 	},
 	"opencode": {
 		DefaultCommand: []string{"opencode", "acp"},
 		StatePaths:     []string{"$HOME/.local/share/opencode"},
+		Steer:          Steer{Lands: "next_step", Receipt: true},
 	},
 }
 
@@ -307,6 +310,13 @@ type AdapterInfo struct {
 	// Paths the agent keeps its session in. A spec whose state volumes do not
 	// cover them is rejected: it would break on the first resume.
 	StatePaths []string
+	Steer      Steer
+}
+
+// Steer is what an adapter does with input sent while the agent works.
+type Steer struct {
+	Lands   string `json:"lands" enum:"next_step,next_turn" doc:"When the agent reads input sent while it works: next_step, at its next model step (possibly within the running turn); next_turn, only once the running turn ends."`
+	Receipt bool   `json:"receipt" doc:"The adapter can report when the agent read an input (a lux.input.consumed record, an input.consumed event). Each input's accepted record says whether it will: it will not for Codex below 0.155, Claude Code without msg_lifecycle_v1, or an opencode command lux did not build."`
 }
 
 // Duration marshals as a Go duration string ("4h", "90s").

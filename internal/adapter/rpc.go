@@ -16,6 +16,8 @@ type rpcConn struct {
 	nextID  atomic.Int64
 	mu      sync.Mutex
 	pending map[int64]chan rpcResponse
+	// closed: readLoop has returned; no response can come.
+	closed bool
 }
 
 type rpcMsg struct {
@@ -49,9 +51,23 @@ func (c *rpcConn) attach(w io.Writer) {
 
 // call sends a request and waits for its response.
 func (c *rpcConn) call(method string, params any) (json.RawMessage, error) {
+	wait, err := c.start(method, params)
+	if err != nil {
+		return nil, err
+	}
+	return wait()
+}
+
+// start sends a request and returns once it is written; wait blocks for
+// its response.
+func (c *rpcConn) start(method string, params any) (wait func() (json.RawMessage, error), err error) {
 	id := c.nextID.Add(1)
 	ch := make(chan rpcResponse, 1)
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("%s: process exited", method)
+	}
 	c.pending[id] = ch
 	c.mu.Unlock()
 	if err := c.lw.send(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
@@ -60,11 +76,13 @@ func (c *rpcConn) call(method string, params any) (json.RawMessage, error) {
 		c.mu.Unlock()
 		return nil, err
 	}
-	r := <-ch
-	if r.Err != nil {
-		return nil, fmt.Errorf("%s: %s (%d)", method, r.Err.Message, r.Err.Code)
-	}
-	return r.Result, nil
+	return func() (json.RawMessage, error) {
+		r := <-ch
+		if r.Err != nil {
+			return nil, fmt.Errorf("%s: %s (%d)", method, r.Err.Message, r.Err.Code)
+		}
+		return r.Result, nil
+	}, nil
 }
 
 func (c *rpcConn) notify(method string, params any) error {
@@ -112,6 +130,7 @@ func (c *rpcConn) readLoop(r io.Reader, onRequest, onNotify func(rpcMsg), other 
 		}
 	}
 	c.mu.Lock()
+	c.closed = true
 	for id, ch := range c.pending {
 		ch <- rpcResponse{Err: &rpcError{Message: "process exited"}}
 		delete(c.pending, id)

@@ -102,6 +102,8 @@ export interface Run {
   state: string;
   stateReason?: string;
   activity?: string;
+  /** What the adapter does with input sent while the agent works. */
+  steer?: { lands: "next_step" | "next_turn"; receipt: boolean };
   exitCode?: number;
   epoch: number;
   sessionId?: string;

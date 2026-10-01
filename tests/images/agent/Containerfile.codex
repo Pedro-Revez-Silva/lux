@@ -1,0 +1,11 @@
+# The codex CLI for the opt-in real-agent suites: its native binary with
+# the rest of its npm vendor directory (codex-code-mode-host, which runs its
+# shell tool, codex-resources, codex-path), in the layout it expects.
+FROM docker.io/library/debian:trixie-20260918-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd -m -u 1000 agent
+COPY codex-vendor /opt/codex
+RUN ln -s /opt/codex/bin/codex /usr/local/bin/codex
+USER agent
+WORKDIR /home/agent

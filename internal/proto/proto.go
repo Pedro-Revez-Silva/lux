@@ -292,12 +292,30 @@ type Status struct {
 type AdapterEvent struct {
 	SessionID string `json:"sessionId,omitempty"`
 	Activity  string `json:"activity,omitempty"` // idle | busy
-	// InputAck acknowledges delivery of an input by request id.
+	// InputAck names an input by request id: its first answer, once.
+	// InputPhase is accepted or failed ("" from an older runner: accepted,
+	// or failed with InputError).
 	InputAck   string `json:"inputAck,omitempty"`
+	InputPhase string `json:"inputPhase,omitempty"`
 	InputError string `json:"inputError,omitempty"`
 	// InputText is what was delivered (capped; InputTruncated if so).
 	InputText      string `json:"inputText,omitempty"`
 	InputTruncated bool   `json:"inputTruncated,omitempty"`
+	// InputLands and InputReceipt: on accepted, when the agent reads it,
+	// and whether a consumed follows.
+	InputLands   string `json:"inputLands,omitempty"`
+	InputReceipt bool   `json:"inputReceipt,omitempty"`
+	// InputProgress is what happened to an input after it was accepted. A
+	// field of its own, so a luxd that does not know it ignores it rather
+	// than reading it as a second InputAck.
+	InputProgress *InputProgress `json:"inputProgress,omitempty"`
+}
+
+// InputProgress: an accepted input consumed, or failed.
+type InputProgress struct {
+	RequestID string `json:"requestId"`
+	Phase     string `json:"phase"` // InputConsumed | InputFailed
+	Error     string `json:"error,omitempty"`
 }
 
 // SnapshotDone ends every placement, however it exited: its state volumes,

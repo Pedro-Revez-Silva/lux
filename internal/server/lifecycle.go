@@ -598,20 +598,69 @@ func (s *Server) applyAdapterEvent(ctx context.Context, tx pgx.Tx, tenantID, run
 		addEvent(ctx, tx, tenantID, runID, epoch, "activity", map[string]any{"activity": ev.Activity})
 	}
 	if ev.InputAck != "" {
-		d := map[string]any{"requestId": ev.InputAck}
-		if ev.InputText != "" {
-			d["text"] = ev.InputText
+		if err := applyInputEvent(ctx, tx, tenantID, runID, epoch, ev); err != nil {
+			return err
 		}
-		if ev.InputTruncated {
-			d["truncated"] = true
-		}
-		typ := "input.delivered"
-		if ev.InputError != "" {
-			typ, d["error"] = "input.failed", ev.InputError
-		}
-		addEvent(ctx, tx, tenantID, runID, epoch, typ, d)
+	}
+	if p := ev.InputProgress; p != nil && p.RequestID != "" {
+		return applyInputProgress(ctx, tx, tenantID, runID, epoch, *p)
 	}
 	return nil
+}
+
+// applyInputEvent records an input's first answer (lux.input) as
+// input.delivered (accepted) or input.failed.
+func applyInputEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, ev proto.AdapterEvent) error {
+	phase := ev.InputPhase
+	if phase == "" {
+		phase = proto.InputAccepted
+		if ev.InputError != "" {
+			phase = proto.InputFailed
+		}
+	}
+	d := map[string]any{"requestId": ev.InputAck, "phase": phase}
+	typ := "input.delivered"
+	switch phase {
+	case proto.InputFailed:
+		typ, d["error"] = "input.failed", ev.InputError
+	case proto.InputAccepted:
+		if ev.InputLands != "" {
+			d["lands"], d["receipt"] = ev.InputLands, ev.InputReceipt
+		}
+	default:
+		return nil
+	}
+	if ev.InputText != "" {
+		d["text"] = ev.InputText
+	}
+	if ev.InputTruncated {
+		d["truncated"] = true
+	}
+	return addInputEvent(ctx, tx, tenantID, runID, epoch, typ, ev.InputAck, d)
+}
+
+// applyInputProgress records what happened to an accepted input
+// (lux.input.consumed, lux.input.failed) as input.consumed or input.failed.
+func applyInputProgress(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, p proto.InputProgress) error {
+	switch p.Phase {
+	case proto.InputConsumed:
+		return addInputEvent(ctx, tx, tenantID, runID, epoch, "input.consumed", p.RequestID, map[string]any{"requestId": p.RequestID})
+	case proto.InputFailed:
+		return addInputEvent(ctx, tx, tenantID, runID, epoch, "input.failed", p.RequestID, map[string]any{"requestId": p.RequestID, "error": p.Error})
+	}
+	return nil
+}
+
+// addInputEvent adds an input event once per request id and type: the
+// runner re-reports what it tails after a restart or reconnect. The key is
+// claimed in run_input_events first, a primary-key insert.
+func addInputEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, typ, requestID string, d map[string]any) error {
+	tag, err := tx.Exec(ctx, `INSERT INTO run_input_events (tenant_id, run_id, type, request_id) VALUES ($1, $2, $3, $4)
+		ON CONFLICT DO NOTHING`, tenantID, runID, typ, requestID)
+	if err != nil || tag.RowsAffected() == 0 {
+		return err
+	}
+	return addEvent(ctx, tx, tenantID, runID, epoch, typ, d)
 }
 
 // discardOldCopies tells every other host holding a local copy of a Run's
