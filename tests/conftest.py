@@ -169,10 +169,11 @@ class Runners:
     def token(self, *args: str) -> str:
         return self.env.luxd_admin("create-host-token", "--tenant", self.lux.tenant_id, *args)["token"]
 
-    def start(self, host: Host, *extra: str, token: str | None = None, wait: bool = True, name: str | None = None) -> Host:
+    def start(self, host: Host, *extra: str, token: str | None = None, wait: bool = True, name: str | None = None,
+              environ: dict[str, str] | None = None) -> Host:
         tok = token or self.tokens.get(host.name) or self.token()
         self.tokens[host.name] = tok
-        self.procs[host.name] = host.start_runner(self.env, tok, *extra, name=name)
+        self.procs[host.name] = host.start_runner(self.env, tok, *extra, name=name, environ=environ)
         if wait:
             self.wait_ready(name or host.name)
         return host

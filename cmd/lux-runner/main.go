@@ -98,6 +98,8 @@ func main() {
 			cfg.Labels[k] = v
 		}
 	}
+	// Test-only (tests/suites): not a flag, so it stays out of --help.
+	cfg.AssignHold = os.Getenv("LUX_TEST_ASSIGN_HOLD")
 	level := slog.LevelInfo
 	if os.Getenv("LUX_DEBUG") != "" {
 		level = slog.LevelDebug

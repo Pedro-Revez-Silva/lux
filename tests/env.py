@@ -236,8 +236,9 @@ class Host:
         return max(requested * allocatable // offered // page * page, 1)
 
     def start_runner(self, env: "TestEnvironment", token: str, *extra: str, name: str | None = None,
-                     url: str | None = None) -> subprocess.Popen:
-        """Start lux-runner inside this host, logging to <log dir>/<host>/runner.log."""
+                     url: str | None = None, environ: dict[str, str] | None = None) -> subprocess.Popen:
+        """Start lux-runner inside this host, logging to <log dir>/<host>/runner.log.
+        environ: more variables for it (e.g. a test hook's)."""
         binary = BIN_DIR / "lux-runner"
         if not binary.exists():
             raise RuntimeError("lux-runner is not built")
@@ -248,6 +249,7 @@ class Host:
                 "docker", "exec", "-i",
                 "-e", f"LUX_URL={url or env.luxd_url}",
                 "-e", f"LUX_HOST_TOKEN={token}",
+                *[a for k, v in (environ or {}).items() for a in ("-e", f"{k}={v}")],
                 self.container,
                 # The host image has no pkill: record the pid to stop it by.
                 "sh", "-c", 'echo $$ > /run/lux-runner.pid; exec "$@"', "lux-runner",

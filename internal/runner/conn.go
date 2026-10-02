@@ -192,8 +192,9 @@ func (c *conn) dispatch(ctx context.Context, f proto.Frame) {
 		// Messages about one Run are handled in order (a stop must not
 		// overtake its assign); different Runs do not wait for each other.
 		c.r.control.enqueue(f.RunID, func() {
-			c.r.handleControl(ctx, f)
-			c.ack(ctx, f.ID)
+			if c.r.handleControl(ctx, f) {
+				c.ack(ctx, f.ID)
+			}
 		})
 	}
 }

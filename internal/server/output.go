@@ -157,6 +157,14 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request, in *outputI
 		return nil
 	}
 
+	// The assigned placement whose last subscription its host ended with
+	// nothing, and when it may be asked again: Run events wake the loop
+	// at any rate, and each pass would otherwise ask the runner again.
+	var empty struct {
+		epoch   int
+		hostID  string
+		retryAt time.Time
+	}
 	for {
 		woken := s.wakeups.next(runID) // before the reads: see wakeups
 		placements, runState, err := s.placementsFrom(ctx, p.TenantID, runID, cur.Epoch)
@@ -180,6 +188,9 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request, in *outputI
 				return send("record", OutputRecord{Cursor: cur.String(), Epoch: pl.epoch, Seq: rec.Seq, Time: rec.Time, Ch: rec.Ch,
 					Data: rec.Data, Event: rec.Event, Server: rec.Server, Stream: rec.Stream})
 			}
+			if pl.epoch == empty.epoch && (pl.state != "assigned" || pl.hostID != empty.hostID) {
+				empty.retryAt = time.Time{} // it moved on: ask its host now
+			}
 			var done bool
 			switch {
 			case pl.blobLoc == "s3":
@@ -189,8 +200,15 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request, in *outputI
 				// Its host died before saving it: gone, by design.
 				_ = send("gap", outputGap{pl.epoch, "output lost with its host"})
 				done = true
+			case follow && pl.state == "assigned" && pl.epoch == empty.epoch && time.Now().Before(empty.retryAt):
+				// Its host said it does not hold it less than 500ms ago.
+				done = false
 			case s.hub.Streaming(pl.hostID):
+				before := cur
 				done, err = s.relayOutput(ctx, pl, since, follow && liveNow, emit, flushEvents)
+				if follow && pl.state == "assigned" && done && err == nil && cur == before {
+					empty.epoch, empty.hostID, empty.retryAt = pl.epoch, pl.hostID, time.Now().Add(500*time.Millisecond)
+				}
 			case liveNow && follow:
 				// No stream from the host: it is reconnecting, or it polls
 				// (no live relay; its output arrives with the upload). Wait.
@@ -213,6 +231,14 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request, in *outputI
 					_ = send("gap", outputGap{pl.epoch, err.Error()})
 					done = true
 				}
+			}
+			if follow && pl.state == "assigned" {
+				// A host that has not taken it up yet ends the subscription
+				// at once, as for a placement that wrote nothing; one that
+				// has (its starting report may be late or lost) relays its
+				// records. Either way it is not finished: keep the cursor
+				// where the relay left it and ask again.
+				done = false
 			}
 			if !done {
 				break

@@ -73,6 +73,10 @@ type Config struct {
 	// is labelled nested=true, and such Runs get what rootless Podman
 	// inside them needs (see nested.go).
 	Nested bool
+	// AssignHold is test-only (LUX_TEST_ASSIGN_HOLD): while the file it
+	// names exists, each assignment is held before it is taken up and
+	// acked. See holdAssignment and noteUnknownEpoch.
+	AssignHold string
 }
 
 type Runner struct {
@@ -319,14 +323,58 @@ func (r *Runner) onWelcome(ctx context.Context, w proto.Welcome) {
 	}
 }
 
-// handleControl handles one durable message from luxd. Idempotent.
-func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
+// holdAssignment waits while the file at path exists, checking every 100ms.
+// It returns ctx's error if ctx ends first, even if the file is gone by then:
+// a cancelled hold must not take the placement up.
+func (r *Runner) holdAssignment(ctx context.Context, path string, a proto.Assign) error {
+	logged := false
+	for {
+		if _, err := os.Stat(path); err != nil {
+			return ctx.Err()
+		}
+		if !logged {
+			r.log.Warn("holding assignment (test hold)", "run", a.RunID, "epoch", a.Epoch, "file", path)
+			logged = true
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+// noteUnknownEpoch appends "<runID> <epoch> <subID>" to <AssignHold>.unknown
+// once an output subscription for an epoch this runner does not hold has
+// been ended with no error. Test-only, with AssignHold: a test waits for
+// the line before releasing the hold.
+func (r *Runner) noteUnknownEpoch(runID string, epoch int, subID string) {
+	f, err := os.OpenFile(r.cfg.AssignHold+".unknown", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		r.log.Warn("test hold: unknown-epoch marker", "err", err)
+		return
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintf(f, "%s %d %s\n", runID, epoch, subID); err != nil {
+		r.log.Warn("test hold: unknown-epoch marker", "err", err)
+	}
+}
+
+// handleControl handles one durable message from luxd. Idempotent. It
+// returns false for a message to leave unacked, so that luxd redelivers it.
+func (r *Runner) handleControl(ctx context.Context, f proto.Frame) bool {
 	switch f.Type {
 	case proto.MsgAssign:
 		var a proto.Assign
 		if err := json.Unmarshal(f.Data, &a); err != nil {
 			r.log.Error("bad assign", "err", err)
-			return
+			return true
+		}
+		if path := r.cfg.AssignHold; path != "" {
+			if err := r.holdAssignment(ctx, path, a); err != nil {
+				r.log.Warn("held assignment abandoned", "run", a.RunID, "epoch", a.Epoch, "err", err)
+				return false
+			}
 		}
 		r.assign(ctx, a)
 	case proto.MsgStop, proto.MsgCancel:
@@ -349,7 +397,7 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
 		var sv proto.Servers
 		if err := json.Unmarshal(f.Data, &sv); err != nil {
 			r.log.Error("bad servers", "err", err)
-			return
+			return true
 		}
 		if p := r.placement(f.RunID, f.Epoch); p != nil {
 			p.setServers(ctx, sv)
@@ -382,7 +430,7 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
 		var e proto.ExitHost
 		_ = json.Unmarshal(f.Data, &e)
 		if !r.shouldExit(ctx, e) {
-			return
+			return true
 		}
 		r.log.Warn("luxd asked this host to exit", "reason", e.Reason, "code", e.Code)
 		// Exit after the ack for this message has gone out (handleControl
@@ -396,6 +444,7 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) {
 	default:
 		r.log.Warn("unknown control message", "type", f.Type)
 	}
+	return true
 }
 
 func (r *Runner) placement(runID string, epoch int) *placement {
@@ -459,7 +508,10 @@ func (r *Runner) handleLive(ctx context.Context, f proto.Frame) {
 			end.Error = err.Error()
 		}
 		if sctx.Err() == nil {
-			_ = r.conn.Send(ctx, proto.Frame{Type: proto.MsgOutputEnd, RunID: f.RunID, Epoch: f.Epoch, Data: proto.Marshal(end)})
+			sendErr := r.conn.Send(ctx, proto.Frame{Type: proto.MsgOutputEnd, RunID: f.RunID, Epoch: f.Epoch, Data: proto.Marshal(end)})
+			if r.cfg.AssignHold != "" && err == nil && sendErr == nil && r.placement(f.RunID, f.Epoch) == nil {
+				r.noteUnknownEpoch(f.RunID, f.Epoch, s.SubID)
+			}
 		}
 	case proto.MsgOutputCancel:
 		var s proto.OutputSubscribe
