@@ -663,15 +663,17 @@ func forgetMissingCopies(ctx context.Context, tx pgx.Tx, hostID string, held []p
 	return err
 }
 
-// recordUsage raises the placement's peaks; values only ever grow.
+// recordUsage raises the placement's peaks; values only ever grow. Each
+// parameter is cast to its column's type: an untyped $n in nullif(...) is
+// inferred as int4, which rejects bytes above 2^31-1 and truncates seconds.
 func recordUsage(ctx context.Context, tx pgx.Tx, runID string, epoch int, u *proto.Usage) error {
 	_, err := tx.Exec(ctx, `UPDATE placements SET
-			peak_memory_bytes = greatest(peak_memory_bytes, nullif($3, 0)),
-			peak_disk_bytes   = greatest(peak_disk_bytes, nullif($4, 0)),
-			peak_pids         = greatest(peak_pids, nullif($5, 0)),
-			cpu_seconds       = greatest(cpu_seconds, nullif($6, 0)),
-			net_rx_bytes      = greatest(net_rx_bytes, nullif($7, 0)),
-			net_tx_bytes      = greatest(net_tx_bytes, nullif($8, 0))
+			peak_memory_bytes = greatest(peak_memory_bytes, nullif($3::bigint, 0)),
+			peak_disk_bytes   = greatest(peak_disk_bytes, nullif($4::bigint, 0)),
+			peak_pids         = greatest(peak_pids, nullif($5::int, 0)),
+			cpu_seconds       = greatest(cpu_seconds, nullif($6::float8, 0)),
+			net_rx_bytes      = greatest(net_rx_bytes, nullif($7::bigint, 0)),
+			net_tx_bytes      = greatest(net_tx_bytes, nullif($8::bigint, 0))
 		WHERE run_id = $1 AND epoch = $2`,
 		runID, epoch, u.PeakMemoryBytes, u.PeakDiskBytes, u.PeakPids, u.CPUSeconds, u.NetRxBytes, u.NetTxBytes)
 	return err

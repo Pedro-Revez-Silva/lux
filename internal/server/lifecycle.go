@@ -220,7 +220,7 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		return err
 	}
 	err := tx.QueryRow(ctx, `UPDATE placements p SET state = 'exited', ended_at = now(),
-			exited_at = coalesce(exited_at, now()), exit_code = $3, exit_reason = $4, output_seq = nullif($5, 0),
+			exited_at = coalesce(exited_at, now()), exit_code = $3, exit_reason = $4, output_seq = nullif($5::bigint, 0),
 			lease_expires_at = NULL
 		WHERE run_id = $1 AND epoch = $2 AND state <> 'exited'
 		RETURNING stop_reason, host_id, snapshot_refused,
@@ -452,7 +452,7 @@ func insertSnapshot(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID, pla
 		if err := insertBlob(ctx, tx, tenantID, runID, epoch, hostID, sd.Output.BlobID, "output", "output", sd.Output.Size, sd.Output.SHA256, sd.Manifest.SnapshotID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE placements SET output_blob_id = $3, output_seq = greatest(output_seq, nullif($4, 0))
+		if _, err := tx.Exec(ctx, `UPDATE placements SET output_blob_id = $3, output_seq = greatest(output_seq, nullif($4::bigint, 0))
 			WHERE run_id = $1 AND epoch = $2`, runID, epoch, sd.Output.BlobID, sd.OutputSeq); err != nil {
 			return err
 		}
