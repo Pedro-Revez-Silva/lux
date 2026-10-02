@@ -390,6 +390,37 @@ components:
         name:
           type: string
       type: object
+    DiskKept:
+      additionalProperties: false
+      properties:
+        kept:
+          description: "Bytes: the disk limit the Run keeps."
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
+        measuredBytes:
+          description: "Bytes: the peak disk use of the placement that took the snapshot it resumes from; absent when none was recorded."
+          format: int64
+          type: integer
+        neededBytes:
+          description: "Bytes: the smallest disk limit a shrink may set (measured plus headroom); absent without a measurement."
+          format: int64
+          type: integer
+        reason:
+          description: Why, in words.
+          type: string
+        requested:
+          description: "Bytes: the disk limit asked for."
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
+      type: object
     DiskSample:
       additionalProperties: false
       properties:
@@ -1794,6 +1825,19 @@ components:
         requestId:
           type: string
       type: object
+    Resize:
+      additionalProperties: false
+      properties:
+        applied:
+          $ref: "#/components/schemas/Resources"
+          description: "The Run's resources from this resume on: what the scheduler reserves and its container gets."
+        disk:
+          $ref: "#/components/schemas/DiskKept"
+          description: Present when a smaller disk was refused and the current one kept.
+        requested:
+          $ref: "#/components/schemas/Resources"
+          description: The resources the resume asked for; the others are absent.
+      type: object
     Resources:
       additionalProperties: false
       properties:
@@ -1892,7 +1936,7 @@ components:
           type: string
         resources:
           $ref: "#/components/schemas/ResumeResources"
-          description: Change what the Run gets from now on (e.g. more disk after it went over).
+          description: "Change what the Run gets from now on (e.g. more disk after it went over). On a Run already resuming: the same as its resume asked for, 202 with that resume's resize; absent or empty, 202; other values, 409 not_resumable."
         secrets:
           description: "A value for every one of the Run's secrets, and for the credentials of repositories it adds: luxd never keeps them."
           items:
@@ -1914,8 +1958,20 @@ components:
     ResumeResources:
       additionalProperties: false
       properties:
+        cpus:
+          description: "A new CPU quota, larger or smaller (0.5 is half a CPU). Absent: unchanged; 0 or less: 422 invalid_spec."
+          format: double
+          type: number
         disk:
-          description: "A new disk limit: its writable layer plus state volumes."
+          description: "A new disk limit: its writable layer plus state volumes. Absent or 0: unchanged; negative: 422 invalid_spec. Larger: applied. Smaller: applied only if the placement that took the snapshot it resumes from reported its final disk use (it exited, was not lost) and the disk is at least its peak disk use plus max(25%, 1 GiB); otherwise the Run keeps its disk and still resumes, and resize.disk in the answer (and in the resume.requested event) says why."
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
+        memory:
+          description: "A new memory size, larger or smaller, in its host's terms as at submit. Absent: unchanged; 0 or less: 422 invalid_spec."
           oneOf:
             - format: int64
               type: integer
@@ -1992,6 +2048,9 @@ components:
         poolId:
           description: That pool's id.
           type: string
+        resize:
+          $ref: "#/components/schemas/Resize"
+          description: "In a resume's answer, when it asked to change resources: what it asked for and what the Run has from now on."
         resume:
           $ref: "#/components/schemas/Resumability"
         runtimeSeconds:
@@ -6479,6 +6538,8 @@ paths:
         From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming.
 
         git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. Adding needs a stopped, lost or failed Run: while it is resuming, 409. A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one.
+
+        resources changes what the Run gets from now on, written into its spec: cpus and memory, larger or smaller; disk larger, or smaller only down to the snapshot's measured use plus headroom (otherwise kept, and resize.disk in the answer says why). A Run already resuming refuses other sizes (409).
 
         Needs the `run` scope.
       operationId: resumeRun

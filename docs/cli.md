@@ -72,7 +72,7 @@ JPEG, WebP or GIF). See [images](adapters.md#images).
 
 ```bash
 lux stop <run> [--wait]         # graceful; snapshot; resumable
-lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--from-snapshot ID] [--disk SIZE] [--to HOST]
+lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--from-snapshot ID] [--cpus N] [--memory SIZE] [--disk SIZE] [--to HOST]
            [--add-repo name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]]... [--request-id ID]
            [--sync repo=ref]...  # move restored checkouts to ref before init
 lux sync <run> repo=ref... [--wait] [--request-id ID]   # a running Run's checkouts
@@ -83,6 +83,17 @@ lux snapshots <run>             # where each snapshot lives
 A resume needs the Run's secrets again. lux looks for each one in
 `--secret`, then `--secrets-from`, then an environment variable of the same
 name.
+
+`--cpus`, `--memory` and `--disk` change what the Run gets from now on
+([resizing on resume](concepts.md#resizing-on-resume)): cpus and memory
+apply, larger or smaller; a smaller disk applies only if the Run's saved
+state fits it with headroom. When it does not, the Run keeps its disk,
+resumes anyway, and lux prints `disk kept: <why>` on stderr.
+
+```bash
+lux resume run_x --cpus 4 --memory 2Gi    # more CPUs, less memory
+lux resume run_x --disk 10Gi              # smaller, if its state fits
+```
 
 `--add-repo` (repeatable) adds a repository to a stopped, lost or failed
 Run. The runner clones it into the restored workspace before the Run

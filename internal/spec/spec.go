@@ -261,6 +261,15 @@ type Resources struct {
 	Pids   int64   `json:"pids,omitempty" yaml:"pids,omitempty"`
 }
 
+// Problems is what Normalize refuses in resources once defaults are filled;
+// a resume that changes them is held to the same rules.
+func (r Resources) Problems() []string {
+	if r.CPUs < 0 || r.Memory < 0 || r.Disk < 0 || r.Pids < 0 {
+		return []string{"resources must not be negative"}
+	}
+	return nil
+}
+
 type Placement struct {
 	Pool     string            `json:"pool,omitempty" yaml:"pool,omitempty" doc:"The pool to run in. Empty: the tenant's default pool, else the platform's, else the pool named default; resolved at submit and stored."`
 	PoolID   string            `json:"poolId,omitempty" yaml:"poolId,omitempty" doc:"The pool to run in, by its id (pool_…), which a rename keeps: the tenant's pool with that id, else the platform's. An id no such pool has is refused at submit (422 unknown_pool). Not with pool; at submit, pool is set to that pool's name."`
@@ -640,9 +649,7 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	if r.Disk == 0 {
 		r.Disk = d.Disk
 	}
-	if r.CPUs < 0 || r.Memory < 0 || r.Disk < 0 || r.Pids < 0 {
-		fail("resources must not be negative")
-	}
+	errs = append(errs, r.Problems()...)
 	if s.Timeout.Duration < 0 {
 		fail("timeout must not be negative")
 	}

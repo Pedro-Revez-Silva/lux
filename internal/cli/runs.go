@@ -868,7 +868,8 @@ func parseAddRepo(v string) (spec.Repository, error) {
 }
 
 func (a *app) resumeCmd() *cobra.Command {
-	var input, secretsFrom, fromSnapshot, to, disk, reqID string
+	var input, secretsFrom, fromSnapshot, to, disk, memory, reqID string
+	var cpus float64
 	var secretArgs, addRepos, syncs []string
 	var follow, wait bool
 	cmd := &cobra.Command{
@@ -894,7 +895,12 @@ stderr as "request <id>", and marks the repository's git.clone event.
 --sync repo=ref moves a repository's checkout to ref (a branch, tag or sha)
 before init, fetched through the host's mirror (repeatable). Tracked files
 become the ref's; untracked and ignored ones are kept. Each is a git.sync
-event; one that fails leaves its checkout as it was.`,
+event; one that fails leaves its checkout as it was.
+
+--cpus, --memory and --disk change what the Run gets from now on. cpus and
+memory apply, larger or smaller. A smaller disk applies only if the Run's
+saved state fits it with headroom; otherwise the Run keeps its disk, still
+resumes, and lux says why on stderr ("disk kept: ...").`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := ctxOf(cmd)
@@ -944,8 +950,18 @@ event; one that fails leaves its checkout as it was.`,
 			if to != "" {
 				req["to"] = to
 			}
+			res := map[string]any{}
 			if disk != "" {
-				req["resources"] = map[string]string{"disk": disk}
+				res["disk"] = disk
+			}
+			if memory != "" {
+				res["memory"] = memory
+			}
+			if cmd.Flags().Changed("cpus") {
+				res["cpus"] = cpus
+			}
+			if len(res) > 0 {
+				req["resources"] = res
 			}
 			if reqID != "" {
 				req["requestId"] = reqID
@@ -968,6 +984,9 @@ event; one that fails leaves its checkout as it was.`,
 			if id := hdr.Get("Lux-Request-Id"); id != "" {
 				fmt.Fprintln(a.stderr, "request", id)
 			}
+			if out.Resize != nil && out.Resize.Disk != nil {
+				fmt.Fprintln(a.stderr, "disk kept:", out.Resize.Disk.Reason)
+			}
 			if follow {
 				if _, err := a.followLogs(ctx, args[0], "", logOpts{stderr: true}); err != nil {
 					return err
@@ -979,6 +998,8 @@ event; one that fails leaves its checkout as it was.`,
 				if err != nil {
 					return err
 				}
+				// GET has no resize: it is the resume's answer alone.
+				r.Resize = out.Resize
 				out = *r
 			}
 			if a.output == "json" {
@@ -993,7 +1014,9 @@ event; one that fails leaves its checkout as it was.`,
 	cmd.Flags().StringArrayVar(&secretArgs, "secret", nil, "NAME=VALUE (repeatable)")
 	cmd.Flags().StringVar(&fromSnapshot, "from-snapshot", "", "resume from an older snapshot")
 	cmd.Flags().StringVar(&to, "to", "", "operators: resume on this host (id or name)")
-	cmd.Flags().StringVar(&disk, "disk", "", "a new disk limit from now on (e.g. 40Gi), for a Run that went over")
+	cmd.Flags().StringVar(&disk, "disk", "", "a new disk limit from now on (e.g. 40Gi); a smaller one only if its saved state fits with headroom")
+	cmd.Flags().StringVar(&memory, "memory", "", "new memory from now on, larger or smaller (e.g. 4Gi)")
+	cmd.Flags().Float64Var(&cpus, "cpus", 0, "new CPUs from now on, larger or smaller (e.g. 0.5)")
 	cmd.Flags().BoolVar(&follow, "follow", false, "stream output until it ends")
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait until it is running (or has ended)")
 	cmd.Flags().StringArrayVar(&addRepos, "add-repo", nil, "add a repository: name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false] (repeatable)")

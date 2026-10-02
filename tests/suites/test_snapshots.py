@@ -7,6 +7,7 @@ epoch."""
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -105,6 +106,46 @@ def test_generic_state_volume_survives_stop(lux, runners, hosts):
     assert out == ["1", "2"], out
     lux.run("cancel", run_id, "--wait")
     assert lux.get(run_id)["state"] == "cancelled"
+
+
+def test_resume_resizes_a_stopped_run(lux, runners, hosts):
+    """A resume with less memory and more CPUs: the container's own cgroup
+    limits are the new ones, the state volume's data survived, and the
+    Run's spec and resume.requested event say so. A disk smaller than its
+    saved state plus headroom is kept, and the Run still resumes; one that
+    fits is applied."""
+    runners.start(hosts[0], "--usage-every", "1s")
+    show = ("echo run >> /data/count; "
+            "echo \"count=$(wc -l < /data/count) cpu=$(tr ' ' / < /sys/fs/cgroup/cpu.max) mem=$(cat /sys/fs/cgroup/memory.max)\"; "
+            "sleep 300")
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", show, resources={"cpus": 1, "memory": "1Gi"},
+                                volumes=[{"name": "data", "path": "/data", "kind": "state"}]))
+    lux.wait_output(run_id, "count=1")
+    lux.run("stop", run_id, "--wait")
+
+    p = lux.run("resume", run_id, "--cpus", "2", "--memory", "512Mi", "--disk", "100Mi", "-o", "json")
+    answer = json.loads(p.stdout)
+    assert "disk kept:" in p.stderr, p.stderr
+    rz = answer["resize"]
+    assert rz["applied"]["cpus"] == 2 and rz["applied"]["memory"] == 512 << 20 and rz["applied"]["disk"] == 20 << 30, rz
+    assert rz["disk"]["requested"] == 100 << 20 and rz["disk"]["kept"] == 20 << 30 and rz["disk"]["reason"], rz
+    out = wait_until(lambda: (lambda o: o if "count=2" in o else None)(lux.logs(run_id)), 60, 0.5,
+                     "the resumed Run never counted 2")
+    line = next(l for l in out.splitlines() if "count=2" in l)
+    assert f"cpu=200000/100000 mem={hosts[0].memory_limit(512 << 20)}" in line, line
+    run = lux.get(run_id)
+    assert run["spec"]["resources"]["cpus"] == 2 and run["spec"]["resources"]["memory"] == 512 << 20, run["spec"]
+    assert run["placements"][-1]["memoryLimit"] == hosts[0].memory_limit(512 << 20)
+    ev = lux.events(run_id, "resume.requested")[-1]["data"]["resources"]
+    assert ev["requested"] == {"cpus": 2, "memory": 512 << 20, "disk": 100 << 20}, ev
+    assert ev["disk"]["kept"] == 20 << 30, ev
+
+    lux.run("stop", run_id, "--wait")
+    rz = lux.json("resume", run_id, "--disk", "2Gi")["resize"]
+    assert "disk" not in rz and rz["applied"]["disk"] == 2 << 30, rz
+    wait_until(lambda: "count=3" in lux.logs(run_id), 60, 0.5, "the third placement never counted 3")
+    assert lux.get(run_id)["spec"]["resources"]["disk"] == 2 << 30
+    lux.run("cancel", run_id, "--wait")
 
 
 def test_ephemeral_volume_does_not(lux, runners, hosts):

@@ -99,6 +99,54 @@ on every start, so it must be idempotent.
   syncs with `POST /v1/runs/{id}/sync` (`lux sync`).
 - Attached servers start again ([Servers](#servers)).
 
+### Resizing on resume
+
+A resume can change what a stopped, lost or failed Run gets from then on
+(`resources: {cpus, memory, disk}` in the request; `lux resume --cpus
+--memory --disk`). A running Run's limits never change: stop it first.
+What a resume applies is written into the Run's spec, so `GET
+/v1/runs/{id}` shows it, the scheduler reserves it, and every later
+placement gets it.
+
+- **cpus and memory** apply, larger or smaller. They must be greater than
+  0 (422 `invalid_spec` otherwise, as at submit). They shape only the
+  container's limits and the reservation, so the runner makes a new
+  container with them (a stopped one is reused only when made the same
+  way), on the same state volumes.
+- **disk** larger applies. Smaller applies only if it is at least the
+  Run's saved state plus headroom: the peak disk use (writable layer plus
+  state volumes) of the placement that took the snapshot it resumes from,
+  plus a quarter of that and at least 1 GiB. That peak counts only once
+  the placement has reported its exit, whose final sample is taken after
+  the snapshot: a placement lost before then (its Run lost) has no final
+  measurement. Less than that floor, or with no final measurement, the
+  Run keeps its disk and resumes anyway, cpus and memory still applied: a
+  smaller limit it is already over would only stop it again
+  ([disk is measured](runspec.md#rules)).
+- The answer's `resize` and the `resume.requested` event's `resources`
+  say what was asked (`requested`), what the Run has now (`applied`),
+  and, when a disk was kept, `disk: {requested, kept, reason,
+  measuredBytes, neededBytes}`.
+- A new size is placed like a submit of that size. The snapshot's host is
+  only preferred: if the new size does not fit there, the Run goes to
+  another host of its pool that has room, or, in a provisioned pool, a new
+  host is asked for; with no host that could fit it, it waits for
+  capacity, saying which resource is short.
+- A resume of a Run already resuming is a retry of the resume it waits
+  on, and its `resources` are compared with what that resume asked for
+  (its `requested`, not what was applied):
+  - the same `cpus`, `memory` and `disk` (each present or absent alike):
+    202, with that first resume's `resize`, a disk it kept included;
+  - no `resources`, or all of them absent or `disk` 0: 202 without
+    `resize`, whatever the first resume asked;
+  - anything else, including a request where the first had none: 409
+    `not_resumable`. Invalid values (cpus or memory 0 or less, a
+    negative disk) are 422 `invalid_spec` first, as on any resume.
+  - A Run lux resumed itself, after a `drain`, `preempt` or `migrate`
+    move, counts as a resume that asked for no resources, even when an
+    earlier resume of yours resized it. While it is resuming, a resume
+    with `resources` gets 409; one without gets 202.
+
 ## Secrets
 
 The caller passes secret values with each submit and resume. lux never

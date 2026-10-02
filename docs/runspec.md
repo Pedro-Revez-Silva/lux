@@ -133,6 +133,9 @@ artifacts:
   kept: resume it with a larger limit (`lux resume <run> --disk 40Gi`, or
   `resources.disk` in the resume request), or it is stopped again. tmpfs
   mounts (with `readOnlyRoot`) count against memory, not disk.
+- **A resume can change cpus, memory and disk** of a stopped Run: cpus
+  and memory larger or smaller, disk larger, or smaller only if its saved
+  state fits with headroom ([resizing on resume](concepts.md#resizing-on-resume)).
 - **Disk is reserved only where the host says how much it has**
   (`lux-runner --disk`); otherwise each Run's limit still applies, but
   the scheduler does not add them up.

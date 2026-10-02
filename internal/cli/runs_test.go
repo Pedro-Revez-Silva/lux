@@ -66,3 +66,39 @@ func TestRunPoolFlag(t *testing.T) {
 		t.Errorf("no --pool: placement.pool was sent, want it left to the server (body %v)", body)
 	}
 }
+
+// resume --wait -o json prints the Run it waited for with the resume's
+// answer's resize, which GET does not carry.
+func TestResumeWaitKeepsResize(t *testing.T) {
+	const resize = `{"requested":{"disk":104857600},"applied":{"cpus":1,"memory":1073741824,"disk":21474836480},` +
+		`"disk":{"requested":104857600,"kept":21474836480,"reason":"its saved state used up to 1 GiB"}}`
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/v1/runs/run_1/resume":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"run_1","state":"resuming","resize":` + resize + `}`))
+		case r.Method == "GET" && r.URL.Path == "/v1/runs/run_1":
+			_, _ = w.Write([]byte(`{"id":"run_1","state":"running"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	out, err := runCLI(t, h, "-o", "json", "resume", "run_1", "--disk", "100Mi", "--wait")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		State  string          `json:"state"`
+		Resize json.RawMessage `json:"resize"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("output %q: %v", out, err)
+	}
+	var want, have any
+	_ = json.Unmarshal([]byte(resize), &want)
+	_ = json.Unmarshal(got.Resize, &have)
+	if got.State != "running" || !reflect.DeepEqual(have, want) {
+		t.Fatalf("state %q resize %s, want running with %s", got.State, got.Resize, resize)
+	}
+}
