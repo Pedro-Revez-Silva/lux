@@ -576,7 +576,9 @@ POST /v1/runs/{id}/resume
 - `push: false` works as for any repository. Pushes include the added
   repositories.
 - Every resume records a `resume.requested` event:
-  `{requestId, by, addedRepositories}`.
+  `{requestId, by, addedRepositories}`, and `addedSecrets` and
+  `removedSecrets` when it declared or removed secrets
+  ([Secrets](concepts.md#secrets)).
 - Adding needs a Run that is stopped, lost or failed. While it is
   resuming, the request gets 409.
 

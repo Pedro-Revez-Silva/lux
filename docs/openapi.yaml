@@ -1931,6 +1931,13 @@ components:
         input:
           $ref: "#/components/schemas/ResumeInput"
           description: A message for the workload once it is back.
+        removeSecrets:
+          description: "Names of the Run's secrets to remove: from this resume on the workload no longer has them and resumes no longer need them. Refused (422 invalid_spec, nothing changed): a name the Run does not have, a git or registry credential, an MCP server's or service's header secret, or a name also in secrets or the credential of a repository this resume adds."
+          items:
+            type: string
+          type:
+            - array
+            - "null"
         requestId:
           description: "Names this resume: in its resume.requested event, in the addedBy of the repositories it adds and in their git.clone events. Generated if absent."
           type: string
@@ -1938,7 +1945,7 @@ components:
           $ref: "#/components/schemas/ResumeResources"
           description: "Change what the Run gets from now on (e.g. more disk after it went over). On a Run already resuming: the same as its resume asked for, 202 with that resume's resize; absent or empty, 202; other values, 409 not_resumable."
         secrets:
-          description: "A value for every one of the Run's secrets, and for the credentials of repositories it adds: luxd never keeps them."
+          description: "A value for every one of the Run's secrets (a new value rotates it), and for the credentials of repositories it adds: luxd never keeps them. A name the Run does not have, and no added repository's credential, declares a new secret, checked as a submit's (as: env, file or none; env by default): the Run has it from this resume on, and every later resume must supply it. On a Run already resuming, the first resume's secrets stand."
           items:
             $ref: "#/components/schemas/Secret"
           type:

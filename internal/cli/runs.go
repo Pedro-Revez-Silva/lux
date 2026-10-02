@@ -870,13 +870,20 @@ func parseAddRepo(v string) (spec.Repository, error) {
 func (a *app) resumeCmd() *cobra.Command {
 	var input, secretsFrom, fromSnapshot, to, disk, memory, reqID string
 	var cpus float64
-	var secretArgs, addRepos, syncs []string
+	var secretArgs, removeSecrets, addRepos, syncs []string
 	var follow, wait bool
 	cmd := &cobra.Command{
 		Use:   "resume <run>",
 		Short: "Resume a stopped, lost or failed Run on any host",
 		Long: `Resume a Run. Its secrets must be supplied again (lux never stores them):
 from the environment (by name), a .env file (--secrets-from), or --secret NAME=VALUE.
+
+--secret NAME=VALUE for a name the Run does not have adds it as a new secret
+(an environment variable): the Run has it from this resume on, and every
+later resume must supply it. --remove-secret NAME (repeatable) removes one:
+the workload no longer has it and resumes no longer need it. A git or
+registry credential, or a secret valuing an MCP server's or service's
+header, cannot be removed.
 
 With an operator key, secrets may be left out while luxd still holds them
 (it has not restarted since they were supplied), and --to chooses the host.
@@ -904,6 +911,11 @@ resumes, and lux says why on stderr ("disk kept: ...").`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := ctxOf(cmd)
+			for _, kv := range secretArgs {
+				if k, _, _ := strings.Cut(kv, "="); slices.Contains(removeSecrets, k) {
+					return fmt.Errorf("secret %q is both supplied and removed", k)
+				}
+			}
 			var repos []spec.Repository
 			for _, v := range addRepos {
 				r, err := parseAddRepo(v)
@@ -928,12 +940,16 @@ resumes, and lux says why on stderr ("disk kept: ...").`,
 			}
 			for _, kv := range secretArgs {
 				k, v, _ := strings.Cut(kv, "=")
-				for i := range secrets {
-					if secrets[i].Name == k {
-						secrets[i].Value = v
-					}
+				i := slices.IndexFunc(secrets, func(s spec.Secret) bool { return s.Name == k })
+				if i < 0 {
+					// A name the Run lacks: the resume declares it (env).
+					secrets = append(secrets, spec.Secret{Name: k})
+					i = len(secrets) - 1
 				}
+				secrets[i].Value = v
 			}
+			// A removed secret is not looked for, nor sent.
+			secrets = slices.DeleteFunc(secrets, func(s spec.Secret) bool { return slices.Contains(removeSecrets, s.Name) })
 			if err := fillSecrets(secrets, secretsFrom); err != nil {
 				return err
 			}
@@ -941,6 +957,9 @@ resumes, and lux says why on stderr ("disk kept: ...").`,
 			// the values luxd still holds.
 			secrets = slices.DeleteFunc(secrets, func(s spec.Secret) bool { return s.Value == "" })
 			req := map[string]any{"secrets": secrets}
+			if len(removeSecrets) > 0 {
+				req["removeSecrets"] = removeSecrets
+			}
 			if input != "" {
 				req["input"] = map[string]string{"text": input}
 			}
@@ -1011,7 +1030,8 @@ resumes, and lux says why on stderr ("disk kept: ...").`,
 	}
 	cmd.Flags().StringVar(&input, "input", "", "message to deliver once it is running")
 	cmd.Flags().StringVar(&secretsFrom, "secrets-from", "", ".env file supplying secret values")
-	cmd.Flags().StringArrayVar(&secretArgs, "secret", nil, "NAME=VALUE (repeatable)")
+	cmd.Flags().StringArrayVar(&secretArgs, "secret", nil, "NAME=VALUE (repeatable); a name the Run lacks adds it as an env secret")
+	cmd.Flags().StringArrayVar(&removeSecrets, "remove-secret", nil, "NAME: remove one of the Run's secrets from now on (repeatable)")
 	cmd.Flags().StringVar(&fromSnapshot, "from-snapshot", "", "resume from an older snapshot")
 	cmd.Flags().StringVar(&to, "to", "", "operators: resume on this host (id or name)")
 	cmd.Flags().StringVar(&disk, "disk", "", "a new disk limit from now on (e.g. 40Gi); a smaller one only if its saved state fits with headroom")

@@ -35,7 +35,8 @@ for target in $ARCHES; do
 done
 wanted() { [[ " $ARCHES " == *" $1 "* ]]; }
 # validate: `luxd validate` checks a configuration as serve would, connecting to nothing.
-FEATURES=(validate)
+# resume-secrets: a resume declares secrets the Run lacks (secrets) and removes them (removeSecrets).
+FEATURES=(validate resume-secrets)
 
 rm -rf "$DIST"
 mkdir -p "$DIST"

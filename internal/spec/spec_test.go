@@ -3,6 +3,7 @@ package spec
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -322,6 +323,110 @@ func TestAddRepositoriesSharingANewCredential(t *testing.T) {
 	}
 	if len(added) != 1 || added[0] != "TOK" || !s.runnerOnly("TOK") {
 		t.Fatalf("added %v, secrets %+v", added, s.Secrets)
+	}
+}
+
+// ResumeSecrets declares new names (as at submit, without their values)
+// and removes others; a refused change leaves the spec as it was.
+func TestResumeSecrets(t *testing.T) {
+	stored := func() RunSpec {
+		var s RunSpec
+		if err := yaml.Unmarshal([]byte(example), &s); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Normalize(BuiltinDefaults); err != nil {
+			t.Fatal(err)
+		}
+		s, _, _ = s.SplitSecrets()
+		return s
+	}
+	s := stored()
+	declared, err := s.ResumeSecrets([]Secret{
+		{Name: "ANTHROPIC_API_KEY", Value: "sk-2"}, // the Run has it: a rotation
+		{Name: "EXTRA", Value: "x-1"},
+		{Name: "CONF", Value: "c-1", As: "file", Path: "/home/agent/.conf"},
+	}, nil, nil, BuiltinDefaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(declared, []string{"EXTRA", "CONF"}) {
+		t.Fatalf("declared %v", declared)
+	}
+	want := []Secret{{Name: "ANTHROPIC_API_KEY", As: "env"}, {Name: "GITHUB_TOKEN", As: "none", RunnerOnly: true},
+		{Name: "EXTRA", As: "env"}, {Name: "CONF", As: "file", Path: "/home/agent/.conf"}}
+	if !reflect.DeepEqual(s.Secrets, want) {
+		t.Fatalf("secrets %+v", s.Secrets)
+	}
+	if _, err := s.ResumeSecrets(nil, []string{"EXTRA", "ANTHROPIC_API_KEY"}, nil, BuiltinDefaults); err != nil {
+		t.Fatal(err)
+	}
+	want = []Secret{want[1], want[3]}
+	if !reflect.DeepEqual(s.Secrets, want) {
+		t.Fatalf("after removal %+v", s.Secrets)
+	}
+
+	for name, c := range map[string]struct {
+		supplied []Secret
+		remove   []string
+		repos    []Repository
+		problem  string
+	}{
+		"invalid name":         {supplied: []Secret{{Name: "1X", Value: "v"}}, problem: `invalid name "1X"`},
+		"reserved":             {supplied: []Secret{{Name: "lux-x", Value: "v", As: "none"}}, problem: "prefix is reserved"},
+		"not an env name":      {supplied: []Secret{{Name: "a.b", Value: "v"}}, problem: "not a valid environment variable name"},
+		"file without path":    {supplied: []Secret{{Name: "F", Value: "v", As: "file"}}, problem: "absolute path"},
+		"bad as":               {supplied: []Secret{{Name: "F", Value: "v", As: "disk"}}, problem: "as must be env, file or none"},
+		"duplicate":            {supplied: []Secret{{Name: "N", Value: "v"}, {Name: "N", Value: "w"}}, problem: `duplicate "N"`},
+		"remove unknown":       {remove: []string{"NOPE"}, problem: "no such secret"},
+		"remove git cred":      {remove: []string{"GITHUB_TOKEN"}, problem: "is a git credential"},
+		"remove and supply":    {supplied: []Secret{{Name: "ANTHROPIC_API_KEY", Value: "v"}}, remove: []string{"ANTHROPIC_API_KEY"}, problem: "also in secrets"},
+		"remove added's cred":  {remove: []string{"ANTHROPIC_API_KEY"}, repos: []Repository{{Name: "w", Credential: "ANTHROPIC_API_KEY"}}, problem: "repository this resume adds"},
+		"remove twice":         {remove: []string{"ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"}, problem: `removeSecrets: duplicate`},
+		"declare and validate": {supplied: []Secret{{Name: "OK", Value: "v"}, {Name: "1X", Value: "v"}}, problem: `invalid name "1X"`},
+	} {
+		s := stored()
+		before := stored()
+		if _, err := s.ResumeSecrets(c.supplied, c.remove, c.repos, BuiltinDefaults); err == nil || !strings.Contains(err.Error(), c.problem) {
+			t.Errorf("%s: want %q, got %v", name, c.problem, err)
+		}
+		if !reflect.DeepEqual(s, before) {
+			t.Errorf("%s: a refused change changed the spec: %+v", name, s.Secrets)
+		}
+	}
+}
+
+// A direct MCP server's header secret cannot be removed; a declared as: none
+// secret, whose name need not be an env name, can be later.
+func TestResumeSecretsMCPHeaderAndNone(t *testing.T) {
+	s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"},
+		MCPServers: []MCPServer{{Name: "a", URL: "https://m.example/", Headers: []MCPHeader{{Name: "Authorization", Secret: "MCP"}}}}},
+		Secrets: []Secret{{Name: "MCP", Value: "v"}}, Network: Network{Unrestricted: true},
+		Volumes: []Volume{{Name: "workspace", Path: "/workspace"}}}
+	if err := s.Normalize(BuiltinDefaults); err != nil {
+		t.Fatal(err)
+	}
+	s, _, _ = s.SplitSecrets()
+	before := s
+	before.Secrets = slices.Clone(s.Secrets)
+	if _, err := s.ResumeSecrets(nil, []string{"MCP"}, nil, BuiltinDefaults); err == nil || !strings.Contains(err.Error(), `"MCP" values an MCP server's or service's header`) {
+		t.Fatalf("remove a direct MCP header's secret: %v", err)
+	}
+	if !reflect.DeepEqual(s, before) {
+		t.Fatalf("a refused removal changed the spec: %+v", s.Secrets)
+	}
+
+	declared, err := s.ResumeSecrets([]Secret{{Name: "MCP", Value: "v"}, {Name: "a.b", Value: "n-1", As: "none"}}, nil, nil, BuiltinDefaults)
+	if err != nil || !reflect.DeepEqual(declared, []string{"a.b"}) {
+		t.Fatalf("declare a.b as none: %v %v", declared, err)
+	}
+	if i := slices.IndexFunc(s.Secrets, func(sec Secret) bool { return sec.Name == "a.b" }); i < 0 || s.Secrets[i].As != "none" || s.Secrets[i].Value != "" {
+		t.Fatalf("a.b stored as %+v", s.Secrets)
+	}
+	if _, err := s.ResumeSecrets([]Secret{{Name: "MCP", Value: "v"}}, []string{"a.b"}, nil, BuiltinDefaults); err != nil {
+		t.Fatalf("remove a.b: %v", err)
+	}
+	if !reflect.DeepEqual(s.Secrets, before.Secrets) {
+		t.Fatalf("after removing a.b %+v, want %+v", s.Secrets, before.Secrets)
 	}
 }
 

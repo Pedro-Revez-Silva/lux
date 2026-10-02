@@ -511,36 +511,11 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	seen := map[string]bool{}
 	for i := range s.Secrets {
 		sec := &s.Secrets[i]
-		if !nameRe.MatchString(sec.Name) {
-			fail("secrets[%d]: invalid name %q", i, sec.Name)
-		}
 		if seen[sec.Name] {
 			fail("secrets: duplicate %q", sec.Name)
 		}
-		if strings.HasPrefix(sec.Name, ReservedSecretPrefix) {
-			fail("secrets[%d]: %q: the %s prefix is reserved", i, sec.Name, ReservedSecretPrefix)
-		}
 		seen[sec.Name] = true
-		if sec.As == "" {
-			// Used only as git credentials or MCP headers: nowhere else.
-			sec.As = "env"
-			if s.onlyCredential(sec.Name) {
-				sec.As = "none"
-			}
-		}
-		switch sec.As {
-		case "none":
-		case "env":
-			if !envRe.MatchString(sec.Name) {
-				fail("secrets[%d]: %q is not a valid environment variable name", i, sec.Name)
-			}
-		case "file":
-			if !path.IsAbs(sec.Path) {
-				fail("secrets[%d]: file secrets need an absolute path", i)
-			}
-		default:
-			fail("secrets[%d].as must be env, file or none", i)
-		}
+		errs = append(errs, s.normalizeSecret(fmt.Sprintf("secrets[%d]", i), sec)...)
 	}
 
 	regs := map[string]bool{}
@@ -754,6 +729,106 @@ func (s *RunSpec) DropRepository(name, requestID string) bool {
 	n := len(s.Git.Repositories)
 	s.Git.Repositories = slices.DeleteFunc(s.Git.Repositories, func(r Repository) bool { return r.Name == name && r.AddedBy == requestID })
 	return len(s.Git.Repositories) < n
+}
+
+// normalizeSecret checks one secret's name and placement (at names it in
+// the messages) and defaults its as: env, or none for a secret used only
+// as a credential or header. Uniqueness is the caller's.
+func (s *RunSpec) normalizeSecret(at string, sec *Secret) []string {
+	var errs []string
+	if !nameRe.MatchString(sec.Name) {
+		errs = append(errs, fmt.Sprintf("%s: invalid name %q", at, sec.Name))
+	}
+	if strings.HasPrefix(sec.Name, ReservedSecretPrefix) {
+		errs = append(errs, fmt.Sprintf("%s: %q: the %s prefix is reserved", at, sec.Name, ReservedSecretPrefix))
+	}
+	if sec.As == "" {
+		sec.As = "env"
+		if s.onlyCredential(sec.Name) {
+			sec.As = "none"
+		}
+	}
+	switch sec.As {
+	case "none":
+	case "env":
+		if !envRe.MatchString(sec.Name) {
+			errs = append(errs, fmt.Sprintf("%s: %q is not a valid environment variable name", at, sec.Name))
+		}
+	case "file":
+		if !path.IsAbs(sec.Path) {
+			errs = append(errs, fmt.Sprintf("%s: %q: file secrets need an absolute path", at, sec.Name))
+		}
+	default:
+		errs = append(errs, fmt.Sprintf("%s: %q: as must be env, file or none", at, sec.Name))
+	}
+	return errs
+}
+
+// ResumeSecrets applies a resume's secrets to a stored (normalized) spec,
+// after AddRepositories (whose new credentials are then the spec's, not
+// declared here). Each supplied secret whose name the spec lacks is
+// declared, checked as at submit and stored without its value; each name
+// in remove leaves the spec. Removing a name the spec lacks, a credential
+// (git, registry or header), a name also supplied, or the credential of a
+// repository in repos (those this resume adds) is refused. Returns the
+// names declared; on any problem, the spec is unchanged.
+func (s *RunSpec) ResumeSecrets(supplied []Secret, remove []string, repos []Repository, d Defaults) ([]string, error) {
+	has := map[string]bool{}
+	for _, sec := range s.Secrets {
+		has[sec.Name] = true
+	}
+	var errs, declared []string
+	var adding []Secret
+	seen := map[string]bool{}
+	for i, sec := range supplied {
+		if has[sec.Name] {
+			continue
+		}
+		if seen[sec.Name] {
+			errs = append(errs, fmt.Sprintf("secrets: duplicate %q", sec.Name))
+			continue
+		}
+		seen[sec.Name] = true
+		n := Secret{Name: sec.Name, As: sec.As, Path: sec.Path}
+		errs = append(errs, s.normalizeSecret(fmt.Sprintf("secrets[%d]", i), &n)...)
+		adding = append(adding, n)
+		declared = append(declared, n.Name)
+	}
+	removing := map[string]bool{}
+	for _, name := range remove {
+		at := fmt.Sprintf("removeSecrets: %q", name)
+		switch {
+		case removing[name]:
+			errs = append(errs, fmt.Sprintf("removeSecrets: duplicate %q", name))
+		case slices.ContainsFunc(supplied, func(sec Secret) bool { return sec.Name == name }):
+			errs = append(errs, at+" is also in secrets: supply it or remove it, not both")
+		case slices.ContainsFunc(repos, func(r Repository) bool { return r.Credential == name }):
+			errs = append(errs, at+" is the credential of a repository this resume adds")
+		case !has[name]:
+			errs = append(errs, at+": the Run has no such secret")
+		case s.isGitCredential(name):
+			errs = append(errs, at+" is a git credential: its repository needs it")
+		case s.isRegistryCredential(name):
+			errs = append(errs, at+" is a registry credential: image.registryAuth needs it")
+		case s.onlyCredential(name):
+			errs = append(errs, at+" values an MCP server's or service's header")
+		}
+		removing[name] = true
+	}
+	if len(errs) > 0 {
+		return nil, &ValidationError{Problems: errs}
+	}
+	if len(adding) == 0 && len(removing) == 0 {
+		return nil, nil
+	}
+	next := *s
+	next.Secrets = slices.DeleteFunc(slices.Clone(s.Secrets), func(sec Secret) bool { return removing[sec.Name] })
+	next.Secrets = append(next.Secrets, adding...)
+	if err := next.Normalize(d); err != nil {
+		return nil, err
+	}
+	*s = next
+	return declared, nil
 }
 
 // headerRe is an HTTP header name: RFC 9110 token characters.

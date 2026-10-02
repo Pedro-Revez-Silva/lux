@@ -104,6 +104,55 @@ def test_resume_requires_the_secrets_and_can_rotate_them(lux, runners, hosts):
     lux.run("cancel", run_id)
 
 
+def test_resume_declares_and_removes_secrets(lux, runners, hosts):
+    """A resume's value for a name the Run lacks declares it (env): the
+    workload has it from then on, output redacts it, and later resumes need
+    it. --remove-secret takes it out again: no longer needed, no longer set."""
+    runners.start(hosts[0])
+    extra = "extra-value-333"
+    script = 'echo "len=${#EXTRA} extra=${EXTRA-unset}"; sleep 300'
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", script, secrets=[{"name": "TOKEN", "value": TOKEN}]))
+    lux.wait_output(run_id, "len=0 extra=unset")
+    lux.run("stop", run_id, "--wait")
+
+    lux.run("resume", run_id, "--secret", f"TOKEN={TOKEN}", "--secret", f"EXTRA={extra}")
+    out = lux.wait_output(run_id, f"len={len(extra)} ")
+    assert f"len={len(extra)} extra=[REDACTED:EXTRA]" in out, out
+    assert extra not in out, out
+    assert sorted(s["name"] for s in lux.get(run_id)["secrets"]) == ["EXTRA", "TOKEN"]
+    lux.run("stop", run_id, "--wait")
+
+    with pytest.raises(CLIError) as e:
+        lux.run("resume", run_id, "--secret", f"TOKEN={TOKEN}")
+    assert "EXTRA" in e.value.stderr, e.value.stderr
+    assert lux.get(run_id)["state"] == "stopped"
+
+    lux.run("resume", run_id, "--secret", f"TOKEN={TOKEN}", "--remove-secret", "EXTRA")
+    wait_until(lambda: lux.logs(run_id).count("len=0 extra=unset") == 2, 60, 0.5, "the workload still has EXTRA")
+    run = lux.get(run_id)
+    assert [s["name"] for s in run["secrets"]] == ["TOKEN"], run["secrets"]
+    assert [s["name"] for s in run["spec"]["secrets"]] == ["TOKEN"], run["spec"]["secrets"]
+    lux.run("cancel", run_id)
+
+
+def test_resume_cannot_remove_a_git_credential(lux, runners, hosts, git_server):
+    """A git credential stays while its repository does: removing it is
+    refused, and the Run is left as it was."""
+    git_server.create("cred", {"a.txt": "x\n"})
+    runners.start(hosts[0])
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "sleep 300",
+                                volumes=[{"name": "workspace", "path": "/workspace", "kind": "state"}],
+                                git={"repositories": [{"name": "cred", "url": git_server.url("cred"), "credential": "GIT_TOKEN"}]},
+                                secrets=[{"name": "GIT_TOKEN", "value": git_server.token}]))
+    lux.wait_state(run_id, "running")
+    lux.run("stop", run_id, "--wait")
+    with pytest.raises(CLIError) as e:
+        lux.run("resume", run_id, "--remove-secret", "GIT_TOKEN")
+    assert e.value.code == 4 and "GIT_TOKEN" in e.value.stderr and "credential" in e.value.stderr, e.value.stderr
+    run = lux.get(run_id)
+    assert run["state"] == "stopped" and [s["name"] for s in run["secrets"]] == ["GIT_TOKEN"], run
+
+
 def test_secrets_lost_with_luxd_stop_the_run(env, lux, runners, hosts):
     """luxd keeps secret values only in memory. A queued Run whose values a
     restarted luxd no longer has stops (after a grace period), resumable

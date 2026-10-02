@@ -92,7 +92,8 @@ on every start, so it must be idempotent.
 - The adapter's **resume** path runs with the stored session id. An agent
   reloads its conversation from its transcript on the restored volume.
 - A resume must supply the Run's **secrets** again, because lux never stores
-  secret values. This also means a resume can rotate credentials.
+  secret values. This also means a resume can rotate credentials, add
+  secrets and remove them ([Secrets](#secrets)).
 - A resume can **sync** repositories (`sync: [{repo, ref}]`, `lux resume
   --sync app=main`): their restored checkouts move to the ref's commit
   before init ([the RunSpec](runspec.md#syncing-checkouts)). A running Run
@@ -169,6 +170,24 @@ stores them:
   not redacted.
 - **A resume needs every secret again**, and is refused before scheduling
   if one is missing. A resume can supply new values, which rotates them.
+- **A resume can add a secret**: a `secrets` entry whose name the Run does
+  not have (and that is not the credential of a repository the same resume
+  adds) declares it, checked as at submit (`as` env, file or none, env by
+  default). From that resume on the workload gets it, output redacts it,
+  and every later resume must supply it. A problem with it is 422
+  `invalid_spec`, and nothing changes.
+- **A resume can remove a secret**: `removeSecrets: [name]` (`lux resume
+  --remove-secret`) takes it out of the Run, so the workload no longer has
+  it and later resumes no longer need it. Refused (422 `invalid_spec`,
+  nothing changed): a name the Run does not have, a git or registry
+  credential, a secret valuing an MCP server's or service's header, and a
+  name also in the same request's `secrets` or the credential of a
+  repository it adds. An operator's resume from the values luxd holds can
+  remove, but adding needs values.
+- A resume of a Run already resuming changes no secrets: the first
+  resume's stand, and a retry is answered 202.
+- The `resume.requested` event lists the names as `addedSecrets` and
+  `removedSecrets`.
 - **Git credentials** are used by the runner only and never enter the
   container (see [the RunSpec](runspec.md#git)).
 - **What lux does not do:** it does not scan state volumes. A secret that

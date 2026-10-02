@@ -72,7 +72,7 @@ JPEG, WebP or GIF). See [images](adapters.md#images).
 
 ```bash
 lux stop <run> [--wait]         # graceful; snapshot; resumable
-lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--from-snapshot ID] [--cpus N] [--memory SIZE] [--disk SIZE] [--to HOST]
+lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--remove-secret NAME] [--from-snapshot ID] [--cpus N] [--memory SIZE] [--disk SIZE] [--to HOST]
            [--add-repo name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]]... [--request-id ID]
            [--sync repo=ref]...  # move restored checkouts to ref before init
 lux sync <run> repo=ref... [--wait] [--request-id ID]   # a running Run's checkouts
@@ -83,6 +83,17 @@ lux snapshots <run>             # where each snapshot lives
 A resume needs the Run's secrets again. lux looks for each one in
 `--secret`, then `--secrets-from`, then an environment variable of the same
 name.
+
+`--secret NAME=VALUE` for a name the Run does not have adds a secret (an
+environment variable) from this resume on; later resumes need it too.
+`--remove-secret NAME` (repeatable) removes one: the workload no longer has
+it, and resumes no longer need it. A git or registry credential, or a
+secret valuing a header, cannot be removed (422).
+
+```bash
+lux resume run_x --secret GIT_TOKEN=… --secret LLM_PROXY_KEY=…   # adds LLM_PROXY_KEY
+lux resume run_x --secret GIT_TOKEN=… --remove-secret LLM_PROXY_KEY
+```
 
 `--cpus`, `--memory` and `--disk` change what the Run gets from now on
 ([resizing on resume](concepts.md#resizing-on-resume)): cpus and memory
