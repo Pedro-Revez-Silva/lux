@@ -105,7 +105,9 @@ func (p *placement) runningStatus() proto.Status {
 	return proto.Status{State: "running", Times: p.times(), MemoryLimit: limit}
 }
 
-// liveState is the state reported in heartbeats; "" when not live.
+// liveState is the state reported in heartbeats; "" when not live. An
+// exited placement is still live until finish has reported it: luxd counts
+// it live until then, and reaps its lease if the snapshot outlasts it.
 func (p *placement) liveState() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -117,8 +119,18 @@ func (p *placement) liveState() string {
 		return "starting"
 	case "running", "stopping":
 		return p.phase
+	case "exited":
+		return "stopping"
 	}
 	return ""
+}
+
+// finishing: the workload has ended and the placement is snapshotting or
+// reporting it.
+func (p *placement) finishing() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.phase == "exited"
 }
 
 func (p *placement) markStale() {
@@ -309,8 +321,7 @@ func (p *placement) run(ctx context.Context) {
 	if sp.Sandbox.NestedContainers {
 		p.env = workloadEnv(sp, info)
 	}
-	prevCtr, err := p.stopPrevious(startCtx)
-	if err != nil {
+	if err := p.stopPrevious(startCtx); err != nil {
 		fail("volumes", err)
 		return
 	}
@@ -341,7 +352,7 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 
-	err = p.createContainer(ctx, sp, image, info.ID, prevCtr, network, a)
+	err = p.createContainer(ctx, sp, image, info.ID, network, a)
 	unpin()
 	if err != nil {
 		fail("container", err)
@@ -520,23 +531,21 @@ func (p *placement) finishWithoutContainer(ctx context.Context, state, msg strin
 // ---- volumes ----------------------------------------------------------------
 
 // stopPrevious stops an earlier placement's container if it still runs, so
-// nothing writes to the volumes while they are emptied or restored, and
-// returns its state for createContainer to weigh reusing it. A container
-// that cannot be stopped fails the placement.
-func (p *placement) stopPrevious(ctx context.Context) (podman.ContainerState, error) {
+// nothing writes to the volumes while they are emptied or restored. A
+// container that cannot be stopped fails the placement.
+func (p *placement) stopPrevious(ctx context.Context) error {
 	name := containerName(p.runID)
 	st, err := p.r.pm.Inspect(ctx, name)
 	if err != nil || !st.Running {
-		return st, err
+		return err
 	}
 	if err := p.r.pm.Kill(ctx, name, "KILL"); err != nil {
-		return st, fmt.Errorf("stop previous container: %w", err)
+		return fmt.Errorf("stop previous container: %w", err)
 	}
 	if _, err := p.r.pm.Wait(ctx, name); err != nil {
-		return st, fmt.Errorf("wait for previous container: %w", err)
+		return fmt.Errorf("wait for previous container: %w", err)
 	}
-	st.Running = false
-	return st, nil
+	return nil
 }
 
 func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, image *os.Root, resume *proto.ResumeInfo) error {
@@ -702,14 +711,20 @@ func hardening(sp spec.RunSpec) []string {
 	)
 }
 
-// createContainer makes the placement's container, or reuses prev (an
-// earlier placement's, stopped) for a same-host resume made the same way:
-// the same image and the same create arguments, which the lux.spec label
-// hashes. The shim config is rewritten either way.
-func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image, imageID string, prev podman.ContainerState, network podman.Network, a *proto.Assign) error {
+// createContainer makes the placement's container, or reuses an earlier
+// placement's (stopped) for a same-host resume made the same way: the same
+// image and the same create arguments, which the lux.spec label hashes.
+// The shim config is rewritten either way. It inspects the container only
+// now: prepareVolumes, restoring a state volume, removes it (-f), and with
+// it a stopped container that mounts it.
+func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image, imageID string, network podman.Network, a *proto.Assign) error {
 	name := containerName(p.runID)
 	args := p.createArgs(sp, image, network)
 	hash := argsHash(args)
+	prev, err := p.r.pm.Inspect(ctx, name)
+	if err != nil {
+		return err
+	}
 	if prev.Exists {
 		if a.Resume != nil && imageID != "" && imageID == prev.ImageID && prev.Labels["lux.spec"] == hash {
 			if err := p.writeShimConfig(ctx, sp); err != nil {

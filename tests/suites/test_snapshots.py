@@ -7,6 +7,7 @@ epoch."""
 
 from __future__ import annotations
 
+import time
 
 import pytest
 
@@ -157,6 +158,115 @@ def test_lost_host_and_resume_from_the_previous_snapshot(env, lux, runners, host
         assert run["placements"][-1]["hostName"] == b.name
     finally:
         a.unpause()
+
+
+# A podman in front of the host's own (first on PATH, so the runner runs
+# it) whose `volume export` first touches /tmp/lux-idlefix-exporting, then
+# waits `secs` seconds or until /tmp/lux-idlefix-release exists. Longer
+# than the harness's 10s lease, it makes a snapshot outlast the lease.
+SLOW_EXPORT = """#!/bin/sh
+if [ "$1 $2" = "volume export" ]; then
+  touch /tmp/lux-idlefix-exporting
+  n=0
+  while [ ! -e /tmp/lux-idlefix-release ] && [ $n -lt {ticks} ]; do sleep 0.2; n=$((n+1)); done
+fi
+exec /usr/bin/podman "$@"
+"""
+
+
+def slow_volume_export(host, secs: int):
+    host.exec("sh", "-c", "rm -f /tmp/lux-idlefix-exporting /tmp/lux-idlefix-release; "
+              "cat > /usr/local/bin/podman && chmod 755 /usr/local/bin/podman",
+              input=SLOW_EXPORT.replace("{ticks}", str(secs * 5)).encode())
+
+
+def normal_volume_export(host):
+    host.exec("sh", "-c", "touch /tmp/lux-idlefix-release; rm -f /usr/local/bin/podman", check=False)
+
+
+def exporting(host) -> bool:
+    return host.exec("sh", "-c", "test -e /tmp/lux-idlefix-exporting && echo y", check=False).strip() == "y"
+
+
+def counting_spec() -> dict:
+    return generic(ALPINE_IMAGE, "sh", "-c", "echo run >> /data/count; wc -l < /data/count; sleep 300",
+                   volumes=[{"name": "data", "path": "/data", "kind": "state"}])
+
+
+def test_snapshot_longer_than_the_lease_is_not_lost(lux, runners, hosts):
+    """A stop whose snapshot takes twice the lease, on a host that keeps
+    heartbeating: the Run ends stopped, with that snapshot recorded."""
+    a = hosts[0]
+    runners.start(a)
+    run_id = lux.submit(counting_spec())
+    lux.wait_output(run_id, "1")
+    slow_volume_export(a, 20)
+    try:
+        started = time.monotonic()
+        lux.run("stop", run_id, "--wait", check=False)
+        run = lux.get(run_id)
+        assert run["state"] == "stopped", run
+        assert exporting(a) and time.monotonic() - started >= 20, "the snapshot was not slowed down"
+        snaps = lux.json("snapshots", run_id)
+        assert [s["epoch"] for s in snaps] == [1], snaps
+        assert run["snapshotId"] == snaps[0]["id"], run
+    finally:
+        normal_volume_export(a)
+    lux.run("resume", run_id, "--wait")
+    wait_until(lambda: lux.logs(run_id).split()[-1:] == ["2"], 30, 0.5, "second placement never counted 2")
+    lux.run("cancel", run_id, "--wait")
+
+
+def test_host_dead_mid_snapshot_is_still_lost(lux, runners, hosts):
+    """A host whose runner dies while it snapshots a stopping Run stops
+    renewing its lease: the Run is lost, with no snapshot recorded."""
+    a = hosts[0]
+    runners.start(a)
+    run_id = lux.submit(counting_spec())
+    lux.wait_output(run_id, "1")
+    slow_volume_export(a, 600)
+    try:
+        lux.run("stop", run_id)
+        wait_until(lambda: exporting(a), 60, 0.5, "the snapshot never started")
+        runners.stop(a, "KILL")
+        run = lux.wait_state(run_id, "lost", timeout=60)
+        assert "heartbeat" in run["stateReason"], run
+        assert lux.json("snapshots", run_id) == [], "a snapshot was recorded"
+    finally:
+        normal_volume_export(a)
+
+
+def test_resume_after_lost_on_the_same_host(lux, runners, hosts):
+    """A Run lost on a host that keeps its stopped container, resumed there:
+    restoring its state volume removes that container, so a new one is
+    made, and the Run starts from the snapshot before the lost placement."""
+    a = hosts[0]
+    runners.start(a)
+    run_id = lux.submit(counting_spec())
+    lux.wait_output(run_id, "1")
+    lux.run("stop", run_id, "--wait")
+    lux.wait_uploaded(run_id)
+    lux.run("resume", run_id, "--wait")
+    wait_until(lambda: lux.logs(run_id).split()[-1:] == ["2"], 30, 0.5, "second placement never counted 2")
+
+    # The runner dies; its container runs on until the runner, back after
+    # luxd gave up on the placement, fences it off and kills it.
+    runners.stop(a, "KILL")
+    run = lux.wait_state(run_id, "lost", timeout=60)
+    assert "heartbeat" in run["stateReason"], run
+    runners.start(a)
+    wait_until(lambda: a.exec("podman", "ps", "-a", "--filter", f"name=lux-{run_id}",
+                              "--format", "{{.State}}").strip() == "exited",
+               60, 0.5, "the lost placement's container was not stopped")
+
+    lux.run("resume", run_id, "--wait")
+    run = lux.get(run_id)
+    assert run["state"] == "running" and run["epoch"] == 3, run
+    # From the snapshot of epoch 1: the lost placement's count is gone.
+    wait_until(lambda: lux.logs(run_id).split()[-1:] == ["2"], 30, 0.5, "third placement never counted 2")
+    ev3 = [e["type"] for e in lux.json("events", run_id) if e.get("epoch") == 3]
+    assert "volumes.restored" in ev3 and "container.reused" not in ev3, ev3
+    lux.run("cancel", run_id, "--wait")
 
 
 

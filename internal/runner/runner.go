@@ -301,7 +301,10 @@ func (r *Runner) onWelcome(ctx context.Context, w proto.Welcome) {
 	r.mu.Lock()
 	var stale []*placement
 	for _, p := range r.placements {
-		if p.liveState() == "" {
+		// A finishing placement luxd no longer lists was reported or lost
+		// meanwhile (a lost one's next report is nacked stale): fencing it
+		// here would skip the upload of a snapshot luxd recorded.
+		if p.liveState() == "" || p.finishing() {
 			continue
 		}
 		if e, ok := want[p.runID]; !ok || e != p.epoch {
@@ -420,7 +423,7 @@ func (r *Runner) assign(ctx context.Context, a proto.Assign) {
 	p := newPlacement(r, a)
 	r.placements[a.RunID] = p
 	r.mu.Unlock()
-	if old != nil && old.liveState() != "" {
+	if old != nil && old.liveState() != "" && !old.finishing() {
 		// The same Run again with a newer epoch while the old one still
 		// runs here: luxd gave up on the old one.
 		old.markStale()
@@ -572,6 +575,11 @@ func (r *Runner) usageLoop(ctx context.Context) {
 		}
 		var wg sync.WaitGroup
 		for _, p := range r.livePlacements() {
+			// A finishing one was sampled by finish, and its volumes are
+			// being exported.
+			if p.finishing() {
+				continue
+			}
 			wg.Go(func() { p.sampleSlow(ctx) })
 		}
 		wg.Wait()
