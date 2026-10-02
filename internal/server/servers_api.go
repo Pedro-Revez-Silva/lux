@@ -106,14 +106,18 @@ func checkLabels(labels map[string]string) error {
 var hostLabelRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // checkHostname turns an owner's hostname into the host stored: the part
-// before the preview domain. It must be under the domain, at least one
-// label of its own, each a DNS label, 253 bytes at most in all.
+// before the preview domain. A single label is relative (the domain is
+// appended); a dotted name must already be under the domain. 253 bytes at
+// most in all.
 func (s *Server) checkHostname(hostname string) (string, error) {
 	domain := strings.ToLower(strings.TrimSuffix(s.cfg.Preview.Domain, "."))
 	if domain == "" {
 		return "", errf(http.StatusUnprocessableEntity, "invalid_server", "hostname: previews are not configured on this lux (preview.domain)")
 	}
 	h := strings.ToLower(strings.TrimSuffix(hostname, "."))
+	if !strings.Contains(hostname, ".") {
+		h += "." + domain
+	}
 	rel, ok := strings.CutSuffix(h, "."+domain)
 	if !ok || rel == "" || len(h) > 253 {
 		return "", errf(http.StatusUnprocessableEntity, "invalid_server", "hostname: %q is not under the preview domain %s", hostname, domain)
@@ -171,7 +175,7 @@ type CreateServerInput struct {
 	Env         map[string]string `json:"env,omitempty"`
 	AfterSync   []string          `json:"afterSync,omitempty" doc:"argv run before the command when it starts after a repository sync."`
 	Labels      map[string]string `json:"labels,omitempty"`
-	Hostname    string            `json:"hostname,omitempty" doc:"Its preview host name: under the preview domain (any number of labels), unique. Default: <name>-<8 characters of its id>.<domain>."`
+	Hostname    string            `json:"hostname,omitempty" doc:"Its unique preview host name: a full name under the preview domain (any number of labels), or one DNS label without a dot (1-63 characters), to which lux appends the domain. Default: <name>-<8 characters of its id>.<domain>."`
 	Wake        string            `json:"wake,omitempty" enum:"request,never" doc:"request: a signed-in request while no running Run serves it asks its owner for one (server.wake_requested on GET /v1/events). Default never."`
 	IdleAfter   *spec.Duration    `json:"idleAfter,omitempty" doc:"server.idle after this long without a request while its Run runs (default 10m; 0: never)."`
 	WakeTimeout *spec.Duration    `json:"wakeTimeout,omitempty" doc:"How long a wake waits for a Run to make it ready before its page says no answer (default 5m)."`
@@ -597,7 +601,7 @@ type listTenantServersInput struct {
 	Label    []string `query:"label,explode" doc:"Only servers with this label (key=value); repeat to require several."`
 	Wake     string   `query:"wake" enum:"request,never," doc:"Only servers that wake so."`
 	Run      string   `query:"run" doc:"Only servers attached to this Run."`
-	Hostname string   `query:"hostname" doc:"Only the server of this hostname."`
+	Hostname string   `query:"hostname" doc:"Only the server of this hostname: a full name under the preview domain or one relative DNS label."`
 	Limit    int      `query:"limit" doc:"At most this many, newest first, 1 to 1000 (default 500)."`
 }
 

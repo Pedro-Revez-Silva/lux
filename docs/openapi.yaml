@@ -319,7 +319,7 @@ components:
               type: string
             - type: number
         hostname:
-          description: "Its preview host name: under the preview domain (any number of labels), unique. Default: <name>-<8 characters of its id>.<domain>."
+          description: "Its unique preview host name: a full name under the preview domain (any number of labels), or one DNS label without a dot (1-63 characters), to which lux appends the domain. Default: <name>-<8 characters of its id>.<domain>."
           type: string
         idleAfter:
           description: "server.idle after this long without a request while its Run runs (default 10m; 0: never)."
@@ -3081,6 +3081,9 @@ components:
             - https
             - http
           type: string
+        previews:
+          description: Whether preview.domain is set, regardless of preview auth mode. Always present; its presence indicates support for single-label relative server hostnames. previewDomain remains null when previews are off or use Cloudflare Access.
+          type: boolean
         scopes:
           items:
             type: string
@@ -7363,12 +7366,12 @@ paths:
           schema:
             description: Only servers attached to this Run.
             type: string
-        - description: Only the server of this hostname.
+        - description: "Only the server of this hostname: a full name under the preview domain or one relative DNS label."
           explode: false
           in: query
           name: hostname
           schema:
-            description: Only the server of this hostname.
+            description: "Only the server of this hostname: a full name under the preview domain or one relative DNS label."
             type: string
         - description: At most this many, newest first, 1 to 1000 (default 500).
           explode: false

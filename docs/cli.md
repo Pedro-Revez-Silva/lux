@@ -341,3 +341,9 @@ that wakes on request is lifetime `owner`. `lux get` lists the Run's
 servers too. Every command takes `-o json` (the API's object, or a list
 of them). `lux events --all` prints server events as what happened to
 which URL: `server.wake_requested srv_… web.pr9.<domain>  by ada@… at /goals`.
+
+`create --hostname` (the API's `POST /v1/servers` `hostname`) also accepts
+one relative DNS label without a dot, up to 63 characters: lux appends its
+preview domain and returns the full hostname and URL. `GET /v1/servers?hostname=`
+finds the same server by either form; dotted names must already be under the
+preview domain, and a relative label with a trailing dot is refused on create.

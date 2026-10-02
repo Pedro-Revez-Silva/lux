@@ -24,6 +24,7 @@ type Whoami struct {
 	// ConsoleAuth is luxd's console auth: key or cloudflare-access.
 	ConsoleAuth string   `json:"consoleAuth"`
 	Scopes      []string `json:"scopes"`
+	Previews    bool     `json:"previews" doc:"Whether preview.domain is set, regardless of preview auth mode. Always present; its presence indicates support for single-label relative server hostnames. previewDomain remains null when previews are off or use Cloudflare Access."`
 	// PreviewDomain: the console signs people in to hosts under
 	// PreviewDomain only, with PreviewScheme and PreviewPort.
 	PreviewDomain *string `json:"previewDomain" nullable:"true" doc:"The preview listener's domain (preview URLs are <scheme>://<server host>.<domain>); null when previews are off, or signed in to through Cloudflare Access rather than a ticket."`
@@ -40,7 +41,7 @@ type whoamiOutput struct {
 func (s *Server) whoami(ctx context.Context, _ *struct{}) (*whoamiOutput, error) {
 	p := principal(ctx)
 	w := Whoami{Operator: p.Operator, KeyID: p.KeyID, Email: p.Email, Name: p.Name, Picture: p.Picture, Scopes: slices.Clone(p.Scopes),
-		ConsoleAuth: cmp.Or(s.cfg.ConsoleAuth.Mode, "key")}
+		ConsoleAuth: cmp.Or(s.cfg.ConsoleAuth.Mode, "key"), Previews: s.cfg.Preview.Domain != ""}
 	if s.previewTickets() {
 		d := s.cfg.Preview.Domain
 		w.PreviewDomain = &d
