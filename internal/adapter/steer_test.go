@@ -143,6 +143,8 @@ func startWireSink(t *testing.T, ad Adapter, cfg proto.ShimConfig, sink Sink) *a
 	toAgent, fromAdapter := io.Pipe()
 	fromAgent, toAdapter := io.Pipe()
 	w := &agentWire{t: t, in: bufio.NewScanner(toAgent), out: toAdapter, sent: make(chan map[string]json.RawMessage, 64), done: make(chan struct{})}
+	// Lines with images run to megabytes.
+	w.in.Buffer(make([]byte, 64<<10), 64<<20)
 	go func() {
 		for w.in.Scan() {
 			var m map[string]json.RawMessage

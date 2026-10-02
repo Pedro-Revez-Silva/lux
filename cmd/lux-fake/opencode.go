@@ -176,7 +176,7 @@ func (o *opencodeServer) promptAsync(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"name":"BadRequest","data":{"message":"messageID must start with msg_"}}`, http.StatusBadRequest)
 		return
 	}
-	p := prompt{text: body.Parts.String(), id: body.MessageID}
+	p := promptOf(body.Parts, body.MessageID)
 	if p.id == "" {
 		p.id = o.messageID()
 	}

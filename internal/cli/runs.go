@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"cmp"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -703,14 +705,29 @@ func (a *app) waitMoved(ctx context.Context, id string, epoch int) (*Run, error)
 func (a *app) steerCmd() *cobra.Command {
 	var interrupt bool
 	var reqID string
+	var images []string
 	cmd := &cobra.Command{
-		Use:   "steer <run> <message>",
+		Use:   "steer <run> [message]",
 		Short: "Send a message to a running workload",
-		Long:  "Send input to a running Run. Agents get it as a message (queued until the\ncurrent turn ends if the agent cannot take it mid-turn); generic workloads\nget it on stdin. --interrupt stops the current turn first.",
-		Args:  cobra.ExactArgs(2),
+		Long: "Send input to a running Run. Agents get it as a message (queued until the\ncurrent turn ends if the agent cannot take it mid-turn); generic workloads\nget it on stdin. --interrupt stops the current turn first.\n\n" +
+			"--image (repeatable) sends an image file with the message, as one message\n(the message may then be left out): PNG, JPEG, WebP or GIF, its type read\nfrom the file's bytes, at most 5 MiB each and 10 in all.",
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 && len(images) == 0 {
+				return fmt.Errorf("a message or --image is required")
+			}
 			var resp map[string]string
-			in := map[string]any{"text": args[1], "interrupt": interrupt}
+			in := map[string]any{"interrupt": interrupt}
+			if len(args) == 2 {
+				in["text"] = args[1]
+			}
+			if len(images) > 0 {
+				atts, err := readImages(images)
+				if err != nil {
+					return err
+				}
+				in["attachments"] = atts
+			}
 			if reqID != "" {
 				in["requestId"] = reqID
 			}
@@ -726,7 +743,26 @@ func (a *app) steerCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&interrupt, "interrupt", false, "stop the current turn first")
 	cmd.Flags().StringVar(&reqID, "request-id", "", "id that makes a retry safe")
+	cmd.Flags().StringArrayVar(&images, "image", nil, "an image file to send with the message (repeatable)")
 	return cmd
+}
+
+// readImages reads image files as input attachments, each typed by its
+// bytes' magic number; luxd checks the limits.
+func readImages(paths []string) ([]spec.Attachment, error) {
+	var out []spec.Attachment
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return nil, err
+		}
+		typ := spec.SniffImage(b)
+		if typ == "" {
+			return nil, fmt.Errorf("%s: not an image lux takes (%s)", p, spec.ImageTypes())
+		}
+		out = append(out, spec.Attachment{Name: filepath.Base(p), ContentType: typ, Data: base64.StdEncoding.EncodeToString(b)})
+	}
+	return out, nil
 }
 
 func (a *app) interruptCmd() *cobra.Command {

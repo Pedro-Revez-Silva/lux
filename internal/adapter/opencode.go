@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/marcioapm/lux/internal/proto"
 )
 
 // opencodeBus is OpenCode's own HTTP server, run by the same process as
@@ -289,11 +291,12 @@ func (b *opencodeBus) seed(ctx context.Context, session string) {
 // may deliver it.
 var errNotSent = errors.New("not sent")
 
-// promptAsync stores text as the user message msgID of session and joins
-// it to the running loop (starting one if none runs). An error wrapping
-// errNotSent means OpenCode did not take it.
-func (b *opencodeBus) promptAsync(ctx context.Context, session, msgID, text string) error {
-	body, _ := json.Marshal(map[string]any{"messageID": msgID, "parts": textInput(text)})
+// promptAsync stores an input as the user message msgID of session (its
+// images as file parts, then its text) and joins it to the running loop
+// (starting one if none runs). An error wrapping errNotSent means OpenCode
+// did not take it.
+func (b *opencodeBus) promptAsync(ctx context.Context, session, msgID string, in proto.Input) error {
+	body, _ := json.Marshal(map[string]any{"messageID": msgID, "parts": inputContent(dialectOpenCode, in)})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.url("/session/"+session+"/prompt_async"), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("%w: %v", errNotSent, err)

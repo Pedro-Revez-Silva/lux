@@ -57,8 +57,11 @@ type Shim struct {
 	// inputPhases: what has been recorded of each input, by request id
 	// (sink.advance).
 	inputPhases map[string]uint8
-	stopping    bool
-	stopWhy     string
+	// inputMeta: each input's attachments, for its records, until its
+	// last record is written.
+	inputMeta map[string][]spec.AttachmentMeta
+	stopping  bool
+	stopWhy   string
 	// hookPgid is a running beforeStop's process group; hookBy is its
 	// deadline, set before the hook starts and only moved earlier by a
 	// shorter stop. hookDone closes when it has ended.
@@ -173,6 +176,9 @@ func (s *Shim) run() int {
 	s.env = env
 	s.mu.Unlock()
 	s.prepareVolumes()
+	if err := s.prepareInputs(); err != nil {
+		s.out.Event(proto.EvWarning, map[string]any{"message": "$LUX_INPUTS: " + err.Error()})
+	}
 	if err := s.serveServices(start.Secrets); err != nil {
 		return s.fail("start-failed", err.Error())
 	}
@@ -205,7 +211,8 @@ func (s *Shim) run() int {
 	s.serversReady()
 
 	s.adapter = ad
-	argv, err := ad.Command(s.cfg)
+	adCfg := s.adapterConfig()
+	argv, err := ad.Command(adCfg)
 	if err != nil {
 		return s.fail("start-failed", err.Error())
 	}
@@ -216,12 +223,11 @@ func (s *Shim) run() int {
 	s.out.Event(proto.EvWorkload, map[string]any{"phase": "start", "pid": proc.Cmd.Process.Pid, "command": argv})
 
 	adDone := make(chan struct{})
-	go func() {
-		defer close(adDone)
-		if err := ad.Run(context.Background(), proc, s.cfg, &sink{s}); err != nil {
-			s.out.Event(proto.EvWarning, map[string]any{"message": "adapter: " + err.Error()})
-		}
-	}()
+	// The adapter's copy of the config is its argument, not a captured
+	// variable: the prompt's images are released once the adapter is done
+	// with them.
+	go s.runAdapter(ad, proc, adCfg, adDone)
+	adCfg = proto.ShimConfig{}
 	// Inputs that arrived before the workload started, then the resume
 	// input from the start message.
 	s.mu.Lock()
@@ -261,6 +267,27 @@ func (s *Shim) run() int {
 		info.Message = s.stopWhy
 	}
 	return s.finish(info)
+}
+
+// adapterConfig is the config the adapter starts with: on a first
+// placement, the prompt's images written to $LUX_INPUTS/prompt and passed
+// on. The shim's own config keeps none of their bytes.
+func (s *Shim) adapterConfig() proto.ShimConfig {
+	cfg := s.cfg
+	s.cfg.PromptAttachments = nil
+	if cfg.Resume {
+		cfg.PromptAttachments = nil
+	} else if len(cfg.PromptAttachments) > 0 {
+		cfg.PromptAttachments = s.inputAttachments(proto.Input{RequestID: "prompt", Attachments: cfg.PromptAttachments})
+	}
+	return cfg
+}
+
+func (s *Shim) runAdapter(ad adapter.Adapter, proc *adapter.Process, cfg proto.ShimConfig, done chan<- struct{}) {
+	defer close(done)
+	if err := ad.Run(context.Background(), proc, cfg, &sink{s}); err != nil {
+		s.out.Event(proto.EvWarning, map[string]any{"message": "adapter: " + err.Error()})
+	}
 }
 
 func (s *Shim) fail(reason, msg string) int {
@@ -464,7 +491,26 @@ func (s *Shim) deliver(in proto.Input) {
 		s.delivered[in.RequestID] = true
 	}
 	s.mu.Unlock()
+	in.Attachments = s.inputAttachments(in)
 	ad.Deliver(in)
+}
+
+// inputAttachments writes an input's images to $LUX_INPUTS before the
+// adapter has it, and keeps their metadata for its records. They are
+// returned with their paths; when they cannot be written, without (a
+// lux.warning says why), and the agent still gets them inline.
+func (s *Shim) inputAttachments(in proto.Input) []spec.Attachment {
+	if len(in.Attachments) == 0 {
+		return in.Attachments
+	}
+	written, meta, err := s.writeInputs(in.RequestID, in.Attachments)
+	if err != nil {
+		s.rememberAttachments(in.RequestID, spec.AttachmentsMeta(in.Attachments))
+		s.out.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf("input %s: writing its images to $LUX_INPUTS: %v", in.RequestID, err)})
+		return in.Attachments
+	}
+	s.rememberAttachments(in.RequestID, meta)
+	return written
 }
 
 // stop winds the workload down: the adapter's graceful stop, then SIGKILL
@@ -621,6 +667,9 @@ func (s *Shim) environment(secrets map[string]string) []string {
 	env["LUX_EPOCH"] = strconv.Itoa(s.cfg.Epoch)
 	if s.cfg.ArtifactsDir != "" {
 		env["LUX_ARTIFACTS"] = s.cfg.ArtifactsDir
+	}
+	if s.cfg.InputsDir != "" {
+		env["LUX_INPUTS"] = s.cfg.InputsDir
 	}
 	for i, svc := range s.cfg.Services {
 		k, v := ServiceEnv(svc.Name)
@@ -958,12 +1007,14 @@ func (k *sink) Activity(idle bool) {
 }
 func (k *sink) InputAccepted(in proto.Input, d adapter.Delivery) {
 	if k.advance(in.RequestID, inputAnswered|inputAccepted, 0) {
-		k.input(in, proto.InputAccepted, map[string]any{"lands": d.Lands, "receipt": d.Receipt}, nil)
+		// Without a receipt, this is the input's last record.
+		k.input(in, proto.InputAccepted, map[string]any{"lands": d.Lands, "receipt": d.Receipt}, nil, !d.Receipt)
 	}
 }
 
 func (k *sink) InputConsumed(requestID string) {
 	if k.advance(requestID, inputEnded, inputAccepted) {
+		k.s.attachmentsOf(requestID, true)
 		k.s.out.Event(proto.EvInputConsumed, map[string]string{"requestId": requestID})
 	}
 }
@@ -972,11 +1023,15 @@ func (k *sink) InputConsumed(requestID string) {
 // accepted, else lux.input.failed.
 func (k *sink) InputFailed(in proto.Input, err error) {
 	if k.advance(in.RequestID, inputAnswered, 0) {
-		k.input(in, proto.InputFailed, nil, err)
+		k.input(in, proto.InputFailed, nil, err, true)
 		return
 	}
 	if k.advance(in.RequestID, inputEnded, inputAccepted) {
-		k.s.out.Event(proto.EvInputFailed, map[string]string{"requestId": in.RequestID, "error": err.Error()})
+		d := map[string]any{"requestId": in.RequestID, "error": err.Error()}
+		if m := k.s.attachmentsOf(in.RequestID, true); m != nil {
+			d["attachments"] = m
+		}
+		k.s.out.Event(proto.EvInputFailed, d)
 	}
 }
 
@@ -1007,12 +1062,20 @@ func (k *sink) advance(id string, bits, need uint8) bool {
 	return true
 }
 
-// input writes an input's lux.input record.
-func (k *sink) input(in proto.Input, phase string, extra map[string]any, err error) {
+// input writes an input's lux.input record; last: no record of it follows.
+func (k *sink) input(in proto.Input, phase string, extra map[string]any, err error, last bool) {
 	// What was delivered, up to a limit (the record stream is not for
 	// whole files); secrets in it are redacted like all output.
 	d := map[string]any{"requestId": in.RequestID, "phase": phase}
 	maps.Copy(d, extra)
+	// Images: what they were, never their bytes.
+	meta := k.s.attachmentsOf(in.RequestID, last)
+	if meta == nil {
+		meta = spec.AttachmentsMeta(in.Attachments)
+	}
+	if meta != nil {
+		d["attachments"] = meta
+	}
 	text := in.Text
 	if text == "" && len(in.Raw) > 0 {
 		text = string(in.Raw)

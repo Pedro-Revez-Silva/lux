@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -39,10 +40,12 @@ type Claude struct {
 	sessionID string
 	inputs    inputLedger
 	// sent: lines written, by uuid, not yet ended (completed, cancelled,
-	// discarded or refused). running: a turn has started and its result
+	// discarded or refused); sentSize: their payload (inputSize), bounded
+	// by maxPendingSteerBytes. running: a turn has started and its result
 	// has not come. The Run is idle when neither holds anything.
-	sent    map[string]proto.Input
-	running bool
+	sent     map[string]proto.Input
+	sentSize int
+	running  bool
 	// lifecycle: Claude Code reports command_lifecycle (msg_lifecycle_v1);
 	// known from the first frame or from system/init. Without it the Run
 	// is busy from each line to a result (inTurn counts them), which a
@@ -106,9 +109,10 @@ func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink
 	c.mu.Unlock()
 
 	go pump(p.Stderr, sink.Stderr)
-	if !cfg.Resume && cfg.Prompt != "" {
-		c.send(proto.Input{RequestID: "prompt", Text: cfg.Prompt})
+	if !cfg.Resume && (cfg.Prompt != "" || len(cfg.PromptAttachments) > 0) {
+		c.send(proto.Input{RequestID: "prompt", Text: cfg.Prompt, Attachments: cfg.PromptAttachments})
 	}
+	cfg.PromptAttachments = nil // c.sent holds them while they are needed
 	for _, in := range queued {
 		c.Deliver(in)
 	}
@@ -193,6 +197,7 @@ func (c *Claude) exited() {
 	why := unreadWhy(c.stopping)
 	sent := c.sent
 	c.sent = nil
+	c.sentSize = 0
 	sink := c.sink
 	c.mu.Unlock()
 	for _, in := range sent {
@@ -221,20 +226,26 @@ func (c *Claude) send(in proto.Input) {
 		in.RequestID = ids.New("in")
 	}
 	uuid := claudeUUID(in.RequestID)
+	c.mu.Lock()
+	keep := !c.known || c.lifecycle
+	if keep && c.sentSize+inputSize(in) > maxPendingSteerBytes {
+		sink := c.sink
+		c.mu.Unlock()
+		c.inputs.fail(sink, in, errors.New(errPendingSteersLimit))
+		return
+	}
+	c.mu.Unlock()
 	c.inputs.track(in)
 	c.mu.Lock()
 	// Without lifecycle frames nothing ever ends a line: keep none.
-	if !c.known || c.lifecycle {
-		if c.sent == nil {
-			c.sent = map[string]proto.Input{}
-		}
-		c.sent[uuid] = in
+	if keep {
+		c.putSent(uuid, in)
 	}
 	c.mu.Unlock()
-	err := c.writeLine(uuid, in.Text)
+	err := c.writeLine(uuid, in)
 	c.mu.Lock()
 	if err != nil {
-		delete(c.sent, uuid)
+		c.dropSent(uuid)
 	} else if !c.lifecycle {
 		c.inTurn++
 	}
@@ -248,6 +259,23 @@ func (c *Claude) send(in proto.Input) {
 	sink.Activity(false)
 	if known && !lifecycle {
 		c.inputs.accept(sink, in, Delivery{Lands: LandsNextStep}, "")
+	}
+}
+
+// putSent and dropSent change c.sent and keep sentSize with it. Under c.mu.
+func (c *Claude) putSent(uuid string, in proto.Input) {
+	c.dropSent(uuid)
+	if c.sent == nil {
+		c.sent = map[string]proto.Input{}
+	}
+	c.sent[uuid] = in
+	c.sentSize += inputSize(in)
+}
+
+func (c *Claude) dropSent(uuid string) {
+	if old, ok := c.sent[uuid]; ok {
+		c.sentSize -= inputSize(old)
+		delete(c.sent, uuid)
 	}
 }
 
@@ -266,6 +294,7 @@ func (c *Claude) init(lifecycle bool) {
 			waiting = append(waiting, in)
 		}
 		c.sent = nil
+		c.sentSize = 0
 		c.inTurn = len(waiting)
 	}
 	c.mu.Unlock()
@@ -282,8 +311,12 @@ func (c *Claude) lifecycleFrame(uuid, state string) {
 	switch state {
 	case "started":
 		c.running = true
+		// Read: never written again, so its payload goes.
+		if ok {
+			c.putSent(uuid, proto.Input{RequestID: in.RequestID})
+		}
 	case "completed", "cancelled", "discarded", "refused":
-		delete(c.sent, uuid)
+		c.dropSent(uuid)
 	}
 	c.mu.Unlock()
 	if !ok {
@@ -336,24 +369,24 @@ func (c *Claude) resend(in proto.Input) bool {
 	}
 	uuid := claudeUUID(fmt.Sprintf("%s#%d", in.RequestID, n))
 	c.mu.Lock()
-	c.sent[uuid] = in
+	c.putSent(uuid, in)
 	c.mu.Unlock()
-	if err := c.writeLine(uuid, in.Text); err != nil {
+	if err := c.writeLine(uuid, in); err != nil {
 		c.mu.Lock()
-		delete(c.sent, uuid)
+		c.dropSent(uuid)
 		c.mu.Unlock()
 		return false
 	}
 	return true
 }
 
-// writeLine writes a user line. Never "priority": "now" aborts the running
-// turn at its next tool boundary, "later" holds the line until the turn
-// ends.
-func (c *Claude) writeLine(uuid, text string) error {
+// writeLine writes a user line: the input's images, then its text. Never
+// "priority": "now" aborts the running turn at its next tool boundary,
+// "later" holds the line until the turn ends.
+func (c *Claude) writeLine(uuid string, in proto.Input) error {
 	return c.lw.send(map[string]any{
 		"type":               "user",
-		"message":            map[string]any{"role": "user", "content": textInput(text)},
+		"message":            map[string]any{"role": "user", "content": inputContent(dialectClaude, in)},
 		"parent_tool_use_id": nil,
 		"uuid":               uuid,
 	})
@@ -389,7 +422,7 @@ func (c *Claude) Deliver(in proto.Input) {
 	if in.Interrupt && busy {
 		_ = c.Interrupt()
 	}
-	if in.Text != "" {
+	if in.HasContent() {
 		c.send(in)
 	} else if in.RequestID != "" {
 		// An interrupt alone: nothing for the agent to read.

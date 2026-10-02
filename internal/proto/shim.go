@@ -36,17 +36,24 @@ func OutputFile(epoch int) string { return "output-" + strconv.Itoa(epoch) + ".j
 func ExitFile(epoch int) string   { return "exit-" + strconv.Itoa(epoch) + ".json" }
 
 type ShimConfig struct {
-	RunID    string            `json:"runId"`
-	Epoch    int               `json:"epoch"`
-	Adapter  string            `json:"adapter"`
-	Command  []string          `json:"command"`
-	Prompt   string            `json:"prompt,omitempty"`
-	Workdir  string            `json:"workdir,omitempty"`
-	User     string            `json:"user,omitempty"` // name or uid[:gid]; empty: root
-	TTY      bool              `json:"tty,omitempty"`
-	Env      map[string]string `json:"env,omitempty"`
-	Init     string            `json:"init,omitempty"`
-	GraceSec float64           `json:"graceSec"`
+	RunID   string   `json:"runId"`
+	Epoch   int      `json:"epoch"`
+	Adapter string   `json:"adapter"`
+	Command []string `json:"command"`
+	Prompt  string   `json:"prompt,omitempty"`
+	// PromptAttachments go with Prompt (spec workload.attachments).
+	PromptAttachments []spec.Attachment `json:"promptAttachments,omitempty"`
+	// InputsDir is $LUX_INPUTS, where the shim writes each input's images;
+	// InputsRoot is the mount it is on, which the shim does not leave
+	// writing there.
+	InputsDir  string            `json:"inputsDir,omitempty"`
+	InputsRoot string            `json:"inputsRoot,omitempty"`
+	Workdir    string            `json:"workdir,omitempty"`
+	User       string            `json:"user,omitempty"` // name or uid[:gid]; empty: root
+	TTY        bool              `json:"tty,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+	Init       string            `json:"init,omitempty"`
+	GraceSec   float64           `json:"graceSec"`
 	// BeforeStop, when set, runs in the container on every stop before the
 	// workload is signalled (spec.Workload.BeforeStop).
 	BeforeStop           []string `json:"beforeStop,omitempty"`

@@ -101,7 +101,7 @@ type pluginAnswer struct {
 
 func loadPluginRuns(ctx context.Context, tx pgx.Tx, ids []string) (map[string]pluginRun, error) {
 	out := map[string]pluginRun{}
-	rows, err := tx.Query(ctx, `SELECT r.id, r.tenant_id, t.name, r.labels, r.spec, r.state, r.created_at, r.finished_at
+	rows, err := tx.Query(ctx, `SELECT r.id, r.tenant_id, t.name, r.labels, coalesce(r.spec->'workload'->>'adapter', ''), r.state, r.created_at, r.finished_at
 		FROM runs r JOIN tenants t ON t.id = r.tenant_id WHERE r.id = ANY($1)`, ids)
 	if err != nil {
 		return nil, err
@@ -109,17 +109,11 @@ func loadPluginRuns(ctx context.Context, tx pgx.Tx, ids []string) (map[string]pl
 	defer rows.Close()
 	for rows.Next() {
 		var r pluginRun
-		var spec map[string]any
-		if err := rows.Scan(&r.RunID, &r.TenantID, &r.TenantName, &r.Labels, &spec, &r.State, &r.Window.From, &r.Window.To); err != nil {
+		if err := rows.Scan(&r.RunID, &r.TenantID, &r.TenantName, &r.Labels, &r.Adapter, &r.State, &r.Window.From, &r.Window.To); err != nil {
 			return nil, err
 		}
 		if r.Labels == nil {
 			r.Labels = map[string]string{}
-		}
-		if workload, ok := spec["workload"].(map[string]any); ok {
-			if adapter, ok := workload["adapter"].(string); ok {
-				r.Adapter = adapter
-			}
 		}
 		r.Terminal = terminal(r.State)
 		r.Placements = make([]struct {

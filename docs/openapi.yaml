@@ -50,6 +50,19 @@ components:
           description: "The Run to attach it to: running (its command starts now) or not (it starts at the Run's next placement)."
           type: string
       type: object
+    Attachment:
+      additionalProperties: false
+      properties:
+        contentType:
+          description: image/png, image/jpeg, image/webp or image/gif; the bytes' magic number must match.
+          type: string
+        data:
+          description: "Required: the image, standard base64 (no data: prefix), at most 5 MiB decoded. Run views leave it out."
+          type: string
+        name:
+          description: Shown to people; 1-255 bytes of UTF-8 without /, \, NUL or control characters. Never used as a path as given.
+          type: string
+      type: object
     BeforeStop:
       additionalProperties: false
       properties:
@@ -850,6 +863,13 @@ components:
     InputRequest:
       additionalProperties: false
       properties:
+        attachments:
+          description: "Images, one message with text (before it): at most 10, each at most 5 MiB decoded; the whole body stays under 8 MiB. Each is also written to $LUX_INPUTS/<requestId>/ in the container. Agent adapters only (400 attachments_unsupported for generic); a bad one is 400 invalid_attachment."
+          items:
+            $ref: "#/components/schemas/Attachment"
+          type:
+            - array
+            - "null"
         interrupt:
           description: Stop the current turn first.
           type: boolean
@@ -861,7 +881,7 @@ components:
           description: "Makes retries safe: the runner delivers each id once. Generated if absent."
           type: string
         text:
-          description: "A message: agents get it as a prompt, generic workloads on stdin."
+          description: "A message: agents get it as a prompt, generic workloads on stdin. May be empty when attachments are given."
           type: string
       type: object
     LifecycleEvent:
@@ -3101,6 +3121,13 @@ components:
       properties:
         adapter:
           type: string
+        attachments:
+          description: "Images given to the agent with its first prompt (request id prompt), each also written to $LUX_INPUTS/prompt/. At most 10, each at most 5 MiB decoded. Agent adapters only: a generic workload is refused (400 attachments_unsupported); a bad one is refused with 400 invalid_attachment."
+          items:
+            $ref: "#/components/schemas/Attachment"
+          type:
+            - array
+            - "null"
         beforeStop:
           $ref: "#/components/schemas/BeforeStop"
           description: "A command run in the container on every stop, before the workload is signalled: a stop asked for, a cancel, a timeout, a drain. Its output is the Run's; what it writes into $LUX_ARTIFACTS is collected. It cannot run when the container dies or its host is lost."
@@ -5967,7 +5994,7 @@ paths:
   /v1/runs/{id}/input:
     post:
       description: |-
-        Agents get text as a message, read at their next model step where the adapter can (the Run's steer says), else when the current turn ends; generic workloads get it on stdin. Its first answer is one lux.input record (phase accepted, or failed) and an input.delivered or input.failed event; after acceptance, lux.input.consumed (where the adapter has a receipt) or lux.input.failed records, and input.consumed or input.failed events. A stopped Run takes its input through resume instead.
+        Agents get text as a message, read at their next model step where the adapter can (the Run's steer says), else when the current turn ends; generic workloads get it on stdin. Its first answer is one lux.input record (phase accepted, or failed) and an input.delivered or input.failed event; after acceptance, lux.input.consumed (where the adapter has a receipt) or lux.input.failed records, and input.consumed or input.failed events. A stopped Run takes its input through resume instead. Images (attachments) are one message with the text, images first; records and events carry their name, contentType, size and sha256, never their bytes. 400 invalid_attachment: a bad image (by index); 400 attachments_unsupported: a generic Run.
 
         Needs the `run` scope.
       operationId: postInput

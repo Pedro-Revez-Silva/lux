@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -68,6 +69,41 @@ func TestInputPhasesRecordedOnce(t *testing.T) {
 		`{"Type":"input.failed","Data":{"error":"workload not reachable","phase":"failed","requestId":"old-bad"}}]`
 	if string(b) != want {
 		t.Fatalf("events\n got %s\nwant %s", b, want)
+	}
+}
+
+// An input's images reach input.delivered and input.failed as the shim
+// recorded them: metadata only.
+func TestInputEventsAttachments(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	sessionFixture(t, s, ctx)
+	meta := []spec.AttachmentMeta{{Name: "shot.png", ContentType: "image/png", Size: 69, SHA256: "ab12"}}
+	for _, ev := range []proto.AdapterEvent{
+		{InputAck: "img-1", InputPhase: proto.InputAccepted, InputLands: "next_step", InputReceipt: true, InputAttachments: meta},
+		{InputProgress: &proto.InputProgress{RequestID: "img-1", Phase: proto.InputFailed, Error: "stopped", Attachments: meta}},
+		{InputAck: "img-2", InputPhase: proto.InputFailed, InputError: "the agent does not take images", InputAttachments: meta},
+	} {
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return s.applyAdapterEvent(ctx, tx, "t1", "r1", 2, ev) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var got []string
+	err := s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT type || ' ' || (data->'attachments')::text FROM run_events WHERE run_id = 'r1' AND type LIKE 'input.%' ORDER BY id`)
+		if err != nil {
+			return err
+		}
+		got, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := `[{"name": "shot.png", "size": 69, "sha256": "ab12", "contentType": "image/png"}]`
+	want := []string{"input.delivered " + m, "input.failed " + m, "input.failed " + m}
+	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("got %q\nwant %q", got, want)
 	}
 }
 

@@ -13,13 +13,13 @@ connects lux's four verbs to whatever the process speaks on stdio:
 The adapter runs inside the container, in `lux-shim`. Pick one with
 `workload.adapter` in the [RunSpec](runspec.md).
 
-| Adapter | Process | Input | Mid-turn input | Interrupt | Stop | Resume |
-| --- | --- | --- | --- | --- | --- | --- |
-| `generic` | `command` as given | text + newline (or raw bytes) on stdin | — | SIGINT | SIGTERM | re-runs `resume.command`, or `command` |
-| `acp` | any [ACP](https://agentclientprotocol.com) agent | `session/prompt` | queued until the turn ends | `session/cancel` | cancel, close stdin | `session/load` if the agent supports it |
-| `claude-code` | `claude -p --input-format stream-json --output-format stream-json --verbose` | a `user` JSON line, with a `uuid` | written at once; read at the next step | `control_request` interrupt | **SIGINT** (ends the turn cleanly) | `--resume <session id>` |
-| `codex` | `codex app-server` | `turn/start` | `turn/steer`; read at the next step | `turn/interrupt` | interrupt, close stdin | `thread/resume` |
-| `opencode` | `opencode acp --port <p> --hostname 127.0.0.1` | as `acp` | joined to the running turn; read at the next step | as `acp` | as `acp` | as `acp` |
+| Adapter | Process | Input | Images | Mid-turn input | Interrupt | Stop | Resume |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `generic` | `command` as given | text + newline (or raw bytes) on stdin | refused (400 `attachments_unsupported`) | — | SIGINT | SIGTERM | re-runs `resume.command`, or `command` |
+| `acp` | any [ACP](https://agentclientprotocol.com) agent | `session/prompt` | `image` blocks, if the agent advertised `promptCapabilities.image` | queued until the turn ends | `session/cancel` | cancel, close stdin | `session/load` if the agent supports it |
+| `claude-code` | `claude -p --input-format stream-json --output-format stream-json --verbose` | a `user` JSON line, with a `uuid` | `image` blocks (base64 source) | written at once; read at the next step | `control_request` interrupt | **SIGINT** (ends the turn cleanly) | `--resume <session id>` |
+| `codex` | `codex app-server` | `turn/start` | `localImage` items (the files in `$LUX_INPUTS`) | `turn/steer`; read at the next step | `turn/interrupt` | interrupt, close stdin | `thread/resume` |
+| `opencode` | `opencode acp --port <p> --hostname 127.0.0.1` | as `acp` | `file` parts (data URLs) in `prompt_async`; as `acp` over ACP | joined to the running turn; read at the next step | as `acp` | as `acp` | as `acp` |
 
 The exact messages, verified against the real CLIs, are in
 [agent-protocols.md](agent-protocols.md). Each adapter is tested end to end
@@ -38,10 +38,10 @@ was accepted as records of their own, each at most once per request id
 
 | Record | Event | When |
 | --- | --- | --- |
-| `lux.input` `{"requestId", "phase":"accepted", "lands", "receipt", "text"?, "truncated"?}` | `input.delivered` | the agent has taken it |
-| `lux.input` `{"requestId", "phase":"failed", "error", "text"?}` | `input.failed` | it was never accepted |
+| `lux.input` `{"requestId", "phase":"accepted", "lands", "receipt", "text"?, "truncated"?, "attachments"?}` | `input.delivered` | the agent has taken it |
+| `lux.input` `{"requestId", "phase":"failed", "error", "text"?, "attachments"?}` | `input.failed` | it was never accepted |
 | `lux.input.consumed` `{"requestId"}` | `input.consumed` | its model's next step has it in context; only when `receipt` was true |
-| `lux.input.failed` `{"requestId", "error"}` | `input.failed` | accepted, but it can no longer be read (the Run stopped first, the agent dropped it); never after `lux.input.consumed` |
+| `lux.input.failed` `{"requestId", "error", "attachments"?}` | `input.failed` | accepted, but it can no longer be read (the Run stopped first, the agent dropped it); never after `lux.input.consumed` |
 
 - `lands`: `next_step`, read at the agent's next model step, possibly within
   the running turn; `next_turn`, read only when the running turn ends.
@@ -72,7 +72,40 @@ that is stopping fails them. Per adapter: Codex, the unread steers start
 the next `turn/start`; OpenCode, they go again through `prompt_async`
 (under a new message id) once the cancelled loop ends; Claude Code, a line
 reported `cancelled` or `discarded` after an interrupt is written again
-with a new `uuid`.
+with a new `uuid`. Each is sent again with its images.
+
+## Images
+
+An input may carry images (`attachments` on `POST /v1/runs/{id}/input`,
+`lux steer --image`, and `workload.attachments` with the first prompt; see
+[the RunSpec](runspec.md#images-with-the-prompt)). The images and the text
+are one message: the agent gets the images first, then the text, and
+`input.consumed` covers both.
+
+- The shim writes each image to `$LUX_INPUTS/<request id>/<n>-<name>`
+  (`n` from 1, the name with anything but letters, digits, `.`, `_` and
+  `-` replaced) before the adapter has the input, private to the workload
+  user (directories 0700, files 0600). `$LUX_INPUTS` is on a state volume
+  (below), so the files outlive a stop, a resume and a move to another
+  host; the agent can open an image again with its own tools.
+- Records and events say what each image was, never its bytes:
+  `attachments: [{"name", "contentType", "size", "sha256"}]` on `lux.input`,
+  `lux.input.failed`, `input.delivered`, `input.failed` and `input`. An
+  input without images has no `attachments`.
+- An ACP agent that did not advertise `promptCapabilities.image` at
+  `initialize` cannot take them: luxd accepts the input, and it then fails
+  with `lux.input` phase `failed`, error `the agent does not take images`.
+- `generic` takes none: luxd refuses them (400 `attachments_unsupported`).
+
+Where `$LUX_INPUTS` is: `.lux-inputs` at the root of the state volume that
+holds the adapter's session (`$HOME/.claude`, `$HOME/.codex`,
+`$HOME/.local/share/opencode`); for `acp`, of the one holding the
+workload's home, else the first state volume. Never inside a git checkout
+(a volume whose root is in a checkout is passed over for the next state
+volume) nor `$LUX_ARTIFACTS` (the runtime volume). A Run
+with no state volume has it at `/.lux/run/inputs` on the runtime volume,
+which a stop and resume on the same host keep and a move to another host
+does not.
 
 Per agent:
 

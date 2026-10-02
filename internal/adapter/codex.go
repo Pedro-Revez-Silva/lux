@@ -128,7 +128,9 @@ func (c *Codex) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink 
 		c.rpc.readLoop(p.Stdout, c.handleRequest, func(m rpcMsg) { c.handleNotification(m, sink) }, sink.Stdout)
 	}()
 
-	if err := c.handshake(cfg, sink); err != nil {
+	err := c.handshake(cfg, sink)
+	cfg.PromptAttachments = nil // the queued prompt holds their paths
+	if err != nil {
 		sink.Event(proto.EvWarning, map[string]any{"message": "codex: " + err.Error()})
 		_ = p.Signal(syscall.SIGTERM)
 	} else {
@@ -170,9 +172,9 @@ func (c *Codex) handshake(cfg proto.ShimConfig, sink Sink) error {
 		if err != nil {
 			return err
 		}
-		if !cfg.Resume && cfg.Prompt != "" {
+		if !cfg.Resume && (cfg.Prompt != "" || len(cfg.PromptAttachments) > 0) {
 			c.mu.Lock()
-			c.queue = append([]proto.Input{{RequestID: "prompt", Text: cfg.Prompt}}, c.queue...)
+			c.queue = append([]proto.Input{withoutWrittenData(proto.Input{RequestID: "prompt", Text: cfg.Prompt, Attachments: cfg.PromptAttachments})}, c.queue...)
 			c.mu.Unlock()
 		}
 	}
@@ -217,14 +219,32 @@ func (c *Codex) delivery() Delivery {
 }
 
 // userInput is turn/start's and turn/steer's params for an input: its
-// request id goes as clientUserMessageId, which Codex echoes as the
-// userMessage item's clientId.
+// images (files the shim wrote), then its text; its request id goes as
+// clientUserMessageId, which Codex echoes as the userMessage item's
+// clientId.
 func userInput(params map[string]any, in proto.Input) map[string]any {
-	params["input"] = textInput(in.Text)
+	params["input"] = inputContent(dialectCodex, in)
 	if in.RequestID != "" {
 		params["clientUserMessageId"] = in.RequestID
 	}
 	return params
+}
+
+// withoutWrittenData drops the bytes of the images the shim wrote to
+// files: Codex is given their paths, so a held or carried input keeps
+// only those.
+func withoutWrittenData(in proto.Input) proto.Input {
+	if len(in.Attachments) == 0 {
+		return in
+	}
+	atts := slices.Clone(in.Attachments)
+	for i := range atts {
+		if atts[i].Path != "" {
+			atts[i].Data = ""
+		}
+	}
+	in.Attachments = atts
+	return in
 }
 
 func (c *Codex) drain() {
@@ -400,6 +420,7 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 // Input that arrives while turn/start is in flight waits for its turn id,
 // then is steered into that turn.
 func (c *Codex) Deliver(in proto.Input) {
+	in = withoutWrittenData(in)
 	c.mu.Lock()
 	turn, thread, ready := c.turn, c.thread, c.ready
 	if ready && turn == "starting" {
@@ -417,7 +438,7 @@ func (c *Codex) Deliver(in proto.Input) {
 	}
 	if in.Interrupt {
 		_, err := c.call("turn/interrupt", map[string]any{"threadId": thread, "turnId": turn})
-		if in.Text == "" {
+		if !in.HasContent() {
 			// An interrupt alone: steers the turn left unread start the
 			// next one (carryUnread).
 			if err != nil {

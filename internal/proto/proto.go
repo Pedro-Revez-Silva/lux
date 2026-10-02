@@ -201,6 +201,9 @@ type Assign struct {
 	Resume *ResumeInfo `json:"resume,omitempty"`
 	// Input to deliver as the first message (resume with input).
 	Input *Input `json:"input,omitempty"`
+	// PromptAttachments: workload.attachments with their bytes, which
+	// Spec leaves out; only on a first placement (Resume nil).
+	PromptAttachments []spec.Attachment `json:"promptAttachments,omitempty"`
 	// Image build resolution from an earlier placement, so rebuilds use the
 	// same pinned FROMs.
 	ImageResolved *ImageResolution `json:"imageResolved,omitempty"`
@@ -265,7 +268,12 @@ type Input struct {
 	// Raw bytes for generic workloads, base64 in JSON.
 	Raw       []byte `json:"raw,omitempty"`
 	Interrupt bool   `json:"interrupt,omitempty"`
+	// Attachments: images that are one message with Text.
+	Attachments []spec.Attachment `json:"attachments,omitempty"`
 }
+
+// HasContent: the input carries something for the agent to read.
+func (in Input) HasContent() bool { return in.Text != "" || len(in.Attachments) > 0 }
 
 // Evicting: the host's provider is taking it away (a spot interruption)
 // at Deadline. luxd moves its Runs elsewhere.
@@ -327,6 +335,8 @@ type AdapterEvent struct {
 	// and whether a consumed follows.
 	InputLands   string `json:"inputLands,omitempty"`
 	InputReceipt bool   `json:"inputReceipt,omitempty"`
+	// InputAttachments: what the input's images were (never their bytes).
+	InputAttachments []spec.AttachmentMeta `json:"inputAttachments,omitempty"`
 	// InputProgress is what happened to an input after it was accepted. A
 	// field of its own, so a luxd that does not know it ignores it rather
 	// than reading it as a second InputAck.
@@ -338,6 +348,8 @@ type InputProgress struct {
 	RequestID string `json:"requestId"`
 	Phase     string `json:"phase"` // InputConsumed | InputFailed
 	Error     string `json:"error,omitempty"`
+	// Attachments, on failed: what the input's images were.
+	Attachments []spec.AttachmentMeta `json:"attachments,omitempty"`
 }
 
 // SnapshotDone ends every placement, however it exited: its state volumes,

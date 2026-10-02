@@ -447,6 +447,78 @@ Checked 2026-09-24 against the same CLI versions, with a real MCP server
 
 ---
 
+## 6. Images on input (`attachments`, `workload.attachments`)
+
+Checked 2026-10-02 with claude 2.1.207, codex 0.145.0 and opencode 1.18.18
+through llm-proxy (claude-haiku-4-5; gpt-5.6-sol; claude-haiku-4.5), by
+`tests/suites/test_input_images.py::test_real_agent_reads_an_image`: a PNG
+of a word in block letters and "What word is written in the image? Reply
+with just the word." Each answered the word, idle and mid-turn. An input
+without images is the one text block of the sections above, unchanged.
+
+**Claude Code** — the `user` line's `content` gets an image block per
+image, then the text block:
+
+```json
+{"type":"user","message":{"role":"user","content":[
+  {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo…"}},
+  {"type":"text","text":"What word is written in the image? Reply with just the word."}]},
+ "parent_tool_use_id":null,"uuid":"<v5 uuid of the request id>"}
+```
+
+The reply line was `{"type":"result",…,"result":"MANGO"}`, with
+`command_lifecycle` `queued`/`started`/`completed` as for text. A line
+re-written after `cancelled`/`discarded` carries the same blocks.
+(verified by running)
+
+**Codex** — `turn/start` and `turn/steer` `input` gets a `localImage`
+item per image (a `UserInput` variant: `{"type":"localImage","path"}`;
+`{"type":"image","url"}` takes a URL), then the text item. The path is the
+file the shim wrote in `$LUX_INPUTS`; Codex reads it itself:
+
+```json
+{"method":"turn/steer","params":{"threadId":"…","expectedTurnId":"…","clientUserMessageId":"real-tulip",
+  "input":[{"type":"localImage","path":"/home/agent/.lux-inputs/real-tulip/1-tulip.png"},
+           {"type":"text","text":"What word is written in the image? Reply with just the word."}]}}
+```
+
+(shape from `codex app-server generate-json-schema`, `UserInput`; reply
+verified by running)
+
+**OpenCode** — over its HTTP server, `prompt_async` `parts` gets a `file`
+part per image, then the text part. OpenCode 1.18.18's own OpenAPI
+(`GET /doc`) gives `FilePartInput` as `{type:"file", mime, url, filename?,
+source?, id?}` with `type`, `mime` and `url` required; a data URL is
+accepted:
+
+```json
+{"messageID":"msg_…","parts":[
+  {"type":"file","mime":"image/png","filename":"tulip.png","url":"data:image/png;base64,iVBORw0KGgo…"},
+  {"type":"text","text":"What word is written in the image? Reply with just the word."}]}
+```
+
+Over ACP (the first prompt, the next turn, or without its server), as any
+ACP agent below. OpenCode advertises `promptCapabilities.image: true`, but
+a model of a custom provider in `opencode.json` takes images only when its
+entry says so (`"attachment": true`, `"modalities": {"input": ["text",
+"image"]}`); without that the model answered "This model does not support
+image input". (verified by running)
+
+**ACP** — `session/prompt` `prompt` gets an `image` `ContentBlock` per
+image, then the text block, only if the agent advertised
+`agentCapabilities.promptCapabilities.image` at `initialize`; otherwise
+lux fails the input with `the agent does not take images`:
+
+```json
+{"method":"session/prompt","params":{"sessionId":"ses_…","prompt":[
+  {"type":"image","mimeType":"image/png","data":"iVBORw0KGgo…"},
+  {"type":"text","text":"…"}]}}
+```
+
+(from docs/source: `ImageContent`, `PromptCapabilities`)
+
+---
+
 ## Sources
 
 - Claude Code, Codex, OpenCode: live protocol captures driven from Python scripts talking

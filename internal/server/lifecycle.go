@@ -94,8 +94,12 @@ func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason 
 			return err
 		}
 	}
+	// prompt_attachments: a succeeded or cancelled Run is never placed again.
+	// A failed one can be resumed, as a first placement when it has no
+	// session and no snapshot, so it keeps them.
 	_, err := tx.Exec(ctx, `UPDATE runs SET state = $2, state_reason = $3, updated_at = now(),
 			finished_at = CASE WHEN $2 IN ('succeeded', 'failed', 'cancelled') THEN now() ELSE finished_at END,
+			prompt_attachments = CASE WHEN $2 IN ('succeeded', 'cancelled') THEN NULL ELSE prompt_attachments END,
 			activity = CASE WHEN $2 IN ('running') THEN activity ELSE '' END
 		WHERE id = $1`, runID, state, reason)
 	if err != nil {
@@ -640,6 +644,9 @@ func applyInputEvent(ctx context.Context, tx pgx.Tx, tenantID, runID string, epo
 	if ev.InputTruncated {
 		d["truncated"] = true
 	}
+	if len(ev.InputAttachments) > 0 {
+		d["attachments"] = ev.InputAttachments
+	}
 	return addInputEvent(ctx, tx, tenantID, runID, epoch, typ, ev.InputAck, d)
 }
 
@@ -650,7 +657,11 @@ func applyInputProgress(ctx context.Context, tx pgx.Tx, tenantID, runID string, 
 	case proto.InputConsumed:
 		return addInputEvent(ctx, tx, tenantID, runID, epoch, "input.consumed", p.RequestID, map[string]any{"requestId": p.RequestID})
 	case proto.InputFailed:
-		return addInputEvent(ctx, tx, tenantID, runID, epoch, "input.failed", p.RequestID, map[string]any{"requestId": p.RequestID, "error": p.Error})
+		d := map[string]any{"requestId": p.RequestID, "error": p.Error}
+		if len(p.Attachments) > 0 {
+			d["attachments"] = p.Attachments
+		}
+		return addInputEvent(ctx, tx, tenantID, runID, epoch, "input.failed", p.RequestID, d)
 	}
 	return nil
 }

@@ -341,6 +341,13 @@ binary, never a Node launcher) into a test image built from
 `tests/images/agent`. Credentials go in as secrets, never as mounted
 config.
 
+`suites/test_input_images.py::test_real_agent_reads_an_image` checks that
+each real CLI reads a steer's image. For OpenCode, the model's entry in
+`LUX_TEST_OPENCODE_CONFIG` must say it takes images (`"attachment": true`,
+`"modalities": {"input": ["text", "image"], "output": ["text"]}`) when it
+is a custom provider's: without it, the model answered that it does not
+support image input.
+
 ### Guards are mutation-checked
 
 When you add a guard (fencing, RLS, redaction), break it on purpose and

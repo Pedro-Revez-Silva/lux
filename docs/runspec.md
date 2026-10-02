@@ -16,6 +16,8 @@ workload:
   adapter: claude-code          # generic | acp | claude-code | codex | opencode
   command: [claude, --model, sonnet]      # default: the adapter's
   prompt: "Fix the flaky test in tests/api"
+  attachments:                  # images with the first prompt (agent adapters)
+    - { name: failing.png, contentType: image/png, data: iVBORw0KGgo… }   # base64
   workdir: /workspace/repos/api
   user: agent                   # default: the image's USER
   grace: 30s                    # graceful stop before SIGKILL
@@ -377,6 +379,35 @@ A host started without `--nested` refuses nested Runs.
 It is still in its own user namespace (an unprivileged uid range on the
 host). The containers it starts use the Run's network, so they have its
 egress rules and hard blocks, and nothing more.
+
+## Images with the prompt
+
+`workload.attachments` gives the agent images with its first prompt
+(request id `prompt`), as one message: the images, then the prompt's text
+(which may be empty). Each is `{name, contentType, data}`:
+
+- `contentType`: `image/png`, `image/jpeg`, `image/webp` or `image/gif`;
+  the decoded bytes' magic number must match it.
+- `data`: the image in standard base64, without a `data:` prefix; at most
+  5 MiB decoded.
+- `name`: 1 to 255 bytes of UTF-8 without `/`, `\`, NUL or control
+  characters. It is shown, and never used as a path as given.
+- At most 10. The whole request stays under luxd's 8 MiB body limit.
+
+luxd checks them at submit: a bad one is refused with 400
+`invalid_attachment` (its message names each by index and why), and any on
+a `generic` Run with 400 `attachments_unsupported`. They go with the first
+placement only, as the prompt does: a resume does not send them again. The
+shim also writes each to `$LUX_INPUTS/prompt/<n>-<name>`, on a state
+volume, so they are there after any resume ([adapters](adapters.md#images)
+says where, and how each agent gets them). luxd keeps their bytes apart
+from the stored spec until a placement resumes the Run (it has a session
+or a snapshot) or the Run succeeds or is cancelled; a failed Run keeps
+them, since resuming it without a session or snapshot starts it afresh. The
+spec, and so a Run's views (`GET /v1/runs/{id}`), keep their names and
+types. Steers take
+images the same way (`attachments` on `POST /v1/runs/{id}/input`,
+`lux steer --image`).
 
 ## Before stop
 

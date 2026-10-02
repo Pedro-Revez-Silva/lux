@@ -58,11 +58,15 @@ server's name (records with `ch: "server"`, `server` and `stream`).
 
 ```bash
 lux steer <run> "also add a test" [--interrupt] [--request-id ID]
+lux steer <run> "what is wrong here?" --image shot.png [--image more.jpg]
 lux interrupt <run>
 ```
 
 Agents get the text as a message. Generic workloads get it on stdin. See
-[adapters](adapters.md) for when a message is delivered.
+[adapters](adapters.md) for when a message is delivered. `--image`
+(repeatable) sends image files with the message, as one message, and the
+message may be left out; each file's type is read from its bytes (PNG,
+JPEG, WebP or GIF). See [images](adapters.md#images).
 
 ## Stop, resume, cancel
 

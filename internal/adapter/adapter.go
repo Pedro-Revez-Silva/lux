@@ -533,9 +533,58 @@ func workdir(cfg proto.ShimConfig) string {
 	return "/root"
 }
 
-// textInput is the one-text-block message both ACP and Codex take.
-func textInput(s string) []map[string]string {
-	return []map[string]string{{"type": "text", "text": s}}
+// Dialects of an input's content: how each protocol takes text and
+// images in one message.
+const (
+	dialectClaude   = iota // Anthropic content blocks
+	dialectCodex           // Codex UserInput items
+	dialectACP             // ACP ContentBlocks
+	dialectOpenCode        // OpenCode prompt_async parts
+)
+
+// inputContent is an input as one message in a protocol: its images, then
+// its text (no text block when it has none and has images). An input
+// without images is exactly the one text block it always was.
+func inputContent(dialect int, in proto.Input) []map[string]any {
+	out := make([]map[string]any, 0, len(in.Attachments)+1)
+	for _, a := range in.Attachments {
+		switch dialect {
+		case dialectClaude:
+			out = append(out, map[string]any{"type": "image", "source": map[string]string{"type": "base64", "media_type": a.ContentType, "data": a.Data}})
+		case dialectCodex:
+			// The file the shim wrote; inline only if it could not. Both are
+			// UserInput variants of the app-server protocol (codex 0.145,
+			// `codex app-server generate-json-schema`): LocalImageUserInput
+			// {type:"localImage", path} and ImageUserInput {type:"image", url}.
+			if a.Path != "" {
+				out = append(out, map[string]any{"type": "localImage", "path": a.Path})
+			} else {
+				out = append(out, map[string]any{"type": "image", "url": "data:" + a.ContentType + ";base64," + a.Data})
+			}
+		case dialectACP:
+			out = append(out, map[string]any{"type": "image", "mimeType": a.ContentType, "data": a.Data})
+		case dialectOpenCode:
+			out = append(out, map[string]any{"type": "file", "mime": a.ContentType, "filename": a.Name, "url": "data:" + a.ContentType + ";base64," + a.Data})
+		}
+	}
+	if in.Text != "" || len(in.Attachments) == 0 {
+		out = append(out, map[string]any{"type": "text", "text": in.Text})
+	}
+	return out
+}
+
+// errNoImages: an ACP agent that did not advertise
+// promptCapabilities.image is given an input with images.
+var errNoImages = errors.New("the agent does not take images")
+
+// inputSize is what an input holds in memory, for the bounds on inputs
+// waiting for the agent.
+func inputSize(in proto.Input) int {
+	n := len(in.Text)
+	for _, a := range in.Attachments {
+		n += len(a.Data)
+	}
+	return n
 }
 
 // withUsage adds an agent's usage report, as it sent it, to a turn_end

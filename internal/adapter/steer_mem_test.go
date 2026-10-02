@@ -134,3 +134,32 @@ func TestOpenCodePendingSteerBytesAreBounded(t *testing.T) {
 		"failed r2: "+errPendingSteersLimit, "accepted r0 next_step receipt=true", "accepted r1 next_step receipt=true",
 		"consumed r0", "consumed r1", "turn_end", "idle")
 }
+
+// The byte limit counts image data: steers of one character of text and
+// 7 MiB of image (a 5 MiB image's base64) fail past 32 MiB, the fifth
+// waiting one first.
+func TestOpenCodePendingSteerImageBytesAreBounded(t *testing.T) {
+	a, b, _, sink, _ := ocWithBus(t)
+	hold := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-hold:
+		default:
+			close(hold)
+		}
+	})
+	b.mu.Lock()
+	b.holdN, b.dropParts = map[int]chan struct{}{0: hold}, true
+	b.mu.Unlock()
+	a.Deliver(proto.Input{RequestID: "r0", Text: "x"})
+	b.postedID(t, 0)
+	for i := 1; i <= 5; i++ {
+		a.Deliver(bigImage(fmt.Sprintf("r%d", i), 7<<20))
+	}
+	sink.wait(t, "failed r5: "+errPendingSteersLimit)
+	for i := 1; i <= 4; i++ {
+		if sink.has(fmt.Sprintf("failed r%d", i)) {
+			t.Fatalf("r%d failed within the budget: %q", i, sink.lines())
+		}
+	}
+}

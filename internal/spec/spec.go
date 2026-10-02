@@ -64,7 +64,10 @@ type Workload struct {
 	Adapter string   `json:"adapter" yaml:"adapter"`
 	Command []string `json:"command,omitempty" yaml:"command,omitempty"`
 	Prompt  string   `json:"prompt,omitempty" yaml:"prompt,omitempty"`
-	Workdir string   `json:"workdir,omitempty" yaml:"workdir,omitempty"`
+	// Attachments go with the first prompt (request id "prompt"), and only
+	// on the Run's first placement.
+	Attachments []Attachment `json:"attachments,omitempty" yaml:"attachments,omitempty" doc:"Images given to the agent with its first prompt (request id prompt), each also written to $LUX_INPUTS/prompt/. At most 10, each at most 5 MiB decoded. Agent adapters only: a generic workload is refused (400 attachments_unsupported); a bad one is refused with 400 invalid_attachment."`
+	Workdir     string       `json:"workdir,omitempty" yaml:"workdir,omitempty"`
 	// User the workload runs as; defaults to the image's user.
 	User   string  `json:"user,omitempty" yaml:"user,omitempty"`
 	TTY    bool    `json:"tty,omitempty" yaml:"tty,omitempty"`
