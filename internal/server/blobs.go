@@ -64,15 +64,28 @@ func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
 		_ = s.blobs.Delete(context.WithoutCancel(r.Context()), key)
 		return errf(http.StatusBadRequest, "checksum_mismatch", "sha256 %s, expected %s", got, want)
 	}
+	var gone bool
 	err = s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
-		if _, err := tx.Exec(r.Context(), `UPDATE blobs SET location = 's3', s3_key = $2, uploaded_at = now()
-			WHERE id = $1 AND location = 'host'`, id, key); err != nil {
+		tag, err := tx.Exec(r.Context(), `UPDATE blobs SET location = 's3', s3_key = $2, uploaded_at = now()
+			WHERE id = $1 AND location = 'host'`, id, key)
+		if err != nil {
 			return err
+		}
+		// Deleted while it uploaded (deleteArtifacts claims blobs still on
+		// their host): the object just written is nobody's.
+		if tag.RowsAffected() == 0 {
+			if err := tx.QueryRow(r.Context(), `SELECT location = 'deleted' FROM blobs WHERE id = $1`, id).Scan(&gone); err != nil || gone {
+				return err
+			}
 		}
 		return markUploaded(r.Context(), tx, runID, epoch)
 	})
 	if err != nil {
 		return err
+	}
+	if gone {
+		s.deleteObjects(context.WithoutCancel(r.Context()), "upload of a deleted blob", []string{key})
+		return errf(http.StatusGone, "gone", "blob %s was deleted", id)
 	}
 	s.Kick() // a resume elsewhere may have been waiting for this upload
 	writeJSON(w, http.StatusOK, map[string]any{"uploaded": true})
@@ -187,6 +200,62 @@ type artifactPath struct {
 	AID string `path:"aid" doc:"The artifact's id."`
 }
 
+type deleteArtifactsOutput struct {
+	Body struct {
+		Deleted int `json:"deleted" doc:"How many artifacts this request deleted: 0 when none were left."`
+	} `nameHint:"ArtifactsDeleted"`
+}
+
+// deleteArtifacts deletes every artifact of a succeeded or cancelled Run:
+// retention never does. The claim is reapRetention's: the Run locked and
+// its state checked, the blobs marked deleted in one transaction, the S3
+// objects deleted after commit. Blobs still on their host are claimed too:
+// serveBlobUpload drops an object that arrives for a deleted blob.
+func (s *Server) deleteArtifacts(ctx context.Context, in *RunPath) (*deleteArtifactsOutput, error) {
+	p := principal(ctx)
+	var keys []string
+	var deleted int
+	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		var state string
+		if err := tx.QueryRow(ctx, `SELECT state FROM runs WHERE id = $1 FOR UPDATE`, in.ID).Scan(&state); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return errNotFound
+			}
+			return err
+		}
+		if state != StateSucceeded && state != StateCancelled {
+			return errf(http.StatusConflict, "not_terminal", "run is %s: only a succeeded or cancelled Run's artifacts can be deleted", state)
+		}
+		rows, err := tx.Query(ctx, `UPDATE blobs b SET location = 'deleted', deleted_at = now()
+			FROM artifacts a WHERE a.run_id = $1 AND b.id = a.blob_id AND b.location <> 'deleted'
+			RETURNING coalesce(b.s3_key, '')`, in.ID)
+		if err != nil {
+			return err
+		}
+		claimed, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		deleted = len(claimed)
+		for _, k := range claimed {
+			if k != "" {
+				keys = append(keys, k)
+			}
+		}
+		if deleted == 0 {
+			return nil
+		}
+		return addEvent(ctx, tx, p.TenantID, in.ID, 0, "artifacts.deleted", map[string]any{"by": p.Actor(), "count": deleted})
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.deleteObjects(context.WithoutCancel(ctx), "artifact delete", keys)
+	out := &deleteArtifactsOutput{}
+	out.Body.Deleted = deleted
+	return out, nil
+}
+
 // downloadArtifact streams an artifact through luxd, as the file the Run
 // wrote. (Blobs are stored zstd-compressed, so a presigned URL would hand
 // out the compressed bytes; luxd decompresses on the way.)
@@ -207,7 +276,7 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request, in *ar
 		w.Header().Set("Retry-After", "2")
 		return errf(http.StatusConflict, "not_uploaded", "artifact is still being uploaded from its host")
 	default:
-		return errf(http.StatusGone, "gone", "artifact was deleted (retention)")
+		return errf(http.StatusGone, "gone", "artifact was deleted")
 	}
 	body, _, err := s.blobs.Get(r.Context(), key)
 	if err != nil {

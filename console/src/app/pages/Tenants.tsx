@@ -1,9 +1,15 @@
 import { useMemo } from "react";
-import { Card, formatBytes, formatCount, IdChip, PageHeader, Table, type Column, RelativeTime } from "@lux/design-system";
+import { Card, formatBytes, formatCount, formatDuration, IdChip, PageHeader, Table, type Column, RelativeTime } from "@lux/design-system";
 import { api, useQuery, type Tenant } from "../../api/index.ts";
 import { go } from "../router.tsx";
 import { useScope } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, UsageBar } from "./common.tsx";
+
+// expiry: how long a stopped, lost or failed Run of the tenant may rest
+// before it is cancelled; 0 is never.
+export function expiry(days: number): string {
+  return days === 0 ? "never" : formatDuration(days * 86_400);
+}
 
 export function Tenants() {
   const scope = useScope();
@@ -18,6 +24,7 @@ export function Tenants() {
       { key: "hosts", header: "Hosts", cell: (t) => (t.maxHosts != null ? `${t.hosts} / ${t.maxHosts}` : String(t.hosts)), sortValue: (t) => t.hosts, align: "right", mono: true, width: 100 },
       { key: "stored", header: "Stored", cell: (t) => (t.maxStorageBytes != null ? <UsageBar used={t.storedBytes} total={t.maxStorageBytes} unit="bytes" /> : <span className="num">{formatBytes(t.storedBytes)}</span>), sortValue: (t) => t.storedBytes },
       { key: "retention", header: "Retention", cell: (t) => `${t.retentionDays}d`, sortValue: (t) => t.retentionDays, align: "right", mono: true, width: 100, optional: true },
+      { key: "expiry", header: "Expiry", cell: (t) => expiry(t.expireAfterDays), sortValue: (t) => t.expireAfterDays || Infinity, align: "right", mono: true, width: 100, optional: true },
       { key: "created", header: "Created", cell: (t) => <RelativeTime at={t.createdAt} />, sortValue: (t) => Date.parse(t.createdAt), align: "right", width: 104 },
     ],
     [],

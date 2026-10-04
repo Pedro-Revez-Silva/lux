@@ -161,11 +161,25 @@ func (a *app) snapshotsCmd() *cobra.Command {
 
 func (a *app) artifactsCmd() *cobra.Command {
 	var dir string
+	var del bool
 	cmd := &cobra.Command{
 		Use:   "artifacts <run>",
-		Short: "List (or download) the files a Run produced",
+		Short: "List (or download, or delete) the files a Run produced",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if del {
+				var resp struct {
+					Deleted int `json:"deleted"`
+				}
+				if err := a.c.Do(ctxOf(cmd), "DELETE", "/v1/runs/"+args[0]+"/artifacts", nil, &resp); err != nil {
+					return err
+				}
+				if a.output == "json" {
+					return a.json(resp)
+				}
+				fmt.Fprintf(a.stdout, "deleted %d artifacts\n", resp.Deleted)
+				return nil
+			}
 			var resp struct {
 				Artifacts []server.Artifact `json:"artifacts"`
 			}
@@ -220,6 +234,8 @@ func (a *app) artifactsCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dir, "download", "", "download every artifact into this directory")
+	cmd.Flags().BoolVar(&del, "delete", false, "delete every artifact of a succeeded or cancelled Run (retention never does)")
+	cmd.MarkFlagsMutuallyExclusive("download", "delete")
 	return cmd
 }
 
@@ -464,14 +480,22 @@ func (a *app) tenantsCmd() *cobra.Command {
 					stored += "/" + bytesHuman(*t.MaxStorageBytes)
 				}
 				rows = append(rows, []string{t.Name, t.ID, fmt.Sprintf("%d/%s", t.ActiveRuns, limit(t.MaxConcurrentRuns)), fmt.Sprint(t.Runs),
-					fmt.Sprintf("%d/%s", t.Hosts, limit(t.MaxHosts)), stored, fmt.Sprintf("%dd", t.RetentionDays)})
+					fmt.Sprintf("%d/%s", t.Hosts, limit(t.MaxHosts)), stored, fmt.Sprintf("%dd", t.RetentionDays), expiry(t.ExpireAfterDays)})
 			}
-			a.table("NAME\tID\tACTIVE\tRUNS\tHOSTS\tSTORED\tRETENTION", rows)
+			a.table("NAME\tID\tACTIVE\tRUNS\tHOSTS\tSTORED\tRETENTION\tEXPIRY", rows)
 			return nil
 		},
 	}
 	cmd.AddCommand(ls)
 	return cmd
+}
+
+// expiry is a tenant's expireAfterDays for a table: 0 is never.
+func expiry(days int) string {
+	if days == 0 {
+		return "never"
+	}
+	return fmt.Sprintf("%dd", days)
 }
 
 func (a *app) statusCmd() *cobra.Command {

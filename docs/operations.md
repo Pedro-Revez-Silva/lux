@@ -173,10 +173,10 @@ array of objects with the same keys (including duration strings), for example
 ### Tenants, keys and quotas
 
 ```bash
-luxd admin create-tenant --name acme [--max-runs N] [--max-hosts N] [--retention-days 30]
+luxd admin create-tenant --name acme [--max-runs N] [--max-hosts N] [--retention-days 30] [--expire-after-days 90]
 luxd admin create-key --tenant T --scopes read,run
 luxd admin create-operator-key [--name N]       # every tenant: see docs/operators.md
-luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BYTES] [--retention-days N]
+luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BYTES] [--retention-days N] [--expire-after-days N]
 ```
 
 - `--max-runs`: Runs that are not stopped or finished. Checked when a Run
@@ -184,10 +184,14 @@ luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BY
 - `--max-hosts`: the tenant's registered hosts. Checked when a host
   registers.
 - `--max-storage`: bytes in snapshots, output and artifacts not yet
-  deleted by retention. Checked when a Run is submitted or resumed.
-- `--retention-days`: how long a finished Run's blobs are kept (default
-  30). The Run and its events stay. Resuming a finished Run clears its
-  finish time, so a live Run's snapshots are never deleted.
+  deleted. Checked when a Run is submitted or resumed.
+- `--retention-days`: how long a succeeded or cancelled Run keeps its
+  snapshots and output after it ended (default 30). The Run, its events
+  and its artifacts stay. A failed Run can be resumed, so retention
+  deletes nothing of it.
+- `--expire-after-days`: how long a Run may rest `stopped`, `lost` or
+  `failed` before lux cancels it (default 90; 0: never). Its retention
+  counts from then.
 
 A request over quota gets HTTP 429, and the CLI exits with code 5.
 
@@ -225,8 +229,32 @@ reach S3 in the background:
    downloaded through luxd, which decompresses them (blobs are stored zstd)
    and sends the file with its length and sha256 (`X-Lux-SHA256`), so a
    download cut short is detected.
-4. Retention deletes a finished Run's blobs from S3 after the tenant's
-   `retention_days`.
+4. The reaper deletes what no Run can use any more
+   ([Which snapshots are kept](concepts.md#which-snapshots-are-kept)):
+   - the older snapshots of a resumable Run, once its current one is
+     uploaded;
+   - a succeeded or cancelled Run's snapshots and output, the tenant's
+     `retention_days` after it ended;
+   - a `failed` Run, which is resumable, is exempt from age-based retention
+     until it expires (`expire_after_days`, default 90: cancelled, then
+     retention); its superseded snapshots are still removed, as above.
+
+   Artifacts are deleted only by `DELETE /v1/runs/{id}/artifacts`. Each
+   deletion marks the blobs deleted (and the snapshots unavailable) in the
+   database first, under the Run's lock, then deletes the S3 objects; a
+   delete S3 refuses is logged (`S3 delete failed; object orphaned`, with
+   its key) and left in the bucket, never retried.
+
+   **Upgrading** to this release (migrations 053–054): the first reaper
+   passes, 20 Runs per pass per kind, cancel every Run resting longer than
+   90 days (`state_changed_at` is backfilled from each Run's last `state`
+   event); delete the volumes of every snapshot but the current one of
+   non-terminal Runs (any not succeeded or cancelled) whose current
+   snapshot is uploaded; and stop deleting failed Runs' blobs and
+   artifacts. Superseded deletion leaves existing succeeded and cancelled
+   Runs alone: they stay governed by retention. Expired Runs lose their
+   snapshots and output 30 days later (their retention starts at the
+   expiry).
 
 Keys are `tenants/<tenant>/runs/<run>/<blob>`. Encrypt the bucket at rest
 (SSE-KMS on AWS).

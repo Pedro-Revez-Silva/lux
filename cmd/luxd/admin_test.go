@@ -165,6 +165,58 @@ func TestAdminPoolDefault(t *testing.T) {
 	}
 }
 
+// create-tenant sets expire_after_days (default 90); set-quota changes it,
+// 0 meaning never, and leaves it when the flag is absent.
+func TestAdminExpireAfterDays(t *testing.T) {
+	cfg, db := adminDB(t)
+	ctx := context.Background()
+	stdout := os.Stdout
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = devnull
+	t.Cleanup(func() { os.Stdout = stdout; devnull.Close() })
+
+	days := func(name string) int {
+		var n int
+		if err := db.QueryRow(ctx, `SELECT expire_after_days FROM tenants WHERE name = $1`, name).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	for _, args := range [][]string{{"create-tenant", "--name", "dflt"}, {"create-tenant", "--name", "short", "--expire-after-days", "7"}} {
+		if err := admin(ctx, cfg, args); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	if days("dflt") != 90 || days("short") != 7 {
+		t.Fatalf("created: %d and %d, want 90 and 7", days("dflt"), days("short"))
+	}
+	if err := admin(ctx, cfg, []string{"create-tenant", "--name", "neg", "--expire-after-days", "-1"}); err == nil {
+		t.Fatal("negative --expire-after-days accepted")
+	}
+	var id string
+	if err := db.QueryRow(ctx, `SELECT id FROM tenants WHERE name = 'short'`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		args []string
+		want int
+	}{
+		{[]string{"set-quota", "--tenant", id, "--expire-after-days", "0"}, 0},
+		{[]string{"set-quota", "--tenant", id, "--retention-days", "3"}, 0},
+		{[]string{"set-quota", "--tenant", id, "--expire-after-days", "30"}, 30},
+	} {
+		if err := admin(ctx, cfg, c.args); err != nil {
+			t.Fatalf("%v: %v", c.args, err)
+		}
+		if got := days("short"); got != c.want {
+			t.Errorf("after %v: %d, want %d", c.args, got, c.want)
+		}
+	}
+}
+
 // create-pool --default writes the pool, its mark and their events in one
 // transaction: each pool the mark moves between records it, and when an
 // event cannot be written neither the settings nor the mark change.

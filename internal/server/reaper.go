@@ -22,7 +22,7 @@ func (s *Server) reaperLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		for _, f := range []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapRetention, s.reapOutdatedStaticHosts} {
+		for _, f := range []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapExpiry, s.reapSuperseded, s.reapRetention, s.reapOutdatedStaticHosts} {
 			if err := f(ctx); err != nil && ctx.Err() == nil {
 				s.log.Warn("reaper", "err", err)
 			}
@@ -427,15 +427,202 @@ func (s *Server) requestStop(ctx context.Context, tx pgx.Tx, tenantID, runID, re
 	return hostID, nil
 }
 
-// reapRetention deletes the blobs of Runs that finished longer ago than
-// their tenant's retention.
+// reapExpiry cancels Runs that have rested (stopped, lost or failed) longer
+// than their tenant's expire_after_days (0: never). The clock is
+// state_changed_at, so a resume and a later stop restart it. The Run is
+// locked and its state re-checked by FOR UPDATE (a resume that committed
+// first fails the WHERE on the row's new version); one held by a resume or
+// cancel in progress is skipped and seen on a later pass.
+func (s *Server) reapExpiry(ctx context.Context) error {
+	var expired []string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// due: each expiring tenant's oldest due Runs, read from
+		// runs_resting below that tenant's own cutoff, so a tenant with a
+		// short limit does not make the pass read other tenants' resting
+		// Runs that are not due; then the oldest 20 of those. The outer
+		// query locks them and repeats the conditions.
+		rows, err := tx.Query(ctx, `WITH due AS (
+				SELECT d.id FROM tenants dt CROSS JOIN LATERAL (
+					SELECT dr.id, dr.state_changed_at FROM runs dr
+					WHERE dr.tenant_id = dt.id AND dr.state IN `+resumableRunStates+`
+					  AND dr.state_changed_at < now() - make_interval(days => dt.expire_after_days)
+					ORDER BY dr.state_changed_at LIMIT 20) d
+				WHERE dt.expire_after_days > 0
+				ORDER BY d.state_changed_at LIMIT 20
+			)
+			SELECT r.id, r.tenant_id, r.state, t.expire_after_days FROM runs r
+			JOIN tenants t ON t.id = r.tenant_id
+			WHERE r.id IN (SELECT id FROM due) AND r.state IN `+resumableRunStates+`
+			  AND t.expire_after_days > 0 AND r.state_changed_at < now() - make_interval(days => t.expire_after_days)
+			ORDER BY r.state_changed_at
+			FOR UPDATE OF r SKIP LOCKED`)
+		if err != nil {
+			return err
+		}
+		type due struct {
+			ID, Tenant, State string
+			Days              int
+		}
+		runs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[due])
+		if err != nil {
+			return err
+		}
+		for _, r := range runs {
+			reason := fmt.Sprintf("expired: %s for %d days", r.State, r.Days)
+			if err := setRunState(ctx, tx, r.Tenant, r.ID, StateCancelled, reason, 0); err != nil {
+				return err
+			}
+			expired = append(expired, r.ID)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, id := range expired {
+		s.secrets.drop(id)
+	}
+	return nil
+}
+
+// supersededWindow: how many flagged Runs one reapSuperseded pass inspects.
+const supersededWindow = 200
+
+// reapSuperseded deletes the volumes of a Run's snapshots other than its
+// current one (runs.snapshot_id), once the current one is uploaded: until
+// then an older snapshot is the only copy that survives losing the host.
+// Only Runs not succeeded or cancelled (reapRetention has those).
 //
-// The database is the claim: blobs are marked deleted, and the snapshots
-// they belong to unavailable, in one transaction that locks each Run and
-// checks it is still finished, so a concurrent resume either sees the Run
-// finished (and is refused a snapshot that is going) or clears finished_at
-// first (and keeps everything). S3 objects are deleted after the claim; one
-// that fails to delete is an orphan in S3, never a Run pointing at nothing.
+// The claim is reapRetention's: the Run is locked first, in a statement of
+// its own, so the claim's statement reads its snapshot_id after any resume
+// --from-snapshot or new snapshot report that committed before the lock,
+// and none can commit during it. The snapshot a queued or starting Run
+// restores is its snapshot_id (assign reads it under the same lock, and
+// neither path moves it while the Run is queued or placed), so it is never
+// claimed. A snapshot with a volume still on its host waits, available,
+// for a later pass: never deleted from under an upload. A blob the current
+// manifest also names is kept.
+//
+// Runs are found by runs.snapshots_superseded, cleared here once the Run
+// has no other available snapshot left, or has ended (reapRetention's).
+// A pass inspects at most supersededWindow flagged Runs after
+// s.supersededCursor, in id order, and moves the cursor past them, so
+// Runs whose older snapshots wait for an upload cost one window per pass
+// however many there are, and every flagged Run is inspected once per
+// rotation.
+func (s *Server) reapSuperseded(ctx context.Context) error {
+	var keys []string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// One index probe per id: under RLS the planner estimates few
+		// flagged rows survive and would seq-scan and sort all of runs for
+		// a plain ORDER BY id LIMIT.
+		rows, err := tx.Query(ctx, `WITH RECURSIVE w(id, n) AS (
+				SELECT (SELECT min(id) FROM runs WHERE snapshots_superseded AND id > $1), 1
+				UNION ALL
+				SELECT (SELECT min(id) FROM runs WHERE snapshots_superseded AND id > w.id), w.n + 1
+				FROM w WHERE w.id IS NOT NULL AND w.n < $2
+			) SELECT id FROM w WHERE id IS NOT NULL ORDER BY id`, s.supersededCursor, supersededWindow)
+		if err != nil {
+			return err
+		}
+		window, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		// A short window reached the end: the next pass starts over. Each
+		// luxd keeps its own cursor; the claim's lock keeps them apart.
+		next := ""
+		if len(window) == supersededWindow {
+			next = window[len(window)-1]
+		}
+		s.supersededCursor = next
+		if len(window) == 0 {
+			return nil
+		}
+		// Candidates: an ended Run or a stale hint (only its flag to
+		// clear), or a Run with an older snapshot the claim would take
+		// now. One whose older snapshots all wait for an upload is left
+		// out before the LIMIT, so it cannot hold a batch slot.
+		rows, err = tx.Query(ctx, `SELECT r.id FROM runs r
+			WHERE r.id = ANY($1) AND r.snapshots_superseded AND (r.state IN ('succeeded', 'cancelled')
+				OR NOT EXISTS (SELECT 1 FROM snapshots o WHERE o.run_id = r.id AND o.available AND o.id IS DISTINCT FROM r.snapshot_id)
+				OR (EXISTS (SELECT 1 FROM snapshots cur WHERE cur.id = r.snapshot_id AND cur.uploaded)
+					AND EXISTS (SELECT 1 FROM snapshots o WHERE o.run_id = r.id AND o.available AND o.id <> r.snapshot_id
+						AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(nullif(o.manifest->'volumes', 'null'), '[]')) v
+							JOIN blobs b ON b.id = v->>'blobId' AND b.run_id = o.run_id WHERE b.location = 'host'))))
+			ORDER BY r.id LIMIT 20
+			FOR UPDATE OF r SKIP LOCKED`, window)
+		if err != nil {
+			return err
+		}
+		runs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil || len(runs) == 0 {
+			return err
+		}
+		// A full batch may leave ready Runs later in the window: the next
+		// pass resumes after the last one claimed.
+		if len(runs) == 20 {
+			s.supersededCursor = runs[len(runs)-1]
+		}
+		// A new statement: it sees whatever committed before the locks.
+		rows, err = tx.Query(ctx, `
+			WITH cur AS (
+				SELECT r.id AS run_id, r.snapshot_id, c.manifest FROM runs r JOIN snapshots c ON c.id = r.snapshot_id
+				WHERE r.id = ANY($1) AND c.uploaded AND r.state NOT IN ('succeeded', 'cancelled')
+			), old AS (
+				SELECT o.id, o.run_id, o.manifest, cur.manifest AS keep FROM snapshots o JOIN cur ON cur.run_id = o.run_id
+				WHERE o.available AND o.id <> cur.snapshot_id
+				  AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(nullif(o.manifest->'volumes', 'null'), '[]')) v
+					JOIN blobs b ON b.id = v->>'blobId' AND b.run_id = o.run_id WHERE b.location = 'host')
+			), gone AS (
+				UPDATE snapshots SET available = false WHERE id IN (SELECT id FROM old)
+			)
+			UPDATE blobs b SET location = 'deleted', deleted_at = now()
+			FROM old, jsonb_array_elements(coalesce(nullif(old.manifest->'volumes', 'null'), '[]')) v
+			WHERE b.id = v->>'blobId' AND b.run_id = old.run_id AND b.kind = 'volume' AND b.location = 's3'
+			  AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(nullif(old.keep->'volumes', 'null'), '[]')) k
+				WHERE k->>'blobId' = b.id)
+			RETURNING b.s3_key`, runs)
+		if err != nil {
+			return err
+		}
+		if keys, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
+			return err
+		}
+		// After the claim's statement, so it sees the snapshots it took.
+		_, err = tx.Exec(ctx, `UPDATE runs r SET snapshots_superseded = false
+			WHERE r.id = ANY($1) AND (r.state IN ('succeeded', 'cancelled') OR NOT EXISTS (
+				SELECT 1 FROM snapshots o WHERE o.run_id = r.id AND o.available AND o.id IS DISTINCT FROM r.snapshot_id))`, runs)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	s.deleteObjects(ctx, "superseded snapshot", keys)
+	return nil
+}
+
+// deleteObjects deletes claimed S3 objects, after the claim committed. One
+// that fails to delete is an orphan in S3, logged, never retried.
+func (s *Server) deleteObjects(ctx context.Context, what string, keys []string) {
+	for _, k := range keys {
+		if err := s.blobs.Delete(ctx, k); err != nil {
+			s.log.Warn(what+": S3 delete failed; object orphaned", "key", k, "err", err)
+		}
+	}
+}
+
+// reapRetention deletes the blobs of Runs that succeeded or were cancelled
+// longer ago than their tenant's retention: snapshot volumes and output.
+// Artifacts are kept until their owner deletes them (deleteArtifacts). A
+// failed Run is resumable, so it is exempt from retention until it expires
+// (reapExpiry) and its retention counts from then.
+//
+// The database is the claim: blobs are marked deleted, and the Run's
+// snapshots unavailable, in one transaction that locks each Run and checks
+// it is still terminal, so a Run cannot be resumed from a snapshot that is
+// going. S3 objects are deleted after the claim; one that fails to delete
+// is an orphan in S3, never a Run pointing at nothing.
 func (s *Server) reapRetention(ctx context.Context) error {
 	var keys []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -443,16 +630,17 @@ func (s *Server) reapRetention(ctx context.Context) error {
 			WITH due AS (
 				SELECT r.id FROM runs r JOIN tenants t ON t.id = r.tenant_id
 				WHERE r.finished_at IS NOT NULL AND r.finished_at < now() - make_interval(days => t.retention_days)
-				  AND EXISTS (SELECT 1 FROM blobs bl WHERE bl.run_id = r.id AND bl.location = 's3')
+				  AND r.state IN ('succeeded', 'cancelled')
+				  AND EXISTS (SELECT 1 FROM blobs bl WHERE bl.run_id = r.id AND bl.location = 's3' AND bl.kind <> 'artifact')
 				ORDER BY r.finished_at LIMIT 20
 				FOR UPDATE OF r SKIP LOCKED
 			), gone AS (
-				UPDATE snapshots SET available = false WHERE run_id IN (SELECT id FROM due)
+				UPDATE snapshots SET available = false WHERE run_id IN (SELECT id FROM due) AND available
 			)
 			-- Only blobs in S3: one still on its host is mid-upload; it is
 			-- claimed on a later pass, once it has arrived.
 			UPDATE blobs SET location = 'deleted', deleted_at = now()
-			WHERE run_id IN (SELECT id FROM due) AND location = 's3'
+			WHERE run_id IN (SELECT id FROM due) AND location = 's3' AND kind <> 'artifact'
 			RETURNING s3_key`)
 		if err != nil {
 			return err
@@ -463,10 +651,6 @@ func (s *Server) reapRetention(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, k := range keys {
-		if err := s.blobs.Delete(ctx, k); err != nil {
-			s.log.Warn("retention: S3 delete failed; object orphaned", "key", k, "err", err)
-		}
-	}
+	s.deleteObjects(ctx, "retention", keys)
 	return nil
 }

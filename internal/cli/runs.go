@@ -1032,7 +1032,7 @@ resumes, and lux says why on stderr ("disk kept: ...").`,
 	cmd.Flags().StringVar(&secretsFrom, "secrets-from", "", ".env file supplying secret values")
 	cmd.Flags().StringArrayVar(&secretArgs, "secret", nil, "NAME=VALUE (repeatable); a name the Run lacks adds it as an env secret")
 	cmd.Flags().StringArrayVar(&removeSecrets, "remove-secret", nil, "NAME: remove one of the Run's secrets from now on (repeatable)")
-	cmd.Flags().StringVar(&fromSnapshot, "from-snapshot", "", "resume from an older snapshot")
+	cmd.Flags().StringVar(&fromSnapshot, "from-snapshot", "", "resume from an older snapshot, while it is available (lux snapshots)")
 	cmd.Flags().StringVar(&to, "to", "", "operators: resume on this host (id or name)")
 	cmd.Flags().StringVar(&disk, "disk", "", "a new disk limit from now on (e.g. 40Gi); a smaller one only if its saved state fits with headroom")
 	cmd.Flags().StringVar(&memory, "memory", "", "new memory from now on, larger or smaller (e.g. 4Gi)")

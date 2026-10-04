@@ -137,7 +137,7 @@ async function api(req: Request, srv: Srv): Promise<Response> {
     }
     if (!authed(req)) return json({ error: { code: "unauthorized", message: "no key" } }, 401);
     if (p === "/v1/whoami") return json(consoleAuth === "cloudflare-access" ? { operator: true, tenant: "", tenantId: "", email: "ada@example.com", name: "Ada Lovelace", scopes: ["read", "run"], consoleAuth, previewDomain: previewDomain || null } : { operator: true, tenant: "", tenantId: "", keyId: "key_op", scopes: ["read", "run"], consoleAuth, previewDomain: previewDomain || null });
-    if (p === "/v1/tenants") return json({ tenants: [{ id: "ten_acme", name: "acme", retentionDays: 30, activeRuns: 1, runs: 12, hosts: 2, storedBytes: 0, createdAt: ago(86400) }] });
+    if (p === "/v1/tenants") return json({ tenants: [{ id: "ten_acme", name: "acme", retentionDays: 30, expireAfterDays: 90, activeRuns: 1, runs: 12, hosts: 2, storedBytes: 0, createdAt: ago(86400) }] });
     if (p === "/v1/runs") return json({ runs: [run()] });
     if (p === `/v1/runs/${RUN_ID}`) return json(run());
     if (p === "/v1/servers") {

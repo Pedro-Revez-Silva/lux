@@ -469,7 +469,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	if _, err := tx.Exec(ctx, `UPDATE runs SET current_epoch = $2, state = 'scheduled', state_reason = '', pending_input = NULL, pending_sync = NULL,
 			place_on = NULL, avoid_host = NULL, needs_host_since = NULL,
 			prompt_attachments = CASE WHEN $3 THEN NULL ELSE prompt_attachments END,
-			first_scheduled_at = coalesce(first_scheduled_at, now()), updated_at = now()
+			first_scheduled_at = coalesce(first_scheduled_at, now()), updated_at = now(), state_changed_at = now()
 		WHERE id = $1`, r.ID, epoch, resume); err != nil {
 		return err
 	}
@@ -600,6 +600,7 @@ func (s *Server) requestResume(ctx context.Context, tx pgx.Tx, tenantID, runID s
 	// treat its blobs as those of a terminal Run. Without input, it keeps
 	// what was pending (a migration's).
 	_, err := tx.Exec(ctx, `UPDATE runs SET state = 'resuming', state_reason = $3, pending_input = coalesce($2, pending_input), updated_at = now(),
+			state_changed_at = CASE WHEN state <> 'resuming' THEN now() ELSE state_changed_at END,
 			exit_code = NULL, finished_at = NULL, needs_host_since = now()
 		WHERE id = $1`, runID, in, why)
 	if err != nil {

@@ -38,7 +38,7 @@ lux ls [--resumable] [--host H] [--state …] [--limit N]
 lux get <run>                       # with what a resume would take, when stopped, lost or failed
 lux hosts ls [--pool P] [--state S] [--all]
 lux hosts get <host>                # lifecycle, capacity, what its live placements hold
-lux tenants ls                      # quotas and what each tenant uses
+lux tenants ls                      # quotas and what each tenant uses; RETENTION, and EXPIRY (never: resting Runs are never cancelled)
 lux history [--since 24h]           # the system over time (sparklines; -o json for the samples)
 lux history <run>                   # a Run's CPU, memory, disk, pids, network, across placements
 lux history --host <host>

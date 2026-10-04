@@ -507,6 +507,11 @@ Each artifact is stored like a snapshot blob (uploaded through luxd to S3)
 with its size, sha256 and content type, and listed by placement epoch.
 Downloads stream through luxd as the file the Run wrote.
 
+Artifacts are never deleted by time, not even with the Run's snapshots and
+output after retention. Once a Run has succeeded or been cancelled, its
+owner deletes them with `lux artifacts <run> --delete` (`DELETE
+/v1/runs/{id}/artifacts`); a download after that is 410 `gone`.
+
 Limits: 1000 artifacts per placement, 1 GiB per file. Symlinks are never
 collected: a workload's link could point anywhere on the host.
 

@@ -76,8 +76,8 @@ lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--se
            [--add-repo name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]]... [--request-id ID]
            [--sync repo=ref]...  # move restored checkouts to ref before init
 lux sync <run> repo=ref... [--wait] [--request-id ID]   # a running Run's checkouts
-lux cancel <run> [--wait]       # final (a snapshot is still taken)
-lux snapshots <run>             # where each snapshot lives
+lux cancel <run> [--wait]       # final (a snapshot is still taken); a Run left stopped, lost or failed is cancelled after its tenant's expiry (default 90 days)
+lux snapshots <run>             # where each snapshot lives; only the current one is kept once uploaded (older ones: available false)
 ```
 
 A resume needs the Run's secrets again. lux looks for each one in
@@ -169,6 +169,7 @@ prints git-style stat lines instead, and `-o json` the whole result
 
 ```bash
 lux artifacts <run> [--download DIR]
+lux artifacts <run> --delete    # a succeeded or cancelled Run's artifacts, from storage; retention never deletes them
 ```
 
 ## Hosts and pools

@@ -6,7 +6,7 @@
 //	luxd admin create-operator-key [--name N]    → {"apiKey"}: every tenant
 //	luxd admin create-host-token [--tenant T] [--pool P] [--label k=v]  → {"token"}
 //	luxd admin create-pool --name N --provider static|ec2 [--tenant T] [--shared] [--default] ...
-//	luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--retention-days N]
+//	luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--retention-days N] [--expire-after-days N]
 //	luxd serve                                    run the API, scheduler and reapers
 //	luxd validate                                 check the configuration as serve would, connecting to nothing
 //	luxd check-config                             the same as validate
@@ -114,14 +114,14 @@ to nothing; it prints "ok: FILE" (or "ok: no file"). check-config is an
 alias of validate.
 
 admin commands:
-  create-tenant --name N [--max-runs N] [--max-hosts N] [--retention-days N]
+  create-tenant --name N [--max-runs N] [--max-hosts N] [--retention-days N] [--expire-after-days N]
   create-key --tenant T [--name N] [--scopes read,run,admin]
   create-operator-key [--name N]
   create-host-token [--tenant T] [--pool P] [--label k=v ...]
   create-pool --name N --provider static|ec2 [--tenant T] [--shared] [--default[=false]]
               [--min N] [--max N] [--warm N] [--template JSON]
               [--hourly-price D --currency C]   (static pools: hosts' default price)
-  set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BYTES] [--retention-days N]`)
+  set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BYTES] [--retention-days N] [--expire-after-days N]`)
 	os.Exit(2)
 }
 
@@ -284,16 +284,20 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		name := fs.String("name", "", "tenant name")
 		maxRuns := fs.Int("max-runs", 0, "max concurrent runs (0: unlimited)")
 		maxHosts := fs.Int("max-hosts", 0, "max hosts (0: unlimited)")
-		retention := fs.Int("retention-days", 30, "days to keep finished runs' blobs")
+		retention := fs.Int("retention-days", 30, "days to keep a succeeded or cancelled Run's snapshots and output")
+		expire := fs.Int("expire-after-days", 90, "days a stopped, lost or failed Run may rest before it is cancelled (0: never)")
 		fs.Parse(args[1:])
 		if *name == "" {
 			return errors.New("--name is required")
 		}
+		if *expire < 0 {
+			return errors.New("--expire-after-days must be 0 (never) or more")
+		}
 		tenantID := ids.New(ids.Tenant)
 		key := ids.Secret("lux")
 		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, retention_days, max_concurrent_runs, max_hosts)
-				VALUES ($1, $2, $3, nullif($4, 0), nullif($5, 0))`, tenantID, *name, *retention, *maxRuns, *maxHosts); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, retention_days, max_concurrent_runs, max_hosts, expire_after_days)
+				VALUES ($1, $2, $3, nullif($4, 0), nullif($5, 0), $6)`, tenantID, *name, *retention, *maxRuns, *maxHosts, *expire); err != nil {
 				return err
 			}
 			_, err := tx.Exec(ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ($1, $2, 'bootstrap', $3, $4)`,
@@ -427,15 +431,17 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		maxRuns := fs.Int("max-runs", -1, "max concurrent runs (0: unlimited)")
 		maxHosts := fs.Int("max-hosts", -1, "max hosts (0: unlimited)")
 		maxStorage := fs.Int64("max-storage", -1, "max stored bytes (0: unlimited)")
-		retention := fs.Int("retention-days", -1, "days to keep finished runs' blobs")
+		retention := fs.Int("retention-days", -1, "days to keep a succeeded or cancelled Run's snapshots and output")
+		expire := fs.Int("expire-after-days", -1, "days a stopped, lost or failed Run may rest before it is cancelled (0: never)")
 		fs.Parse(args[1:])
 		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `UPDATE tenants SET
 					max_concurrent_runs = CASE WHEN $2 < 0 THEN max_concurrent_runs ELSE nullif($2, 0) END,
 					max_hosts = CASE WHEN $3 < 0 THEN max_hosts ELSE nullif($3, 0) END,
 					max_storage_bytes = CASE WHEN $4 < 0 THEN max_storage_bytes ELSE nullif($4, 0) END,
-					retention_days = CASE WHEN $5 < 0 THEN retention_days ELSE $5 END
-				WHERE id = $1`, *tenant, *maxRuns, *maxHosts, *maxStorage, *retention)
+					retention_days = CASE WHEN $5 < 0 THEN retention_days ELSE $5 END,
+					expire_after_days = CASE WHEN $6 < 0 THEN expire_after_days ELSE $6 END
+				WHERE id = $1`, *tenant, *maxRuns, *maxHosts, *maxStorage, *retention, *expire)
 			return err
 		})
 		if err != nil {

@@ -52,6 +52,74 @@ func TestParseAddRepo(t *testing.T) {
 	}
 }
 
+// tenants ls shows each tenant's expiry: days, or never for 0.
+func TestTenantsLsExpiry(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tenants":[{"id":"t_a","name":"a","retentionDays":30,"expireAfterDays":90},
+			{"id":"t_b","name":"b","retentionDays":5,"expireAfterDays":0}]}`))
+	}))
+	defer srv.Close()
+	var out strings.Builder
+	a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: io.Discard}
+	root := a.root()
+	root.SetArgs([]string{"--url", srv.URL, "--api-key", "k", "tenants", "ls"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	header, rowA, rowB := strings.Fields(lines[0]), strings.Fields(lines[1]), strings.Fields(lines[2])
+	if header[len(header)-1] != "EXPIRY" || rowA[len(rowA)-1] != "90d" || rowB[len(rowB)-1] != "never" || rowB[len(rowB)-2] != "5d" {
+		t.Fatalf("table:\n%s", out.String())
+	}
+}
+
+// artifacts --delete sends DELETE /v1/runs/<run>/artifacts and says how
+// many went.
+func TestArtifactsDelete(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"deleted":3}`))
+	}))
+	defer srv.Close()
+	var out strings.Builder
+	a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: io.Discard}
+	root := a.root()
+	root.SetArgs([]string{"--url", srv.URL, "--api-key", "k", "artifacts", "run_1", "--delete"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(seen, []string{"DELETE /v1/runs/run_1/artifacts"}) || out.String() != "deleted 3 artifacts\n" {
+		t.Fatalf("sent %v, printed %q", seen, out.String())
+	}
+}
+
+// artifacts --download with --delete is refused before any request.
+func TestArtifactsDownloadDeleteRefused(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"deleted":3,"artifacts":[]}`))
+	}))
+	defer srv.Close()
+	var out strings.Builder
+	a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: io.Discard}
+	root := a.root()
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"--url", srv.URL, "--api-key", "k", "artifacts", "run_1", "--download", t.TempDir(), "--delete"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "none of the others can be") {
+		t.Fatalf("--download --delete: %v, want refused as mutually exclusive", err)
+	}
+	if len(seen) != 0 || out.String() != "" {
+		t.Fatalf("sent %v, printed %q, want nothing", seen, out.String())
+	}
+}
+
 // pools set --default alone sends a marker-only body, exactly name and
 // isDefault, which luxd refuses to read as anything else; with a setting,
 // the whole pool.

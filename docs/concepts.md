@@ -53,6 +53,14 @@ submitted → scheduled → starting → running ─┬─▶ succeeded
 | `succeeded` / `failed` / `cancelled` | Terminal. A failed Run can still be resumed. |
 | `lost` | Its host stopped heartbeating while it was live. Resumable from the last snapshot taken *before* the lost placement. Work since then is gone. |
 
+A Run that stays `stopped`, `lost` or `failed` (resting) longer than its
+tenant's `expireAfterDays` (default 90; 0: never) is **cancelled by lux**,
+with `stateReason` `expired: stopped for 90 days` (or `lost`, `failed`),
+and a `state` event like any cancel. The clock is the time in that state:
+a resume restarts it at the next stop. Its storage then follows the
+cancelled Run's ([below](#which-snapshots-are-kept)): 90 days resting plus
+the tenant's retention. Cancel a Run sooner yourself to free it sooner.
+
 `stateReason` explains the current state, for example `exit code 3`,
 `waiting for capacity: 2 hosts in its pool lack cpus (requested 4)`, or
 `lease expired: host stopped heartbeating`. A Run waiting for a host counts
@@ -74,6 +82,25 @@ A **snapshot** is the state volumes as of one exit, plus a manifest. The
 runner exports each volume (`podman volume export`, zstd) and keeps the
 snapshot locally. It then uploads it through luxd to S3 in the background.
 Runners never hold S3 credentials.
+
+### Which snapshots are kept
+
+Every snapshot is a full copy of the state volumes, so lux keeps only the
+ones a Run can still use:
+
+- **A Run that can resume** (`stopped`, `lost`, `failed`, or on its way
+  back) keeps its **current** snapshot (the one a resume starts from).
+  Older snapshots are deleted once the current one has finished uploading;
+  until then the older one is the only copy that would survive losing the
+  host. `resume --from-snapshot` an older snapshot works while it still
+  exists; a deleted one is 409 `snapshot_unavailable`. `lux snapshots`
+  keeps listing every snapshot, deleted ones with `available` false.
+- **A succeeded or cancelled Run** (an expired Run too) keeps its
+  snapshots and output for the tenant's retention (default 30 days) after
+  it ended, then they are deleted.
+- **Artifacts** are never deleted by time: they stay until their owner
+  deletes them (`lux artifacts <run> --delete`, a succeeded or cancelled
+  Run's only).
 
 **What does not survive a move:** running processes, memory, open
 connections, background servers, and anything outside the state volumes,

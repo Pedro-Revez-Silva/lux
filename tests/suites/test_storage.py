@@ -128,16 +128,24 @@ def test_storage_quota(env, lux, runners, hosts):
     assert e.value.code == 5 and "quota" in e.value.stderr
 
 
-def test_resuming_a_failed_run_after_retention_says_why(env, lux, runners, hosts):
-    """A failed Run is resumable; once retention has taken its snapshot,
-    resuming it ends as lost with the reason, rather than failing to
-    restore on a host."""
+def test_retention_spares_a_failed_runs_snapshot(env, lux, runners, hosts):
+    """A failed Run is resumable, so retention leaves its snapshot alone even
+    at 0 days: a later succeeded Run of the same tenant is deleted, the
+    failed one still resumes from its own state. It goes only once it
+    expires (cancelled), then after retention like any terminal Run."""
     env.luxd_admin("set-quota", "--tenant", lux.tenant_id, "--retention-days", "0")
     runners.start(hosts[0])
-    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "exit 1", volumes=[{"name": "d", "path": "/d"}]))
-    lux.wait_state(run_id, "failed")
-    wait_until(lambda: not any(sn["available"] for sn in lux.json("snapshots", run_id)), 60, 1,
-               "retention never took the snapshot")
-    lux.run("resume", run_id)
-    run = lux.wait_state(run_id, "lost")
-    assert "snapshot" in run["stateReason"], run
+    failed = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "test -f /d/f && exit 0; touch /d/f; exit 1",
+                                volumes=[{"name": "d", "path": "/d"}]))
+    lux.wait_state(failed, "failed")
+    lux.wait_placement_uploaded(failed)
+    done = lux.submit(generic(ALPINE_IMAGE, "echo", "gone-soon"))
+    lux.wait_state(done, "succeeded")
+    # Retention has run over this tenant after the failed Run finished.
+    wait_until(lambda: not s3_keys(env, done) and lux.get(done)["placements"][0].get("uploadedAt"),
+               60, 1, "retention never deleted the succeeded Run")
+    assert any(sn["available"] for sn in lux.json("snapshots", failed)), lux.json("snapshots", failed)
+    assert s3_keys(env, failed)
+    lux.run("resume", failed)
+    # /d/f came back from the snapshot, so the script exits 0 this time.
+    lux.wait_state(failed, "succeeded")

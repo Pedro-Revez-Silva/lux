@@ -568,6 +568,8 @@ export interface Tenant {
   id: string;
   name: string;
   retentionDays: number;
+  /** Days a stopped, lost or failed Run may rest before it is cancelled; 0: never. */
+  expireAfterDays: number;
   maxConcurrentRuns?: number;
   maxHosts?: number;
   maxStorageBytes?: number;

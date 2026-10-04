@@ -152,6 +152,9 @@ type Server struct {
 	decided   map[string]map[string]bool
 	swept     map[string]bool
 	leaseHeld bool
+	// supersededCursor: the last flagged Run id reapSuperseded inspected
+	// ("" to start over); reaper goroutine only.
+	supersededCursor string
 	// deployment identifies this lux database in provider tags, so two
 	// deployments sharing a cloud account never take each other's
 	// instances for orphans (read by the provisioner).

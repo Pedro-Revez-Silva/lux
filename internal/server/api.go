@@ -87,7 +87,8 @@ func (s *Server) routes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "resumeRun", Method: http.MethodPost, Path: "/v1/runs/{id}/resume", Tags: []string{"runs"},
 		Summary: "Resume a stopped, lost or failed Run",
-		Description: "From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming.\n\n" +
+		Description: "From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming. " +
+			"A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been cancelled, and is not resumable.\n\n" +
 			"git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event " +
 			"with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. " +
 			"Adding needs a stopped, lost or failed Run: while it is resuming, 409. " +
@@ -162,7 +163,9 @@ func (s *Server) routes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "listSnapshots", Method: http.MethodGet, Path: "/v1/runs/{id}/snapshots", Tags: []string{"runs"},
 		Summary: "List a Run's snapshots",
-		Errors:  []int{http.StatusNotFound},
+		Description: "Every snapshot it took. A Run keeps only its current one (the one a resume starts from) once that is uploaded; " +
+			"a succeeded or cancelled Run keeps them for its tenant's retention. A deleted one stays listed, available false.",
+		Errors: []int{http.StatusNotFound},
 	}, "read", s.listSnapshots)
 	register(s, api, huma.Operation{
 		OperationID: "listArtifacts", Method: http.MethodGet, Path: "/v1/runs/{id}/artifacts", Tags: []string{"runs"},
@@ -170,11 +173,19 @@ func (s *Server) routes(api huma.API) {
 		Errors:  []int{http.StatusNotFound},
 	}, "read", s.listArtifacts)
 	register(s, api, huma.Operation{
+		OperationID: "deleteArtifacts", Method: http.MethodDelete, Path: "/v1/runs/{id}/artifacts", Tags: []string{"runs"},
+		Summary: "Delete a Run's artifacts",
+		Description: "Every artifact of a succeeded or cancelled Run, from storage; retention never deletes artifacts. Their listing stays, " +
+			"available false, and a download answers 410 gone. Works however long ago the Run ended. Idempotent: deleted is 0 once none are left. " +
+			"409 not_terminal on any other Run (a stopped, lost or failed one can still be resumed).",
+		Errors: []int{http.StatusNotFound, http.StatusConflict},
+	}, "run", s.deleteArtifacts)
+	register(s, api, huma.Operation{
 		OperationID: "downloadArtifact", Method: http.MethodGet, Path: "/v1/artifacts/{aid}", Tags: []string{"runs"},
 		Summary: "Download an artifact",
 		Description: "The file the Run wrote, streamed through luxd. Content-Length and X-Lux-SHA256 let a client tell a whole download " +
 			"from one cut short (the response is aborted, never ended cleanly, on a failure mid-way). " +
-			"409 not_uploaded (with Retry-After) while it is still on its host; 410 gone once deleted by retention.",
+			"409 not_uploaded (with Retry-After) while it is still on its host; 410 gone once deleted (DELETE /v1/runs/{id}/artifacts).",
 		Responses: map[string]*huma.Response{"200": {
 			Description: "The file.",
 			Content:     map[string]*huma.MediaType{"application/octet-stream": {Schema: &huma.Schema{Type: huma.TypeString, Format: "binary"}}},
@@ -1094,7 +1105,7 @@ func (s *Server) resumability(ctx context.Context, tenantID string, run *Run) (*
 			rs.OnHosts = append(rs.OnHosts, *host)
 		}
 		if !available {
-			rs.Blockers = append(rs.Blockers, "its snapshot is no longer available: resume --from-snapshot an older one")
+			rs.Blockers = append(rs.Blockers, "its snapshot is no longer available: resume --from-snapshot an older one if lux snapshots lists one available")
 		} else if !rs.Uploaded && host == nil {
 			rs.Blockers = append(rs.Blockers, "its snapshot was never uploaded and no host holds it")
 		}
@@ -1353,7 +1364,7 @@ type resumeRequest struct {
 	Git           *resumeGit    `json:"git,omitempty" doc:"Repositories to add. The runner clones them before the Run starts again; one whose clone fails is dropped and the Run goes on without it (a git.clone event says so)."`
 	Input         *resumeInput  `json:"input,omitempty" doc:"A message for the workload once it is back."`
 	// FromSnapshot resumes from an older snapshot (e.g. after lost).
-	FromSnapshot string           `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost)."`
+	FromSnapshot string           `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost). Older snapshots are deleted once the latest is uploaded: one deleted is 409 snapshot_unavailable."`
 	To           string           `json:"to,omitempty" doc:"Operators: place it on this host (id or name), and nowhere else."`
 	Resources    *resumeResources `json:"resources,omitempty" doc:"Change what the Run gets from now on (e.g. more disk after it went over). On a Run already resuming: the same as its resume asked for, 202 with that resume's resize; absent or empty, 202; other values, 409 not_resumable."`
 	Sync         []proto.SyncRef  `json:"sync,omitempty" doc:"Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha) before init, through the host's mirror: tracked files become the ref's, untracked and ignored ones are kept. Each is a git.sync event; the Run goes on after a failed one, its checkout as it was (or, if a reset failed half-way, where git stopped, with refs/lux/pre-sync holding what was there)."`
@@ -1593,7 +1604,8 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			if !ok {
 				return errf(http.StatusConflict, "snapshot_unavailable", "snapshot %s is no longer available", req.FromSnapshot)
 			}
-			if _, err := tx.Exec(ctx, `UPDATE runs SET snapshot_id = $2 WHERE id = $1`, id, req.FromSnapshot); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE runs SET snapshot_id = $2,
+					snapshots_superseded = snapshots_superseded OR snapshot_id IS DISTINCT FROM $2 WHERE id = $1`, id, req.FromSnapshot); err != nil {
 				return err
 			}
 		}

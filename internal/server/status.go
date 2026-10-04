@@ -13,7 +13,8 @@ import (
 type Tenant struct {
 	ID                string    `json:"id"`
 	Name              string    `json:"name"`
-	RetentionDays     int       `json:"retentionDays"`
+	RetentionDays     int       `json:"retentionDays" doc:"Days a succeeded or cancelled Run keeps its snapshots and output after it ended. Artifacts are kept until deleted."`
+	ExpireAfterDays   int       `json:"expireAfterDays" doc:"Days a stopped, lost or failed Run may rest before lux cancels it; 0: never."`
 	MaxConcurrentRuns *int      `json:"maxConcurrentRuns,omitempty"`
 	MaxHosts          *int      `json:"maxHosts,omitempty"`
 	MaxStorageBytes   *int64    `json:"maxStorageBytes,omitempty"`
@@ -35,7 +36,7 @@ func (s *Server) listTenants(ctx context.Context, _ *TenantQuery) (*listTenantsO
 	p := principal(ctx)
 	tenants := []Tenant{}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT t.id, t.name, t.retention_days, t.max_concurrent_runs, t.max_hosts, t.max_storage_bytes,
+		rows, err := tx.Query(ctx, `SELECT t.id, t.name, t.retention_days, t.expire_after_days, t.max_concurrent_runs, t.max_hosts, t.max_storage_bytes,
 				(SELECT count(*) FROM runs WHERE tenant_id = t.id AND state NOT IN `+inactiveRunStates+`),
 				(SELECT count(*) FROM runs WHERE tenant_id = t.id),
 				(SELECT count(*) FROM hosts WHERE tenant_id = t.id AND state <> 'terminated'),
@@ -47,7 +48,7 @@ func (s *Server) listTenants(ctx context.Context, _ *TenantQuery) (*listTenantsO
 		}
 		tenants, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (Tenant, error) {
 			var t Tenant
-			err := row.Scan(&t.ID, &t.Name, &t.RetentionDays, &t.MaxConcurrentRuns, &t.MaxHosts, &t.MaxStorageBytes,
+			err := row.Scan(&t.ID, &t.Name, &t.RetentionDays, &t.ExpireAfterDays, &t.MaxConcurrentRuns, &t.MaxHosts, &t.MaxStorageBytes,
 				&t.ActiveRuns, &t.Runs, &t.Hosts, &t.StoredBytes, &t.CreatedAt)
 			return t, err
 		})
