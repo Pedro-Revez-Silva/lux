@@ -428,6 +428,12 @@ func (c *Codex) Deliver(in proto.Input) {
 		c.mu.Unlock()
 		return
 	}
+	if ready && turn != "" && in.Interrupt && in.HasContent() {
+		// Queued under the lock that saw the turn running, so its
+		// turn/completed starts it whether that comes before or after
+		// the result of turn/interrupt.
+		c.queue = append([]proto.Input{in}, c.queue...)
+	}
 	c.mu.Unlock()
 	if !ready || turn == "" {
 		c.mu.Lock()
@@ -449,9 +455,6 @@ func (c *Codex) Deliver(in proto.Input) {
 			}
 			return
 		}
-		c.mu.Lock()
-		c.queue = append([]proto.Input{in}, c.queue...)
-		c.mu.Unlock()
 		return
 	}
 	// Tracked on arrival: carried inputs keep the order they came in.
