@@ -624,6 +624,11 @@ export interface Sample {
   capacityMemory?: number;
   allocatedCpus?: number;
   allocatedMemory?: number;
+  /** System: bytes in S3 (compressed) by blob kind; a rollup's mean. */
+  storedVolume?: number;
+  storedOutput?: number;
+  storedArtifact?: number;
+  storedContext?: number;
 }
 
 /** The control host by what each figure is of: a luxd restart starts a new luxd series; a machine's and Postgres's go on. */

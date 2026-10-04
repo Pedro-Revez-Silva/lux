@@ -120,7 +120,9 @@ luxd keeps samples of:
   and network counters;
 - the system, every `LUX_SAMPLE_EVERY`, once in total and once per tenant:
   Runs by state, busy and idle, the queue, Runs started and finished, time
-  to start (p50, p95), hosts by state, capacity and what is allocated.
+  to start (p50, p95), hosts by state, capacity and what is allocated, and
+  the bytes kept in S3 by kind (snapshots, output, artifacts, build
+  contexts; [Telemetry](telemetry.md#history)).
 - the control host, the machine luxd itself runs on, with the system: CPU
   and memory used against what it has, each tracked filesystem's used and
   free space (`history.disk_paths`, `LUX_HISTORY_DISK_PATHS`; default `/`;

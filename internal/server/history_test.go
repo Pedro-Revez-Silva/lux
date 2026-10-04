@@ -137,6 +137,71 @@ func TestRollupHistory(t *testing.T) {
 	}
 }
 
+// GET /v1/history carries the stored bytes: a tenant key its own, an
+// operator the whole system's; zero bytes are sent, not left out.
+func TestSystemHistoryStored(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 'acme')`)
+	tenantKey, opKey := ids.Secret("luxk"), ids.Secret("luxk")
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('kt', 't1', 'k', $1, ARRAY['read'])`, ids.Hash(tenantKey))
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('ko', NULL, 'o', $1, ARRAY['operator'])`, ids.Hash(opKey))
+	execSQL(t, s, ctx, `INSERT INTO system_samples (tenant_id, res, at, stored_volume, stored_output, stored_artifact, stored_context) VALUES
+		('', 0, now() - interval '1 minute', 10, 20, 30, 40), ('t1', 0, now() - interval '1 minute', 1, 0, 3, 0)`)
+	for key, want := range map[string]string{tenantKey: "1 0 3 0", opKey: "10 20 30 40"} {
+		h := historyRequest(t, s, key, "/v1/history?res=0&since=1h")
+		if len(h.Samples) != 1 {
+			t.Fatalf("samples: %+v", h.Samples)
+		}
+		sm := h.Samples[0]
+		if sm.StoredVolume == nil || sm.StoredOutput == nil || sm.StoredArtifact == nil || sm.StoredContext == nil {
+			t.Fatalf("missing stored bytes: %+v", sm)
+		}
+		if got := fmt.Sprint(*sm.StoredVolume, *sm.StoredOutput, *sm.StoredArtifact, *sm.StoredContext); got != want {
+			t.Errorf("stored %s, want %s", got, want)
+		}
+	}
+}
+
+// The rollups average stored bytes per bucket, each kind and tenant apart.
+func TestRollupStored(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	for i, off := range []time.Duration{0, 30 * time.Second, time.Minute, 90 * time.Second} {
+		v := int64(100 * (i + 1))
+		execSQL(t, s, ctx, `INSERT INTO system_samples (tenant_id, res, at, stored_volume, stored_output, stored_artifact, stored_context)
+			VALUES ('', 0, $1, $2::bigint, $2::bigint + 1, $2::bigint + 2, $2::bigint + 3), ('ta', 0, $1, $2::bigint * 2, 0, 0, 10)`, hour.Add(off), v)
+	}
+	if err := s.rollupHistory(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][]int64{}
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, _ := tx.Query(ctx, `SELECT tenant_id || '/' || res, stored_volume, stored_output, stored_artifact, stored_context
+			FROM system_samples WHERE res > 0 ORDER BY tenant_id, res, at`)
+		var key string
+		var v [4]int64
+		_, err := pgx.ForEachRow(rows, []any{&key, &v[0], &v[1], &v[2], &v[3]}, func() error {
+			got[key] = append(got[key], v[:]...)
+			return nil
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]int64{
+		"/60":     {150, 151, 152, 153, 350, 351, 352, 353},
+		"/3600":   {250, 251, 252, 253},
+		"ta/60":   {300, 0, 0, 10, 700, 0, 0, 10},
+		"ta/3600": {500, 0, 0, 10},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("rollups:\n got %v\nwant %v", got, want)
+	}
+}
+
 // The rollup's table-wide lower bound skips nothing: a key whose newest
 // bucket lags another key's is still rolled up, in the rollup that follows
 // and in the next hour's; a sample committed late into the newest rolled-up
@@ -291,5 +356,101 @@ func TestSampleSystem(t *testing.T) {
 	}
 	if got := read(); got["ta"].Strt != 1 || got[""].Strt != 1 || got["tb"].Strt != 0 {
 		t.Fatalf("second sample: %v", got)
+	}
+}
+
+// sampleSystem records each tenant's and the whole system's bytes in S3 by
+// kind: blobs still on a host or deleted are not counted, and a tenant with
+// no live Run, flow or host but bytes in S3 still gets its row.
+func TestSampleSystemStored(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('ta', 'a'), ('tc', 'c'), ('td', 'd')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, activity) VALUES
+		('ra', 'ta', '{}', 'running', 'busy'), ('rc', 'tc', '{}', 'succeeded', ''), ('rd', 'td', '{}', 'failed', '')`)
+	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, size, location) VALUES
+		('a1', 'ta', 'ra', 1, 'volume', 'v', 100, 's3'), ('a2', 'ta', 'ra', 1, 'volume', 'w', 20, 's3'),
+		('a3', 'ta', 'ra', 1, 'output', 'o', 7, 's3'), ('a4', 'ta', 'ra', 1, 'volume', 'x', 1000, 'host'),
+		('a5', 'ta', 'ra', 1, 'artifact', 'y', 5000, 'deleted'),
+		('c1', 'tc', 'rc', 1, 'artifact', 'a', 3, 's3'), ('c2', 'tc', 'rc', 1, 'context', 'c', 40, 's3'),
+		('c3', 'tc', 'rc', 1, 'output', 'o', 9, 's3'),
+		('d1', 'td', 'rd', 1, 'volume', 'v', 50, 'deleted')`)
+	if err := s.sampleSystem(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][4]int64{}
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, _ := tx.Query(ctx, `SELECT tenant_id, stored_volume, stored_output, stored_artifact, stored_context FROM system_samples`)
+		var id string
+		var v [4]int64
+		_, err := pgx.ForEachRow(rows, []any{&id, &v[0], &v[1], &v[2], &v[3]}, func() error {
+			got[id] = v
+			return nil
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// td has a finished Run and only deleted bytes: no row.
+	want := map[string][4]int64{
+		"":   {120, 16, 3, 40},
+		"ta": {120, 7, 0, 0},
+		"tc": {0, 9, 3, 40},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("stored:\n got %v\nwant %v", got, want)
+	}
+}
+
+// sampleSystem's hosts and capacity: a tenant counts its own non-terminated
+// hosts and the platform's, never another tenant's; the whole system (the
+// empty tenant id) counts all.
+// Capacity is the ready and draining hosts' cpus and memory. A tenant with
+// only bytes in S3 gets the platform's.
+func TestSampleSystemHosts(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('ta', 'a'), ('ts', 's'), ('tz', 'z')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state, tenant_id, capacity) VALUES
+		('ha1', 'ha1', 'ready', 'ta', '{"cpus": 4, "memory": 1000}'),
+		('ha2', 'ha2', 'lost', 'ta', '{"cpus": 16, "memory": 9}'),
+		('ha3', 'ha3', 'terminated', 'ta', '{"cpus": 128, "memory": 3}'),
+		('hz', 'hz', 'ready', 'tz', '{"cpus": 64, "memory": 64000}'),
+		('hp1', 'hp1', 'ready', NULL, '{"cpus": 8, "memory": 4000}'),
+		('hp2', 'hp2', 'draining', NULL, '{"cpus": 1, "memory": 100}'),
+		('hp3', 'hp3', 'lost', NULL, '{"cpus": 32, "memory": 7}'),
+		('hp4', 'hp4', 'terminated', NULL, '{"cpus": 256, "memory": 5}')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('rs', 'ts', '{}', 'succeeded')`)
+	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, size, location) VALUES
+		('s1', 'ts', 'rs', 1, 'output', 'o', 11, 's3')`)
+	if err := s.sampleSystem(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, _ := tx.Query(ctx, `SELECT tenant_id, hosts, cap_cpus, cap_mem FROM system_samples`)
+		var id string
+		var hosts map[string]int
+		var cpus float64
+		var mem int64
+		_, err := pgx.ForEachRow(rows, []any{&id, &hosts, &cpus, &mem}, func() error {
+			got[id] = fmt.Sprint(hosts, cpus, mem)
+			hosts = nil
+			return nil
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"":   fmt.Sprint(map[string]int{"ready": 3, "draining": 1, "lost": 2}, 77.0, int64(69100)),
+		"ta": fmt.Sprint(map[string]int{"ready": 2, "draining": 1, "lost": 2}, 13.0, int64(5100)),
+		"ts": fmt.Sprint(map[string]int{"ready": 1, "draining": 1, "lost": 1}, 9.0, int64(4100)),
+		"tz": fmt.Sprint(map[string]int{"ready": 2, "draining": 1, "lost": 1}, 73.0, int64(68100)),
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("hosts, cpus, memory:\n got %v\nwant %v", got, want)
 	}
 }

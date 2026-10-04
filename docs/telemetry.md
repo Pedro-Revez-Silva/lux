@@ -306,7 +306,7 @@ kept as samples, in these tables, at three resolutions (`res`: 0 raw, 60,
 | --- | --- | --- |
 | `host_samples` | each heartbeat | the host's CPU seconds (counter), memory and disk in use; its live placements and the CPU and memory they asked for; the runner process's own use (below) |
 | `placement_samples` | each heartbeat, per live placement | CPU seconds (counter), memory and pids now, disk, network counters |
-| `system_samples` | every `LUX_SAMPLE_EVERY` | for the system (tenant `''`) and each tenant with anything live: Runs by state, busy, idle, queued, started and finished since the last sample, time to start p50/p95, hosts by state, capacity, allocated |
+| `system_samples` | every `LUX_SAMPLE_EVERY` | for the system (tenant `''`) and each tenant with anything live or with bytes in S3: Runs by state, busy, idle, queued, started and finished since the last sample, time to start p50/p95, hosts by state, capacity, allocated, and stored bytes by kind (below) |
 | `control_samples`, `control_disk_samples` | with the whole system's sample, at its instant | the control host, the machine luxd runs on: CPU seconds (counter) and cores, memory used and total; its Postgres database's size and connections (read with SQL, so a remote database works too); for each of `LUX_HISTORY_DISK_PATHS` its filesystem's used, free (writable without root) and total bytes; and the luxd process's own use (below) |
 
 lux's own processes, luxd on its control samples and each host's runner on
@@ -325,6 +325,27 @@ reading's counter and start (not the maximum, which may be the previous
 process's); RSS, heap and goroutines are averaged, the peak is the
 bucket's maximum. The API has the runner's as `runner` on a host's
 samples, with the CPU as cores.
+
+Stored bytes are what lux keeps in S3 for the tenant (every tenant for
+`''`) at the sample's instant: the sum of `blobs.size` over blobs whose
+`location` is `s3`, by `kind`. A blob still only on its host is not
+counted yet, and one retention deleted no longer is. `size` is the
+compressed (zstd) size, what S3 holds and bills, not the size of the files
+inside. A tenant whose Runs have all ended is still sampled while it has
+bytes in S3.
+
+| Column | API (`/v1/history`) | Blob kind | Console |
+| --- | --- | --- | --- |
+| `stored_volume` | `storedVolume` | `volume`: state volume snapshots | Snapshots |
+| `stored_output` | `storedOutput` | `output`: a placement's output | Output |
+| `stored_artifact` | `storedArtifact` | `artifact` | Artifacts |
+| `stored_context` | `storedContext` | `context`: image build contexts | Build contexts |
+
+They are levels: a rollup bucket is their mean. The four add up to the
+tenant's bytes in S3, which the Overview's **Stored** chart stacks.
+Migration 052 filled them into the samples written before they existed,
+from each blob's `uploaded_at` and `deleted_at` (in S3 from its upload
+until its deletion), so the chart reaches back as far as the samples kept.
 
 Control samples are keyed by the luxd process that took them (`instance`:
 a `luxd_...` id new at each start, so no two processes share one, on one

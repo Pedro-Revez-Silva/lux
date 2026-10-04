@@ -231,3 +231,28 @@ export function familyDisplay(families: readonly FamilyInfo[]): Map<string, { la
   }
   return out;
 }
+
+/* ---------- stored bytes by blob kind ---------- */
+
+/** Blob kinds luxd keeps in S3 (blobs.kind). */
+export type StorageKind = "volume" | "output" | "artifact" | "context";
+
+/**
+ * Label and chart slot of each kind. Fixed per kind, so a kind keeps its
+ * colour whichever kinds a view shows; slot 1 is left to compute.
+ */
+const STORAGE_KINDS: Record<StorageKind, { label: string; slot: number }> = {
+  volume: { label: "Snapshots", slot: 3 },
+  output: { label: "Output", slot: 7 },
+  artifact: { label: "Artifacts", slot: 4 },
+  context: { label: "Build contexts", slot: 5 },
+};
+
+/** Every kind, in stacking order (bottom first). */
+export const STORAGE_KIND_LIST = Object.keys(STORAGE_KINDS) as StorageKind[];
+
+/** A kind's label and colour; an unknown kind gets its key and the neutral dot. */
+export function storageKindStyle(kind: string): { label: string; color: string } {
+  const k = STORAGE_KINDS[kind as StorageKind];
+  return k ? { label: k.label, color: `var(--chart-${k.slot})` } : { label: kind, color: "var(--st-neutral-dot)" };
+}

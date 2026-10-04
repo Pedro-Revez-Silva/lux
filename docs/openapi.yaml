@@ -2519,6 +2519,22 @@ components:
         started:
           format: int64
           type: integer
+        storedArtifact:
+          description: Bytes of artifacts in S3 (compressed), at this point; a rollup's mean.
+          format: int64
+          type: integer
+        storedContext:
+          description: Bytes of image build contexts in S3 (compressed), at this point; a rollup's mean.
+          format: int64
+          type: integer
+        storedOutput:
+          description: Bytes of Run output in S3 (compressed), at this point; a rollup's mean.
+          format: int64
+          type: integer
+        storedVolume:
+          description: "Bytes of volume snapshots in S3 (compressed: what S3 holds), at this point; a rollup's mean."
+          format: int64
+          type: integer
       type: object
     Sandbox:
       additionalProperties: false

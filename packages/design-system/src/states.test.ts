@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { familyDisplay } from "./states.ts";
+import { familyDisplay, STORAGE_KIND_LIST, storageKindStyle } from "./states.ts";
 
 const color = (families: Parameters<typeof familyDisplay>[0], family: string) => familyDisplay(families).get(family)?.color;
 
@@ -43,4 +43,17 @@ test("a family's colour does not depend on its companions", () => {
 test("labels: the displayName, else Compute for compute, else the key", () => {
   const d = familyDisplay([{ family: "compute" }, { family: "ai", displayName: "AI models" }, { family: "egress" }]);
   expect([d.get("compute")!.label, d.get("ai")!.label, d.get("egress")!.label]).toEqual(["Compute", "AI models", "egress"]);
+});
+
+test("each storage kind has its own label and categorical slot, never compute's", () => {
+  expect(STORAGE_KIND_LIST).toEqual(["volume", "output", "artifact", "context"]);
+  expect(STORAGE_KIND_LIST.map((k) => storageKindStyle(k).label)).toEqual(["Snapshots", "Output", "Artifacts", "Build contexts"]);
+  const colors = STORAGE_KIND_LIST.map((k) => storageKindStyle(k).color);
+  expect(new Set(colors).size).toBe(STORAGE_KIND_LIST.length);
+  expect(colors.every((c) => /^var\(--chart-[2-8]\)$/.test(c))).toBe(true);
+  expect(storageKindStyle("output").color).toBe("var(--chart-7)");
+});
+
+test("an unknown storage kind keeps its key and a neutral colour", () => {
+  expect(storageKindStyle("cache")).toEqual({ label: "cache", color: "var(--st-neutral-dot)" });
 });

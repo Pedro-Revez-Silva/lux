@@ -78,7 +78,8 @@ func (s *Server) historyLoop(ctx context.Context) {
 // sampleSystem writes one system sample per tenant with anything to count,
 // and one for the whole system (an empty tenant id). Runs and starts are the
 // tenant's; hosts and capacity are the tenant's own hosts plus the
-// platform's (what it can use), and every host for the whole system.
+// platform's (what it can use), and every host for the whole system. Stored
+// bytes are the tenant's blobs in S3, by kind.
 //
 // Starts and finishes are counted in a window a minute behind (from the
 // last sample's window end to now - 1m), so one written by a transaction
@@ -127,28 +128,54 @@ func (s *Server) sampleSystem(ctx context.Context) error {
 				FROM placements pl WHERE pl.state IN `+livePlacementStates+`
 				GROUP BY GROUPING SETS ((pl.tenant_id), ())
 			),
+			-- Bytes in S3 by kind: an index-only scan of blobs_s3_tenant_kind.
+			stored AS (
+				SELECT coalesce(tenant_id, '') AS id,
+					coalesce(sum(size) FILTER (WHERE kind = 'volume'), 0)::bigint AS volume,
+					coalesce(sum(size) FILTER (WHERE kind = 'output'), 0)::bigint AS output,
+					coalesce(sum(size) FILTER (WHERE kind = 'artifact'), 0)::bigint AS artifact,
+					coalesce(sum(size) FILTER (WHERE kind = 'context'), 0)::bigint AS context,
+					coalesce(sum(size), 0) AS total
+				FROM blobs WHERE location = 's3'
+				GROUP BY GROUPING SETS ((tenant_id), ())
+			),
+			-- Non-terminated hosts, read once: by owner (NULL: the platform) and state.
+			host_groups AS (
+				SELECT tenant_id, state, count(*) AS n,
+					coalesce(sum((capacity->>'cpus')::float8) FILTER (WHERE state IN ('ready', 'draining')), 0) AS cpus,
+					coalesce(sum((capacity->>'memory')::int8) FILTER (WHERE state IN ('ready', 'draining')), 0) AS mem
+				FROM hosts WHERE state <> 'terminated'
+				GROUP BY tenant_id, state
+			),
+			-- A tenant with nothing live but bytes in S3 is still sampled.
 			tenants AS (
 				SELECT '' AS id
 				UNION SELECT id FROM runs_by UNION SELECT id FROM flow
-				UNION SELECT tenant_id FROM hosts WHERE tenant_id IS NOT NULL AND state <> 'terminated'
+				UNION SELECT tenant_id FROM host_groups WHERE tenant_id IS NOT NULL
+				UNION SELECT id FROM stored WHERE total > 0
 			),
-			-- Hosts a tenant may use: its own and the platform's; all for ''.
+			-- Hosts a tenant may use: its own groups and the platform's; all
+			-- for ''. Joins on the groups, never a scan of hosts per tenant.
+			host_rows AS (
+				SELECT g.tenant_id AS id, g.state, g.n, g.cpus, g.mem FROM host_groups g JOIN tenants t ON t.id = g.tenant_id
+				UNION ALL
+				SELECT t.id, g.state, g.n, g.cpus, g.mem FROM tenants t CROSS JOIN host_groups g WHERE t.id <> '' AND g.tenant_id IS NULL
+				UNION ALL
+				SELECT '', state, n, cpus, mem FROM host_groups
+			),
 			hosts_by AS (
-				SELECT t.id, jsonb_object_agg(x.state, x.n) AS hosts, sum(x.cpus) AS cpus, sum(x.mem)::bigint AS mem
-				FROM tenants t CROSS JOIN LATERAL (
-					SELECT h.state, count(*) AS n,
-						coalesce(sum((h.capacity->>'cpus')::float8) FILTER (WHERE h.state IN ('ready', 'draining')), 0) AS cpus,
-						coalesce(sum((h.capacity->>'memory')::int8) FILTER (WHERE h.state IN ('ready', 'draining')), 0) AS mem
-					FROM hosts h WHERE h.state <> 'terminated' AND (t.id = '' OR h.tenant_id = t.id OR h.tenant_id IS NULL)
-					GROUP BY h.state) x
-				GROUP BY t.id
+				SELECT id, jsonb_object_agg(state, n) AS hosts, sum(cpus) AS cpus, sum(mem)::bigint AS mem
+				FROM (SELECT id, state, sum(n)::bigint AS n, sum(cpus) AS cpus, sum(mem) AS mem FROM host_rows GROUP BY id, state) x
+				GROUP BY id
 			)
 			INSERT INTO system_samples (tenant_id, res, at, window_end, runs, busy, idle, queued, started, finished, start_p50, start_p95,
-				hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem)
+				hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem, stored_volume, stored_output, stored_artifact, stored_context)
 			SELECT t.id, 0, now(), (SELECT until FROM w), coalesce(r.runs, '{}'), coalesce(r.busy, 0), coalesce(r.idle, 0), coalesce(r.queued, 0),
 				coalesce(f.started, 0), coalesce(f.finished, 0), f.pct[1], f.pct[2], coalesce(h.hosts, '{}'), coalesce(h.cpus, 0), coalesce(h.mem, 0),
-				coalesce(a.cpus, 0), coalesce(a.mem, 0)
+				coalesce(a.cpus, 0), coalesce(a.mem, 0),
+				coalesce(st.volume, 0), coalesce(st.output, 0), coalesce(st.artifact, 0), coalesce(st.context, 0)
 			FROM tenants t LEFT JOIN runs_by r USING (id) LEFT JOIN flow f USING (id) LEFT JOIN alloc a USING (id) LEFT JOIN hosts_by h USING (id)
+				LEFT JOIN stored st USING (id)
 			ON CONFLICT DO NOTHING`, from)
 		if err != nil {
 			return err
@@ -294,12 +321,14 @@ var (
 			round(avg(pids))::int, max(net_rx), max(net_tx)
 		FROM placement_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "placement_samples", "d.run_id = s.run_id AND d.epoch = s.epoch") + `
 		GROUP BY run_id, epoch, tenant_id, 5 ON CONFLICT DO NOTHING`
-	// Runs and hosts by state are the bucket's last sample.
+	// Runs and hosts by state are the bucket's last sample; stored bytes
+	// are levels.
 	rollupSystem = `INSERT INTO system_samples (tenant_id, res, at, runs, busy, idle, queued, started, finished, start_p50, start_p95,
-			hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem)
+			hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem, stored_volume, stored_output, stored_artifact, stored_context)
 		SELECT tenant_id, $2::int, ` + rollupBucket + `, (array_agg(runs ORDER BY at DESC))[1], round(avg(busy))::int, round(avg(idle))::int,
 			round(avg(queued))::int, sum(started)::int, sum(finished)::int, avg(start_p50), max(start_p95),
-			(array_agg(hosts ORDER BY at DESC))[1], avg(cap_cpus), avg(cap_mem)::bigint, avg(alloc_cpus), avg(alloc_mem)::bigint
+			(array_agg(hosts ORDER BY at DESC))[1], avg(cap_cpus), avg(cap_mem)::bigint, avg(alloc_cpus), avg(alloc_mem)::bigint,
+			avg(stored_volume)::bigint, avg(stored_output)::bigint, avg(stored_artifact)::bigint, avg(stored_context)::bigint
 		FROM system_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "system_samples", "d.tenant_id = s.tenant_id") + `
 		GROUP BY tenant_id, 3 ON CONFLICT DO NOTHING`
 	// A pool's levels are averaged, its hosts by state the bucket's last,
@@ -360,6 +389,11 @@ type Sample struct {
 	CapMem    *int64         `json:"capacityMemory,omitempty"`
 	SysAllocC *float64       `json:"allocatedCpus,omitempty"`
 	SysAllocM *int64         `json:"allocatedMemory,omitempty"`
+	// The system: bytes in S3 by blob kind.
+	StoredVolume   *int64 `json:"storedVolume,omitempty" doc:"Bytes of volume snapshots in S3 (compressed: what S3 holds), at this point; a rollup's mean."`
+	StoredOutput   *int64 `json:"storedOutput,omitempty" doc:"Bytes of Run output in S3 (compressed), at this point; a rollup's mean."`
+	StoredArtifact *int64 `json:"storedArtifact,omitempty" doc:"Bytes of artifacts in S3 (compressed), at this point; a rollup's mean."`
+	StoredContext  *int64 `json:"storedContext,omitempty" doc:"Bytes of image build contexts in S3 (compressed), at this point; a rollup's mean."`
 }
 
 // ProcessSample is one of lux's own processes: a host's runner, or luxd.
@@ -704,7 +738,7 @@ func (s *Server) systemHistory(ctx context.Context, in *HistoryQuery) (*historyO
 	h := History{From: from, To: to, Resolution: res, Samples: []Sample{}}
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT at, runs, busy, idle, queued, started, finished, start_p50, start_p95,
-				hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem
+				hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem, stored_volume, stored_output, stored_artifact, stored_context
 			FROM system_samples WHERE tenant_id = $1 AND res = $2 AND at BETWEEN $3 AND $4 ORDER BY at`, p.TenantID, res, from, to)
 		if err != nil {
 			return err
@@ -712,7 +746,7 @@ func (s *Server) systemHistory(ctx context.Context, in *HistoryQuery) (*historyO
 		h.Samples, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (Sample, error) {
 			var sm Sample
 			err := row.Scan(&sm.At, &sm.Runs, &sm.Busy, &sm.Idle, &sm.Queued, &sm.Started, &sm.Finished, &sm.StartP50, &sm.StartP95,
-				&sm.Hosts, &sm.CapCPUs, &sm.CapMem, &sm.SysAllocC, &sm.SysAllocM)
+				&sm.Hosts, &sm.CapCPUs, &sm.CapMem, &sm.SysAllocC, &sm.SysAllocM, &sm.StoredVolume, &sm.StoredOutput, &sm.StoredArtifact, &sm.StoredContext)
 			return sm, err
 		})
 		if err != nil || !controlVisible(p) {

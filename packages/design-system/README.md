@@ -10,7 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
-bun run test           # bun test: idle countdown and server states, money rounding, y scale, family colours, CostFigure, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme (src/*.test.ts*)
+bun run test           # bun test: idle countdown and server states, money rounding, y scale, family colours, storage kind colours, CostFigure, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme (src/*.test.ts*)
 ```
 
 ## Using it
@@ -48,7 +48,7 @@ src/
   format.ts         bytes, durations, relative time, cores, percentages, money
   states.ts         run/host/server state -> hue family + label (a server's process: ServerStateMark;
                     a server as the tenant's list shows it, asleep/waking/no answer: ServedStateMark);
-                    cost status; cost family -> chart slot
+                    cost status; cost family -> chart slot; stored blob kind -> label + chart slot
   theme.ts          theme and density: toggles, persistence, cssVar()
   icons.tsx         the icon set
   *.tsx             components
@@ -200,7 +200,7 @@ All in `src/tokens.css`.
 | Accent | `--accent` `--accent-hover` `--accent-active` `--accent-fg` `--accent-subtle` `--accent-text` `--focus-ring` |
 | Semantic | `--{success,warn,danger,info}-{fg,bg,dot}` |
 | State hues | `--st-{neutral,blue,teal,green,amber,red,violet}-{fg,bg,dot}` |
-| Chart | `--chart-1` … `--chart-8` (fixed order; cost families map onto them, compute is `--chart-1`), `--chart-grid` `--chart-axis` `--chart-label` `--chart-cursor`, `--chart-h`; unallocated cost uses `--st-neutral-dot` |
+| Chart | `--chart-1` … `--chart-8` (fixed order; cost families and stored blob kinds map onto them, compute is `--chart-1`), `--chart-grid` `--chart-axis` `--chart-label` `--chart-cursor`, `--chart-h`; unallocated cost uses `--st-neutral-dot` |
 | Logs | `--log-stderr-bg` `--log-stderr-fg` `--log-line-hover` |
 | Terminal | `--term-bg` `--term-scrollbar` (the frame around the screen, following the console theme; a Terminal with a `scheme` sets its own on `.term[data-term-scheme]`; the screen's palette is `terminalThemes.ts`) |
 | Type | `--font-sans` `--font-mono`, `--text-{xs,sm,md,lg,xl,2xl,3xl}` (density-dependent), `--leading-{tight,normal}`, `--weight-{normal,medium,semibold}` |
@@ -251,6 +251,19 @@ hint alone, never on the families shown beside it, so it has one colour in
 every view.
 Two families that land on one slot share it: a collision is accepted, a
 colour that changes between views is not.
+
+Stored bytes by blob kind (`storageKindStyle`, `STORAGE_KIND_LIST`, the
+`StorageKind` type): each kind luxd keeps in S3 has a fixed label and
+`--chart-N` slot, stacked in this order (gallery: charts, "Stored").
+Slot 1 stays compute's. An unknown kind keeps its key as the label and
+`--st-neutral-dot`, so a new kind is shown, never dropped.
+
+| Kind | Label | Slot |
+| --- | --- | --- |
+| `volume` | Snapshots | 3 |
+| `output` | Output | 7 |
+| `artifact` | Artifacts | 4 |
+| `context` | Build contexts | 5 |
 
 ## Components
 

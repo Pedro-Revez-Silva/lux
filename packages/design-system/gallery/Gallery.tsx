@@ -58,6 +58,8 @@ import {
   sumMoney,
   StatePill,
   StatTile,
+  STORAGE_KIND_LIST,
+  storageKindStyle,
   TenantPicker,
   Table,
   Tabs,
@@ -79,7 +81,7 @@ import {
   type TimeRange,
 } from "../src/index.ts";
 import { IconDots, IconInfo, IconMinus, IconMoon, IconPencil, IconPlus, IconRefresh, IconRows, IconRowsLoose, IconStar, IconSun, IconTerminal, IconWarning } from "../src/icons.tsx";
-import { fakeAnsiLogs, fakeCostLines, fakeCostSeries, fakeHosts, fakeLogs, fakeMultilineLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeServersWakeable, fakeShellScript, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
+import { fakeAnsiLogs, fakeCostLines, fakeCostSeries, fakeHosts, fakeLogs, fakeMultilineLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeServersWakeable, fakeShellScript, fakeStoredSeries, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
 
 function Section({ id, title, children, note }: { id: string; title: string; note?: ReactNode; children: ReactNode }) {
   return (
@@ -904,6 +906,8 @@ function Selects() {
 
 function Charts() {
   const s = useMemo(() => fakeSeries(), []);
+  const st = useMemo(() => fakeStoredSeries(), []);
+  const kinds = STORAGE_KIND_LIST.map(storageKindStyle);
   return (
     <Section id="charts" title="TimeSeriesChart" note="uPlot line charts: 2px lines, hairline grid, one y axis (never two), crosshair with one tooltip listing every series, click a legend entry to hide a series. Units format axes and tooltips. Series slots are fixed to the entity, so filtering never repaints survivors. Height comes from --chart-h (200 / 240 / 280px as the screen grows; less when compact); the chart grid adds columns as the content widens.">
       <div className="grid grid-charts">
@@ -918,6 +922,9 @@ function Charts() {
         </Card>
         <Card title="Memory" subtitle="bytes formatting on axis and tooltip">
           <TimeSeriesChart x={s.x} ys={[s.mem]} series={[{ label: "Peak memory", color: 7, area: true }]} unit="bytes" />
+        </Card>
+        <Card title="Stored" subtitle="in S3, by kind: storageKindStyle, stacked">
+          <TimeSeriesChart x={st.x} ys={[st.volume, st.output, st.artifact, st.context]} series={kinds} unit="bytes" stacked />
         </Card>
       </div>
       <h3 className="sg-h3">Sparkline</h3>

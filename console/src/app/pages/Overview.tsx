@@ -1,14 +1,28 @@
-import { Card, formatBytes, formatCores, formatCount, formatDuration, formatElapsed, PageHeader, rangeText, SectionHeader, StatTile, TimeSeriesChart } from "@lux/design-system";
-import { api, useNow } from "../../api/index.ts";
+import { useMemo } from "react";
+import { Card, formatBytes, formatCores, formatCount, formatDuration, formatElapsed, PageHeader, rangeText, SectionHeader, StatTile, STORAGE_KIND_LIST, storageKindStyle, TimeSeriesChart, type StorageKind } from "@lux/design-system";
+import { api, useNow, type Sample } from "../../api/index.ts";
 import { go } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
-import { ErrorBlock, ErrorStrip, useSeries } from "./common.tsx";
+import { ErrorBlock, ErrorStrip, seriesFrom, useSeries, type SeriesData } from "./common.tsx";
 import { ActivityFeed } from "./ActivityFeed.tsx";
 import { ControlHost } from "./ControlHost.tsx";
 import { OverviewCost } from "./OverviewCost.tsx";
 
 /** What the Queued tile counts. */
 const QUEUED = ["submitted", "resuming", "provisioning"];
+
+/** Each stored kind's sample field: every kind is a series, so the stack sums to the total in S3. */
+const STORED: Record<StorageKind, (s: Sample) => number | undefined> = {
+  volume: (s) => s.storedVolume,
+  output: (s) => s.storedOutput,
+  artifact: (s) => s.storedArtifact,
+  context: (s) => s.storedContext,
+};
+
+/** The Stored chart's series: one per kind, bottom first, coloured by kind. */
+export function storedSeries(samples: Sample[] | undefined): SeriesData & { series: { label: string; color: string }[] } {
+  return { ...seriesFrom(samples, STORAGE_KIND_LIST.map((k) => STORED[k])), series: STORAGE_KIND_LIST.map(storageKindStyle) };
+}
 
 
 export function Overview() {
@@ -28,6 +42,7 @@ export function Overview() {
   const cpu = useSeries(h, [(s) => s.allocatedCpus, (s) => s.capacityCpus]);
   const mem = useSeries(h, [(s) => s.allocatedMemory, (s) => s.capacityMemory]);
   const hostSeries = useSeries(h, [(s) => s.hosts?.ready, (s) => s.hosts?.draining, (s) => s.hosts?.lost]);
+  const stored = useMemo(() => storedSeries(h), [h]);
 
   const loading = status.loading;
   const lostHosts = hosts.lost ?? 0;
@@ -71,6 +86,9 @@ export function Overview() {
             </Card>
             <Card title="Memory" subtitle="allocated vs capacity">
               <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Allocated", color: 7, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="bytes" />
+            </Card>
+            <Card title="Stored" subtitle="in S3, by kind">
+              <TimeSeriesChart x={stored.x} ys={stored.ys} series={stored.series} unit="bytes" stacked />
             </Card>
           </div>
           <OverviewCost />
