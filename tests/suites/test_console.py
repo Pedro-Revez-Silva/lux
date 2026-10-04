@@ -6,8 +6,10 @@ system's Chrome, or Playwright's own Chromium if installed
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_EVEN, Decimal
 
 import psycopg
@@ -633,6 +635,76 @@ def test_overview_stored_chart_stacks_bytes_by_kind(page, env, lux):
         assert not page.errors, page.errors
     finally:
         page.unroute(HISTORY)
+
+
+def _memory_history(route):
+    """An hour of minute samples near 1 TB allocated: every y label but 0 B
+    is a long one such as "931.3 GiB" (the scale steps in decimal bytes)."""
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    at = lambda m: (now - timedelta(minutes=60 - m)).isoformat().replace("+00:00", "Z")
+    samples = [{"at": at(m), "allocatedMemory": (900 + m) * 10**9, "capacityMemory": 1000 * 10**9} for m in range(61)]
+    route.fulfill(status=200, content_type="application/json",
+                  body=json.dumps({"from": at(0), "to": at(60), "resolution": 0, "samples": samples}))
+
+
+def test_overview_memory_chart_fits_its_y_labels_and_tooltip_follows_the_cursor(page, browser, env, lux):
+    """The y axis widens past its 56px floor to fit long byte labels, and the
+    tooltip stays on the crosshair to either side of it, at 1x and 2x pixels."""
+    # Capacity, 10**12 B, is a whole number of any nice step: always the top label.
+    top_label = "931.3 GiB"
+    # .tschart-tip.is-left sits 16px left of its anchor (components.css); the other one starts on it.
+    flipped_gap = 16
+
+    def check(pg, dpr):
+        pg.route(HISTORY, _memory_history)
+        pg.goto(env.luxd_url + "/?range=1h")
+        chart = pg.locator("section.card", has=pg.get_by_role("heading", name="Memory", exact=True)).locator(".tschart")
+        expect(chart.locator(".tschart-plot canvas")).to_have_count(1, timeout=15_000)
+        assert pg.evaluate("() => devicePixelRatio") == dpr
+        over = chart.locator(".u-over")
+        gutter = lambda: over.evaluate("o => o.getBoundingClientRect().left - o.closest('.tschart').querySelector('canvas').getBoundingClientRect().left")
+        label_w = pg.evaluate("""label => {
+            const ctx = document.createElement('canvas').getContext('2d');
+            ctx.font = '11px ' + getComputedStyle(document.documentElement).getPropertyValue('--font-sans');
+            return ctx.measureText(label).width;
+        }""", top_label)
+        # 5px: uPlot's gap between a label and the plot. The label must need more than the 56px floor.
+        need = math.ceil(label_w) + 5
+        assert need > 56, label_w
+        wait_until(lambda: gutter() >= need, 10, 0.2, f"y axis gutter under {need}px for {top_label!r} at {dpr}x")
+        over.scroll_into_view_if_needed()
+        box = over.bounding_box()
+        for frac, flipped in ((0.25, False), (0.85, True)):
+            pg.mouse.move(box["x"] + box["width"] * frac, box["y"] + box["height"] / 2)
+            tip = chart.locator(".tschart-tip.is-left" if flipped else ".tschart-tip:not(.is-left)")
+            expect(tip).to_be_visible(timeout=5_000)
+
+            def offset():
+                return pg.evaluate("""([tip, cur, flipped]) => {
+                    const t = tip.getBoundingClientRect(), c = cur.getBoundingClientRect().left;
+                    return flipped ? c - t.right : t.left - c;
+                }""", [tip.element_handle(), chart.locator(".u-cursor-x").element_handle(), flipped])
+            want = flipped_gap if flipped else 0
+            wait_until(lambda: abs(offset() - want) <= 2, 5, 0.2,
+                       f"tooltip {'right' if flipped else 'left'} edge not {want}px from the cursor at {dpr}x ({offset()})")
+        pg.mouse.move(0, 0)
+        assert not pg.errors, pg.errors
+
+    page.sign_in(lux.api_key, "/?range=1h")
+    try:
+        check(page, 1)
+    finally:
+        page.unroute(HISTORY)
+
+    ctx = browser.new_context(viewport=VIEWPORT, device_scale_factor=2)
+    try:
+        ctx.add_init_script(f"sessionStorage.setItem('lux.key', {json.dumps(lux.api_key)})")
+        hi = ctx.new_page()
+        hi.errors = []
+        hi.on("pageerror", lambda e: hi.errors.append(str(e)))
+        check(hi, 2)
+    finally:
+        ctx.close()
 
 
 def test_operator_overview_has_unallocated_and_top_tenants(page, env, operator):

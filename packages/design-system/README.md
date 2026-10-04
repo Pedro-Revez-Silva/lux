@@ -10,7 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
-bun run test           # bun test: idle countdown and server states, money rounding, y scale, family colours, storage kind colours, CostFigure, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme (src/*.test.ts*)
+bun run test           # bun test: idle countdown and server states, money rounding, y scale, y axis width, family colours, storage kind colours, CostFigure, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme (src/*.test.ts*)
 ```
 
 ## Using it

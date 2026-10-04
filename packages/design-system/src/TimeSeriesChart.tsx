@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
+import { measuredAxisSize } from "./axisSize.ts";
 import { formatClock, formatTimestamp, formatUnit, type Unit } from "./format.ts";
 import { niceScale, niceSplits } from "./scale.ts";
 import { cssVar, useDensity, useTheme } from "./theme.ts";
@@ -88,6 +89,7 @@ interface Hover {
   idx: number;
   left: number;
   top: number;
+  plotLeft: number;
 }
 
 /** uPlot line chart: crosshair + one tooltip for every series, unit-aware axes, theme-aware, resizes. */
@@ -178,7 +180,7 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
           font,
           grid: { stroke: grid, width: 1 },
           ticks: { show: false },
-          size: 56,
+          size: measuredAxisSize(font),
           values: (_u, vals) => vals.map((v) => fmt(v)),
           space: 32,
           splits: nice ? (_u, _i, min, max) => niceSplits(min, max, step) : undefined,
@@ -232,7 +234,8 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
               setHover(null);
               return;
             }
-            setHover({ idx, left: u.cursor.left ?? 0, top: u.cursor.top ?? 0 });
+            // cursor.left is relative to the plot area, which starts after the measured y axis.
+            setHover({ idx, left: u.cursor.left ?? 0, top: u.cursor.top ?? 0, plotLeft: u.bbox.left / uPlot.pxRatio });
           },
         ],
       },
@@ -284,7 +287,7 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
         <div className="tschart-plot" ref={host} style={{ height }} />
       )}
       {hover && x[hover.idx] != null && (
-        <div className={flip ? "tschart-tip is-left" : "tschart-tip"} style={{ left: hover.left + 56, top: 8 }}>
+        <div className={flip ? "tschart-tip is-left" : "tschart-tip"} style={{ left: hover.left + hover.plotLeft, top: 8 }}>
           <div className="tschart-tip-time mono">{formatTimestamp(x[hover.idx]! * 1000)}</div>
           {series.map((s, i) =>
             hidden.has(i) ? null : (

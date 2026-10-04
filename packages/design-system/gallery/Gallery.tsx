@@ -923,6 +923,9 @@ function Charts() {
         <Card title="Memory" subtitle="bytes formatting on axis and tooltip">
           <TimeSeriesChart x={s.x} ys={[s.mem]} series={[{ label: "Peak memory", color: 7, area: true }]} unit="bytes" />
         </Card>
+        <Card title="Fleet memory" subtitle="hundreds of GiB: the y axis widens to its longest label">
+          <TimeSeriesChart x={s.x} ys={[s.fleetMem]} series={[{ label: "Used", color: 7, area: true }]} unit="bytes" />
+        </Card>
         <Card title="Stored" subtitle="in S3, by kind: storageKindStyle, stacked">
           <TimeSeriesChart x={st.x} ys={[st.volume, st.output, st.artifact, st.context]} series={kinds} unit="bytes" stacked />
         </Card>

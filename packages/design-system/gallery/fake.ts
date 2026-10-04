@@ -126,8 +126,8 @@ export const fakePlacementStages: TimelineStage[] = (() => {
   ];
 })();
 
-/** 24h of 1-minute samples for a few series. */
-export function fakeSeries(points = 24 * 60, stepSec = 60): { x: number[]; running: number[]; idle: number[]; queued: number[]; cpu: number[]; mem: number[]; hosts: number[] } {
+/** 24h of 1-minute samples for a few series; fleetMem is hundreds of GiB, for long y labels. */
+export function fakeSeries(points = 24 * 60, stepSec = 60): { x: number[]; running: number[]; idle: number[]; queued: number[]; cpu: number[]; mem: number[]; hosts: number[]; fleetMem: number[] } {
   const r = rng(7);
   const x: number[] = [];
   const running: number[] = [];
@@ -136,6 +136,7 @@ export function fakeSeries(points = 24 * 60, stepSec = 60): { x: number[]; runni
   const cpu: number[] = [];
   const mem: number[] = [];
   const hosts: number[] = [];
+  const fleetMem: number[] = [];
   const t0 = Math.floor(NOW / 1000) - points * stepSec;
   let run = 30;
   let q = 4;
@@ -152,8 +153,10 @@ export function fakeSeries(points = 24 * 60, stepSec = 60): { x: number[]; runni
     cpu.push(run * 0.9 + r() * 6);
     mem.push((run * 1.4 + r() * 8) * 1024 ** 3);
     hosts.push(h);
+    // Derived, not drawn from r(): the other series keep their values.
+    fleetMem.push((run * 5.6 + h * 3 + (i % 17)) * 1024 ** 3);
   }
-  return { x, running, idle, queued, cpu, mem, hosts };
+  return { x, running, idle, queued, cpu, mem, hosts, fleetMem };
 }
 
 // Snapshots are swept nightly; output and artifacts accumulate.
