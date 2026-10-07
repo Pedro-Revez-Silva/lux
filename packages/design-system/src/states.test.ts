@@ -46,14 +46,17 @@ test("labels: the displayName, else Compute for compute, else the key", () => {
 });
 
 test("each storage kind has its own label and categorical slot, never compute's", () => {
-  expect(STORAGE_KIND_LIST).toEqual(["volume", "output", "artifact", "context"]);
-  expect(STORAGE_KIND_LIST.map((k) => storageKindStyle(k).label)).toEqual(["Snapshots", "Output", "Artifacts", "Build contexts"]);
+  expect(STORAGE_KIND_LIST).toEqual(["volume", "output", "artifact"]);
+  expect(STORAGE_KIND_LIST.map((k) => storageKindStyle(k).label)).toEqual(["Snapshots", "Output", "Artifacts"]);
   const colors = STORAGE_KIND_LIST.map((k) => storageKindStyle(k).color);
-  expect(new Set(colors).size).toBe(STORAGE_KIND_LIST.length);
-  expect(colors.every((c) => /^var\(--chart-[2-8]\)$/.test(c))).toBe(true);
-  expect(storageKindStyle("output").color).toBe("var(--chart-7)");
+  expect(colors).toEqual(["var(--chart-3)", "var(--chart-7)", "var(--chart-4)"]);
 });
 
 test("an unknown storage kind keeps its key and a neutral colour", () => {
   expect(storageKindStyle("cache")).toEqual({ label: "cache", color: "var(--st-neutral-dot)" });
+});
+
+test("build contexts are not a charted kind", () => {
+  expect(STORAGE_KIND_LIST).not.toContain("context");
+  expect(storageKindStyle("context")).toEqual({ label: "context", color: "var(--st-neutral-dot)" });
 });

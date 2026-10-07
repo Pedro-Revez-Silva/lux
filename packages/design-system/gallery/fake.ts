@@ -160,13 +160,12 @@ export function fakeSeries(points = 24 * 60, stepSec = 60): { x: number[]; runni
 }
 
 // Snapshots are swept nightly; output and artifacts accumulate.
-export function fakeStoredSeries(hours = 30 * 24): { x: number[]; volume: number[]; output: number[]; artifact: number[]; context: number[] } {
+export function fakeStoredSeries(hours = 30 * 24): { x: number[]; volume: number[]; output: number[]; artifact: number[] } {
   const r = rng(51);
   const x: number[] = [];
   const volume: number[] = [];
   const output: number[] = [];
   const artifact: number[] = [];
-  const context: number[] = [];
   const t0 = Math.floor(NOW / 3_600_000) * 3600 - hours * 3600;
   const GiB = 1024 ** 3;
   let v = 40 * GiB;
@@ -176,13 +175,14 @@ export function fakeStoredSeries(hours = 30 * 24): { x: number[]; volume: number
     v = i % 24 === 3 ? v * 0.7 : v + r() * 3 * GiB;
     o += r() * 0.15 * GiB;
     a += r() < 0.1 ? r() * 2 * GiB : 0;
+    // Preserve the random sequence for the charted series.
+    r();
     x.push(t0 + i * 3600);
     volume.push(Math.round(v));
     output.push(Math.round(o));
     artifact.push(Math.round(a));
-    context.push(Math.round((0.4 + r() * 0.1) * GiB));
   }
-  return { x, volume, output, artifact, context };
+  return { x, volume, output, artifact };
 }
 
 export function fakeLogs(n = 50_000): LogLine[] {

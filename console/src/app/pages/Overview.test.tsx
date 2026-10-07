@@ -32,23 +32,22 @@ const SAMPLES: Sample[] = [
   { at: iso(60), storedVolume: 120, storedOutput: 9, storedArtifact: 3, storedContext: 40 },
 ];
 
-test("Stored: one series per kind, every kind, values from its own field", () => {
+test("Stored: one series per charted kind, values from its own field; storedContext is not charted", () => {
   const s = storedSeries(SAMPLES);
-  expect(s.series.map((x) => x.label)).toEqual(["Snapshots", "Output", "Artifacts", "Build contexts"]);
-  expect(s.series.map((x) => x.color)).toEqual(["var(--chart-3)", "var(--chart-7)", "var(--chart-4)", "var(--chart-5)"]);
+  expect(s.series.map((x) => x.label)).toEqual(["Snapshots", "Output", "Artifacts"]);
+  expect(s.series.map((x) => x.color)).toEqual(["var(--chart-3)", "var(--chart-7)", "var(--chart-4)"]);
   expect(s.x).toEqual([T0 / 1000, T0 / 1000 + 60]);
   expect(s.ys).toEqual([
     [100, 120],
     [7, 9],
     [0, 3],
-    [40, 40],
   ]);
-  // The stack sums to every byte in S3.
-  expect(s.ys.reduce((t, y) => t + (y[1] ?? 0), 0)).toBe(172);
+  // The stack's total leaves out the 40 bytes of storedContext.
+  expect(s.ys.reduce((t, y) => t + (y[1] ?? 0), 0)).toBe(132);
 });
 
 test("Stored: a sample without the fields is a gap, not zero", () => {
-  expect(storedSeries([{ at: iso(0) }]).ys).toEqual([[null], [null], [null], [null]]);
+  expect(storedSeries([{ at: iso(0) }]).ys).toEqual([[null], [null], [null]]);
 });
 
 /** The Overview, as role at url. History answers one sample: uPlot needs a canvas happy-dom lacks, and draws from two. */
@@ -96,7 +95,7 @@ for (const c of [
       expect(card).toBeDefined();
       expect(card!.textContent).toContain("in S3, by kind");
       const legend = [...card!.querySelectorAll(".tschart-legend-item")].map((b) => b.textContent);
-      expect(legend).toEqual(["Snapshots", "Output", "Artifacts", "Build contexts"]);
+      expect(legend).toEqual(["Snapshots", "Output", "Artifacts"]);
       const history = p.fake.calls.find((u) => u.startsWith("/v1/history"))!;
       expect(new URL(history, "http://localhost").searchParams.get("tenant") ?? undefined).toBe(c.tenant);
     } finally {

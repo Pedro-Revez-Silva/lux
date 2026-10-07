@@ -263,7 +263,10 @@ Slot 1 stays compute's. An unknown kind keeps its key as the label and
 | `volume` | Snapshots | 3 |
 | `output` | Output | 7 |
 | `artifact` | Artifacts | 4 |
-| `context` | Build contexts | 5 |
+
+`context` (`storedContext`) has no writer yet, so its always-zero series
+is omitted rather than drawn along the stack's top. To chart it, add it
+to `STORAGE_KINDS` and the Overview's `STORED`.
 
 ## Components
 

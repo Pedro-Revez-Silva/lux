@@ -98,6 +98,41 @@ func TestReapRetentionSparesResumable(t *testing.T) {
 	}
 }
 
+// A due Run is claimed even when more already-reaped Runs than a pass's
+// batch finished before it; a Run whose only S3 data is artifacts is not a
+// candidate, however old: its snapshot stays available.
+func TestReapRetentionPastReapedHistory(t *testing.T) {
+	s, ctx, f := retentionFixture(t, StateSucceeded, StateSucceeded, 1, 30)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, finished_at)
+		SELECT 'old' || lpad(i::text, 3, '0'), 't2', '{}', 'succeeded', 1, now() - make_interval(days => 100 + i)
+		FROM generate_series(1, 50) i`)
+	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, location, s3_key, deleted_at)
+		SELECT r.id || '-' || k, 't2', r.id, 1, k, 'work', 'deleted', r.id || '/' || k, now()
+		FROM runs r, unnest(ARRAY['volume', 'output']) k WHERE r.id LIKE 'old___'`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, finished_at)
+		VALUES ('rart', 't2', '{}', 'succeeded', 1, now() - interval '400 days')`)
+	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('part', 't2', 'rart', 'hb', 1, 'exited')`)
+	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, location, s3_key, deleted_at) VALUES
+		('rart-vol', 't2', 'rart', 1, 'volume', 'work', 'deleted', 'rart/rart-vol', now()),
+		('rart-art', 't2', 'rart', 1, 'artifact', 'a.txt', 's3', 'rart/rart-art', NULL)`)
+	execSQL(t, s, ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest, host_id, uploaded)
+		VALUES ('snapArt', 't2', 'rart', 'part', 1, '{"volumes":[]}', 'hb', true)`)
+
+	if err := s.reapRetention(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"rb/bB-out-snapB", "rb/bB-out-snapB2", "rb/bB-vol-snapB", "rb/bB-vol-snapB2"}
+	if got := f.Deleted(); !slices.Equal(got, want) {
+		t.Errorf("S3 deletes %v, want rb's %v", got, want)
+	}
+	if !snapshotAvailable(t, s, "snapArt") {
+		t.Error("an artifact-only Run's snapshot made unavailable")
+	}
+	if got := blobLocations(t, s, "rart")["rart-art"]; got != "s3" {
+		t.Errorf("rart's artifact: %s, want s3", got)
+	}
+}
+
 // An S3 delete that fails leaves an orphan, logged; the claim stands.
 func TestReapRetentionS3Failure(t *testing.T) {
 	s, ctx, f := retentionFixture(t, StateSucceeded, StateSucceeded, 1, 30)

@@ -603,18 +603,20 @@ HISTORY = re.compile(r"/v1/history(\?|$)")
 def test_overview_stored_chart_stacks_bytes_by_kind(page, env, lux):
     """The Stored card stacks the bytes in S3 by kind: the tooltip lists each
     kind's bytes and their Total, and a kind hidden from the legend leaves
-    the Total."""
+    the Total. storedContext is sampled but not charted: no legend entry, no
+    tooltip row, not in the Total."""
     now = time.time()
     at = lambda s: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - s))
     body = {"from": at(600), "to": at(0), "resolution": 0, "samples": [
         {"at": at(120), "storedVolume": MIB, "storedOutput": 0, "storedArtifact": 0, "storedContext": 0},
-        {"at": at(60), "storedVolume": 2 * MIB, "storedOutput": MIB, "storedArtifact": MIB // 2, "storedContext": MIB // 2},
+        {"at": at(60), "storedVolume": 2 * MIB, "storedOutput": MIB, "storedArtifact": MIB, "storedContext": 3 * MIB},
     ]}
     page.route(HISTORY, lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(body)))
     try:
         page.sign_in(lux.api_key, "/")
         card = page.locator("section.card", has=page.get_by_role("heading", name="Stored", exact=True))
         expect(card.locator(".tschart-plot canvas")).to_have_count(1, timeout=15_000)
+        expect(card.locator(".tschart-legend").get_by_role("button")).to_have_text(["Snapshots", "Output", "Artifacts"])
         tip = card.locator(".tschart-tip")
 
         def hover_last():
@@ -625,13 +627,13 @@ def test_overview_stored_chart_stacks_bytes_by_kind(page, env, lux):
             expect(tip).to_have_count(1)
 
         hover_last()
-        expect(tip.locator(".tschart-tip-label")).to_have_text(["Snapshots", "Output", "Artifacts", "Build contexts", "Total"])
-        expect(tip.locator(".tschart-tip-value")).to_have_text(["2 MiB", "1 MiB", "512 KiB", "512 KiB", "4 MiB"])
+        expect(tip.locator(".tschart-tip-label")).to_have_text(["Snapshots", "Output", "Artifacts", "Total"])
+        expect(tip.locator(".tschart-tip-value")).to_have_text(["2 MiB", "1 MiB", "1 MiB", "4 MiB"])
 
         card.locator(".tschart-legend").get_by_role("button", name="Output", exact=True).click()
         hover_last()
-        expect(tip.locator(".tschart-tip-label")).to_have_text(["Snapshots", "Artifacts", "Build contexts", "Total"])
-        expect(tip.locator(".tschart-tip-value")).to_have_text(["2 MiB", "512 KiB", "512 KiB", "3 MiB"])
+        expect(tip.locator(".tschart-tip-label")).to_have_text(["Snapshots", "Artifacts", "Total"])
+        expect(tip.locator(".tschart-tip-value")).to_have_text(["2 MiB", "1 MiB", "3 MiB"])
         assert not page.errors, page.errors
     finally:
         page.unroute(HISTORY)

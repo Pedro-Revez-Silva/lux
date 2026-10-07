@@ -927,7 +927,7 @@ function Charts() {
           <TimeSeriesChart x={s.x} ys={[s.fleetMem]} series={[{ label: "Used", color: 7, area: true }]} unit="bytes" />
         </Card>
         <Card title="Stored" subtitle="in S3, by kind: storageKindStyle, stacked">
-          <TimeSeriesChart x={st.x} ys={[st.volume, st.output, st.artifact, st.context]} series={kinds} unit="bytes" stacked />
+          <TimeSeriesChart x={st.x} ys={[st.volume, st.output, st.artifact]} series={kinds} unit="bytes" stacked />
         </Card>
       </div>
       <h3 className="sg-h3">Sparkline</h3>

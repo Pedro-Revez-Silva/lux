@@ -11,12 +11,11 @@ import { OverviewCost } from "./OverviewCost.tsx";
 /** What the Queued tile counts. */
 const QUEUED = ["submitted", "resuming", "provisioning"];
 
-/** Each stored kind's sample field: every kind is a series, so the stack sums to the total in S3. */
+// storedContext is sampled but not charted: nothing writes that kind yet.
 const STORED: Record<StorageKind, (s: Sample) => number | undefined> = {
   volume: (s) => s.storedVolume,
   output: (s) => s.storedOutput,
   artifact: (s) => s.storedArtifact,
-  context: (s) => s.storedContext,
 };
 
 /** The Stored chart's series: one per kind, bottom first, coloured by kind. */
