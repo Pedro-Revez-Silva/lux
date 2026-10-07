@@ -108,6 +108,8 @@ func eventLine(e server.LifecycleEvent) string {
 			line += fmt.Sprintf("tenant host quota reached (%s more wanted); ", s("wanted"))
 		case "no_fit":
 			line += "no new host fits the unmet runs; "
+		case "launch_backoff":
+			line += s("detail") + "; "
 		}
 		line += fmt.Sprintf("%s waiting, had %s, max %s", s("waiting"), s("total"), s("max")) + capacityPlanText(d)
 	case "host.capacity_decision":

@@ -143,6 +143,13 @@ func TestEventLineCapacity(t *testing.T) {
 			  "expected":{"capacity":{"cpus":8,"memory":0,"disk":0,"runs":0},"observations":1},"deficits":[],"exhausted":[],"ineligible":[]}`,
 			"no host launched: at max 1 (3 more wanted); 20 waiting, had 1, max 1; plan: 0 ready, 0 starting, 20 planned, 0 unmet, 0 blocked; " +
 				"new host cpus 8, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)"},
+		{"blocked by a launch backoff", "pool.scale_blocked",
+			`{"cause":"launch_backoff","wanted":1,"waiting":1,"total":0,"max":1,"ready":0,"starting":0,"planned":1,"unmet":0,"blocked":0,
+			  "detail":"launch backing off after 5 failures; next attempt in 2m0s: api error InvalidLaunchTemplateName.NotFound",
+			  "expected":{"capacity":{"cpus":8,"memory":0,"disk":0,"runs":0},"observations":1},"deficits":[],"exhausted":[],"ineligible":[]}`,
+			"no host launched: launch backing off after 5 failures; next attempt in 2m0s: api error InvalidLaunchTemplateName.NotFound; " +
+				"1 waiting, had 0, max 1; plan: 0 ready, 0 starting, 1 planned, 0 unmet, 0 blocked; " +
+				"new host cpus 8, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)"},
 		{"blocked by quota", "pool.scale_blocked",
 			`{"cause":"quota","wanted":1,"waiting":1,"total":1,"max":0,"ready":0,"starting":0,"planned":1,"unmet":0,"blocked":0,
 			  "expected":{"capacity":{"cpus":8,"memory":0,"disk":0,"runs":0},"observations":1},"deficits":[],"exhausted":[],"ineligible":[]}`,

@@ -117,12 +117,8 @@ func (s *Server) provision(ctx context.Context) error {
 	// Leadership: a lease in the database, not a lock held on a connection
 	// across provider calls. One luxd reconciles at a time; another takes
 	// over when the lease lapses.
-	if ok, err := s.provisionLease(ctx); err != nil || !ok {
-		s.leaseHeld = false
+	if ok, err := s.holdProvisionLease(ctx); !ok {
 		return err
-	}
-	if !s.leaseHeld {
-		s.tookProvisionLease()
 	}
 	var pools []poolRow
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -139,6 +135,7 @@ func (s *Server) provision(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.forgetLaunchBackoffs(pools)
 	checkAlive := time.Since(s.lastAliveCheck) > s.cfg.ProviderCheckEvery
 	if checkAlive {
 		s.lastAliveCheck = time.Now()
@@ -149,8 +146,7 @@ func (s *Server) provision(ctx context.Context) error {
 			continue
 		}
 		// Provider calls can be slow: still the provisioner?
-		if ok, err := s.provisionLease(ctx); err != nil || !ok {
-			s.leaseHeld = false
+		if ok, err := s.holdProvisionLease(ctx); !ok {
 			return err
 		}
 		if err := s.reconcilePool(ctx, prov, pl, checkAlive); err != nil {
@@ -161,11 +157,13 @@ func (s *Server) provision(ctx context.Context) error {
 }
 
 // tookProvisionLease: another provisioner may have recorded host decisions
-// while this process did not hold the lease, so each pool's are read from
-// the database once again (idleDecisions).
+// since this process last held the lease, so each pool's are read from
+// the database once again (idleDecisions). Launch backoffs start afresh: a
+// launch another holder made meanwhile is not known here.
 func (s *Server) tookProvisionLease() {
 	s.leaseHeld = true
 	s.forgetDecisions()
+	s.launchBackoff = map[string]*poolBackoff{}
 }
 
 func (s *Server) forgetDecisions() {
@@ -296,11 +294,18 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	if pl.Max > 0 {
 		want = min(want, pl.Max-st.total)
 	}
+	// After a failed launch only launching waits (launch_backoff.go); the
+	// scale-down and terminations above have run.
+	bo := s.launchBackoffFor(pl)
+	if want > 0 && bo != nil && s.now().Before(bo.notBefore) {
+		s.scaleBlocked(ctx, pl, &st, causeBackoff, needed, bo.evidence(s.now()))
+		return nil
+	}
 	up := scaleUp(pl, &st, warm, want)
 	launched, quota := 0, false
 	for i := range max(want, 0) {
 		if i > 0 {
-			if ok, err := s.provisionLease(ctx); err != nil || !ok {
+			if ok, err := s.holdProvisionLease(ctx); !ok {
 				return err
 			}
 			up = nil // recorded with the first launch
@@ -313,6 +318,10 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 			quota = true
 			break
 		}
+		var refused *launchRefused
+		if errors.As(err, &refused) && ctx.Err() == nil && !errors.Is(refused.err, context.Canceled) {
+			s.launchFailed(pl, refused.err)
+		}
 		if err != nil {
 			return err
 		}
@@ -320,18 +329,20 @@ func (s *Server) reconcilePool(ctx context.Context, prov Provider, pl poolRow, c
 	}
 	if launched == 0 {
 		if cause := blockedCause(pl, &st, needed, quota); cause != "" {
-			s.scaleBlocked(ctx, pl, &st, cause, needed)
+			s.scaleBlocked(ctx, pl, &st, cause, needed, nil)
 		}
 	}
 	return nil
 }
 
 // Why a pass that launched nothing did not: the tenant's host quota, --max
-// clipping the hosts the plan or warm wanted, or unmet Runs no new host fits.
+// clipping the hosts the plan or warm wanted, unmet Runs no new host fits,
+// or the pool's launch backoff after failed launches.
 const (
-	causeQuota = "quota"
-	causeMax   = "max"
-	causeNoFit = "no_fit"
+	causeQuota   = "quota"
+	causeMax     = "max"
+	causeNoFit   = "no_fit"
+	causeBackoff = "launch_backoff"
 )
 
 // blockedCause is "" when nothing is blocked: nothing was wanted, or unmet
@@ -390,19 +401,25 @@ var capacityDecisionEvent = transition{typ: evCapacityDecision}
 
 // scaleBlocked records why a pass launched nothing while hosts were wanted
 // or Runs stay unmet (blockedCause); wanted is how many hosts the plan,
-// warm and min asked for.
-func (s *Server) scaleBlocked(ctx context.Context, pl poolRow, st *poolState, cause string, wanted int) {
+// warm and min asked for, extra the cause's own fields. A launch backoff
+// repeats every pass while it lasts: it folds into one counted row (its
+// failures, detail and wait volatile) rather than recording a state.
+func (s *Server) scaleBlocked(ctx context.Context, pl poolRow, st *poolState, cause string, wanted int, extra map[string]any) {
 	d := st.plan.summary()
 	d["waiting"], d["total"], d["max"], d["cause"] = st.demand, st.total, pl.Max, cause
 	if cause != causeNoFit {
 		d["wanted"] = wanted
 	}
+	maps.Copy(d, extra)
 	tr := scaleBlockedEvent
-	if cause == causeMax || cause == causeQuota {
+	if cause == causeMax || cause == causeQuota || cause == causeBackoff {
 		// At a fleet cap, the queue's size and fit do not change the cause.
 		tr.volatile = slices.Concat(tr.volatile, []string{"planned", "unmet", "blocked", "deficits", "expected", "unknown"})
 	}
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if cause == causeBackoff {
+			return poolRepeatEvent(ctx, tx, pl.ID, evScaleBlocked, d, slices.Concat(tr.volatile, backoffVolatile)...)
+		}
 		return transitionEvent(ctx, tx, poolEvents, pl.ID, tr, d)
 	}); err != nil {
 		s.log.Warn("recording a blocked scale-up", "pool", pl.Name, "err", err)
@@ -779,8 +796,11 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 		if err != nil {
 			s.log.Warn("mark terminated", "host", hostID, "err", err)
 		}
-		return fmt.Errorf("launch in %s: %w", pl.Name, launchErr)
+		return fmt.Errorf("launch in %s: %w", pl.Name, &launchRefused{launchErr})
 	}
+	// The provider launched: the pool's failures are over even if recording
+	// the instance below fails.
+	delete(s.launchBackoff, pl.ID)
 	s.log.Info("host launched", "pool", pl.Name, "host", name, "providerId", l.ProviderID,
 		"instanceType", l.InstanceType, "zone", l.Zone, "market", l.Market)
 	var drained []string
@@ -858,19 +878,44 @@ func checkHostQuota(ctx context.Context, tx pgx.Tx, tenantID string) error {
 var instanceID = ids.New("luxd")
 
 // provisionLease makes this luxd the provisioner for the next while, if
-// no other one is (a row with a holder and an expiry).
-func (s *Server) provisionLease(ctx context.Context) (bool, error) {
-	var ok bool
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+// no other one is (a row with a holder and an expiry). fresh: the row it
+// replaced was not this process's unexpired lease (none, expired, or
+// another holder's), so another provisioner may have run since.
+func (s *Server) provisionLease(ctx context.Context) (held, fresh bool, err error) {
+	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// The row is locked until commit, so the upsert replaces the version
+		// read here; now() is the transaction's, the same in both.
+		var current bool
+		err := tx.QueryRow(ctx, `SELECT holder = $1 AND expires_at >= now() FROM leases WHERE name = 'provisioner' FOR UPDATE`,
+			instanceID).Scan(&current)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		fresh = !current
 		return tx.QueryRow(ctx, `INSERT INTO leases (name, holder, expires_at) VALUES ('provisioner', $1, now() + $2::interval)
 			ON CONFLICT (name) DO UPDATE SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at
 				WHERE leases.holder = EXCLUDED.holder OR leases.expires_at < now()
-			RETURNING true`, instanceID, interval(max(10*s.cfg.Tick, 30*time.Second))).Scan(&ok)
+			RETURNING true`, instanceID, interval(max(10*s.cfg.Tick, 30*time.Second))).Scan(&held)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return false, false, nil
 	}
-	return ok, err
+	return held, fresh, err
+}
+
+// holdProvisionLease is every lease check of a pass. A failed check marks
+// the lease lost; holding it after a loss, or in a new epoch, starts afresh
+// (tookProvisionLease). Renewing the current epoch keeps what it knew.
+func (s *Server) holdProvisionLease(ctx context.Context) (bool, error) {
+	held, fresh, err := s.provisionLease(ctx)
+	if err != nil || !held {
+		s.leaseHeld = false
+		return false, err
+	}
+	if fresh || !s.leaseHeld {
+		s.tookProvisionLease()
+	}
+	return true, nil
 }
 
 // releaseProvisionLease gives the lease up, if this luxd holds it.

@@ -82,7 +82,9 @@ import (
 //   - scaleBlocked (pool.scale_blocked) and hostDecisionEvent
 //     (host.capacity_decision): transitions (transitionEvent), each in a
 //     transaction of its own that takes no other lock; the stream is taken
-//     exclusive only when the state changed.
+//     exclusive only when the state changed. A launch backoff's
+//     pool.scale_blocked folds instead (poolRepeatEvent), in the same
+//     lock-free transaction.
 //
 // A fold takes its stream exclusive after every other lock its transaction
 // takes (launch writes its host row, then folds; a failed launch

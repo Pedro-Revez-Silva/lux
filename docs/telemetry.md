@@ -233,12 +233,18 @@ adds the plan; rows written before planning have none of these:
 **`pool.scale_blocked`** is written on a pass that launches nothing while
 hosts are wanted or Runs stay unmet. `cause` says why: `max` (`--max`
 stops the hosts the plan, warm or `--min` wanted), `quota` (the tenant's
-host quota is reached) or `no_fit` (unmet Runs that no new host fits). It
+host quota is reached), `no_fit` (unmet Runs that no new host fits) or
+`launch_backoff` (the pool's launches failed and it waits before the next
+attempt; see [EC2 pools](operations.md#ec2-pools)). It
 is not written while unmet Runs wait for a probe or bootstrap host of the
 current template that is still starting: the pass is waiting, not blocked.
 It carries `waiting`, `total`, `max`, the same plan fields as
 `pool.scale_up` (`ready` through `omitted`) and, for `max` and `quota`,
-`wanted`: how many hosts the pool asked for.
+`wanted`: how many hosts the pool asked for. For `launch_backoff` it also
+carries `failures` (consecutive failed launches), `retryInSeconds` (until
+the next attempt), `error` (the provider's last error, request IDs stripped
+and limited to 200 runes) and `detail`, the line `lux pools events` prints, e.g.
+`launch backing off after 5 failures; next attempt in 2m0s: <error>`.
 
 It records a state, not each pass. For `max` and `quota`, only `cause` and
 `max` distinguish states; changes to queue size, fit or expected capacity
@@ -250,6 +256,13 @@ last record falls outside the latest 32 pool events; more than 32 events
 per pass can make it repeat each pass. Clearing demand without a scale-up
 does not reset this bounded event lookup, and a folded scale-up retains
 its original position in the stream.
+
+`launch_backoff` instead counts each waiting pass, folding best-effort
+into the latest backoff row with updated `failures`, `retryInSeconds`,
+`error` and `detail`. Folding searches only the pool's latest 8 events
+and permits intervening retry-loop events. Differing launch errors can
+push the row outside that window; other intervening pool events can also
+prevent folding. Either starts a new `pool.scale_blocked` row.
 
 A blocker is either a resource, with `resource` (`cpus`, `memory`, `disk`
 or `runs`), `requested`, `used`, `capacity` and `available`

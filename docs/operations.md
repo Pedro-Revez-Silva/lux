@@ -482,7 +482,7 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   its start, so keep the interval well above one sweep's duration: a
   15-candidate sweep under EC2 throttling can take about 10s. When every
   candidate fails or is skipped, the launch fails with the code and the
-  candidates and is retried on the next pass. Fallback types use the same
+  candidates and the pool backs off (below). Fallback types use the same
   launch template, so its AMI must suit them (same architecture);
   `lux hosts ls` shows the type a host got.
 - **Scale down:** a host idle longer than the pool's `--scale-down-after`
@@ -506,7 +506,19 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   ```
 
   Without it, `--warm` hosts are kept at all times.
-- **Failures:** a launch that fails is retried on the next pass. A host
+- **Failures:** provider launch errors, including capacity errors, delay
+  the pool's next launch by 15s, then 30s, 60s … up to 5m after each
+  consecutive failed attempt returns. Quota refusals, caller cancellation
+  and persistence errors do not count; scale-down, terminations and alive
+  checks continue. Provider success (even if persisting it fails) or a
+  change to the pool's provisioner settings (`lux pools set`) resets the
+  backoff. It is in memory: restart or any newly taken provisioner lease
+  epoch (no previous row, an expired lease or a different holder) resets
+  every pool; renewing this luxd's unexpired lease does not.
+  Waiting passes record `pool.scale_blocked` with cause `launch_backoff`,
+  counted per pass and folded best-effort into one row; a long backoff
+  with differing errors can start another row. `lux pools events` shows
+  `launch backing off after N failures; next attempt in …: <error>`. A host
   that never registers within `LUX_LAUNCH_TIMEOUT` (default 10m) is
   terminated. An instance EC2 no longer has is written off and replaced.
 - **Orphans:** once a minute luxd lists the pool's instances by tag. One

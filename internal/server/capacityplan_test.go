@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -773,13 +774,16 @@ func TestCapacityReconcileBoundedExactSummary(t *testing.T) {
 func TestCapacityReconcileFailureRetriesOneBootstrap(t *testing.T) {
 	s, pl, p := planningFixture(t, 6)
 	p.fail = true
+	now := time.Now()
+	s.now = func() time.Time { return now }
 	for range 2 {
 		if err := s.reconcilePool(context.Background(), p, pl, false); err == nil {
 			t.Fatal("want launch error")
 		}
+		now = now.Add(time.Hour) // past the launch backoff
 	}
 	if p.calls != 2 {
-		t.Fatalf("failed cold launches must retry one per tick, got %d", p.calls)
+		t.Fatalf("failed cold launches must retry one per pass, got %d", p.calls)
 	}
 	p.fail = false
 	for range 2 {

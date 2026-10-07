@@ -185,6 +185,8 @@ function blockedCause(d: Obj, s: (k: string) => string): string {
       return `tenant host quota reached (${s("wanted")} more wanted); `;
     case "no_fit":
       return "no new host fits the unmet runs; ";
+    case "launch_backoff":
+      return `${s("detail")}; `;
     default:
       return "";
   }

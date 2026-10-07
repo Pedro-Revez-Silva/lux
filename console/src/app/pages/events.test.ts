@@ -121,6 +121,11 @@ test("a blocked scale-up names its cause", () => {
     "no host launched: no new host fits the unmet runs; 1 waiting, had 0, max 2; plan: 0 ready, 0 starting, 0 planned, 1 unmet, 0 blocked; " +
       "new host cpus 8, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)",
   );
+  const detail = "launch backing off after 2 failures; next attempt in 25s: api error InvalidLaunchTemplateName.NotFound";
+  expect(infra("pool.scale_blocked", { ...plan, cause: "launch_backoff", detail, wanted: 1, waiting: 1, total: 0, max: 1, planned: 1 })).toBe(
+    `no host launched: ${detail}; 1 waiting, had 0, max 1; plan: 0 ready, 0 starting, 1 planned, 0 unmet, 0 blocked; ` +
+      "new host cpus 8, memory unlimited, disk unlimited, runs unlimited from 1 observation(s)",
+  );
 });
 
 test("a probe scale-up says it is one", () => {

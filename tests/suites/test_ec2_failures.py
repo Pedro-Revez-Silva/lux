@@ -3,6 +3,8 @@ register, failed launches, and instances whose launch reply was lost."""
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from conftest import fake_only, generic
@@ -60,7 +62,7 @@ def test_a_failed_launch_is_retried(lux, ec2):
     assert "launch failed" in lux.run("hosts", "ls", "--state", "launch_failed").stdout
     # At least two sweeps (one request per subnet each) before capacity
     # comes back, so the interval between them is observed.
-    wait_until(lambda: len(ec2.launch_attempts) >= 4, 30, 0.3, "no second sweep")
+    wait_until(lambda: len(lux.json("hosts", "ls", "--state", "launch_failed")) >= 2, 45, 0.3, "no second sweep")
     with ec2.lock:
         ec2.fail_launches = False
         attempts = list(zip(ec2.launch_attempted_at, ec2.launch_attempts))
@@ -71,21 +73,62 @@ def test_a_failed_launch_is_retried(lux, ec2):
     assert {h["id"] for h in refused}.isdisjoint({h["id"] for h in launched}), (refused, launched)
     # The fake answers InsufficientInstanceCapacity with a 500 naming the
     # zone, as EC2 does. A refused launch makes one request per candidate
-    # (the pool's two subnets), with no SDK retries, and luxd then skips
-    # each for LUX_EC2_NO_CAPACITY_RETRY_AFTER (3s here): the passes in
-    # between (1s apart) are refused without a call, with the same error
-    # (the one event above). So each (type, subnet) is asked every 3-4s
-    # (bounds [2, 10] leave room for request latency and a loaded host),
-    # neither on every pass (~1s) nor after the 30s default, and there are fewer
-    # requests than twice the refusals.
+    # (the pool's two subnets), with no SDK retries, and the pool then
+    # launches nothing for its launch backoff (15s after the first
+    # failure): so each (type, subnet) is asked once per sweep, the second
+    # sweep about 15s after the first (bounds [13, 25] leave room for
+    # request latency and a loaded host), not on every pass (~1s) nor at
+    # the no-capacity marks' 3s; one refused host per sweep.
+    # Capacity-mark suppression is covered by TestLaunchSweepDoesNotSplit / TestLaunchRetriesThePrimaryOnceItsMarkExpires.
     by_key: dict[tuple[str, str], list[float]] = {}
     for at, key in attempts:
         by_key.setdefault(key, []).append(at)
     assert set(by_key) == {("m7i.large", "subnet-a"), ("m7i.large", "subnet-b")}, by_key
     for key, times in by_key.items():
         gaps = [b - a for a, b in zip(times, times[1:])]
-        assert gaps and all(2 <= g <= 10 for g in gaps), (key, times)
-    assert len(attempts) < 2 * len(refused), (attempts, refused)
+        assert gaps and all(13 <= g <= 25 for g in gaps), (key, times)
+    assert len(attempts) == 2 * len(refused), (attempts, refused)
+
+
+def test_a_failing_launch_backs_off_until_the_pool_is_fixed(lux, ec2):
+    """A launch EC2 refuses for a reason other than capacity (a launch
+    template deleted under the pool) is not retried every pass: the pool
+    waits 15s, then 30s, ... and says so in one pool.scale_blocked. Setting
+    the pool again (the operator's fix) is tried at once."""
+    fake_only(ec2)
+    ec2.launch_failures = {("m7i.large", "*"): "InvalidLaunchTemplateName.NotFound"}
+    pool(lux, ec2, min=1, max=1)
+
+    # Wait for work done, not for time: two failures committed. Without a
+    # backoff the second follows the first on the next pass (~1s); with it,
+    # 15s later, and the third is not due for another 30s.
+    def two_completed_failures():
+        failed = [e for e in pool_events(lux) if e["type"] == "pool.launch_failed"]
+        return failed if sum(e["count"] for e in failed) >= 2 else None
+
+    failed = wait_until(two_completed_failures, 60, 0.2, "no second completed launch failure")
+    with ec2.lock:
+        times = list(ec2.launch_attempted_at)
+        calls = ec2.calls.count("RunInstances")
+    assert len(times) == 2 and calls == 2, (times, calls)
+    assert times[1] - times[0] >= 15, times
+    assert all("InvalidLaunchTemplateName.NotFound" in e["data"]["error"] for e in failed), failed
+    [blocked] = [e for e in pool_events(lux) if e["type"] == "pool.scale_blocked"]
+    assert blocked["data"]["cause"] == "launch_backoff", blocked
+    assert blocked["count"] >= 1, blocked
+    assert "InvalidLaunchTemplateName.NotFound" in blocked["data"]["detail"], blocked
+    assert blocked["data"]["detail"].startswith("launch backing off after "), blocked
+    assert "launch backing off after" in lux.run("pools", "events", "burst").stdout
+
+    # The fix: the pool set again with another instance type, mid-backoff.
+    pool(lux, ec2, min=1, max=1, template={**ec2.template, "instanceType": "m6i.large"})
+    fixed_at = time.monotonic()
+    wait_until(lambda: ("m6i.large", "subnet-a") in ec2.launch_attempts or ("m6i.large", "subnet-b") in ec2.launch_attempts,
+               5, 0.1, "the fixed pool waited out its backoff")
+    with ec2.lock:
+        at = next(t for t, k in zip(ec2.launch_attempted_at, ec2.launch_attempts) if k[0] == "m6i.large")
+    assert at - fixed_at < 4, at - fixed_at
+    wait_until(lambda: len(ec2_hosts(lux)) == 1, 90, 0.3, "the fixed pool's host never registered")
 
 
 def test_a_launch_falls_back_to_the_next_instance_type(lux, ec2):

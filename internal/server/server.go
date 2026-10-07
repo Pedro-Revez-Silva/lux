@@ -67,6 +67,10 @@ type Config struct {
 	// LostGrace is how long a lost provisioned host keeps its instance
 	// before it is terminated (a restart or network blip is not a loss).
 	LostGrace time.Duration
+	// LaunchBackoff and LaunchBackoffMax: how long a pool waits after its
+	// first failed launch, doubling per consecutive failure up to the max
+	// (0: launchBackoffInitial, launchBackoffMax).
+	LaunchBackoff, LaunchBackoffMax time.Duration
 	// OutdatedDrainPercent caps how many of a pool's hosts may be
 	// draining for outdated binaries at once, as a percentage of its live
 	// hosts (at least 1 regardless). 0: DefaultOutdatedDrainPercent.
@@ -152,6 +156,12 @@ type Server struct {
 	decided   map[string]map[string]bool
 	swept     map[string]bool
 	leaseHeld bool
+	// launchBackoff: per pool id, its consecutive failed launches and when
+	// it may launch again (launchBackoffFor); provisioner goroutine only.
+	launchBackoff map[string]*poolBackoff
+	// now is the provisioner's clock for launch backoff (time.Now; tests
+	// replace it).
+	now func() time.Time
 	// supersededCursor: the last flagged Run id reapSuperseded inspected
 	// ("" to start over); reaper goroutine only.
 	supersededCursor string
@@ -206,6 +216,8 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 	if cfg.LaunchTimeout == 0 {
 		cfg.LaunchTimeout = DefaultLaunchTimeout
 	}
+	cfg.LaunchBackoff = cmp.Or(cfg.LaunchBackoff, launchBackoffInitial)
+	cfg.LaunchBackoffMax = cmp.Or(cfg.LaunchBackoffMax, launchBackoffMax)
 	if cfg.OutdatedDrainPercent == 0 {
 		cfg.OutdatedDrainPercent = DefaultOutdatedDrainPercent
 	}
@@ -243,6 +255,7 @@ func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Serv
 		diskFailing: map[string]bool{},
 		id:          instanceID,
 		hostname:    hostname(),
+		now:         time.Now,
 	}
 	s.readPostgres = s.postgresFigures
 	if cfg.ConsoleAuth.Mode == "cloudflare-access" {
