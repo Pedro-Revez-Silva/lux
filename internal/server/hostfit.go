@@ -5,6 +5,8 @@ import (
 	"maps"
 	"slices"
 	"strings"
+
+	"github.com/marcioapm/lux/internal/proto"
 )
 
 // Resource values use CPUs, bytes (memory and disk), or placement counts
@@ -33,6 +35,7 @@ const (
 	// kindScope: the host is not the Run's (pool, removed pool, tenant,
 	// sharing, another chosen host).
 	kindScope
+	kindSyncModes
 )
 
 // hostFit is independent of snapshot locality and scheduler affinity. A chosen
@@ -74,6 +77,10 @@ func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 	if r.Spec.Sandbox.NestedContainers && h.Labels["nested"] != "true" {
 		constraint(kindNested, "host does not support nested containers")
 	}
+	// An older runner would run a fast-forward or fetch resume as move.
+	if proto.SafeSyncModes(r.PendingSync) && !slices.Contains(h.Caps, proto.CapSyncModes) {
+		constraint(kindSyncModes, "host's lux-runner predates sync modes")
+	}
 	res := r.Spec.Resources
 	resource := func(name string, requested, used, capacity float64, blocked bool) {
 		if blocked {
@@ -111,7 +118,7 @@ type waitCapacity struct {
 }
 
 // waitKinds is the reason's fixed order: the resource kinds, then constraints.
-var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested"}
+var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested", "syncModes"}
 
 // add counts h's blockers, unless one of them rules h out for this Run on
 // pool, tenancy or chosen-host grounds, or h is not connected to this luxd
@@ -128,6 +135,8 @@ func (w *waitCapacity) add(blockers []fitBlocker) {
 			kind = "labels"
 		case kindNested:
 			kind = "nested"
+		case kindSyncModes:
+			kind = "syncModes"
 		default:
 			return
 		}
@@ -172,6 +181,8 @@ func (w *waitCapacity) reason(r pendingRun) string {
 			what = lack + " its required labels"
 		case "nested":
 			what = plural(n, "does", "do") + " not support nested containers"
+		case "syncModes":
+			what = plural(n, "runs a lux-runner", "run lux-runners") + " without sync modes (its sync asks for fast-forward or fetch)"
 		}
 		// The subject is named once: the first part says which hosts, later
 		// parts only how many (nothing for the chosen host).

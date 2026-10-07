@@ -401,7 +401,9 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 	nestedMismatch := nested && plan.Expected != nil && plan.Expected.nestedMismatch
 	nested = nested && !nestedMismatch
 	virtual := func(id string) *candidateHost {
-		h := &candidateHost{ID: id, TenantID: pl.TenantID, PoolID: pl.ID, Pool: pl.Name, Shared: pl.Shared && pl.TenantID == nil, Retired: pl.Retired, Connected: true}
+		h := &candidateHost{ID: id, TenantID: pl.TenantID, PoolID: pl.ID, Pool: pl.Name, Shared: pl.Shared && pl.TenantID == nil, Retired: pl.Retired, Connected: true,
+			// A new host runs the binaries this luxd serves.
+			Caps: []string{proto.CapSyncModes}}
 		if plan.Expected != nil {
 			h.Capacity = plan.Expected.Capacity
 			h.Labels = maps.Clone(plan.Expected.Labels)
@@ -560,7 +562,7 @@ func waitingRuns(ctx context.Context, tx pgx.Tx, pl poolRow) ([]pendingRun, map[
 	// updated_at is when the Run entered provisioning: setRunState stamps it,
 	// and while it waits only state_reason and place_on change, neither of
 	// which touches updated_at.
-	rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, snapshot_id,
+	rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, snapshot_id, pending_sync,
 		jsonb_array_length(secrets) > 0, coalesce(place_on, ''), coalesce(avoid_host, ''), pool_id, updated_at
 		FROM runs WHERE pool_id = $1 AND state = 'provisioning' AND NOT cancel_requested
 		ORDER BY updated_at, id`, pl.ID)
@@ -573,7 +575,7 @@ func waitingRuns(ctx context.Context, tx pgx.Tx, pl poolRow) ([]pendingRun, map[
 	for rows.Next() {
 		var r pendingRun
 		var since time.Time
-		if err := rows.Scan(&r.ID, &r.TenantID, &r.State, &r.Spec, &r.SnapshotID, &r.HasSecrets, &r.PlaceOn, &r.AvoidHost, &r.PoolID, &since); err != nil {
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.State, &r.Spec, &r.SnapshotID, &r.PendingSync, &r.HasSecrets, &r.PlaceOn, &r.AvoidHost, &r.PoolID, &since); err != nil {
 			return nil, nil, err
 		}
 		runs = append(runs, r)

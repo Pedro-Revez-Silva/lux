@@ -332,12 +332,16 @@ func writeFrame(ctx context.Context, ws *websocket.Conn, f proto.Frame) error {
 // sent (whatever order ids committed in). The poll fallback has no
 // connection and asks for every unacked message.
 func (s *Server) pendingMessages(ctx context.Context, hostID string, undelivered bool) ([]proto.Frame, error) {
+	if err := s.refuseUnsupportedSyncs(ctx, hostID); err != nil {
+		return nil, err
+	}
 	var out []proto.Frame
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			UPDATE host_messages SET delivered_at = now()
 			WHERE id IN (SELECT id FROM host_messages
 				WHERE host_id = $1 AND acked_at IS NULL AND (NOT $2 OR delivered_at IS NULL)
+				  AND NOT (`+unsupportedSync+`)
 				ORDER BY id LIMIT 500)
 			RETURNING id, type, coalesce(run_id, ''), coalesce(epoch, 0), payload`, hostID, undelivered)
 		if err != nil {
@@ -364,6 +368,127 @@ func (s *Server) pendingMessages(ctx context.Context, hostID string, undelivered
 		}
 	}
 	return out, nil
+}
+
+// unsupportedSync, for SQL on host_messages: a sync or assignment that asks
+// for a mode other than move (proto.SafeSyncModes), queued for a host whose
+// latest registration lacks proto.CapSyncModes. An older runner drops the
+// mode and moves the checkout: such a message is never delivered.
+const unsupportedSync = `host_messages.type IN ('sync', 'assign')
+	AND jsonb_path_exists(host_messages.payload, CASE host_messages.type
+		WHEN 'sync' THEN '$.repos[*] ? (@.mode != "" && @.mode != "move")'
+		ELSE '$.sync[*] ? (@.mode != "" && @.mode != "move")' END::jsonpath)
+	AND NOT EXISTS (SELECT 1 FROM hosts h WHERE h.id = host_messages.host_id AND 'sync-modes' = ANY(h.capabilities))`
+
+// syncModesGone is the outcome of a sync refused at delivery.
+const syncModesGone = "the host's lux-runner no longer supports sync modes"
+
+// refuseUnsupportedSyncs settles every unsupportedSync message of a host
+// in place of delivering it, and acks it. A running Run's sync ends failed:
+// a failed git.sync per repository, then sync.done. An assignment's
+// placement, not yet started, is lost and its Run queued again with its
+// sync, so that hostFit waits for a host with sync modes.
+func (s *Server) refuseUnsupportedSyncs(ctx context.Context, hostID string) error {
+	type refused struct {
+		id    int64
+		runID string
+	}
+	var found []refused
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT id, coalesce(run_id, '') FROM host_messages
+			WHERE host_id = $1 AND acked_at IS NULL AND `+unsupportedSync+` ORDER BY id`, hostID)
+		if err != nil {
+			return err
+		}
+		found, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (refused, error) {
+			var m refused
+			return m, r.Scan(&m.id, &m.runID)
+		})
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	for _, m := range found {
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return s.refuseSync(ctx, tx, hostID, m.id, m.runID) }); err != nil {
+			return err
+		}
+	}
+	if len(found) > 0 {
+		s.Kick()
+	}
+	return nil
+}
+
+func (s *Server) refuseSync(ctx context.Context, tx pgx.Tx, hostID string, id int64, runID string) error {
+	// The Run first, then its message: as a report's transaction locks them.
+	var tenantID string
+	var current int
+	if err := tx.QueryRow(ctx, `SELECT tenant_id, current_epoch FROM runs WHERE id = $1 FOR UPDATE`, runID).Scan(&tenantID, &current); err != nil {
+		return err
+	}
+	var typ string
+	var epoch int
+	var payload json.RawMessage
+	err := tx.QueryRow(ctx, `SELECT type, coalesce(epoch, 0), payload FROM host_messages
+		WHERE id = $1 AND acked_at IS NULL AND `+unsupportedSync+` FOR UPDATE`, id).Scan(&typ, &epoch, &payload)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // acked, or the host has sync modes again
+	}
+	if err != nil {
+		return err
+	}
+	s.log.Warn("sync refused at delivery: no sync modes", "host", hostID, "run", runID, "epoch", epoch, "type", typ)
+	var later laterEvents
+	switch typ {
+	case proto.MsgSync:
+		var m proto.Sync
+		if err := json.Unmarshal(payload, &m); err != nil {
+			return err
+		}
+		for _, r := range m.Repos {
+			if err := addEvent(ctx, tx, tenantID, runID, epoch, proto.EvGitSync, map[string]any{"repo": r.Repo, "ref": r.Ref,
+				"mode": proto.SyncModeOf(r.Mode), "status": "failed", "error": syncModesGone, "requestId": m.RequestID}); err != nil {
+				return err
+			}
+		}
+		if err := addEvent(ctx, tx, tenantID, runID, epoch, proto.EvSyncDone, map[string]any{"requestId": m.RequestID, "changed": false}); err != nil {
+			return err
+		}
+	case proto.MsgAssign:
+		var a proto.Assign
+		if err := json.Unmarshal(payload, &a); err != nil {
+			return err
+		}
+		var assigned bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM placements WHERE run_id = $1 AND epoch = $2 AND host_id = $3 AND state = 'assigned')`,
+			runID, epoch, hostID).Scan(&assigned); err != nil {
+			return err
+		}
+		if assigned && epoch == current {
+			if err := s.placementLost(ctx, tx, runID, epoch, syncModesGone, &later); err != nil {
+				return err
+			}
+			var state string
+			if err := tx.QueryRow(ctx, `SELECT state FROM runs WHERE id = $1`, runID).Scan(&state); err != nil {
+				return err
+			}
+			if state == StateLost {
+				if err := s.requestResume(ctx, tx, tenantID, runID, a.Input, syncModesGone); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(ctx, `UPDATE runs SET pending_sync = $2 WHERE id = $1`, runID, a.Sync); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE host_messages SET acked_at = now(),
+			payload = CASE type WHEN $2 THEN payload - 'promptAttachments' ELSE payload END
+		WHERE id = $1`, id, proto.MsgAssign); err != nil {
+		return err
+	}
+	return later.write()
 }
 
 func (s *Server) attachSecrets(runID string, data json.RawMessage) json.RawMessage {

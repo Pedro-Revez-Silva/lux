@@ -159,16 +159,21 @@ func TestDiffNonUTF8Patch(t *testing.T) {
 	}
 }
 
-func gitBasesOf(t *testing.T, s *Server, runID string, epoch int) map[string]string {
+func lineageBasesOf(t *testing.T, s *Server, runID string, epoch int) (gitBases, syncBases map[string]string) {
 	t.Helper()
 	ctx := context.Background()
-	var m map[string]string
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) (err error) {
-		m, err = gitBases(ctx, tx, runID, epoch)
+		gitBases, syncBases, err = lineageBases(ctx, tx, runID, epoch)
 		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
+	return gitBases, syncBases
+}
+
+func gitBasesOf(t *testing.T, s *Server, runID string, epoch int) map[string]string {
+	t.Helper()
+	m, _ := lineageBasesOf(t, s, runID, epoch)
 	return m
 }
 
@@ -232,5 +237,81 @@ func TestGitBasesFollowSyncs(t *testing.T) {
 		('t1', 'r1', 2, 'git.clone', '{"repo": "app", "status": "cloned", "commit": "reclone-d"}')`)
 	if m := bases(3); m["app"] != "reclone-d" {
 		t.Fatalf("epoch 3 after a later clone: %v", m)
+	}
+}
+
+// A sync's bundle prerequisite follows every sync that fetched a commit
+// into the checkout, kept or only fetched too, across the placements that
+// restore it; the live diff's base does not move for those.
+func TestSyncBasesFollowFetches(t *testing.T) {
+	s, _ := diffFixture(t)
+	ctx := context.Background()
+	sync := func() map[string]string {
+		t.Helper()
+		_, sb := lineageBasesOf(t, s, "r1", 2)
+		return sb
+	}
+	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES
+		('t1', 'r1', 1, 'git.sync', '{"repo": "app", "status": "fetched", "from": "base-app", "to": "fetch-b"}')`)
+	if sb := sync(); sb["app"] != "fetch-b" {
+		t.Fatalf("sync bases after a fetch only: %v", sb)
+	}
+	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES
+		('t1', 'r1', 1, 'git.sync', '{"repo": "app", "status": "kept", "from": "base-app", "to": "kept-c"}'),
+		('t1', 'r1', 1, 'git.sync', '{"repo": "app", "status": "failed", "to": "never-d"}')`)
+	if sb := sync(); sb["app"] != "kept-c" {
+		t.Fatalf("sync bases: %v", sb)
+	}
+	if m := gitBasesOf(t, s, "r1", 2); m["app"] != "base-app" {
+		t.Fatalf("git bases: %v", m)
+	}
+}
+
+// The assignment of a placement that restores a snapshot carries the
+// lineage's SyncBases (and its GitBases, the diff's): through a fetch-only
+// placement, past a failed placement that restored the same snapshot, on
+// another host, and from an explicitly older snapshot.
+func TestAssignmentCarriesSyncBases(t *testing.T) {
+	s, _ := diffFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, state) VALUES ('h2', 'h2', 'ready')`)
+	// Epoch 2 (restored s1) only fetched fetch-b, then snapshotted s2.
+	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES
+		('t1', 'r1', 2, 'git.sync', '{"repo": "app", "status": "fetched", "from": "base-app", "to": "fetch-b"}')`)
+	execSQL(t, s, ctx, `INSERT INTO snapshots (id, tenant_id, run_id, placement_id, epoch, manifest) VALUES ('s2', 't1', 'r1', 'p2', 2, '{}')`)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited'`)
+	epoch := 2
+	assign := func(snapshot, host string) proto.Assign {
+		t.Helper()
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return s.assign(ctx, tx, pendingRun{ID: "r1", TenantID: "t1", Epoch: epoch, SnapshotID: &snapshot}, &candidateHost{ID: host})
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		epoch++
+		var a proto.Assign
+		systemScan(t, s, `SELECT payload FROM host_messages WHERE type = 'assign' AND run_id = 'r1' AND epoch = $1 AND host_id = $2`,
+			[]any{epoch, host}, &a)
+		execSQL(t, s, ctx, `UPDATE placements SET state = 'exited' WHERE run_id = 'r1'`)
+		return a
+	}
+	for _, c := range []struct {
+		name, snapshot, host, failed string
+		syncBase                     string
+	}{
+		{"restoring the fetch-only placement, on another host", "s2", "h2", "never-c", "fetch-b"},
+		{"restoring it again, past a failed placement", "s2", "h1", "", "fetch-b"},
+		{"restoring the older snapshot", "s1", "h2", "", "base-app"},
+	} {
+		a := assign(c.snapshot, c.host)
+		if a.Epoch != epoch || a.SyncBases["app"] != c.syncBase || len(a.SyncBases) != 1 || a.GitBases["app"] != "base-app" {
+			t.Fatalf("%s: epoch %d, syncBases %v, gitBases %v", c.name, a.Epoch, a.SyncBases, a.GitBases)
+		}
+		if c.failed != "" {
+			// This placement fails after a sync that failed.
+			execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data) VALUES
+				('t1', 'r1', $1, 'git.sync', jsonb_build_object('repo', 'app', 'status', 'failed', 'to', $2::text))`, epoch, c.failed)
+		}
 	}
 }

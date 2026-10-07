@@ -232,6 +232,29 @@ func (p *placement) event(ctx context.Context, typ string, data map[string]any) 
 	}()
 }
 
+// restoreState starts the placement's run state from its assignment: what
+// it carries over from an earlier placement, and state.json's volumes.
+func (p *placement) restoreState() {
+	a := p.assign
+	prev, _ := readRunState(p.dir)
+	st := &runState{RunID: p.runID, TenantID: p.tenantID, Epoch: p.epoch, Phase: "assigned", Times: map[string]int64{}}
+	stored, _, _ := a.Spec.SplitSecrets()
+	st.Spec = &stored
+	if prev != nil {
+		st.VolumesSnapshot, st.VolumesEpoch = prev.VolumesSnapshot, prev.VolumesEpoch
+	}
+	// Clone commits of what an earlier placement cloned; a clone here
+	// replaces its repository's.
+	st.GitBases = maps.Clone(a.GitBases)
+	st.SyncBases = maps.Clone(a.SyncBases)
+	// The container starts with this runner's --shim mounted.
+	st.ShimSyncModes = p.r.shimSyncModes
+	p.mu.Lock()
+	p.state = st
+	p.mu.Unlock()
+	_ = writeRunState(p.dir, st)
+}
+
 // run takes a placement from assignment to its final report.
 func (p *placement) run(ctx context.Context) {
 	defer close(p.done)
@@ -241,20 +264,7 @@ func (p *placement) run(ctx context.Context) {
 	// else: not runner memory past it, not state.json.
 	prompt := a.PromptAttachments
 	a.PromptAttachments = nil
-	prev, _ := readRunState(p.dir)
-	st := &runState{RunID: p.runID, TenantID: p.tenantID, Epoch: p.epoch, Phase: "assigned", Times: map[string]int64{}}
-	p.mu.Lock()
-	p.state = st
-	p.mu.Unlock()
-	stored, _, _ := sp.SplitSecrets()
-	p.state.Spec = &stored
-	if prev != nil {
-		p.state.VolumesSnapshot, p.state.VolumesEpoch = prev.VolumesSnapshot, prev.VolumesEpoch
-	}
-	// Clone commits of what an earlier placement cloned; a clone here
-	// replaces its repository's.
-	p.state.GitBases = maps.Clone(a.GitBases)
-	_ = writeRunState(p.dir, p.state)
+	p.restoreState()
 	p.setPhase("starting")
 	go p.report(ctx, proto.MsgStatus, proto.Status{State: "starting"})
 

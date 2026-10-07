@@ -50,6 +50,8 @@ type candidateHost struct {
 	PoolID    string
 	Retired   bool // its pool is retired
 	Connected bool
+	// Caps: the optional features its runner said it has (hosts.capabilities).
+	Caps []string
 }
 
 type pendingRun struct {
@@ -258,7 +260,7 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 	rows, err := tx.Query(ctx, `
 		SELECT h.id, h.tenant_id, coalesce(p.name, ''), coalesce(h.pool_id, ''), h.labels, h.capacity, coalesce(h.caches->'images', '[]'),
 			coalesce(h.caches->'gitMirrors', '[]'),
-			coalesce(p.shared AND p.tenant_id IS NULL, false), coalesce(p.retired, false)
+			coalesce(p.shared AND p.tenant_id IS NULL, false), coalesce(p.retired, false), h.capabilities
 		FROM hosts h LEFT JOIN pools p ON p.id = h.pool_id
 		WHERE h.id = ANY($2) AND h.state = 'ready' AND NOT h.draining
 		  AND h.last_heartbeat > now() - $1::interval`,
@@ -271,7 +273,7 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 	for rows.Next() {
 		h := &candidateHost{}
 		var images []string
-		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.PoolID, &h.Labels, &h.Capacity, &images, &h.Mirrors, &h.Shared, &h.Retired); err != nil {
+		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.PoolID, &h.Labels, &h.Capacity, &images, &h.Mirrors, &h.Shared, &h.Retired, &h.Caps); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -475,7 +477,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	}
 	// The placement is on the Run, its host and its host's pool alike.
 	// snapshotId: what its volumes start from (null: empty), the lineage
-	// its repositories' bases follow (gitBases).
+	// its repositories' bases follow (lineageBases).
 	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID, "pool": h.Pool, "poolId": h.PoolID, "snapshotId": r.SnapshotID}); err != nil {
 		return err
 	}
@@ -489,7 +491,7 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 
 	a := proto.Assign{RunID: r.ID, TenantID: r.TenantID, Epoch: epoch, Spec: r.Spec, ImageResolved: r.ImageResolved, Sync: r.PendingSync}
 	if r.SnapshotID != nil {
-		if a.GitBases, err = gitBases(ctx, tx, r.ID, epoch); err != nil {
+		if a.GitBases, a.SyncBases, err = lineageBases(ctx, tx, r.ID, epoch); err != nil {
 			return err
 		}
 	}
@@ -512,8 +514,8 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 		return err
 	}
 	// Then its servers: every attached one that is up starts on every
-	// placement.
-	if err := s.startAttachedServers(ctx, tx, r.TenantID, r.ID, epoch, len(a.Sync) > 0); err != nil {
+	// placement, running afterSync first as its sync's modes say.
+	if err := s.startAttachedServers(ctx, tx, r.TenantID, r.ID, epoch, afterSyncFor(a.Sync)); err != nil {
 		return err
 	}
 	reserveHost(h, r)

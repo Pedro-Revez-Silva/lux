@@ -151,6 +151,33 @@ func TestServerProcesses(t *testing.T) {
 	o.Close()
 }
 
+// A server with UnmovedCommand runs it when the sync before init moved no
+// checkout, and its Command (afterSync first) when one moved.
+func TestServerUnmovedCommand(t *testing.T) {
+	for _, moved := range []bool{false, true} {
+		dir := t.TempDir()
+		o, err := OpenOutput(filepath.Join(dir, "out.jsonl"), NewRedactor(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := &Shim{out: o, red: NewRedactor(nil), user: &userInfo{home: dir}, env: []string{"PATH=" + os.Getenv("PATH")},
+			streams: map[int]chan syscall.WaitStatus{}, groups: map[int]bool{},
+			srv: servers{procs: map[string]*serverProc{}, started: map[string]int64{}, stopping: map[string]*serverProc{}, syncMoved: moved}}
+		s.cfg.Workdir = dir
+		done := make(chan struct{})
+		go s.reap(done)
+		marker := filepath.Join(dir, "ran")
+		s.setServers([]proto.ServerSpec{{Name: "web", Gen: 1,
+			Command:        []string{"sh", "-c", "echo after-sync > " + marker},
+			UnmovedCommand: []string{"sh", "-c", "echo plain > " + marker}}})
+		s.serversReady()
+		want := map[bool]string{false: "plain", true: "after-sync"}[moved]
+		waitFor(t, func() bool { b, _ := os.ReadFile(marker); return strings.TrimSpace(string(b)) == want }, "moved "+strconv.FormatBool(moved)+": want "+want)
+		close(done)
+		o.Close()
+	}
+}
+
 func waitFor(t *testing.T, fn func() bool, msg string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

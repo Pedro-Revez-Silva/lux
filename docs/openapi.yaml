@@ -1960,7 +1960,7 @@ components:
             - array
             - "null"
         sync:
-          description: "Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha) before init, through the host's mirror: tracked files become the ref's, untracked and ignored ones are kept. Each is a git.sync event; the Run goes on after a failed one, its checkout as it was (or, if a reset failed half-way, where git stopped, with refs/lux/pre-sync holding what was there)."
+          description: "Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha; mode: move, fast-forward or fetch) before init, through the host's mirror. Mode move (default): tracked files become the ref's, untracked and ignored ones are kept. fast-forward: only a checkout that loses nothing moves; fetch: none does. Each is a git.sync event; the Run goes on after a failed one, its checkout as it was (or, if a reset failed half-way, where git stopped, with refs/lux/pre-sync holding what was there)."
           items:
             $ref: "#/components/schemas/SyncRef"
           type:
@@ -2850,6 +2850,9 @@ components:
     SyncRef:
       additionalProperties: false
       properties:
+        mode:
+          description: "move (default): the checkout becomes the ref's, a dirty or diverged one reset (what was there saved as refs/lux/pre-sync). fast-forward: it moves only when nothing can be lost (HEAD an ancestor of the ref's commit, no tracked file changed, HEAD on the ref's branch or, for a tag or sha, detached, no merge, rebase, am, cherry-pick or revert in progress); otherwise it is kept as it is. fetch: it never moves. In fast-forward and fetch, a branch's commit is also refs/remotes/lux/<branch> in the checkout, and the git.sync event's operation names a git operation in progress in the checkout (merge, rebase, am, cherry-pick, revert or sequencer). Any other value: 422."
+          type: string
         ref:
           type: string
         repo:
@@ -2861,7 +2864,7 @@ components:
         requestId:
           type: string
         sync:
-          description: "Repositories to move: repo (the spec's name) and ref (branch, tag or sha)."
+          description: "Repositories to move: repo (the spec's name), ref (branch, tag or sha) and mode (move, fast-forward or fetch; default move)."
           items:
             $ref: "#/components/schemas/SyncRef"
           type:
@@ -6563,7 +6566,7 @@ paths:
   /v1/runs/{id}/push:
     post:
       description: |-
-        To the spec's git.push branch, with the runner's credentials. The outcome arrives as a git.push event carrying the request id.
+        To the spec's git.push branch, with the runner's credentials. The outcome arrives as a git.push event carrying the request id: per repository {repo, branch, commit?, status, operation?, error?}, status pushed, up-to-date, rejected (the lease failed: the branch moved), refused (a merge, rebase, am, cherry-pick, revert or sequencer is in progress in the checkout, named by operation: nothing was pushed), failed (with error, e.g. the checkout changed while it was being pushed) or skipped (push: false).
 
         expect: per repository, the commit the push branch must be at for the push to go ahead (a compare-and-swap). Without it, the lease is what this Run last pushed, or, the first time, that the branch does not exist.
 
@@ -7375,7 +7378,9 @@ paths:
   /v1/runs/{id}/sync:
     post:
       description: |-
-        The runner fetches each ref through the host's mirror, and the checkout moves as on a resume's sync (see resume): each repository is a git.sync event, then sync.done. Servers with afterSync run it and restart once a checkout moved; the others keep running.
+        The runner fetches each ref through the host's mirror, and the checkout moves as on a resume's sync (see resume), as its mode allows: each repository is a git.sync event, then sync.done (changed: whether a checkout moved). In modes fast-forward and fetch, a git.sync event's operation names a git operation in progress in the checkout: merge, rebase, am (a git am session), cherry-pick, revert or sequencer (a sequence of picks or reverts between steps); such a checkout never moves. Servers with afterSync run it and restart once a checkout moved; the others keep running.
+
+        409 `sync_modes_unsupported` when a mode other than move is asked for and the Run's host runs a lux-runner without sync modes.
 
         Needs the `run` scope.
       operationId: syncRun

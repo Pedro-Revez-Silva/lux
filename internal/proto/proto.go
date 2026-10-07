@@ -103,7 +103,7 @@ type Hello struct {
 	// runners that predate self-update: luxd never drains those for it.
 	RunnerSHA256 string `json:"runnerSha256,omitempty"`
 	ShimSHA256   string `json:"shimSha256,omitempty"`
-	// Capabilities: optional features this runner has (CapDiff).
+	// Capabilities: optional features this runner has (CapDiff, CapSyncModes).
 	Capabilities []string `json:"capabilities,omitempty"`
 }
 
@@ -211,16 +211,60 @@ type Assign struct {
 	// last synced it to, for repositories this one restores rather than
 	// clones.
 	GitBases map[string]string `json:"gitBases,omitempty"`
+	// SyncBases: per repository, the last commit an earlier placement
+	// fetched into the checkout this one restores (its clone, or any sync
+	// that did not fail): the prerequisite of its next sync's bundle.
+	SyncBases map[string]string `json:"syncBases,omitempty"`
 	// Sync: repositories whose restored checkout moves to a ref before init.
 	Sync []SyncRef `json:"sync,omitempty"`
 }
 
 // SyncRef asks for a repository's checkout to be moved to ref (a branch,
-// tag or sha), fetched through the host's mirror.
+// tag or sha), fetched through the host's mirror. Mode says when it may
+// move (SyncModes; "" is SyncMove).
 type SyncRef struct {
 	Repo string `json:"repo"`
 	Ref  string `json:"ref"`
+	Mode string `json:"mode,omitempty" doc:"move (default): the checkout becomes the ref's, a dirty or diverged one reset (what was there saved as refs/lux/pre-sync). fast-forward: it moves only when nothing can be lost (HEAD an ancestor of the ref's commit, no tracked file changed, HEAD on the ref's branch or, for a tag or sha, detached, no merge, rebase, am, cherry-pick or revert in progress); otherwise it is kept as it is. fetch: it never moves. In fast-forward and fetch, a branch's commit is also refs/remotes/lux/<branch> in the checkout, and the git.sync event's operation names a git operation in progress in the checkout (merge, rebase, am, cherry-pick, revert or sequencer). Any other value: 422."`
 }
+
+// Sync modes: how a checkout may move.
+const (
+	SyncMove        = "move"
+	SyncFastForward = "fast-forward"
+	SyncFetch       = "fetch"
+)
+
+// SyncModes are the modes a SyncRef may ask for.
+var SyncModes = []string{SyncMove, SyncFastForward, SyncFetch}
+
+// SyncModeOf is mode, or SyncMove for "".
+func SyncModeOf(mode string) string {
+	if mode == "" {
+		return SyncMove
+	}
+	return mode
+}
+
+// SafeSyncModes reports whether refs ask for a mode other than move: one
+// an older runner or lux-shim, which knows only move, would run as move.
+func SafeSyncModes(refs []SyncRef) bool {
+	for _, r := range refs {
+		if SyncModeOf(r.Mode) != SyncMove {
+			return true
+		}
+	}
+	return false
+}
+
+const (
+	// CapSyncModes is the Hello capability of a runner that carries a
+	// sync's mode, with a lux-shim that applies it.
+	CapSyncModes = "sync-modes"
+	// SyncModeProbe is no mode: a lux-shim that knows modes fails it and
+	// names it in its result's mode; an older one has no mode to name.
+	SyncModeProbe = "lux-probe"
+)
 
 // Sync is MsgSync: a running placement's repositories to move. Servers
 // with afterSync restart after it (luxd sends the new set).
@@ -453,6 +497,10 @@ type ServerSpec struct {
 	Command []string          `json:"command,omitempty"`
 	Workdir string            `json:"workdir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
+	// UnmovedCommand, when set, replaces Command if the placement's sync
+	// before init moved no checkout: Command runs afterSync first, this
+	// one does not. A shim that does not know it runs Command.
+	UnmovedCommand []string `json:"unmovedCommand,omitempty"`
 }
 
 // EvServerState is the runner's report of a server's state (a RunEvent):
@@ -506,12 +554,15 @@ type Push struct {
 }
 
 // PushResult is one repository's outcome, reported in a git.push event.
+// Refused: the checkout has Operation in progress (OperationOf); nothing
+// was pushed.
 type PushResult struct {
-	Repo   string `json:"repo"`
-	Branch string `json:"branch"`
-	Commit string `json:"commit,omitempty"`
-	Status string `json:"status"` // pushed | up-to-date | rejected | failed
-	Error  string `json:"error,omitempty"`
+	Repo      string `json:"repo"`
+	Branch    string `json:"branch"`
+	Commit    string `json:"commit,omitempty"`
+	Status    string `json:"status"` // pushed | up-to-date | rejected | refused | failed | skipped
+	Operation string `json:"operation,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // Ack is the data of an ack, when there is any.

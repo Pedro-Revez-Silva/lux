@@ -15,6 +15,44 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
+// A resume whose sync asks for fast-forward or fetch waits, rather than go
+// to a host whose runner lacks sync modes (it would run the sync as move);
+// it is placed once the host has them. A move sync goes anywhere.
+func TestSchedulerSyncModesNeedTheCapability(t *testing.T) {
+	s := testServer(t)
+	namedPools(t, s, "pool")
+	ctx := context.Background()
+	s.cfg.LeaseDuration = time.Minute
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, name, pool_id, state, capacity, capabilities, last_heartbeat)
+		VALUES ('h', 'h', 'pool', 'ready', '{"cpus":4,"memory":16384}', ARRAY['diff'], now())`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, pending_sync) VALUES
+		('r', 't1', '{"placement":{"pool":"pool"},"resources":{"cpus":1,"memory":1024}}', 'submitted', '[{"repo":"app","ref":"main","mode":"fetch"}]'),
+		('m', 't1', '{"placement":{"pool":"pool"},"resources":{"cpus":1,"memory":1024}}', 'submitted', '[{"repo":"app","ref":"main"}]')`)
+	s.hub.polled("h")
+	if err := s.scheduleOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var state, reason, moveState string
+	systemScan(t, s, `SELECT state, state_reason FROM runs WHERE id = 'r'`, nil, &state, &reason)
+	systemScan(t, s, `SELECT state FROM runs WHERE id = 'm'`, nil, &moveState)
+	if want := "waiting for capacity: 1 host in its pool runs a lux-runner without sync modes (its sync asks for fast-forward or fetch)"; state == StateScheduled || reason != want {
+		t.Fatalf("Run = %s/%q, want %q", state, reason, want)
+	}
+	if moveState != StateScheduled {
+		t.Fatalf("move sync's Run = %s", moveState)
+	}
+	execSQL(t, s, ctx, `UPDATE hosts SET capabilities = ARRAY['diff', 'sync-modes'] WHERE id = 'h'`)
+	execSQL(t, s, ctx, `UPDATE runs SET updated_at = now() WHERE id = 'r'`)
+	if err := s.scheduleOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	systemScan(t, s, `SELECT state FROM runs WHERE id = 'r'`, nil, &state)
+	if state != StateScheduled {
+		t.Fatalf("state with sync modes = %s", state)
+	}
+}
+
 func TestSchedulerFitWaitAndPlacementResources(t *testing.T) {
 	s := testServer(t)
 	namedPools(t, s, "pool")

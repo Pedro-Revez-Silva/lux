@@ -240,13 +240,15 @@ func (m *Manager) Materialize(ctx context.Context, r Repo, dir string) (*Result,
 	return res, nil
 }
 
-// PushResult says what a push did.
+// PushResult says what a push did. Operation, when refused: the git
+// operation in progress in the checkout (proto.OperationOf).
 type PushResult struct {
-	Repo   string `json:"repo"`
-	Branch string `json:"branch"`
-	Commit string `json:"commit,omitempty"`
-	Status string `json:"status"` // pushed | up-to-date | rejected | failed | skipped
-	Error  string `json:"error,omitempty"`
+	Repo      string `json:"repo"`
+	Branch    string `json:"branch"`
+	Commit    string `json:"commit,omitempty"`
+	Status    string `json:"status"` // pushed | up-to-date | rejected | refused | failed | skipped
+	Operation string `json:"operation,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 // Push pushes the commit in bundle (made by the workload from its HEAD) to

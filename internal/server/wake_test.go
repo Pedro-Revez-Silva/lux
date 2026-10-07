@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -269,7 +272,7 @@ func TestWakeOncePerWake(t *testing.T) {
 	// resolved, and the page drops into the app.
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'running', current_epoch = 2`)
 	execSQL(t, s, ctx, `INSERT INTO placements (id, tenant_id, run_id, host_id, epoch, state) VALUES ('p2', 't1', $1, 'h1', 2, 'running')`, r1)
-	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return s.startAttachedServers(ctx, tx, "t1", r1, 2, false) })
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return s.startAttachedServers(ctx, tx, "t1", r1, 2, afterSyncNever) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -628,6 +631,323 @@ func TestSyncRequests(t *testing.T) {
 	systemScan(t, s, `SELECT pending_sync FROM runs WHERE id = $1`, []any{r1}, &pending)
 	if len(pending) != 1 || pending[0].Ref != "abc123" {
 		t.Fatalf("pending sync: %+v", pending)
+	}
+}
+
+// A sync's mode, on POST /sync and a resume's sync: a known one is
+// carried to the runner (the sync message, the next assignment); an
+// unknown one is refused, named. On the assignment, servers run afterSync
+// first for a move, only if a checkout moved for a fast-forward (the shim
+// decides: UnmovedCommand), and never for a fetch.
+func TestSyncModes(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	execSQL(t, s, ctx, `UPDATE runs SET spec = '{"workload": {"workdir": "/w"}, "git": {"repositories": [{"name": "app", "url": "https://x/app.git", "path": "/w/app"}, {"name": "lib", "url": "https://x/lib.git", "path": "/w/lib"}]}}'`)
+	createSrv(t, s, key, map[string]any{"name": "cold", "port": 3001, "command": []string{"serve"}, "afterSync": []string{"npm", "ci"}, "runId": r1})
+	bad := map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "main", "mode": "rebase"}}}
+	w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", bad)
+	if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), `unknown mode \"rebase\"`) {
+		t.Fatalf("unknown mode: %d %s", w.Code, w.Body)
+	}
+	// A host whose runner has no sync modes: move (or none) still goes;
+	// fast-forward and fetch are refused, nothing sent.
+	before := syncMessages(t, s)
+	for _, mode := range []string{"fast-forward", "fetch"} {
+		body := map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "main"}, {"repo": "lib", "ref": "main", "mode": mode}}}
+		if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", body); w.Code != http.StatusConflict ||
+			!strings.Contains(w.Body.String(), "sync_modes_unsupported") || !strings.Contains(w.Body.String(), "without sync modes") {
+			t.Fatalf("mode %s on an old runner: %d %s", mode, w.Code, w.Body)
+		}
+	}
+	if after := syncMessages(t, s); after != before {
+		t.Fatalf("a refused sync was sent: %d messages, was %d", after, before)
+	}
+	for _, mode := range []string{"", "move"} {
+		body := map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "main", "mode": mode}}}
+		if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", body); w.Code != http.StatusAccepted {
+			t.Fatalf("mode %q on an old runner: %d %s", mode, w.Code, w.Body)
+		}
+	}
+	execSQL(t, s, ctx, `UPDATE hosts SET capabilities = ARRAY['diff', 'sync-modes']`)
+	for i, mode := range []string{"", "move", "fast-forward", "fetch"} {
+		id := "m" + strconv.Itoa(i)
+		body := map[string]any{"requestId": id, "sync": []map[string]string{{"repo": "app", "ref": "main", "mode": mode}}}
+		if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", body); w.Code != http.StatusAccepted {
+			t.Fatalf("mode %q: %d %s", mode, w.Code, w.Body)
+		}
+		var msg proto.Sync
+		systemScan(t, s, `SELECT payload FROM host_messages WHERE type = 'sync' ORDER BY id DESC LIMIT 1`, nil, &msg)
+		if msg.RequestID != id || len(msg.Repos) != 1 || msg.Repos[0].Mode != mode {
+			t.Fatalf("sync message for mode %q: %+v", mode, msg)
+		}
+	}
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped'`)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited'`)
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/resume", bad); w.Code != http.StatusUnprocessableEntity ||
+		!strings.Contains(w.Body.String(), `unknown mode \"rebase\"`) {
+		t.Fatalf("resume with an unknown mode: %d %s", w.Code, w.Body)
+	}
+	var pending []proto.SyncRef
+	systemScan(t, s, `SELECT pending_sync FROM runs WHERE id = $1`, []any{r1}, &pending)
+	if len(pending) != 0 {
+		t.Fatalf("a refused resume kept its sync: %+v", pending)
+	}
+	if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/resume", map[string]any{"sync": []map[string]string{
+		{"repo": "app", "ref": "main", "mode": "fast-forward"}, {"repo": "lib", "ref": "v1", "mode": "fetch"}}}); w.Code != http.StatusAccepted {
+		t.Fatalf("resume with modes: %d %s", w.Code, w.Body)
+	}
+	systemScan(t, s, `SELECT pending_sync FROM runs WHERE id = $1`, []any{r1}, &pending)
+	if len(pending) != 2 || pending[0].Mode != "fast-forward" || pending[1].Mode != "fetch" {
+		t.Fatalf("pending sync: %+v", pending)
+	}
+
+	epoch := 1
+	assign := func(refs []proto.SyncRef) (proto.Assign, proto.ServerSpec) {
+		t.Helper()
+		epoch++
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return s.assign(ctx, tx, pendingRun{ID: r1, TenantID: "t1", Epoch: epoch - 1, PendingSync: refs}, &candidateHost{ID: "h1"})
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var a proto.Assign
+		systemScan(t, s, `SELECT payload FROM host_messages WHERE type = 'assign' ORDER BY id DESC LIMIT 1`, nil, &a)
+		sets := pendingServers(t, s, ctx)
+		execSQL(t, s, ctx, `UPDATE placements SET state = 'exited' WHERE run_id = $1`, r1)
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return stopServersAtEnd(ctx, tx, "t1", r1, epoch, "run stopped")
+		}); err != nil {
+			t.Fatal(err)
+		}
+		set := sets[len(sets)-1]
+		if len(set.Servers) != 1 {
+			t.Fatalf("servers: %+v", set)
+		}
+		return a, set.Servers[0]
+	}
+	withAfter := func(cmd []string) bool {
+		return len(cmd) == 3 && strings.Contains(cmd[2], "'npm' 'ci' && exec 'serve'")
+	}
+	plain := func(cmd []string) bool { return len(cmd) == 1 && cmd[0] == "serve" }
+	for _, c := range []struct {
+		name     string
+		refs     []proto.SyncRef
+		command  func([]string) bool
+		unmoved  func([]string) bool
+		wantMode string
+	}{
+		{"no sync", nil, plain, func(c []string) bool { return c == nil }, ""},
+		{"move", []proto.SyncRef{{Repo: "app", Ref: "main"}}, withAfter, func(c []string) bool { return c == nil }, ""},
+		{"fast-forward", []proto.SyncRef{{Repo: "app", Ref: "main", Mode: "fast-forward"}}, withAfter, plain, "fast-forward"},
+		{"fetch", []proto.SyncRef{{Repo: "app", Ref: "main", Mode: "fetch"}}, plain, func(c []string) bool { return c == nil }, "fetch"},
+		{"move and fetch", []proto.SyncRef{{Repo: "app", Ref: "main", Mode: "fetch"}, {Repo: "lib", Ref: "main", Mode: "move"}}, withAfter,
+			func(c []string) bool { return c == nil }, "fetch"},
+	} {
+		a, sv := assign(c.refs)
+		if len(a.Sync) != len(c.refs) || (len(c.refs) > 0 && a.Sync[0].Mode != c.wantMode) {
+			t.Fatalf("%s: assignment's sync %+v", c.name, a.Sync)
+		}
+		if !c.command(sv.Command) || !c.unmoved(sv.UnmovedCommand) {
+			t.Fatalf("%s: command %q, unmovedCommand %q", c.name, sv.Command, sv.UnmovedCommand)
+		}
+	}
+}
+
+// A fast-forward or fetch queued while the host had sync modes, then
+// re-registered without them (an older runner) before it was delivered, is
+// never delivered, nor redelivered: an old runner drops the mode and moves
+// the checkout. A running Run's sync ends failed (git.sync per repository,
+// sync.done); an assignment goes without its fast-forward or fetch refs,
+// each a failed git.sync. A move is delivered as it was.
+func TestSafeSyncNotDeliveredAfterDowngrade(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	execSQL(t, s, ctx, `UPDATE runs SET spec = '{"git": {"repositories": [{"name": "app", "url": "https://x/app.git", "path": "/w/app"}, {"name": "lib", "url": "https://x/lib.git", "path": "/w/lib"}]}}'`)
+	tok := &hostToken{}
+	hello := proto.Hello{Name: "h1", ProtocolVersion: proto.Version, Capabilities: []string{proto.CapSyncModes},
+		Live: []proto.LivePlacement{{RunID: r1, Epoch: 1}}}
+	register := func(caps []string) {
+		t.Helper()
+		hello.Capabilities = caps
+		if _, err := s.registerHost(ctx, tok, hello); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Every unacked message, as a reconnect replays them, and as a poll reads them.
+	replay := func() []proto.Frame {
+		t.Helper()
+		execSQL(t, s, ctx, `UPDATE host_messages SET delivered_at = NULL WHERE host_id = 'h1'`)
+		ws, err := s.pendingMessages(ctx, "h1", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		poll, err := s.pendingMessages(ctx, "h1", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return append(ws, poll...)
+	}
+	syncEvents := func(requestID string) (failed map[string]string, done int) {
+		t.Helper()
+		failed = map[string]string{}
+		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			rows, err := tx.Query(ctx, `SELECT type, coalesce(data->>'repo', ''), coalesce(data->>'status', ''), coalesce(data->>'error', ''),
+					coalesce(data->>'changed', '') FROM run_events WHERE run_id = $1 AND data->>'requestId' = $2 ORDER BY id`, r1, requestID)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var typ, repo, status, msg, changed string
+				if err := rows.Scan(&typ, &repo, &status, &msg, &changed); err != nil {
+					return err
+				}
+				switch typ {
+				case proto.EvGitSync:
+					if _, dup := failed[repo]; dup || status != "failed" {
+						return fmt.Errorf("git.sync %s: %s (again: %v)", repo, status, dup)
+					}
+					failed[repo] = msg
+				case proto.EvSyncDone:
+					if changed != "false" {
+						return fmt.Errorf("sync.done changed=%s", changed)
+					}
+					done++
+				}
+			}
+			return rows.Err()
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return failed, done
+	}
+	const gone = "the host's lux-runner no longer supports sync modes"
+
+	register([]string{proto.CapSyncModes})
+	for _, body := range []map[string]any{
+		{"requestId": "safe", "sync": []map[string]string{{"repo": "app", "ref": "main", "mode": "fetch"}, {"repo": "lib", "ref": "main"}}},
+		{"requestId": "move", "sync": []map[string]string{{"repo": "app", "ref": "main", "mode": "move"}}},
+	} {
+		if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", body); w.Code != http.StatusAccepted {
+			t.Fatalf("sync %v: %d %s", body, w.Code, w.Body)
+		}
+	}
+	register(nil)
+	for range 2 {
+		var delivered []string
+		for _, f := range replay() {
+			if f.Type == proto.MsgSync {
+				var m proto.Sync
+				_ = json.Unmarshal(f.Data, &m)
+				delivered = append(delivered, m.RequestID)
+			}
+		}
+		if !slices.Equal(delivered, []string{"move", "move"}) {
+			t.Fatalf("syncs delivered to the old runner: %v", delivered)
+		}
+		failed, done := syncEvents("safe")
+		if len(failed) != 2 || failed["app"] != gone || failed["lib"] != gone || done != 1 {
+			t.Fatalf("the refused sync: failed %v, sync.done %d", failed, done)
+		}
+	}
+
+	// A resume assigned while the host had sync modes.
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped'`)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited'`)
+	execSQL(t, s, ctx, `UPDATE host_messages SET acked_at = now()`)
+	register([]string{proto.CapSyncModes})
+	refs := []proto.SyncRef{{Repo: "app", Ref: "main", Mode: proto.SyncFastForward}, {Repo: "lib", Ref: "v1"}}
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return s.assign(ctx, tx, pendingRun{ID: r1, TenantID: "t1", Epoch: 1, PendingSync: refs}, &candidateHost{ID: "h1"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hello.Live = nil
+	register(nil)
+	for range 2 {
+		for _, f := range replay() {
+			if f.Type == proto.MsgAssign {
+				t.Fatalf("assignment delivered to the old runner: %s", f.Data)
+			}
+		}
+		var state, reason, placement, exitReason string
+		var pending []proto.SyncRef
+		systemScan(t, s, `SELECT r.state, r.state_reason, r.pending_sync, p.state, coalesce(p.exit_reason, '') FROM runs r
+			JOIN placements p ON p.run_id = r.id AND p.epoch = 2 WHERE r.id = $1`, []any{r1}, &state, &reason, &pending, &placement, &exitReason)
+		if state != StateResuming || !slices.Equal(pending, refs) || placement != "lost" || exitReason != gone {
+			t.Fatalf("after the refused assignment: run %s (%q), pending %+v, placement %s (%q)", state, reason, pending, placement, exitReason)
+		}
+		var lost int
+		systemScan(t, s, `SELECT count(*) FROM run_events WHERE run_id = $1 AND type = 'state' AND data->>'state' = 'lost'`, []any{r1}, &lost)
+		if lost != 1 {
+			t.Fatalf("lost %d times", lost)
+		}
+	}
+}
+
+// syncMessages counts the sync messages queued for any host.
+func syncMessages(t *testing.T, s *Server) (n int) {
+	t.Helper()
+	systemScan(t, s, `SELECT count(*) FROM host_messages WHERE type = 'sync'`, nil, &n)
+	return n
+}
+
+// A host's sync modes are what its latest Hello says, through
+// registerHost: none, then sync-modes, then none again (an older runner
+// back). After each, the API takes a fast-forward or fetch sync only with
+// them (no message written otherwise) and the scheduler places a safe-mode
+// resume on it only with them; move goes throughout.
+func TestSyncModesFollowRegistration(t *testing.T) {
+	s, ctx, key, _ := wakeFixture(t)
+	execSQL(t, s, ctx, `UPDATE runs SET spec = '{"git": {"repositories": [{"name": "app", "url": "https://x/app.git", "path": "/w/app"}]}}'`)
+	tok := &hostToken{}
+	for i, c := range []struct {
+		caps []string
+		safe int
+	}{
+		{nil, http.StatusConflict},
+		{[]string{proto.CapDiff, proto.CapSyncModes}, http.StatusAccepted},
+		{nil, http.StatusConflict},
+	} {
+		if _, err := s.registerHost(ctx, tok, proto.Hello{Name: "h1", ProtocolVersion: proto.Version, Capabilities: c.caps,
+			Live: []proto.LivePlacement{{RunID: r1, Epoch: 1}}}); err != nil {
+			t.Fatal(err)
+		}
+		for _, mode := range []string{proto.SyncFastForward, proto.SyncFetch} {
+			before := syncMessages(t, s)
+			body := map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "main", "mode": mode}}}
+			w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", body)
+			if w.Code != c.safe {
+				t.Fatalf("hello %d %v, mode %s: %d %s", i, c.caps, mode, w.Code, w.Body)
+			}
+			if wrote := syncMessages(t, s) - before; (c.safe == http.StatusAccepted) != (wrote == 1) {
+				t.Fatalf("hello %d, mode %s: %d sync messages written", i, mode, wrote)
+			}
+		}
+		for _, mode := range []string{"", proto.SyncMove} {
+			body := map[string]any{"sync": []map[string]string{{"repo": "app", "ref": "main", "mode": mode}}}
+			if w := apiCall(t, s, key, http.MethodPost, "/v1/runs/"+r1+"/sync", body); w.Code != http.StatusAccepted {
+				t.Fatalf("hello %d, mode %q: %d %s", i, mode, w.Code, w.Body)
+			}
+		}
+		var hosts []*candidateHost
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) (err error) {
+			hosts, err = s.candidateHosts(ctx, tx, []string{"h1"})
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if len(hosts) != 1 {
+			t.Fatalf("hello %d: candidates %+v", i, hosts)
+		}
+		hosts[0].Connected = true
+		for _, mode := range []string{proto.SyncFastForward, proto.SyncMove} {
+			r := pendingRun{ID: "r", TenantID: "t1", PlaceOn: "h1", PendingSync: []proto.SyncRef{{Repo: "app", Ref: "main", Mode: mode}}}
+			blocked := slices.ContainsFunc(hostFit(r, hosts[0]), func(b fitBlocker) bool { return b.Kind == kindSyncModes })
+			if want := mode != proto.SyncMove && c.safe != http.StatusAccepted; blocked != want {
+				t.Fatalf("hello %d %v, a %s resume: blocked %v, want %v", i, c.caps, mode, blocked, want)
+			}
+		}
 	}
 }
 

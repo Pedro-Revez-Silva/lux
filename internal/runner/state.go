@@ -47,6 +47,14 @@ type runState struct {
 	// runner restart too.
 	User     string            `json:"user,omitempty"`
 	GitBases map[string]string `json:"gitBases,omitempty"`
+	// SyncBases: each repository's last commit fetched into its checkout
+	// (a clone, or any sync that did not fail): the next sync's bundle
+	// leaves out its history. Never a live diff's base.
+	SyncBases map[string]string `json:"syncBases,omitempty"`
+	// ShimSyncModes: the lux-shim this placement's container started with
+	// applies a sync's mode. Absent (false) in a state an older runner
+	// wrote: its container's shim is then not known to.
+	ShimSyncModes bool `json:"shimSyncModes,omitempty"`
 	// LastExitAt, unix ms, for host-local TTL.
 	LastExitAt int64 `json:"lastExitAt,omitempty"`
 }

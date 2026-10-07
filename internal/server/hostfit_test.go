@@ -55,6 +55,20 @@ func TestHostFitConstraints(t *testing.T) {
 		}, nil},
 		{"chosen preserves isolation", func(r *pendingRun, h *candidateHost) { r.PlaceOn = h.ID; h.Tenants = []string{"t2"} }, []fitBlocker{{Kind: kindScope, Reason: "non-shared host is used by another tenant"}}},
 		{"chosen preserves nested", func(r *pendingRun, h *candidateHost) { r.PlaceOn = h.ID; r.Spec.Sandbox.NestedContainers = true }, []fitBlocker{{Kind: kindNested, Reason: "host does not support nested containers"}}},
+		{"resume sync move, old runner", func(r *pendingRun, h *candidateHost) {
+			r.PendingSync = []proto.SyncRef{{Repo: "a", Ref: "main"}, {Repo: "b", Ref: "main", Mode: proto.SyncMove}}
+		}, nil},
+		{"resume sync fast-forward, old runner", func(r *pendingRun, h *candidateHost) {
+			r.PendingSync = []proto.SyncRef{{Repo: "a", Ref: "main"}, {Repo: "b", Ref: "main", Mode: proto.SyncFastForward}}
+		}, []fitBlocker{{Kind: kindSyncModes, Reason: "host's lux-runner predates sync modes"}}},
+		{"chosen preserves sync modes", func(r *pendingRun, h *candidateHost) {
+			r.PlaceOn = h.ID
+			r.PendingSync = []proto.SyncRef{{Repo: "a", Ref: "main", Mode: proto.SyncFetch}}
+		}, []fitBlocker{{Kind: kindSyncModes, Reason: "host's lux-runner predates sync modes"}}},
+		{"resume sync fetch, runner with modes", func(r *pendingRun, h *candidateHost) {
+			r.PendingSync = []proto.SyncRef{{Repo: "a", Ref: "main", Mode: proto.SyncFetch}}
+			h.Caps = []string{proto.CapDiff, proto.CapSyncModes}
+		}, nil},
 		{"unlimited", func(r *pendingRun, h *candidateHost) {
 			h.Capacity = proto.Capacity{}
 			h.UsedCPUs = 100

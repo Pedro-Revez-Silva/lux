@@ -37,12 +37,17 @@ func TestFeedLine(t *testing.T) {
 }
 
 func TestParseSyncs(t *testing.T) {
-	refs, err := parseSyncs([]string{"app=main", "lib=feat/x=y"})
-	if err != nil || len(refs) != 2 || refs[0].Repo != "app" || refs[1].Ref != "feat/x=y" {
+	refs, err := parseSyncs([]string{"app=main", "lib=feat/x=y"}, "")
+	if err != nil || len(refs) != 2 || refs[0].Repo != "app" || refs[1].Ref != "feat/x=y" || refs[0].Mode != "" {
+		t.Fatalf("%+v %v", refs, err)
+	}
+	// The call's mode goes with every repository.
+	refs, err = parseSyncs([]string{"app=main", "lib=v1"}, "fast-forward")
+	if err != nil || len(refs) != 2 || refs[0].Mode != "fast-forward" || refs[1].Mode != "fast-forward" {
 		t.Fatalf("%+v %v", refs, err)
 	}
 	for _, bad := range []string{"app", "=main", "app="} {
-		if _, err := parseSyncs([]string{bad}); err == nil {
+		if _, err := parseSyncs([]string{bad}, ""); err == nil {
 			t.Errorf("%q parsed", bad)
 		}
 	}

@@ -279,3 +279,30 @@ func TestHostState(t *testing.T) {
 		}
 	}
 }
+
+// lux sync --wait names an operation in progress on a repository's line.
+func TestSyncWaitNamesTheOperation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			_, _ = w.Write([]byte(`{"requestId":"rq"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"events":[
+			{"id":1,"type":"git.sync","data":{"requestId":"rq","repo":"app","status":"kept","from":"aaaa","to":"bbbb","ahead":0,"behind":2,"operation":"rebase"}},
+			{"id":2,"type":"git.sync","data":{"requestId":"rq","repo":"lib","status":"up-to-date","from":"cccc","to":"cccc","ahead":0,"behind":0}},
+			{"id":3,"type":"sync.done","data":{"requestId":"rq","changed":false}}]}`))
+	}))
+	defer srv.Close()
+	var out strings.Builder
+	a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: io.Discard}
+	root := a.root()
+	root.SetArgs([]string{"--url", srv.URL, "--api-key", "k", "sync", "run_x", "app=main", "lib=main", "--mode", "fast-forward", "--wait"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	want := "app kept aaaa → bbbb (0 ahead, 2 behind) [rebase in progress]\nlib up-to-date cccc → cccc (0 ahead, 0 behind)\n"
+	if out.String() != want {
+		t.Fatalf("got\n%s\nwant\n%s", out.String(), want)
+	}
+}

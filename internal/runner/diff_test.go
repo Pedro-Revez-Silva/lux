@@ -109,7 +109,7 @@ func TestDiffNotRunning(t *testing.T) {
 // restarted runner re-adopts its placement from.
 func TestDiffBasesPersist(t *testing.T) {
 	_, p := diffRunner(t, `true`)
-	p.setGitBase("lib", "beef")
+	p.setBases("lib", "beef", true)
 	st, err := readRunState(p.dir)
 	if err != nil || st.GitBases["lib"] != "beef" || st.GitBases["app"] != "c0ffee" || st.User != "1000:1000" {
 		t.Fatalf("%+v %v", st, err)

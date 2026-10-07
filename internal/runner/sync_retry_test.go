@@ -23,13 +23,16 @@ import (
 // syncFixture is a running placement of run_x with repository app (a bare
 // repository at bare), whose podman is script (given podman's arguments),
 // and whose reports to luxd are acked; syncs are the git.sync events
-// reported so far. The script sees the bare repository as $BARE.
+// reported so far, pushes the git.push events' data. The script sees the
+// bare repository as $BARE.
 type syncFixture struct {
-	p     *placement
-	sp    spec.RunSpec
-	bare  string
-	mu    sync.Mutex
-	syncs []proto.SyncResult
+	p      *placement
+	sp     spec.RunSpec
+	bare   string
+	mu     sync.Mutex
+	syncs  []proto.SyncResult
+	done   []map[string]any
+	pushes []map[string]any
 }
 
 func newSyncFixture(t *testing.T, script string) *syncFixture {
@@ -66,7 +69,7 @@ func newSyncFixture(t *testing.T, script string) *syncFixture {
 	sp := spec.RunSpec{Git: &spec.Git{Repositories: []spec.Repository{{Name: "app", URL: bare, Path: "/w/app"}}}}
 	f := &syncFixture{sp: sp, bare: bare}
 	f.p = &placement{r: r, runID: "run_x", tenantID: "t1", epoch: 1, dir: filepath.Join(root, "run"), phase: "running",
-		assign: &proto.Assign{}, state: &runState{User: "1000:1000", Spec: &sp}}
+		assign: &proto.Assign{}, state: &runState{User: "1000:1000", Spec: &sp, ShimSyncModes: true}}
 	os.MkdirAll(f.p.dir, 0o755)
 
 	// luxd: ack every report, keep the git.sync events.
@@ -81,7 +84,17 @@ func newSyncFixture(t *testing.T, script string) *syncFixture {
 			r.conn.mu.Unlock()
 			for _, fr := range reports {
 				var ev proto.RunEvent
-				if json.Unmarshal(fr.Data, &ev) == nil && ev.Type == proto.EvGitSync {
+				_ = json.Unmarshal(fr.Data, &ev)
+				switch ev.Type {
+				case proto.EvSyncDone:
+					f.mu.Lock()
+					f.done = append(f.done, ev.Data)
+					f.mu.Unlock()
+				case "git.push":
+					f.mu.Lock()
+					f.pushes = append(f.pushes, ev.Data)
+					f.mu.Unlock()
+				case proto.EvGitSync:
 					var res proto.SyncResult
 					b, _ := json.Marshal(ev.Data)
 					_ = json.Unmarshal(b, &res)

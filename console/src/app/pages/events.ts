@@ -91,7 +91,7 @@ export function eventSummary(e: Event): string {
     case "git.sync":
       return d.status === "failed"
         ? `${str(d.repo) ?? "?"} not synced to ${str(d.ref) ?? "?"}: ${str(d.error) ?? "?"}`
-        : `${str(d.repo) ?? "?"} ${str(d.status) ?? "?"} ${(str(d.from) ?? "").slice(0, 7)} → ${(str(d.to) ?? "").slice(0, 7)}${d.dirty === true ? " (tracked changes saved as refs/lux/pre-sync)" : ""}`;
+        : `${str(d.repo) ?? "?"} ${str(d.status) ?? "?"} ${(str(d.from) ?? "").slice(0, 7)} → ${(str(d.to) ?? "").slice(0, 7)}${d.dirty === true && str(d.saved) ? " (tracked changes saved as refs/lux/pre-sync)" : ""}${typeof d.ahead === "number" && typeof d.behind === "number" ? ` (${d.ahead} ahead, ${d.behind} behind)` : ""}`;
     case "git.clone":
       return d.status === "failed"
         ? `${str(d.repo) ?? "?"} not cloned: ${str(d.error) ?? "?"}`

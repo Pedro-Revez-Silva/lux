@@ -594,11 +594,17 @@ its branch's latest commit), and so can a running Run:
 
 ```json
 POST /v1/runs/{id}/resume   {"secrets": [...], "sync": [{"repo": "app", "ref": "feat/x"}]}
-POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…"}]}
+POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…", "mode": "fast-forward"}]}
 ```
 
-`repo` is a repository's `name` in the spec; `ref` a branch, tag or sha
-(`lux resume --sync app=feat/x`, `lux sync <run> app=feat/x [--wait]`).
+`repo` is a repository's `name` in the spec; `ref` a branch, tag or sha;
+`mode` how the checkout may move: `move` (the default), `fast-forward` or
+`fetch`. Any other mode is refused (422 `invalid_request`, naming it), as
+are an unknown repo, an empty ref and a repo given twice. From the CLI,
+the mode is the call's, for every repository in it: `lux resume --sync
+app=feat/x [--sync-mode fast-forward]`, `lux sync <run> app=feat/x [--mode
+fast-forward] [--wait]`. Releases that take `mode` list `sync-modes` in
+`FEATURES`.
 
 - **Credentials stay out.** The runner fetches the ref through the host's
   mirror with the repository's credential and writes a bundle of the
@@ -614,7 +620,9 @@ POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…"}]}
   `init`; on a running Run, at once.
 - **The image needs `git`** (the checkout moves inside the container); an
   image without it reports every sync `failed` and the Run goes on.
-- **The rule**, per repository:
+- In every mode the commit is fetched into the checkout as
+  `refs/lux/sync` first.
+- **Mode `move`** makes the checkout the ref's, per repository:
   - already at the commit, nothing changed: `up-to-date`;
   - no tracked file changed, and the checkout's `HEAD` is an ancestor of
     the commit: `fast-forward` (a branch is checked out as itself, at the
@@ -624,19 +632,88 @@ POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…"}]}
     changes, or the old `HEAD`; the next reset replaces it), then tracked
     files become the commit's.
     **Untracked and ignored files are kept** (a database file, `node_modules`,
-    a build cache); an untracked file the commit now tracks is replaced;
-  - anything that fails: `failed` with git's message, and **the Run goes
-    on** (a resume still starts). A failure before the move (the fetch, a
-    missing checkout) leaves the checkout as it was; one during a reset
-    leaves it where git stopped, with `refs/lux/pre-sync` holding what was
-    there.
-- Each repository's outcome is a `git.sync` event: `{repo, ref, from, to,
-  status, dirty?, diverged?, saved?, error?, missingBase?, fullBundle?}` (and `requestId` for a
-  running Run's sync, which ends with `sync.done {requestId, changed}`).
-  A moved checkout is the base of `lux diff` from then on.
+    a build cache); an untracked file the commit now tracks is replaced.
+
+  Right for a preview; wrong for a checkout an agent edits.
+- **Mode `fast-forward`** never discards anything in the checkout, and
+  moves it only where `HEAD` already is:
+  - at the commit, nothing changed: `up-to-date`;
+  - `HEAD` an ancestor of the commit, no tracked file changed, and `HEAD`
+    on the branch to sync to (or detached, for a tag or sha):
+    `fast-forward`, `HEAD` advancing with its branch;
+  - `HEAD` an ancestor of (or at) the commit, tracked files changed: not
+    moved, `kept` with `dirty: true`;
+  - the commit an ancestor of `HEAD` (local commits on top): not moved,
+    `ahead`;
+  - the histories diverged: not moved, `kept` with `diverged: true`;
+  - `HEAD` on another branch than the one to sync to, detached with a
+    branch to sync to, or on a branch with a tag or sha to sync to: not
+    moved, `kept`; no branch moves or is created;
+  - a merge, rebase, am, cherry-pick or revert in progress: not moved, `kept`
+    (with `operation`, below);
+  - an ignored or untracked file at a path the commit adds: not
+    overwritten, `failed`.
+
+  The move is a fast-forward merge of whatever `HEAD` is when it runs: a
+  commit, branch switch or detach the workload makes while the sync runs
+  makes it fail (or keep), and nothing it made is lost.
+- **Mode `fetch`** never moves the checkout: `fetched`.
+- `fast-forward` and `fetch` need a host whose lux-runner and lux-shim
+  have sync modes: `POST /v1/runs/{id}/sync` answers 409
+  `sync_modes_unsupported` on an older runner, a resume waits for a host
+  that has them, and a Run whose container started with an older lux-shim
+  fails each such sync (`this Run's lux-shim predates sync modes; resume it
+  to update`). `move` goes everywhere. A host that re-registers with an
+  older runner before such a sync reaches it is never sent it: a running
+  Run's sync ends `failed` (`the host's lux-runner no longer supports sync
+  modes`), and a resume not yet started there is placed again, waiting for
+  a host that has them.
+- In `fast-forward` and `fetch`, a branch's commit is also
+  `refs/remotes/lux/<branch>` in the checkout, after every sync, moved or
+  not, so the workload can `git log HEAD..lux/<branch>`, `git merge
+  lux/<branch>` or `git rebase lux/<branch>` itself. A checkout that does
+  not move keeps its working tree, index, `HEAD` and `refs/lux/pre-sync`
+  exactly as they were. Their results carry `ahead` and `behind`: the
+  commits `HEAD` has that the commit has not, and the reverse.
+- In `fast-forward` and `fetch`, a result whose checkout has a git
+  operation in progress names it as `operation`, whatever its status:
+  `merge` (`MERGE_HEAD`), `rebase` (`rebase-merge`, or `rebase-apply`
+  without `applying`: either rebase backend), `am` (`rebase-apply/applying`:
+  a `git am` session, finished with `git am --continue` or `--abort`, never
+  `git rebase`), `cherry-pick` (`CHERRY_PICK_HEAD`), `revert` (`REVERT_HEAD`) or
+  `sequencer` (`sequencer/todo`: a sequence of picks or reverts between
+  two of them, such as a range cherry-pick whose stopped pick was
+  committed by hand and not continued; a range stopped on a pick's
+  conflict has `CHERRY_PICK_HEAD` too, and is `cherry-pick`; a `sequencer`
+  directory without `todo` is stale, ignored and left as it is),
+  looked up where git resolves them (`git rev-parse --git-path`) as the
+  result is made, after the fetch, so an operation that starts or ends
+  while the sync fetches is reported as it then stands. A `fast-forward`
+  checks once more immediately before it moves, and moves only with none
+  in progress. The
+  operation is the workload's to finish (`git rebase --continue`, `git
+  merge --continue`) or abort: commands that switch branches or start
+  another merge are refused by git until then. A checkout restored
+  mid-operation on another host (a resume) keeps it, and reports it.
+  `move` does not report it.
+- Anything that fails: `failed` with git's message, and **the Run goes
+  on** (a resume still starts). A failure before the move (the fetch, a
+  missing checkout) leaves the checkout as it was; one during a reset
+  leaves it where git stopped, with `refs/lux/pre-sync` holding what was
+  there.
+- Each repository's outcome is a `git.sync` event: `{repo, ref, mode,
+  from, to, status, dirty?, diverged?, ahead?, behind?, operation?, saved?, error?,
+  missingBase?, fullBundle?}`, status one of `up-to-date`,
+  `fast-forward`, `reset`, `kept`, `ahead`, `fetched`, `failed` (and
+  `requestId` for a running Run's sync, which ends with `sync.done
+  {requestId, changed}`; `changed` is true only if a checkout moved:
+  `fast-forward` or `reset`). A moved checkout is the base of `lux diff`
+  from then on.
 - After a running Run's sync that moved a checkout, servers with
   `afterSync` run it and restart; the others keep running (a dev server
-  reloads by itself).
+  reloads by itself). On a resume, servers run `afterSync` before their
+  command when its sync has a `move` repository; with only `fast-forward`
+  and `fetch` ones, only if a checkout moved.
 
 `lux push <run> [--wait]` pushes each repository's current commit to
 `git.push.branch`, again with the runner's credential:
@@ -653,11 +730,37 @@ POST /v1/runs/{id}/sync     {"sync": [{"repo": "app", "ref": "9f31c2e…"}]}
   The checkout's hooks and config never run as the runner and never see the
   token.
 - Pushing with nothing new reports `up-to-date`.
+- A checkout with a merge, rebase, am, cherry-pick, revert or sequencer in
+  progress is not pushed: its `HEAD` is a half-done result (mid-rebase,
+  the commit rebased onto plus whatever was replayed so far). It is
+  reported `refused`, with `operation` naming it and `error` saying so
+  (`a rebase is in progress in the checkout: finish or abort it, then
+  push`); the other repositories push as normal. The check runs where the
+  bundle is made, as the workload's user, with the container's `sh` and
+  `git` (the same `git rev-parse --git-path` lookup as a sync's), so it
+  holds whichever lux-shim the container started with. If it cannot run
+  (no `sh` in the image, the container gone, not a checkout), the
+  repository is `failed` and nothing is pushed.
+- The workload keeps running while its checkout is bundled, and lux does
+  not lock it out, so the push verifies what it bundled instead: it checks
+  for an operation, reads `HEAD` as S, checks again, bundles `HEAD`,
+  checks a third time, and requires the bundle's one head to be S. An
+  operation seen at any of the three checks is `refused` as above; a
+  bundle whose head is not S is `failed` (`the checkout changed while it
+  was being pushed; push again`). Either way the bundle is deleted and
+  nothing is pushed. The guarantee is exactly this: what is pushed is the
+  commit S that `HEAD` was at between the first two checks, and only if no
+  operation was seen at any of the three checks and the bundle holds S. It
+  is a snapshot: an operation that starts and ends between two checks, or
+  starts after the third, is not seen, and a change to the checkout after
+  the bundle is made does not change what is pushed.
 - A repository with `push: false` is never pushed: it is reported
   `skipped`, and `expect` may not name it. Use it for repositories cloned
   for context; their credential may be read-only. The workload can still
   commit in such a checkout; lux just never pushes it.
-- Each repository's outcome is a `git.push` event. `--wait` prints the
+- Each repository's outcome is a `git.push` event: `{repo, branch,
+  commit?, status, operation?, error?}`, status one of `pushed`,
+  `up-to-date`, `rejected`, `refused`, `failed`, `skipped`. `--wait` prints the
   outcomes and exits non-zero unless every repository was pushed or already
   up to date.
 

@@ -359,9 +359,33 @@ type stateChange struct {
 	state           string
 	// stopReason: when stopping, why.
 	stopReason string
-	// afterSync: when starting after a sync, run each server's afterSync
-	// before its command.
-	afterSync bool
+	// afterSync: when starting after a sync, whether to run each server's
+	// afterSync before its command: afterSyncNever, afterSyncAlways, or
+	// afterSyncIfMoved (only if the placement's sync before init moved a
+	// checkout, which the shim alone knows when it starts the server).
+	afterSync string
+}
+
+const (
+	afterSyncNever   = ""
+	afterSyncAlways  = "always"
+	afterSyncIfMoved = "ifMoved"
+)
+
+// afterSyncFor is when a placement's servers run afterSync, given the
+// sync its assignment carries: a mode move resets or moves, as before
+// modes; fast-forward moves only sometimes; fetch never moves.
+func afterSyncFor(refs []proto.SyncRef) string {
+	when := afterSyncNever
+	for _, r := range refs {
+		switch proto.SyncModeOf(r.Mode) {
+		case proto.SyncMove:
+			return afterSyncAlways
+		case proto.SyncFastForward:
+			when = afterSyncIfMoved
+		}
+	}
+	return when
 }
 
 // setServerState moves servers to a state and records a server.state
@@ -376,7 +400,7 @@ func setServerState(ctx context.Context, tx pgx.Tx, c stateChange, where string,
 			gen = nextval('run_servers_gen'),
 			exit_code = NULL, error = NULL, ready_since = NULL,
 			active = CASE WHEN $2 = 'starting' THEN jsonb_build_object('port', port, 'command', command, 'workdir', workdir, 'env', env,
-				'afterSync', CASE WHEN $5 THEN after_sync END) END,
+				'afterSync', CASE WHEN $5 <> '' THEN after_sync END, 'afterSyncIfMoved', $5 = 'ifMoved') END,
 			epoch = CASE WHEN $2 = 'starting' THEN nullif($3, 0) ELSE epoch END,
 			stop_reason = CASE WHEN $2 = 'stopped' THEN $4 END,
 			-- The placement it stopped in: one already stopped keeps its,
@@ -439,10 +463,10 @@ const upWithCommand = `rs.command IS NOT NULL AND NOT (rs.state = 'stopped' AND 
 
 // startAttachedServers starts a Run's servers on a new placement (every
 // placement: a first start, a resume, a migration, a resume after a lost
-// host), and sends the placement its servers. afterSync: the placement
-// syncs repositories first, so servers run their afterSync. A Run without
+// host), and sends the placement its servers. afterSync: when they run
+// their afterSync first (afterSyncFor the placement's sync). A Run without
 // servers is sent nothing.
-func (s *Server) startAttachedServers(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, afterSync bool) error {
+func (s *Server) startAttachedServers(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, afterSync string) error {
 	if err := setServerState(ctx, tx, stateChange{tenantID: tenantID, runID: runID, epoch: epoch, state: ServerStarting, afterSync: afterSync}, upWithCommand); err != nil {
 		return err
 	}
@@ -530,11 +554,12 @@ func desiredServers(ctx context.Context, tx pgx.Tx, runID string, epoch int, rev
 		var portOnly, watched bool
 		var gen int64
 		var active *struct {
-			Port      int               `json:"port"`
-			Command   []string          `json:"command"`
-			Workdir   string            `json:"workdir"`
-			Env       map[string]string `json:"env"`
-			AfterSync []string          `json:"afterSync"`
+			Port             int               `json:"port"`
+			Command          []string          `json:"command"`
+			Workdir          string            `json:"workdir"`
+			Env              map[string]string `json:"env"`
+			AfterSync        []string          `json:"afterSync"`
+			AfterSyncIfMoved bool              `json:"afterSyncIfMoved"`
 		}
 		if err := rows.Scan(&name, &port, &portOnly, &state, &watched, &gen, &active); err != nil {
 			return msg, err
@@ -551,9 +576,13 @@ func desiredServers(ctx context.Context, tx pgx.Tx, runID string, epoch int, rev
 		if active.Port != port {
 			msg.Ports = append(msg.Ports, active.Port)
 		}
-		msg.Servers = append(msg.Servers, proto.ServerSpec{Name: name, Port: active.Port, Gen: gen,
+		sv := proto.ServerSpec{Name: name, Port: active.Port, Gen: gen,
 			Command: withAfterSync(active.AfterSync, active.Command),
-			Workdir: spec.ServerWorkdir(workdir, active.Workdir), Env: active.Env})
+			Workdir: spec.ServerWorkdir(workdir, active.Workdir), Env: active.Env}
+		if active.AfterSyncIfMoved && len(active.AfterSync) > 0 {
+			sv.UnmovedCommand = active.Command
+		}
+		msg.Servers = append(msg.Servers, sv)
 	}
 	slices.Sort(msg.Ports)
 	msg.Ports = slices.Compact(msg.Ports)
@@ -1065,7 +1094,7 @@ func restartAfterSync(ctx context.Context, tx pgx.Tx, tenantID, runID string, ep
 	if current != epoch || state != StateRunning {
 		return "", nil
 	}
-	if err := setServerState(ctx, tx, stateChange{tenantID: tenantID, runID: runID, epoch: epoch, state: ServerStarting, afterSync: true},
+	if err := setServerState(ctx, tx, stateChange{tenantID: tenantID, runID: runID, epoch: epoch, state: ServerStarting, afterSync: afterSyncAlways},
 		upWithCommand+` AND rs.after_sync IS NOT NULL`); err != nil {
 		return "", err
 	}

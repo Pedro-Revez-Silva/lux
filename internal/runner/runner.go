@@ -121,6 +121,9 @@ type Runner struct {
 	// hashed once at startup (a self-update replaces the file, not this
 	// process, so the hash is stable for the process's life).
 	runnerSHA256, shimSHA256 string
+	// shimSyncModes: its --shim applies a sync's mode (shimKnowsSyncModes),
+	// asked once at startup like shimSHA256.
+	shimSyncModes bool
 	// mem scales a Run's resources.memory to its container's limit.
 	mem memoryScale
 }
@@ -210,6 +213,7 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 		r.runnerSHA256 = sha256File(exe)
 	}
 	r.shimSHA256 = sha256File(cfg.Shim)
+	r.shimSyncModes = shimKnowsSyncModes(cfg.Shim)
 	return r, nil
 }
 
@@ -261,6 +265,14 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
+// capabilities are Hello's: sync modes only with a shim that has them.
+func (r *Runner) capabilities() []string {
+	if r.shimSyncModes {
+		return []string{proto.CapDiff, proto.CapSyncModes}
+	}
+	return []string{proto.CapDiff}
+}
+
 func (r *Runner) hello(ctx context.Context) proto.Hello {
 	pv, _ := r.pm.Version(ctx)
 	imgs, _ := r.pm.Images(ctx)
@@ -280,7 +292,7 @@ func (r *Runner) hello(ctx context.Context) proto.Hello {
 		LocalSnapshots:  r.localSnapshots(),
 		RunnerSHA256:    r.runnerSHA256,
 		ShimSHA256:      r.shimSHA256,
-		Capabilities:    []string{proto.CapDiff},
+		Capabilities:    r.capabilities(),
 	}
 	r.mu.Lock()
 	for _, p := range r.placements {

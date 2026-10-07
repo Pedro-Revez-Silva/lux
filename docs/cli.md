@@ -74,8 +74,8 @@ JPEG, WebP or GIF). See [images](adapters.md#images).
 lux stop <run> [--wait]         # graceful; snapshot; resumable
 lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--remove-secret NAME] [--from-snapshot ID] [--cpus N] [--memory SIZE] [--disk SIZE] [--to HOST]
            [--add-repo name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]]... [--request-id ID]
-           [--sync repo=ref]...  # move restored checkouts to ref before init
-lux sync <run> repo=ref... [--wait] [--request-id ID]   # a running Run's checkouts
+           [--sync repo=ref]... [--sync-mode move|fast-forward|fetch]  # move restored checkouts to ref before init
+lux sync <run> repo=ref... [--mode move|fast-forward|fetch] [--wait] [--request-id ID]   # a running Run's checkouts
 lux cancel <run> [--wait]       # final (a snapshot is still taken); a Run left stopped, lost or failed is cancelled after its tenant's expiry (default 90 days)
 lux snapshots <run>             # where each snapshot lives; only the current one is kept once uploaded (older ones: available false)
 ```
@@ -126,10 +126,19 @@ lux resume run_x --add-repo docs=git@github.com:o/docs.git,ref=v2,push=false --r
 
 `--sync repo=ref` (repeatable) moves a repository's restored checkout to
 `ref` before init; `lux sync` does it for a running Run, after which
-servers with `afterSync` restart ([syncing
-checkouts](runspec.md#syncing-checkouts) has the rule). `lux sync --wait`
-prints each repository's outcome (`up-to-date`, `fast-forward`, `reset`,
-`failed`) and exits 1 if one failed.
+servers with `afterSync` restart if a checkout moved ([syncing
+checkouts](runspec.md#syncing-checkouts) has the rule). `--sync-mode`
+(resume) and `--mode` (sync) apply one mode to every repository of the
+call: `move` (default), `fast-forward` (moves only a checkout that loses
+nothing, where `HEAD` already is; a dirty, diverged or ahead one, or one
+on another branch, is kept as it is) or `fetch`
+(never moves; the ref's commit is `refs/remotes/lux/<branch>` in the
+checkout). `lux sync --wait` prints each repository's outcome
+(`up-to-date`, `fast-forward`, `reset`, `kept`, `ahead`, `fetched`,
+`failed`; with the ahead and behind counts in the new modes, and
+`[rebase in progress]` when the checkout has a merge, rebase, am,
+cherry-pick, revert or sequencer in progress) and exits 1
+if one failed.
 
 ## Git
 

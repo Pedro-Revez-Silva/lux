@@ -143,7 +143,10 @@ test("server events say what happened to which server, and a sync from where to 
   expect(ev("server.state", { name: "web", state: "exited", exitCode: 1, error: "boom" })).toBe("web exited (exit 1: boom)");
   expect(ev("server.detached", { name: "web", from: "run_x", reason: "run succeeded" })).toBe("web detached from run_x (run succeeded)");
   expect(ev("server.expired", { name: "web", reason: "expired" })).toBe("web expired (expired)");
-  expect(ev("git.sync", { repo: "app", status: "reset", from: "aaaaaaaa1", to: "bbbbbbbb2", dirty: true })).toBe(
+  expect(ev("git.sync", { repo: "app", status: "reset", from: "aaaaaaaa1", to: "bbbbbbbb2", dirty: true, saved: "refs/lux/pre-sync" })).toBe(
     "app reset aaaaaaa → bbbbbbb (tracked changes saved as refs/lux/pre-sync)",
+  );
+  expect(ev("git.sync", { repo: "app", status: "kept", mode: "fast-forward", from: "aaaaaaaa1", to: "bbbbbbbb2", dirty: true, ahead: 0, behind: 2 })).toBe(
+    "app kept aaaaaaa → bbbbbbb (0 ahead, 2 behind)",
   );
 });

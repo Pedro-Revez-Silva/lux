@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
@@ -26,12 +28,39 @@ import (
 
 const syncDir = "sync" // on the runtime volume: /.lux/run/sync/<syncSubdir>
 
+// shimKnowsSyncModes asks the lux-shim at path whether it applies a sync's
+// mode: it syncs a checkout that does not exist in mode SyncModeProbe. One
+// that knows modes fails it naming that mode; an older one names none.
+// Nothing is touched either way. A shim that does not answer within the
+// deadline does not know them: it runs in its own process group, killed
+// whole at the deadline, and its output is waited for no longer than
+// WaitDelay after (a descendant that escaped the group cannot hold it open).
+func shimKnowsSyncModes(path string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	args := proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "probe", Path: "/nonexistent/lux-sync-probe", Mode: proto.SyncModeProbe}}}
+	cmd := exec.CommandContext(ctx, path, "sync", string(proto.Marshal(args)))
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 2 * time.Second
+	out, err := cmd.Output()
+	var res []proto.SyncResult
+	if err != nil || json.Unmarshal(out, &res) != nil {
+		return false
+	}
+	return len(res) == 1 && res[0].Mode == proto.SyncModeProbe
+}
+
+// oldShim is a safe-mode sync's result on a placement whose lux-shim
+// predates modes: it would run the sync as move.
+const oldShim = "this Run's lux-shim predates sync modes; resume it to update"
+
 // prepareSync fetches and bundles each ref, and returns what the shim is
 // to do (nil: nothing), and a failed result for each repository that
 // cannot be prepared: the caller reports those, and the Run goes on. Each
 // bundle holds only the history after the checkout's known base
-// (GitBases); full: the whole history, the retry for a checkout that lacks
-// its base.
+// (SyncBases, else GitBases); full: the whole history, the retry for a
+// checkout that lacks its base.
 func (p *placement) prepareSync(ctx context.Context, sp spec.RunSpec, refs []proto.SyncRef, requestID string, full bool) (*proto.SyncArgs, []proto.SyncResult) {
 	if len(refs) == 0 {
 		return nil, nil
@@ -46,17 +75,20 @@ func (p *placement) prepareSync(ctx context.Context, sp spec.RunSpec, refs []pro
 		}
 	}
 	bases := map[string]string{}
-	if !full {
-		p.mu.Lock()
-		if p.state != nil {
-			bases = maps.Clone(p.state.GitBases)
+	shimModes := false
+	p.mu.Lock()
+	if p.state != nil {
+		shimModes = p.state.ShimSyncModes
+		if !full {
+			maps.Copy(bases, p.state.GitBases)
+			maps.Copy(bases, p.state.SyncBases)
 		}
-		p.mu.Unlock()
 	}
+	p.mu.Unlock()
 	args := &proto.SyncArgs{}
 	var failed []proto.SyncResult
 	for _, ref := range refs {
-		res := proto.SyncResult{Repo: ref.Repo, Ref: ref.Ref, Status: "failed"}
+		res := proto.SyncResult{Repo: ref.Repo, Ref: ref.Ref, Mode: proto.SyncModeOf(ref.Mode), Status: "failed"}
 		var repo *spec.Repository
 		if sp.Git != nil {
 			for i := range sp.Git.Repositories {
@@ -66,6 +98,8 @@ func (p *placement) prepareSync(ctx context.Context, sp spec.RunSpec, refs []pro
 			}
 		}
 		switch {
+		case res.Mode != proto.SyncMove && !shimModes:
+			res.Error = oldShim
 		case err != nil:
 			res.Error = "runtime volume: " + err.Error()
 		case repo == nil:
@@ -76,7 +110,7 @@ func (p *placement) prepareSync(ctx context.Context, sp spec.RunSpec, refs []pro
 			name := ref.Repo + ".bundle"
 			t, berr := p.r.git.SyncBundle(ctx, r, bases[ref.Repo], filepath.Join(rt, syncDir, sub, name))
 			if berr == nil {
-				args.Repos = append(args.Repos, proto.SyncRepo{Name: ref.Repo, Path: repo.Path, Ref: ref.Ref, Commit: t.Commit,
+				args.Repos = append(args.Repos, proto.SyncRepo{Name: ref.Repo, Path: repo.Path, Ref: ref.Ref, Mode: ref.Mode, Commit: t.Commit,
 					Branch: t.Branch, Bundle: proto.ShimRunDir + "/" + syncDir + "/" + sub + "/" + name, Base: t.Base})
 				continue
 			}
@@ -97,7 +131,7 @@ func retryRefs(args *proto.SyncArgs, names []string) []proto.SyncRef {
 	for _, name := range names {
 		for _, r := range args.Repos {
 			if r.Name == name {
-				refs = append(refs, proto.SyncRef{Repo: r.Name, Ref: r.Ref})
+				refs = append(refs, proto.SyncRef{Repo: r.Name, Ref: r.Ref, Mode: r.Mode})
 			}
 		}
 	}
@@ -123,16 +157,12 @@ func (p *placement) removeSyncBundles(ctx context.Context, requestID string) {
 	}
 }
 
-// moved: the sync changed the checkout.
-func moved(res proto.SyncResult) bool {
-	return res.Status == "fast-forward" || res.Status == "reset"
-}
-
-// reportSync sends a repository's git.sync event, and keeps a moved
-// checkout's commit as the base of its live diffs.
+// reportSync sends a repository's git.sync event, keeps a moved
+// checkout's commit as the base of its live diffs, and any fetched one
+// (a sync that did not fail) as its next bundle's prerequisite.
 func (p *placement) reportSync(ctx context.Context, res proto.SyncResult, requestID string) {
-	if moved(res) && res.To != "" {
-		p.setGitBase(res.Repo, res.To)
+	if res.Status != "failed" && res.To != "" {
+		p.setBases(res.Repo, res.To, res.Moved())
 	}
 	var d map[string]any
 	b, _ := json.Marshal(res)
@@ -163,7 +193,7 @@ func (p *placement) syncRunning(ctx context.Context, req proto.Sync) {
 	defer func() { _ = p.reportRetrying(ctx, proto.RunEvent{Type: proto.EvSyncDone, Data: done}) }()
 	if !running || user == "" {
 		for _, r := range req.Repos {
-			p.reportSync(ctx, proto.SyncResult{Repo: r.Repo, Ref: r.Ref, Status: "failed", Error: "the Run is not running"}, req.RequestID)
+			p.reportSync(ctx, proto.SyncResult{Repo: r.Repo, Ref: r.Ref, Mode: proto.SyncModeOf(r.Mode), Status: "failed", Error: "the Run is not running"}, req.RequestID)
 		}
 		return
 	}
@@ -187,7 +217,7 @@ func (p *placement) syncRunning(ctx context.Context, req proto.Sync) {
 	}
 	for _, res := range results {
 		p.reportSync(ctx, res, req.RequestID)
-		if moved(res) {
+		if res.Moved() {
 			done["changed"] = true
 		}
 	}

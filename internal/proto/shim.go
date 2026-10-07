@@ -227,17 +227,19 @@ type SyncArgs struct {
 func (a SyncArgs) Failed(msg string) []SyncResult {
 	var out []SyncResult
 	for _, r := range a.Repos {
-		out = append(out, SyncResult{Repo: r.Name, Ref: r.Ref, To: r.Commit, Status: "failed", Error: msg})
+		out = append(out, SyncResult{Repo: r.Name, Ref: r.Ref, Mode: SyncModeOf(r.Mode), To: r.Commit, Status: "failed", Error: msg})
 	}
 	return out
 }
 
 // SyncRepo is one checkout to move. Base, when set, is the bundle's
-// prerequisite: the bundle holds only the history after it.
+// prerequisite: the bundle holds only the history after it. Mode is
+// SyncRef's.
 type SyncRepo struct {
 	Name   string `json:"name"`
 	Path   string `json:"path"`
 	Ref    string `json:"ref"`
+	Mode   string `json:"mode,omitempty"`
 	Commit string `json:"commit"`
 	Branch string `json:"branch,omitempty"`
 	Bundle string `json:"bundle"`
@@ -249,21 +251,68 @@ type SyncRepo struct {
 // histories diverged: tracked files are the ref's now, untracked and
 // ignored ones kept, what was there saved as refs/lux/pre-sync), failed
 // (the checkout as it was, or where git stopped in a reset, with
-// refs/lux/pre-sync holding what was there). MissingBase: failed because
+// refs/lux/pre-sync holding what was there). Modes fast-forward and fetch
+// never reset; they add kept (not moved: tracked files changed, diverged,
+// or HEAD not on the target's branch, or not detached for a tag or sha), ahead (not moved: HEAD has commits on top of the ref's) and
+// fetched (mode fetch), with Ahead and Behind: the commits HEAD has that
+// the ref's commit has not, and the reverse. MissingBase: failed because
 // the checkout lacks the bundle's Base (the runner retries once with the
-// whole history); FullBundle: this result is that retry's.
+// whole history); FullBundle: this result is that retry's. Operation, in
+// modes fast-forward and fetch: the git operation in progress in the
+// checkout (OperationOf) as the result was made, whatever the status.
 type SyncResult struct {
 	Repo        string `json:"repo"`
 	Ref         string `json:"ref"`
+	Mode        string `json:"mode,omitempty"`
 	From        string `json:"from,omitempty"`
 	To          string `json:"to,omitempty"`
 	Status      string `json:"status"`
 	Dirty       bool   `json:"dirty,omitempty"`
 	Diverged    bool   `json:"diverged,omitempty"`
+	Ahead       *int   `json:"ahead,omitempty"`
+	Behind      *int   `json:"behind,omitempty"`
+	Operation   string `json:"operation,omitempty"`
 	Saved       string `json:"saved,omitempty"`
 	Error       string `json:"error,omitempty"`
 	MissingBase bool   `json:"missingBase,omitempty"`
 	FullBundle  bool   `json:"fullBundle,omitempty"`
+}
+
+// OperationStates is what git leaves in the git dir while a merge,
+// rebase, am, cherry-pick, revert or sequence of them waits for the
+// workload, in the order OperationOf names them: an am session's
+// rebase-apply has applying in it (an apply-backend rebase's has not),
+// and a cherry-pick of a range has both CHERRY_PICK_HEAD and
+// sequencer/todo, and is a cherry-pick. A sequence is in progress only
+// while sequencer/todo exists (what `git cherry-pick --continue` reads;
+// without it git reports no cherry-pick or revert in progress): a
+// sequencer directory without it is stale and not an operation.
+var OperationStates = []string{"MERGE_HEAD", "rebase-merge", "rebase-apply/applying", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer/todo"}
+
+// OperationOf names the operation an OperationStates entry stands for:
+// merge, rebase, am, cherry-pick, revert or sequencer; "" for anything
+// else.
+func OperationOf(state string) string {
+	switch state {
+	case "MERGE_HEAD":
+		return "merge"
+	case "rebase-merge", "rebase-apply":
+		return "rebase"
+	case "rebase-apply/applying":
+		return "am"
+	case "CHERRY_PICK_HEAD":
+		return "cherry-pick"
+	case "REVERT_HEAD":
+		return "revert"
+	case "sequencer/todo":
+		return "sequencer"
+	}
+	return ""
+}
+
+// Moved: the sync changed the checkout.
+func (r SyncResult) Moved() bool {
+	return r.Status == "fast-forward" || r.Status == "reset"
 }
 
 // MissingBase names the repositories whose sync failed for want of the

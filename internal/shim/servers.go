@@ -47,6 +47,9 @@ type servers struct {
 	// start waits for its last process (a restart would otherwise find
 	// the port still held), up to stopWait.
 	stopping map[string]*serverProc
+	// syncMoved: the sync before init moved a checkout; a server's
+	// UnmovedCommand runs in place of its Command otherwise.
+	syncMoved bool
 }
 
 // stopWait bounds how long a server's next start waits for its last
@@ -137,7 +140,11 @@ func (s *Shim) startServer(sv proto.ServerSpec) *serverProc {
 	for k, v := range sv.Env {
 		env = append(env, k+"="+v)
 	}
-	cmd := s.command(sv.Command, env)
+	argv := sv.Command
+	if len(sv.UnmovedCommand) > 0 && !s.srv.syncMoved {
+		argv = sv.UnmovedCommand
+	}
+	cmd := s.command(argv, env)
 	if dir := sv.Workdir; dir != "" {
 		if !filepath.IsAbs(dir) {
 			dir = filepath.Join(s.user.home, dir)

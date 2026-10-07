@@ -164,38 +164,53 @@ func notRunning(runState, plState string) error {
 	return errf(http.StatusConflict, "run_not_running", "%s: its diff is available only while the Run is running; %s", what, keepAPatch)
 }
 
-// gitBases are the commits lux last knew the checkouts of a Run's placement
-// at epoch to be at: per repository, its latest successful git.clone or
-// moved git.sync (fast-forward, reset) in that placement, else in the
-// placement whose snapshot it restored, and so on back (a resume clones
-// only the repositories it adds; a snapshot keeps the synced checkout). A
-// snapshot older than the latest (resume --from-snapshot) leads back
+// lineageBases walks the checkouts of a Run's placement at epoch back
+// through the snapshots it restored, per repository:
+//
+//   - gitBases, the commit lux last knew it to be at: its latest successful
+//     git.clone or moved git.sync (fast-forward, reset) in that placement,
+//     else in the placement whose snapshot it restored, and so on back (a
+//     resume clones only the repositories it adds; a snapshot keeps the
+//     synced checkout);
+//   - syncBases, the last commit fetched into it: its clone, or any git.sync
+//     that did not fail (one that kept or only fetched too). A sync's bundle
+//     leaves out its history.
+//
+// A snapshot older than the latest (resume --from-snapshot) leads back
 // through its own placement, never through those after it. A placement
 // scheduled before lineage was recorded (no snapshotId) has only its own
 // events: an earlier placement's may not be what it restored.
-func gitBases(ctx context.Context, tx pgx.Tx, runID string, epoch int) (map[string]string, error) {
-	m := map[string]string{}
+func lineageBases(ctx context.Context, tx pgx.Tx, runID string, epoch int) (gitBases, syncBases map[string]string, err error) {
+	gitBases, syncBases = map[string]string{}, map[string]string{}
 	for e := epoch; e > 0; {
 		// The types are literals so the plan can use run_events_sync.
 		rows, err := tx.Query(ctx, `SELECT data->>'repo',
-				CASE WHEN type = 'git.clone' THEN coalesce(data->>'commit', '') ELSE coalesce(data->>'to', '') END
+				CASE WHEN type = 'git.clone' THEN coalesce(data->>'commit', '') ELSE coalesce(data->>'to', '') END,
+				type = 'git.clone' OR data->>'status' IN ('fast-forward', 'reset')
 			FROM run_events WHERE run_id = $1 AND epoch = $2 AND type IN ('git.clone', 'git.sync')
 			  AND ((type = 'git.clone' AND data->>'status' = 'cloned')
-			    OR (type = 'git.sync' AND data->>'status' IN ('fast-forward', 'reset') AND data->>'to' <> ''))
+			    OR (type = 'git.sync' AND data->>'to' <> '' AND data->>'status' <> 'failed'))
 			ORDER BY id DESC`, runID, e)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		clones, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) ([2]string, error) {
-			var kv [2]string
-			return kv, r.Scan(&kv[0], &kv[1])
+		type fetch struct {
+			repo, commit string
+			moved        bool
+		}
+		fetches, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (fetch, error) {
+			var f fetch
+			return f, r.Scan(&f.repo, &f.commit, &f.moved)
 		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		for _, kv := range clones {
-			if _, ok := m[kv[0]]; !ok {
-				m[kv[0]] = kv[1]
+		for _, f := range fetches {
+			if _, ok := gitBases[f.repo]; !ok && f.moved {
+				gitBases[f.repo] = f.commit
+			}
+			if _, ok := syncBases[f.repo]; !ok {
+				syncBases[f.repo] = f.commit
 			}
 		}
 		var recorded bool
@@ -207,17 +222,21 @@ func gitBases(ctx context.Context, tx pgx.Tx, runID string, epoch int) (map[stri
 			break // no lineage, or it started from empty volumes
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		prev := 0
 		if err := tx.QueryRow(ctx, `SELECT epoch FROM snapshots WHERE id = $1 AND run_id = $2`, *snap, runID).Scan(&prev); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return nil, err
+			return nil, nil, err
 		}
 		// Epochs only go back: a snapshot is always an earlier placement's.
 		e = min(prev, e-1)
 	}
+	return nilIfNoBases(gitBases), nilIfNoBases(syncBases), nil
+}
+
+func nilIfNoBases(m map[string]string) map[string]string {
 	if len(m) == 0 {
-		return nil, nil
+		return nil
 	}
-	return m, nil
+	return m
 }

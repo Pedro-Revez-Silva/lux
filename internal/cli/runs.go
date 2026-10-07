@@ -868,7 +868,7 @@ func parseAddRepo(v string) (spec.Repository, error) {
 }
 
 func (a *app) resumeCmd() *cobra.Command {
-	var input, secretsFrom, fromSnapshot, to, disk, memory, reqID string
+	var input, secretsFrom, fromSnapshot, to, disk, memory, reqID, syncMode string
 	var cpus float64
 	var secretArgs, removeSecrets, addRepos, syncs []string
 	var follow, wait bool
@@ -989,11 +989,13 @@ resumes, and lux says why on stderr ("disk kept: ...").`,
 				req["git"] = map[string]any{"repositories": repos}
 			}
 			if len(syncs) > 0 {
-				refs, err := parseSyncs(syncs)
+				refs, err := parseSyncs(syncs, syncMode)
 				if err != nil {
 					return err
 				}
 				req["sync"] = refs
+			} else if syncMode != "" {
+				return fmt.Errorf("--sync-mode needs --sync")
 			}
 			var out Run
 			hdr, err := a.c.DoHeader(ctx, "POST", "/v1/runs/"+args[0]+"/resume", req, &out)
@@ -1042,36 +1044,45 @@ resumes, and lux says why on stderr ("disk kept: ...").`,
 	cmd.Flags().StringArrayVar(&addRepos, "add-repo", nil, "add a repository: name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false] (repeatable)")
 	cmd.Flags().StringVar(&reqID, "request-id", "", "names this resume (in its events and added repositories); generated if absent")
 	cmd.Flags().StringArrayVar(&syncs, "sync", nil, "repo=ref: move the repository's checkout to ref before init (repeatable)")
+	cmd.Flags().StringVar(&syncMode, "sync-mode", "", "with --sync: "+syncModeHelp)
 	return cmd
 }
 
-// parseSyncs reads repo=ref arguments.
-func parseSyncs(args []string) ([]proto.SyncRef, error) {
+// parseSyncs reads repo=ref arguments, each synced in mode ("": the
+// server's default, move).
+func parseSyncs(args []string, mode string) ([]proto.SyncRef, error) {
 	var out []proto.SyncRef
 	for _, a := range args {
 		repo, ref, ok := strings.Cut(a, "=")
 		if !ok || repo == "" || ref == "" {
 			return nil, fmt.Errorf("%q: want repo=ref", a)
 		}
-		out = append(out, proto.SyncRef{Repo: repo, Ref: ref})
+		out = append(out, proto.SyncRef{Repo: repo, Ref: ref, Mode: mode})
 	}
 	return out, nil
 }
 
+// syncModeHelp is --mode's and --sync-mode's help.
+const syncModeHelp = "how each checkout may move: move (default: becomes the ref's, local changes reset and saved as refs/lux/pre-sync), " +
+	"fast-forward (only if nothing is lost; else kept as it is), fetch (never; the ref's commit is refs/remotes/lux/<branch>)"
+
 func (a *app) syncCmd() *cobra.Command {
-	var reqID string
+	var reqID, mode string
 	var wait bool
 	cmd := &cobra.Command{
 		Use:   "sync <run> repo=ref...",
 		Short: "Move a running Run's checkouts to new commits",
 		Long: `Move a running Run's repositories' checkouts to refs (branches, tags or
 shas), fetched through its host's mirror, as lux resume --sync does before
-init. Servers with afterSync run it and restart once a checkout moved; the
-others keep running. With --wait, print each repository's git.sync outcome.`,
+init. --mode fast-forward moves a checkout only when nothing in it can be
+lost, and --mode fetch never moves one: both leave a branch's commit as
+refs/remotes/lux/<branch> in the checkout. Servers with afterSync run it
+and restart once a checkout moved; the others keep running. With --wait,
+print each repository's git.sync outcome.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := ctxOf(cmd)
-			refs, err := parseSyncs(args[1:])
+			refs, err := parseSyncs(args[1:], mode)
 			if err != nil {
 				return err
 			}
@@ -1115,7 +1126,15 @@ others keep running. With --wait, print each repository's git.sync outcome.`,
 					}
 					failed := false
 					for _, r := range results {
-						fmt.Fprintf(a.stdout, "%s %s %s → %s\n", r["repo"], r["status"], shortSHA(r["from"]), shortSHA(r["to"]))
+						line := fmt.Sprintf("%s %s %s → %s", r["repo"], r["status"], shortSHA(r["from"]), shortSHA(r["to"]))
+						if ahead, ok := r["ahead"].(float64); ok {
+							behind, _ := r["behind"].(float64)
+							line += fmt.Sprintf(" (%d ahead, %d behind)", int(ahead), int(behind))
+						}
+						if op, _ := r["operation"].(string); op != "" {
+							line += fmt.Sprintf(" [%s in progress]", op)
+						}
+						fmt.Fprintln(a.stdout, line)
 						failed = failed || r["status"] == "failed"
 					}
 					if failed {
@@ -1130,6 +1149,7 @@ others keep running. With --wait, print each repository's git.sync outcome.`,
 	}
 	cmd.Flags().StringVar(&reqID, "request-id", "", "names this sync (in its git.sync events); generated if absent")
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait for the outcome; exit 1 if a repository failed")
+	cmd.Flags().StringVar(&mode, "mode", "", syncModeHelp)
 	return cmd
 }
 
