@@ -20,6 +20,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 
+	"github.com/marcioapm/lux/internal/ec2"
 	"github.com/marcioapm/lux/internal/server"
 	"github.com/marcioapm/lux/internal/spec"
 )
@@ -103,6 +104,10 @@ type config struct {
 	} `toml:"costs"`
 	EC2 struct {
 		Endpoint string `toml:"endpoint" env:"LUX_EC2_ENDPOINT"`
+		// NoCapacityRetryAfter: how long a candidate (region, instance
+		// type, launch template, subnet, market) EC2 had no capacity for
+		// is skipped by later launches; 0 never skips.
+		NoCapacityRetryAfter duration `toml:"no_capacity_retry_after" env:"LUX_EC2_NO_CAPACITY_RETRY_AFTER"`
 	} `toml:"ec2"`
 	Console struct {
 		// Auth: "key" (paste an API key) or "cloudflare-access".
@@ -223,6 +228,7 @@ func defaultConfig() config {
 	c.LostGrace.Duration = server.DefaultLostGrace
 	c.ListingLag.Duration = server.DefaultListingLag
 	c.OutdatedDrainPercent = server.DefaultOutdatedDrainPercent
+	c.EC2.NoCapacityRetryAfter.Duration = ec2.DefaultNoCapacityRetryAfter
 	d := spec.BuiltinDefaults
 	c.Defaults.CPUs, c.Defaults.Memory.Bytes, c.Defaults.Disk.Bytes, c.Defaults.Pids = d.CPUs, d.Memory, d.Disk, d.Pids
 	c.History.SampleEvery.Duration = 10 * time.Second
@@ -526,6 +532,9 @@ func (c config) check() error {
 	}
 	if c.Costs.Compute.PricingRegion == "" {
 		problems = append(problems, "costs.compute.pricing_region (LUX_COSTS_PRICING_REGION) is required")
+	}
+	if c.EC2.NoCapacityRetryAfter.Duration < 0 {
+		problems = append(problems, "ec2.no_capacity_retry_after (LUX_EC2_NO_CAPACITY_RETRY_AFTER) must not be negative")
 	}
 	switch c.Console.Auth {
 	case "key":

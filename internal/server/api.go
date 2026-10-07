@@ -2958,6 +2958,46 @@ func checkTemplateTags(raw any) error {
 	return nil
 }
 
+// maxFallbackInstanceTypes bounds a launch's RunInstances attempts to
+// (1 + this) × the pool's subnets.
+const maxFallbackInstanceTypes = 4
+
+// checkFallbackInstanceTypes refuses an EC2 template's fallbackInstanceTypes
+// unless it is an array of at most maxFallbackInstanceTypes distinct,
+// non-empty strings, none of them the template's instanceType, which must be
+// set: the fallbacks are tried after it.
+func checkFallbackInstanceTypes(raw, primary any) error {
+	list, isList := raw.([]any)
+	if !isList {
+		return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.fallbackInstanceTypes must be an array of strings, got %T", raw)
+	}
+	if len(list) == 0 {
+		return nil
+	}
+	instanceType, _ := primary.(string)
+	if instanceType == "" {
+		return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.fallbackInstanceTypes needs template.instanceType: the fallbacks are tried after it")
+	}
+	if len(list) > maxFallbackInstanceTypes {
+		return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.fallbackInstanceTypes has %d entries; at most %d", len(list), maxFallbackInstanceTypes)
+	}
+	seen := map[string]bool{}
+	for i, v := range list {
+		s, isString := v.(string)
+		if !isString || s == "" {
+			return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.fallbackInstanceTypes[%d] must be a non-empty string, got %#v", i, v)
+		}
+		if s == instanceType {
+			return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.fallbackInstanceTypes[%d] %q is the instanceType", i, s)
+		}
+		if seen[s] {
+			return errf(http.StatusUnprocessableEntity, "invalid_pool", "template.fallbackInstanceTypes[%d] %q is listed twice", i, s)
+		}
+		seen[s] = true
+	}
+	return nil
+}
+
 // putPool creates or updates one of the tenant's pools.
 type poolBody struct {
 	TenantQuery
@@ -3025,9 +3065,16 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 				return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "template.nestedContainers must be true or false, got %T", raw)
 			}
 		}
+		if raw, present := pl.Template["fallbackInstanceTypes"]; present {
+			if err := checkFallbackInstanceTypes(raw, pl.Template["instanceType"]); err != nil {
+				return nil, err
+			}
+		}
 	} else if _, present := pl.Template["nestedContainers"]; present {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool",
 			"template.nestedContainers is for ec2 pools; a static host offers nested containers with lux-runner --nested")
+	} else if _, present := pl.Template["fallbackInstanceTypes"]; present {
+		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "template.fallbackInstanceTypes is for ec2 pools")
 	}
 	if err := ValidPoolPrice(pl.Provider, pl.HourlyPrice, pl.Currency); err != nil {
 		return nil, err

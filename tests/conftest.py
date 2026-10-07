@@ -506,7 +506,8 @@ class RealEC2:
 # luxd's provisioning timers against the fake EC2: seconds, not minutes, so
 # tests see a timer fire without waiting out a production default.
 FAKE_EC2_TIMERS = {"LUX_SCALE_DOWN_AFTER": "3s", "LUX_LAUNCH_TIMEOUT": "8s",
-                   "LUX_PROVIDER_CHECK_EVERY": "2s", "LUX_LOST_GRACE": "4s", "LUX_LISTING_LAG": "4s"}
+                   "LUX_PROVIDER_CHECK_EVERY": "2s", "LUX_LOST_GRACE": "4s", "LUX_LISTING_LAG": "4s",
+                   "LUX_EC2_NO_CAPACITY_RETRY_AFTER": "3s"}
 
 
 @pytest.fixture

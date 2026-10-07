@@ -15,14 +15,20 @@ variable "runner_pools" {
     installs podman if missing) or a prebuilt image (luxd's "env" user
     data, plain KEY=value lines). `user_data_format` must stay
     "ignition" for `image = "fcos"`.
+    `fallback_instance_types` (at most 4) go into the pool template's
+    `fallbackInstanceTypes`: when EC2 has no capacity for `instance_type`
+    in any of the pool's subnets, luxd tries each of them in turn, in
+    every subnet. They launch from the same launch template, so the same
+    AMI: each must be of the pool's `arch`.
   EOT
   type = map(object({
-    instance_type    = string
-    arch             = string                       # "arm64" or "amd64": the AMI architecture and what to put in the pool-set instanceType
-    image            = optional(string, "fcos")     # "fcos" | "custom"
-    ami_id           = optional(string, "")         # required when image = "custom"
-    user_data_format = optional(string, "ignition") # "ignition" | "script" | "env"
-    spot             = optional(bool, true)
+    instance_type           = string
+    arch                    = string                       # "arm64" or "amd64": the AMI architecture and what to put in the pool-set instanceType
+    image                   = optional(string, "fcos")     # "fcos" | "custom"
+    ami_id                  = optional(string, "")         # required when image = "custom"
+    user_data_format        = optional(string, "ignition") # "ignition" | "script" | "env"
+    spot                    = optional(bool, true)
+    fallback_instance_types = optional(list(string), []) # same arch as instance_type
   }))
   default = {
     arm64 = {
@@ -46,6 +52,19 @@ variable "runner_pools" {
   validation {
     condition     = alltrue([for k, v in var.runner_pools : v.image != "fcos" || v.user_data_format == "ignition"])
     error_message = "runner_pools[*].user_data_format must be \"ignition\" when image = \"fcos\": Fedora CoreOS only takes Ignition."
+  }
+  validation {
+    condition     = alltrue([for k, v in var.runner_pools : alltrue([for it in v.fallback_instance_types : it != null])])
+    error_message = "runner_pools[*].fallback_instance_types must not contain null (luxd refuses the pool otherwise)."
+  }
+  validation {
+    # A null entry passes here: the block above refuses it.
+    condition = alltrue([for k, v in var.runner_pools : alltrue(concat(
+      [length(v.fallback_instance_types) <= 4],
+      [length(distinct(v.fallback_instance_types)) == length(v.fallback_instance_types)],
+      [for it in v.fallback_instance_types : it == null || (it != "" && it != v.instance_type)],
+    ))])
+    error_message = "runner_pools[*].fallback_instance_types: at most 4, distinct, non-empty, and not the pool's instance_type (luxd refuses the pool otherwise)."
   }
 }
 
@@ -185,14 +204,14 @@ output "runner_pools_set_commands" {
       "lux pools set ${k}",
       "--provider ec2",
       "--min 0 --max 10 --warm 0",
-      "--template '${jsonencode({
+      "--template '${jsonencode(merge({
         region         = var.region
         launchTemplate = aws_launch_template.runner[k].name
         instanceType   = v.instance_type
         subnets        = aws_subnet.public[*].id
         spot           = v.spot
         userData       = v.user_data_format
-      })}'",
+      }, length(v.fallback_instance_types) > 0 ? { fallbackInstanceTypes = v.fallback_instance_types } : {}))}'",
     ])
   }
 }

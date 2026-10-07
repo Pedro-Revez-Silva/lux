@@ -299,6 +299,13 @@ lines — for an AMI that already has `lux-runner` baked in). The value
 feeds straight into the `userData` field of the `lux pools set --template`
 JSON that luxd reads.
 
+`fallback_instance_types` (optional, at most 4) feeds the template's
+`fallbackInstanceTypes`: a launch EC2 has no capacity for tries
+`instance_type` in every subnet (one per AZ, `az_count`), then each
+fallback the same way ([EC2 pools](../../docs/operations.md#ec2-pools)).
+They share the pool's launch template and AMI, so each must be of the
+pool's `arch`. A pool without them gets the same `--template` as before.
+
 ## GCP and Azure
 
 Not built yet. `aws/` is meant to be one sibling of `gcp/` and `azure/`

@@ -132,6 +132,7 @@ under a timeout. `luxd check-config` is an alias of `validate`.
 | `LUX_LAUNCH_TIMEOUT` | `10m` | How long a launched host may take to register before it is terminated. |
 | `LUX_OUTDATED_DRAIN_PERCENT` | `10` | Caps concurrent outdated-binaries drains per pool, as a percentage of its live hosts (at least 1 regardless). |
 | `LUX_EC2_ENDPOINT` | AWS | Overrides the EC2 endpoint (tests). |
+| `LUX_EC2_NO_CAPACITY_RETRY_AFTER` | `30s` | How long launches skip a candidate (region, instance type, launch template, subnet, market) after EC2 had no capacity for it (see **No capacity** below); `0` never skips. |
 | `LUX_SAMPLE_EVERY` | `10s` | How often the system is sampled for history ([Operators](operators.md#history)). |
 | `LUX_HISTORY_RAW` | `48h` | How long raw samples (hosts and placements: one per heartbeat) are kept. |
 | `LUX_HISTORY_MINUTES` | `720h` | How long minute rollups are kept. |
@@ -463,6 +464,27 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   ones kept ready. It keeps at
   least `--min` hosts and never more than `--max`. Launches alternate
   across the template's subnets.
+- **No capacity:** when `RunInstances` fails with
+  `InsufficientInstanceCapacity`, `InsufficientCapacity` or `Unsupported`
+  (the type is not offered in that zone), the launch tries the next
+  subnet, wrapping round, then each of `fallbackInstanceTypes` (optional,
+  at most 4, distinct, not the `instanceType`, which must be set) the same
+  way: types `[m8g, m7g]` and subnets `[a, b, c]` starting at `b` try m8g
+  in b, c, a, then m7g in b, c, a. Each candidate without capacity logs at
+  info (`ec2: no capacity`); a success on a later candidate warns once
+  (`ec2: launched a later candidate`). These errors are not retried in
+  place; any other error (a quota such as `VcpuLimitExceeded`, a
+  permission, a bad parameter) ends the launch at once. A candidate without
+  capacity is skipped for `LUX_EC2_NO_CAPACITY_RETRY_AFTER` (30s; `0` never
+  skips) by every launch with the same region, instance type, launch
+  template, subnet and market (spot or on-demand), so a shortage costs one
+  sweep of `RunInstances` calls per interval. A sweep's marks all date from
+  its start, so keep the interval well above one sweep's duration: a
+  15-candidate sweep under EC2 throttling can take about 10s. When every
+  candidate fails or is skipped, the launch fails with the code and the
+  candidates and is retried on the next pass. Fallback types use the same
+  launch template, so its AMI must suit them (same architecture);
+  `lux hosts ls` shows the type a host got.
 - **Scale down:** a host idle longer than the pool's `--scale-down-after`
   (default `LUX_SCALE_DOWN_AFTER`, 10m), above the minimum and warm count,
   is cordoned. It is terminated once

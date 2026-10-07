@@ -29,7 +29,7 @@ variable "vpc_cidr" {
 }
 
 variable "az_count" {
-  description = "Number of availability zones to spread public subnets across (2-3)."
+  description = "Number of availability zones to spread public subnets across (2-3). Runner pools launch in every one of them, so 3 gives a launch without capacity in one zone more zones to fall back to; some regions have only 2."
   type        = number
   default     = 2
 

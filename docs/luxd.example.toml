@@ -77,6 +77,10 @@ pricing_endpoint = ""              # LUX_PRICING_ENDPOINT (tests)
 
 [ec2]
 endpoint = ""                      # LUX_EC2_ENDPOINT (tests)
+# Skip a candidate (region, type, launch template, subnet, market) EC2 had no
+# capacity for. "0s" never skips; keep it well above one sweep (~10s for 15
+# candidates under throttling).
+no_capacity_retry_after = "30s"    # LUX_EC2_NO_CAPACITY_RETRY_AFTER
 
 [console]
 # How the web console signs people in (docs/operators.md#signing-in):

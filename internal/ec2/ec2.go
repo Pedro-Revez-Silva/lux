@@ -3,8 +3,19 @@
 // A pool's template names what to launch:
 //
 //	{"region": "eu-west-1", "launchTemplate": "lt-0abc…" (id or name),
-//	 "instanceType": "m7i.2xlarge", "subnets": ["subnet-…", …],
-//	 "tags": {"team": "platform"}, "spot": true, "userData": "ignition"}
+//	 "instanceType": "m7i.2xlarge", "fallbackInstanceTypes": ["m6i.2xlarge"],
+//	 "subnets": ["subnet-…", …], "tags": {"team": "platform"}, "spot": true,
+//	 "userData": "ignition"}
+//
+// A launch EC2 has no capacity for (InsufficientInstanceCapacity,
+// InsufficientCapacity, or Unsupported: the type is not offered in that
+// zone) tries instanceType in each of the subnets, from the pool's next one
+// round, then each fallbackInstanceTypes entry the same way. Any other
+// error ends the launch. A candidate without capacity is skipped for
+// SkipNoCapacityFor (default 30s; 0 never skips) by later launches with the
+// same region, instance type, launch template, subnet and market, so a
+// shortage costs one sweep of RunInstances calls, not one per launch; when
+// every candidate is skipped, the launch fails without calling EC2.
 //
 // With "spot", instances are one-time spot instances, terminated on
 // interruption. Every instance's user data sets LUX_EC2_IMDS, so its
@@ -32,6 +43,7 @@
 package ec2
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -45,6 +57,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	awsec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -56,12 +69,15 @@ import (
 
 // Template is a pool's EC2 settings.
 type Template struct {
-	Region         string            `json:"region"`
-	LaunchTemplate string            `json:"launchTemplate"`
-	InstanceType   string            `json:"instanceType"`
-	Subnets        []string          `json:"subnets"`
-	Tags           map[string]string `json:"tags"`
-	Spot           bool              `json:"spot"`
+	Region         string `json:"region"`
+	LaunchTemplate string `json:"launchTemplate"`
+	InstanceType   string `json:"instanceType"`
+	// FallbackInstanceTypes are tried, in order, after InstanceType when
+	// EC2 has no capacity for it in any of Subnets (see Launch).
+	FallbackInstanceTypes []string          `json:"fallbackInstanceTypes"`
+	Subnets               []string          `json:"subnets"`
+	Tags                  map[string]string `json:"tags"`
+	Spot                  bool              `json:"spot"`
 	// UserData: "ignition" (default), "script", or "env". See the package
 	// doc. Validated when the pool is set (internal/server), so an unknown
 	// value is refused there, not here at launch time.
@@ -86,7 +102,30 @@ type Provider struct {
 	memoryFailed map[[2]string]time.Time
 	// memoryTimeout bounds one lookup, which runs before RunInstances.
 	memoryTimeout time.Duration
+	// noCapacity is the last capacity error per capacityKey: within
+	// noCapacityFor of it, launches skip the candidate.
+	noCapacity    map[capacityKey]noCapacityMark
+	noCapacityFor time.Duration
+	now           func() time.Time
 	log           *slog.Logger
+}
+
+// capacityKey is the EC2 capacity a candidate asks for: what lux sets on
+// RunInstances plus the launch template, whose type, zone, placement group,
+// tenancy or capacity reservation lux does not see.
+type capacityKey struct {
+	region, instanceType, launchTemplate, subnet string
+	spot                                         bool
+}
+
+func (t Template) capacityKey(c candidate) capacityKey {
+	return capacityKey{t.Region, c.instanceType, t.LaunchTemplate, c.subnet, t.Spot}
+}
+
+type noCapacityMark struct {
+	at   time.Time
+	code string
+	err  error
 }
 
 const (
@@ -94,10 +133,23 @@ const (
 	memoryRetryAfter    = 10 * time.Minute
 )
 
+// DefaultNoCapacityRetryAfter is how long a candidate EC2 had no capacity
+// for is skipped: long enough that a shortage costs one sweep of
+// RunInstances per pool, not one per launch, short enough to see capacity
+// come back within a minute.
+const DefaultNoCapacityRetryAfter = 30 * time.Second
+
 // New builds the provider. endpoint overrides the EC2 endpoint (tests).
 func New(endpoint string, log *slog.Logger) *Provider {
 	return &Provider{endpoint: endpoint, clients: map[string]*awsec2.Client{}, next: map[string]int{},
-		memory: map[[2]string]int64{}, memoryFailed: map[[2]string]time.Time{}, memoryTimeout: memoryLookupTimeout, log: log}
+		memory: map[[2]string]int64{}, memoryFailed: map[[2]string]time.Time{}, memoryTimeout: memoryLookupTimeout,
+		noCapacity: map[capacityKey]noCapacityMark{}, noCapacityFor: DefaultNoCapacityRetryAfter, now: time.Now, log: log}
+}
+
+// SkipNoCapacityFor sets how long a candidate without capacity is skipped
+// (default DefaultNoCapacityRetryAfter); 0 never skips.
+func (p *Provider) SkipNoCapacityFor(d time.Duration) {
+	p.noCapacityFor = d
 }
 
 func (p *Provider) client(ctx context.Context, region string) (*awsec2.Client, error) {
@@ -124,7 +176,8 @@ func (p *Provider) client(ctx context.Context, region string) (*awsec2.Client, e
 // Launch starts one instance and returns its id, instance type and
 // availability zone as RunInstances reports them, and its market (from the
 // template's spot). tags are set on it (with the template's own); env is
-// the runner's environment, rendered into user data.
+// the runner's environment, rendered into user data. Without capacity, it
+// falls back across subnets and fallbackInstanceTypes (see the package doc).
 func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, env map[string]string) (server.Launched, error) {
 	var none server.Launched
 	t, err := parse(template)
@@ -139,20 +192,6 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 		return none, err
 	}
 	env = runnerEnv(t, env)
-	// The runner offers the machine's gross memory, which Runs ask in. Only
-	// a template naming its type says it before the launch; without it the
-	// runner offers its MemTotal.
-	if t.InstanceType != "" && env["LUX_RUNNER_MEMORY"] == "" {
-		if mem, err := p.instanceMemory(ctx, c, t.Region, t.InstanceType); err != nil {
-			p.log.Warn("ec2: instance type memory unknown; the host offers its MemTotal", "instanceType", t.InstanceType, "err", err)
-		} else {
-			env["LUX_RUNNER_MEMORY"] = strconv.FormatInt(mem, 10)
-		}
-	}
-	ud, err := renderUserData(t.UserData, env)
-	if err != nil {
-		return none, err
-	}
 	lt := &types.LaunchTemplateSpecification{Version: aws.String("$Default")}
 	if strings.HasPrefix(t.LaunchTemplate, "lt-") {
 		lt.LaunchTemplateId = aws.String(t.LaunchTemplate)
@@ -168,17 +207,16 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 	for _, k := range slices.Sorted(maps.Keys(merged)) {
 		instTags = append(instTags, types.Tag{Key: aws.String(k), Value: aws.String(merged[k])})
 	}
-	in := &awsec2.RunInstancesInput{
+	base := awsec2.RunInstancesInput{
 		MinCount:       aws.Int32(1),
 		MaxCount:       aws.Int32(1),
 		LaunchTemplate: lt,
-		UserData:       aws.String(base64.StdEncoding.EncodeToString(ud)),
 		TagSpecifications: []types.TagSpecification{
 			{ResourceType: types.ResourceTypeInstance, Tags: instTags},
 		},
 	}
 	if t.Spot {
-		in.InstanceMarketOptions = &types.InstanceMarketOptionsRequest{
+		base.InstanceMarketOptions = &types.InstanceMarketOptionsRequest{
 			MarketType: types.MarketTypeSpot,
 			SpotOptions: &types.SpotMarketOptions{
 				SpotInstanceType:             types.SpotInstanceTypeOneTime,
@@ -186,18 +224,195 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 			},
 		}
 	}
-	if t.InstanceType != "" {
-		in.InstanceType = types.InstanceType(t.InstanceType)
-	}
+	start := 0
 	if len(t.Subnets) > 0 {
-		i := p.next[t.LaunchTemplate] % len(t.Subnets)
+		start = p.next[t.LaunchTemplate] % len(t.Subnets)
 		p.next[t.LaunchTemplate]++
-		in.SubnetId = aws.String(t.Subnets[i])
 	}
-	out, err := c.RunInstances(ctx, in)
+	return p.tryCandidates(ctx, c, t, base, env, start)
+}
+
+// tryCandidates sends base as each of t's candidates from subnet start,
+// skipping those EC2 had no capacity for within noCapacityFor.
+func (p *Provider) tryCandidates(ctx context.Context, c *awsec2.Client, t Template, base awsec2.RunInstancesInput, env map[string]string, start int) (server.Launched, error) {
+	var none server.Launched
+	userData := map[string]string{} // instance type → base64 user data
+	cands := candidates(t, start)
+	skipped, failed := 0, 0
+	// One reading for the whole sweep: its marks expire together, so a
+	// later launch sweeps all of them or none, whatever each call took.
+	now := p.now()
+	for n, cand := range cands {
+		key := t.capacityKey(cand)
+		if m, ok := p.noCapacity[key]; ok && now.Sub(m.at) < p.noCapacityFor {
+			skipped++
+			continue
+		}
+		ud, ok := userData[cand.instanceType]
+		if !ok {
+			raw, err := renderUserData(t.UserData, p.withMemory(ctx, c, t.Region, env, cand.instanceType))
+			if err != nil {
+				return none, err
+			}
+			ud = base64.StdEncoding.EncodeToString(raw)
+			userData[cand.instanceType] = ud
+		}
+		in := base
+		in.UserData = aws.String(ud)
+		if cand.instanceType != "" {
+			in.InstanceType = types.InstanceType(cand.instanceType)
+		}
+		if cand.subnet != "" {
+			in.SubnetId = aws.String(cand.subnet)
+		}
+		out, err := c.RunInstances(ctx, &in, noCapacityRetries)
+		if err == nil {
+			delete(p.noCapacity, key)
+			if n > 0 {
+				p.log.Warn("ec2: launched a later candidate: earlier ones had no capacity", "instanceType", cand.instanceType,
+					"subnet", cand.subnet, "failed", failed, "skipped", skipped)
+			}
+			return launched(t, out)
+		}
+		code, capacity := capacityError(err)
+		if !capacity {
+			if n > 0 {
+				return none, fmt.Errorf("ec2 RunInstances (%s, after %d without capacity): %w", cand, n, err)
+			}
+			return none, fmt.Errorf("ec2 RunInstances: %w", err)
+		}
+		failed++
+		p.noCapacity[key] = noCapacityMark{at: now, code: code, err: err}
+		p.log.Info("ec2: no capacity", "instanceType", cand.instanceType, "subnet", cand.subnet, "code", code)
+	}
+	// Every candidate failed now or has a recent mark, so the template's
+	// first candidate has one; its error is wrapped because EC2's message
+	// names the zone, and text that varied with the rotation would split
+	// pool.launch_failed events. The code leads: the provisioner keeps 200
+	// characters of a launch error.
+	m := p.noCapacity[t.capacityKey(t.head())]
+	return none, fmt.Errorf("ec2 RunInstances: %s for every candidate: %s: %w", m.code, candidateList(t), m.err)
+}
+
+// candidateList is every candidate of t: "m8g.2xlarge, m7g.2xlarge in
+// subnet-a, subnet-b" (every type is tried in every subnet).
+func candidateList(t Template) string {
+	return candidate{strings.Join(t.instanceTypes(), ", "), strings.Join(t.Subnets, ", ")}.String()
+}
+
+// instanceTypes is InstanceType, then FallbackInstanceTypes: the order
+// Launch tries them in.
+func (t Template) instanceTypes() []string {
+	return append([]string{t.InstanceType}, t.FallbackInstanceTypes...)
+}
+
+// A candidate is one RunInstances attempt: an instance type ("" for the
+// launch template's) in a subnet ("" for the launch template's or the
+// default VPC's).
+type candidate struct{ instanceType, subnet string }
+
+func (c candidate) String() string {
+	s := cmp.Or(c.instanceType, "template type")
+	if c.subnet != "" {
+		s += " in " + c.subnet
+	}
+	return s
+}
+
+// head is t's first candidate whatever the rotation: InstanceType in the
+// first subnet.
+func (t Template) head() candidate {
+	return candidate{t.InstanceType, subnetsFrom(t, 0)[0]}
+}
+
+// subnetsFrom is t's subnets from start, wrapping round; [""] (the launch
+// template's or the default VPC's) when it names none.
+func subnetsFrom(t Template, start int) []string {
+	if len(t.Subnets) == 0 {
+		return []string{""}
+	}
+	return append(slices.Clone(t.Subnets[start:]), t.Subnets[:start]...)
+}
+
+// candidates is the order Launch tries: each instance type (InstanceType,
+// then FallbackInstanceTypes) in each subnet, from start and wrapping round.
+func candidates(t Template, start int) []candidate {
+	itypes := t.instanceTypes()
+	subnets := subnetsFrom(t, start)
+	out := make([]candidate, 0, len(itypes)*len(subnets))
+	for _, it := range itypes {
+		for _, sn := range subnets {
+			out = append(out, candidate{it, sn})
+		}
+	}
+	return out
+}
+
+// capacityCodes are the RunInstances errors that say this type is not
+// to be had in this zone now (InsufficientInstanceCapacity,
+// InsufficientCapacity) or at all (Unsupported): another subnet or type may
+// still launch. Every other error (quotas, permissions, parameters) would
+// fail the same way for every candidate.
+var capacityCodes = map[string]bool{
+	"InsufficientInstanceCapacity": true,
+	"InsufficientCapacity":         true,
+	"Unsupported":                  true,
+}
+
+func capacityError(err error) (string, bool) {
+	var ae smithy.APIError
+	if errors.As(err, &ae) && capacityCodes[ae.ErrorCode()] {
+		return ae.ErrorCode(), true
+	}
+	return "", false
+}
+
+// noCapacityRetries keeps the SDK from retrying a capacity error (EC2
+// answers InsufficientInstanceCapacity with a 500, which the default
+// retryer repeats against the same zone): Launch moves to the next
+// candidate instead. Other errors keep the client's retry behaviour.
+func noCapacityRetries(o *awsec2.Options) {
+	o.Retryer = &capacityNotRetryable{RetryerV2: asRetryerV2(o.Retryer)}
+}
+
+type capacityNotRetryable struct{ aws.RetryerV2 }
+
+func (r *capacityNotRetryable) IsErrorRetryable(err error) bool {
+	if _, capacity := capacityError(err); capacity {
+		return false
+	}
+	return r.RetryerV2.IsErrorRetryable(err)
+}
+
+// asRetryerV2 is r as a RetryerV2. The SDK's own retryers are; any other
+// gets AddWithMaxAttempts' adapter, keeping its attempt count.
+func asRetryerV2(r aws.Retryer) aws.RetryerV2 {
+	if v, ok := r.(aws.RetryerV2); ok {
+		return v
+	}
+	return retry.AddWithMaxAttempts(r, r.MaxAttempts()).(aws.RetryerV2)
+}
+
+// withMemory is env with instanceType's memory as LUX_RUNNER_MEMORY: the
+// runner offers the machine's gross memory, which Runs ask in. Only a
+// named type says it before the launch; without one (or when its lookup
+// fails) the runner offers its MemTotal. A caller's LUX_RUNNER_MEMORY wins.
+func (p *Provider) withMemory(ctx context.Context, c *awsec2.Client, region string, env map[string]string, instanceType string) map[string]string {
+	if instanceType == "" || env["LUX_RUNNER_MEMORY"] != "" {
+		return env
+	}
+	mem, err := p.instanceMemory(ctx, c, region, instanceType)
 	if err != nil {
-		return none, fmt.Errorf("ec2 RunInstances: %w", err)
+		p.log.Warn("ec2: instance type memory unknown; the host offers its MemTotal", "instanceType", instanceType, "err", err)
+		return env
 	}
+	env = maps.Clone(env)
+	env["LUX_RUNNER_MEMORY"] = strconv.FormatInt(mem, 10)
+	return env
+}
+
+func launched(t Template, out *awsec2.RunInstancesOutput) (server.Launched, error) {
+	var none server.Launched
 	if len(out.Instances) != 1 || out.Instances[0].InstanceId == nil {
 		return none, errors.New("ec2 RunInstances: no instance in the reply")
 	}

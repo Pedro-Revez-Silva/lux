@@ -199,6 +199,8 @@ func badConfigs(dbURL, s3URL string) []struct {
 			"s3.access_key and s3.secret_key (LUX_S3_ACCESS_KEY, LUX_S3_SECRET_KEY): set both or neither"},
 		{"s3.secret_key alone", valid, []string{"LUX_S3_SECRET_KEY=s3-secret-value"},
 			"s3.access_key and s3.secret_key (LUX_S3_ACCESS_KEY, LUX_S3_SECRET_KEY): set both or neither"},
+		{"ec2.no_capacity_retry_after negative", valid, []string{"LUX_EC2_NO_CAPACITY_RETRY_AFTER=-1s"},
+			"configuration: ec2.no_capacity_retry_after (LUX_EC2_NO_CAPACITY_RETRY_AFTER) must not be negative"},
 	}
 }
 
