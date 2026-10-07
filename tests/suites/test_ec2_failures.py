@@ -3,6 +3,7 @@ register, failed launches, and instances whose launch reply was lost."""
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -96,6 +97,10 @@ def test_a_failing_launch_backs_off_until_the_pool_is_fixed(lux, ec2):
     waits 15s, then 30s, ... and says so in one pool.scale_blocked. Setting
     the pool again (the operator's fix) is tried at once."""
     fake_only(ec2)
+    # Stored while its template launches (a set checks it), then the template
+    # goes: the same set again with --min 1 is not checked, and every launch
+    # fails as EC2 fails a deleted launch template.
+    pool(lux, ec2, min=0, max=1)
     ec2.launch_failures = {("m7i.large", "*"): "InvalidLaunchTemplateName.NotFound"}
     pool(lux, ec2, min=1, max=1)
 
@@ -146,6 +151,33 @@ def test_a_launch_falls_back_to_the_next_instance_type(lux, ec2):
     assert ec2.launch_attempts[:3] == [("m7i.large", "subnet-a"), ("m7i.large", "subnet-b"), ("m6i.large", "subnet-a")], \
         ec2.launch_attempts
     assert not [e for e in pool_events(lux) if e["type"] == "pool.launch_failed"], pool_events(lux)
+
+
+def test_a_launch_template_ec2_does_not_have_is_refused_when_the_pool_is_set(lux, ec2):
+    """Production 2026-10-07: a pools set named a launch template Terraform
+    had deleted; luxd stored it and every launch failed with
+    InvalidLaunchTemplateName.NotFound. Setting the pool now asks EC2 (a
+    dry-run RunInstances per subnet) and refuses it; the pool keeps its old
+    template and every other setting, writes no event, and launches nothing."""
+    fake_only(ec2)
+    pool(lux, ec2, max=2)
+    gone = {**ec2.template, "launchTemplate": "lux-runner-arm64"}
+    [before] = [p for p in lux.json("pools", "ls") if p["name"] == "burst"]
+    events_before = lux.json("pools", "events", "burst", "--all")
+    r = lux.run("pools", "set", "burst", "--provider", "ec2", "--max", "10", "--template", json.dumps(gone), check=False)
+    assert r.returncode == 4, (r.returncode, r.stderr)
+    assert "template: ec2 cannot launch it: InvalidLaunchTemplateName.NotFound" in r.stderr, r.stderr
+    [after] = [p for p in lux.json("pools", "ls") if p["name"] == "burst"]
+    assert after == before, (before, after)
+    assert lux.json("pools", "events", "burst", "--all") == events_before
+    assert [d for d in ec2.dry_runs if d[0] == "lux-runner-arm64"] == [("lux-runner-arm64", "m7i.large", "subnet-a")], ec2.dry_runs
+    # The first set checked every subnet; the same template set again
+    # (only --max changed) is not checked; nothing was launched by either.
+    assert [(d[1], d[2]) for d in ec2.dry_runs if d[0] == ec2.template["launchTemplate"]] == \
+        [("m7i.large", "subnet-a"), ("m7i.large", "subnet-b")], ec2.dry_runs
+    pool(lux, ec2, max=3)
+    assert len(ec2.dry_runs) == 3, ec2.dry_runs
+    assert "RunInstances" not in ec2.calls, ec2.calls
 
 
 def test_a_purged_instance_does_not_write_off_the_others(lux, ec2):

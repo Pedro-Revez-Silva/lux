@@ -114,6 +114,7 @@ uv run python run_tests.py --keep            # keep containers and database to d
 uv run python run_tests.py --hosts 3         # more simulated hosts
 uv run python run_tests.py --real-ec2        # EC2 suites against real AWS (nightly)
 uv run pytest test_harness_config.py         # the harness's own config; no Docker (make harness-unit)
+uv run pytest test_fake_ec2.py               # the fake EC2's answers; no Docker (make harness-unit)
 ```
 
 Your own lux settings never reach the harness's `lux` and `luxd`: every
@@ -302,7 +303,16 @@ tests assert the same tool events on fake and real variants.
 EC2 API calls lux makes (RunInstances, TerminateInstances,
 DescribeInstances). Each "instance" is a new simulated host that boots
 `lux-runner` from the instance's user data, as a real AMI would. Tests
-can make launches fail, or make instances never register.
+can make launches fail, or make instances never register. A
+`RunInstances` with `DryRun` (the check when a pool is set) answers
+`DryRunOperation`, or the error the real call would get: a launch
+template not in `ec2.launch_templates` is
+`InvalidLaunchTemplateName.NotFound`, and an injected `launch_failures`
+code fails it too, except the capacity shortages a dry run does not test
+(`InsufficientInstanceCapacity`, `InsufficientCapacity`).
+`UnauthorizedOperation` is a 403, as EC2's. Dry runs are recorded in
+`ec2.dry_runs`, not in `ec2.calls`; `tests/test_fake_ec2.py` checks these
+answers without Docker.
 
 `--real-ec2` runs the same suite against AWS. The tests that need the
 fake's failure injection are skipped. It needs:

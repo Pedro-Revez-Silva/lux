@@ -4538,7 +4538,7 @@ paths:
         - pools
     post:
       description: |-
-        `isDefault: true` makes it the tenant's default pool, where Runs whose spec names no pool go from then on (Runs already submitted keep theirs); the tenant's previous default loses the mark. `false` clears it. A body of exactly `name` and `isDefault` marks an existing pool and changes nothing else; any other field without `provider` is a 422 `invalid_pool`. From an operator key naming no tenant, a marker-only body marks a platform pool as the platform's default, for tenants without one of their own.
+        `isDefault: true` makes it the tenant's default pool, where Runs whose spec names no pool go from then on (Runs already submitted keep theirs); the tenant's previous default loses the mark. `false` clears it. A body of exactly `name` and `isDefault` marks an existing pool and changes nothing else; any other field without `provider` is a 422 `invalid_pool`. From an operator key naming no tenant, a marker-only body marks a platform pool as the platform's default, for tenants without one of their own. An `ec2` pool is stored only if EC2 would launch its template (a dry-run RunInstances per subnet and fallback type, within 10s); otherwise 422 `invalid_pool` `template: ec2 cannot launch it: <EC2's code>: <message>`. A pool set again with the same provider and an identical template is not checked. 409 `pool_changed`: another set created or replaced the pool while its template was being checked; set it again.
 
         Needs the `admin` scope.
       operationId: putPool
@@ -4592,6 +4592,12 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
           description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
         "422":
           content:
             application/json:

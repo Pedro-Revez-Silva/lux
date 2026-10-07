@@ -67,6 +67,10 @@ def _parse_env_lines(text: str) -> dict[str, str]:
 # The instance type the fake's launch templates stand for.
 FAKE_TEMPLATE_TYPE = "m7i.large"
 
+# The capacity shortages a dry run never answers (EC2 does not test
+# capacity for one); every other injected failure fails it too.
+DRY_RUN_UNTESTED = frozenset({"InsufficientInstanceCapacity", "InsufficientCapacity"})
+
 
 class FakeEC2:
     real = False
@@ -87,6 +91,12 @@ class FakeEC2:
         self.launch_attempted_at: list[float] = []
         self.no_boot = False  # launched instances never start a runner
         self.lose_reply = False
+        # The launch templates that exist, by id or name: RunInstances naming
+        # another fails as EC2's does (InvalidLaunchTemplate*.NotFound).
+        self.launch_templates = {template["launchTemplate"]}
+        # Each RunInstances with DryRun: (launchTemplate, instanceType,
+        # subnet). Kept out of calls and launch_attempts, which count launches.
+        self.dry_runs: list[tuple[str, str, str]] = []
         self.notices: dict[str, dict] = {}  # id → spot instance-action
         # What DescribeInstanceTypes says every type has (0: it fails). As
         # much as the harness's runners offer by default, so a launched
@@ -172,7 +182,8 @@ class FakeEC2:
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
                 q = {k: v[0] for k, v in parse_qs(body).items()}
                 action = q.get("Action", "")
-                fake.calls.append(action)
+                if q.get("DryRun") != "true":
+                    fake.calls.append(action)
                 try:
                     xml = getattr(fake, "_" + action)(q)
                     code = 200
@@ -191,10 +202,24 @@ class FakeEC2:
 
     def _RunInstances(self, q):
         itype, subnet = q.get("InstanceType") or FAKE_TEMPLATE_TYPE, q.get("SubnetId", "")
+        lt_id, lt_name = q.get("LaunchTemplate.LaunchTemplateId"), q.get("LaunchTemplate.LaunchTemplateName")
+        if q.get("DryRun") == "true":
+            # As EC2: DryRunOperation where the call would have been allowed,
+            # else the error it would have failed with. Capacity is not
+            # tested, so fail_launches and capacity codes do not apply.
+            with self.lock:
+                self.dry_runs.append((lt_id or lt_name, itype, subnet))
+            self._check_launch_template(lt_id, lt_name)
+            failure = self.launch_failures.get((itype, subnet)) or self.launch_failures.get((itype, "*"))
+            if failure and failure not in DRY_RUN_UNTESTED:
+                raise FakeError(failure, f"no {itype} in {self._zone(subnet)} (fake)")
+            self._instance_tags(q)
+            raise FakeError("DryRunOperation", "Request would have succeeded, but DryRun flag is set.")
         with self.lock:
             self.launch_attempts.append((itype, subnet))
             self.launch_attempted_at.append(time.monotonic())
             failing = self.fail_launches
+        self._check_launch_template(lt_id, lt_name)
         if failing:
             # EC2's own wording, which names the zone asked for.
             raise FakeError("InsufficientInstanceCapacity",
@@ -206,20 +231,12 @@ class FakeEC2:
             raise FakeError(failure, f"no {itype} in {self._zone(subnet)} (fake)")
         userdata = base64.b64decode(q.get("UserData", "")).decode()
         env = _parse_user_data(userdata)
-        tags = {}
-        i = 1
-        while f"TagSpecification.1.Tag.{i}.Key" in q:
-            key = q[f"TagSpecification.1.Tag.{i}.Key"]
-            if key in tags:
-                # As EC2: a key named twice fails the whole request.
-                raise FakeError("InvalidParameterValue", f"Duplicate tag key '{key}' specified.")
-            tags[key] = q.get(f"TagSpecification.1.Tag.{i}.Value", "")
-            i += 1
+        tags = self._instance_tags(q)
         iid = "i-" + uuid.uuid4().hex[:17]
         with self.lock:
             self.instances[iid] = {"state": "pending", "host": None, "tags": tags, "env": env,
                                    "userdata": userdata,
-                                   "launchTemplate": q.get("LaunchTemplate.LaunchTemplateId") or q.get("LaunchTemplate.LaunchTemplateName"),
+                                   "launchTemplate": lt_id or lt_name,
                                    "instanceType": q.get("InstanceType"), "subnet": q.get("SubnetId"),
                                    "market": q.get("InstanceMarketOptions.MarketType")}
         threading.Thread(target=self._boot, args=(iid,), daemon=True).start()
@@ -234,6 +251,28 @@ class FakeEC2:
                 f"<placement><availabilityZone>{escape(zone)}</availabilityZone></placement>"
                 f"<instanceState><code>0</code><name>pending</name>"
                 f"</instanceState></item></instancesSet></RunInstancesResponse>")
+
+    def _check_launch_template(self, lt_id: str | None, lt_name: str | None):
+        with self.lock:
+            known = set(self.launch_templates)
+        if lt_id and lt_id not in known:
+            raise FakeError("InvalidLaunchTemplateId.NotFound", f"The specified launch template, with template ID {lt_id}, does not exist.")
+        if lt_name and lt_name not in known:
+            raise FakeError("InvalidLaunchTemplateName.NotFound",
+                            f"The specified launch template, with template name {lt_name}, does not exist.")
+
+    @staticmethod
+    def _instance_tags(q) -> dict:
+        tags = {}
+        i = 1
+        while f"TagSpecification.1.Tag.{i}.Key" in q:
+            key = q[f"TagSpecification.1.Tag.{i}.Key"]
+            if key in tags:
+                # As EC2: a key named twice fails the whole request.
+                raise FakeError("InvalidParameterValue", f"Duplicate tag key '{key}' specified.")
+            tags[key] = q.get(f"TagSpecification.1.Tag.{i}.Value", "")
+            i += 1
+        return tags
 
     def _zone(self, subnet: str) -> str:
         """The availability zone a capacity error names: one per subnet, as
@@ -322,13 +361,19 @@ class FakeEC2:
 
 class FakeError(Exception):
     # EC2 answers a capacity shortage with a 500 (the SDK's default retryer
-    # would retry it), and the client's own mistakes with a 400.
+    # would retry it), a dry run that would have succeeded with a 412, a
+    # missing permission with a 403, and the client's own mistakes with a 400.
     SERVER_ERRORS = {"InsufficientInstanceCapacity", "InsufficientCapacity", "Unsupported", "InternalError"}
 
     def __init__(self, code: str, msg: str):
         super().__init__(msg)
         self.code = code
-        self.status = 500 if code in self.SERVER_ERRORS else 400
+        if code == "DryRunOperation":
+            self.status = 412
+        elif code == "UnauthorizedOperation":
+            self.status = 403
+        else:
+            self.status = 500 if code in self.SERVER_ERRORS else 400
 
 
 def _error(code: str, msg: str) -> str:

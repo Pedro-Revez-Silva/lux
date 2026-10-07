@@ -120,37 +120,134 @@ func TestArtifactsDownloadDeleteRefused(t *testing.T) {
 	}
 }
 
+// poolsLuxd is a fake luxd for pools set: whoami says operator or tenant
+// t1, GET /v1/pools lists pools, and each POST /v1/pools body is recorded.
+func poolsLuxd(t *testing.T, operator bool, pools ...string) (string, *[]map[string]any) {
+	t.Helper()
+	posted := &[]map[string]any{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/whoami":
+			_ = json.NewEncoder(w).Encode(map[string]any{"operator": operator, "tenant": map[bool]string{false: "t1"}[operator]})
+		case "GET /v1/pools":
+			_, _ = w.Write([]byte(`{"pools":[` + strings.Join(pools, ",") + `]}`))
+		case "POST /v1/pools":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("body: %v", err)
+			}
+			*posted = append(*posted, body)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL, posted
+}
+
+// lux runs the CLI against url, returning its exit code and what it printed.
+func lux(url string, args ...string) (code int, stdout, stderr string) {
+	var out, errs strings.Builder
+	a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: &errs}
+	code = a.main(append([]string{"--url", url, "--api-key", "k"}, args...))
+	return code, out.String(), errs.String()
+}
+
 // pools set --default alone sends a marker-only body, exactly name and
 // isDefault, which luxd refuses to read as anything else; with a setting,
 // the whole pool.
 func TestPoolsSetDefaultSendsOnlyTheMark(t *testing.T) {
-	var got []map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Errorf("body: %v", err)
-		}
-		got = append(got, body)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	defer srv.Close()
+	url, got := poolsLuxd(t, false, `{"name":"a","tenant":"t1","provider":"static","isDefault":false}`)
 	for _, args := range [][]string{{"pools", "set", "a", "--default"}, {"pools", "set", "a", "--default=false"}, {"pools", "set", "a", "--provider", "static", "--default"}} {
-		a := &app{stdin: strings.NewReader(""), stdout: io.Discard, stderr: io.Discard}
-		root := a.root()
-		root.SetArgs(append([]string{"--url", srv.URL, "--api-key", "k"}, args...))
-		if err := root.Execute(); err != nil {
-			t.Fatalf("%v: %v", args, err)
+		if code, _, stderr := lux(url, args...); code != 0 {
+			t.Fatalf("%v: exit %d: %s", args, code, stderr)
 		}
 	}
-	if want := (map[string]any{"name": "a", "isDefault": true}); !reflect.DeepEqual(got[0], want) {
-		t.Errorf("--default sent %v, want %v", got[0], want)
+	if want := (map[string]any{"name": "a", "isDefault": true}); !reflect.DeepEqual((*got)[0], want) {
+		t.Errorf("--default sent %v, want %v", (*got)[0], want)
 	}
-	if want := (map[string]any{"name": "a", "isDefault": false}); !reflect.DeepEqual(got[1], want) {
-		t.Errorf("--default=false sent %v, want %v", got[1], want)
+	if want := (map[string]any{"name": "a", "isDefault": false}); !reflect.DeepEqual((*got)[1], want) {
+		t.Errorf("--default=false sent %v, want %v", (*got)[1], want)
 	}
-	if got[2]["provider"] != "static" || got[2]["isDefault"] != true {
-		t.Errorf("a full set sent %v", got[2])
+	if (*got)[2]["provider"] != "static" || (*got)[2]["isDefault"] != true {
+		t.Errorf("a full set sent %v", (*got)[2])
+	}
+}
+
+// The production pool of 2026-10-07: nested containers and --max 4. A set
+// pasted without nestedContainers and with --max 10 is refused, naming the
+// removal; --replace writes it; --dry-run prints both changes and writes
+// nothing; a value-only change is written, and printed.
+func TestPoolsSetRefusesRemovals(t *testing.T) {
+	const existing = `{"name":"default","tenant":"t1","provider":"ec2","maxHosts":4,"isDefault":true,
+		"template":{"launchTemplate":"lux-runner","nestedContainers":true}}`
+	set := []string{"pools", "set", "default", "--provider", "ec2", "--max", "10", "--template", `{"launchTemplate":"lux-runner"}`}
+
+	url, posted := poolsLuxd(t, false, existing)
+	code, stdout, stderr := lux(url, set...)
+	if code != 4 || len(*posted) != 0 {
+		t.Fatalf("exit %d, posted %v; want 4 and nothing", code, *posted)
+	}
+	if !strings.Contains(stderr, "would remove template.nestedContainers from pool default") || !strings.Contains(stderr, "--replace") {
+		t.Errorf("stderr %q", stderr)
+	}
+	if want := "maxHosts 4→10\ntemplate.nestedContainers true→-\n"; stdout != want {
+		t.Errorf("stdout %q, want %q", stdout, want)
+	}
+
+	code, stdout, _ = lux(url, append(set, "--dry-run")...)
+	if code != 0 || len(*posted) != 0 || stdout != "maxHosts 4→10\ntemplate.nestedContainers true→-\n" {
+		t.Errorf("--dry-run: exit %d, posted %v, stdout %q", code, *posted, stdout)
+	}
+
+	if code, _, stderr = lux(url, append(set, "--replace")...); code != 0 || len(*posted) != 1 || (*posted)[0]["maxHosts"] != 10.0 {
+		t.Errorf("--replace: exit %d (%s), posted %v", code, stderr, *posted)
+	}
+
+	code, stdout, stderr = lux(url, "pools", "set", "default", "--provider", "ec2", "--max", "10",
+		"--template", `{"launchTemplate":"lux-runner","nestedContainers":true}`)
+	if code != 0 || len(*posted) != 2 || stdout != "maxHosts 4→10\n" {
+		t.Errorf("value-only change: exit %d (%s), posted %d, stdout %q", code, stderr, len(*posted), stdout)
+	}
+}
+
+// Optional top-level settings the pool has and the set leaves out are
+// removals too; giving them again is not.
+func TestPoolsSetRefusesRemovedOptionalSettings(t *testing.T) {
+	url, posted := poolsLuxd(t, false, `{"name":"metal","tenant":"t1","provider":"static","scaleDownAfter":"10m0s",
+		"warmWhileActive":true,"hourlyPrice":"0.4","currency":"USD"}`)
+	code, _, stderr := lux(url, "pools", "set", "metal", "--provider", "static")
+	if code != 4 || len(*posted) != 0 {
+		t.Fatalf("exit %d, posted %v", code, *posted)
+	}
+	if !strings.Contains(stderr, "would remove currency, hourlyPrice, scaleDownAfterSeconds, warmWhileActive from pool metal") {
+		t.Errorf("stderr %q", stderr)
+	}
+	code, stdout, stderr := lux(url, "pools", "set", "metal", "--provider", "static", "--scale-down-after", "10m",
+		"--warm-while-active", "--hourly-price", "0.40", "--currency", "USD")
+	if code != 0 || len(*posted) != 1 || stdout != "no changes\n" {
+		t.Errorf("the same settings: exit %d (%s), posted %d, stdout %q", code, stderr, len(*posted), stdout)
+	}
+}
+
+// A set naming no pool of the target owner says it creates one, and does;
+// a platform pool of that name is not the tenant's.
+func TestPoolsSetSaysItCreates(t *testing.T) {
+	url, posted := poolsLuxd(t, false, `{"name":"arm64","provider":"ec2","platform":true}`)
+	code, stdout, _ := lux(url, "pools", "set", "arm64", "--provider", "static", "--dry-run")
+	if code != 0 || len(*posted) != 0 || stdout != "creating pool arm64 (no pool of that name for tenant t1)\n" {
+		t.Errorf("--dry-run: exit %d, posted %v, stdout %q", code, *posted, stdout)
+	}
+	code, stdout, _ = lux(url, "pools", "set", "arm64", "--provider", "static")
+	if code != 0 || len(*posted) != 1 || !strings.HasPrefix(stdout, "creating pool arm64") {
+		t.Errorf("exit %d, posted %v, stdout %q", code, *posted, stdout)
+	}
+	url, _ = poolsLuxd(t, true)
+	if code, stdout, _ = lux(url, "--tenant", "acme", "pools", "set", "arm64", "--provider", "static", "--dry-run"); stdout != "creating pool arm64 (no pool of that name for tenant acme)\n" {
+		t.Errorf("operator --tenant acme: exit %d, stdout %q", code, stdout)
 	}
 }
 

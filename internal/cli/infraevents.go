@@ -141,17 +141,7 @@ func eventLine(e server.LifecycleEvent) string {
 		}
 	case "pool.config_changed", "pool.retired", "pool.restored":
 		changes, _ := d["changes"].(map[string]any)
-		keys := make([]string, 0, len(changes))
-		for k := range changes {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		var parts []string
-		for _, k := range keys {
-			c, _ := changes[k].(map[string]any)
-			parts = append(parts, fmt.Sprintf("%s %v→%v", k, orNone(c["old"]), orNone(c["new"])))
-		}
-		line = strings.Join(parts, ", ")
+		line = strings.Join(changeLines(changes), ", ")
 		if d["created"] == true {
 			line = "created: " + line
 		}
@@ -180,6 +170,23 @@ func eventLine(e server.LifecycleEvent) string {
 		line += fmt.Sprintf(" (×%d, last %s)", e.Count, e.LastTime.Local().Format(time.DateTime))
 	}
 	return line
+}
+
+// changeLines is each of a pool's changes ({field: {"old", "new"}}, as
+// server.PoolChanges makes them), "field old→new", by field; an absent or
+// empty value is "-".
+func changeLines(changes map[string]any) []string {
+	keys := make([]string, 0, len(changes))
+	for k := range changes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		c, _ := changes[k].(map[string]any)
+		parts = append(parts, fmt.Sprintf("%s %v→%v", k, orNone(c["old"]), orNone(c["new"])))
+	}
+	return parts
 }
 
 func orNone(v any) any {

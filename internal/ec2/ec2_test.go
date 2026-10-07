@@ -946,14 +946,14 @@ func decodedUserData(t *testing.T, ud string) string {
 // fakeEC2 answers DescribeInstanceTypes (memMiB, an error when 0, no answer
 // until the client gives up when negative) and RunInstances, counting calls
 // and keeping each launch's user data.
-func fakeEC2(t *testing.T, memMiB int) (url string, calls map[string]int, userData *[]string) {
+func fakeEC2(t *testing.T, memMiB int) (url string, calls *actionCalls, userData *[]string) {
 	t.Helper()
 	awsTestEnv(t)
-	calls, userData = map[string]int{}, &[]string{}
+	calls, userData = &actionCalls{n: map[string]int{}}, &[]string{}
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		action := r.PostForm.Get("Action")
-		calls[action]++
+		calls.add(action)
 		w.Header().Set("Content-Type", "text/xml")
 		switch action {
 		case "DescribeInstanceTypes":
@@ -983,6 +983,27 @@ func fakeEC2(t *testing.T, memMiB int) (url string, calls map[string]int, userDa
 	return fake.URL, calls, userData
 }
 
+// actionCalls counts a fake's requests by Action. Handlers run
+// concurrently: a hanging lookup's handler outlives its client's timeout
+// while the launch's RunInstances is served.
+type actionCalls struct {
+	mu sync.Mutex
+	n  map[string]int
+}
+
+func (c *actionCalls) add(action string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.n[action]++
+}
+
+// snapshot is the counts so far.
+func (c *actionCalls) snapshot() map[string]int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return maps.Clone(c.n)
+}
+
 // A template naming its instance type launches a runner offering that
 // type's gross memory; the type is looked up once for the process.
 func TestLaunchOffersTheInstanceTypesMemory(t *testing.T) {
@@ -994,7 +1015,7 @@ func TestLaunchOffersTheInstanceTypesMemory(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if calls["DescribeInstanceTypes"] != 1 || calls["RunInstances"] != 2 {
+	if calls := calls.snapshot(); calls["DescribeInstanceTypes"] != 1 || calls["RunInstances"] != 2 {
 		t.Errorf("calls %v, want one DescribeInstanceTypes for two RunInstances", calls)
 	}
 	for _, ud := range *userData {
@@ -1011,7 +1032,7 @@ func TestLaunchWithoutTheInstanceTypesMemory(t *testing.T) {
 	if _, err := New(url, discard).Launch(context.Background(), template, nil, map[string]string{"LUX_URL": "http://luxd"}); err != nil {
 		t.Fatalf("launch failed with the lookup: %v", err)
 	}
-	if calls["RunInstances"] != 1 || len(*userData) != 1 || strings.Contains((*userData)[0], "LUX_RUNNER_MEMORY") {
+	if calls := calls.snapshot(); calls["RunInstances"] != 1 || len(*userData) != 1 || strings.Contains((*userData)[0], "LUX_RUNNER_MEMORY") {
 		t.Errorf("calls %v, user data %q: want one launch without LUX_RUNNER_MEMORY", calls, *userData)
 	}
 }
@@ -1036,7 +1057,7 @@ func TestLaunchDoesNotWaitOnAHangingLookup(t *testing.T) {
 			t.Errorf("launch took %s with a %s lookup timeout", d, p.memoryTimeout)
 		}
 	}
-	if calls["DescribeInstanceTypes"] != 1 || calls["RunInstances"] != 2 {
+	if calls := calls.snapshot(); calls["DescribeInstanceTypes"] != 1 || calls["RunInstances"] != 2 {
 		t.Errorf("calls %v, want one DescribeInstanceTypes for two RunInstances", calls)
 	}
 	for _, ud := range *userData {

@@ -394,21 +394,11 @@ func ChangePool(ctx context.Context, tx pgx.Tx, tenantID *string, name string, c
 	if err != nil || after == nil {
 		return err
 	}
-	// Every field either side has: a template key removed is old→null.
-	changes := map[string]any{}
-	keys := maps.Clone(after.fields)
+	var old map[string]any
 	if before != nil {
-		maps.Copy(keys, before.fields)
+		old = before.fields
 	}
-	for k := range keys {
-		var old any
-		if before != nil {
-			old = before.fields[k]
-		}
-		if v := after.fields[k]; !reflect.DeepEqual(old, v) {
-			changes[k] = map[string]any{"old": old, "new": v}
-		}
-	}
+	changes := PoolChanges(old, after.fields)
 	if len(changes) == 0 {
 		return nil
 	}
@@ -427,36 +417,61 @@ type poolSnapshot struct {
 	fields map[string]any
 }
 
-// poolSettings is a pool's settings as config_changed reports them, one
-// value per field, template keys each on their own (template.region, ...).
+// PoolChanges is every field before or after has whose value differs, as
+// {"old": …, "new": …}: a field one side lacks (a template key removed) is
+// nil on that side. pool.config_changed's changes, and lux pools set's.
+func PoolChanges(before, after map[string]any) map[string]any {
+	changes := map[string]any{}
+	keys := maps.Clone(after)
+	maps.Copy(keys, before)
+	for k := range keys {
+		if old, v := before[k], after[k]; !reflect.DeepEqual(old, v) {
+			changes[k] = map[string]any{"old": old, "new": v}
+		}
+	}
+	return changes
+}
+
+// PoolSettings is the settings of pl a pools set replaces, one value per
+// field as pool.config_changed names them, template keys each on their own
+// (template.region, ...).
+func PoolSettings(pl Pool) map[string]any {
+	f := map[string]any{"provider": pl.Provider, "minHosts": pl.MinHosts, "maxHosts": pl.MaxHosts, "warmHosts": pl.WarmHosts,
+		"scaleDownAfterSeconds": int(pl.ScaleDownAfter.Duration / time.Second), "warmWhileActive": pl.WarmWhileActive,
+		"hourlyPrice": pl.HourlyPrice, "currency": pl.Currency}
+	for k, v := range pl.Template {
+		// Through JSON, as the event stores it: 1 and 1.0 compare equal.
+		b, _ := json.Marshal(v)
+		var norm any
+		_ = json.Unmarshal(b, &norm)
+		f["template."+k] = norm
+	}
+	return f
+}
+
+// poolSettings is a pool's PoolSettings, and its shared, retired and
+// default mark, as config_changed reports them.
 // A pool holds no secrets: a template is where and what to launch (region,
 // launch template, subnets, tags), and credentials are luxd's own.
 func poolSettings(ctx context.Context, tx pgx.Tx, tenantID *string, name string) (*poolSnapshot, error) {
 	var p poolSnapshot
-	var provider, price, currency string
-	var tmpl map[string]any
-	var minH, maxH, warm, sda int
-	var wwa, shared, retired, isDefault bool
+	var pl Pool
+	var sda int
+	var shared, retired, isDefault bool
 	err := tx.QueryRow(ctx, `SELECT id, provider, template, min_hosts, max_hosts, warm_hosts, coalesce(scale_down_after_s, 0),
 			warm_while_active, shared, retired, is_default, coalesce(trim_scale(hourly_price)::text, ''), coalesce(price_currency, '')
 		FROM pools WHERE tenant_id IS NOT DISTINCT FROM $1 AND name = $2 FOR NO KEY UPDATE`, tenantID, name).
-		Scan(&p.id, &provider, &tmpl, &minH, &maxH, &warm, &sda, &wwa, &shared, &retired, &isDefault, &price, &currency)
+		Scan(&p.id, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts, &sda, &pl.WarmWhileActive,
+			&shared, &retired, &isDefault, &pl.HourlyPrice, &pl.Currency)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	p.fields = map[string]any{"provider": provider, "minHosts": minH, "maxHosts": maxH, "warmHosts": warm,
-		"scaleDownAfterSeconds": sda, "warmWhileActive": wwa, "shared": shared, "retired": retired,
-		"isDefault": isDefault, "hourlyPrice": price, "currency": currency}
-	for k, v := range tmpl {
-		// Through JSON, as the event stores it: 1 and 1.0 compare equal.
-		b, _ := json.Marshal(v)
-		var norm any
-		_ = json.Unmarshal(b, &norm)
-		p.fields["template."+k] = norm
-	}
+	pl.ScaleDownAfter.Duration = time.Duration(sda) * time.Second
+	p.fields = PoolSettings(pl)
+	p.fields["shared"], p.fields["retired"], p.fields["isDefault"] = shared, retired, isDefault
 	return &p, nil
 }
 

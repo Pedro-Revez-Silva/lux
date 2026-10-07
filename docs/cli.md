@@ -190,7 +190,7 @@ lux hosts drain <host> [--force-evict]   # admin: no new Runs; without --force-e
 lux hosts price <host> --hourly-price 0.40 --currency USD   # admin: a static host's flat price, from now on
 lux hosts price <host> --clear           # admin: no price, so its Runs get no compute cost from now on
 lux pools ls                             # DEFAULT: * on the pool Runs naming no pool go to; operators without --tenant: every tenant's, OWNER platform or the tenant
-lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON] [--default]
+lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON] [--default] [--replace] [--dry-run]
 lux pools set <name> --default           # admin: make it the tenant's default pool (moves the mark); changes nothing else
 lux pools set <name> --default=false     # admin: clear it
 lux pools set <name> --provider static --hourly-price 0.40 --currency USD   # default price of hosts registering into it
@@ -264,6 +264,36 @@ without it keeps the pool's mark. Given alone, it changes only the mark;
 with any other flag, `--provider` is needed too (the pool is replaced).
 An operator without `--tenant` marks a platform pool as the platform's
 default.
+
+Because `pools set` replaces the whole pool, it first reads the pool it
+would replace (the same owner) and prints each change, one per line, as
+`pool.config_changed` names them: `maxHosts 4→10`,
+`template.nestedContainers true→-` (`-`: absent). A set that would
+**remove** something is refused (exit 4, nothing written) with the list of
+removals: a template key the pool has and the set leaves out, or a
+`--scale-down-after`, `--warm-while-active` or `--hourly-price`/`--currency`
+the pool has and the set does not give. Pass `--replace` to write it
+anyway. A value change alone (`4→10`) is printed and written. A set naming
+no pool of that owner prints `creating pool <name> (no pool of that name
+for <owner>)` and creates it, so a set aimed at a pool that was renamed
+shows it. `--dry-run` prints the changes (or `no changes`) and writes
+nothing. The check is the CLI's: the API's `POST /v1/pools` stays a full
+replace.
+
+```bash
+$ lux pools set default --provider ec2 --max 10 --template "$TEMPLATE"
+maxHosts 4→10
+template.nestedContainers true→-
+lux: pools set would remove template.nestedContainers from pool default; nothing written. Pass --replace to remove them, or give them again.
+```
+
+An `ec2` pool is stored only if EC2 says its template would launch: luxd
+sends a dry-run `RunInstances` for it first
+([operations](operations.md#ec2-pools)). A refusal is exit 4,
+`template: ec2 cannot launch it: <EC2's code>: <message>`, e.g.
+`InvalidLaunchTemplateName.NotFound` for a launch template that no longer
+exists, and the pool keeps what it had. A set that keeps the pool's
+template as it is (changing only `--max`, say) is not checked again.
 
 ## Status and history
 

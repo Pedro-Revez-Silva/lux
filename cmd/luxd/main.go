@@ -402,23 +402,32 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		if err := server.ValidPoolPrice(*provider, *price, *currency); err != nil {
 			return err
 		}
+		log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 		id := ids.New(ids.Pool)
-		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
+		checkedID, err := server.CheckPoolTemplate(ctx, db, providers(cfg, log), *tenant, *name, id, *provider, tmpl)
+		if err != nil {
+			return err
+		}
+		err = db.Tx(ctx, sys, func(tx pgx.Tx) error {
 			if err := server.CheckPoolName(ctx, tx, optional(*tenant), *name); err != nil {
 				return err
 			}
 			// SavePool records the change and any mark it moves as pool events, in this transaction.
 			return server.SavePool(ctx, tx, *tenant, *name, isDefault.v, func() error {
-				_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
+				var storedID string
+				err := tx.QueryRow(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
 						scale_down_after_s, warm_while_active, hourly_price, price_currency)
 					VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11, nullif($12, '')::numeric, nullif($13, ''))
 					ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 						min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts, shared = EXCLUDED.shared,
 						scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
 						hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
-						`+server.PoolRevive,
-					id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive, *price, *currency)
-				return err
+						`+server.PoolRevive+` RETURNING id`,
+					id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive, *price, *currency).Scan(&storedID)
+				if err != nil {
+					return err
+				}
+				return server.ConfirmCheckedPool(*name, storedID, checkedID)
 			})
 		})
 		if err != nil {

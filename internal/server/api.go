@@ -387,8 +387,12 @@ func (s *Server) routes(api huma.API) {
 			"A body of exactly `name` and `isDefault` marks an existing pool and changes nothing else; " +
 			"any other field without `provider` is a 422 `invalid_pool`. " +
 			"From an operator key naming no tenant, a marker-only body marks a platform pool as the platform's default, " +
-			"for tenants without one of their own.",
-		Errors: []int{http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity},
+			"for tenants without one of their own. " +
+			"An `ec2` pool is stored only if EC2 would launch its template (a dry-run RunInstances per subnet and fallback type, within 10s); " +
+			"otherwise 422 `invalid_pool` `template: ec2 cannot launch it: <EC2's code>: <message>`. " +
+			"A pool set again with the same provider and an identical template is not checked. " +
+			"409 `pool_changed`: another set created or replaced the pool while its template was being checked; set it again.",
+		Errors: []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "admin", s.putPool)
 	register(s, api, huma.Operation{
 		OperationID: "deletePool", Method: http.MethodDelete, Path: "/v1/pools/{name}", Tags: []string{"pools"},
@@ -3100,20 +3104,31 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	if pl.ScaleDownAfter.Duration < 0 || pl.ScaleDownAfter.Duration > 0 && sda == nil {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "scaleDownAfter must be at least 1s")
 	}
+	// A pool this set creates gets newID, which its check's lux:pool-id
+	// tag carries; an existing one keeps its own.
+	newID := ids.New(ids.Pool)
+	checkedID, err := CheckPoolTemplate(ctx, s.db, s.cfg.Providers, p.TenantID, pl.Name, newID, pl.Provider, pl.Template)
+	if err != nil {
+		return nil, err
+	}
 	var out Pool
-	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+	err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		err := SavePool(ctx, tx, p.TenantID, pl.Name, pl.IsDefault, func() error {
-			_, err := tx.Exec(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
+			var storedID string
+			err := tx.QueryRow(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
 					scale_down_after_s, warm_while_active, hourly_price, price_currency)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''))
 				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
 					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
 					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
-					`+PoolRevive,
-				ids.New(ids.Pool), p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
-				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency)
-			return err
+					`+PoolRevive+` RETURNING id`,
+				newID, p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
+				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency).Scan(&storedID)
+			if err != nil {
+				return err
+			}
+			return ConfirmCheckedPool(pl.Name, storedID, checkedID)
 		})
 		if err != nil {
 			return err

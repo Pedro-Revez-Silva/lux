@@ -30,6 +30,13 @@ type Provider interface {
 	Instances(ctx context.Context, template json.RawMessage, tags map[string]string) (map[string]Instance, error)
 }
 
+// Checker is a Provider that can tell, without launching, whether a pool
+// template would launch with tags (LaunchTags): asked when a pool is set
+// (CheckPoolTemplate).
+type Checker interface {
+	Check(ctx context.Context, template json.RawMessage, tags map[string]string) error
+}
+
 // Launched is a host as the provider started it. InstanceType is the
 // provider's answer, not the template's (a launch template may choose it);
 // empty fields are unknown and stored as NULL.
@@ -58,7 +65,7 @@ type Instance struct {
 // instances whatever its database knows (a launch whose reply was lost,
 // a row written off too early).
 const (
-	tagManaged    = "lux:managed"
+	TagManaged    = "lux:managed"
 	tagDeployment = "lux:deployment" // which lux database launched it
 	tagPool       = "lux:pool"       // its name at launch; informational, not updated on rename
 	tagPoolID     = "lux:pool-id"    // what a pool's instances are listed by
@@ -615,7 +622,26 @@ func (s *Server) providerGone(ctx context.Context, h hostRef, st *poolState) {
 // poolTags are what a pool's instances are listed by: its id, never its
 // name, which a rename changes.
 func (s *Server) poolTags(pl poolRow) map[string]string {
-	return map[string]string{tagManaged: "true", tagDeployment: s.deployment, tagPoolID: pl.ID}
+	return poolTagsOf(s.deployment, pl.ID)
+}
+
+func poolTagsOf(deployment, poolID string) map[string]string {
+	return map[string]string{TagManaged: "true", tagDeployment: deployment, tagPoolID: poolID}
+}
+
+// launchName is the name of host hostID launched into pool poolName.
+func launchName(poolName, hostID string) string {
+	return fmt.Sprintf("%s-%s", poolName, hostID[len(hostID)-8:])
+}
+
+// LaunchTags are the tags a launch of host hostID into the pool poolID
+// (named poolName) puts on its instance: the pool's tags, plus Name and
+// lux:host for the host and lux:pool for the pool's name. The preflight
+// (CheckPoolTemplate) sends the same set.
+func LaunchTags(deployment, poolID, poolName, hostID string) map[string]string {
+	tags := poolTagsOf(deployment, poolID)
+	tags["Name"], tags[tagHost], tags[tagPool] = launchName(poolName, hostID), hostID, poolName
+	return tags
 }
 
 // warm is how many idle hosts the pool keeps ready: its warm count, or
@@ -737,7 +763,7 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 // nil, is the scale-up this launch starts, recorded with it.
 func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[string]any) error {
 	hostID := ids.New(ids.Host)
-	name := fmt.Sprintf("%s-%s", pl.Name, hostID[len(hostID)-8:])
+	name := launchName(pl.Name, hostID)
 	token := ids.Secret("luxh")
 	tokenID := ids.New(ids.HostToken)
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -777,8 +803,7 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 		return err
 	}
 	env := map[string]string{"LUX_URL": s.cfg.RunnerURL, "LUX_HOST_TOKEN": token, "LUX_HOST_NAME": name}
-	tags := s.poolTags(pl)
-	tags["Name"], tags[tagHost], tags[tagPool] = name, hostID, pl.Name
+	tags := LaunchTags(s.deployment, pl.ID, pl.Name, hostID)
 	l, launchErr := prov.Launch(ctx, pl.Template, tags, env)
 	if launchErr != nil {
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {

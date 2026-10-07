@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -624,12 +625,23 @@ name): a tenant's pool and a platform pool may share a name.`,
 	}
 	var p server.Pool
 	var template string
-	var isDefault bool
+	var isDefault, replace, dryRun bool
 	set := &cobra.Command{
 		Use:   "set <name>",
 		Short: "Create or update a pool",
 		Long: `Create or update a pool. Every flag but --default replaces the pool's
 setting, omitted ones included.
+
+Before writing, the pool as it is now is compared with what this set sends,
+and each change is printed (maxHosts 4→10, template.nestedContainers
+true→-). A set that would remove something (a template key, or a
+--scale-down-after, --warm-while-active or price the pool has) is refused,
+exit 4, naming what it would remove: --replace accepts the removals. A set
+naming no pool of yours prints "creating pool <name>". --dry-run prints the
+changes and writes nothing.
+
+luxd checks an ec2 pool's template can launch before storing it (a dry-run
+RunInstances; docs/operations.md, EC2 pools), unless it is unchanged.
 
 --default marks the pool as the tenant's default: Runs whose spec names no
 pool go to it from now on (Runs already submitted keep theirs). It moves
@@ -638,18 +650,66 @@ alone, --default changes only the mark of an existing pool.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p.Name = args[0]
+			marker := false
 			if cmd.Flags().Changed("default") {
 				p.IsDefault = &isDefault
-				if !slices.ContainsFunc(poolFields, cmd.Flags().Changed) {
-					// Exactly these two fields: server.Pool would send its
-					// zero settings too, which luxd refuses without provider.
-					return a.c.Do(ctxOf(cmd), "POST", "/v1/pools", map[string]any{"name": p.Name, "isDefault": isDefault}, nil)
-				}
+				marker = !slices.ContainsFunc(poolFields, cmd.Flags().Changed)
 			}
 			if template != "" {
 				if err := json.Unmarshal([]byte(template), &p.Template); err != nil {
 					return fmt.Errorf("--template: %w", err)
 				}
+			}
+			if marker && !dryRun {
+				// Exactly these two fields: server.Pool would send its
+				// zero settings too, which luxd refuses without provider.
+				return a.c.Do(ctxOf(cmd), "POST", "/v1/pools", map[string]any{"name": p.Name, "isDefault": isDefault}, nil)
+			}
+			current, owner, platform, err := a.poolTarget(cmd, p.Name)
+			if err != nil {
+				return err
+			}
+			if platform && !marker {
+				if dryRun {
+					return errors.New("pools set writes a tenant's pool: name one with --tenant, LUX_TENANT, or tenant in ~/.config/lux/config.toml")
+				}
+				// luxd refuses it (tenant_required), and main says how to
+				// name a tenant.
+				return a.c.Do(ctxOf(cmd), "POST", "/v1/pools", p, nil)
+			}
+			if current == nil {
+				if marker {
+					return fmt.Errorf("no pool %s to mark", p.Name)
+				}
+				fmt.Fprintf(a.stdout, "creating pool %s (no pool of that name for %s)\n", p.Name, owner)
+				if dryRun {
+					return nil
+				}
+				return a.c.Do(ctxOf(cmd), "POST", "/v1/pools", p, nil)
+			}
+			before, after := server.PoolSettings(*current), server.PoolSettings(p)
+			// luxd stores a price without trailing zeros (0.40 lists as 0.4).
+			after["hourlyPrice"] = trimDecimal(p.HourlyPrice)
+			if marker {
+				before, after = map[string]any{}, map[string]any{}
+			}
+			if p.IsDefault != nil {
+				before["isDefault"], after["isDefault"] = current.IsDefault != nil && *current.IsDefault, *p.IsDefault
+			}
+			changes := changeLines(server.PoolChanges(before, after))
+			if len(changes) == 0 {
+				fmt.Fprintln(a.stdout, "no changes")
+			}
+			for _, c := range changes {
+				fmt.Fprintln(a.stdout, c)
+			}
+			if dryRun {
+				return nil
+			}
+			if removed := removals(before, after); len(removed) > 0 && !replace {
+				fmt.Fprintf(a.stderr, "lux: pools set would remove %s from pool %s; nothing written. Pass --replace to remove them, or give them again.\n",
+					strings.Join(removed, ", "), p.Name)
+				return exitCode(4)
 			}
 			return a.c.Do(ctxOf(cmd), "POST", "/v1/pools", p, nil)
 		},
@@ -712,8 +772,67 @@ finds this pool. --platform renames the platform's pool of that name
 	set.Flags().StringVar(&p.HourlyPrice, "hourly-price", "", "static pools: default hourly price of hosts registering into it, a decimal (with --currency); existing hosts keep theirs. Like every flag here, it replaces the pool's: omitted, the pool has no default price")
 	set.Flags().StringVar(&p.Currency, "currency", "", "ISO 4217 currency of --hourly-price (e.g. USD)")
 	set.Flags().BoolVar(&isDefault, "default", false, "mark it the tenant's default pool, for Runs that name none (--default=false clears it; omitted: unchanged)")
+	set.Flags().BoolVar(&replace, "replace", false, "write even when the set removes template keys, a scale-down time, warm-while-active or a price the pool has")
+	set.Flags().BoolVar(&dryRun, "dry-run", false, "print what would change and write nothing")
 	cmd.AddCommand(ls, set, a.poolEventsCmd())
 	return cmd
+}
+
+// poolTarget is the live pool name that pools set would write, nil when
+// there is none; its owner as the operator knows it (the key's tenant,
+// --tenant's, or the platform); and whether that is the platform, which an
+// operator without --tenant targets (only --default may write there).
+func (a *app) poolTarget(cmd *cobra.Command, name string) (*server.Pool, string, bool, error) {
+	var who server.Whoami
+	if err := a.c.Do(ctxOf(cmd), "GET", "/v1/whoami", nil, &who); err != nil {
+		return nil, "", false, err
+	}
+	platform, owner := false, "tenant "+who.Tenant
+	if who.Operator {
+		platform, owner = a.c.Tenant == "", "tenant "+a.c.Tenant
+		if platform {
+			owner = "the platform"
+		}
+	}
+	var resp struct {
+		Pools []server.Pool `json:"pools"`
+	}
+	if err := a.c.Do(ctxOf(cmd), "GET", "/v1/pools", nil, &resp); err != nil {
+		return nil, "", false, err
+	}
+	for _, pl := range resp.Pools {
+		if pl.Name == name && pl.Platform == platform {
+			return &pl, owner, platform, nil
+		}
+	}
+	return nil, owner, platform, nil
+}
+
+// trimDecimal is a decimal string without trailing fractional zeros.
+func trimDecimal(s string) string {
+	if !strings.Contains(s, ".") {
+		return s
+	}
+	return strings.TrimSuffix(strings.TrimRight(s, "0"), ".")
+}
+
+// removals are the settings before has that after drops: template keys,
+// and a scale-down time, warm-while-active or price set before and unset
+// after. A pools set replaces the pool, so these go silently otherwise.
+func removals(before, after map[string]any) []string {
+	var out []string
+	for k := range before {
+		if _, kept := after[k]; strings.HasPrefix(k, "template.") && !kept {
+			out = append(out, k)
+		}
+	}
+	for _, k := range []string{"scaleDownAfterSeconds", "warmWhileActive", "hourlyPrice", "currency"} {
+		if v, ok := before[k]; ok && !reflect.ValueOf(v).IsZero() && reflect.ValueOf(after[k]).IsZero() {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // umask is the process's file-creation mask (read by setting it back).

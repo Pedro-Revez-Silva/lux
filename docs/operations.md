@@ -506,6 +506,33 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   ```
 
   Without it, `--warm` hosts are kept at all times.
+- **Checked when set:** before an `ec2` pool is stored (`lux pools set`,
+  `POST /v1/pools`, `luxd admin create-pool`), luxd asks EC2 whether its
+  template would launch: `RunInstances` with `DryRun`, once per subnet
+  with `instanceType`, then once per `fallbackInstanceTypes` entry in the
+  first subnet (no subnets: once per type). What a launch sends and the
+  check sends the same: the launch template, instance type, subnet, spot
+  market options, and every tag key with the pool's values
+  (`lux:managed`, `lux:deployment`, `lux:pool-id`, `lux:pool`, and the
+  template's `tags`); a pool the set creates is checked with the id it
+  is then stored under. What is representative: the host's tag values
+  (`Name`, `lux:host` carry a fresh host id, not the one a launch will
+  use), and the user data, rendered in the template's format without the
+  host's URL, token and name and without the instance type's memory.
+  EC2 answers `DryRunOperation` when the call would have been allowed;
+  any other answer refuses the pool, 422
+  `invalid_pool` `template: ec2 cannot launch it: <code>: <message>` (a
+  missing launch template, subnet or permission), and nothing is stored.
+  A dry run does not test capacity. The whole check has 10s. It needs no
+  IAM beyond launching: a dry-run `ec2:RunInstances` is authorised like
+  the real call (same resources, same conditions), so luxd's launch
+  policy covers it, and a policy that would refuse a launch refuses the
+  check (`UnauthorizedOperation`), except for a condition on the host's
+  own tag values or the user data. Setting a pool again with the same
+  provider and an identical template is not checked, so a change to
+  `--max` needs no EC2. A set that races another create of the same pool
+  (or its replacement under a new id) fails with 409 `pool_changed` and
+  stores nothing; set it again.
 - **Failures:** provider launch errors, including capacity errors, delay
   the pool's next launch by 15s, then 30s, 60s … up to 5m after each
   consecutive failed attempt returns. Quota refusals, caller cancellation

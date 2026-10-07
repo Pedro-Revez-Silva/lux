@@ -4,9 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -275,5 +281,144 @@ func TestAdminPoolDefaultEvents(t *testing.T) {
 	}
 	if marked != "b" || maxA != 0 {
 		t.Fatalf("after a refused create-pool: default %q, a's max_hosts %d; want b and 0", marked, maxA)
+	}
+}
+
+// create-pool --provider ec2 asks EC2 (a dry run) whether the template
+// would launch, and stores nothing when it would not.
+func TestAdminCreatePoolChecksTheTemplateLaunches(t *testing.T) {
+	cfg, db := adminDB(t)
+	ctx := context.Background()
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_PROFILE", "")
+	var dryRuns atomic.Int64
+	var mu sync.Mutex
+	var successfulTags map[string]string
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if r.PostForm.Get("DryRun") == "true" {
+			dryRuns.Add(1)
+		}
+		if lt := r.PostForm.Get("LaunchTemplate.LaunchTemplateName"); lt != "lux-runner" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `<Response><Errors><Error><Code>InvalidLaunchTemplateName.NotFound</Code><Message>The specified launch template, with template name %s, does not exist.</Message></Error></Errors><RequestID>1</RequestID></Response>`, lt)
+			return
+		}
+		tags := map[string]string{}
+		for i := 1; r.PostForm.Has(fmt.Sprintf("TagSpecification.1.Tag.%d.Key", i)); i++ {
+			tags[r.PostForm.Get(fmt.Sprintf("TagSpecification.1.Tag.%d.Key", i))] = r.PostForm.Get(fmt.Sprintf("TagSpecification.1.Tag.%d.Value", i))
+		}
+		mu.Lock()
+		successfulTags = tags
+		mu.Unlock()
+		w.WriteHeader(http.StatusPreconditionFailed)
+		_, _ = io.WriteString(w, `<Response><Errors><Error><Code>DryRunOperation</Code><Message>Request would have succeeded, but DryRun flag is set.</Message></Error></Errors><RequestID>1</RequestID></Response>`)
+	}))
+	defer fake.Close()
+	cfg.EC2.Endpoint = fake.URL
+	stdout := os.Stdout
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = devnull
+	t.Cleanup(func() { os.Stdout = stdout; devnull.Close() })
+
+	err = admin(ctx, cfg, []string{"create-pool", "--name", "arm64", "--provider", "ec2", "--max", "4",
+		"--template", `{"region": "eu-north-1", "launchTemplate": "lux-runner-arm64"}`})
+	if err == nil || !strings.Contains(err.Error(), "template: ec2 cannot launch it: InvalidLaunchTemplateName.NotFound") {
+		t.Fatalf("err %v, want the check's refusal", err)
+	}
+	var n int
+	if err := db.QueryRow(ctx, `SELECT count(*) FROM pools`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("%d pools stored after a refused create-pool", n)
+	}
+	if err := admin(ctx, cfg, []string{"create-pool", "--name", "arm64", "--provider", "ec2", "--max", "4",
+		"--template", `{"region": "eu-north-1", "launchTemplate": "lux-runner"}`}); err != nil {
+		t.Fatalf("a template that launches: %v", err)
+	}
+	if dryRuns.Load() != 2 {
+		t.Errorf("%d dry runs, want one per create-pool", dryRuns.Load())
+	}
+	// The successful check's tags are a launch's in the stored pool.
+	var storedID, deployment string
+	if err := db.QueryRow(ctx, `SELECT id FROM pools WHERE name = 'arm64'`).Scan(&storedID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(ctx, `SELECT value FROM settings WHERE name = 'deployment'`).Scan(&deployment); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	got := successfulTags
+	mu.Unlock()
+	if got["lux:pool-id"] != storedID || got["lux:deployment"] != deployment || got["lux:pool"] != "arm64" {
+		t.Fatalf("checked tags %v do not identify stored pool %s (deployment %s)", got, storedID, deployment)
+	}
+	host := got["lux:host"]
+	if want := server.LaunchTags(deployment, storedID, "arm64", host); !maps.Equal(got, want) ||
+		!strings.HasPrefix(host, "host_") || got["Name"] != "arm64-"+host[len(host)-8:] {
+		t.Errorf("checked tags %v, want a launch's %v with a host_ id", got, want)
+	}
+}
+
+// A create-pool whose pool another create-pool makes while its template is
+// checked would store the pool under an id its check did not carry: it
+// fails with pool_changed, and the other create's pool stays as it was.
+func TestAdminCreatePoolRefusesAPoolCreatedDuringItsCheck(t *testing.T) {
+	cfg, db := adminDB(t)
+	ctx := context.Background()
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", t.TempDir()+"/none")
+	t.Setenv("AWS_PROFILE", "")
+	var interleave atomic.Bool
+	var otherErr error
+	interleave.Store(true)
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The first dry run creates the pool by another create-pool
+		// (a static one: no check of its own) before it answers.
+		if interleave.Swap(false) {
+			otherErr = admin(ctx, cfg, []string{"create-pool", "--name", "arm64", "--max", "2"})
+		}
+		w.WriteHeader(http.StatusPreconditionFailed)
+		_, _ = io.WriteString(w, `<Response><Errors><Error><Code>DryRunOperation</Code><Message>Request would have succeeded, but DryRun flag is set.</Message></Error></Errors><RequestID>1</RequestID></Response>`)
+	}))
+	defer fake.Close()
+	cfg.EC2.Endpoint = fake.URL
+	stdout := os.Stdout
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = devnull
+	t.Cleanup(func() { os.Stdout = stdout; devnull.Close() })
+
+	err = admin(ctx, cfg, []string{"create-pool", "--name", "arm64", "--provider", "ec2", "--max", "4",
+		"--template", `{"region": "eu-north-1", "launchTemplate": "lux-runner"}`})
+	if otherErr != nil {
+		t.Fatalf("the other create-pool: %v", otherErr)
+	}
+	var he *server.HTTPError
+	if !errors.As(err, &he) || he.Code != "pool_changed" ||
+		!strings.Contains(err.Error(), "pool arm64 was created or replaced by another write while its template was being checked") {
+		t.Fatalf("err %v, want pool_changed", err)
+	}
+	var provider string
+	var maxHosts, n, events int
+	if err := db.QueryRow(ctx, `SELECT (SELECT count(*) FROM pools), provider, max_hosts, (SELECT count(*) FROM pool_events)
+		FROM pools WHERE name = 'arm64'`).Scan(&n, &provider, &maxHosts, &events); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 || provider != "static" || maxHosts != 2 || events != 1 {
+		t.Errorf("%d pools, arm64 %s max %d, %d events; want the other create's static max 2 and its one event", n, provider, maxHosts, events)
 	}
 }

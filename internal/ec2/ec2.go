@@ -54,6 +54,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -91,7 +92,10 @@ type Template struct {
 
 type Provider struct {
 	endpoint string
-	clients  map[string]*awsec2.Client
+	// clientsMu guards clients: Check runs from request handlers while the
+	// provisioner launches, lists and terminates.
+	clientsMu sync.Mutex
+	clients   map[string]*awsec2.Client
 	// next subnet per pool: launches spread across the pool's subnets.
 	next map[string]int
 	// memory is each instance type's memory in bytes, per region, as
@@ -152,8 +156,14 @@ func (p *Provider) SkipNoCapacityFor(d time.Duration) {
 	p.noCapacityFor = d
 }
 
+// client is region's cached client, built on first use. The build runs
+// without clientsMu (LoadDefaultConfig may reach IMDS or STS); when two
+// callers build the same region, the first one published wins.
 func (p *Provider) client(ctx context.Context, region string) (*awsec2.Client, error) {
-	if c := p.clients[region]; c != nil {
+	p.clientsMu.Lock()
+	c := p.clients[region]
+	p.clientsMu.Unlock()
+	if c != nil {
 		return c, nil
 	}
 	var opts []func(*config.LoadOptions) error
@@ -164,11 +174,16 @@ func (p *Provider) client(ctx context.Context, region string) (*awsec2.Client, e
 	if err != nil {
 		return nil, err
 	}
-	c := awsec2.NewFromConfig(cfg, func(o *awsec2.Options) {
+	c = awsec2.NewFromConfig(cfg, func(o *awsec2.Options) {
 		if p.endpoint != "" {
 			o.BaseEndpoint = aws.String(p.endpoint)
 		}
 	})
+	p.clientsMu.Lock()
+	defer p.clientsMu.Unlock()
+	if won := p.clients[region]; won != nil {
+		return won, nil
+	}
 	p.clients[region] = c
 	return c, nil
 }
@@ -185,13 +200,27 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 		return none, err
 	}
 	if t.LaunchTemplate == "" {
-		return none, errors.New("ec2: the pool template needs a launchTemplate")
+		return none, errNoLaunchTemplate
 	}
 	c, err := p.client(ctx, t.Region)
 	if err != nil {
 		return none, err
 	}
 	env = runnerEnv(t, env)
+	start := 0
+	if len(t.Subnets) > 0 {
+		start = p.next[t.LaunchTemplate] % len(t.Subnets)
+		p.next[t.LaunchTemplate]++
+	}
+	return p.tryCandidates(ctx, c, t, runInput(t, tags), env, start)
+}
+
+var errNoLaunchTemplate = errors.New("ec2: the pool template needs a launchTemplate")
+
+// runInput is the RunInstancesInput every candidate of t's launches shares:
+// the launch template, its tags (t's and tags), and the spot market.
+// withCandidate sets the rest; Launch then adds the user data.
+func runInput(t Template, tags map[string]string) awsec2.RunInstancesInput {
 	lt := &types.LaunchTemplateSpecification{Version: aws.String("$Default")}
 	if strings.HasPrefix(t.LaunchTemplate, "lt-") {
 		lt.LaunchTemplateId = aws.String(t.LaunchTemplate)
@@ -224,12 +253,86 @@ func (p *Provider) Launch(ctx context.Context, template json.RawMessage, tags, e
 			},
 		}
 	}
-	start := 0
-	if len(t.Subnets) > 0 {
-		start = p.next[t.LaunchTemplate] % len(t.Subnets)
-		p.next[t.LaunchTemplate]++
+	return base
+}
+
+// withCandidate is base asking for cand's instance type and subnet; an
+// empty one leaves the launch template's.
+func withCandidate(base awsec2.RunInstancesInput, cand candidate) awsec2.RunInstancesInput {
+	in := base
+	if cand.instanceType != "" {
+		in.InstanceType = types.InstanceType(cand.instanceType)
 	}
-	return p.tryCandidates(ctx, c, t, base, env, start)
+	if cand.subnet != "" {
+		in.SubnetId = aws.String(cand.subnet)
+	}
+	return in
+}
+
+// CheckTimeout bounds a whole Check.
+const CheckTimeout = 10 * time.Second
+
+// Check asks EC2 whether template would launch with tags, launching
+// nothing: RunInstances with DryRun, built by Launch's code (launch
+// template, instance type, subnet, market, tags merged with the
+// template's). The caller passes a launch's tags (server.LaunchTags); the
+// user data is the template's format rendered without a host's URL, token
+// or instance-type memory. One call per subnet with instanceType, then one
+// per fallbackInstanceTypes entry in the first subnet. EC2 answers
+// DryRunOperation where the real call would have been allowed; DryRun does
+// not test capacity. The first other answer is the error, EC2's code
+// first: "<code>: <message> (<candidate>)".
+func (p *Provider) Check(ctx context.Context, template json.RawMessage, tags map[string]string) error {
+	t, err := parse(template)
+	if err != nil {
+		return err
+	}
+	if t.LaunchTemplate == "" {
+		return errNoLaunchTemplate
+	}
+	ud, err := renderUserData(t.UserData, runnerEnv(t, map[string]string{}))
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, CheckTimeout)
+	defer cancel()
+	c, err := p.client(ctx, t.Region)
+	if err != nil {
+		return err
+	}
+	base := runInput(t, tags)
+	base.DryRun = aws.Bool(true)
+	base.UserData = aws.String(base64.StdEncoding.EncodeToString(ud))
+	for _, cand := range checkCandidates(t) {
+		in := withCandidate(base, cand)
+		_, err := c.RunInstances(ctx, &in)
+		var ae smithy.APIError
+		switch {
+		case err == nil:
+			// EC2 answers a dry run it would allow with DryRunOperation;
+			// an endpoint that answers success has not confirmed it.
+			return fmt.Errorf("unexpected successful RunInstances response to DryRun; authorization was not confirmed (%s)", cand)
+		case !errors.As(err, &ae):
+			return fmt.Errorf("ec2 RunInstances (%s): %w", cand, err)
+		case ae.ErrorCode() != "DryRunOperation":
+			return fmt.Errorf("%s: %s (%s)", ae.ErrorCode(), ae.ErrorMessage(), cand)
+		}
+	}
+	return nil
+}
+
+// checkCandidates are the RunInstances Check asks about: instanceType in
+// every subnet, then each fallback type in the first.
+func checkCandidates(t Template) []candidate {
+	subnets := subnetsFrom(t, 0)
+	out := make([]candidate, 0, len(subnets)+len(t.FallbackInstanceTypes))
+	for _, sn := range subnets {
+		out = append(out, candidate{t.InstanceType, sn})
+	}
+	for _, it := range t.FallbackInstanceTypes {
+		out = append(out, candidate{it, subnets[0]})
+	}
+	return out
 }
 
 // tryCandidates sends base as each of t's candidates from subnet start,
@@ -257,14 +360,8 @@ func (p *Provider) tryCandidates(ctx context.Context, c *awsec2.Client, t Templa
 			ud = base64.StdEncoding.EncodeToString(raw)
 			userData[cand.instanceType] = ud
 		}
-		in := base
+		in := withCandidate(base, cand)
 		in.UserData = aws.String(ud)
-		if cand.instanceType != "" {
-			in.InstanceType = types.InstanceType(cand.instanceType)
-		}
-		if cand.subnet != "" {
-			in.SubnetId = aws.String(cand.subnet)
-		}
 		out, err := c.RunInstances(ctx, &in, noCapacityRetries)
 		if err == nil {
 			delete(p.noCapacity, key)
