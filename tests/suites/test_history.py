@@ -39,7 +39,7 @@ def test_run_and_host_history(lux, runners, hosts):
     # The text form draws sparklines; CPU in cores, or millicores under one.
     out = lux.run("history", run_id).stdout
     assert re.search(r"^cpu .* (\d+(\.\d+)?m|[\d.]+ cores?)  \(", out, re.M), out
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_system_history_is_scoped(tenant_factory, operator, env, hosts):
@@ -59,7 +59,7 @@ def test_system_history_is_scoped(tenant_factory, operator, env, hosts):
         wait_until(lambda: running(operator), 30, 1, "system history never showed it")
         # Another tenant's history does not.
         assert not running(b)
-        a.run("cancel", run_id)
+        a.run("terminate", run_id)
     finally:
         ra.stop_all()
 
@@ -70,7 +70,7 @@ def test_history_of_another_tenants_run_is_not_found(tenant_factory):
     with pytest.raises(CLIError) as e:
         a.run("history", run_id)
     assert e.value.code == 3
-    b.run("cancel", run_id)
+    b.run("terminate", run_id)
 
 
 def test_control_host_is_only_in_the_operators_whole_system_history(tenant_factory, operator):

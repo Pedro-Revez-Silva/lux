@@ -1,7 +1,7 @@
 """workload.beforeStop: a command the Run leaves behind with, on every stop.
 
 The shim runs it in the container before the workload is signalled — for a
-stop asked for, a cancel, a timeout — as the workload's user with its
+stop asked for, a terminate, a timeout — as the workload's user with its
 environment. What it writes into $LUX_ARTIFACTS is collected like any
 artifact, and a hook that overruns is cut off rather than holding the stop.
 """
@@ -54,12 +54,12 @@ def test_runs_before_a_stop_and_its_files_are_collected(lux, runners, hosts, tmp
     assert (tmp_path / "1/.lux/artifacts/hook-home").read_text().strip() != ""
 
 
-def test_runs_before_a_cancel(lux, runners, hosts):
+def test_runs_before_a_terminate(lux, runners, hosts):
     runners.start(hosts[0])
     run_id = lux.submit(hooked())
     started(lux, run_id)
-    lux.run("cancel", run_id)
-    lux.wait_state(run_id, "cancelled", timeout=60)
+    lux.run("terminate", run_id)
+    lux.wait_state(run_id, "terminated", timeout=60)
     assert "/.lux/artifacts/final-count" in artifact_paths(lux, run_id)
 
 
@@ -69,7 +69,7 @@ def test_runs_before_a_timeout_stop(lux, runners, hosts):
     runners.start(hosts[0])
     run_id = lux.submit(hooked(timeout="8s"))
     started(lux, run_id)
-    lux.wait_state(run_id, "failed", "stopped", "succeeded", "cancelled", timeout=90)
+    lux.wait_state(run_id, "failed", "stopped", "succeeded", "terminated", timeout=90)
     assert "/.lux/artifacts/final-count" in artifact_paths(lux, run_id)
 
 

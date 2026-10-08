@@ -104,7 +104,7 @@ func (s *Server) sampleSystem(ctx context.Context) error {
 				SELECT coalesce(tenant_id, '') AS id, state, count(*) AS n,
 					count(*) FILTER (WHERE state = 'running' AND activity = 'busy') AS busy,
 					count(*) FILTER (WHERE state = 'running' AND activity = 'idle') AS idle
-				FROM runs WHERE state NOT IN ('succeeded', 'failed', 'cancelled')
+				FROM runs WHERE state NOT IN `+endedRunStates+`
 				GROUP BY GROUPING SETS ((tenant_id, state), (state))
 			),
 			runs_by AS (

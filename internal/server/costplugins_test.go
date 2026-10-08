@@ -446,7 +446,7 @@ func TestStoppedSettlementRestartsOnTerminalTransition(t *testing.T) {
 	finish(t, s, "t1", "r1", StateStopped)
 	drain(t, s)
 	execSQL(t, s, context.Background(), `UPDATE cost_sources SET settles_left = 0, next_at = NULL WHERE run_id = 'r1' AND source = 'ledger'`)
-	finish(t, s, "t1", "r1", StateCancelled)
+	finish(t, s, "t1", "r1", StateTerminated)
 	drain(t, s)
 	_, c := getCost(t, s, keys["t1"], "r1")
 	if c.Final || c.Status != "complete" || len(c.Lines) != 1 || c.Lines[0].Final {

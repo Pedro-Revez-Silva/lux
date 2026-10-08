@@ -389,7 +389,7 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) bool {
 			}
 		}
 		r.assign(ctx, a)
-	case proto.MsgStop, proto.MsgCancel:
+	case proto.MsgStop, proto.MsgTerminate:
 		var s proto.StopRequest
 		_ = json.Unmarshal(f.Data, &s)
 		if p := r.placement(f.RunID, f.Epoch); p != nil {

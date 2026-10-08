@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Badge, Button, ConfirmDialog, Dialog, formatBytes, IdChip, Select, useToast } from "@lux/design-system";
 import { IconTerminal } from "@lux/design-system/icons";
-import { api, errorText, EXEC_RUN_STATES, isApiError, RESUMABLE_RUN_STATES, TERMINAL_RUN_STATES, useQuery, type MigrateRequest, type ResumeRequest, type Run, type Snapshot } from "../../api/index.ts";
+import { api, ENDED_RUN_STATES, errorText, EXEC_RUN_STATES, isApiError, RESUMABLE_RUN_STATES, TERMINAL_RUN_STATES, useQuery, type MigrateRequest, type ResumeRequest, type Run, type Snapshot } from "../../api/index.ts";
 import { ButtonLink } from "./common.tsx";
 import { terminalPath } from "./TerminalPage.tsx";
 
@@ -12,7 +12,7 @@ export interface RunActionsProps {
   onChanged: (run: Run) => void;
 }
 
-type Open = "stop" | "cancel" | "resume" | "migrate" | null;
+type Open = "stop" | "terminate" | "resume" | "migrate" | null;
 
 export function RunActions({ run, operator, onChanged }: RunActionsProps) {
   const toast = useToast();
@@ -20,9 +20,13 @@ export function RunActions({ run, operator, onChanged }: RunActionsProps) {
   const [busy, setBusy] = useState(false);
 
   const terminal = TERMINAL_RUN_STATES.has(run.state);
-  const canStop = !terminal && run.state !== "stopped" && run.state !== "lost";
-  const canCancel = !terminal;
-  const canResume = RESUMABLE_RUN_STATES.has(run.state);
+  const canStop = !ENDED_RUN_STATES.has(run.state) && run.state !== "stopped" && run.state !== "lost";
+  const canTerminate = !terminal;
+  // Every resting state, unless resumePolicy is never; not run.resumable,
+  // which is false for a Run refused only for want of a snapshot, which may
+  // still be resumed from an older one (the dialog's fromSnapshot). Any
+  // other refusal comes back from the server as the dialog's error.
+  const canResume = RESUMABLE_RUN_STATES.has(run.state) && run.spec.resumePolicy !== "never";
   const canMigrate = operator && run.state === "running";
 
   /** Runs an action; returns the error (already toasted) or null on success. */
@@ -56,8 +60,8 @@ export function RunActions({ run, operator, onChanged }: RunActionsProps) {
       <Button disabled={!canStop} onClick={() => setOpen("stop")}>
         Stop
       </Button>
-      <Button variant="danger" disabled={!canCancel} onClick={() => setOpen("cancel")}>
-        Cancel
+      <Button variant="danger" disabled={!canTerminate} onClick={() => setOpen("terminate")}>
+        Terminate
       </Button>
       <Button variant="primary" disabled={!canResume} onClick={() => setOpen("resume")}>
         Resume
@@ -78,14 +82,14 @@ export function RunActions({ run, operator, onChanged }: RunActionsProps) {
         onCancel={() => setOpen(null)}
       />
       <ConfirmDialog
-        open={open === "cancel"}
-        title="Cancel run?"
-        description="The run ends for good: it cannot be resumed, and its held secrets are dropped. Its snapshots and artifacts stay until retention."
-        confirmLabel="Cancel run"
+        open={open === "terminate"}
+        title="Terminate run?"
+        description="The run ends for good: it cannot be resumed, and its held secrets are dropped. Its snapshots and output are deleted after retention; its artifacts stay until deleted."
+        confirmLabel="Terminate run"
         tone="danger"
         confirmText={run.id}
         loading={busy}
-        onConfirm={() => void act("Cancel", () => api.cancelRun(run.id))}
+        onConfirm={() => void act("Terminate", () => api.terminateRun(run.id))}
         onCancel={() => setOpen(null)}
       />
       {open === "resume" && <ResumeDialog run={run} operator={operator} busy={busy} onConfirm={(body) => act("Resume", () => api.resumeRun(run.id, body))} onCancel={() => setOpen(null)} />}

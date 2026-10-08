@@ -104,8 +104,35 @@ def test_generic_state_volume_survives_stop(lux, runners, hosts):
     out = wait_until(lambda: (lambda o: o if o[-1:] == ["2"] else None)(lux.logs(run_id).split()),
                      30, 0.5, "second placement never counted 2")
     assert out == ["1", "2"], out
-    lux.run("cancel", run_id, "--wait")
-    assert lux.get(run_id)["state"] == "cancelled"
+    # lux cancel is terminate's deprecated alias: it says so, and terminates.
+    p = lux.run("cancel", run_id, "--wait")
+    assert p.stderr.strip() == 'Command "cancel" is deprecated, use lux terminate', p.stderr
+    assert lux.get(run_id)["state"] == "terminated"
+
+
+def test_resume_a_succeeded_run(lux, runners, hosts):
+    """A Run that succeeded is resumable: lux ls --resumable lists it, and a
+    resume runs the generic adapter's resume.command on its restored state
+    volume, as for a stopped Run."""
+    runners.start(hosts[0])
+    spec = generic(ALPINE_IMAGE, "sh", "-c", "echo first > /data/log",
+                   volumes=[{"name": "data", "path": "/data", "kind": "state"}])
+    spec["workload"]["resume"] = {"command": ["sh", "-c", "echo again >> /data/log; cat /data/log"]}
+    run_id = lux.submit(spec)
+    run = lux.wait_state(run_id, "succeeded", timeout=60)
+    assert run["resumable"] is True, run
+    lux.wait_placement_uploaded(run_id)
+    assert run_id in [r["id"] for r in lux.json("ls", "--resumable")]
+    lux.run("resume", run_id)
+    lux.wait_output(run_id, "again", timeout=90)
+    run = lux.wait_state(run_id, "succeeded", timeout=90)
+    assert run["epoch"] == 2, run
+    assert lux.logs(run_id).split()[-2:] == ["first", "again"], lux.logs(run_id)
+    lux.run("terminate", run_id, "--wait")
+    run = lux.get(run_id)
+    assert run["state"] == "terminated" and run["resumable"] is False, run
+    p = lux.run("resume", run_id, check=False)
+    assert p.returncode == 4 and p.stderr.strip() == "lux: run is terminated", p
 
 
 def test_resume_resizes_a_stopped_run(lux, runners, hosts):
@@ -145,7 +172,7 @@ def test_resume_resizes_a_stopped_run(lux, runners, hosts):
     assert "disk" not in rz and rz["applied"]["disk"] == 2 << 30, rz
     wait_until(lambda: "count=3" in lux.logs(run_id), 60, 0.5, "the third placement never counted 3")
     assert lux.get(run_id)["spec"]["resources"]["disk"] == 2 << 30
-    lux.run("cancel", run_id, "--wait")
+    lux.run("terminate", run_id, "--wait")
 
 
 def test_ephemeral_volume_does_not(lux, runners, hosts):
@@ -158,7 +185,7 @@ def test_ephemeral_volume_does_not(lux, runners, hosts):
     lux.run("resume", run_id, "--wait")
     wait_until(lambda: lux.logs(run_id).split().count("ready") == 2, 30, 0.5, "the resumed Run never listed /scratch")
     assert "x" not in lux.logs(run_id).split()
-    lux.run("cancel", run_id, "--wait")
+    lux.run("terminate", run_id, "--wait")
 
 
 def test_input_to_a_stopped_run_points_at_resume(lux, runners, hosts, fake_image):
@@ -255,7 +282,7 @@ def test_snapshot_longer_than_the_lease_is_not_lost(lux, runners, hosts):
         normal_volume_export(a)
     lux.run("resume", run_id, "--wait")
     wait_until(lambda: lux.logs(run_id).split()[-1:] == ["2"], 30, 0.5, "second placement never counted 2")
-    lux.run("cancel", run_id, "--wait")
+    lux.run("terminate", run_id, "--wait")
 
 
 def test_host_dead_mid_snapshot_is_still_lost(lux, runners, hosts):
@@ -307,7 +334,7 @@ def test_resume_after_lost_on_the_same_host(lux, runners, hosts):
     wait_until(lambda: lux.logs(run_id).split()[-1:] == ["2"], 30, 0.5, "third placement never counted 2")
     ev3 = [e["type"] for e in lux.json("events", run_id) if e.get("epoch") == 3]
     assert "volumes.restored" in ev3, ev3
-    lux.run("cancel", run_id, "--wait")
+    lux.run("terminate", run_id, "--wait")
 
 
 
@@ -324,7 +351,7 @@ def test_same_host_resume_has_a_new_container(lux, runners, hosts):
     lux.run("stop", run_id, "--wait")
     lux.run("resume", run_id, "--wait")
     out = lux.wait_output(run_id, "count=2")
-    lux.run("cancel", run_id, "--wait")
+    lux.run("terminate", run_id, "--wait")
     assert "LEAK" not in out, out
     assert lux.events(run_id, "volumes.local") and not lux.events(run_id, "volumes.restored")
     # Documents the event a reused stopped container used to emit; the
@@ -348,4 +375,4 @@ def test_resume_elsewhere_right_after_stop(lux, runners, hosts, fake_image):
     lux.run("resume", run_id, "--wait", "--input", "read big.txt")
     lux.wait_output(run_id, "data")
     assert lux.get(run_id)["placements"][-1]["hostName"] == b.name
-    lux.run("cancel", blocker)
+    lux.run("terminate", blocker)

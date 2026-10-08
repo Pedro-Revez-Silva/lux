@@ -242,7 +242,7 @@ an estimate, or a cost source has not answered yet.`,
 		},
 	}
 	cmd.Flags().StringVar(&state, "state", "", "filter by state (comma-separated)")
-	cmd.Flags().BoolVar(&resumable, "resumable", false, "only Runs resume accepts (stopped, lost, failed; not those whose only snapshot report was refused)")
+	cmd.Flags().BoolVar(&resumable, "resumable", false, "only Runs resume accepts (stopped, lost, failed, succeeded; not resumePolicy never, nor those whose only snapshot report was refused)")
 	cmd.Flags().StringVar(&host, "host", "", "only Runs placed on this host (id or name), ever")
 	cmd.Flags().IntVar(&limit, "limit", 0, "at most this many (default 100, max 1000)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "filter by label key=value")
@@ -697,7 +697,7 @@ func (a *app) waitMoved(ctx context.Context, id string, epoch int) (*Run, error)
 		switch {
 		case run.State == server.StateRunning && run.Epoch > epoch:
 			return true, nil
-		case run.State == server.StateStopped && run.Epoch > epoch, run.State == server.StateLost, server.Terminal(run.State):
+		case run.State == server.StateStopped && run.Epoch > epoch, run.State == server.StateLost, server.Ended(run.State):
 			return true, fmt.Errorf("run is %s: %s", run.State, run.StateReason)
 		}
 		return false, nil
@@ -808,11 +808,23 @@ func (a *app) lifecycle(use, short, path string, wantStates ...string) *cobra.Co
 }
 
 func (a *app) stopCmd() *cobra.Command {
-	return a.lifecycle("stop", "Stop a Run gracefully (resumable)", "stop", "stopped", "succeeded", "failed", "cancelled", "lost")
+	return a.lifecycle("stop", "Stop a Run gracefully (resumable)", "stop", "stopped", "succeeded", "failed", "terminated", "lost")
 }
 
+func (a *app) terminateCmd() *cobra.Command {
+	// A terminate request ends terminated on every path (an ended Run at
+	// once, a live one when its placement exits or is lost).
+	return a.lifecycle("terminate", "Stop a Run and end it for good: terminated, never resumable", "terminate", "terminated")
+}
+
+// cancelCmd is terminate's old name, kept for scripts that use it: hidden,
+// and cobra notes the deprecation on stderr (its own output, which only
+// this command routes to a.stderr).
 func (a *app) cancelCmd() *cobra.Command {
-	return a.lifecycle("cancel", "Stop a Run and make it final", "cancel", "cancelled", "succeeded", "failed")
+	cmd := a.terminateCmd()
+	cmd.Use, cmd.Deprecated = "cancel <run>", "use lux terminate"
+	cmd.SetOut(a.stderr)
+	return cmd
 }
 
 // parseAddRepo reads --add-repo: name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false].
@@ -876,7 +888,7 @@ func (a *app) resumeCmd() *cobra.Command {
 	var follow, wait bool
 	cmd := &cobra.Command{
 		Use:   "resume <run>",
-		Short: "Resume a stopped, lost or failed Run on any host",
+		Short: "Resume a stopped, lost, failed or succeeded Run on any host",
 		Long: `Resume a Run. Its secrets must be supplied again (lux never stores them):
 from the environment (by name), a .env file (--secrets-from), or --secret NAME=VALUE.
 
@@ -1017,7 +1029,7 @@ resumes, and lux says why on stderr ("disk kept: ...").`,
 				return a.waitExit(ctx, args[0])
 			}
 			if wait {
-				r, err := a.waitState(ctx, args[0], "running", "succeeded", "failed", "cancelled", "stopped", "lost")
+				r, err := a.waitState(ctx, args[0], "running", "succeeded", "failed", "terminated", "stopped", "lost")
 				if err != nil {
 					return err
 				}
@@ -1221,7 +1233,7 @@ func (a *app) waitFor(ctx context.Context, id string, done func(*Run) (bool, err
 // waitExit waits for a Run to stop or end and returns its exit code as the
 // command's.
 func (a *app) waitExit(ctx context.Context, id string) error {
-	run, err := a.waitState(ctx, id, "succeeded", "failed", "cancelled", "stopped", "lost")
+	run, err := a.waitState(ctx, id, "succeeded", "failed", "terminated", "stopped", "lost")
 	if err != nil {
 		return err
 	}

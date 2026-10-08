@@ -206,7 +206,7 @@ type deleteArtifactsOutput struct {
 	} `nameHint:"ArtifactsDeleted"`
 }
 
-// deleteArtifacts deletes every artifact of a succeeded or cancelled Run:
+// deleteArtifacts deletes every artifact of a terminated Run:
 // retention never does. The claim is reapRetention's: the Run locked and
 // its state checked, the blobs marked deleted in one transaction, the S3
 // objects deleted after commit. Blobs still on their host are claimed too:
@@ -223,8 +223,8 @@ func (s *Server) deleteArtifacts(ctx context.Context, in *RunPath) (*deleteArtif
 			}
 			return err
 		}
-		if state != StateSucceeded && state != StateCancelled {
-			return errf(http.StatusConflict, "not_terminal", "run is %s: only a succeeded or cancelled Run's artifacts can be deleted", state)
+		if !terminal(state) {
+			return errf(http.StatusConflict, "not_terminal", "run is %s: only a terminated Run's artifacts can be deleted", state)
 		}
 		rows, err := tx.Query(ctx, `UPDATE blobs b SET location = 'deleted', deleted_at = now()
 			FROM artifacts a WHERE a.run_id = $1 AND b.id = a.blob_id AND b.location <> 'deleted'

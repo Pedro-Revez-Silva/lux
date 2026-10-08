@@ -42,7 +42,7 @@ def test_clone_at_a_sha_or_tag(lux, runners, hosts, fake_image, git_server):
         run_id = lux.submit(repo_spec(fake_image, git_server, "read v.txt", repo="pinned", ref=ref))
         out = lux.wait_output(run_id, "one")
         assert "two" not in out
-        lux.run("cancel", run_id)
+        lux.run("terminate", run_id)
 
 
 def test_credentials_never_enter_the_container(lux, runners, hosts, fake_image, git_server):
@@ -126,7 +126,7 @@ def test_mirror_is_reused(lux, runners, hosts, fake_image, git_server):
     for _ in range(2):
         run_id = lux.submit(repo_spec(fake_image, git_server, "read a.txt", repo="mirrored", push=None))
         lux.wait_output(run_id, "x")
-        lux.run("cancel", run_id)
+        lux.run("terminate", run_id)
     clones = [r for r in git_server.requests() if "mirrored" in r and "git-upload-pack" in r and "POST" in r]
     # First Run clones; the second only fetches (both upload-pack, but the
     # host holds one mirror).
@@ -244,7 +244,7 @@ def test_one_script_commits_in_two_repositories(lux, runners, hosts, fake_image,
     assert pushed == {"one": "pushed", "two": "pushed"}, pushed
     assert git_server.show("one", "lux/work", "a.txt") == "x\n"
     assert git_server.show("two", "lux/work", "b.txt") == "y\n"
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 # ---- repositories added on resume ------------------------------------------------
@@ -298,7 +298,7 @@ def test_a_resume_adds_a_repository(lux, runners, hosts, fake_image, git_server)
     assert pushed == {"one": "pushed", "two": "pushed"}, pushed
     assert git_server.show("one", "lux/work", "a.txt") == "from-one\n"
     assert git_server.show("two", "lux/work", "c.txt") == "y\n"
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_an_added_repository_that_cannot_be_cloned_is_dropped(lux, runners, hosts, fake_image, git_server):
@@ -321,7 +321,7 @@ def test_an_added_repository_that_cannot_be_cloned_is_dropped(lux, runners, host
     lux.wait_output(run_id, "no ghost")
     # Pushes leave it out too.
     assert [r["repo"] for r in lux.json("push", run_id, "--wait", check=False)] == ["one"]
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_adding_a_repository_is_refused_when_it_cannot_be(lux, runners, hosts, fake_image, git_server):
@@ -342,7 +342,7 @@ def test_adding_a_repository_is_refused_when_it_cannot_be(lux, runners, hosts, f
     with pytest.raises(CLIError) as e:
         lux.run("resume", run_id, "--add-repo", f"late={git_server.url('two')}", *secret)
     assert e.value.code == 4 and "stop it first" in e.value.stderr, e.value.stderr
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_a_submitted_spec_cannot_set_added_by(lux, fake_image, git_server):

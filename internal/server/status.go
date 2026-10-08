@@ -13,8 +13,8 @@ import (
 type Tenant struct {
 	ID                string    `json:"id"`
 	Name              string    `json:"name"`
-	RetentionDays     int       `json:"retentionDays" doc:"Days a succeeded or cancelled Run keeps its snapshots and output after it ended. Artifacts are kept until deleted."`
-	ExpireAfterDays   int       `json:"expireAfterDays" doc:"Days a stopped, lost or failed Run may rest before lux cancels it; 0: never."`
+	RetentionDays     int       `json:"retentionDays" doc:"Days a terminated Run keeps its snapshots and output after it was terminated. Artifacts are kept until deleted."`
+	ExpireAfterDays   int       `json:"expireAfterDays" doc:"Days a stopped, lost, failed or succeeded Run may rest before lux terminates it; 0: never."`
 	MaxConcurrentRuns *int      `json:"maxConcurrentRuns,omitempty"`
 	MaxHosts          *int      `json:"maxHosts,omitempty"`
 	MaxStorageBytes   *int64    `json:"maxStorageBytes,omitempty"`

@@ -61,7 +61,7 @@ type pluginRun struct {
 	Labels     map[string]string `json:"labels"`
 	Adapter    string            `json:"adapter"`
 	State      string            `json:"state"`
-	Terminal   bool              `json:"terminal"`
+	Ended      bool              `json:"terminal"` // the plugin protocol's name for ended
 	Window     struct {
 		From time.Time  `json:"from"`
 		To   *time.Time `json:"to"`
@@ -115,7 +115,9 @@ func loadPluginRuns(ctx context.Context, tx pgx.Tx, ids []string) (map[string]pl
 		if r.Labels == nil {
 			r.Labels = map[string]string{}
 		}
-		r.Terminal = terminal(r.State)
+		// What a plugin settles is the end of the Run's placements; a
+		// resume sets it back to false.
+		r.Ended = ended(r.State)
 		r.Placements = make([]struct {
 			Epoch int        `json:"epoch"`
 			From  time.Time  `json:"from"`
@@ -547,7 +549,7 @@ func (s *Server) writePluginCost(ctx context.Context, tx pgx.Tx, cfg CostPluginC
 		for _, l := range a.Lines {
 			lines = append(lines, costReport{Family: l.Family, Item: l.Item, Amount: l.Amount, Currency: l.Currency, From: l.From, To: l.To, Details: l.Details})
 		}
-		if terminal(e.State) || e.State == StateStopped || e.State == StateLost {
+		if ended(e.State) || e.State == StateStopped || e.State == StateLost {
 			if left == nil {
 				n := len(settle)
 				left = &n
@@ -562,7 +564,7 @@ func (s *Server) writePluginCost(ctx context.Context, tx pgx.Tx, cfg CostPluginC
 					*left--
 				}
 			}
-			if terminal(e.State) && (a.Final || *left == 0) {
+			if ended(e.State) && (a.Final || *left == 0) {
 				status = "final"
 			} else if *left > 0 {
 				t := base.Add(settle[len(settle)-*left])

@@ -99,7 +99,7 @@ export function ServerRow({ server: s, runRunning, now = Date.now(), busy, onSta
             <span className="server-tags">
               {s.wake === "request" && <span className="server-tag" title="Its owner is asked to bring a Run up when someone opens it">wakes on request</span>}
               {s.lifetime === "owner" && <span className="server-tag" title="Kept when the run finishes, until its owner deletes it">owner deletes</span>}
-              {s.lifetime === "run" && <span className="server-tag is-quiet" title="Deleted when the run succeeds or is cancelled">ends with this run</span>}
+              {s.lifetime === "run" && <span className="server-tag is-quiet" title="Deleted when the run is terminated">ends with this run</span>}
             </span>
           )}
         </div>

@@ -73,8 +73,8 @@ def test_every_exit_collects(lux, runners, hosts):
     lux.run("stop", run_id, "--wait")
     lux.run("resume", run_id)
     lux.wait_state(run_id, "running")
-    lux.run("cancel", run_id)
-    lux.wait_state(run_id, "cancelled")
+    lux.run("terminate", run_id)
+    lux.wait_state(run_id, "terminated")
     arts = wait_available(lux, run_id, 3)
     by_epoch = sorted((a["epoch"], a["path"]) for a in arts)
     assert (1, "/workspace/out/stamp") in by_epoch and (2, "/workspace/out/stamp") in by_epoch, by_epoch

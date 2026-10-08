@@ -147,8 +147,8 @@ def test_sign_in_and_see_every_tenant(page, env, operator, tenant_factory):
     page.get_by_text(na, exact=True).wait_for(timeout=15_000)
     assert page.get_by_text(nb, exact=True).count() == 0
     assert not page.errors, page.errors
-    a.run("cancel", ra)
-    b.run("cancel", rb)
+    a.run("terminate", ra)
+    b.run("terminate", rb)
 
 
 def test_a_tenant_key_sees_only_its_own(page, tenant_factory):
@@ -160,8 +160,8 @@ def test_a_tenant_key_sees_only_its_own(page, tenant_factory):
     assert page.get_by_text(nb, exact=True).count() == 0
     # No tenants page for a tenant.
     assert page.get_by_role("link", name="Tenants").count() == 0
-    a.run("cancel", ra)
-    b.run("cancel", rb)
+    a.run("terminate", ra)
+    b.run("terminate", rb)
 
 
 def test_run_page_streams_output_and_stops_the_run(page, operator, lux, runners, hosts):
@@ -174,7 +174,7 @@ def test_run_page_streams_output_and_stops_the_run(page, operator, lux, runners,
     page.get_by_role("button", name="Stop run", exact=True).click()
     wait_until(lambda: lux.get(run_id)["state"] == "stopped", 60, 0.5, "the console's stop never took effect")
     assert not page.errors, page.errors
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_run_output_tabs_separate_the_workloads_lines_from_luxs(page, env, operator, lux, runners, hosts):
@@ -237,7 +237,7 @@ def test_run_output_tabs_separate_the_workloads_lines_from_luxs(page, env, opera
     expect(log.locator(".logline-system").first).to_be_visible()
     assert "output=" not in page.url, page.url
     assert not page.errors, page.errors
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_hosts_live_runs_shows_the_count_and_the_cap_only_near_it(page, lux, runners, hosts):
@@ -281,7 +281,7 @@ def test_hosts_live_runs_shows_the_count_and_the_cap_only_near_it(page, lux, run
     expect(cell.locator(".badge-warn")).to_have_text("3 / 4", timeout=15_000)
     assert not page.errors, page.errors
     for r in runs:
-        lux.run("cancel", r)
+        lux.run("terminate", r)
 
 
 def test_pages_update_live_from_events(page, operator, tenant_factory):
@@ -294,7 +294,7 @@ def test_pages_update_live_from_events(page, operator, tenant_factory):
     run_id = _parked(a, name)
     page.get_by_text(name, exact=True).wait_for(timeout=5_000)
     assert not page.errors, page.errors
-    a.run("cancel", run_id)
+    a.run("terminate", run_id)
 
 
 def test_host_page_charts_its_runner_process(page, operator, lux, runners, hosts):
@@ -415,7 +415,7 @@ def test_runs_list_shows_runtime_and_placements(page, env, lux, runners, hosts):
     expect(runtime).to_have_attribute("aria-sort", "descending")
     expect(page.get_by_text("Runtime, largest first")).to_have_count(1, timeout=15_000)
     assert not page.errors, page.errors
-    lux.run("cancel", never)
+    lux.run("terminate", never)
 
 
 def _both_themes(page, env, path: str, check):
@@ -464,7 +464,7 @@ def test_a_pending_run_shows_no_cost_yet_not_zero(page, env, lux):
         expect(card.get_by_text(re.compile(r"\$0(\.0+)?\b"))).to_have_count(0)
         expect(card.locator(".money-list-lg")).to_have_count(0)
     _both_themes(page, env, f"/runs/{run_id}", check)
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def _dollars(amount: str, exact: bool = False) -> str:
@@ -548,7 +548,7 @@ def test_runs_list_cost_column_matches_the_run_page(page, env, lux, operator, ru
                 .map(e => `${e.tagName}.${e.className} ${e.scrollWidth}>${e.clientWidth}`)""")
             assert not overflow, (width, overflow)
     assert not page.errors, page.errors
-    lux.run("cancel", pending)
+    lux.run("terminate", pending)
 
 
 @pytest.fixture
@@ -758,7 +758,7 @@ def test_rename_a_pool_through_the_dialog(page, lux, runners, hosts):
     run = lux.get(waiting)
     assert run["pool"] == new and run["spec"]["placement"]["pool"] == old, run
     assert not page.errors, page.errors
-    lux.run("cancel", waiting)
+    lux.run("terminate", waiting)
 
 
 def test_pools_page_makes_a_pool_the_default(page, lux):

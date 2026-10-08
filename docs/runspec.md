@@ -177,17 +177,26 @@ lux moves a Run when a force-evicting drain (`lux hosts drain --force-evict`,
   policy, e.g. `preempt: not resumed (resumePolicy manual)`. It is
   snapshotted as usual and its servers stop; a person may resume it.
   `lux migrate` refuses it with 409 `not_movable` and leaves it running.
-- `never`: as `manual`, for one-shot work such as a CI job holding a
-  single-use token, and it also refuses every requested resume, whatever
-  the Run's state (stopped by request included): 409 `not_resumable`,
-  "resumePolicy never: this Run cannot be resumed". `lux ls --resumable`
-  leaves it out. An assignment no runner started (refused by an outdated
-  runner) may still be placed again: none of the work ran.
+- `never`: for one-shot work such as a CI job holding a single-use token.
+  It can never be resumed, so no end leaves it resting resumable: one that
+  would leave it `stopped`, `lost`, `succeeded` or `failed` ends it `terminated`
+  instead (and its storage goes after the tenant's retention), its
+  `exitCode` kept and its outcome in `stateReason`: `succeeded; resumePolicy
+  never`, `exit code 1; resumePolicy never`, `stop; resumePolicy never`,
+  `host lost: missed heartbeats; resumePolicy never`,
+  or for a move `preempt: not resumed (resumePolicy never)` (or `drain`).
+  `lux migrate` refuses it with 409 `not_movable`, as `manual`. A requested
+  resume of one still resting from an older luxd is refused whatever its
+  state: 409 `not_resumable`, "resumePolicy never: this Run cannot be
+  resumed". `lux ls --resumable` leaves it out. An assignment no runner
+  started (refused by an outdated runner) may still be placed again: none
+  of the work ran.
 
 Except for `never`, the policy covers only what lux does by itself: a resume
 you ask for restores the snapshot as usual. A cordon-only drain does not stop
 the Run. A Run whose host stopped answering ends `lost`, which is never
-resumed automatically, whatever the policy. Any other value is refused with
+resumed automatically, whatever the policy (a `never` Run ends `terminated`
+instead, as above). Any other value is refused with
 422 `invalid_spec`.
 
 An older luxd ignores `resumePolicy` and treats the Run as `auto`. A client
@@ -229,7 +238,7 @@ image:
   image named there would not be pinned, so it is refused. Add
   `FROM image AS name` and use the name instead.
 - A build has the Run's limits: CPUs, memory (no swap), and processes.
-- A stop or cancel during a build ends the build.
+- A stop or terminate during a build ends the build.
 - If a rebuild on another host produces a different image, the Run
   continues and records an `image.rebuild-differs` event. That happens when
   a `RUN` step is not reproducible, for example one that downloads the
@@ -446,7 +455,7 @@ shim also writes each to `$LUX_INPUTS/prompt/<n>-<name>`, on a state
 volume, so they are there after any resume ([adapters](adapters.md#images)
 says where, and how each agent gets them). luxd keeps their bytes apart
 from the stored spec until a placement resumes the Run (it has a session
-or a snapshot) or the Run succeeds or is cancelled; a failed Run keeps
+or a snapshot) or the Run is terminated; a failed or succeeded Run keeps
 them, since resuming it without a session or snapshot starts it afresh. The
 spec, and so a Run's views (`GET /v1/runs/{id}`), keep their names and
 types. Steers take
@@ -456,7 +465,7 @@ images the same way (`attachments` on `POST /v1/runs/{id}/input`,
 ## Before stop
 
 `workload.beforeStop` is what a Run leaves behind as it stops. On **every
-stop** — a `lux stop`, a cancel, the Run's `timeout`, a drain, a
+stop** — a `lux stop`, a terminate, the Run's `timeout`, a drain, a
 preemption — the shim runs the command in the container first, while the
 workload is still whole, and only then signals the workload. It runs as
 the workload's user, with its environment and working directory; its
@@ -482,7 +491,7 @@ The hook runs once per placement, only after the workload has started.
 
 A **server** is a named URL that reaches a port in a Run, optionally with a
 command lux runs in its container. `workload.servers` declares servers the
-Run owns (lifetime `run`: they go when it succeeds or is cancelled). More
+Run owns (lifetime `run`: they go when it is terminated). More
 can be added while it runs, and servers of the tenant's own attached to it
 (`lux server`, the API: see [concepts](concepts.md#servers), which also
 says when they start).
@@ -535,7 +544,7 @@ leaving the Run `stopped` and its state volume snapshotted.
 
 Artifacts are files a Run produces, kept after it ends and downloadable
 with `lux artifacts <run> --download DIR`. They are collected **on every
-exit** (a stop, a failure, a cancel, not only success), per placement:
+exit** (a stop, a failure, a terminate, not only success), per placement:
 
 - files matching `artifacts.paths`: absolute globs on the Run's volumes,
   where `*` matches within a directory and `**` any depth
@@ -549,7 +558,7 @@ with its size, sha256 and content type, and listed by placement epoch.
 Downloads stream through luxd as the file the Run wrote.
 
 Artifacts are never deleted by time, not even with the Run's snapshots and
-output after retention. Once a Run has succeeded or been cancelled, its
+output after retention. Once a Run has been terminated, its
 owner deletes them with `lux artifacts <run> --delete` (`DELETE
 /v1/runs/{id}/artifacts`); a download after that is 410 `gone`.
 
@@ -588,7 +597,7 @@ needs no `network.egress` rule and none is checked.
 
 ### Adding repositories on resume
 
-A resume can add repositories to a stopped, lost or failed Run. Pass them in
+A resume can add repositories to a stopped, lost, failed or succeeded Run. Pass them in
 the request's `git.repositories` (`lux resume --add-repo`), in the same shape
 as the spec's:
 
@@ -625,7 +634,7 @@ POST /v1/runs/{id}/resume
   `{requestId, by, addedRepositories}`, and `addedSecrets` and
   `removedSecrets` when it declared or removed secrets
   ([Secrets](concepts.md#secrets)).
-- Adding needs a Run that is stopped, lost or failed. While it is
+- Adding needs a Run that is stopped, lost, failed or succeeded. While it is
   resuming, the request gets 409.
 
 ### Syncing checkouts

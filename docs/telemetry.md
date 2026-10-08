@@ -26,7 +26,7 @@ Each stint on a host, in `placements[]`:
 | `volumesRestoredAt` | State volumes were restored (or found locally). |
 | `containerStartedAt` | The container started. |
 | `workloadStartedAt` | The init script finished and the workload was started. |
-| `stopRequestedAt` | A stop, cancel, drain or timeout was requested (`stopReason` says which). |
+| `stopRequestedAt` | A stop, terminate, drain or timeout was requested (`stopReason` says which). |
 | `exitedAt` | The container exited. |
 | `snapshotDoneAt` | Its state was saved on the host. |
 | `uploadedAt` | All its blobs reached S3. |

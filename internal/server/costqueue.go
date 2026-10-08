@@ -182,10 +182,10 @@ func (s *Server) costTick(ctx context.Context) (bool, error) {
 					UNION
 					SELECT id FROM (
 						SELECT missing.id FROM runs missing
-						WHERE missing.state IN ('succeeded', 'failed', 'cancelled', 'stopped', 'lost')
+						WHERE missing.state IN `+inactiveRunStates+`
 							AND (EXISTS (SELECT 1 FROM unnest($1::text[]) AS plugin(source)
 								WHERE NOT EXISTS (SELECT 1 FROM cost_sources c WHERE c.run_id = missing.id AND c.source = plugin.source))
-								OR (missing.state IN ('succeeded', 'failed', 'cancelled')
+								OR (missing.state IN `+endedRunStates+`
 									AND NOT EXISTS (SELECT 1 FROM cost_sources c WHERE c.run_id = missing.id AND c.source = 'compute')))
 							AND NOT EXISTS (SELECT 1 FROM cost_pending p WHERE p.run_id = missing.id)
 						ORDER BY missing.id LIMIT $2) AS missing_sources)
@@ -416,10 +416,11 @@ type computeEval struct {
 	Open bool
 }
 
-// final: nothing about the Run's compute can change any more. Only a
-// terminal Run's; a stopped or lost one may still be resumed.
+// final: nothing about the Run's compute can change unless it is resumed
+// (resetCostFinality undoes it then). An ended Run's; a stopped or lost
+// one is expected back.
 func (e *computeEval) final() bool {
-	return terminal(e.State) && !e.Open && len(e.Missing) == 0
+	return ended(e.State) && !e.Open && len(e.Missing) == 0
 }
 
 // costHost is what a line says about the host a placement ran on.
@@ -709,7 +710,7 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, _ *c
 	}
 	final := e.final()
 	var attempts int
-	if terminal(e.State) {
+	if ended(e.State) {
 		if err := tx.QueryRow(ctx, `SELECT attempts FROM cost_sources WHERE run_id = $1 AND source = 'compute'`, runID).Scan(&attempts); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
@@ -721,7 +722,7 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, _ *c
 		status, lastError = "incomplete", strings.Join(e.Missing, "; ")
 	}
 	var nextAt *time.Time
-	if terminal(e.State) && !final {
+	if ended(e.State) && !final {
 		attempts++
 		t := now.Add(min(s.cfg.Costs.Every<<min(attempts-1, 16), costRetryMax))
 		nextAt = &t

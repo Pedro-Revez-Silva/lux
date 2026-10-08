@@ -76,14 +76,25 @@ func r1Moving(t *testing.T, s *Server) bool {
 // its final snapshot (snapR1, with an agent session) as the runner sends it.
 func exitR1(t *testing.T, s *Server) {
 	t.Helper()
+	snapshotR1(t, s)
+	reportR1Exit(t, s, 143, "stopped")
+}
+
+// snapshotR1 reports r1's placement 1 took snapshot snapR1 (session sess-1).
+func snapshotR1(t *testing.T, s *Server) {
+	t.Helper()
 	sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "snapR1", RunID: "r1", Epoch: 1, SessionID: "sess-1",
 		Volumes: []proto.VolumeSnapshot{{Name: "work", Path: "/work", BlobID: "b-r1-vol", Size: 10, SHA256: "r1-vol"}}}}
 	if got := reportSnapshot(t, s, "h1", "r1", 1, sd); got.Type != proto.MsgAck || ackRefused(t, got) {
 		t.Fatalf("snapshot report: %s %s", got.Type, got.Data)
 	}
-	code := 143
+}
+
+// reportR1Exit reports r1's placement 1 exited with code and reason.
+func reportR1Exit(t *testing.T, s *Server, code int, reason string) {
+	t.Helper()
 	f := proto.Frame{Type: proto.MsgStatus, ID: 2, RunID: "r1", Epoch: 1,
-		Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: "stopped"})}
+		Data: proto.Marshal(proto.Status{State: "exited", ExitCode: &code, Reason: reason})}
 	if got := s.handleReport(context.Background(), "h1", f); got.Type != proto.MsgAck {
 		t.Fatalf("exit report: %s %s", got.Type, got.Data)
 	}
@@ -98,8 +109,9 @@ func assignOf(t *testing.T, s *Server, epoch int) proto.Assign {
 	return a
 }
 
-// With resumePolicy manual or never, a move that stops the Run ends it failed, its
-// reason naming the move, with no new placement, its secrets dropped and
+// With resumePolicy manual or never, a move that stops the Run ends it
+// (manual: failed, resumable by hand; never: terminated), its reason
+// naming the move, with no new placement, its secrets dropped and
 // its servers stopped as for any end. With auto or unset it is resumed
 // from its snapshot and session; with restart it is placed again as a
 // first placement: no snapshot to restore, no session (the adapter's
@@ -136,7 +148,7 @@ func TestResumePolicyOnMove(t *testing.T) {
 				// elsewhere waits for nothing else.
 				execSQL(t, s, ctx, `UPDATE snapshots SET uploaded = true WHERE id = 'snapR1'`)
 				var svStop, queuedReason string
-				systemScan(t, s, `SELECT (SELECT coalesce(stop_reason, '') FROM run_servers WHERE run_id = 'r1'), state_reason FROM runs WHERE id = 'r1'`,
+				systemScan(t, s, `SELECT coalesce((SELECT coalesce(stop_reason, '') FROM run_servers WHERE run_id = 'r1'), 'deleted'), state_reason FROM runs WHERE id = 'r1'`,
 					nil, &svStop, &queuedReason)
 				if _, _, err := s.scheduleBatch(ctx, cursorPos{}); err != nil {
 					t.Fatal(err)
@@ -149,9 +161,14 @@ func TestResumePolicyOnMove(t *testing.T) {
 				_, cached := s.secrets.get("r1")
 				if failsOnMove {
 					want := stop + ": not resumed (resumePolicy " + policy + ")"
-					if state != StateFailed || reason != want || placements != 1 || cached || svStop != "run stopped" {
-						t.Errorf("state %q reason %q placements %d secrets cached %v server %q; want failed %q 1 false \"run stopped\"",
-							state, reason, placements, cached, svStop, want)
+					// never: terminated, its lifetime-run server deleted.
+					wantState, wantServer := StateFailed, "run stopped"
+					if policy == "never" {
+						wantState, wantServer = StateTerminated, "deleted"
+					}
+					if state != wantState || reason != want || placements != 1 || cached || svStop != wantServer {
+						t.Errorf("state %q reason %q placements %d secrets cached %v server %q; want %s %q 1 false %q",
+							state, reason, placements, cached, svStop, wantState, want, wantServer)
 					}
 					return
 				}
@@ -251,16 +268,16 @@ func TestResumePolicyManualResumableByHand(t *testing.T) {
 	}
 }
 
-// A cancel that lands while the Run stops for a move wins over the move,
-// whatever the policy: it ends cancelled.
-func TestResumePolicyCancelDuringMove(t *testing.T) {
+// A terminate that lands while the Run stops for a move wins over the move,
+// whatever the policy: it ends terminated.
+func TestResumePolicyTerminateDuringMove(t *testing.T) {
 	for _, policy := range []string{"never", "manual", "restart"} {
 		t.Run(policy, func(t *testing.T) {
 			s, _ := policyFixture(t, policy)
 			if err := moveStops["preempt"](t, s); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.cancelRun(tenantCtx("t1"), &RunPath{ID: "r1"}); err != nil {
+			if _, err := s.terminateRun(tenantCtx("t1"), &RunPath{ID: "r1"}); err != nil {
 				t.Fatal(err)
 			}
 			exitR1(t, s)
@@ -268,8 +285,8 @@ func TestResumePolicyCancelDuringMove(t *testing.T) {
 			var placements int
 			systemScan(t, s, `SELECT state, state_reason, (SELECT count(*) FROM placements WHERE run_id = 'r1') FROM runs WHERE id = 'r1'`,
 				nil, &state, &reason, &placements)
-			if state != StateCancelled || reason != "cancelled" || placements != 1 {
-				t.Fatalf("state %q reason %q placements %d, want cancelled \"cancelled\" 1", state, reason, placements)
+			if state != StateTerminated || reason != "terminated" || placements != 1 {
+				t.Fatalf("state %q reason %q placements %d, want terminated \"terminated\" 1", state, reason, placements)
 			}
 		})
 	}
@@ -308,8 +325,8 @@ func TestResumePolicyRestartSkippedSnapshotIsReaped(t *testing.T) {
 	}
 }
 
-// GET /v1/runs?resumable=true leaves out a failed never Run and lists a
-// failed manual one.
+// GET /v1/runs?resumable=true leaves out a never Run ended by a move
+// (terminated) and lists a failed manual one.
 func TestResumePolicyResumableList(t *testing.T) {
 	for policy, listed := range map[string]bool{"never": false, "manual": true} {
 		t.Run(policy, func(t *testing.T) {
@@ -332,15 +349,19 @@ func TestResumePolicyResumableList(t *testing.T) {
 }
 
 // Every requested resume of a never Run is refused, by its tenant or an
-// operator, whether it failed after a move, was stopped by request or is
-// still running (the refusal, not "stop it first"), and nothing changes:
-// no state, no secrets or spec written, no placement.
+// operator, whether a move or a stop by request ended it (terminated),
+// it is still running (the refusal, not "stop it first"), or it still
+// rests stopped from a luxd before never Runs ended terminated; and
+// nothing changes: no state, no secrets or spec written, no placement.
 func TestResumePolicyNeverRefusesResume(t *testing.T) {
-	for _, how := range []string{"failed after preempt", "stopped by request", "running"} {
+	for _, how := range []string{"failed after preempt", "stopped by request", "running", "resting from an older luxd"} {
 		for _, who := range []string{"tenant", "operator"} {
 			t.Run(how+"/"+who, func(t *testing.T) {
 				s, ctx := policyFixture(t, "never")
 				switch how {
+				case "resting from an older luxd":
+					execSQL(t, s, ctx, `UPDATE placements SET state = 'exited', ended_at = now() WHERE id = 'p1'`)
+					execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped', state_reason = 'stop' WHERE id = 'r1'`)
 				case "stopped by request":
 					if _, err := s.stopRun(tenantCtx("t1"), &RunPath{ID: "r1"}); err != nil {
 						t.Fatal(err)
@@ -388,5 +409,32 @@ func TestResumePolicyNeverRefusesResume(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A terminate whose first step (terminate_requested) committed before its
+// stop overrode a move's stop reason, raced by that move's exit report: the
+// Run ends terminated, is not resumed, and its secrets go.
+func TestTerminateRacedByAMoveIsNotResumed(t *testing.T) {
+	for _, move := range []string{"migrate", "drain", "preempt"} {
+		t.Run(move, func(t *testing.T) {
+			s, ctx := policyFixture(t, "")
+			if err := moveStops[move](t, s); err != nil {
+				t.Fatal(err)
+			}
+			execSQL(t, s, ctx, `UPDATE runs SET terminate_requested = true WHERE id = 'r1'`)
+			exitR1(t, s)
+			var state, reason string
+			var resumes int
+			systemScan(t, s, `SELECT state, state_reason,
+					(SELECT count(*) FROM run_events WHERE run_id = r.id AND type = 'resume.requested')
+				FROM runs r WHERE id = 'r1'`, nil, &state, &reason, &resumes)
+			if state != StateTerminated || reason != "terminated" || resumes != 0 {
+				t.Fatalf("%s %q, %d resume.requested; want terminated, none", state, reason, resumes)
+			}
+			if _, held := s.secrets.get("r1"); held {
+				t.Fatal("secrets still held")
+			}
+		})
 	}
 }

@@ -947,7 +947,8 @@ func (p *placement) startShim(ctx context.Context, a *proto.Assign) error {
 
 func (p *placement) requestStop(ctx context.Context, reason string) {
 	p.mu.Lock()
-	if p.stopWhy == "" || reason == "cancel" {
+	// A terminate overrides an earlier stop's reason ("cancel" from an older luxd).
+	if p.stopWhy == "" || reason == "terminate" || reason == "cancel" {
 		p.stopWhy = reason
 	}
 	phase := p.phase

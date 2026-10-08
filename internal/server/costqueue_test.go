@@ -64,7 +64,7 @@ func TestSetRunStateQueuesCosts(t *testing.T) {
 		{StateLost, store.System(), "state:lost -"},
 		{StateSucceeded, store.Tenant("t1"), "state:succeeded -"},
 		{StateFailed, store.System(), "state:failed -"},
-		{StateCancelled, store.Tenant("t1"), "state:cancelled -"},
+		{StateTerminated, store.Tenant("t1"), "state:terminated -"},
 	} {
 		execSQL(t, s, ctx, `DELETE FROM cost_pending`)
 		if err := s.db.Tx(ctx, c.scope, func(tx pgx.Tx) error {
@@ -99,7 +99,7 @@ func TestSetRunStateQueuesCosts(t *testing.T) {
 	// wins, and a claim is freed (its result was read before the change).
 	execSQL(t, s, ctx, `INSERT INTO cost_pending (run_id, due_at, reason, claimed_by, claimed_until)
 		VALUES ('r1', now() - interval '1 hour', 'tick', 'other', now() + interval '1 minute')`)
-	for _, st := range []string{StateStopping, StateStopped, StateCancelled} {
+	for _, st := range []string{StateStopping, StateStopped, StateTerminated} {
 		if err := s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
 			return setRunState(ctx, tx, "t1", "r1", st, "", 1)
 		}); err != nil {
@@ -109,7 +109,7 @@ func TestSetRunStateQueuesCosts(t *testing.T) {
 	var n int
 	var early bool
 	systemScan(t, s, `SELECT count(*), bool_and(due_at < now() - interval '59 minutes') FROM cost_pending`, nil, &n, &early)
-	if got := pending(t, s, "r1"); n != 1 || !early || got != "state:cancelled -" {
+	if got := pending(t, s, "r1"); n != 1 || !early || got != "state:terminated -" {
 		t.Errorf("merged into %d rows (earliest kept %v): %q", n, early, got)
 	}
 
@@ -208,7 +208,7 @@ func TestCostTickBackfillsTerminalComputeInBatches(t *testing.T) {
 	s.cfg.Costs.Batch = 1
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES
 		('historical-a','t1','{}','succeeded'), ('historical-b','t2','{}','failed'),
-		('historical-c','t1','{}','cancelled'), ('historical-stopped','t1','{}','stopped')`)
+		('historical-c','t1','{}','terminated'), ('historical-stopped','t1','{}','stopped')`)
 	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status) VALUES ('historical-c','t1','compute','final')`)
 	if _, err := s.costTick(ctx); err != nil {
 		t.Fatal(err)
@@ -247,7 +247,7 @@ func TestCostTickDiscoversHistoricalPluginSources(t *testing.T) {
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped' WHERE id = 'r1'`)
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'lost' WHERE id = 'r2'`)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES
-		('old-t1', 't1', '{}', 'failed'), ('old-t2', 't2', '{}', 'cancelled'),
+		('old-t1', 't1', '{}', 'failed'), ('old-t2', 't2', '{}', 'terminated'),
 		('existing', 't1', '{}', 'succeeded'), ('quiet', 't1', '{}', 'stopped')`)
 	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, next_at) VALUES
 		('old-t1', 't1', 'compute', 'final', NULL), ('old-t2', 't2', 'compute', 'final', NULL),
@@ -440,7 +440,7 @@ func TestCostTickBatchesHistoricalMissingSources(t *testing.T) {
 			('r2', now() + interval '1 hour', 'retry', NULL, NULL)`)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state)
 		SELECT 'historical-' || n, 't1', '{}',
-			(ARRAY['succeeded', 'failed', 'cancelled', 'stopped', 'lost'])[(n - 1) % 5 + 1]
+			(ARRAY['succeeded', 'failed', 'terminated', 'stopped', 'lost'])[(n - 1) % 5 + 1]
 		FROM generate_series(1, 20) n`)
 	readQueue := func(id string) (string, string) {
 		t.Helper()
@@ -477,7 +477,7 @@ func TestCostTickBatchesHistoricalMissingSources(t *testing.T) {
 		}
 		execSQL(t, s, ctx, `DELETE FROM cost_ticks`)
 	}
-	for _, state := range []string{"succeeded", "failed", "cancelled", "stopped", "lost"} {
+	for _, state := range []string{"succeeded", "failed", "terminated", "stopped", "lost"} {
 		var n int
 		systemScan(t, s, `SELECT count(*) FROM runs r JOIN cost_sources c ON c.run_id = r.id
 			WHERE r.id LIKE 'historical-%' AND r.state = $1 AND c.source = 'ledger' AND c.status IN ('final', 'ok')`, []any{state}, &n)
@@ -543,7 +543,7 @@ func TestPollDueCostSourcesConfiguredPluginsOnly(t *testing.T) {
 	ctx := context.Background()
 	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped' WHERE id IN ('r1', 'r2')`)
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES
-		('plugin-due', 't1', '{}', 'failed'), ('plugin-later', 't2', '{}', 'cancelled'),
+		('plugin-due', 't1', '{}', 'failed'), ('plugin-later', 't2', '{}', 'terminated'),
 		('removed-only', 't2', '{}', 'stopped'), ('final-only', 't1', '{}', 'succeeded')`)
 	execSQL(t, s, ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, next_at) VALUES
 		('plugin-due', 't1', 'ledger', 'incomplete', now() - interval '1 second'),

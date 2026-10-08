@@ -26,7 +26,7 @@ def test_exec_runs_as_the_workload_with_its_environment(lux, runners, hosts, fak
     # stdin, stdout and the exit code are the command's
     p = lux.run("exec", run_id, "-T", "--", "sh", "-c", "tr a-z A-Z; exit 7", input="shout\n", check=False)
     assert p.returncode == 7 and p.stdout == "SHOUT\n", (p.returncode, p.stdout, p.stderr)
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_exec_with_a_terminal(lux, runners, hosts):
@@ -35,7 +35,7 @@ def test_exec_with_a_terminal(lux, runners, hosts):
     lux.wait_output(run_id, "up")
     out = lux.run("exec", run_id, "-t", "--", "sh", "-c", "tty; stty size", input="").stdout
     assert "/dev/pts/" in out, out
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_exec_needs_a_running_run(lux, runners, hosts):
@@ -58,7 +58,7 @@ def test_exec_does_not_outlive_its_client(lux, runners, hosts):
     p.kill()
     p.wait()
     wait_until(lambda: not host.running("sleep", marker), 20, 0.3, "the exec'd command outlived its client")
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_attach_to_a_terminal_workload(lux, runners, hosts):
@@ -81,7 +81,7 @@ def test_attach_to_a_terminal_workload(lux, runners, hosts):
     p.stdin.close()
     p.terminate()
     p.wait(timeout=10)
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_attach_needs_a_terminal(lux, runners, hosts):
@@ -91,7 +91,7 @@ def test_attach_needs_a_terminal(lux, runners, hosts):
     with pytest.raises(CLIError) as e:
         lux.run("attach", run_id, input="")
     assert "tty" in e.value.stderr, e.value.stderr
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_port_forward_reaches_a_declared_port_only(lux, runners, hosts):
@@ -112,7 +112,7 @@ def test_port_forward_reaches_a_declared_port_only(lux, runners, hosts):
     with pytest.raises(CLIError) as e:
         lux.run("port-forward", run_id, "ssh", str(free_port()))
     assert "no port named" in e.value.stderr, e.value.stderr
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_streams_need_the_runs_tenant(lux, tenant_factory, runners, hosts):
@@ -123,7 +123,7 @@ def test_streams_need_the_runs_tenant(lux, tenant_factory, runners, hosts):
     with pytest.raises(CLIError) as e:
         other.run("exec", run_id, "--", "true")
     assert "not found" in e.value.stderr.lower(), e.value.stderr
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_port_forward_after_a_runner_restart(lux, runners, hosts):
@@ -145,7 +145,7 @@ def test_port_forward_after_a_runner_restart(lux, runners, hosts):
     finally:
         p.terminate()
         p.wait(timeout=10)
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_a_stream_ends_when_the_runner_goes_away(lux, runners, hosts):

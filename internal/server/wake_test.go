@@ -450,8 +450,9 @@ func TestAttachDetachAndEveryPlacement(t *testing.T) {
 	}
 }
 
-// Lifetimes: a Run's lifetime-run servers go when it succeeds or is
-// cancelled, not when it fails; owner servers are detached and stay.
+// Lifetimes: a Run's lifetime-run servers go when it is terminated, not
+// when it fails or succeeds (it can be resumed); owner servers are
+// detached and stay.
 // Deleting a server detaches it first; its hostname is gone. expireAfter
 // deletes an owner server unrequested for that long.
 func TestServerLifetimes(t *testing.T) {
@@ -471,13 +472,20 @@ func TestServerLifetimes(t *testing.T) {
 	if err := set(StateSucceeded); err != nil {
 		t.Fatal(err)
 	}
+	if got := getSrv(t, s, key, owner.ID); got.RunID == nil {
+		t.Fatalf("owner server detached by a success, which a resume can undo: %+v", got)
+	}
+	getSrv(t, s, key, runServer.ID)
+	if err := set(StateTerminated); err != nil {
+		t.Fatal(err)
+	}
 	if w := apiCall(t, s, key, http.MethodGet, "/v1/servers/"+runServer.ID, nil); w.Code != http.StatusNotFound {
-		t.Fatalf("run server after success: %d", w.Code)
+		t.Fatalf("run server after terminate: %d", w.Code)
 	}
 	if got := getSrv(t, s, key, owner.ID); got.RunID != nil {
-		t.Fatalf("owner server after success: %+v", got)
+		t.Fatalf("owner server after terminate: %+v", got)
 	}
-	if ev := serverEventsOf(t, s, ctx, runServer.ID, "server.deleted"); len(ev) != 1 || ev[0]["reason"] != "run succeeded" {
+	if ev := serverEventsOf(t, s, ctx, runServer.ID, "server.deleted"); len(ev) != 1 || ev[0]["reason"] != "run terminated" {
 		t.Fatalf("deleted event: %+v", ev)
 	}
 	// Owner deletion: 404, "This preview is gone".
@@ -760,18 +768,7 @@ func TestSyncModes(t *testing.T) {
 // sync.done); an assignment goes without its fast-forward or fetch refs,
 // each a failed git.sync. A move is delivered as it was.
 func TestSafeSyncNotDeliveredAfterDowngrade(t *testing.T) {
-	s, ctx, key, _ := wakeFixture(t)
-	execSQL(t, s, ctx, `UPDATE runs SET spec = '{"git": {"repositories": [{"name": "app", "url": "https://x/app.git", "path": "/w/app"}, {"name": "lib", "url": "https://x/lib.git", "path": "/w/lib"}]}}'`)
-	tok := &hostToken{}
-	hello := proto.Hello{Name: "h1", ProtocolVersion: proto.Version, Capabilities: []string{proto.CapSyncModes},
-		Live: []proto.LivePlacement{{RunID: r1, Epoch: 1}}}
-	register := func(caps []string) {
-		t.Helper()
-		hello.Capabilities = caps
-		if _, err := s.registerHost(ctx, tok, hello); err != nil {
-			t.Fatal(err)
-		}
-	}
+	s, ctx, key, hello, register := syncModesFixture(t)
 	// Every unacked message, as a reconnect replays them, and as a poll reads them.
 	replay := func() []proto.Frame {
 		t.Helper()
@@ -851,21 +848,9 @@ func TestSafeSyncNotDeliveredAfterDowngrade(t *testing.T) {
 		}
 	}
 
-	// A resume assigned while the host had sync modes. resumePolicy never
-	// refuses requested resumes only: an assignment no runner started is
-	// still placed again.
-	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped', spec = spec || '{"resumePolicy": "never"}'`)
-	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited'`)
-	execSQL(t, s, ctx, `UPDATE host_messages SET acked_at = now()`)
-	register([]string{proto.CapSyncModes})
-	refs := []proto.SyncRef{{Repo: "app", Ref: "main", Mode: proto.SyncFastForward}, {Repo: "lib", Ref: "v1"}}
-	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		return s.assign(ctx, tx, pendingRun{ID: r1, TenantID: "t1", Epoch: 1, PendingSync: refs}, &candidateHost{ID: "h1"})
-	}); err != nil {
-		t.Fatal(err)
-	}
-	hello.Live = nil
-	register(nil)
+	// resumePolicy never refuses requested resumes only: an assignment no
+	// runner started is still placed again.
+	refs := assignResumeThenDowngrade(t, s, ctx, hello, register)
 	for range 2 {
 		for _, f := range replay() {
 			if f.Type == proto.MsgAssign {
@@ -884,6 +869,72 @@ func TestSafeSyncNotDeliveredAfterDowngrade(t *testing.T) {
 		if lost != 1 {
 			t.Fatalf("lost %d times", lost)
 		}
+	}
+}
+
+// syncModesFixture: wakeFixture with r1's spec naming repositories app and
+// lib, running on h1, and register, which re-registers h1 with caps and
+// hello's live placements.
+func syncModesFixture(t *testing.T) (s *Server, ctx context.Context, key string, hello *proto.Hello, register func(caps []string)) {
+	t.Helper()
+	s, ctx, key, _ = wakeFixture(t)
+	execSQL(t, s, ctx, `UPDATE runs SET spec = '{"git": {"repositories": [{"name": "app", "url": "https://x/app.git", "path": "/w/app"}, {"name": "lib", "url": "https://x/lib.git", "path": "/w/lib"}]}}'`)
+	tok := &hostToken{}
+	hello = &proto.Hello{Name: "h1", ProtocolVersion: proto.Version, Capabilities: []string{proto.CapSyncModes},
+		Live: []proto.LivePlacement{{RunID: r1, Epoch: 1}}}
+	register = func(caps []string) {
+		t.Helper()
+		hello.Capabilities = caps
+		if _, err := s.registerHost(ctx, tok, *hello); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return s, ctx, key, hello, register
+}
+
+// assignResumeThenDowngrade makes r1 (resumePolicy never) stopped, assigns
+// its resume to h1 with a fast-forward sync while h1 has sync modes, then
+// re-registers h1 without them and without live placements. It returns the
+// assignment's sync; the assignment is refused at its next delivery.
+func assignResumeThenDowngrade(t *testing.T, s *Server, ctx context.Context, hello *proto.Hello, register func([]string)) []proto.SyncRef {
+	t.Helper()
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped', spec = spec || '{"resumePolicy": "never"}'`)
+	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited'`)
+	execSQL(t, s, ctx, `UPDATE host_messages SET acked_at = now()`)
+	register([]string{proto.CapSyncModes})
+	refs := []proto.SyncRef{{Repo: "app", Ref: "main", Mode: proto.SyncFastForward}, {Repo: "lib", Ref: "v1"}}
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		return s.assign(ctx, tx, pendingRun{ID: r1, TenantID: "t1", Epoch: 1, PendingSync: refs}, &candidateHost{ID: "h1"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hello.Live = nil
+	register(nil)
+	return refs
+}
+
+// An assignment refused at delivery (no sync modes) for a Run whose
+// terminate is pending is not placed again: the Run ends terminated, its
+// secrets dropped, with no resume after it.
+func TestRefusedAssignmentOfTerminatingRunEndsTerminated(t *testing.T) {
+	s, ctx, _, hello, register := syncModesFixture(t)
+	assignResumeThenDowngrade(t, s, ctx, hello, register)
+	execSQL(t, s, ctx, `UPDATE runs SET terminate_requested = true WHERE id = $1`, r1)
+	s.secrets.put(r1, map[string]string{"TOKEN": "jit"})
+	if _, err := s.pendingMessages(ctx, "h1", false); err != nil {
+		t.Fatal(err)
+	}
+	var state, reason, placement string
+	var resumes int
+	systemScan(t, s, `SELECT r.state, r.state_reason, p.state,
+			(SELECT count(*) FROM run_events e WHERE e.run_id = r.id
+				AND (e.type = 'resume.requested' OR (e.type = 'state' AND e.data->>'state' = 'resuming')))
+		FROM runs r JOIN placements p ON p.run_id = r.id AND p.epoch = 2 WHERE r.id = $1`, []any{r1}, &state, &reason, &placement, &resumes)
+	if state != StateTerminated || reason != "terminated; host lost" || placement != "lost" || resumes != 0 {
+		t.Fatalf("run %s (%q), placement %s, %d resumes after; want terminated (\"terminated; host lost\"), lost, none", state, reason, placement, resumes)
+	}
+	if _, held := s.secrets.get(r1); held {
+		t.Fatal("secrets still held")
 	}
 }
 
@@ -1181,13 +1232,14 @@ func TestPreviewPagesNameNoOrchestrator(t *testing.T) {
 	}
 }
 
-// A Run that succeeds or is cancelled while its owner server serves: the
-// server stops with the placement and is detached, its events say so, and
-// it is never detached with a live process.
+// A Run that is terminated while its owner server serves: the server stops
+// with the placement and is detached, its events say so, and it is never
+// detached with a live process. A Run that succeeds keeps it attached,
+// stopped: a resume starts it again.
 func TestOwnerServerEndsStoppedWithItsRun(t *testing.T) {
 	for _, c := range []struct{ name, stopReason, outcome string }{
 		{"exit 0", "", StateSucceeded},
-		{"cancelled", "cancel", StateCancelled},
+		{"terminated", "terminate", StateTerminated},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, ctx, key, _ := wakeFixture(t)
@@ -1211,6 +1263,12 @@ func TestOwnerServerEndsStoppedWithItsRun(t *testing.T) {
 				t.Fatalf("run: %s", runState)
 			}
 			got := getSrv(t, s, key, sv.ID)
+			if c.outcome == StateSucceeded {
+				if got.RunID == nil || *got.RunID != r1 || got.Process != ServerStopped {
+					t.Fatalf("after the Run succeeded: %+v, want attached and stopped", got)
+				}
+				return
+			}
 			if got.RunID != nil || got.Process != ServerStopped || got.StopReason == nil || *got.StopReason != "detached" || got.Epoch != nil {
 				t.Fatalf("after the Run ended: %+v", got)
 			}

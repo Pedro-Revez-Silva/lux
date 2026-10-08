@@ -36,7 +36,7 @@ def test_drain_only_touches_the_callers_host(tenant_factory, runners, hosts, env
         a.run("hosts", "drain", "host-x")
         time.sleep(3)
         assert b.get(run_b)["state"] == "running", "tenant A's drain stopped tenant B's Run"
-        b.run("cancel", run_b)
+        b.run("terminate", run_b)
     finally:
         ra.stop_all()
         rb.stop_all()
@@ -80,7 +80,7 @@ def test_plain_drain_leaves_running_run_and_places_new_elsewhere(lux, runners, h
     other = lux.submit(generic(ALPINE_IMAGE, "echo", "elsewhere"))
     lux.wait_state(other, "succeeded")
     assert lux.get(other)["placements"][0]["hostName"] == hosts[1].name
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_force_evict_on_an_already_draining_host_moves_its_run(lux, runners, hosts):
@@ -100,17 +100,17 @@ def test_force_evict_on_an_already_draining_host_moves_its_run(lux, runners, hos
                      90, 0.5, "force-evicted Run never resumed elsewhere")
     assert [p["hostName"] for p in run["placements"]] == [hosts[0].name, hosts[1].name], run["placements"]
     assert run["placements"][0]["stopReason"] == "drain"
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
-def test_cancel_right_after_submit_is_not_lost(lux, runners, hosts):
-    """A cancel that reaches the runner together with its assign must still
+def test_terminate_right_after_submit_is_not_lost(lux, runners, hosts):
+    """A terminate that reaches the runner together with its assign must still
     stop the Run."""
     runners.start(hosts[0])
     run_id = lux.submit(generic(ALPINE_IMAGE, "sleep", "300"))
-    lux.run("cancel", run_id)
-    run = lux.wait_state(run_id, "cancelled", timeout=60)
-    assert run["state"] == "cancelled"
+    lux.run("terminate", run_id)
+    run = lux.wait_state(run_id, "terminated", timeout=60)
+    assert run["state"] == "terminated"
 
 
 def test_resumed_failed_run_is_not_finished(lux, runners, hosts):
@@ -122,7 +122,7 @@ def test_resumed_failed_run_is_not_finished(lux, runners, hosts):
     lux.run("resume", run_id)
     run = lux.wait_state(run_id, "running")
     assert not run.get("finishedAt"), run
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_resume_retry_keeps_secrets(lux, runners, hosts):
@@ -138,7 +138,7 @@ def test_resume_retry_keeps_secrets(lux, runners, hosts):
     lux.run("resume", run_id)
     runners.start(hosts[0])
     lux.wait_output(run_id, "len=12")
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_a_run_naming_no_pool_goes_to_the_tenants_default(lux, runners, hosts):
@@ -184,7 +184,7 @@ def test_a_run_naming_no_pool_goes_to_the_tenants_default(lux, runners, hosts):
         assert lux.get(moved)["spec"]["placement"]["pool"] == "other"
     finally:
         for r in runs:
-            lux.run("cancel", r, check=False)
+            lux.run("terminate", r, check=False)
         for pool in ("arm64", "other"):
             lux.run("pools", "rm", pool, check=False)
 

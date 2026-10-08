@@ -39,4 +39,4 @@ def test_a_running_run_survives_a_luxd_outage(env, lux, runners, hosts):
     # And the same container goes on.
     seen = lux.logs(run_id).count("tick-")
     lux.wait_output(run_id, f"tick-{seen + 1}", timeout=30)
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)

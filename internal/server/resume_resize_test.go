@@ -301,7 +301,7 @@ func TestResumeResizeOfANonResumableRun(t *testing.T) {
 			t.Errorf("spec %+v, want %+v", got, want)
 		}
 	})
-	for _, state := range []string{StateRunning, StateSucceeded, StateCancelled} {
+	for _, state := range []string{StateRunning, StateTerminated} {
 		t.Run(state, func(t *testing.T) {
 			s := testServer(t)
 			id := stoppedRun(t, s, resizeBase, i64(gib))

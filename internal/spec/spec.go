@@ -36,7 +36,7 @@ type RunSpec struct {
 	Sandbox   Sandbox           `json:"sandbox" yaml:"sandbox"`
 	Artifacts Artifacts         `json:"artifacts" yaml:"artifacts"`
 	// Empty is stored as given and means ResumeAuto.
-	ResumePolicy string `json:"resumePolicy,omitempty" yaml:"resumePolicy,omitempty" doc:"What lux does when it moves the Run (a drain, a spot preemption, a migration). auto (the default): resumed elsewhere, restored from its snapshot. restart: started again from scratch elsewhere (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host. manual: ends failed, and an operator's migrate is refused (409 not_movable); a person may resume it. never: as manual, and every requested resume is refused (409 not_resumable; an assignment no runner started may still be placed again), for one-shot work such as a CI job holding a single-use token."`
+	ResumePolicy string `json:"resumePolicy,omitempty" yaml:"resumePolicy,omitempty" doc:"What lux does when it moves the Run (a drain, a spot preemption, a migration). auto (the default): resumed elsewhere, restored from its snapshot. restart: started again from scratch elsewhere (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host. manual: ends failed, and an operator's migrate is refused (409 not_movable); a person may resume it. never: it can never be resumed, so every end that would leave it resumable (a move, a requested stop, success, failure) ends it terminated, its outcome in stateReason (e.g. succeeded; resumePolicy never), and an operator's migrate is refused; a requested resume of one still resting from an older luxd is refused (409 not_resumable); an assignment no runner started may still be placed again. For one-shot work such as a CI job holding a single-use token."`
 }
 
 // RunSpec.ResumePolicy values.
@@ -47,8 +47,9 @@ const (
 	ResumeNever   = "never"
 )
 
-// FailsOnMove reports whether a resumePolicy ends the Run as failed when
-// lux moves it, rather than placing it again: manual and never.
+// FailsOnMove reports whether a resumePolicy ends the Run, rather than
+// placing it again, when lux moves it: manual (failed) and never
+// (terminated).
 func FailsOnMove(policy string) bool { return policy == ResumeManual || policy == ResumeNever }
 
 // RefusesResume reports whether a resumePolicy refuses every requested
@@ -92,10 +93,10 @@ type Workload struct {
 	Resume *Resume `json:"resume,omitempty" yaml:"resume,omitempty"`
 	// Grace is how long a graceful stop waits before SIGKILL.
 	Grace      Duration    `json:"grace,omitempty" yaml:"grace,omitempty"`
-	BeforeStop *BeforeStop `json:"beforeStop,omitempty" yaml:"beforeStop,omitempty" doc:"A command run in the container on every stop, before the workload is signalled: a stop asked for, a cancel, a timeout, a drain. Its output is the Run's; what it writes into $LUX_ARTIFACTS is collected. It cannot run when the container dies or its host is lost."`
+	BeforeStop *BeforeStop `json:"beforeStop,omitempty" yaml:"beforeStop,omitempty" doc:"A command run in the container on every stop, before the workload is signalled: a stop asked for, a terminate, a timeout, a drain. Its output is the Run's; what it writes into $LUX_ARTIFACTS is collected. It cannot run when the container dies or its host is lost."`
 	MCPServers []MCPServer `json:"mcpServers,omitempty" yaml:"mcpServers,omitempty" doc:"MCP servers (streamable HTTP) the agent connects to, through its adapter. Each URL's host must be allowed by network.egress (unless unrestricted), and may not be the control plane's."`
 	Services   []Service   `json:"services,omitempty" yaml:"services,omitempty" doc:"HTTP services the workload calls through a local socket (/.lux/services/<name>.sock, named in LUX_SERVICE_<NAME>), which adds their headers: the workload never holds the credentials. Same URL rules as mcpServers."`
-	Servers    []Server    `json:"servers,omitempty" yaml:"servers,omitempty" doc:"Servers: named ports of the Run, each optionally with a command lux starts in the container, as the workload's user with its environment. Started on every start of the Run (a resume, a migration), like every server attached to it; deleted when it succeeds or is cancelled. More can be added while it runs (POST /v1/runs/{id}/servers) or attached (POST /v1/servers/{id}/attach)."`
+	Servers    []Server    `json:"servers,omitempty" yaml:"servers,omitempty" doc:"Servers: named ports of the Run, each optionally with a command lux starts in the container, as the workload's user with its environment. Started on every start of the Run (a resume, a migration), like every server attached to it; deleted when it is terminated. More can be added while it runs (POST /v1/runs/{id}/servers) or attached (POST /v1/servers/{id}/attach)."`
 }
 
 // Server is a named port of a Run, with an optional command that serves

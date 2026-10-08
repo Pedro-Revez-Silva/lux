@@ -466,20 +466,8 @@ func (s *Server) refuseSync(ctx context.Context, tx pgx.Tx, hostID string, id in
 			return err
 		}
 		if assigned && epoch == current {
-			if err := s.placementLost(ctx, tx, runID, epoch, syncModesGone, &later); err != nil {
+			if err := s.requeueUnstartedPlacement(ctx, tx, tenantID, runID, epoch, syncModesGone, &later, a); err != nil {
 				return err
-			}
-			var state string
-			if err := tx.QueryRow(ctx, `SELECT state FROM runs WHERE id = $1`, runID).Scan(&state); err != nil {
-				return err
-			}
-			if state == StateLost {
-				if err := s.requestResume(ctx, tx, tenantID, runID, a.Input, syncModesGone); err != nil {
-					return err
-				}
-				if _, err := tx.Exec(ctx, `UPDATE runs SET pending_sync = $2 WHERE id = $1`, runID, a.Sync); err != nil {
-					return err
-				}
 			}
 		}
 	}

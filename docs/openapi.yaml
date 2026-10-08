@@ -2066,6 +2066,9 @@ components:
         resize:
           $ref: "#/components/schemas/Resize"
           description: "In a resume's answer, when it asked to change resources: what it asked for and what the Run has from now on."
+        resumable:
+          description: "Whether POST /v1/runs/{id}/resume without fromSnapshot would be accepted: its state is stopped, lost, failed or succeeded, its resumePolicy is not never, and it is not left with only a refused snapshot report. The same test as GET /v1/runs?resumable=true. As of this answer: a Run being stopped is not resumable until it is stopped."
+          type: boolean
         resume:
           $ref: "#/components/schemas/Resumability"
         runtimeSeconds:
@@ -2307,7 +2310,7 @@ components:
           format: date-time
           type: string
         lifetime:
-          description: "run: deleted when its Run finishes for good (succeeded, cancelled). owner: kept until its owner deletes it."
+          description: "run: deleted when its Run is terminated. owner: kept until its owner deletes it."
           enum:
             - run
             - owner
@@ -2394,7 +2397,7 @@ components:
           $ref: "#/components/schemas/Resources"
           description: "What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, disk 20Gi, pids 1024, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_DISK, LUX_DEFAULT_PIDS). disk bounds the writable layer plus state volumes: a Run over it is stopped and fails."
         resumePolicy:
-          description: "What lux does when it moves the Run (a drain, a spot preemption, a migration). auto (the default): resumed elsewhere, restored from its snapshot. restart: started again from scratch elsewhere (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host. manual: ends failed, and an operator's migrate is refused (409 not_movable); a person may resume it. never: as manual, and every requested resume is refused (409 not_resumable; an assignment no runner started may still be placed again), for one-shot work such as a CI job holding a single-use token."
+          description: "What lux does when it moves the Run (a drain, a spot preemption, a migration). auto (the default): resumed elsewhere, restored from its snapshot. restart: started again from scratch elsewhere (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host. manual: ends failed, and an operator's migrate is refused (409 not_movable); a person may resume it. never: it can never be resumed, so every end that would leave it resumable (a move, a requested stop, success, failure) ends it terminated, its outcome in stateReason (e.g. succeeded; resumePolicy never), and an operator's migrate is refused; a requested resume of one still resting from an older luxd is refused (409 not_resumable); an assignment no runner started may still be placed again. For one-shot work such as a CI job holding a single-use token."
           type: string
         sandbox:
           $ref: "#/components/schemas/Sandbox"
@@ -2884,7 +2887,7 @@ components:
           format: date-time
           type: string
         expireAfterDays:
-          description: "Days a stopped, lost or failed Run may rest before lux cancels it; 0: never."
+          description: "Days a stopped, lost, failed or succeeded Run may rest before lux terminates it; 0: never."
           format: int64
           type: integer
         hosts:
@@ -2904,7 +2907,7 @@ components:
         name:
           type: string
         retentionDays:
-          description: Days a succeeded or cancelled Run keeps its snapshots and output after it ended. Artifacts are kept until deleted.
+          description: Days a terminated Run keeps its snapshots and output after it was terminated. Artifacts are kept until deleted.
           format: int64
           type: integer
         runs:
@@ -3231,7 +3234,7 @@ components:
             - "null"
         beforeStop:
           $ref: "#/components/schemas/BeforeStop"
-          description: "A command run in the container on every stop, before the workload is signalled: a stop asked for, a cancel, a timeout, a drain. Its output is the Run's; what it writes into $LUX_ARTIFACTS is collected. It cannot run when the container dies or its host is lost."
+          description: "A command run in the container on every stop, before the workload is signalled: a stop asked for, a terminate, a timeout, a drain. Its output is the Run's; what it writes into $LUX_ARTIFACTS is collected. It cannot run when the container dies or its host is lost."
         command:
           items:
             type: string
@@ -3257,7 +3260,7 @@ components:
         resume:
           $ref: "#/components/schemas/Resume"
         servers:
-          description: "Servers: named ports of the Run, each optionally with a command lux starts in the container, as the workload's user with its environment. Started on every start of the Run (a resume, a migration), like every server attached to it; deleted when it succeeds or is cancelled. More can be added while it runs (POST /v1/runs/{id}/servers) or attached (POST /v1/servers/{id}/attach)."
+          description: "Servers: named ports of the Run, each optionally with a command lux starts in the container, as the workload's user with its environment. Started on every start of the Run (a resume, a migration), like every server attached to it; deleted when it is terminated. More can be added while it runs (POST /v1/runs/{id}/servers) or attached (POST /v1/servers/{id}/attach)."
           items:
             $ref: "#/components/schemas/Server"
           type:
@@ -4057,7 +4060,7 @@ paths:
   /v1/hosts/{id}/drain:
     post:
       description: |-
-        No new placements; its live Runs finish where they are. With forceEvict, they are also stopped and resumed elsewhere (a Run with resumePolicy manual or never fails instead; also applies to a host that is already draining). Only the tenant's own hosts; operators, any host.
+        No new placements; its live Runs finish where they are. With forceEvict, they are also stopped and resumed elsewhere (a Run with resumePolicy manual fails instead, one with never ends terminated; also applies to a host that is already draining). Only the tenant's own hosts; operators, any host.
 
         Needs the `admin` scope.
       operationId: drainHost
@@ -4687,7 +4690,7 @@ paths:
   /v1/pools/{name}:
     delete:
       description: |-
-        Its provisioned hosts are cordoned and terminated once idle; its Runs wait for a pool of that name again. If it was the tenant's default pool, the tenant has none until another is marked. forceEvict also stops its hosts' live Runs so they resume elsewhere (a Run with resumePolicy manual or never fails instead).
+        Its provisioned hosts are cordoned and terminated once idle; its Runs wait for a pool of that name again. If it was the tenant's default pool, the tenant has none until another is marked. forceEvict also stops its hosts' live Runs so they resume elsewhere (a Run with resumePolicy manual fails instead, one with never ends terminated).
 
         Needs the `admin` scope.
       operationId: deletePool
@@ -5297,12 +5300,12 @@ paths:
             examples:
               - running,stopped
             type: string
-        - description: "Only Runs resume accepts: stopped, lost or failed, except one whose only snapshot report was refused or whose resumePolicy is never."
+        - description: "Only Runs resume accepts: stopped, lost, failed or succeeded, except one whose only snapshot report was refused or whose resumePolicy is never."
           explode: false
           in: query
           name: resumable
           schema:
-            description: "Only Runs resume accepts: stopped, lost or failed, except one whose only snapshot report was refused or whose resumePolicy is never."
+            description: "Only Runs resume accepts: stopped, lost, failed or succeeded, except one whose only snapshot report was refused or whose resumePolicy is never."
             type: boolean
         - description: Only Runs with a placement (any epoch) on this host, by id or name.
           explode: false
@@ -5507,7 +5510,7 @@ paths:
   /v1/runs/{id}/artifacts:
     delete:
       description: |-
-        Every artifact of a succeeded or cancelled Run, from storage; retention never deletes artifacts. Their listing stays, available false, and a download answers 410 gone. Works however long ago the Run ended. Idempotent: deleted is 0 once none are left. 409 not_terminal on any other Run (a stopped, lost or failed one can still be resumed).
+        Every artifact of a terminated Run, from storage; retention never deletes artifacts. Their listing stays, available false, and a download answers 410 gone. Works however long ago the Run ended. Idempotent: deleted is 0 once none are left. 409 not_terminal on any other Run (a stopped, lost, failed or succeeded one can still be resumed).
 
         Needs the `run` scope.
       operationId: deleteArtifacts
@@ -5705,8 +5708,9 @@ paths:
           $ref: "#/components/schemas/StreamData"
   /v1/runs/{id}/cancel:
     post:
+      deprecated: true
       description: |-
-        It ends as cancelled and cannot be resumed. Idempotent.
+        The old name of POST /v1/runs/{id}/terminate, which it is in every way: the Run ends as terminated.
 
         Needs the `run` scope.
       operationId: cancelRun
@@ -5757,7 +5761,7 @@ paths:
           description: Internal Server Error
       security:
         - apiKey: []
-      summary: Cancel a Run
+      summary: Terminate a Run (deprecated alias)
       tags:
         - runs
   /v1/runs/{id}/cost:
@@ -6645,9 +6649,9 @@ paths:
   /v1/runs/{id}/resume:
     post:
       description: |-
-        From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming. A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been cancelled, and is not resumable. A Run whose spec has resumePolicy never refuses every requested resume: 409 not_resumable, whatever its state (an assignment no runner started may still be placed again).
+        From its latest snapshot (or fromSnapshot), on any host, through the adapter's resume path with its session: a succeeded Run like a stopped one. Its secrets must be supplied again. Idempotent while resuming. A terminated Run is not resumable (409 not_resumable). A Run left stopped, lost, failed or succeeded longer than its tenant's expireAfterDays has been terminated. A Run whose spec has resumePolicy never ends terminated whenever it would rest resumable, and a requested resume of one is refused: 409 not_resumable, whatever its state (an assignment no runner started may still be placed again).
 
-        git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. Adding needs a stopped, lost or failed Run: while it is resuming, 409. A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one, or unless its resumePolicy is restart and it has no session, which restores nothing.
+        git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. Adding needs a Run resume accepts (not one already resuming: 409). A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one, or unless its resumePolicy is restart and it has no session, which restores nothing.
 
         resources changes what the Run gets from now on, written into its spec: cpus and memory, larger or smaller; disk larger, or smaller only down to the snapshot's measured use plus headroom (otherwise kept, and resize.disk in the answer says why). A Run already resuming refuses other sizes (409).
 
@@ -6722,7 +6726,7 @@ paths:
           description: Internal Server Error
       security:
         - apiKey: []
-      summary: Resume a stopped, lost or failed Run
+      summary: Resume a stopped, lost, failed or succeeded Run
       tags:
         - runs
   /v1/runs/{id}/servers:
@@ -7273,7 +7277,7 @@ paths:
   /v1/runs/{id}/snapshots:
     get:
       description: |-
-        Every snapshot it took. A Run keeps only its current one (the one a resume starts from) once that is uploaded; a succeeded or cancelled Run keeps them for its tenant's retention. A deleted one stays listed, available false.
+        Every snapshot it took. A Run that can resume keeps only its current one (the one a resume starts from) once that is uploaded; a terminated Run keeps them for its tenant's retention. A deleted one stays listed, available false.
 
         Needs the `read` scope.
       operationId: listSnapshots
@@ -7453,6 +7457,63 @@ paths:
       security:
         - apiKey: []
       summary: Move a running Run's checkouts to new commits
+      tags:
+        - runs
+  /v1/runs/{id}/terminate:
+    post:
+      description: |-
+        It ends as terminated, for good: it cannot be resumed, and its snapshots and output go after its tenant's retention. Idempotent.
+
+        Needs the `run` scope.
+      operationId: terminateRun
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+          description: Accepted
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Terminate a Run
       tags:
         - runs
   /v1/runs/{id}/tickets:

@@ -110,7 +110,7 @@ sleep 600
     out = lux.wait_output(run_id, "kept:2", timeout=120)
     assert out.split().count("images:0") == 2, out  # the marker image is gone
     assert lux.events(run_id, "volumes.local"), "the same-host resume did not keep its volumes"
-    lux.run("cancel", run_id, "--wait")
+    lux.run("terminate", run_id, "--wait")
 
 
 # A small-file-heavy build, then a run of it: where fuse-overlayfs pays per

@@ -958,7 +958,7 @@ func TestCapacityReconcileScaleBlockedNoFitRotatingQueue(t *testing.T) {
 		arrive(fmt.Sprintf("big%d", i), `{"cpus":4}`)
 	}
 	for i := range 8 {
-		execSQL(t, s, ctx, `UPDATE runs SET state='cancelled' WHERE id=$1`, fmt.Sprintf("big%d", i))
+		execSQL(t, s, ctx, `UPDATE runs SET state='terminated' WHERE id=$1`, fmt.Sprintf("big%d", i))
 		arrive(fmt.Sprintf("big%d", i+3), `{"cpus":4}`)
 		planningTick(t, s, pl, p, false)
 	}
@@ -967,7 +967,7 @@ func TestCapacityReconcileScaleBlockedNoFitRotatingQueue(t *testing.T) {
 		t.Fatalf("launched %d, scale-blocked %+v, want one no_fit row over 8 passes", p.calls, evs)
 	}
 	// Same count waiting; one Run is now blocked on memory instead.
-	execSQL(t, s, ctx, `UPDATE runs SET state='cancelled' WHERE id='big8'`)
+	execSQL(t, s, ctx, `UPDATE runs SET state='terminated' WHERE id='big8'`)
 	arrive("fat", `{"memory":1000}`)
 	planningTick(t, s, pl, p, false)
 	if evs := events(t, s, evScaleBlocked); len(evs) != 2 || evs[1].Data["unmet"] != 3.0 {
@@ -1030,7 +1030,7 @@ func TestCapacityReconcileScaleBlockedCause(t *testing.T) {
 			}
 			execSQL(t, s, ctx, `UPDATE runs SET spec = '{"resources":{"cpus":1},"placement":{"pool":"burst","requires":{"arch":"missing"}}}' WHERE id = 'arrival0'`)
 			planningTick(t, s, pl, p, false)
-			execSQL(t, s, ctx, `UPDATE runs SET cancel_requested = true WHERE id LIKE 'arrival%'`)
+			execSQL(t, s, ctx, `UPDATE runs SET terminate_requested = true WHERE id LIKE 'arrival%'`)
 			planningTick(t, s, pl, p, false)
 			if evs := events(t, s, evScaleBlocked); len(evs) != 1 {
 				t.Fatalf("moving backlog wrote %d blocked rows for %s, want one", len(evs), tc.cause)

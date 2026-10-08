@@ -238,7 +238,7 @@ func TestHostDecisionIdleOnceDemandClears(t *testing.T) {
 	observePlanningHost(t, s, "full", "ready", proto.Capacity{CPUs: 1}, map[string]string{})
 	livePlacement(t, s, "full", `{"cpus":1}`)
 	planningTick(t, s, pl, p, false)
-	execSQL(t, s, context.Background(), `UPDATE runs SET state='cancelled' WHERE id='r0'`)
+	execSQL(t, s, context.Background(), `UPDATE runs SET state='terminated' WHERE id='r0'`)
 	for range 3 {
 		planningTick(t, s, pl, p, false)
 	}
@@ -332,7 +332,7 @@ func TestHostDecisionIdleScope(t *testing.T) {
 		// looked beyond its own pool.
 		planningTick(t, s, pl2, p, false)
 		planningTick(t, s, pl, p, false)
-		execSQL(t, s, ctx, `UPDATE runs SET state='cancelled' WHERE id='r0'`)
+		execSQL(t, s, ctx, `UPDATE runs SET state='terminated' WHERE id='r0'`)
 		for range 2 {
 			planningTick(t, s, pl, p, false)
 		}
@@ -358,7 +358,7 @@ func TestHostDecisionIdleScope(t *testing.T) {
 		if got := hostDecisions(t, s, "chosen"); len(got) != 1 || got[0]["decision"] != "blocked" {
 			t.Fatalf("chosen decisions %+v, want blocked", got)
 		}
-		execSQL(t, s, ctx, `UPDATE runs SET state='cancelled' WHERE id='r0'`)
+		execSQL(t, s, ctx, `UPDATE runs SET state='terminated' WHERE id='r0'`)
 		for range 3 {
 			planningTick(t, s, pl2, p, false)
 			planningTick(t, s, pl, p, false)
@@ -383,7 +383,7 @@ func TestHostDecisionIdleScope(t *testing.T) {
 		if got := hostDecisions(t, s, "chosen"); len(got) != 1 || got[0]["decision"] != "blocked" {
 			t.Fatalf("chosen decisions %+v, want blocked", got)
 		}
-		execSQL(t, s, ctx, `UPDATE runs SET state='cancelled' WHERE id='r0'`)
+		execSQL(t, s, ctx, `UPDATE runs SET state='terminated' WHERE id='r0'`)
 		for range 3 {
 			planningTick(t, s, plat, p, false)
 			planningTick(t, s, pl, p, false)
@@ -400,7 +400,7 @@ func TestHostDecisionIdleScope(t *testing.T) {
 		for range 2 {
 			planningTick(t, s, pl, p, false)
 		}
-		execSQL(t, s, context.Background(), `UPDATE runs SET state='cancelled'`)
+		execSQL(t, s, context.Background(), `UPDATE runs SET state='terminated'`)
 		planningTick(t, s, pl, p, false)
 		got := hostDecisions(t, s, p.hosts[0])
 		want := []map[string]any{{"pool": "burst", "stage": "starting", "decision": "reserved"}, {"pool": "burst", "stage": "starting", "decision": "idle"}}
@@ -414,7 +414,7 @@ func TestHostDecisionIdleScope(t *testing.T) {
 		livePlacement(t, s, "full", `{"cpus":1}`)
 		planningTick(t, s, pl, p, false)
 		execSQL(t, s, context.Background(), `UPDATE hosts SET state='terminated' WHERE id='full'`)
-		execSQL(t, s, context.Background(), `UPDATE runs SET state='cancelled' WHERE id='r0'`)
+		execSQL(t, s, context.Background(), `UPDATE runs SET state='terminated' WHERE id='r0'`)
 		for range 2 {
 			planningTick(t, s, pl, p, false)
 		}

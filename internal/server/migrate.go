@@ -84,7 +84,7 @@ func (s *Server) migrateRun(ctx context.Context, in *migrateRunInput) (*accepted
 		// Before the state: a stopped Run with such a policy gets
 		// not_movable too, since no move of it is ever possible.
 		case spec.FailsOnMove(policy):
-			// Moved, it would fail: the operator stops or cancels it instead.
+			// Moved, it would fail: the operator stops or terminates it instead.
 			return errf(http.StatusConflict, "not_movable", "the Run's resumePolicy is %s: it cannot continue on another host", policy)
 		case state != StateRunning && state != StateStopping:
 			return errf(http.StatusConflict, "not_running", "run is %s: only a running Run can be migrated (a stopped one: resume --to)", state)

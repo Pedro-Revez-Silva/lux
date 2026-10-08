@@ -112,7 +112,7 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, snapshot_id, session_id, current_epoch, pending_input, pending_sync, image_resolved,
 				jsonb_array_length(secrets) > 0, coalesce(place_on, ''), coalesce(avoid_host, ''), pool_id, updated_at, updated_at < now() - $3::interval
-			FROM runs WHERE state IN `+queuedRunStates+` AND NOT cancel_requested
+			FROM runs WHERE state IN `+queuedRunStates+` AND NOT terminate_requested
 			  AND (updated_at, id) > ($1, $2)
 			ORDER BY updated_at, id FOR UPDATE SKIP LOCKED LIMIT 20`,
 			pos.updated, pos.id, interval(s.secretsGrace()))
@@ -173,10 +173,16 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 			// Secret values live only in memory. If this luxd does not hold
 			// them past the grace period (it restarted, or they went to an
 			// instance that is gone), the Run cannot start until someone
-			// supplies them again: it stops, resumable with its secrets.
+			// supplies them again: it stops, resumable with its secrets. A
+			// never Run cannot be resumed, so it ends terminated.
 			if _, ok := s.secrets.get(r.ID); r.HasSecrets && !ok {
 				if it.graceful {
-					if err := setRunState(ctx, tx, r.TenantID, r.ID, StateStopped, "secrets must be supplied again: resume with them", r.Epoch); err != nil {
+					why := secretsLostReason
+					if spec.RefusesResume(r.Spec.ResumePolicy) {
+						why = secretsLostNeverReason
+					}
+					if _, err := s.endRun(ctx, tx, runEnd{tenantID: r.TenantID, runID: r.ID, epoch: r.Epoch,
+						policy: r.Spec.ResumePolicy, state: StateStopped, reason: why}); err != nil {
 						return err
 					}
 				}
@@ -412,7 +418,9 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 // its pool has one.
 func (s *Server) noHost(ctx context.Context, tx pgx.Tx, r pendingRun, wait string) error {
 	if wait == "snapshot unavailable" {
-		return setRunState(ctx, tx, r.TenantID, r.ID, StateLost, "its snapshot is no longer available", r.Epoch)
+		_, err := s.endRun(ctx, tx, runEnd{tenantID: r.TenantID, runID: r.ID, epoch: r.Epoch,
+			policy: r.Spec.ResumePolicy, state: StateLost, reason: snapshotUnavailableReason})
+		return err
 	}
 	// Its pool's provider. A removed pool (retired) has no stand-in;
 	// re-creating it (the same row) serves the Run again.
@@ -525,19 +533,32 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 // foreignSnapshotReason: why a Run whose snapshot cannot be restored failed.
 const foreignSnapshotReason = "its snapshot does not match this Run's blob records"
 
+// snapshotUnavailableReason: why a Run whose snapshot no host or blob store
+// holds any more is lost.
+const snapshotUnavailableReason = "its snapshot is no longer available"
+
+// secretsLostReason (secretsLostNeverReason for a never Run, which cannot
+// be resumed) is the state_reason of a queued Run whose secret values no
+// luxd holds any more.
+const (
+	secretsLostReason      = "secrets must be supplied again: resume with them"
+	secretsLostNeverReason = "its secrets are no longer held"
+)
+
 // failUnrestorable fails a queued Run whose snapshot restoreManifest
-// refused (err a *foreignBlobError), and reports whether it did. Nothing
-// was written for a placement; resuming the Run again meets the same check.
+// refused (err a *foreignBlobError), and reports whether it did: a never
+// Run ends terminated instead. Nothing was written for a placement;
+// resuming the Run again meets the same check.
 func (s *Server) failUnrestorable(ctx context.Context, tx pgx.Tx, r pendingRun, err error) (bool, error) {
 	var foreign *foreignBlobError
 	if !errors.As(err, &foreign) {
 		return false, err
 	}
 	s.log.Warn("resume refused", "run", r.ID, "snapshot", *r.SnapshotID, "err", err)
-	if err := setRunState(ctx, tx, r.TenantID, r.ID, StateFailed, foreignSnapshotReason, r.Epoch); err != nil {
+	if _, err := s.endRun(ctx, tx, runEnd{tenantID: r.TenantID, runID: r.ID, epoch: r.Epoch,
+		policy: r.Spec.ResumePolicy, state: StateFailed, reason: foreignSnapshotReason}); err != nil {
 		return false, err
 	}
-	s.secrets.drop(r.ID)
 	return true, nil
 }
 

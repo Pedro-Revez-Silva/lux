@@ -49,7 +49,7 @@ def test_the_workload_calls_a_service_with_the_credential_added(lux, runners, ho
     assert '{"hello":"there"}' in out
     assert all(f"tick {i}" in out for i in range(3)), out
     assert mcp_server.token not in everything_visible(lux, run_id)
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_an_unreachable_service_is_a_502(lux, runners, hosts, fake_image, mcp_server):
@@ -58,7 +58,7 @@ def test_an_unreachable_service_is_a_502(lux, runners, hosts, fake_image, mcp_se
     run_id = lux.submit(spec)
     out = lux.wait_output(run_id, "done", timeout=90)
     assert "status 502" in out and "service tools unreachable" in out, out
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_the_credential_is_out_of_reach_even_for_root(lux, runners, hosts, fake_image, mcp_server):
@@ -85,7 +85,7 @@ def test_the_credential_is_out_of_reach_even_for_root(lux, runners, hosts, fake_
     assert "end" in out and mcp_server.token not in out, "the credential was readable from the container"
     assert "LUX_SERVICE_TOOLS=unix:/.lux/services/tools.sock" in out
     assert mcp_server.token not in everything_visible(lux, run_id)
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_services_work_after_a_resume(lux, runners, hosts, fake_image, mcp_server):
@@ -100,7 +100,7 @@ def test_services_work_after_a_resume(lux, runners, hosts, fake_image, mcp_serve
     out = lux.wait_output(run_id, "second", timeout=90)
     after = lux.logs(run_id, "--since", since)
     assert "status 200" in after and '"auth": true' in after, after
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_submit_refused_when_egress_does_not_allow_the_service(env, lux, fake_image, mcp_server):

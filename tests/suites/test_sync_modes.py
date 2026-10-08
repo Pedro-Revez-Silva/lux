@@ -94,7 +94,7 @@ def test_fast_forward_keeps_local_work_and_moves_a_clean_checkout(lux, runners, 
     r = out[0]
     assert r["status"] == "fetched" and r["ahead"] == 1 and r["behind"] == 1 and r["to"] == four, out
     assert git(lux, run_id, "rev-parse", "HEAD") == mine and git(lux, run_id, "rev-parse", "lux/main") == four
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_resume_fast_forward_keeps_a_dirty_checkout_and_moves_a_clean_one(lux, runners, hosts, fake_image, git_server):
@@ -140,7 +140,7 @@ def test_resume_fast_forward_keeps_a_dirty_checkout_and_moves_a_clean_one(lux, r
     wait_state(lux, sv["id"], "ready")
     wait_until(lambda: after_syncs(lux, run_id) >= 1, 60, 1, "afterSync never ran after the resume's fast-forward")
     assert after_syncs(lux, run_id) == 1
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def push(lux, run_id: str) -> dict:
@@ -225,5 +225,5 @@ def test_a_rebase_in_progress_moves_to_another_host_and_is_kept(lux, runners, ho
     assert exec_in(lux, run_id, "cat", "/workspace/app/message.txt", "/workspace/app/other.txt").stdout == "resolved\nnewest\n"
     out = lux.json("sync", run_id, "app=main", "--mode", "fast-forward", "--wait", timeout=120)
     assert out[0]["status"] == "ahead" and out[0]["behind"] == 0 and "operation" not in out[0], out
-    lux.run("cancel", blocker)
-    lux.run("cancel", run_id)
+    lux.run("terminate", blocker)
+    lux.run("terminate", run_id)

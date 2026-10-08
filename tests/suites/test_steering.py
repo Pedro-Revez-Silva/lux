@@ -71,7 +71,7 @@ def test_fake_conditionals(lux, runners, hosts, fake_image):
     out = lux.logs(run_id)
     assert "finding: not fixed" in out and "fixed now" in out and "nested-ok" in out, out
     assert "WRONG" not in out, out
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_acp_turn_end_carries_the_agents_usage(lux, runners, hosts, fake_image):

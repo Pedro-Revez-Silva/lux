@@ -202,7 +202,7 @@ def test_a_run_over_its_disk_limit_is_stopped_and_fails(lux, runners, hosts):
     lux.wait_output(run_id, "start\nwrote\nstart", timeout=60)
     run = lux.get(run_id)
     assert run["state"] == "running" and run["spec"]["resources"]["disk"] == 256 << 20, run
-    lux.run("cancel", run_id, "--wait")
+    lux.run("terminate", run_id, "--wait")
 
     # Under the limit: untouched. The default is 20 GiB.
     ok = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "dd if=/dev/zero of=/tmp/f bs=1M count=8 2>/dev/null; sleep 3"))
@@ -219,7 +219,7 @@ def test_disk_is_reserved_on_the_host(lux, runners, hosts):
     from env import wait_until
     wait_until(lambda: lux.get(second).get("stateReason") == "waiting for capacity: 1 host in its pool lacks disk (requested 512.0 MiB)",
                20, 0.5, "not held for disk")
-    lux.run("cancel", big, "--wait")
+    lux.run("terminate", big, "--wait")
     lux.wait_state(second, "succeeded", timeout=60)
 
 
@@ -249,4 +249,4 @@ def test_a_timeout_counts_running_time_only(lux, runners, hosts):
     assert lux.get(free)["spec"].get("timeout") in (None, "0s"), lux.get(free)["spec"]
     time.sleep(5)
     assert lux.get(free)["state"] == "running"
-    lux.run("cancel", free, "--wait")
+    lux.run("terminate", free, "--wait")

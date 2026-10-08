@@ -161,7 +161,7 @@ def test_rules_survive_a_runner_restart(lux, runners, egress_hosts, net_targets)
     runners.start(egress_hosts[0])
     wait_until(lambda: lux.logs(run_id).count(f"OK:{t.allowed_ip}") > 10, 60, 1, "the Run lost its allowed egress")
     assert f"OK:{t.denied_ip}" not in lux.logs(run_id)
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_runs_cannot_reach_each_other(lux, runners, egress_hosts, net_targets):
@@ -177,4 +177,4 @@ def test_runs_cannot_reach_each_other(lux, runners, egress_hosts, net_targets):
     client = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", fetch(f"{ip}:8080"),
                                 network={"egress": [{"cidr": "0.0.0.0/0"}]}))
     assert f"NO:{ip}:8080" in probe(lux, client)
-    lux.run("cancel", server)
+    lux.run("terminate", server)

@@ -41,9 +41,9 @@ def test_an_access_user_is_an_operator(env, access, tenant_factory):
     run_id = t.submit(generic(ALPINE_IMAGE, "true", placement={"requires": {"nowhere": "yes"}}))
     hdr = {"Cf-Access-Jwt-Assertion": token}
     assert run_id in {r["id"] for r in _get(env, "/v1/runs?limit=1000", headers=hdr).json()["runs"]}
-    r = requests.post(f"{env.luxd_url}/v1/runs/{run_id}/cancel", headers=hdr, timeout=10)
+    r = requests.post(f"{env.luxd_url}/v1/runs/{run_id}/terminate", headers=hdr, timeout=10)
     assert r.status_code == 202, r.text
-    assert [e["data"]["by"] for e in t.events(run_id, "cancel.requested")] == ["ada@example.com"]
+    assert [e["data"]["by"] for e in t.events(run_id, "terminate.requested")] == ["ada@example.com"]
     assert "picture" not in me  # the identity provider sent none
 
 
@@ -65,7 +65,7 @@ def test_operator_allowlist_ignores_email_case(env, access, tenant_factory):
     assert me.json()["email"] == "ADA@EXAMPLE.COM"
     runs = _get(env, "/v1/runs", headers=hdr, params={"tenant": other.tenant_id, "limit": 1000})
     assert runs.status_code == 200 and run_id in {r["id"] for r in runs.json()["runs"]}, runs.text
-    other.run("cancel", run_id)
+    other.run("terminate", run_id)
 
 
 def test_access_tenant_is_isolated(env, access, tenant_factory):
@@ -87,14 +87,14 @@ def test_access_tenant_is_isolated(env, access, tenant_factory):
                                                    headers=hdr).json()["runs"]}
     assert _get(env, "/v1/runs/" + run_id, headers=hdr).status_code == 404
     assert _get(env, "/v1/tenants", headers=hdr).status_code == 403
-    r = requests.post(f"{env.luxd_url}/v1/runs/{run_id}/cancel", headers=hdr, timeout=10)
+    r = requests.post(f"{env.luxd_url}/v1/runs/{run_id}/terminate", headers=hdr, timeout=10)
     assert r.status_code == 404, r.text
-    cancel = requests.post(f"{env.luxd_url}/v1/runs/{mine_id}/cancel", headers=hdr, timeout=10)
-    assert cancel.status_code == 202, cancel.text
+    terminate = requests.post(f"{env.luxd_url}/v1/runs/{mine_id}/terminate", headers=hdr, timeout=10)
+    assert terminate.status_code == 202, terminate.text
     events = _get(env, f"/v1/runs/{mine_id}/events", headers=hdr)
     assert events.status_code == 200, events.text
-    assert [e["data"]["by"] for e in events.json()["events"] if e["type"] == "cancel.requested"] == ["ordinary@example.com"]
-    other.run("cancel", run_id)
+    assert [e["data"]["by"] for e in events.json()["events"] if e["type"] == "terminate.requested"] == ["ordinary@example.com"]
+    other.run("terminate", run_id)
 
 
 def test_access_status_and_history_are_tenant_scoped(env, access, tenant_factory):
@@ -127,9 +127,9 @@ def test_access_status_and_history_are_tenant_scoped(env, access, tenant_factory
         assert narrowed_samples and any(s.get("queued") == 1 for s in narrowed_samples), narrowed_samples
         assert all(s.get("queued", 0) < 2 for s in own_samples + narrowed_samples)
     finally:
-        requests.post(f"{env.luxd_url}/v1/runs/{own_id}/cancel", headers=hdr, timeout=10)
+        requests.post(f"{env.luxd_url}/v1/runs/{own_id}/terminate", headers=hdr, timeout=10)
         for run_id in other_ids:
-            other.run("cancel", run_id)
+            other.run("terminate", run_id)
 
 
 def test_access_hosts_and_pools_are_tenant_scoped(env, access, tenant_factory, hosts):
@@ -241,13 +241,13 @@ def test_the_cookie_does_not_authorize_cross_site_actions(env, access, tenant_fa
     t = tenant_factory()
     run_id = t.submit(generic(ALPINE_IMAGE, "true", placement={"requires": {"nowhere": "yes"}}))
     cookie = {"CF_Authorization": access.token("mallory-victim@example.com")}
-    url = f"{env.luxd_url}/v1/runs/{run_id}/cancel"
+    url = f"{env.luxd_url}/v1/runs/{run_id}/terminate"
     assert _get(env, "/v1/whoami", cookies=cookie).status_code == 200
     for site in (None, "cross-site", "same-site"):
         hdr = {"Sec-Fetch-Site": site} if site else {}
         r = requests.post(url, cookies=cookie, headers=hdr, timeout=10)
         assert r.status_code == 401, (site, r.status_code, r.text)
-    assert t.get(run_id)["state"] != "cancelled"
+    assert t.get(run_id)["state"] != "terminated"
     r = requests.post(url, cookies=cookie, headers={"Sec-Fetch-Site": "same-origin"}, timeout=10)
     assert r.status_code == 202, r.text
 

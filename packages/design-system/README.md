@@ -214,7 +214,7 @@ State mapping (`src/states.ts`):
 
 | Hue | Run states | Host states | Server states |
 | --- | --- | --- | --- |
-| neutral | submitted, pending, provisioning, stopped, cancelled | provisioning, terminated | stopped |
+| neutral | submitted, pending, provisioning, stopped, terminated | provisioning, terminated | stopped |
 | blue | scheduled, starting, resuming | registered | starting |
 | teal | running, busy | | |
 | violet | idle | | |

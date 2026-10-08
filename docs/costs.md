@@ -17,17 +17,18 @@ The parts this design builds on:
 
 - **Run states** (`internal/server/lifecycle.go`): `submitted`,
   `provisioning`, `scheduled`, `starting`, `running`, `stopping`,
-  `stopped`, `resuming`, `succeeded`, `failed`, `cancelled`, `lost`. Only
-  `succeeded`, `failed` and `cancelled` are terminal (`terminal()`), and a
+  `stopped`, `resuming`, `succeeded`, `failed`, `terminated`, `lost`. Only
+  `terminated` is terminal (`terminal()`); costs settle on any end
+  (`ended()`: `succeeded`, `failed`, `terminated`), and a `succeeded` or
   `failed` Run can still be resumed (`resumableRunStates` =
-  `stopped`, `lost`, `failed`). There is no "paused", "parked", "aborted"
+  `stopped`, `lost`, `failed`, `succeeded`), which resets them. There is no "paused", "parked", "aborted"
   or "completed". Mapped onto lux's states, those words mean:
 
   | Requirement's word | lux transition |
   | --- | --- |
   | paused / parked | `running → stopping → stopped` (`stop`, or a `drain`/`preempt`/`migrate` move, which then goes `stopped → resuming`) |
   | stopped | same as above |
-  | aborted / cancelled | `→ cancelled` (from `stopping`, or straight from `submitted`/`resuming`/`provisioning`/`stopped`/`lost` in `stopOrCancel`; or `lost` with `cancel_requested`) |
+  | aborted / cancelled | `→ terminated` (from `stopping`, or straight from `submitted`/`resuming`/`provisioning`/`stopped`/`lost` in `stopOrTerminate`; or `lost` with `terminate_requested`) |
   | failed | `→ failed` (non-zero exit, `timeout`, `disk`, adapter failure) |
   | completed | `→ succeeded` |
   | (host died) | `→ lost` (`placementLost`) |
@@ -282,10 +283,10 @@ including after rate changes; an open placement is re-estimated on each
 cost evaluation. Once it ends with a usable rate, its amount and rate are
 frozen independently of the Run and later placements or prices do not
 reprice it. A placement without a usable rate has no amount, not a zero
-amount: compute stays `incomplete` and terminal Runs retry until a matching
+amount: compute stays `incomplete` and ended Runs retry until a matching
 rate is available. A priced placement can freeze even when another placement
 on the Run is missing a rate. The Run's compute line becomes final only when
-it is terminal and all placements are ended and priced; resuming resets the
+it has ended and all placements are ended and priced; resuming resets the
 Run line's final flag, not its frozen placement amounts. This is an
 estimate contract, not reconciliation with provider billing.
 
@@ -575,8 +576,9 @@ config wins, logged once.
   epoch (section 6). Child or sub-agent sessions are the plugin's job: it
   resolves them from the parent session. lux sends only the top-level ids
   the adapters report.
-- `terminal` is true once the Run is `succeeded`, `failed` or `cancelled`.
-  A `failed` Run can still be resumed, and then it goes back to `false`.
+- `terminal` is true once the Run has ended: `succeeded`, `failed` or
+  `terminated`. A `succeeded` or `failed` Run can still be resumed, and
+  then it goes back to `false`.
 
 Response, `200`:
 
@@ -664,14 +666,14 @@ least(cost_pending.due_at, EXCLUDED.due_at)`).
 
 **Lifecycle trigger.** `setRunState` adds one statement to the transaction
 it already runs: when the new state is `stopping`, `stopped`, `lost`,
-`succeeded`, `failed` or `cancelled`, it upserts `cost_pending` with
+`succeeded`, `failed` or `terminated`, it upserts `cost_pending` with
 `due_at = now()`. The new row commits with the state change, or not at all
 if the change rolls back. It is one index write, and no HTTP call ever
 happens in that transaction. `stopping` is included so a stop's costs show
-up right away. The following `stopped` or terminal state queues the Run
+up right away. The following `stopped` or ended state queues the Run
 again, and that evaluation includes the placement's real `ended_at`.
 Entering one of these states from somewhere other than `running` (for
-example `submitted → cancelled`) queues the Run too. That is cheap, and it
+example `submitted → terminated`) queues the Run too. That is cheap, and it
 lets a plugin report costs from before a placement.
 
 **Tick.** Every `costs.every` (2m), each luxd tries to claim the tick:
@@ -749,43 +751,43 @@ CREATE TABLE cost_sources (
   answered_at   timestamptz,       -- last successful answer
   attempts      int NOT NULL DEFAULT 0,
   next_at       timestamptz,       -- next retry or settle attempt
-  settles_left  int,               -- set when the Run turns terminal
+  settles_left  int,               -- set when the Run ends
   last_error    text NOT NULL DEFAULT '',
   PRIMARY KEY (run_id, source)
 );  -- tenant_rows RLS; last_error is shown only to operators
 ```
 
-A **terminal** Run becomes final like this:
+An **ended** Run (`succeeded`, `failed`, `terminated`) becomes final like this:
 
 1. The state change queues it at once. Every source is asked with
    `terminal: true`.
-2. Each plugin schedules its own `settle` list after a terminal answer
+2. Each plugin schedules its own `settle` list after such an answer
    (default `["10m", "1h"]`); compute does not use these slots.
 3. A plugin source is `final` when it answers `final: true`, or when it
    answers the last settle attempt. Failed attempts don't use up a settle
  slot:
    they back off and retry, up to `costs.settle_give_up` (7 days). After
    that, the source is `incomplete` for good and flagged to operators.
-4. `compute` is final when the Run is terminal, every placement has ended
+4. `compute` is final when the Run has ended, every placement has ended
    and each has a frozen, priced snapshot. There is no spot-specific
    24-hour settlement wait. Plugin settlement is independent of compute.
 5. The Run is **final** when every source is final. Lines are then marked
    `final = true`.
 
 
-A `failed` Run that is **resumed** leaves the terminal state. Its sources
+A `succeeded` or `failed` Run that is **resumed** is no longer ended. Its sources
 go back to `ok` (not final), and it is active again.
 
-`stopped` and `lost` Runs are not terminal. They are evaluated when they
+`stopped` and `lost` Runs have not ended. They are evaluated when they
 enter the state; plugins may settle late answers, but compute has no
-settlement timer. Neither source is marked final until the Run becomes
-terminal. After that these Runs stay quiet until resumed.
+settlement timer. Neither source is marked final until the Run ends.
+After that these Runs stay quiet until resumed.
 
 **Built** (migrations `022_cost_queue.sql` and
 `027_cost_placement_snapshots.sql`, `internal/server/costqueue.go`):
 
 - `setRunState` queues through `lux_cost_enqueue(run, reason)`, a
-  `SECURITY DEFINER` function: an API stop or cancel runs in the tenant's
+  `SECURITY DEFINER` function: an API stop or terminate runs in the tenant's
   scope, where the system-only `cost_pending` is out of reach. It queues
   only a Run that scope can see. `PUBLIC` may not execute it: only
   `lux_app` (granted with its other privileges when luxd migrates), and
@@ -817,16 +819,16 @@ terminal. After that these Runs stay quiet until resumed.
   independently refreshed from host rates and occupancy (section 7).
 - Compute's source row is `ok` after a priced answer, `incomplete` if any
   placement (including static) has no usable matching rate, and `final`
-  when the Run is terminal and every placement is frozen. Missing placements
+  when the Run has ended and every placement is frozen. Missing placements
   are listed in `last_error`; they are not counted as zero. An incomplete
-  terminal Run gets a retry at `costs.every`, doubling up to 1h. A stopped
+  ended Run gets a retry at `costs.every`, doubling up to 1h. A stopped
   or lost Run gets no compute retry until resumed.
 - A resume (`requestResume`) sets final sources back to `ok`, clears their
   `next_at` and attempts, and marks the Run's lines estimates again, in
   the resume's transaction. It also queues the Run (`state:resuming`),
   which frees any claim: a drainer's result, read while the Run was still
   finished, is not written.
-- Spot compute has no separate settlement clock: a terminal Run becomes
+- Spot compute has no separate settlement clock: an ended Run becomes
   compute-final as soon as every ended placement has a priced snapshot.
   Later spot observations do not revise frozen placement amounts.
 
@@ -1139,7 +1141,7 @@ enabled = true                     # LUX_COSTS: off stops ticks, drains and pric
 every = "2m"                       # LUX_COSTS_EVERY: the active-Run tick
 drain_every = "2s"                 # LUX_COSTS_DRAIN_EVERY: pending-queue poll (also woken by lux_events)
 batch = 1000                       # LUX_COSTS_BATCH: Runs one drain claims
-settle = ["10m", "1h"]             # LUX_COSTS_SETTLE: re-asks after terminal before final (per plugin overridable)
+settle = ["10m", "1h"]             # LUX_COSTS_SETTLE: re-asks after the Run ends before final (per plugin overridable)
 settle_give_up = "168h"            # LUX_COSTS_SETTLE_GIVE_UP
 backoff = "10s"                    # LUX_COSTS_BACKOFF
 backoff_max = "10m"                # LUX_COSTS_BACKOFF_MAX
@@ -1186,7 +1188,7 @@ operators can delete them with `luxd admin costs forget-source <name>`
    second Run's lines for that session instead? And if a fork feature is
    added later, which Run should the shared prefix be charged to?
 2. **How late may a plugin settle?** The proposed default is re-asking at
-   +10m and +1h after terminal, plus `final: true` to end early, and giving
+   +10m and +1h after the Run ends, plus `final: true` to end early, and giving
    up after 7 days. Is 1h enough for the upstreams you have in mind, or
    should the default be longer (such as +24h)?
 3. **Key without family.** The key is (source, run, item), so one source

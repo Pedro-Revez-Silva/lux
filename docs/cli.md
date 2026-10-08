@@ -31,7 +31,7 @@ was reached; `1` anything else.
 lux run -f spec.yaml [--follow | --wait] [--name N] [-l k=v] [--pool P] [--idempotency-key K] [--secrets-from .env]
 lux run --image alpine -- echo hello           # a quick generic Run
 lux run --image alpine --pool arm64 -- uname -m
-lux ls [--state running,stopped] [-l team=x] [--resumable] [--host H] [--limit N]   # with RUNTIME and COST columns; --resumable omits Runs whose only snapshot report was refused
+lux ls [--state running,stopped] [-l team=x] [--resumable] [--host H] [--limit N]   # with RUNTIME and COST columns; --resumable omits Runs whose only snapshot report was refused, and resumePolicy never
 lux get <run>                                  # state, placements, usage
 lux logs <run> [-f] [--since <cursor>] [--events] [--stderr=false] [--server NAME | --servers]
 lux events <run>                               # lifecycle events
@@ -68,7 +68,7 @@ Agents get the text as a message. Generic workloads get it on stdin. See
 message may be left out; each file's type is read from its bytes (PNG,
 JPEG, WebP or GIF). See [images](adapters.md#images).
 
-## Stop, resume, cancel
+## Stop, resume, terminate
 
 ```bash
 lux stop <run> [--wait]         # graceful; snapshot; resumable
@@ -76,7 +76,7 @@ lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--se
            [--add-repo name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]]... [--request-id ID]
            [--sync repo=ref]... [--sync-mode move|fast-forward|fetch]  # move restored checkouts to ref before init
 lux sync <run> repo=ref... [--mode move|fast-forward|fetch] [--wait] [--request-id ID]   # a running Run's checkouts
-lux cancel <run> [--wait]       # final (a snapshot is still taken); a Run left stopped, lost or failed is cancelled after its tenant's expiry (default 90 days)
+lux terminate <run> [--wait]    # ends it for good: terminated, never resumable (a snapshot is still taken); a Run left stopped, lost, failed or succeeded is terminated after its tenant's expiry (default 90 days). `lux cancel` is a deprecated alias.
 lux snapshots <run>             # where each snapshot lives; only the current one is kept once uploaded (older ones: available false)
 ```
 
@@ -106,7 +106,7 @@ lux resume run_x --cpus 4 --memory 2Gi    # more CPUs, less memory
 lux resume run_x --disk 10Gi              # smaller, if its state fits
 ```
 
-`--add-repo` (repeatable) adds a repository to a stopped, lost or failed
+`--add-repo` (repeatable) adds a repository to a stopped, lost, failed or succeeded
 Run. The runner clones it into the restored workspace before the Run
 starts again (see [Git](runspec.md#git)):
 
@@ -178,7 +178,7 @@ prints git-style stat lines instead, and `-o json` the whole result
 
 ```bash
 lux artifacts <run> [--download DIR]
-lux artifacts <run> --delete    # a succeeded or cancelled Run's artifacts, from storage; retention never deletes them
+lux artifacts <run> --delete    # a terminated Run's artifacts, from storage; retention never deletes them
 ```
 
 ## Hosts and pools

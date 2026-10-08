@@ -47,7 +47,23 @@ arrive, a few seconds late.
    luxd does that records an event (heartbeats, registration, placements,
    drains) waits — about 3–4 s per million events for the two together.
    A migration that fails on a deadlock with luxd can be run again.
-3. Restart (or roll) every `luxd serve` onto the new binary.
+   For a release with 056, steps 2–3 change: luxds do not keep working
+   meanwhile, and are not rolled. 056 renames `runs.cancel_requested` to
+   `terminate_requested` and rewrites `cancelled` to `terminated` in stored
+   Runs, events and the cost queue. While 056 runs it blocks every access
+   to `runs` (each luxd request, scheduler pass and runner report waits on
+   it) for about 1–2 s per million `run_events` rows, plus the scan of
+   `runs` itself; once it commits, a luxd older than it fails every
+   request that reads or writes the column, until it is restarted on the
+   new binary. With one luxd, migrate and then restart it at once (the
+   host reconciler does exactly this): the old luxd's failures last only
+   between the commit and the restart, and runners retry their reports.
+   With several luxds sharing the database, stop every one before 056
+   runs and start them again on the new binary (step 3) once it has
+   committed, so that no request reaches an older luxd.
+3. Restart (or roll) every `luxd serve` onto the new binary; for a release
+   with 056 and several luxds, start every one of them, all stopped in
+   step 2: do not roll.
 
 Migrate first: a luxd newer than its schema does not check it, and fails
 requests that touch what is missing (luxds older than the schema keep
@@ -188,13 +204,13 @@ luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BY
   registers.
 - `--max-storage`: bytes in snapshots, output and artifacts not yet
   deleted. Checked when a Run is submitted or resumed.
-- `--retention-days`: how long a succeeded or cancelled Run keeps its
-  snapshots and output after it ended (default 30). The Run, its events
-  and its artifacts stay. A failed Run can be resumed, so retention
-  deletes nothing of it.
-- `--expire-after-days`: how long a Run may rest `stopped`, `lost` or
-  `failed` before lux cancels it (default 90; 0: never). Its retention
-  counts from then.
+- `--retention-days`: how long a terminated Run keeps its snapshots and
+  output after it was terminated (default 30). The Run, its events and its
+  artifacts stay. Every other Run can be resumed, so retention deletes
+  nothing of it.
+- `--expire-after-days`: how long a Run may rest `stopped`, `lost`,
+  `failed` or `succeeded` before lux terminates it (default 90; 0: never).
+  Its retention counts from then.
 
 A request over quota gets HTTP 429, and the CLI exits with code 5.
 
@@ -240,28 +256,51 @@ reach S3 in the background:
    ([Which snapshots are kept](concepts.md#which-snapshots-are-kept)):
    - the older snapshots of a resumable Run, once its current one is
      uploaded;
-   - a succeeded or cancelled Run's snapshots and output, the tenant's
-     `retention_days` after it ended;
-   - a `failed` Run, which is resumable, is exempt from age-based retention
-     until it expires (`expire_after_days`, default 90: cancelled, then
-     retention); its superseded snapshots are still removed, as above.
+   - a terminated Run's snapshots and output, the tenant's
+     `retention_days` after it was terminated;
+   - a `stopped`, `lost`, `failed` or `succeeded` Run, which is resumable,
+     is exempt from age-based retention until it expires
+     (`expire_after_days`, default 90: terminated, then retention); its
+     superseded snapshots are still removed, as above.
 
-   Artifacts are deleted only by `DELETE /v1/runs/{id}/artifacts`. Each
+   Artifacts are deleted only by `DELETE /v1/runs/{id}/artifacts` (of a
+   terminated Run). Each
    deletion marks the blobs deleted (and the snapshots unavailable) in the
    database first, under the Run's lock, then deletes the S3 objects; a
    delete S3 refuses is logged (`S3 delete failed; object orphaned`, with
    its key) and left in the bucket, never retried.
 
-   **Upgrading** to this release (migrations 053–054): the first reaper
-   passes, 20 Runs per pass per kind, cancel every Run resting longer than
+   **Upgrading** to migrations 053–054: the first reaper
+   passes, 20 Runs per pass per kind, terminate every Run resting longer than
    90 days (`state_changed_at` is backfilled from each Run's last `state`
    event); delete the volumes of every snapshot but the current one of
-   non-terminal Runs (any not succeeded or cancelled) whose current
+   Runs that are not terminated whose current
    snapshot is uploaded; and stop deleting failed Runs' blobs and
-   artifacts. Superseded deletion leaves existing succeeded and cancelled
-   Runs alone: they stay governed by retention. Expired Runs lose their
+   artifacts. Expired Runs lose their
    snapshots and output 30 days later (their retention starts at the
    expiry).
+
+   **Upgrading** to migrations 056–057 (succeeded becomes resumable,
+   cancelled becomes terminated): existing `succeeded` Runs stop being
+   reaped by retention. One whose snapshot retention already deleted is
+   still listed as resumable by its state (`resumable` and `?resumable=true`
+   look at state, policy and refused reports, not at the snapshot's
+   availability); `GET /v1/runs/{id}` shows the blocker "its snapshot is
+   no longer available", and a resume of it ends `lost` with that reason
+   when the scheduler finds nothing to restore. Each `succeeded` Run rests from its
+   `state_changed_at`, so the first expiry passes terminate every one
+   that succeeded more than the tenant's `expire_after_days` ago, 20 per
+   pass; their retention then starts. A succeeded Run's older snapshots
+   are now superseded and deleted once its current one is uploaded.
+   Existing `cancelled` Runs become `terminated`, `terminated_at`
+   taken from their `state_changed_at` (when they were cancelled).
+   Runs with `resumePolicy: never` that already rest (`stopped`, `lost`,
+   `failed`, `succeeded`) stay as they are until terminated or expired;
+   resume refuses them, as before.
+   Succeeded Runs now keep their snapshots and output until
+   they expire (`expire_after_days`, default 90) plus retention, and those
+   bytes count toward `max_storage_bytes`: clients should terminate Runs
+   they will not resume.
 
 Keys are `tenants/<tenant>/runs/<run>/<blob>`. Encrypt the bucket at rest
 (SSE-KMS on AWS).

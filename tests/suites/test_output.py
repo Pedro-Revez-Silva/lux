@@ -250,4 +250,4 @@ def test_follow_across_same_host_resumes(lux, runners, hosts):
         want = [(r["cursor"], r["data"]) for r in lux.records(run_id) if r["ch"] == "stdout"]
         assert got == want
     finally:
-        lux.run("cancel", run_id, "--wait", check=False)
+        lux.run("terminate", run_id, "--wait", check=False)

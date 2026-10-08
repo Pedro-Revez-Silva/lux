@@ -35,13 +35,13 @@ func artifactID(t *testing.T, s *Server, blobID string) string {
 // after retention deleted the rest; again, it is a no-op. A resumable or
 // live Run is 409; another tenant's Run is 404.
 func TestDeleteArtifacts(t *testing.T) {
-	s, ctx, f := retentionFixture(t, StateSucceeded, StateCancelled, 1, 400)
+	s, ctx, f := retentionFixture(t, StateTerminated, StateTerminated, 1, 400)
 	if err := s.reapRetention(ctx); err != nil {
 		t.Fatal(err)
 	}
 	t1, t2 := apiKey(t, s, new("t1"), "run", "read"), apiKey(t, s, new("t2"), "run", "read")
-	// Another succeeded Run of rb's tenant, with an artifact of its own.
-	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, finished_at) VALUES ('rc', 't2', '{}', 'succeeded', 1, now())`)
+	// Another terminated Run of rb's tenant, with an artifact of its own.
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, finished_at) VALUES ('rc', 't2', '{}', 'terminated', 1, now())`)
 	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, location, s3_key) VALUES ('bC-art', 't2', 'rc', 1, 'artifact', '/c', 's3', 'rc/bC-art')`)
 	execSQL(t, s, ctx, `INSERT INTO artifacts (id, tenant_id, run_id, epoch, path, blob_id) VALUES ('aC', 't2', 'rc', 1, '/c', 'bC-art')`)
 	before := len(f.Deleted())
@@ -77,8 +77,8 @@ func TestDeleteArtifacts(t *testing.T) {
 	if code != http.StatusOK || body["deleted"] != float64(0) || len(f.Deleted()) != before+2 {
 		t.Fatalf("again: %d %v, deletes %v", code, body, f.Deleted())
 	}
-	// Resumable and live Runs keep theirs.
-	for _, state := range []string{StateStopped, StateLost, StateFailed, StateRunning, StateResuming} {
+	// Resumable (a succeeded one included) and live Runs keep theirs.
+	for _, state := range []string{StateStopped, StateLost, StateFailed, StateSucceeded, StateRunning, StateResuming} {
 		execSQL(t, s, ctx, `UPDATE runs SET state = $1 WHERE id = 'ra'`, state)
 		if code, _ := callJSON(t, s, t1, http.MethodDelete, "/v1/runs/ra/artifacts"); code != http.StatusConflict {
 			t.Fatalf("%s Run: %d, want 409", state, code)
@@ -92,7 +92,7 @@ func TestDeleteArtifacts(t *testing.T) {
 // An artifact still on its host is deleted too; when its upload arrives,
 // the object is dropped and the blob stays deleted.
 func TestDeleteArtifactsBeforeUpload(t *testing.T) {
-	s, ctx, f := retentionFixture(t, StateSucceeded, StateSucceeded, 1, 1)
+	s, ctx, f := retentionFixture(t, StateTerminated, StateTerminated, 1, 1)
 	execSQL(t, s, ctx, `UPDATE blobs SET location = 'host', s3_key = NULL WHERE id = 'bA-art'`)
 	key := apiKey(t, s, new("t1"), "run")
 	if code, body := callJSON(t, s, key, http.MethodDelete, "/v1/runs/ra/artifacts"); code != http.StatusOK || body["deleted"] != float64(1) {
@@ -109,7 +109,7 @@ func TestDeleteArtifactsBeforeUpload(t *testing.T) {
 // An artifact deleted while its upload is under way: the upload answers
 // 410, its S3 object is deleted, and the blob stays deleted.
 func TestDeleteArtifactsDuringUpload(t *testing.T) {
-	s, ctx, f := retentionFixture(t, StateSucceeded, StateSucceeded, 1, 1)
+	s, ctx, f := retentionFixture(t, StateTerminated, StateTerminated, 1, 1)
 	body := []byte("artifact bytes")
 	sum := sha256.Sum256(body)
 	execSQL(t, s, ctx, `UPDATE blobs SET location = 'host', s3_key = NULL, sha256 = $1 WHERE id = 'bA-art'`, hex.EncodeToString(sum[:]))
@@ -138,7 +138,7 @@ func TestDeleteArtifactsDuringUpload(t *testing.T) {
 // An artifact whose upload committed before the delete: the delete claims
 // it and deletes the uploaded object.
 func TestDeleteArtifactsAfterUpload(t *testing.T) {
-	s, ctx, f := retentionFixture(t, StateSucceeded, StateSucceeded, 1, 1)
+	s, ctx, f := retentionFixture(t, StateTerminated, StateTerminated, 1, 1)
 	body := []byte("artifact bytes")
 	sum := sha256.Sum256(body)
 	execSQL(t, s, ctx, `UPDATE blobs SET location = 'host', s3_key = NULL, sha256 = $1 WHERE id = 'bA-art'`, hex.EncodeToString(sum[:]))
@@ -168,7 +168,7 @@ func TestDeleteArtifactsAfterUpload(t *testing.T) {
 // An S3 delete that fails leaves an orphan, logged with its key; the claim
 // stands: the blob stays deleted and the request succeeds.
 func TestDeleteArtifactsS3Failure(t *testing.T) {
-	s, _, f := retentionFixture(t, StateSucceeded, StateSucceeded, 1, 1)
+	s, _, f := retentionFixture(t, StateTerminated, StateTerminated, 1, 1)
 	log := captureLog(s)
 	f.failPrefix = "ra/"
 	key := apiKey(t, s, new("t1"), "run")

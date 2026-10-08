@@ -67,7 +67,7 @@ def test_cost_cli(lux, tenant_factory, operator, runners, hosts):
     ls = lux.run("ls").stdout
     assert re.search(rf"^{pending}\s.*\s—\s", ls, re.M), ls
     assert re.search(r"^total:\s+—$", lux.run("cost", pending).stdout, re.M)
-    lux.run("cancel", pending)
+    lux.run("terminate", pending)
 
     # Another tenant sees neither the Run's cost nor its summary.
     other = tenant_factory()

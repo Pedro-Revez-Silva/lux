@@ -82,7 +82,7 @@ def test_a_server_runs_and_is_reachable(lux, runners, hosts, fake_image):
     assert lux.get(run_id)["servers"][0]["name"] == "web"
     assert [e["data"]["state"] for e in lux.events(run_id, "server.state")][:2] == ["starting", "ready"]
     assert lux.events(run_id, "server.added")
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_a_server_that_exits(lux, runners, hosts, fake_image):
@@ -96,7 +96,7 @@ def test_a_server_that_exits(lux, runners, hosts, fake_image):
     lux.run("server", "restart", run_id, "bad")
     wait_until(lambda: len([e for e in lux.events(run_id, "server.state") if e["data"]["state"] == "exited"]) == 2,
                30, 0.5, "never exited again")
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_start_stop_and_a_port_started_by_hand(lux, runners, hosts, fake_image):
@@ -137,7 +137,7 @@ def test_start_stop_and_a_port_started_by_hand(lux, runners, hosts, fake_image):
         lux.run("server", "start", run_id, "later")
     assert e.value.code == 4 and "a server starts only in a running Run" in e.value.stderr
     lux.run("server", "add", run_id, "later2", "8082", "--no-start", "--", *serve(8082))
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def _accepts(port: int) -> bool:
@@ -197,7 +197,7 @@ def test_servers_stop_with_a_migration_and_start_again(operator, lux, runners, h
     # A plain stop: stopped as "run stopped".
     lux.run("stop", run_id, "--wait", timeout=120)
     assert server(lux, run_id, "app")["stopReason"] == "run stopped"
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_invalid_servers(lux, runners, hosts, fake_image):
@@ -216,7 +216,7 @@ def test_invalid_servers(lux, runners, hosts, fake_image):
     with pytest.raises(CLIError) as e:
         lux.run("server", "add", run_id, "web-", "8081")
     assert "invalid name" in e.value.stderr
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 # ---- stream tickets and the Origin check ---------------------------------------
@@ -247,7 +247,7 @@ def test_tickets_are_single_use_and_bound(lux, tenant_factory, runners, hosts):
     # Nowhere but the stream routes.
     t2 = mint(lux, run_id, "exec").json()["ticket"]
     assert requests.get(f"{lux.env.luxd_url}/v1/runs/{run_id}", params={"ticket": t2}, timeout=10).status_code == 401
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_streams_refuse_other_origins(lux, runners, hosts):
@@ -262,7 +262,7 @@ def test_streams_refuse_other_origins(lux, runners, hosts):
     r = requests.get(url, headers={**upgrade, "Origin": lux.env.luxd_url}, timeout=10, stream=True)
     assert r.status_code == 101, r.status_code
     r.close()
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_lux_shell(lux, runners, hosts, fake_image):
@@ -271,7 +271,7 @@ def test_lux_shell(lux, runners, hosts, fake_image):
     lux.wait_state(run_id, "running")
     out = lux.run("shell", run_id, input="echo shell-$((20+22)) $0; exit\n", timeout=60).stdout
     assert "shell-42" in out and "bash" in out, out
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_lux_shell_without_bash(lux, runners, hosts):
@@ -282,7 +282,7 @@ def test_lux_shell_without_bash(lux, runners, hosts):
     lux.run("exec", run_id, "-T", "--", "/bin/sh", "-c", "! command -v bash", input="")
     out = lux.run("shell", run_id, input="echo shell-$((20+22)); exit\n", timeout=60).stdout
     assert "shell-42" in out.splitlines(), out
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 # ---- previews ----------------------------------------------------------------------
@@ -379,7 +379,7 @@ def test_preview(lux, runners, hosts, fake_image):
     lux.run("stop", run_id, "--wait", timeout=120)
     r = pv.get("/")
     assert "Not running" in r.text, r.text
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_preview_holds_a_starting_server(lux, runners, hosts, fake_image):
@@ -392,4 +392,4 @@ def test_preview_holds_a_starting_server(lux, runners, hosts, fake_image):
     sign_in(lux, pv, run_id)
     r = pv.get("/")
     assert r.status_code == 200 and "finally" in r.text, (r.status_code, r.text)
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)

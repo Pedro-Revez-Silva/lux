@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Badge, Button, Card, ConnectionBadge, CrumbSep, DEFAULT_FONT_SIZE, EmptyState, formatDuration, IconButton, IdChip, LinkButton, PageHeader, SegmentedControl, StatePill, Terminal, TerminalOverlay, useTerminalScheme, type ConnectionStatus, type TerminalHandle, type TerminalSchemePref, type TerminalSize } from "@lux/design-system";
 import { IconChevronLeft, IconExternal, IconMinus, IconPlus, IconRefresh, IconTerminal, IconWarning } from "@lux/design-system/icons";
-import { errorText, EXEC_RUN_STATES, isApiError, openExec, SHELL_COMMAND, TERMINAL_RUN_STATES, useSession, type ExecSession, type Run } from "../../api/index.ts";
+import { ENDED_RUN_STATES, errorText, EXEC_RUN_STATES, isApiError, openExec, SHELL_COMMAND, TERMINAL_RUN_STATES, useSession, type ExecSession, type Run } from "../../api/index.ts";
 import { href, Link, scoped, useSearch } from "../router.tsx";
 import { ButtonLink, ErrorBlock, HostLink, PageSkeleton, RunLink, runPath, useRun } from "./common.tsx";
 
@@ -326,8 +326,8 @@ function ShellOverlay({ run, shell, onReconnect }: { run: Run; shell: Shell; onR
 function NotRunning({ run }: { run: Run }) {
   const last = run.placements?.at(-1);
   const state = run.state;
-  const ended = TERMINAL_RUN_STATES.has(state);
-  const parked = state === "stopped" || state === "lost";
+  const ended = ENDED_RUN_STATES.has(state);
+  const parked = state === "stopped" || state === "lost" || (ended && !TERMINAL_RUN_STATES.has(state));
   const title =
     state === "stopped"
       ? "This run is stopped — there is no container to open a shell in."

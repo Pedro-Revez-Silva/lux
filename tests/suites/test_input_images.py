@@ -122,7 +122,7 @@ def test_images_reach_the_agent_and_survive_a_move(lux, runners, hosts, harness,
     wait_until(lambda: "/home/agent/.lux-inputs" in lux.logs(run_id), harness.timeout, 0.3, "LUX_INPUTS not set")
     # The first prompt's images are not given again on resume.
     assert lux.logs(run_id).count(_seen(prompt_img, prompt_shape)) == 1
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 @harnesses(lambda h: h.adapter in SHAPES)
@@ -159,7 +159,7 @@ def test_interrupt_resends_images(lux, runners, hosts, harness, tmp_path):
     if ack.get("receipt"):
         wait_until(lambda: any(r.get("event", {}).get("type") == "lux.input.consumed" and r["event"]["data"]["requestId"] == "int-img"
                                for r in lux.records(run_id, "--events")), 20, 0.3, "no lux.input.consumed")
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_real_agent_reads_an_image(lux, runners, hosts, harness, tmp_path):
@@ -194,7 +194,7 @@ def test_real_agent_reads_an_image(lux, runners, hosts, harness, tmp_path):
         print(f"{harness.id} {'mid-turn' if busy else 'idle'} lands={ack.get('lands')} receipt={ack.get('receipt')} replied: {reply.strip()!r}")
         assert ack["phase"] == "accepted" and ack["attachments"] == [_meta(img.name, word_png(word))], ack
         lux.wait_activity(run_id, "idle", timeout=harness.timeout)
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_images_refused(lux, runners, hosts, fake_image, tmp_path):
@@ -212,7 +212,7 @@ def test_images_refused(lux, runners, hosts, fake_image, tmp_path):
     with pytest.raises(CLIError) as e:
         lux.submit(fake_agent(fake_image, "echo hi", workload={"attachments": mismatched}))
     assert "does not match its bytes" in e.value.stderr, e.value.stderr
-    lux.run("cancel", plain)
+    lux.run("terminate", plain)
 
 
 def test_acp_agent_without_images(lux, runners, hosts, fake_image, tmp_path):
@@ -232,4 +232,4 @@ def test_acp_agent_without_images(lux, runners, hosts, fake_image, tmp_path):
     lux.run("steer", run_id, "echo still-here")
     lux.wait_output(run_id, "still-here")
     assert "with-image" not in lux.logs(run_id)
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)

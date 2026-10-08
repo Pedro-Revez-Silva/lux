@@ -88,7 +88,7 @@ def test_agent_calls_an_mcp_server(env, lux, runners, hosts, fake_image, mcp_ser
     from pathlib import Path
     assert mcp_server.token not in (Path(env.log_dir) / "luxd.log").read_text(errors="replace")
     assert mcp_server.token not in (Path(hosts[0].log_dir) / "runner.log").read_text(errors="replace")
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_acp_mcp_servers_after_session_load(lux, runners, hosts, fake_image, mcp_server):
@@ -115,7 +115,7 @@ def test_acp_mcp_servers_after_session_load(lux, runners, hosts, fake_image, mcp
     assert "echo: again" in lux.logs(run_id, "--since", since)
     assert lux.get(run_id)["sessionId"] == session, "the session was not loaded"
     assert mcp_server.token not in everything_visible(lux, run_id)
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_acp_agent_without_http_mcp_gets_a_warning(lux, runners, hosts, fake_image, mcp_server):
@@ -129,7 +129,7 @@ def test_acp_agent_without_http_mcp_gets_a_warning(lux, runners, hosts, fake_ima
     warnings = [r["event"] for r in lux.records(run_id, "--events") if r.get("ch") == "event"
                 and r["event"].get("type") == "lux.warning" and "HTTP MCP" in str(r["event"].get("data"))]
     assert warnings, lux.records(run_id, "--events")
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_submit_refused_when_egress_does_not_allow_the_server(lux, fake_image, mcp_server):
@@ -192,4 +192,4 @@ def test_an_mcp_server_backed_by_a_service(lux, runners, hosts, fake_image, mcp_
     assert "end" in out and mcp_server.token not in out, "the token is visible in the container"
     assert "LUX_SERVICE_TOOLS_URL=http://127.0.0.1:41000" in out
     assert mcp_server.token not in everything_visible(lux, run_id)
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)

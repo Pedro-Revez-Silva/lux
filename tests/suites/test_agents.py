@@ -252,7 +252,7 @@ def test_mid_turn_steering(lux, runners, hosts, harness):
     _check_phases(lux, run_id, harness, "mid-1")
     # Once each: the prompt's too.
     assert [r["step"] for r in _input_records(lux, run_id, "prompt")][0] == "accepted"
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 @harnesses(lambda h: h.caps.steer_joins_turn)
@@ -298,7 +298,7 @@ def test_interrupt_carries_an_unread_steer(lux, runners, hosts, harness):
     # before the next one's.
     assert len(turn_ends) >= 2 and turn_ends[0] < consumed[0] < turn_ends[1], (turn_ends, consumed)
     assert turn_ends[0] < steer_call["start"] < turn_ends[1] and steered in steer_call["output"], (turn_ends, steer_call)
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 @harnesses(lambda h: h.caps.steer_joins_turn)
@@ -356,7 +356,7 @@ def test_stop_resume_elsewhere_and_remember(lux, runners, hosts, harness):
     out = lux.logs(run_id)
     for v in harness.secret_values():
         assert v not in out, "a credential leaked into output"
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 @harnesses(lambda h: h.name == "codex")

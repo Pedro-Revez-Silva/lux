@@ -28,6 +28,7 @@ export interface RunSpec {
   workload: { adapter: string; command?: string[]; prompt?: string; workdir?: string; user?: string; tty?: boolean; servers?: SpecServer[] };
   resources: SpecResources;
   placement: { pool?: string; requires?: Record<string, string>; prefers?: Record<string, string> };
+  resumePolicy?: "auto" | "restart" | "manual" | "never";
   [key: string]: unknown;
 }
 
@@ -101,6 +102,8 @@ export interface Run {
   name?: string;
   labels: Record<string, string>;
   state: string;
+  /** POST /resume without fromSnapshot would accept it (the ?resumable=true test); always present. */
+  resumable: boolean;
   stateReason?: string;
   activity?: string;
   /** What the adapter does with input sent while the agent works. */
@@ -568,7 +571,7 @@ export interface Tenant {
   id: string;
   name: string;
   retentionDays: number;
-  /** Days a stopped, lost or failed Run may rest before it is cancelled; 0: never. */
+  /** Days a stopped, lost, failed or succeeded Run may rest before it is terminated; 0: never. */
   expireAfterDays: number;
   maxConcurrentRuns?: number;
   maxHosts?: number;
@@ -762,18 +765,20 @@ export interface Page<T> {
   offset?: number;
 }
 
-/** Run states that never change again. */
-export const TERMINAL_RUN_STATES = new Set(["succeeded", "failed", "cancelled"]);
+/** Run states that never change again: terminated alone. */
+export const TERMINAL_RUN_STATES = new Set(["terminated"]);
+/** Run states whose last placement ended on its own or for good; all but terminated can be resumed. */
+export const ENDED_RUN_STATES = new Set(["succeeded", "failed", "terminated"]);
 /** What POST /input accepts. */
 export const INPUT_RUN_STATES = new Set(["starting", "running"]);
-/** What POST /resume accepts. */
-export const RESUMABLE_RUN_STATES = new Set(["stopped", "lost", "failed"]);
+/** What POST /resume accepts, by state (Run.resumable says whether this Run would be). */
+export const RESUMABLE_RUN_STATES = new Set(["stopped", "lost", "failed", "succeeded"]);
 /** What the exec stream (a terminal) and a server's start/stop/restart need. */
 export const EXEC_RUN_STATES = new Set(["running"]);
 
 /** Still changing: worth polling. */
 export function isRunActive(state: string): boolean {
-  return !TERMINAL_RUN_STATES.has(state) && state !== "stopped" && state !== "lost";
+  return !ENDED_RUN_STATES.has(state) && state !== "stopped" && state !== "lost";
 }
 
 /** GET /v1/pools/stats: one pool's figures over the range (a tenant: its own Runs, allocation and cost). */

@@ -269,9 +269,9 @@ def test_a_renamed_pool_keeps_its_hosts_and_runs(lux, ec2):
         time.sleep(2)
         run = lux.get(stale)
         assert run["state"] == "submitted" and not run.get("host") and not run.get("poolId"), run
-        lux.run("cancel", stale)
+        lux.run("terminate", stale)
         evs = list(reversed(lux.json("pools", "events", "burst2", "--all")))
         assert [e["data"] for e in evs if e["type"] == "pool.renamed"] == [{"from": "burst", "to": "burst2"}], evs
-        lux.run("cancel", first)
+        lux.run("terminate", first)
     finally:
         lux.run("pools", "rename", "burst2", "burst", check=False)

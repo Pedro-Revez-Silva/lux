@@ -21,8 +21,9 @@ function line(e: FeedEvent): string {
       return s.replace(/^snapshot /, "snapshot ");
     case "stop.requested":
       return `stop requested ${s}`;
+    case "terminate.requested":
     case "cancel.requested":
-      return `cancel requested ${s}`;
+      return `terminate requested ${s}`;
     case "resume.requested":
       return `resume requested ${s}`;
     case "migrate.requested":

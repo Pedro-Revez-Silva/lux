@@ -16,7 +16,7 @@ export type RunState =
   | "resuming"
   | "succeeded"
   | "failed"
-  | "cancelled"
+  | "terminated"
   | "lost";
 
 /**
@@ -46,7 +46,7 @@ const RUN_STATES: Record<RunState, StateStyle> = {
   resuming: { hue: "blue", label: "Resuming", live: true },
   succeeded: { hue: "green", label: "Succeeded" },
   failed: { hue: "red", label: "Failed" },
-  cancelled: { hue: "neutral", label: "Cancelled" },
+  terminated: { hue: "neutral", label: "Terminated" },
   lost: { hue: "red", label: "Lost" },
 };
 

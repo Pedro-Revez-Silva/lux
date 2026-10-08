@@ -284,8 +284,8 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		name := fs.String("name", "", "tenant name")
 		maxRuns := fs.Int("max-runs", 0, "max concurrent runs (0: unlimited)")
 		maxHosts := fs.Int("max-hosts", 0, "max hosts (0: unlimited)")
-		retention := fs.Int("retention-days", 30, "days to keep a succeeded or cancelled Run's snapshots and output")
-		expire := fs.Int("expire-after-days", 90, "days a stopped, lost or failed Run may rest before it is cancelled (0: never)")
+		retention := fs.Int("retention-days", 30, "days to keep a terminated Run's snapshots and output, from its terminate")
+		expire := fs.Int("expire-after-days", 90, "days a stopped, lost, failed or succeeded Run may rest before it is terminated (0: never)")
 		fs.Parse(args[1:])
 		if *name == "" {
 			return errors.New("--name is required")
@@ -440,8 +440,8 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		maxRuns := fs.Int("max-runs", -1, "max concurrent runs (0: unlimited)")
 		maxHosts := fs.Int("max-hosts", -1, "max hosts (0: unlimited)")
 		maxStorage := fs.Int64("max-storage", -1, "max stored bytes (0: unlimited)")
-		retention := fs.Int("retention-days", -1, "days to keep a succeeded or cancelled Run's snapshots and output")
-		expire := fs.Int("expire-after-days", -1, "days a stopped, lost or failed Run may rest before it is cancelled (0: never)")
+		retention := fs.Int("retention-days", -1, "days to keep a terminated Run's snapshots and output, from its terminate")
+		expire := fs.Int("expire-after-days", -1, "days a stopped, lost, failed or succeeded Run may rest before it is terminated (0: never)")
 		fs.Parse(args[1:])
 		err := db.Tx(ctx, sys, func(tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `UPDATE tenants SET

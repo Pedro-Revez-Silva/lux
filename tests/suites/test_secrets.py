@@ -101,7 +101,7 @@ def test_resume_requires_the_secrets_and_can_rotate_them(lux, runners, hosts):
     out = lux.wait_output(run_id, f"len={len(second)} ")
     assert f"len={len(second)} raw=[REDACTED:TOKEN]" in out, out
     assert first not in out and second not in out, out
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_resume_declares_and_removes_secrets(lux, runners, hosts):
@@ -132,7 +132,7 @@ def test_resume_declares_and_removes_secrets(lux, runners, hosts):
     run = lux.get(run_id)
     assert [s["name"] for s in run["secrets"]] == ["TOKEN"], run["secrets"]
     assert [s["name"] for s in run["spec"]["secrets"]] == ["TOKEN"], run["spec"]["secrets"]
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_resume_cannot_remove_a_git_credential(lux, runners, hosts, git_server):

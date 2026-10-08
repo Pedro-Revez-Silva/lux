@@ -22,5 +22,5 @@ test("wake and lifetime in words, without naming any orchestrator", () => {
   expect(wakeText({ wake: "never" })).toBe("Never: it runs only while its run does");
   expect(lifetimeText({ lifetime: "owner", expireAfter: "720h0m0s" })).toBe("Until its owner deletes it, or 30d without a request");
   expect(lifetimeText({ lifetime: "owner", expireAfter: null })).toBe("Until its owner deletes it");
-  expect(lifetimeText({ lifetime: "run", expireAfter: null })).toBe("Ends with its run (succeeded or cancelled)");
+  expect(lifetimeText({ lifetime: "run", expireAfter: null })).toBe("Ends with its run (terminated)");
 });

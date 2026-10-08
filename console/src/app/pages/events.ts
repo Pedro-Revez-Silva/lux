@@ -56,6 +56,7 @@ export function eventSummary(e: Event): string {
     case "input.failed":
       return `input failed: ${str(d.error) ?? "?"}`;
     case "stop.requested":
+    case "terminate.requested":
     case "cancel.requested":
       return `by ${str(d.by) ?? "?"}`;
     case "migrate.requested":

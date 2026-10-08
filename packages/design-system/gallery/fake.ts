@@ -42,7 +42,7 @@ export interface FakeRun {
   stateReason: string;
 }
 
-const STATES: (RunState | "idle")[] = ["running", "running", "running", "running", "starting", "scheduled", "submitted", "stopping", "stopped", "resuming", "succeeded", "succeeded", "failed", "cancelled", "lost", "idle"];
+const STATES: (RunState | "idle")[] = ["running", "running", "running", "running", "starting", "scheduled", "submitted", "stopping", "stopped", "resuming", "succeeded", "succeeded", "failed", "terminated", "lost", "idle"];
 const IMAGES = ["ghcr.io/acme/agent:1.14", "docker.io/library/alpine:3.21", "ghcr.io/acme/ci-runner:sha-8b1f2c", "ghcr.io/globex/codex-env:latest", "ghcr.io/initech/py312:2026.09"];
 const HOSTS = ["i-0a1b2c3d4e5f60718", "i-0f9e8d7c6b5a49382", "i-04c2f1e7d9b3a5061", "host-lab-01", "host-lab-02", "i-0b7d3e1a9c5f24680"];
 

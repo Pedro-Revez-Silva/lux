@@ -127,7 +127,7 @@ export function Runs() {
                   {" "}in state <span className="mono">{states.join(" or ")}</span>
                 </>
               )}
-              {resumable && <>{states.length > 0 ? " and" : ""} resumable (stopped, lost or failed)</>}
+              {resumable && <>{states.length > 0 ? " and" : ""} resumable (stopped, lost, failed or succeeded)</>}
               {host && (
                 <>
                   {" "}placed on{" "}

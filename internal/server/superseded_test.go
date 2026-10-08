@@ -71,7 +71,7 @@ func blobLocations(t *testing.T, s *Server, run string) map[string]string {
 // unavailable. The current one, the older one's output and artifacts, and
 // a Run with only its current snapshot are untouched.
 func TestReapSuperseded(t *testing.T) {
-	for _, state := range []string{StateStopped, StateLost, StateFailed} {
+	for _, state := range []string{StateStopped, StateLost, StateFailed, StateSucceeded} {
 		t.Run(state, func(t *testing.T) {
 			s, ctx, f := supersededFixture(t)
 			execSQL(t, s, ctx, `UPDATE runs SET state = $1 WHERE id = 'rb'`, state)

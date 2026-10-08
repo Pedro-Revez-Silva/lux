@@ -29,7 +29,7 @@ export const api = {
     request<CostSummary>("/costs", { tenant, query: { group: p.group, family: p.family, interval: p.interval, since: p.since, from: p.from, to: p.to }, signal }),
 
   stopRun: (id: string) => request<Run>(`/runs/${enc(id)}/stop`, { method: "POST" }),
-  cancelRun: (id: string) => request<Run>(`/runs/${enc(id)}/cancel`, { method: "POST" }),
+  terminateRun: (id: string) => request<Run>(`/runs/${enc(id)}/terminate`, { method: "POST" }),
   resumeRun: (id: string, body: ResumeRequest) => request<Run>(`/runs/${enc(id)}/resume`, { method: "POST", body }),
   migrateRun: (id: string, body: MigrateRequest) => request<Run>(`/runs/${enc(id)}/migrate`, { method: "POST", body }),
   inputRun: (id: string, text: string) => request<{ requestId: string }>(`/runs/${enc(id)}/input`, { method: "POST", body: { text } }),

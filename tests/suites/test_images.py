@@ -66,7 +66,7 @@ def test_a_moved_run_rebuilds_from_the_pinned_base(lux, runners, hosts, fake_ima
     built_b = wait_until(lambda: (e := events(lux, run_id, "image.built"))[1:] and e[-1], 10, 0.3, "no rebuild")
     assert built_b["imageId"] == first["imageId"], (built_b, first)
     assert not events(lux, run_id, "image.rebuild-differs")
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_a_rebuild_that_differs_is_a_warning(lux, runners, hosts):
@@ -83,7 +83,7 @@ def test_a_rebuild_that_differs_is_a_warning(lux, runners, hosts):
     lux.run("resume", run_id)
     lux.wait_state(run_id, "running")
     wait_until(lambda: events(lux, run_id, "image.rebuild-differs"), 10, 0.3, "no image.rebuild-differs event")
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_a_build_reaches_only_what_the_spec_allows(lux, runners, egress_hosts, net_targets):
@@ -173,14 +173,14 @@ def test_copy_from_an_image_is_refused(lux, runners, hosts):
     lux.wait_state(ok, "succeeded")
 
 
-def test_cancel_ends_a_build(lux, runners, hosts):
-    """A cancel during a long build ends it, and leaves no egress behind."""
+def test_terminate_ends_a_build(lux, runners, hosts):
+    """A terminate during a long build ends it, and leaves no egress behind."""
     host = runners.start(hosts[0])
     marker = f"6{uuid.uuid4().int % 10**6:06d}"  # a sleep no other process runs
     run_id = lux.submit(built(f"FROM {ALPINE_IMAGE}\nRUN sleep {marker}\n", "true"))
     wait_until(lambda: host.running("sleep", marker), 30, 0.3, "the build step never ran")
-    lux.run("cancel", run_id)
-    lux.wait_state(run_id, "cancelled", timeout=30)
+    lux.run("terminate", run_id)
+    lux.wait_state(run_id, "terminated", timeout=30)
     wait_until(lambda: not host.running("sleep", marker), 20, 0.5, "the build is still running")
     assert "chain run_" not in host.exec("nft", "list", "table", "inet", "lux")
 

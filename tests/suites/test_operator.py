@@ -24,9 +24,9 @@ def test_operator_sees_every_tenant_and_can_narrow(operator, tenant_factory, env
     assert "TENANT" in operator.run("ls").stdout
     # A Run's own routes work without naming its tenant.
     assert operator.get(rb)["tenant"] == names[b.tenant_id]
-    operator.run("cancel", rb)
-    assert b.wait_state(rb, "cancelled")["state"] == "cancelled"
-    a.run("cancel", ra)
+    operator.run("terminate", rb)
+    assert b.wait_state(rb, "terminated")["state"] == "terminated"
+    a.run("terminate", ra)
 
 
 def test_tenant_keys_stay_in_their_tenant(tenant_factory):
@@ -42,7 +42,7 @@ def test_tenant_keys_stay_in_their_tenant(tenant_factory):
         a.run("tenants", "ls")
     assert "operator" in e.value.stderr
     assert a.json("status")["runs"] == {}
-    b.run("cancel", rb)
+    b.run("terminate", rb)
 
 
 def test_operator_must_name_a_tenant_to_create(operator, tenant_factory):
@@ -53,7 +53,7 @@ def test_operator_must_name_a_tenant_to_create(operator, tenant_factory):
     run_id = operator.submit(generic(ALPINE_IMAGE, "true", placement={"requires": {"nowhere": "yes"}}), "--tenant", t.tenant_id)
     # Created in that tenant: its own key sees it.
     assert t.get(run_id)["id"] == run_id
-    operator.run("cancel", run_id)
+    operator.run("terminate", run_id)
 
 
 def test_operator_hosts_status_and_drain(operator, tenant_factory, env, hosts):
@@ -88,7 +88,7 @@ def test_operator_hosts_status_and_drain(operator, tenant_factory, env, hosts):
         assert b.wait_state(run_b, "stopped", "resuming")["state"] in ("stopped", "resuming")
         assert b.json("hosts", "get", "op-host")["draining"]
         assert not a.json("hosts", "get", "op-host")["draining"]
-        b.run("cancel", run_b)
+        b.run("terminate", run_b)
     finally:
         ra.stop_all()
         rb.stop_all()
@@ -120,8 +120,8 @@ def test_tenants_do_not_see_each_others_use_of_platform_hosts(operator, tenant_f
         assert "operators" in e.value.stderr
         # A tenant filters its Runs by a platform host too.
         assert [r["id"] for r in a.json("ls", "--host", name)] == [ra]
-        a.run("cancel", ra)
-        b.run("cancel", rb)
+        a.run("terminate", ra)
+        b.run("terminate", rb)
     finally:
         hosts[0].stop_runner()
         proc.wait(timeout=10)

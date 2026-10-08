@@ -564,7 +564,7 @@ func waitingRuns(ctx context.Context, tx pgx.Tx, pl poolRow) ([]pendingRun, map[
 	// which touches updated_at.
 	rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, snapshot_id, pending_sync,
 		jsonb_array_length(secrets) > 0, coalesce(place_on, ''), coalesce(avoid_host, ''), pool_id, updated_at
-		FROM runs WHERE pool_id = $1 AND state = 'provisioning' AND NOT cancel_requested
+		FROM runs WHERE pool_id = $1 AND state = 'provisioning' AND NOT terminate_requested
 		ORDER BY updated_at, id`, pl.ID)
 	if err != nil {
 		return nil, nil, err

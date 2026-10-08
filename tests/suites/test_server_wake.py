@@ -156,7 +156,7 @@ def test_wake_end_to_end_with_sync_and_state(lux, runners, hosts, fake_image, gi
     syncs = lux.events(run_id, "git.sync")
     assert syncs[-1]["data"]["status"] == "fast-forward" and syncs[-1]["data"]["from"] == a and syncs[-1]["data"]["to"] == b_commit, syncs
     assert len(events(lux, sv["id"], "server.wake_requested")) == 1
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_no_wake_without_sign_in_and_no_answer(lux, runners, hosts, fake_image):
@@ -211,7 +211,7 @@ def test_idle_is_reset_by_requests_not_websockets(lux, runners, hosts, fake_imag
     # A request resets it: idle again later, once more.
     b.get("/")
     wait_until(lambda: len(events(lux, sv["id"], "server.idle")) == 2, 30, 1, "not idle again")
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_attach_detach_and_every_placement(operator, lux, runners, hosts, fake_image):
@@ -261,18 +261,23 @@ def test_attach_detach_and_every_placement(operator, lux, runners, hosts, fake_i
         assert lux.get(r2)["host"] == other.name
     finally:
         h.unpause()
-    lux.run("cancel", r1)
-    lux.run("cancel", r2)
+    lux.run("terminate", r1)
+    lux.run("terminate", r2)
 
 
 def test_lifetimes_deletion_and_expiry(lux, runners, hosts, fake_image):
     runners.start(hosts[0])
-    # A Run that succeeds: its run servers go; an owner server is detached.
+    # A Run that succeeds keeps them (it can be resumed): run servers stay,
+    # an owner server stays attached.
     ok = lux.submit(generic(fake_image, "sh", "-c", "sleep 8"))
     lux.wait_state(ok, "running")
     lux.run("server", "add", ok, "a", "8080", "--no-start")
     owner = create(lux, name="b", port=8081, runId=ok, lifetime="owner")
     lux.wait_state(ok, "succeeded", timeout=60)
+    assert sorted(s["name"] for s in lux.get(ok)["servers"]) == ["a", "b"]
+    assert get(lux, owner["id"])["runId"] == ok
+    # Terminated, it loses its run servers; the owner server is detached.
+    lux.run("terminate", ok, "--wait")
     assert lux.get(ok).get("servers", []) == []
     assert get(lux, owner["id"])["runId"] is None
     # A failed one keeps them (it can be resumed).
@@ -281,12 +286,12 @@ def test_lifetimes_deletion_and_expiry(lux, runners, hosts, fake_image):
     lux.run("server", "add", bad, "a", "8080", "--no-start")
     lux.wait_state(bad, "failed", timeout=60)
     assert [s["name"] for s in lux.get(bad)["servers"]] == ["a"]
-    # A cancelled one: gone.
+    # A terminated one: gone.
     c = lux.submit(preview_spec(fake_image))
     lux.wait_state(c, "running")
     lux.run("server", "add", c, "a", "8080", "--no-start")
-    lux.run("cancel", c)
-    lux.wait_state(c, "cancelled")
+    lux.run("terminate", c)
+    lux.wait_state(c, "terminated")
     assert lux.get(c).get("servers", []) == []
     # Owner deletion: detached first (its command stops), its URL gone.
     r = lux.submit(preview_spec(fake_image))
@@ -303,7 +308,7 @@ def test_lifetimes_deletion_and_expiry(lux, runners, hosts, fake_image):
     exp = create(lux, name="old", port=1, expireAfter="3s")
     wait_until(lambda: api(lux, "GET", f"/v1/servers/{exp['id']}").status_code == 404, 30, 1, "never expired")
     assert [e["type"] for e in events(lux, exp["id"])][-1] == "server.expired"
-    lux.run("cancel", r)
+    lux.run("terminate", r)
 
 
 def test_sync_running_with_after_sync_and_the_dirty_rule(lux, runners, hosts, fake_image, git_server):
@@ -347,7 +352,7 @@ def test_sync_running_with_after_sync_and_the_dirty_rule(lux, runners, hosts, fa
     assert lux.get(run_id)["state"] == "running"
     assert lux.events(run_id, "git.sync")[-1]["data"]["status"] == "failed"
     wait_state(lux, hot["id"], "ready")
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 # Drops every commit of the checkout's but a new root one, so it no longer
@@ -388,7 +393,7 @@ def test_sync_bundles_only_new_history_and_falls_back(lux, runners, hosts, fake_
     assert res["status"] == "reset" and res["fullBundle"], res
     assert exec_in(lux, run_id, "cat", "/workspace/app/message.txt").stdout == "four\n"
     assert exec_in(lux, run_id, "sh", "-c", no_bundles).stdout.strip() == "none"
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 # Makes the checkout shallow at its HEAD: every commit before it (the clone
@@ -426,7 +431,7 @@ def test_a_synced_checkout_is_the_base_after_a_resume(lux, runners, hosts, fake_
     res = resume_sync(lux, run_id, c)
     assert res["status"] == "fast-forward" and res["from"] == b and not res.get("fullBundle") and not res.get("missingBase"), res
     assert exec_in(lux, run_id, "cat", "/workspace/app/message.txt").stdout == "three\n"
-    lux.run("cancel", run_id)
+    lux.run("terminate", run_id)
 
 
 def test_hostnames_and_tenant_isolation(lux, tenant_factory, runners, hosts, fake_image):

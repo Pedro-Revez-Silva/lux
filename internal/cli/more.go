@@ -235,7 +235,7 @@ func (a *app) artifactsCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&dir, "download", "", "download every artifact into this directory")
-	cmd.Flags().BoolVar(&del, "delete", false, "delete every artifact of a succeeded or cancelled Run (retention never does)")
+	cmd.Flags().BoolVar(&del, "delete", false, "delete every artifact of a terminated Run (retention never does)")
 	cmd.MarkFlagsMutuallyExclusive("download", "delete")
 	return cmd
 }

@@ -690,7 +690,7 @@ func TestRunsPagedSortEveryKey(t *testing.T) {
 		{fixtureRun{id: "rf", tenant: "t2", state: "running", pool: "alpine", adapter: "generic", host: "h-c", epoch: 1,
 			runtime: fixed(0), placement: fixed(10)}, -60, nil, "p2",
 			[]pl{{"hc", "running", -60, f(-60), f(-50), f(60), nil}}, nil},
-		{fixtureRun{id: "rg", tenant: "t1", state: "cancelled", adapter: "generic", cost: str("2"), runtime: none, placement: fixed(0)}, -50, nil, "",
+		{fixtureRun{id: "rg", tenant: "t1", state: "terminated", adapter: "generic", cost: str("2"), runtime: none, placement: fixed(0)}, -50, nil, "",
 			nil, [][2]string{{"2", "EUR"}}},
 		{fixtureRun{id: "rh", tenant: "t1", name: "aardvark", state: "lost", pool: "burst", host: "h-a", epoch: 1,
 			cost: str("0.75"), runtime: fixed(90), placement: fixed(10)}, -300, nil, "p1",
@@ -772,7 +772,7 @@ func TestRunsPagedSortEveryKey(t *testing.T) {
 		}
 	}
 	num := func(v float64) *float64 { return &v }
-	stateOrder := []string{"submitted", "scheduled", "provisioning", "starting", "running", "stopping", "stopped", "resuming", "succeeded", "failed", "cancelled", "lost"}
+	stateOrder := []string{"submitted", "scheduled", "provisioning", "starting", "running", "stopping", "stopped", "resuming", "succeeded", "failed", "terminated", "lost"}
 	tenants := map[string]string{"t1": "alpha", "t2": "beta"}
 	for _, dir := range []string{"asc", "desc"} {
 		for k, v := range map[string]func(string) *string{

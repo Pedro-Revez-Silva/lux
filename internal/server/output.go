@@ -252,8 +252,8 @@ func (s *Server) serveOutput(w http.ResponseWriter, r *http.Request, in *outputI
 		if err := flushEvents(); err != nil {
 			return nil
 		}
-		ended := terminal(runState) || runState == StateStopped || runState == StateLost
-		if !follow || (ended && allDone(placements, cur)) {
+		atRest := ended(runState) || runState == StateStopped || runState == StateLost
+		if !follow || (atRest && allDone(placements, cur)) {
 			return send("end", outputEnd{lastEvent, cur.String(), runState})
 		}
 		if !progressed {

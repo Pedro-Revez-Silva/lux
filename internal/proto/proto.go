@@ -40,7 +40,7 @@ const (
 	MsgInput           = "input"
 	MsgInterrupt       = "interrupt"
 	MsgStop            = "stop"
-	MsgCancel          = "cancel"
+	MsgTerminate       = "cancel" // a terminate request; "cancel" on the wire, as every runner knows it
 	MsgPush            = "push"
 	MsgSnapshotDiscard = "snapshot.discard"
 	MsgDrain           = "drain"
@@ -327,7 +327,7 @@ type Evicting struct {
 }
 
 type StopRequest struct {
-	Reason string `json:"reason"` // stop | cancel | preempt | drain | timeout | disk
+	Reason string `json:"reason"` // stop | terminate | preempt | drain | timeout | disk (an older luxd: cancel for terminate)
 }
 
 // ExitHost tells a static runner to exit once it has drained: its
@@ -348,7 +348,7 @@ const ExitCodeOutdatedBinaries = 42
 type Status struct {
 	State    string `json:"state"` // starting | running | stopping | exited | failed
 	ExitCode *int   `json:"exitCode,omitempty"`
-	// Why it exited: exited | stopped | cancelled | error | ...
+	// Why it exited: exited | stopped | error | ...
 	Reason  string `json:"reason,omitempty"`
 	Message string `json:"message,omitempty"`
 	// Highest output seq written, once exited.

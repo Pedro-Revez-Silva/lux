@@ -241,7 +241,7 @@ func (o *orchestrator) wake(ctx context.Context, runID *string) error {
 			log.Printf("resuming %s on %s's latest commit", *runID, o.c.branch)
 			return o.do(ctx, "POST", "/v1/runs/"+*runID+"/resume", map[string]any{
 				"secrets": secrets, "sync": []map[string]string{{"repo": o.c.repoName, "ref": o.c.branch}}}, nil)
-		case "succeeded", "cancelled":
+		case "succeeded", "terminated":
 			// Never runs again: a new one below.
 		default:
 			log.Printf("%s is %s already", *runID, run.State)

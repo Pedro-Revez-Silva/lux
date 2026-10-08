@@ -116,7 +116,7 @@ def test_a_same_host_resume_starts_as_on_a_new_host(lux, runners, hosts):
     lux.run("stop", run_id, "--wait")
     lux.run("resume", run_id, "--wait")
     out = lux.wait_output(run_id, "DONE:2", timeout=120)
-    lux.run("cancel", run_id, "--wait")
+    lux.run("terminate", run_id, "--wait")
     assert "ENGINE-OK:2" in out and "INNER-FAILED" not in out, out
     assert "LEAK:" not in out and "LEFTOVER:" not in out, out
     assert lux.events(run_id, "volumes.local"), "the resume did not keep its volumes on the host"

@@ -393,7 +393,7 @@ function Layout() {
           actions={
             <>
               <Button>Stop</Button>
-              <Button variant="danger">Cancel</Button>
+              <Button variant="danger">Terminate</Button>
               <Button variant="primary" disabled>
                 Resume
               </Button>
@@ -1251,13 +1251,13 @@ function Dialogs() {
   return (
     <Section id="dialogs" title="ConfirmDialog" note="Native <dialog>; destructive actions use the danger tone and may require typing the target id.">
       <div className="sg-row">
-        <Button onClick={() => setA(true)}>Cancel run…</Button>
+        <Button onClick={() => setA(true)}>Terminate run…</Button>
         <Button variant="danger" onClick={() => setB(true)}>
           Drain host…
         </Button>
         <Button onClick={() => setC(true)}>Migrate with reason…</Button>
       </div>
-      <ConfirmDialog open={a} title="Cancel run?" description="The run stops after the grace period. Its state volumes are snapshotted; a cancelled run can be resumed." confirmLabel="Cancel run" tone="danger" onConfirm={() => { setA(false); toast({ title: "Run cancelled", tone: "success" }); }} onCancel={() => setA(false)} />
+      <ConfirmDialog open={a} title="Terminate run?" description="The run stops after the grace period and ends for good: a terminated run cannot be resumed." confirmLabel="Terminate run" tone="danger" onConfirm={() => { setA(false); toast({ title: "Run terminated", tone: "success" }); }} onCancel={() => setA(false)} />
       <ConfirmDialog open={b} title="Drain i-0a1b2c3d4e5f60718?" description="No new placements will be assigned. Its 3 live placements finish where they are, unless forced. The host is terminated when empty." confirmLabel="Drain host" tone="danger" confirmText="i-0a1b2c3d4e5f60718" checkbox={{ label: "Force evict running Runs", help: "Stops its live runs now: they are snapshotted and resumed elsewhere." }} onConfirm={(_input, forceEvict) => { setB(false); toast({ title: "Draining i-0a1b2c3d4e5f60718", description: forceEvict ? "3 placements to move" : undefined, tone: "warn" }); }} onCancel={() => setB(false)} />
       <ConfirmDialog open={c} title="Migrate run" description="Stops this placement and resumes on another host in the same pool." confirmLabel="Migrate" input={{ label: "Reason (recorded on the event)", placeholder: "e.g. host degraded", required: true }} onConfirm={(reason) => { setC(false); toast({ title: "Migration requested", description: reason }); }} onCancel={() => setC(false)} />
     </Section>

@@ -280,7 +280,8 @@ func TestSnapshotReportRedelivered(t *testing.T) {
 // with the refusal in its state_reason, keeps its previous snapshot, and is
 // not resumed, a move included. None of the report is stored, not even the
 // placement's snapshot_done_at. An accepted report of a move resumes it.
-// resumePolicy manual and never fail the moved Run with both reasons;
+// resumePolicy manual fails the moved Run with both reasons, never
+// terminates it with both (its lifetime-run server deleted);
 // restart restores nothing, so it is placed again from scratch regardless.
 func TestSnapshotReportRefusedEndsRunWithoutResume(t *testing.T) {
 	for _, c := range []struct {
@@ -293,7 +294,7 @@ func TestSnapshotReportRefusedEndsRunWithoutResume(t *testing.T) {
 		{"migrate", "migrate", "", true, true, StateStopped, "migrate; " + refusedSnapshotReason},
 		{"drain", "drain", "", true, true, StateStopped, "drain; " + refusedSnapshotReason},
 		{"drain, auto", "drain", "auto", true, true, StateStopped, "drain; " + refusedSnapshotReason},
-		{"drain, never", "drain", "never", true, true, StateFailed, "drain: not resumed (resumePolicy never); " + refusedSnapshotReason},
+		{"drain, never", "drain", "never", true, true, StateTerminated, "drain: not resumed (resumePolicy never); " + refusedSnapshotReason},
 		{"drain, manual", "drain", "manual", true, true, StateFailed, "drain: not resumed (resumePolicy manual); " + refusedSnapshotReason},
 		{"drain, restart", "drain", "restart", true, true, StateResuming, "auto-restart after drain"},
 		{"stop", "stop", "", true, true, StateStopped, "stop; " + refusedSnapshotReason},
@@ -361,10 +362,18 @@ func TestSnapshotReportRefusedEndsRunWithoutResume(t *testing.T) {
 			}
 			var svState, svStop string
 			var svEpoch int
-			systemScan(t, s, `SELECT state, coalesce(stop_reason, ''), coalesce(stopped_epoch, 0) FROM run_servers WHERE run_id = 'rb'`, nil,
-				&svState, &svStop, &svEpoch)
-			if svState != ServerStopped || svStop != wantStop || svEpoch != 2 {
-				t.Errorf("rb's server: state %q stop_reason %q stopped_epoch %d; want %q %q 2", svState, svStop, svEpoch, ServerStopped, wantStop)
+			if c.state == StateTerminated {
+				var servers int
+				systemScan(t, s, `SELECT count(*) FROM run_servers WHERE run_id = 'rb'`, nil, &servers)
+				if servers != 0 {
+					t.Errorf("a terminated Run kept %d lifetime-run servers", servers)
+				}
+			} else {
+				systemScan(t, s, `SELECT state, coalesce(stop_reason, ''), coalesce(stopped_epoch, 0) FROM run_servers WHERE run_id = 'rb'`, nil,
+					&svState, &svStop, &svEpoch)
+				if svState != ServerStopped || svStop != wantStop || svEpoch != 2 {
+					t.Errorf("rb's server: state %q stop_reason %q stopped_epoch %d; want %q %q 2", svState, svStop, svEpoch, ServerStopped, wantStop)
+				}
 			}
 			// Nothing schedules it (no epoch-3 placement), except a restart,
 			// placed again with nothing to restore.
