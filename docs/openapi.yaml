@@ -2393,6 +2393,9 @@ components:
         resources:
           $ref: "#/components/schemas/Resources"
           description: "What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, disk 20Gi, pids 1024, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_DISK, LUX_DEFAULT_PIDS). disk bounds the writable layer plus state volumes: a Run over it is stopped and fails."
+        resumePolicy:
+          description: "What lux does when it moves the Run (a drain, a spot preemption, a migration). auto (the default): resumed elsewhere, restored from its snapshot. restart: started again from scratch elsewhere (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host. manual: ends failed, and an operator's migrate is refused (409 not_movable); a person may resume it. never: as manual, and every requested resume is refused (409 not_resumable; an assignment no runner started may still be placed again), for one-shot work such as a CI job holding a single-use token."
+          type: string
         sandbox:
           $ref: "#/components/schemas/Sandbox"
         secrets:
@@ -4054,7 +4057,7 @@ paths:
   /v1/hosts/{id}/drain:
     post:
       description: |-
-        No new placements; its live Runs finish where they are. With forceEvict, they are also stopped and resumed elsewhere (also applies to a host that is already draining). Only the tenant's own hosts; operators, any host.
+        No new placements; its live Runs finish where they are. With forceEvict, they are also stopped and resumed elsewhere (a Run with resumePolicy manual or never fails instead; also applies to a host that is already draining). Only the tenant's own hosts; operators, any host.
 
         Needs the `admin` scope.
       operationId: drainHost
@@ -4684,7 +4687,7 @@ paths:
   /v1/pools/{name}:
     delete:
       description: |-
-        Its provisioned hosts are cordoned and terminated once idle; its Runs wait for a pool of that name again. If it was the tenant's default pool, the tenant has none until another is marked. forceEvict also stops its hosts' live Runs so they resume elsewhere.
+        Its provisioned hosts are cordoned and terminated once idle; its Runs wait for a pool of that name again. If it was the tenant's default pool, the tenant has none until another is marked. forceEvict also stops its hosts' live Runs so they resume elsewhere (a Run with resumePolicy manual or never fails instead).
 
         Needs the `admin` scope.
       operationId: deletePool
@@ -5294,12 +5297,12 @@ paths:
             examples:
               - running,stopped
             type: string
-        - description: "Only Runs resume accepts: stopped, lost or failed, except one whose only snapshot report was refused."
+        - description: "Only Runs resume accepts: stopped, lost or failed, except one whose only snapshot report was refused or whose resumePolicy is never."
           explode: false
           in: query
           name: resumable
           schema:
-            description: "Only Runs resume accepts: stopped, lost or failed, except one whose only snapshot report was refused."
+            description: "Only Runs resume accepts: stopped, lost or failed, except one whose only snapshot report was refused or whose resumePolicy is never."
             type: boolean
         - description: Only Runs with a placement (any epoch) on this host, by id or name.
           explode: false
@@ -6235,7 +6238,7 @@ paths:
   /v1/runs/{id}/migrate:
     post:
       description: |-
-        It is stopped (its state snapshotted), then resumed at once on `to`, or on any host but the one it was on. An agent resumes its session; `input`, if given, is delivered once it runs again.
+        It is stopped (its state snapshotted), then resumed at once on `to`, or on any host but the one it was on. An agent resumes its session; `input`, if given, is delivered once it runs again. A Run whose spec has resumePolicy restart starts again from scratch there; one with manual or never is refused (409 not_movable).
 
         Needs the `operator` scope.
       operationId: migrateRun
@@ -6642,9 +6645,9 @@ paths:
   /v1/runs/{id}/resume:
     post:
       description: |-
-        From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming. A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been cancelled, and is not resumable.
+        From its latest snapshot (or fromSnapshot), on any host. Its secrets must be supplied again. Idempotent while resuming. A Run left stopped, lost or failed longer than its tenant's expireAfterDays has been cancelled, and is not resumable. A Run whose spec has resumePolicy never refuses every requested resume: 409 not_resumable, whatever its state (an assignment no runner started may still be placed again).
 
-        git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. Adding needs a stopped, lost or failed Run: while it is resuming, 409. A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one.
+        git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. Adding needs a stopped, lost or failed Run: while it is resuming, 409. A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one, or unless its resumePolicy is restart and it has no session, which restores nothing.
 
         resources changes what the Run gets from now on, written into its spec: cpus and memory, larger or smaller; disk larger, or smaller only down to the snapshot's measured use plus headroom (otherwise kept, and resize.disk in the answer says why). A Run already resuming refuses other sizes (409).
 

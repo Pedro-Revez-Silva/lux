@@ -133,30 +133,35 @@ type serverRow struct {
 	Moving                   bool
 }
 
+// serverSelect reads the Run's spec only while it is stopping, the one
+// state where Moving looks at its resumePolicy.
 const serverSelect = `SELECT sv.id, sv.tenant_id, sv.name, sv.host, sv.port, sv.command, sv.workdir, sv.env, sv.labels, sv.from_spec,
 	sv.state, sv.exit_code, sv.error, sv.since, sv.ready_since, sv.stop_reason, sv.stopped_epoch, sv.epoch, sv.last_request_at,
 	sv.run_id, sv.wake, sv.lifetime, sv.owner, sv.idle_after_s, sv.wake_timeout_s, sv.expire_after_s, sv.after_sync,
 	sv.wake_requested_at, sv.wake_by, sv.wake_path, sv.wakes, sv.idle_notified_at, sv.created_at, sv.updated_at,
-	coalesce(r.state, ''), coalesce(r.name, ''), coalesce(p.stop_reason, '')
+	coalesce(r.state, ''), coalesce(r.name, ''), coalesce(p.stop_reason, ''),
+	CASE WHEN r.state = 'stopping' THEN NOT ` + failsOnMoveSQL + ` ELSE true END
 	FROM run_servers sv LEFT JOIN runs r ON r.id = sv.run_id
 	LEFT JOIN placements p ON p.run_id = r.id AND p.epoch = r.current_epoch `
 
 func scanServerRow(row pgx.Row) (serverRow, error) {
 	var v serverRow
+	var resumes bool
 	err := row.Scan(&v.ID, &v.TenantID, &v.Name, &v.Host, &v.Port, &v.Command, &v.Workdir, &v.Env, &v.Labels, &v.FromSpec,
 		&v.State, &v.ExitCode, &v.Error, &v.Since, &v.ReadySince, &v.StopReason, &v.StoppedEpoch, &v.Epoch, &v.LastRequestAt,
 		&v.RunID, &v.Wake, &v.Lifetime, &v.Owner, &v.IdleAfterS, &v.WakeTimeoutS, &v.ExpireAfterS, &v.AfterSync,
 		&v.WakeRequestedAt, &v.WakeBy, &v.WakePath, &v.Wakes, &v.IdleNotifiedAt, &v.CreatedAt, &v.UpdatedAt,
-		&v.RunState, &v.RunName, &v.PlacementStop)
+		&v.RunState, &v.RunName, &v.PlacementStop, &resumes)
 	if v.Env == nil {
 		v.Env = map[string]string{}
 	}
 	if v.Labels == nil {
 		v.Labels = map[string]string{}
 	}
-	// Moving: its placement is stopping to move, or its Run is on its way
-	// to the next one after a move.
-	v.Moving = (v.RunState == StateStopping && slices.Contains(movedStops, v.PlacementStop)) ||
+	// Moving: its placement is stopping to move (and the Run will be
+	// placed again: resumePolicy is not manual or never), or its Run is
+	// on its way to the next one after a move.
+	v.Moving = (v.RunState == StateStopping && resumes && slices.Contains(movedStops, v.PlacementStop)) ||
 		(v.StopReason != nil && *v.StopReason == "migrated" && slices.Contains(startingRunStates, v.RunState))
 	return v, err
 }
@@ -449,7 +454,8 @@ func stopServersAtEnd(ctx context.Context, tx pgx.Tx, tenantID, runID string, ep
 }
 
 // endReason is the stopReason servers get when their placement ended with
-// a placement stop reason (placements.stop_reason).
+// a placement stop reason (placements.stop_reason) and the Run is resumed
+// after it if that was a move.
 func endReason(placementStop string) string {
 	if slices.Contains(movedStops, placementStop) {
 		return "migrated"

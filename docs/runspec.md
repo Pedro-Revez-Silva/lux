@@ -74,6 +74,7 @@ volumes:
 
 resources: { cpus: 4, memory: 8Gi, disk: 50Gi, pids: 2048 }
 timeout: 4h                     # running time, over all placements; unset: no limit
+resumePolicy: auto              # auto | restart | manual | never: after a drain, preemption or migration (see below)
 
 placement:
   pool: default                 # omitted: the tenant's default pool (see Rules)
@@ -156,6 +157,45 @@ artifacts:
   such pool has (none, another tenant's, a removed pool) is refused at
   submit with 422 `unknown_pool`; the Run is not created. A spec that sets
   both `pool` and `poolId` is refused with 422 `invalid_spec`.
+
+## Resume policy
+
+lux moves a Run when a force-evicting drain (`lux hosts drain --force-evict`,
+`lux pools rm --force-evict`), a spot preemption or an operator's
+`lux migrate` stops it. `resumePolicy` says what happens next:
+
+- `auto` (the default, also when unset): resumed elsewhere, restored from its snapshot.
+- `restart`: started again from scratch elsewhere, for workloads safe to
+  rerun whose saved state must not be trusted on another host. It is placed
+  as a first placement: empty state volumes, the spec's command through the
+  adapter's start path, no agent session. Its snapshot is not restored, but
+  is kept (`lux resume --from-snapshot` can still use it). Its `state` event
+  says `auto-restart after preempt` (or `drain`, `migrate`). `lux migrate`
+  restarts it on the target host.
+- `manual`: ends `failed`, with `stateReason` naming the cause and the
+  policy, e.g. `preempt: not resumed (resumePolicy manual)`. It is
+  snapshotted as usual and its servers stop; a person may resume it.
+  `lux migrate` refuses it with 409 `not_movable` and leaves it running.
+- `never`: as `manual`, for one-shot work such as a CI job holding a
+  single-use token, and it also refuses every requested resume, whatever
+  the Run's state (stopped by request included): 409 `not_resumable`,
+  "resumePolicy never: this Run cannot be resumed". `lux ls --resumable`
+  leaves it out. An assignment no runner started (refused by an outdated
+  runner) may still be placed again: none of the work ran.
+
+Except for `never`, the policy covers only what lux does by itself: a resume
+you ask for restores the snapshot as usual. A cordon-only drain does not stop
+the Run. A Run whose host stopped answering ends `lost`, which is never
+resumed automatically, whatever the policy. Any other value is refused with
+422 `invalid_spec`.
+
+An older luxd ignores `resumePolicy` and treats the Run as `auto`. A client
+that relies on `restart`, `manual` or `never` should check that the release
+lists `resume-policy` in `FEATURES`, or that `GET /v1/runs/{id}` echoes
+`spec.resumePolicy`. Where several luxd share a database, an older one that
+rewrites the Run's spec (a resume adding secrets or repositories, a failed
+clone dropping one) drops the field for good: upgrade every luxd before
+submitting a policy other than `auto`.
 
 ## Images
 

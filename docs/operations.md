@@ -61,6 +61,7 @@ since older releases lack both the file and the commands it names:
 | Feature | Since the release says it, a deployer may |
 | --- | --- |
 | `validate` | run `luxd [--config FILE] validate` against the host's configuration before migrating or switching to the release. |
+| `resume-policy` | let tenants submit a RunSpec with `resumePolicy` `restart`, `manual` or `never` ([resume policy](runspec.md#resume-policy)), once every luxd sharing the database runs such a release: an older luxd treats the Run as `auto`, and one that rewrites its spec drops the field for good. |
 
 A release with no `FEATURES` file, or no `validate` line, predates
 `luxd validate`.
@@ -212,7 +213,9 @@ reach S3 in the background:
    the recorded manifest, output and artifacts exactly. The Run's state
    reason says so; a resume starts it from that previous snapshot. A Run
    with no previous snapshot is not resumable (409 `no_snapshot`, and
-   left out of `lux ls --resumable`) unless `--from-snapshot` names one.
+   left out of `lux ls --resumable`) unless `--from-snapshot` names one,
+   or unless its resumePolicy is restart and it has no session, which
+   restores nothing.
    The runner deletes the refused snapshot's files instead of uploading
    them.
 2. The host keeps its local copy, so a resume there moves nothing. It
@@ -492,7 +495,8 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
   cordons the pool's hosts the same way, without `--force-evict`: a Run on
   one finishes where it is and the host is terminated once idle; with
   `--force-evict` it is stopped (snapshotted) and resumed elsewhere at once,
-  never cut short.
+  never cut short (`resumePolicy: restart` starts it from scratch instead;
+  `manual` or `never` ends it `failed`).
 - **Scale to zero when idle:** `--warm-while-active` keeps the `--warm`
   hosts only while the pool is in use: a Run live on it, or placed or
   ended within its `--scale-down-after`. After that the pool drops to
@@ -574,7 +578,11 @@ runner reads as `--ec2-imds`; IMDSv2 must be reachable). On the notice:
    Run has time to snapshot its state volumes and upload them.
 3. Each preempted Run is resumed automatically from that snapshot, on
    another host. If the pool has none free it launches one. An agent picks
-   its session back up, as after any resume.
+   its session back up, as after any resume. Its spec's `resumePolicy`
+   can change that ([resume policy](runspec.md#resume-policy)): `restart`
+   starts it again on another host from scratch, not from the snapshot;
+   `manual` and `never` (one-shot work) end it `failed`, e.g.
+   `preempt: not resumed (resumePolicy never)`.
 
 A Run whose stop or upload cannot finish in time (a very large state
 volume) is lost when the instance goes. It is resumable from its previous

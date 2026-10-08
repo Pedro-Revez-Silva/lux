@@ -851,8 +851,10 @@ func TestSafeSyncNotDeliveredAfterDowngrade(t *testing.T) {
 		}
 	}
 
-	// A resume assigned while the host had sync modes.
-	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped'`)
+	// A resume assigned while the host had sync modes. resumePolicy never
+	// refuses requested resumes only: an assignment no runner started is
+	// still placed again.
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'stopped', spec = spec || '{"resumePolicy": "never"}'`)
 	execSQL(t, s, ctx, `UPDATE placements SET state = 'exited'`)
 	execSQL(t, s, ctx, `UPDATE host_messages SET acked_at = now()`)
 	register([]string{proto.CapSyncModes})

@@ -48,10 +48,10 @@ submitted → scheduled → starting → running ─┬─▶ succeeded
 | `starting` | Image ready, volumes restored, container starting, init running. |
 | `running` | The workload is running. `activity` says whether an agent is `busy` or `idle` (waiting for input). |
 | `stopping` | Asked to wind down. The adapter stops the workload gracefully, then it is killed after the grace period. |
-| `stopped` | Exited on request with its state saved. **Resumable.** |
+| `stopped` | Exited on request with its state saved. **Resumable.** A Run stopped by a move (force-evicting drain, spot preemption, migrate) is then resumed by lux at once, unless its spec's `resumePolicy` says otherwise: `restart` starts it again from scratch, `manual` and `never` end it `failed` ([resume policy](runspec.md#resume-policy)). |
 | `resuming` | Waiting for a host for its next placement. |
-| `succeeded` / `failed` / `cancelled` | Terminal. A failed Run can still be resumed. |
-| `lost` | Its host stopped heartbeating while it was live. Resumable from the last snapshot taken *before* the lost placement. Work since then is gone. |
+| `succeeded` / `failed` / `cancelled` | Terminal. A failed Run can still be resumed, unless its `resumePolicy` is `never`. |
+| `lost` | Its host stopped heartbeating while it was live. Resumable from the last snapshot taken *before* the lost placement. Work since then is gone. Never resumed automatically. |
 
 A Run that stays `stopped`, `lost` or `failed` (resting) longer than its
 tenant's `expireAfterDays` (default 90; 0: never) is **cancelled by lux**,
@@ -173,7 +173,10 @@ placement gets it.
   - A Run lux resumed itself, after a `drain`, `preempt` or `migrate`
     move, counts as a resume that asked for no resources, even when an
     earlier resume of yours resized it. While it is resuming, a resume
-    with `resources` gets 409; one without gets 202.
+    with `resources` gets 409; one without gets 202. With `resumePolicy:
+    restart` it is restarted from scratch instead (no snapshot restored);
+    with `manual` or `never` it is not placed again: it ends `failed`
+    ([resume policy](runspec.md#resume-policy)).
 
 ## Secrets
 

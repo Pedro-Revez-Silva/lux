@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"slices"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 )
 
 // Run states. See docs/lifecycle.md.
@@ -40,16 +42,63 @@ const queuedRunStates = "('submitted', 'resuming', 'provisioning')"
 // resumableRunStates, for SQL: Runs resume accepts.
 const resumableRunStates = "('stopped', 'lost', 'failed')"
 
-// refusedWithoutSnapshot, for SQL over runsFrom: the current placement's
-// latest report was refused and the Run has no snapshot to restore.
-const refusedWithoutSnapshot = "coalesce(rp.snapshot_refused AND r.snapshot_id IS NULL, false)"
+// refusedWithoutSnapshot, for SQL over runs (as r): the current placement's
+// latest report was refused and the Run has no snapshot to restore. Exempt
+// is a restart Run with no session either: it restores nothing, so resuming
+// it is a first placement. One with a session would resume that session on
+// empty volumes, so it stays refused.
+const refusedWithoutSnapshot = `(r.snapshot_id IS NULL AND NOT ` + restartsFromScratchSQL + ` AND EXISTS (
+	SELECT 1 FROM placements p WHERE p.run_id = r.id AND p.epoch = r.current_epoch AND p.snapshot_refused))`
 
 // noSnapshotReason explains why resume refuses such a Run.
 const noSnapshotReason = "its only snapshot report was refused, so there is no snapshot to restore"
 
 // movedStops: stop reasons that move a Run rather than stop it; it is
-// resumed elsewhere as soon as it has stopped.
+// placed again as soon as it has stopped (resumed, or restarted from
+// scratch), unless its spec's resumePolicy is manual or never
+// (spec.FailsOnMove), when it fails instead.
 var movedStops = []string{"drain", "preempt", "migrate"}
+
+// notResumedReason is the state_reason of a Run failed by a move (stop)
+// because of its resumePolicy.
+func notResumedReason(stop, policy string) string {
+	return stop + ": not resumed (resumePolicy " + policy + ")"
+}
+
+// runResumePolicySQL, for SQL over runs (as r): its spec's resumePolicy,
+// "" when unset (auto). Every SQL reading of the policy goes through it.
+const runResumePolicySQL = `coalesce(r.spec->>'resumePolicy', '')`
+
+// failsOnMoveSQL, for SQL over runs (as r): spec.FailsOnMove of its policy.
+const failsOnMoveSQL = runResumePolicySQL + ` IN ('` + spec.ResumeManual + `', '` + spec.ResumeNever + `')`
+
+// refusesResumeSQL, for SQL over runs (as r): spec.RefusesResume of its policy.
+const refusesResumeSQL = runResumePolicySQL + ` = '` + spec.ResumeNever + `'`
+
+// restartsFromScratchSQL, for SQL over runs (as r): resumePolicy restart and
+// no session, so a resume restores nothing (assign sends no ResumeInfo).
+const restartsFromScratchSQL = `(` + runResumePolicySQL + ` = '` + spec.ResumeRestart + `' AND r.session_id = '')`
+
+// neverResumableReason is why a Run whose resumePolicy is never is not
+// resumed: the 409's message and its resumability blocker.
+const neverResumableReason = "resumePolicy never: this Run cannot be resumed"
+
+// errNeverResumable refuses any requested resume of a Run whose
+// resumePolicy is never.
+func errNeverResumable() error {
+	return errf(http.StatusConflict, "not_resumable", "%s", neverResumableReason)
+}
+
+// forgetRestoredState makes a Run's next placement a first one: with no
+// snapshot and no session, assign sends no ResumeInfo, so the runner
+// starts it on empty state volumes through the adapter's start path. Its
+// snapshots stay (resume --from-snapshot); flagged superseded, retention
+// deletes them once the next placement's snapshot is uploaded.
+func forgetRestoredState(ctx context.Context, tx pgx.Tx, runID string) error {
+	_, err := tx.Exec(ctx, `UPDATE runs SET snapshots_superseded = snapshots_superseded OR snapshot_id IS NOT NULL,
+			snapshot_id = NULL, session_id = '' WHERE id = $1`, runID)
+	return err
+}
 
 // placementRef names one placement.
 type placementRef struct {
@@ -247,6 +296,15 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	}
 	addEvent(ctx, tx, tenantID, runID, epoch, "exited", map[string]any{"exitCode": st.ExitCode, "reason": st.Reason, "message": st.Message})
 
+	moveStop := slices.Contains(movedStops, stopReason)
+	var policy string
+	if moveStop {
+		if err := tx.QueryRow(ctx, `SELECT `+runResumePolicySQL+` FROM runs r WHERE r.id = $1`, runID).Scan(&policy); err != nil {
+			return err
+		}
+	}
+	failsOnMove := moveStop && spec.FailsOnMove(policy)
+	restarts := policy == spec.ResumeRestart
 	var next, reason string
 	switch {
 	case cancel || stopReason == "cancel":
@@ -255,7 +313,10 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		next, reason = StateFailed, "timeout"
 	case stopReason == "disk":
 		next, reason = StateFailed, "disk limit exceeded"
-	case stopReason == "stop" || slices.Contains(movedStops, stopReason):
+	case failsOnMove:
+		// One-shot: what it was doing cannot continue on another host.
+		next, reason = StateFailed, notResumedReason(stopReason, policy)
+	case stopReason == "stop" || moveStop:
 		// A requested stop: resumable (and a move resumed below).
 		next, reason = StateStopped, stopReason
 	case st.State == "failed":
@@ -279,10 +340,15 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	if err := setRunState(ctx, tx, tenantID, runID, next, reason, epoch); err != nil {
 		return err
 	}
-	serverStop := endReason(stopReason)
-	if snapshotRefused {
-		// A refused move is not resumed elsewhere: the servers just stop.
-		serverStop = endReason("stop")
+	// A refused move cannot resume from its rejected snapshot; leave the
+	// Run stopped for a person to decide what to restore. restart is
+	// exempt: it restores nothing, and forgetRestoredState clears the
+	// snapshot_id the refusal left.
+	moved := moveStop && !failsOnMove && (!snapshotRefused || restarts)
+	// Servers count as migrated only when the Run is resumed elsewhere.
+	serverStop := endReason("stop")
+	if moved {
+		serverStop = endReason(stopReason)
 	}
 	if err := stopServersAtEnd(ctx, tx, tenantID, runID, epoch, serverStop); err != nil {
 		return err
@@ -294,13 +360,18 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 	if stopReason != "" {
 		ended["stopReason"] = stopReason
 	}
-	// A refused move cannot resume from its rejected snapshot; leave the
-	// Run stopped for a person to decide what to restore.
-	moved := slices.Contains(movedStops, stopReason) && !snapshotRefused
 	if moved {
-		// Moved, not stopped by a person: resume elsewhere automatically
-		// (with the input a migration left, if any).
-		if err := s.requestResume(ctx, tx, tenantID, runID, nil, "auto-resume after "+stopReason); err != nil {
+		// Moved, not stopped by a person: placed again automatically
+		// (with the input a migration left, if any). restart: from
+		// scratch, as a first placement, its snapshot ignored.
+		why := "auto-resume after " + stopReason
+		if restarts {
+			if err := forgetRestoredState(ctx, tx, runID); err != nil {
+				return err
+			}
+			why = "auto-restart after " + stopReason
+		}
+		if err := s.requestResume(ctx, tx, tenantID, runID, nil, why); err != nil {
 			return err
 		}
 	}

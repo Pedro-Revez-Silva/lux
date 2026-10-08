@@ -35,7 +35,25 @@ type RunSpec struct {
 	Network   Network           `json:"network" yaml:"network"`
 	Sandbox   Sandbox           `json:"sandbox" yaml:"sandbox"`
 	Artifacts Artifacts         `json:"artifacts" yaml:"artifacts"`
+	// Empty is stored as given and means ResumeAuto.
+	ResumePolicy string `json:"resumePolicy,omitempty" yaml:"resumePolicy,omitempty" doc:"What lux does when it moves the Run (a drain, a spot preemption, a migration). auto (the default): resumed elsewhere, restored from its snapshot. restart: started again from scratch elsewhere (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host. manual: ends failed, and an operator's migrate is refused (409 not_movable); a person may resume it. never: as manual, and every requested resume is refused (409 not_resumable; an assignment no runner started may still be placed again), for one-shot work such as a CI job holding a single-use token."`
 }
+
+// RunSpec.ResumePolicy values.
+const (
+	ResumeAuto    = "auto"
+	ResumeRestart = "restart"
+	ResumeManual  = "manual"
+	ResumeNever   = "never"
+)
+
+// FailsOnMove reports whether a resumePolicy ends the Run as failed when
+// lux moves it, rather than placing it again: manual and never.
+func FailsOnMove(policy string) bool { return policy == ResumeManual || policy == ResumeNever }
+
+// RefusesResume reports whether a resumePolicy refuses every requested
+// resume: never.
+func RefusesResume(policy string) bool { return policy == ResumeNever }
 
 // Image is exactly one of a pinned reference or a build.
 type Image struct {
@@ -627,6 +645,11 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	errs = append(errs, r.Problems()...)
 	if s.Timeout.Duration < 0 {
 		fail("timeout must not be negative")
+	}
+	switch s.ResumePolicy {
+	case "", ResumeAuto, ResumeRestart, ResumeManual, ResumeNever:
+	default:
+		fail("resumePolicy: must be auto, restart, manual or never, got %q", s.ResumePolicy)
 	}
 	for i, e := range s.Network.Egress {
 		if (e.Host == "") == (e.CIDR == "") {

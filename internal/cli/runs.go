@@ -651,7 +651,9 @@ func (a *app) migrateCmd() *cobra.Command {
 		Long: `Stop a running Run, snapshotting its state, and resume it at once on
 another host: the one --to names, or any but the one it is on. An agent
 resumes its session where it was; --input is delivered once it is running
-again (if it was mid-turn, that turn was interrupted: tell it to go on).`,
+again (if it was mid-turn, that turn was interrupted: tell it to go on).
+A Run with resumePolicy: restart starts again from scratch there; one with
+manual or never is refused (409 not_movable).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			req := map[string]any{}

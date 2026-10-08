@@ -37,7 +37,8 @@ wanted() { [[ " $ARCHES " == *" $1 "* ]]; }
 # validate: `luxd validate` checks a configuration as serve would, connecting to nothing.
 # resume-secrets: a resume declares secrets the Run lacks (secrets) and removes them (removeSecrets).
 # sync-modes: a sync entry's mode (move, fast-forward, fetch) on POST /v1/runs/{id}/sync and a resume's sync.
-FEATURES=(validate resume-secrets sync-modes)
+# resume-policy: a RunSpec's resumePolicy (auto, restart, manual, never); an older luxd ignores it and treats the Run as auto.
+FEATURES=(validate resume-secrets sync-modes resume-policy)
 
 rm -rf "$DIST"
 mkdir -p "$DIST"

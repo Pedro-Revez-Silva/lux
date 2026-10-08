@@ -2,6 +2,8 @@ package spec
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -82,6 +84,55 @@ func TestAllProblemsAtOnce(t *testing.T) {
 	ve, ok := err.(*ValidationError)
 	if !ok || len(ve.Problems) < 3 {
 		t.Fatalf("want several problems, got %v", err)
+	}
+}
+
+func TestResumePolicy(t *testing.T) {
+	for policy, ok := range map[string]bool{"": true, "auto": true, "restart": true, "manual": true, "never": true, "Never": false, "always": false} {
+		s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"}}, ResumePolicy: policy}
+		err := s.Normalize(BuiltinDefaults)
+		if (err == nil) != ok {
+			t.Errorf("%q: %v", policy, err)
+		}
+		if !ok {
+			want := fmt.Sprintf("resumePolicy: must be auto, restart, manual or never, got %q", policy)
+			var ve *ValidationError
+			if !errors.As(err, &ve) || !slices.Equal(ve.Problems, []string{want}) {
+				t.Errorf("%q: error %v, want only %q", policy, err, want)
+			}
+		}
+		if ok && s.ResumePolicy != policy {
+			t.Errorf("%q stored as %q", policy, s.ResumePolicy)
+		}
+	}
+	var s RunSpec
+	if err := yaml.Unmarshal([]byte("resumePolicy: never\n"), &s); err != nil || s.ResumePolicy != ResumeNever {
+		t.Fatalf("yaml: %q %v", s.ResumePolicy, err)
+	}
+	if b, _ := json.Marshal(RunSpec{}); strings.Contains(string(b), "resumePolicy") {
+		t.Fatalf("unset resumePolicy marshalled: %s", b)
+	}
+}
+
+// Which policies fail a moved Run and which refuse a requested resume;
+// unset is auto.
+func TestResumePolicySets(t *testing.T) {
+	for _, c := range []struct {
+		policy                     string
+		failsOnMove, refusesResume bool
+	}{
+		{"", false, false},
+		{ResumeAuto, false, false},
+		{ResumeRestart, false, false},
+		{ResumeManual, true, false},
+		{ResumeNever, true, true},
+	} {
+		if got := FailsOnMove(c.policy); got != c.failsOnMove {
+			t.Errorf("FailsOnMove(%q) = %v", c.policy, got)
+		}
+		if got := RefusesResume(c.policy); got != c.refusesResume {
+			t.Errorf("RefusesResume(%q) = %v", c.policy, got)
+		}
 	}
 }
 
