@@ -383,8 +383,6 @@ type ContainerState struct {
 	StartedAt  time.Time
 	FinishedAt time.Time
 	CgroupPath string
-	Labels     map[string]string
-	ImageID    string
 }
 
 func (p *Podman) Inspect(ctx context.Context, name string) (ContainerState, error) {
@@ -396,7 +394,6 @@ func (p *Podman) Inspect(ctx context.Context, name string) (ContainerState, erro
 		return ContainerState{}, err
 	}
 	var raw []struct {
-		Image string `json:"Image"`
 		State struct {
 			Status     string    `json:"Status"`
 			Running    bool      `json:"Running"`
@@ -407,9 +404,6 @@ func (p *Podman) Inspect(ctx context.Context, name string) (ContainerState, erro
 			FinishedAt time.Time `json:"FinishedAt"`
 			CgroupPath string    `json:"CgroupPath"`
 		} `json:"State"`
-		Config struct {
-			Labels map[string]string `json:"Labels"`
-		} `json:"Config"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil || len(raw) == 0 {
 		return ContainerState{}, fmt.Errorf("inspect %s: %v", name, err)
@@ -418,7 +412,7 @@ func (p *Podman) Inspect(ctx context.Context, name string) (ContainerState, erro
 	return ContainerState{
 		Exists: true, Status: r.State.Status, Running: r.State.Running, ExitCode: r.State.ExitCode,
 		OOMKilled: r.State.OOMKilled, Pid: r.State.Pid, StartedAt: r.State.StartedAt, FinishedAt: r.State.FinishedAt,
-		CgroupPath: r.State.CgroupPath, Labels: r.Config.Labels, ImageID: r.Image,
+		CgroupPath: r.State.CgroupPath,
 	}, nil
 }
 

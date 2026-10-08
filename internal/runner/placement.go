@@ -12,7 +12,6 @@ import (
 	"maps"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -294,7 +293,7 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 	// The network and its egress rules first: an image build runs on it,
-	// and a reused container rejoins it; both need its rules.
+	// and the container joins it; both need its rules.
 	network, err := p.setupNetwork(startCtx, sp)
 	if err != nil {
 		fail("network", err)
@@ -338,7 +337,7 @@ func (p *placement) run(ctx context.Context) {
 		fail("volumes", err)
 		return
 	}
-	if err := p.prepareVolumes(startCtx, sp, imageRoot, a.Resume); err != nil {
+	if err := p.prepareVolumes(startCtx, sp, a.Resume); err != nil {
 		fail("volumes", err)
 		return
 	}
@@ -365,7 +364,7 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 
-	err = p.createContainer(ctx, sp, image, info.ID, network, a, prompt)
+	err = p.createContainer(ctx, sp, image, network, prompt)
 	unpin()
 	if err != nil {
 		fail("container", err)
@@ -503,6 +502,23 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 		}
 		time.Sleep(time.Second)
 	}
+	// Remove by ID after the final ack: a concurrent resume may already
+	// have created another container under the Run's name. Keep the volumes.
+	p.mu.Lock()
+	id, image := p.state.Container, p.state.Image
+	p.mu.Unlock()
+	if id != "" {
+		// A hung podman must not keep the placement in "exited" indefinitely.
+		rmCtx, cancel := context.WithTimeout(ctx, time.Minute)
+		if err := p.r.pm.Remove(rmCtx, id); err != nil {
+			p.r.log.Warn("removing the stopped container failed", "run", p.runID, "epoch", p.epoch, "container", id, "err", err)
+		}
+		cancel()
+	}
+	if image != "" {
+		// Start the image TTL at the stop without claiming an operator's image.
+		p.r.images.touch(image, p.tenantID)
+	}
 	p.mu.Lock()
 	p.state.Phase = "reported"
 	p.mu.Unlock()
@@ -561,7 +577,7 @@ func (p *placement) stopPrevious(ctx context.Context) error {
 	return nil
 }
 
-func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, image *os.Root, resume *proto.ResumeInfo) error {
+func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, resume *proto.ResumeInfo) error {
 	labels := map[string]string{LabelManaged: "true", LabelRun: p.runID, LabelTenant: p.tenantID}
 	var refs []volumeRef
 	for _, v := range sp.Volumes {
@@ -597,11 +613,10 @@ func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, image *
 
 	for _, v := range append(slices.Clone(refs), p.state.EngineVolumes...) {
 		switch {
-		case v.Kind == "ephemeral" && p.r.pm.VolumeExists(ctx, v.Volume):
-			if err := p.resetEphemeral(ctx, v, image); err != nil {
-				return fmt.Errorf("reset %s: %w", v.Volume, err)
-			}
 		case v.Kind == "ephemeral":
+			// Empty on every placement, as a new host's.
+			_ = p.r.pm.VolumeRemove(ctx, v.Volume)
+			p.r.forgetMountpoint(v.Volume)
 			if err := p.r.pm.VolumeCreate(ctx, v.Volume, labels); err != nil {
 				return err
 			}
@@ -724,45 +739,25 @@ func hardening(sp spec.RunSpec) []string {
 	)
 }
 
-// createContainer makes the placement's container, or reuses an earlier
-// placement's (stopped) for a same-host resume made the same way: the same
-// image and the same create arguments, which the lux.spec label hashes.
-// The shim config is rewritten either way. It inspects the container only
-// now: prepareVolumes, restoring a state volume, removes it (-f), and with
-// it a stopped container that mounts it.
-func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image, imageID string, network podman.Network, a *proto.Assign, prompt []spec.Attachment) error {
-	name := containerName(p.runID)
-	args := p.createArgs(sp, image, network)
-	hash := argsHash(args)
-	prev, err := p.r.pm.Inspect(ctx, name)
-	if err != nil {
+// Every placement gets a fresh writable layer, even on a same-host resume.
+func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image string, network podman.Network, prompt []spec.Attachment) error {
+	if err := p.r.pm.Remove(ctx, containerName(p.runID)); err != nil {
 		return err
-	}
-	if prev.Exists {
-		if a.Resume != nil && imageID != "" && imageID == prev.ImageID && prev.Labels["lux.spec"] == hash {
-			if err := p.writeShimConfig(ctx, sp, prompt); err != nil {
-				return err
-			}
-			p.event(ctx, "container.reused", nil)
-			return nil
-		}
-		if err := p.r.pm.Remove(ctx, name); err != nil {
-			return err
-		}
 	}
 	if err := p.writeShimConfig(ctx, sp, prompt); err != nil {
 		return err
 	}
-	// The label goes before the image, the last argument.
-	args = append(args[:len(args)-1], "--label", "lux.spec="+hash, image)
-	if _, err := p.r.pm.Create(ctx, args); err != nil {
+	id, err := p.r.pm.Create(ctx, p.createArgs(sp, image, network))
+	if err != nil {
 		return err
 	}
-	return nil
+	p.mu.Lock()
+	p.state.Container = id
+	p.mu.Unlock()
+	return writeRunState(p.dir, p.state)
 }
 
-// createArgs is how the placement's container is made, but for its lux.spec
-// label; the image is last.
+// createArgs is how the placement's container is made; the image is last.
 func (p *placement) createArgs(sp spec.RunSpec, image string, network podman.Network) []string {
 	args := hardening(sp)
 	memory := fmt.Sprintf("%d", p.r.mem.limit(int64(sp.Resources.Memory)))
@@ -793,15 +788,6 @@ func (p *placement) createArgs(sp spec.RunSpec, image string, network podman.Net
 	args = append(args, dnsArgs(sp, network)...)
 	args = append(args, p.extraArgs(sp)...)
 	return append(args, image)
-}
-
-// argsHash identifies how a container is made: its create arguments. A
-// stopped container is reused only if they match, so anything that shapes
-// it (a runner's mounts, its security options) is covered.
-func argsHash(args []string) string {
-	b, _ := json.Marshal(args)
-	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:8])
 }
 
 // mounts are every volume the container mounts: the spec's, then the
@@ -1251,70 +1237,6 @@ func (p *placement) checkDisk(ctx context.Context, used int64) {
 		go p.reportRetrying(context.WithoutCancel(ctx), proto.RunEvent{Type: proto.EvDiskExceeded,
 			Data: map[string]any{"usedBytes": used, "limitBytes": limit}})
 	}
-}
-
-// emptyDir removes what is in dir, not dir itself. RemoveAll does not follow
-// links, so nothing outside dir goes.
-func emptyDir(dir string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// resetEphemeral gives an existing ephemeral volume back as a fresh one would
-// be, in place: removing it (-f) would also remove a stopped container that
-// mounts it, which a same-host resume may reuse. Its root goes back to root
-// and what the image has at its path is copied in, as podman does into a new
-// volume.
-func (p *placement) resetEphemeral(ctx context.Context, v volumeRef, image *os.Root) error {
-	mp, err := p.r.mountpoint(ctx, v.Volume)
-	if err != nil {
-		return err
-	}
-	if err := emptyDir(mp); err != nil {
-		return err
-	}
-	if err := errors.Join(os.Lchown(mp, 0, 0), os.Chmod(mp, 0o755)); err != nil {
-		return err
-	}
-	return copyUp(ctx, image, v.Path, mp)
-}
-
-// copyUp copies what the image has at a container path into a volume. The
-// directory is opened through the image's os.Root (a link in it cannot lead
-// out) and copied from that fd by `cp -a --preserve=all`, which keeps owners,
-// setuid bits, hardlinks and xattrs (file capabilities among them).
-func copyUp(ctx context.Context, image *os.Root, path, dst string) error {
-	src := strings.TrimPrefix(filepath.Clean(path), "/")
-	fi, err := image.Lstat(src)
-	if err != nil || !fi.IsDir() {
-		return nil // the image has nothing there: the volume stays empty
-	}
-	dir, err := image.Open(src)
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return copyTree(ctx, dir, dst)
-}
-
-// copyTree copies the contents of the open directory from into dir, with
-// every attribute cp can keep. from is handed to cp as its fd 3, so no path
-// is resolved again.
-func copyTree(ctx context.Context, from *os.File, dir string) error {
-	cmd := exec.CommandContext(ctx, "cp", "-a", "--preserve=all", "--no-target-directory", "/proc/self/fd/3/.", dir)
-	cmd.ExtraFiles = []*os.File{from}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("copy: %v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 // dirSize is the bytes of the regular files under root, a hardlinked file

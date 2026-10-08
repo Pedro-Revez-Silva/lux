@@ -176,17 +176,20 @@ container. Under `--userns=auto` that needed more than the commonly cited
     home itself. The shim walks to each from `/` through directory file
     descriptors with `O_NOFOLLOW`, so a link the workload planted (or swaps
     in meanwhile) is never followed.
-  - The runner empties every existing ephemeral volume in place rather than
-    removing it (`podman volume rm -f` would also remove the stopped
-    container a same-host resume reuses), gives its root back to root, and
-    copies in what the image has at its path with `cp -a` (hardlinks,
-    setuid bits and file capabilities kept), as podman does into a new
-    volume. It stops a still-running earlier container first; one that
-    cannot be stopped fails the placement. The image is mounted once for
-    all of this.
-  - A stopped container is reused only if it was made with the same create
-    arguments (their hash is its `lux.spec` label), so one made without
-    these mounts or under another AppArmor mode is not.
+  - Every placement starts with empty engine stores: the runner removes an
+    existing ephemeral volume and creates it again, and podman copies in
+    what the image has at its path, as on a new host. It stops a
+    still-running earlier container first; one that cannot be stopped fails
+    the placement.
+  - A resume always gets a new container, on the same host too: the
+    runner removes the earlier placement's and creates one from the image
+    on the Run's volumes (on the same host, the ones it already has). A
+    stopped container is never started again: its writable layer (`/tmp`,
+    `/run`) would hold an engine's runtime state (rootless Podman's
+    `pause.pid` and `storage-run-<uid>`, dockerd's pid file) for a store
+    that is now empty, which a resume on another host never has. The
+    runner removes a placement's container once its stop is reported; its
+    volumes stay.
 
 ## Exec, attach, ports
 

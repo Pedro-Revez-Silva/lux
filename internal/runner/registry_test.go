@@ -113,18 +113,46 @@ func TestPickEvictions(t *testing.T) {
 	}
 	inUse := map[string]bool{"b": true}
 
-	if got := pickEvictions(cands, inUse, 0, recent); len(got) != 0 {
+	if got := pickEvictions(cands, inUse, nil, 0, recent); len(got) != 0 {
 		t.Fatalf("nothing needed: %v", got)
 	}
-	if got := pickEvictions(cands, inUse, 50, recent); !reflect.DeepEqual(got, []string{"localhost/lux-build:old"}) {
+	if got := pickEvictions(cands, inUse, nil, 50, recent); !reflect.DeepEqual(got, []string{"localhost/lux-build:old"}) {
 		t.Fatal(got)
 	}
-	if got := pickEvictions(cands, inUse, 350, recent); !reflect.DeepEqual(got, []string{"localhost/lux-build:old", "localhost/lux-build:mid"}) {
+	if got := pickEvictions(cands, inUse, nil, 350, recent); !reflect.DeepEqual(got, []string{"localhost/lux-build:old", "localhost/lux-build:mid"}) {
 		t.Fatal(got)
 	}
 	want := []string{"localhost/lux-build:old", "localhost/lux-build:mid", "localhost/lux-build:k", "reg.example.com/cache:k", "localhost/lux-build:new"}
-	if got := pickEvictions(cands, inUse, 1<<40, recent); !reflect.DeepEqual(got, want) {
+	if got := pickEvictions(cands, inUse, nil, 1<<40, recent); !reflect.DeepEqual(got, want) {
 		t.Fatal(got)
+	}
+}
+
+// Disk pressure leaves the image of a stopped Run whose volumes wait here
+// for a resume (its container, which pinned the image, is gone), and takes
+// one no local copy needs.
+func TestPickEvictionsLeavesALocalCopysImage(t *testing.T) {
+	dir := t.TempDir()
+	r := &Runner{cfg: Config{DataDir: dir}}
+	for run, st := range map[string]*runState{
+		"held":       {RunID: "held", Phase: "reported", Image: "alpine:3", VolumesSnapshot: "snap1"},
+		"diverged":   {RunID: "diverged", Phase: "started", Image: "ghcr.io/a/other:1"},
+		"no-volumes": {RunID: "no-volumes", Phase: "reported", Image: "alpine"},
+	} {
+		if err := writeRunState(r.runDir(run), st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	held := r.localCopyImages()
+	if !reflect.DeepEqual(held, map[string]bool{"docker.io/library/alpine:3": true}) {
+		t.Fatalf("local copies' images %v, want docker.io/library/alpine:3 only", held)
+	}
+	cands := []imageCandidate{
+		{Ref: "alpine:3", ID: "h", Names: []string{"alpine:3"}, Size: 100, LastUsed: 1},
+		{Ref: "ghcr.io/a/free:1", ID: "f", Names: []string{"ghcr.io/a/free:1"}, Size: 100, LastUsed: 2},
+	}
+	if got := pickEvictions(cands, nil, held, 1<<40, 1000); !reflect.DeepEqual(got, []string{"ghcr.io/a/free:1"}) {
+		t.Fatalf("evicted %v, want only ghcr.io/a/free:1", got)
 	}
 }
 

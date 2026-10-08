@@ -279,8 +279,8 @@ def test_host_dead_mid_snapshot_is_still_lost(lux, runners, hosts):
 
 def test_resume_after_lost_on_the_same_host(lux, runners, hosts):
     """A Run lost on a host that keeps its stopped container, resumed there:
-    restoring its state volume removes that container, so a new one is
-    made, and the Run starts from the snapshot before the lost placement."""
+    a new container is made, and the Run starts from the snapshot before the
+    lost placement."""
     a = hosts[0]
     runners.start(a)
     run_id = lux.submit(counting_spec())
@@ -306,10 +306,30 @@ def test_resume_after_lost_on_the_same_host(lux, runners, hosts):
     # From the snapshot of epoch 1: the lost placement's count is gone.
     wait_until(lambda: lux.logs(run_id).split()[-1:] == ["2"], 30, 0.5, "third placement never counted 2")
     ev3 = [e["type"] for e in lux.json("events", run_id) if e.get("epoch") == 3]
-    assert "volumes.restored" in ev3 and "container.reused" not in ev3, ev3
+    assert "volumes.restored" in ev3, ev3
     lux.run("cancel", run_id, "--wait")
 
 
+
+
+def test_same_host_resume_has_a_new_container(lux, runners, hosts):
+    """A resume on the host the Run stopped on keeps its state volume there
+    (nothing restored) and starts in a new container, as on another host:
+    nothing written outside the volumes, /tmp included, is still there."""
+    runners.start(hosts[0])
+    script = "[ -e /tmp/mark ] && echo LEAK; date > /tmp/mark; echo run >> /data/count; echo count=$(wc -l < /data/count); sleep 300"
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", script,
+                                volumes=[{"name": "data", "path": "/data", "kind": "state"}]))
+    lux.wait_output(run_id, "count=1")
+    lux.run("stop", run_id, "--wait")
+    lux.run("resume", run_id, "--wait")
+    out = lux.wait_output(run_id, "count=2")
+    lux.run("cancel", run_id, "--wait")
+    assert "LEAK" not in out, out
+    assert lux.events(run_id, "volumes.local") and not lux.events(run_id, "volumes.restored")
+    # Documents the event a reused stopped container used to emit; the
+    # runner no longer has it, so LEAK above is the guard.
+    assert not lux.events(run_id, "container.reused")
 
 
 def test_resume_elsewhere_right_after_stop(lux, runners, hosts, fake_image):

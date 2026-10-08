@@ -102,16 +102,18 @@ ones a Run can still use:
   deletes them (`lux artifacts <run> --delete`, a succeeded or cancelled
   Run's only).
 
-**What does not survive a move:** running processes, memory, open
+**What does not survive a stop:** running processes, memory, open
 connections, background servers, and anything outside the state volumes,
-including the container's writable layer. Anything a workload installs at
+including the container's writable layer (`/tmp`, `/run`): every resume,
+on the same host or another, starts in a new container. Anything a workload installs at
 runtime belongs in the image or in the init script, and the init script runs
 on every start, so it must be idempotent.
 
 ## Resume
 
-- **Same host, local snapshot still there:** nothing moves. The scheduler
-  strongly prefers this host.
+- **Same host, local snapshot still there:** nothing moves: the state
+  volumes are already there. The runner starts a new container on them,
+  exactly as another host would. The scheduler strongly prefers this host.
 - **Another host:** the new runner downloads the snapshot from S3 through a
   short-lived presigned URL, imports the volumes and starts a new
   container. If the snapshot has not finished uploading from its host, the
@@ -138,9 +140,8 @@ placement gets it.
 
 - **cpus and memory** apply, larger or smaller. They must be greater than
   0 (422 `invalid_spec` otherwise, as at submit). They shape only the
-  container's limits and the reservation, so the runner makes a new
-  container with them (a stopped one is reused only when made the same
-  way), on the same state volumes.
+  container's limits and the reservation; the resume's new container gets
+  them, on the same state volumes.
 - **disk** larger applies. Smaller applies only if it is at least the
   Run's saved state plus headroom: the peak disk use (writable layer plus
   state volumes) of the placement that took the snapshot it resumes from,

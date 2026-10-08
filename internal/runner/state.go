@@ -27,6 +27,8 @@ type runState struct {
 	// artifact sources.
 	EngineVolumes []volumeRef `json:"engineVolumes,omitempty"`
 	Image         string      `json:"image"`
+	// Container is the id of the container this placement created.
+	Container string `json:"container,omitempty"`
 	// Times, unix ms, for status reports.
 	Times map[string]int64 `json:"times,omitempty"`
 	// Exit, once known.

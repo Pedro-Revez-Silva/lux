@@ -550,7 +550,7 @@ func (r *Runner) relieveDisk(ctx context.Context) []string {
 		cands = append(cands, imageCandidate{Ref: ref, ID: info.ID, Names: info.Names, Size: info.Size, LastUsed: at})
 	}
 	var removed []string
-	for _, ref := range pickEvictions(cands, inUse, need, time.Now().Add(-recentUse).UnixMilli()) {
+	for _, ref := range pickEvictions(cands, inUse, r.localCopyImages(), need, time.Now().Add(-recentUse).UnixMilli()) {
 		if r.rmi(ctx, ref) {
 			removed = append(removed, ref)
 		}
@@ -603,13 +603,27 @@ type imageCandidate struct {
 	LastUsed int64
 }
 
+// localCopyImages protects images needed by local volumes awaiting a resume,
+// keyed by full ref to match eviction candidates.
+func (r *Runner) localCopyImages() map[string]bool {
+	out := map[string]bool{}
+	entries, _ := os.ReadDir(filepath.Join(r.cfg.DataDir, "runs"))
+	for _, e := range entries {
+		if st, err := readRunState(r.runDir(e.Name())); err == nil && st.VolumesSnapshot != "" && st.Image != "" {
+			out[fullRef(st.Image)] = true
+		}
+	}
+	return out
+}
+
 // pickEvictions chooses which of lux's image names to remove to free need
-// bytes: whole images no container uses, least recently used first (an
-// image's last use is its latest name's), and none used after recent. An
-// image that also has a name lux did not give it would not be freed, so it
+// bytes: whole images no container uses and no local copy awaits (held,
+// by full ref), least recently used first (an image's last use is its
+// latest name's), and none used after recent. An image that also has a name
+// lux did not give it would not be freed, so it
 // is left alone. Sizes are estimates (layers can be shared): the next pass
 // measures again.
-func pickEvictions(cands []imageCandidate, inUse map[string]bool, need, recent int64) []string {
+func pickEvictions(cands []imageCandidate, inUse, held map[string]bool, need, recent int64) []string {
 	type image struct {
 		refs []string
 		size int64
@@ -629,6 +643,9 @@ func pickEvictions(cands []imageCandidate, inUse map[string]bool, need, recent i
 	var ids []string
 	for id, im := range byID {
 		if inUse[id] || inUse[strings.TrimPrefix(id, "sha256:")] || im.last > recent {
+			continue
+		}
+		if slices.ContainsFunc(im.refs, func(ref string) bool { return held[ref] }) {
 			continue
 		}
 		if slices.ContainsFunc(im.all, func(n string) bool { return !slices.Contains(im.refs, n) }) {

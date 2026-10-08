@@ -219,8 +219,10 @@ reach S3 in the background:
    restores nothing.
    The runner deletes the refused snapshot's files instead of uploading
    them.
-2. The host keeps its local copy, so a resume there moves nothing. It
-   deletes the copy when:
+2. The host keeps its local copy (the Run's volumes; not its container,
+   which the runner removes once the stop is reported), so a resume there
+   moves nothing: it starts a new container on those volumes, as another
+   host would on restored ones. It deletes the copy when:
    - luxd tells it the Run now runs elsewhere (from S3), or
    - the copy is older than the runner's `--host-ttl` (default 24h).
 

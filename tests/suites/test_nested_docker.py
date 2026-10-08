@@ -15,10 +15,8 @@ from env import ALPINE_IMAGE
 
 # Rootless dockerd as the workload user, with no storage driver named: it
 # picks overlay2 only where it can. Load alpine so nothing reaches a
-# registry. Its runtime directory is cleared first: a reused container
-# (same-host resume) keeps /tmp, and a pid file from before.
+# registry.
 DOCKERD = f"""
-rm -rf /tmp/xdg
 export XDG_RUNTIME_DIR=/tmp/xdg DOCKER_HOST=unix:///tmp/xdg/docker.sock; mkdir -p /tmp/xdg
 dockerd-rootless >/tmp/dockerd.log 2>&1 &
 for i in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
@@ -87,8 +85,9 @@ mkdir -p /home/agent/.local/share/other && echo home-writable
 def test_images_are_not_snapshotted(lux, runners, hosts):
     """The engine stores are ephemeral: a stop does not snapshot images and
     layers, even with a state volume over the home they are in, and a
-    resume starts with an empty store. The container itself is kept for a
-    same-host resume (emptying the store must not remove it)."""
+    resume starts with an empty store. A same-host resume keeps the home
+    volume where it is and starts a new container, whose /tmp has nothing
+    of the last one's dockerd (its pid file would stop the new one)."""
     runners.start(hosts[0], "--nested")
     home = [{"name": "home", "path": "/home/agent", "kind": "state"}]
     # A marker image made from alpine: DOCKERD reloads alpine on every
@@ -110,7 +109,7 @@ sleep 600
     lux.run("resume", run_id, "--wait")
     out = lux.wait_output(run_id, "kept:2", timeout=120)
     assert out.split().count("images:0") == 2, out  # the marker image is gone
-    assert lux.events(run_id, "container.reused"), "the same-host resume did not reuse the container"
+    assert lux.events(run_id, "volumes.local"), "the same-host resume did not keep its volumes"
     lux.run("cancel", run_id, "--wait")
 
 

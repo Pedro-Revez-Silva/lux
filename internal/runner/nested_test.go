@@ -1,15 +1,11 @@
 package runner
 
 import (
-	"context"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
-	"syscall"
 	"testing"
-
-	"golang.org/x/sys/unix"
 
 	"github.com/marcioapm/lux/internal/passwd"
 	"github.com/marcioapm/lux/internal/podman"
@@ -108,28 +104,6 @@ func TestDirSizeCountsHardlinksOnce(t *testing.T) {
 	}
 }
 
-func TestEmptyDir(t *testing.T) {
-	d, outside := t.TempDir(), t.TempDir()
-	keep := filepath.Join(outside, "keep")
-	for _, f := range []string{filepath.Join(d, "x", "y"), keep} {
-		if err := os.MkdirAll(f, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Symlink(outside, filepath.Join(d, "link")); err != nil {
-		t.Fatal(err)
-	}
-	if err := emptyDir(d); err != nil {
-		t.Fatal(err)
-	}
-	if es, _ := os.ReadDir(d); len(es) != 0 {
-		t.Errorf("left %v", es)
-	}
-	if _, err := os.Stat(keep); err != nil {
-		t.Errorf("followed a link out: %v", err)
-	}
-}
-
 func TestAppArmorRestrictsUserns(t *testing.T) {
 	d := t.TempDir()
 	for content, want := range map[string]bool{"1\n": true, "0\n": false} {
@@ -196,97 +170,5 @@ func TestMadeParents(t *testing.T) {
 				t.Errorf("got %v, want %v", got, c.want)
 			}
 		})
-	}
-}
-
-// A stopped container is reused only if it was made with the same
-// arguments: a runner's engine mounts or security options change them.
-func TestArgsHashCoversRunnerArgs(t *testing.T) {
-	base := []string{"--name", "lux-r1", "-v", "lux-r1-home:/home/agent:idmap", "img"}
-	withStore := []string{"--name", "lux-r1", "-v", "lux-r1-home:/home/agent:idmap",
-		"-v", "lux-r1--docker:/home/agent/.local/share/docker:idmap", "img"}
-	withAppArmor := append(slices.Clone(base[:len(base)-1]), "--security-opt=apparmor=unconfined", "img")
-	if argsHash(base) != argsHash(slices.Clone(base)) {
-		t.Error("the same arguments hash differently")
-	}
-	if argsHash(base) == argsHash(withStore) {
-		t.Error("an engine mount does not change the hash")
-	}
-	if argsHash(base) == argsHash(withAppArmor) {
-		t.Error("the AppArmor mode does not change the hash")
-	}
-}
-
-// copyTree recreates an image's engine store in a volume as podman's
-// copy-up would: modes, setuid bits, hardlinks as hardlinks, links as links
-// (never followed out), and, as root, owners and file capabilities.
-func TestCopyTree(t *testing.T) {
-	src, dst, outside := t.TempDir(), t.TempDir(), t.TempDir()
-	layer := filepath.Join(src, "overlay", "l1")
-	if err := os.MkdirAll(layer, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	f := filepath.Join(layer, "f")
-	if err := os.WriteFile(f, []byte("layer"), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	asRoot := os.Getuid() == 0
-	// Owner first: a chown clears setuid and file capabilities.
-	if asRoot {
-		if err := os.Chown(f, 1234, 1234); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Chmod(f, 0o640|os.ModeSetuid); err != nil {
-		t.Fatal(err)
-	}
-	if asRoot {
-		// cap_net_raw=ep, as security.capability v2.
-		caps := []byte{0, 0, 0, 2, 0, 0x20, 0, 0, 0, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-		if err := unix.Setxattr(f, "security.capability", caps, 0); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Link(f, filepath.Join(layer, "hard")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(src, "out")); err != nil {
-		t.Fatal(err)
-	}
-	dir, err := os.Open(src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer dir.Close()
-	if err := copyTree(context.Background(), dir, dst); err != nil {
-		t.Fatal(err)
-	}
-	g := filepath.Join(dst, "overlay", "l1", "f")
-	if b, err := os.ReadFile(g); err != nil || string(b) != "layer" {
-		t.Fatalf("file: %q %v", b, err)
-	}
-	fi, _ := os.Stat(g)
-	if fi.Mode()&(os.ModePerm|os.ModeSetuid) != 0o640|os.ModeSetuid {
-		t.Errorf("file mode %v, want setuid 0640", fi.Mode())
-	}
-	if d, _ := os.Stat(filepath.Join(dst, "overlay")); d.Mode().Perm() != 0o700 {
-		t.Errorf("dir mode %v", d.Mode())
-	}
-	if h, _ := os.Stat(filepath.Join(dst, "overlay", "l1", "hard")); h == nil || !os.SameFile(fi, h) {
-		t.Error("a hardlink became a copy")
-	}
-	if l, err := os.Lstat(filepath.Join(dst, "out")); err != nil || l.Mode()&os.ModeSymlink == 0 {
-		t.Errorf("a link was not copied as a link: %v", err)
-	}
-	if es, _ := os.ReadDir(outside); len(es) != 0 {
-		t.Errorf("wrote through a link: %v", es)
-	}
-	if asRoot {
-		if st := fi.Sys().(*syscall.Stat_t); st.Uid != 1234 {
-			t.Errorf("owner %d, want 1234", st.Uid)
-		}
-		if n, err := unix.Getxattr(g, "security.capability", make([]byte, 64)); err != nil || n == 0 {
-			t.Errorf("file capability lost: %v", err)
-		}
 	}
 }

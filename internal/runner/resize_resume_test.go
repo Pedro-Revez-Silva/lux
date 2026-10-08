@@ -22,9 +22,9 @@ import (
 
 // resizePodman is a fake podman keeping its container and volumes as files
 // beside it ($0.ctr, $0.vol.<name>), and logging its commands to $0.log.
-// The container, while it exists, is inspected as stopped, made from image
-// img1 with the lux.spec label in $0.hash. A create writes a new id to
-// $0.ctr and its arguments to $0.created; `volume import` copies its input
+// The container, while it exists, is inspected as stopped. A create writes a new id to
+// $0.ctr and its arguments to $0.created, and fails, as podman's does,
+// while a container exists under the name; `volume import` copies its input
 // into the volume's file; `volume rm` removes the container too, as
 // podman's -f does.
 const resizePodman = `#!/bin/sh
@@ -32,7 +32,7 @@ echo "$*" >> "$0.log"
 case "$1 $2" in
 "container inspect")
   [ -e "$0.ctr" ] || { echo "no such container $3" >&2; exit 125; }
-  printf '[{"Image":"img1","State":{"Status":"exited","Running":false},"Config":{"Labels":{"lux.spec":"%s"}}}]' "$(cat "$0.hash")" ;;
+  printf '[{"Image":"img1","State":{"Status":"exited","Running":false}}]' ;;
 "volume exists") [ -e "$0.vol.$3" ] ;;
 "volume create") eval "v=\${$#}"; : > "$0.vol.$v" ;;
 "volume rm") rm -f "$0.vol.$4" "$0.ctr" ;;
@@ -43,6 +43,7 @@ case "$1 $2" in
   cat "$0.ctr" >> "$0.started" ;;
 *)
   if [ "$1" = create ]; then
+    [ -e "$0.ctr" ] && { echo "Error: creating container storage: the container name \"lux-run1\" is already in use by $(cat "$0.ctr")" >&2; exit 125; }
     id=$(cat "$0.next-id")
     echo "ctr-$id" > "$0.ctr"
     echo "$((id+1))" > "$0.next-id"
@@ -53,8 +54,8 @@ esac
 
 // resizeFixture is run1's placement at epoch 2 on the host that ran epoch
 // 1: its state volume "data" holds "state" (snapshot snap1, also kept
-// locally as blob1), and its stopped container ctr-1 was made from old.
-// The new placement's assignment carries now.
+// locally as blob1), and its stopped container is ctr-1. The new
+// placement's assignment carries now.
 type resizeFixture struct {
 	r   *Runner
 	p   *placement
@@ -62,7 +63,7 @@ type resizeFixture struct {
 	bin string
 }
 
-func newResizeFixture(t *testing.T, old, now spec.Resources, local string) *resizeFixture {
+func newResizeFixture(t *testing.T, now spec.Resources, local string) *resizeFixture {
 	t.Helper()
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "podman")
@@ -92,7 +93,6 @@ func newResizeFixture(t *testing.T, old, now spec.Resources, local string) *resi
 		Volumes: []proto.VolumeSnapshot{{Name: "data", Path: "/data", BlobID: "blob1"}}}
 
 	vols := []spec.Volume{{Name: "data", Path: "/data", Kind: "state"}}
-	oldSpec := spec.RunSpec{Volumes: vols, Resources: old}
 	a := &proto.Assign{RunID: "run1", TenantID: "t1", Epoch: 2, Spec: spec.RunSpec{Volumes: vols, Resources: now},
 		Resume: &proto.ResumeInfo{Snapshot: manifest}}
 	p := newPlacement(r, *a)
@@ -106,7 +106,6 @@ func newResizeFixture(t *testing.T, old, now spec.Resources, local string) *resi
 		".vol." + runtimeVolume("run1"):      "",
 		".ctr":                               "ctr-1\n",
 		".next-id":                           "2\n",
-		".hash":                              argsHash(p.createArgs(oldSpec, "img", podman.Network{})),
 	} {
 		if err := os.WriteFile(bin+suffix, []byte(value), 0o600); err != nil {
 			t.Fatal(err)
@@ -139,10 +138,10 @@ func (f *resizeFixture) start(t *testing.T) {
 	ctx := context.Background()
 	err := f.p.stopPrevious(ctx)
 	if err == nil {
-		err = f.p.prepareVolumes(ctx, f.a.Spec, nil, f.a.Resume)
+		err = f.p.prepareVolumes(ctx, f.a.Spec, f.a.Resume)
 	}
 	if err == nil {
-		err = f.p.createContainer(ctx, f.a.Spec, "img", "img1", podman.Network{}, f.a, nil)
+		err = f.p.createContainer(ctx, f.a.Spec, "img", podman.Network{}, nil)
 	}
 	if err == nil {
 		err = f.r.pm.Start(ctx, containerName("run1"))
@@ -166,12 +165,10 @@ func (f *resizeFixture) flag(name string) string {
 	return ""
 }
 
-// A resume with other cpus or memory does not reuse the stopped container:
-// a new one is made with the new limits, and the Run's state volume keeps
-// its data, whether it was the snapshot's already (nothing moves) or is
-// restored from it.
+// A resume with other cpus or memory gets a new container with the new
+// limits, and the Run's state volume keeps its data, whether it was the
+// snapshot's already (nothing moves) or is restored from it.
 func TestResizedResumeGetsANewContainer(t *testing.T) {
-	old := spec.Resources{CPUs: 2, Memory: 4 << 30, Pids: 1024}
 	for _, c := range []struct {
 		name  string
 		now   spec.Resources
@@ -182,7 +179,7 @@ func TestResizedResumeGetsANewContainer(t *testing.T) {
 		{"more cpus, volumes restored", spec.Resources{CPUs: 4, Memory: 4 << 30, Pids: 1024}, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			f := newResizeFixture(t, old, c.now, c.local)
+			f := newResizeFixture(t, c.now, c.local)
 			f.start(t)
 			if got := f.read(".started"); got != "ctr-2\n" {
 				t.Fatalf("started %q, want a new container ctr-2; podman:\n%s", got, f.read(".log"))
@@ -203,12 +200,4 @@ func TestResizedResumeGetsANewContainer(t *testing.T) {
 			}
 		})
 	}
-	// The same size, volumes local: the stopped container is reused.
-	t.Run("same size", func(t *testing.T) {
-		f := newResizeFixture(t, old, old, "snap1")
-		f.start(t)
-		if got := f.read(".started"); got != "ctr-1\n" {
-			t.Fatalf("started %q, want the stopped ctr-1 reused; podman:\n%s", got, f.read(".log"))
-		}
-	})
 }

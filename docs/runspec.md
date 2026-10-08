@@ -341,7 +341,8 @@ Hosts remove the images lux put there once they go unused:
 - lux records the images it pulled (`image.ref`, `FROM` bases, cache
   pulls), built, or tagged, with their last use on the host. After the
   host TTL (`lux-runner --host-ttl`, 24h by default) without use, it
-  removes them.
+  removes them. A Run's stop counts as a use of its image, so a resume on
+  the host within the TTL finds the image there, as it finds the volumes.
 - Images the host already had when a Run needed them are the operator's.
   lux never removes them, and never prunes unnamed images either.
 - An image a starting Run is about to use is never removed, however long
@@ -350,7 +351,8 @@ Hosts remove the images lux put there once they go unused:
   by default), each pass removes lux's images that no container uses,
   least recently used first, until it is under the mark. Images used in
   the last ten minutes are spared, and so is an image that also has a name
-  lux didn't give it.
+  lux didn't give it, and the image of a stopped Run whose volumes the host
+  keeps for a resume.
 - An image a container still uses is never removed. A later pass retries.
 
 ## Nested containers
@@ -388,14 +390,12 @@ On a host whose AppArmor restricts unprivileged user namespaces (Ubuntu
 24.04 and later), the runner also runs nested Runs `apparmor=unconfined`:
 without it, rootless Docker cannot create its network namespace.
 
-A same-host resume can reuse the container, `/tmp` included: clear the
-engine's runtime directory before starting it (rootless Docker's pid file
-in `$XDG_RUNTIME_DIR` otherwise stops `dockerd` with "process is still
-running").
+Every placement, a same-host resume included, starts in a new container:
+`/tmp` and `/run` hold nothing of an earlier one's engine.
 
 ```bash
 # inside the container, as the workload user
-rm -rf /tmp/xdg && mkdir -p /tmp/xdg
+mkdir -p /tmp/xdg
 export XDG_RUNTIME_DIR=/tmp/xdg DOCKER_HOST=unix:///tmp/xdg/docker.sock
 dockerd-rootless >/tmp/dockerd.log 2>&1 &
 docker build -t app . && docker compose up
