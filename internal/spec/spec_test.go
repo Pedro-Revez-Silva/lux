@@ -199,6 +199,8 @@ func TestMCPServers(t *testing.T) {
 		{"address outside the cidr", base(byHost, MCPServer{Name: "a", URL: "http://10.2.0.1/mcp"}), "add an egress rule"},
 		{"a name is not matched by a cidr", base(Network{Egress: []EgressRule{{CIDR: "0.0.0.0/0"}}}, MCPServer{Name: "a", URL: "https://x.example/mcp"}), "add an egress rule"},
 		{"no rules", base(Network{}, MCPServer{Name: "a", URL: "https://mcp.example.com/mcp"}), "add an egress rule"},
+		{"wildcard rule", base(Network{Egress: []EgressRule{{Host: "*.example.com"}}}, MCPServer{Name: "a", URL: "https://a.b.example.com/mcp"}), ""},
+		{"wildcard excludes the apex", base(Network{Egress: []EgressRule{{Host: "*.example.com"}}}, MCPServer{Name: "a", URL: "https://example.com/mcp"}), "add an egress rule"},
 		{"duplicate names", base(byHost, MCPServer{Name: "a", URL: "https://mcp.example.com/"}, MCPServer{Name: "a", URL: "https://mcp.example.com/"}), "duplicate name"},
 		{"bad name", base(byHost, MCPServer{Name: "Bad Name", URL: "https://mcp.example.com/"}), "invalid name"},
 		{"not http", base(byHost, MCPServer{Name: "a", URL: "ftp://mcp.example.com/"}), "http or https"},
@@ -215,6 +217,102 @@ func TestMCPServers(t *testing.T) {
 		case c.problem != "" && (err == nil || !strings.Contains(err.Error(), c.problem)):
 			t.Errorf("%s: want %q, got %v", c.name, c.problem, err)
 		}
+	}
+}
+
+func TestEgressWildcardValidation(t *testing.T) {
+	const shape = `network.egress[1]: a wildcard is "*." then a domain of at least two labels, e.g. *.example.com`
+	const portPath = "network.egress[1]: a wildcard is a domain only, without a port or path"
+	for _, c := range []struct {
+		host, problem string // "" for valid
+	}{
+		{"*.example.com", ""},
+		{"*.a.b.example.com", ""},
+		{"*.Example.COM", ""},
+		{"*.example.com.", ""},
+		{"*.com", shape},
+		{"*.", shape},
+		{"*", shape},
+		{"a.*.com", shape},
+		{"*foo.com", shape},
+		{"**.x.com", shape},
+		{"*.*.x.com", shape},
+		{"x.example.*", shape},
+		{"*.exa_mple.com", shape},
+		{"*.0.5", shape},
+		{"*.example.com:443", portPath},
+		{"*.example.com/path", portPath},
+	} {
+		s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"}},
+			Network: Network{Egress: []EgressRule{{Host: "api.example.com"}, {Host: c.host}}}}
+		err := s.Normalize(BuiltinDefaults)
+		var ve *ValidationError
+		switch {
+		case c.problem == "" && err != nil:
+			t.Errorf("%q: %v", c.host, err)
+		case c.problem != "" && (!errors.As(err, &ve) || !slices.Equal(ve.Problems, []string{c.problem})):
+			t.Errorf("%q: want %q, got %v", c.host, c.problem, err)
+		}
+	}
+}
+
+func TestEgressRuleMatches(t *testing.T) {
+	for _, c := range []struct {
+		rule, name string
+		want       bool
+	}{
+		{"*.example.com", "a.example.com", true},
+		{"*.example.com", "a.b.example.com", true},
+		{"*.example.com", "example.com", false},
+		{"*.example.com", "a.example.org", false},
+		{"*.example.com", "evilexample.com", false},
+		{"*.example.com", "a.evilexample.com", false},
+		{"*.example.com", ".example.com", false},
+		{"*.example.com", "A.Example.COM", true},
+		{"*.example.com", "a.example.com.", true},
+		{"*.Example.com.", "a.example.com", true},
+		{"*.example.com", "", false},
+		{"*.com", "a.com", false},
+		{"api.example.com", "API.example.com.", true},
+		{"api.example.com", "x.api.example.com", false},
+		{"*.1.1", "1.1.1.1", false},
+		{"*.example.com", "a..example.com", false},
+		{"*.example.com", "_x.example.com", false},
+		{"*.example.com", "-a.example.com", false},
+		{"*.example.com", "example.com.evil.com", false},
+		{"*.example.com", "a.example.com.evil.com", false},
+		{"*.example.com", "bücher.example.com", false},
+		{"*.example.com", "xn--bcher-kva.example.com", true},
+		{"", "", false},
+	} {
+		if got := (EgressRule{Host: c.rule}).Matches(c.name); got != c.want {
+			t.Errorf("%q matches %q: got %v, want %v", c.rule, c.name, got, c.want)
+		}
+		// The runner's path for a wildcard agrees with Matches.
+		if strings.HasPrefix(c.rule, "*.") {
+			s, ok := WildcardSuffix(c.rule)
+			if got := ok && SuffixMatches(s, NormalHost(c.name)); got != c.want {
+				t.Errorf("%q suffix-matches %q: got %v, want %v", c.rule, c.name, got, c.want)
+			}
+		}
+	}
+	// validWildcard already rejects a numeric last label; the suffix
+	// match refuses an IP literal on its own too.
+	if SuffixMatches(".1.1", "1.1.1.1") {
+		t.Error(`".1.1" matches 1.1.1.1`)
+	}
+}
+
+func TestServiceCoveredByWildcard(t *testing.T) {
+	s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"},
+		Services: []Service{{Name: "api", URL: "https://api.svc.example.com/v1"}}},
+		Network: Network{Egress: []EgressRule{{Host: "*.svc.example.com"}}}}
+	if err := s.Normalize(BuiltinDefaults); err != nil {
+		t.Fatal(err)
+	}
+	s.Network.Egress = []EgressRule{{Host: "*.other.example.com"}}
+	if err := s.Normalize(BuiltinDefaults); err == nil || !strings.Contains(err.Error(), `does not allow service "api" at api.svc.example.com`) {
+		t.Fatalf("got %v", err)
 	}
 }
 

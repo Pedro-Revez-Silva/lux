@@ -119,6 +119,35 @@ def test_dns_events_are_distinct_lookups(lux, runners, egress_hosts, net_targets
     assert names == sorted([t.allowed_name, t.denied_name]), names
 
 
+def test_wildcard_admits_names_under_its_domain(lux, runners, egress_hosts, net_targets):
+    """*.wild.lux.test: a name one or more labels under it resolves and
+    connects on its first lookup; the apex and other domains do not resolve.
+    Control: an unrestricted Run resolves those two, so the records exist."""
+    runners.start(egress_hosts[0])
+    t = net_targets
+    resolves = lambda n: f"nslookup {n} >/dev/null 2>&1 && echo DNS-OK:{n} || echo DNS-NO:{n}"
+    admitted, refused = ["a.wild.lux.test", "b.c.wild.lux.test"], ["wild.lux.test", "x.other.lux.test"]
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "; ".join(
+        [fetch(n) for n in admitted + refused] + [resolves(n) for n in refused]),
+        network={"egress": [{"host": "*.wild.lux.test"}]}))
+    out = probe(lux, run_id)
+    lines = {line.strip() for line in out.splitlines()}
+    for n in admitted:
+        assert f"OK:{n}" in lines, out
+    for n in refused:
+        assert f"NO:{n}" in lines and f"DNS-NO:{n}" in lines, out
+    dns = [e["data"] for e in lux.json("events", run_id) if e["type"] == "dns"]
+    for n in admitted:
+        assert any(d["name"] == n and d["allowed"] and d.get("answers") == [t.allowed_ip] for d in dns), dns
+    for n in refused:
+        assert any(d["name"] == n and not d["allowed"] for d in dns), dns
+        assert not any(d["name"] == n and d["allowed"] for d in dns), dns
+    control = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "; ".join(resolves(n) for n in refused),
+                                 network={"unrestricted": True}))
+    out = probe(lux, control)
+    assert {f"DNS-OK:{n}" for n in refused} <= {line.strip() for line in out.splitlines()}, out
+
+
 def test_rules_survive_a_runner_restart(lux, runners, egress_hosts, net_targets):
     """The runner restarts while a Run is live: the Run keeps its rules,
     with no window where it can reach what it may not."""

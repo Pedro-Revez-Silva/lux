@@ -62,6 +62,7 @@ since older releases lack both the file and the commands it names:
 | --- | --- |
 | `validate` | run `luxd [--config FILE] validate` against the host's configuration before migrating or switching to the release. |
 | `resume-policy` | let tenants submit a RunSpec with `resumePolicy` `restart`, `manual` or `never` ([resume policy](runspec.md#resume-policy)), once every luxd sharing the database runs such a release: an older luxd treats the Run as `auto`, and one that rewrites its spec drops the field for good. |
+| `egress-wildcards` | let tenants submit a RunSpec with a wildcard host rule in `network.egress`, `*.<domain>` ([network egress](runspec.md#network-egress)), once every luxd and runner runs such a release: an older luxd refuses the spec, and an older runner allows no name under it. |
 
 A release with no `FEATURES` file, or no `validate` line, predates
 `luxd validate`.

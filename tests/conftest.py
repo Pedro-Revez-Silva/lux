@@ -455,7 +455,12 @@ def net_targets(env: TestEnvironment):
 
     allowed = start("web", NAME="allowed")
     denied = start("web", NAME="denied")
-    dns = start("dns", RECORDS=f"allowed.lux.test={allowed},denied.lux.test={denied},meta.lux.test=169.254.169.254")
+    # host-record names match exactly (no subdomains): the wild.lux.test
+    # apex is its own record, so a wildcard rule refusing it is the rule,
+    # not a name that does not exist.
+    wild = ",".join(f"{n}={allowed}" for n in ["a.wild.lux.test", "b.c.wild.lux.test", "wild.lux.test"])
+    dns = start("dns", RECORDS=f"allowed.lux.test={allowed},denied.lux.test={denied},meta.lux.test=169.254.169.254,"
+                               f"{wild},x.other.lux.test={denied}")
     yield NetTargets(allowed, denied, dns)
     for n in names:
         sh("docker", "rm", "-f", n, check=False)
