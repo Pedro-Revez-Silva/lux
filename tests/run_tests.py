@@ -8,6 +8,7 @@
     uv run python run_tests.py --hosts 3         # more simulated hosts
     uv run python run_tests.py --real-ec2        # EC2 suites against real AWS (nightly)
     uv run python run_tests.py --serve           # a lux to develop against (see serve.py)
+    uv run python run_tests.py --serve --nested  # ... whose hosts offer nested containers
     uv run python run_tests.py -j 4              # 4 environments, suites split between them
 
 Each invocation gets its own database, bucket, Docker network and hosts, so
@@ -61,7 +62,11 @@ def main() -> None:
     parser.add_argument("--shard", default="", metavar="N/M",
                         help="run only the Nth of M even shares of the suites (by recorded duration), e.g. on "
                              "M CI machines; with -j, split that share further")
+    parser.add_argument("--nested", action="store_true",
+                        help="with --serve: every host's runner offers nested containers (lux-runner --nested)")
     args, pytest_args = parser.parse_known_args()
+    if args.nested and not args.serve:
+        parser.error("--nested needs --serve (the suites start their own nested runners)")
 
     if args.down is not None:
         from serve import down
@@ -92,8 +97,9 @@ def main() -> None:
     # directory (suites/) selects every suite in it.
     files = [a.split("::")[0].rsplit("/", 1)[-1] for a in selected]
     every = not selected or "" in files
+    # --serve --nested preloads the Podman one, an image to try nesting with.
     nested, docker = build_nested_images(
-        podman=every or "test_nested.py" in files,
+        podman=every or args.nested or "test_nested.py" in files,
         docker=every or "test_nested_docker.py" in files)
     images = {**agent_images, "nested": nested, "docker": docker, **{ref: ref for ref in args.image}}
     binaries = {k: str(v) if v else None for k, v in built.items()}
@@ -112,7 +118,7 @@ def main() -> None:
     if args.serve:
         from serve import serve
         try:
-            serve(env, fake_image, args.detach)
+            serve(env, fake_image, args.detach, nested=args.nested)
         except BaseException:
             env.teardown()
             raise

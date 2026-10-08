@@ -198,6 +198,7 @@ uv run python run_tests.py --serve                       # up until Ctrl-C
 uv run python run_tests.py --serve --detach --hosts 3    # up in the background
 uv run python run_tests.py --serve --image ghcr.io/acme/agent:dev   # preload from local Docker
 uv run python run_tests.py --serve --preview-local 8090  # previews at http://<host>.lux.localhost:8090
+uv run python run_tests.py --serve --nested              # hosts offer nested containers
 uv run python run_tests.py --down                        # take the detached one down
 ```
 
@@ -206,6 +207,12 @@ It prints and writes `env.json` in its log directory. `luxd_url` and
 and `tenant_id` are there too. `--image` (repeatable) copies an image from
 the local Docker into every host, so Runs using it never pull. The
 `lux-fake` test agent is always preloaded as `localhost/lux-fake:test`.
+`--nested` starts every runner with `lux-runner --nested`, so Runs with
+`sandbox.nestedContainers` ([runspec](runspec.md#nested-containers)) are
+placed instead of waiting, and preloads `localhost/lux-nested:test`
+(rootless Podman inside, from `tests/images/nested`) to try them with.
+Without it no host offers nested containers. `--nested` without `--serve`
+is refused: the suites start their own nested runners.
 
 ### Try branch previews locally
 

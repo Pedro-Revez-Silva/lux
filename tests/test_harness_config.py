@@ -132,3 +132,39 @@ def test_clean_environ_drops_the_developers_lux_settings(monkeypatch):
     for gone in ("LUX_TENANT", "LUX_URL", "LUX_API_KEY", "LUX_CONFIG", "XDG_CONFIG_HOME"):
         assert gone not in env, gone
     assert env["LUX_TEST_S3_PORT"] == "59100" and env["LUX_DEBUG"] == "1" and env["PATH_FOR_TEST"] == "kept"
+
+
+def test_nested_without_serve_is_refused_before_building():
+    p = subprocess.run([sys.executable, "run_tests.py", "--nested"], cwd=TESTS_DIR, capture_output=True, text=True)
+    assert p.returncode == 2 and "--nested needs --serve" in p.stderr, (p.stdout, p.stderr)
+    assert "building" not in p.stdout, p.stdout
+
+
+# Two suites: the nested image must follow --nested whatever the selection.
+@pytest.mark.parametrize("suite", ["suites/test_serve.py", "suites/test_scheduling.py"])
+@pytest.mark.parametrize("flags, nested", [(["--serve", "--nested"], True), (["--serve"], False)])
+def test_serve_passes_nested_to_the_image_build_and_the_runners(monkeypatch, flags, nested, suite):
+    import run_tests
+    import serve
+
+    calls = {}
+    monkeypatch.setattr(run_tests, "build_binaries", lambda: {})
+    monkeypatch.setattr(run_tests, "build_fake_image", lambda _bin: None)
+    monkeypatch.setattr(run_tests, "build_agent_images", lambda _wanted: {})
+
+    def build_nested_images(podman, docker):
+        calls["podman"] = podman
+        return ("localhost/lux-nested:test" if podman else None), None
+    monkeypatch.setattr(run_tests, "build_nested_images", build_nested_images)
+
+    def fake_serve(env, fake_image, detach, nested=False):
+        calls["nested"], calls["images"] = nested, env.extra["images"]
+    monkeypatch.setattr(serve, "serve", fake_serve)
+    # suites/test_serve.py names a suite, so the nested image is selected by
+    # --nested alone, not by a full run.
+    monkeypatch.setattr(sys, "argv", ["run_tests.py", *flags, "--detach", suite])
+    run_tests.main()
+    assert calls["nested"] is nested, calls
+    assert calls["podman"] is nested, calls
+    if nested:
+        assert calls["images"]["nested"] == "localhost/lux-nested:test", calls
