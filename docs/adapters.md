@@ -167,6 +167,27 @@ Per agent:
   lost while the stream stays up leaves the Run busy until the next status
   event, reconnect or end of a lux turn.
   Without OpenCode's server, activity follows lux's turns only, as `acp`.
+  **A command lux did not build**, such as a wrapper starting
+  `opencode acp --port N`, runs as given. With its own `--port N` or
+  `--port=N`, lux follows `127.0.0.1:N` for **activity only**, using the
+  combined state, status reads, stream-down idle and backoff described
+  above. Only the last `--port` counts; a missing or invalid value, or no
+  `--port`, means no server following. lux assumes the port serves OpenCode
+  without checking. OpenCode in another container (for example in a
+  `--nested` pool) must share the Run's network namespace or forward the
+  port onto its `127.0.0.1`.
+  lux sends only `GET /event` and `GET /session/status` to this server,
+  never `prompt_async`. Steers, interrupts and input receipts stay on ACP;
+  a steer is a second `session/prompt`, accepted with no receipt.
+  If the workload has `OPENCODE_SERVER_PASSWORD` (an `env` secret or plain
+  variable), each request uses HTTP Basic auth with
+  `OPENCODE_SERVER_USERNAME` (default `opencode`); the password is never
+  logged. lux follows no redirects. A 401 or 403 on either request retries
+  with the same backoff, allowing auth setup or restarts; a refused status
+  read also drops the stream and shows OpenCode idle. After 30 refusals
+  without an accepted status read (one to two minutes), lux emits one
+  `lux.warning` and sends no more requests: activity follows lux's turns
+  only. OpenCode is never shown busy while it refuses lux.
   **Interrupt** reaches only turns lux started: a Run shown busy by a loop
   a client started over OpenCode's HTTP API alone is not cancelled.
   `lux interrupt` succeeds and sends nothing; an interrupt carrying input
@@ -206,8 +227,9 @@ Header values come from secrets and are never in the command line. See
   input)` instead of leaving you to guess whether it is hung. Most adapters
   know only the turns lux started. `opencode` with OpenCode's server up also
   follows OpenCode's own status for the Run's session, so a loop a client
-  started over OpenCode's HTTP API (`prompt_async`) shows the Run busy too
-  (the OpenCode notes under [Images](#images)).
+  started over OpenCode's HTTP API (`prompt_async`) shows the Run busy too,
+  also for a command lux did not build that serves OpenCode on a `--port`
+  of its own (the OpenCode notes under [Images](#images)).
 - **Acknowledged input.** Every `lux steer` gets a request id. What happens
   to it is reported in phases (see [Input: accepted and
   consumed](#input-accepted-and-consumed)): `input.delivered` when the agent

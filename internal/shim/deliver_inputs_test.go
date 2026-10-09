@@ -111,3 +111,34 @@ func TestAdapterConfigReleasesPromptImages(t *testing.T) {
 		t.Fatalf("resume: adapter %+v, shim %+v", cfg.PromptAttachments, s.cfg.PromptAttachments)
 	}
 }
+
+// envAdapter records the environment it is given and whether that came
+// before Command.
+type envAdapter struct {
+	recordingAdapter
+	env           []string
+	envBeforeArgv bool
+}
+
+func (e *envAdapter) WorkloadEnv(env []string) { e.env = env }
+func (e *envAdapter) Command(proto.ShimConfig) ([]string, error) {
+	e.envBeforeArgv = e.env != nil
+	return []string{"true"}, nil
+}
+
+// An adapter that reads the workload's environment is given it, with the
+// Run's env secrets, before it builds the command; the workload starts
+// with that same environment.
+func TestWorkloadCommandGivesAdapterTheEnvironment(t *testing.T) {
+	s, _, _ := inputsShim(t)
+	s.cfg.Secrets = []spec.Secret{{Name: "OPENCODE_SERVER_PASSWORD", As: "env"}, {Name: "KEYFILE", As: "file", Path: "/k"}}
+	env := s.environment(map[string]string{"OPENCODE_SERVER_PASSWORD": "pw-1", "KEYFILE": "k"})
+	ad := &envAdapter{}
+	argv, got, err := workloadCommand(ad, s.cfg, env)
+	if err != nil || !slices.Equal(argv, []string{"true"}) || !ad.envBeforeArgv {
+		t.Fatalf("argv %q, err %v, environment before Command %v", argv, err, ad.envBeforeArgv)
+	}
+	if !slices.Contains(ad.env, "OPENCODE_SERVER_PASSWORD=pw-1") || slices.Contains(ad.env, "KEYFILE=k") || !slices.Equal(ad.env, got) {
+		t.Fatalf("adapter's environment %q, workload's %q", ad.env, got)
+	}
+}

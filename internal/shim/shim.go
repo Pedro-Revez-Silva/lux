@@ -215,11 +215,11 @@ func (s *Shim) run() int {
 
 	s.adapter = ad
 	adCfg := s.adapterConfig()
-	argv, err := ad.Command(adCfg)
+	argv, workloadEnv, err := workloadCommand(ad, adCfg, env)
 	if err != nil {
 		return s.fail("start-failed", err.Error())
 	}
-	proc, err := s.startWorkload(argv, withAdapterEnv(env, ad, s.cfg))
+	proc, err := s.startWorkload(argv, workloadEnv)
 	if err != nil {
 		return s.fail("start-failed", err.Error())
 	}
@@ -756,6 +756,18 @@ func (s *Shim) writeSecret(name string, value []byte) error {
 	}
 	_ = os.Chown(src, s.user.uid, s.user.gid)
 	return nil
+}
+
+// workloadCommand is the workload's argv and environment (env with what
+// its adapter adds). An adapter that reads that environment
+// (adapter.WorkloadEnv) is given it before it builds the argv.
+func workloadCommand(ad adapter.Adapter, cfg proto.ShimConfig, env []string) ([]string, []string, error) {
+	env = withAdapterEnv(env, ad, cfg)
+	if we, ok := ad.(adapter.WorkloadEnv); ok {
+		we.WorkloadEnv(env)
+	}
+	argv, err := ad.Command(cfg)
+	return argv, env, err
 }
 
 // withAdapterEnv is the workload's environment: env plus what its adapter

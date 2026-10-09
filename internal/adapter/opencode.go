@@ -51,6 +51,26 @@ type opencodeBus struct {
 	last int64
 	// seeded: the session whose stored messages last was raised to.
 	seeded string
+
+	// observer: a server the workload's own command runs (not lux's
+	// `opencode acp --port`): followed for activity only, never sent to.
+	// user and password: OpenCode's server Basic auth, if set.
+	observer       bool
+	user, password string
+	// refusals (under mu): an observer's requests refused since the server
+	// last accepted a status read; gaveUp: the refusal that reached
+	// refusalLimit, after which the observer sends nothing more. drop ends
+	// the open event stream, nil when none is.
+	refusals int
+	gaveUp   error
+	drop     context.CancelFunc
+
+	// pause waits out one reconnect backoff d, false if ctx ends first; a
+	// timer unless a test sets it before Run.
+	pause func(ctx context.Context, d time.Duration) bool
+	// beforeRegister, nil in production, lets tests schedule a refusal before
+	// the terminal check and stream cancellation registration.
+	beforeRegister func()
 }
 
 // freeLoopbackPort is a port nothing listens on at 127.0.0.1 now.
@@ -70,8 +90,80 @@ func newOpencodeBus(port int, dir string) *opencodeBus {
 	// try again.
 	direct := &http.Transport{Proxy: nil, DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
 		ResponseHeaderTimeout: 3 * time.Second}
+	// A redirect is never followed: it could lead off 127.0.0.1:port, or to
+	// another port there with the Basic auth still attached. The 3xx itself
+	// is the answer, an error to every caller (none takes it as success).
+	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &opencodeBus{port: port, dir: dir, expect: map[string]busSteer{},
-		hc: &http.Client{Timeout: 30 * time.Second, Transport: direct}, stream: &http.Client{Transport: direct}}
+		hc:     &http.Client{Timeout: 30 * time.Second, Transport: direct, CheckRedirect: noRedirect},
+		stream: &http.Client{Transport: direct, CheckRedirect: noRedirect}}
+}
+
+// newOpencodeObserver follows the server a command lux did not build runs
+// on 127.0.0.1:port, with OpenCode's Basic auth if password is set.
+func newOpencodeObserver(port int, dir, user, password string) *opencodeBus {
+	b := newOpencodeBus(port, dir)
+	b.observer, b.user, b.password = true, user, password
+	return b
+}
+
+// authorize adds the server's Basic auth to a request, if it has a password.
+func (b *opencodeBus) authorize(req *http.Request) {
+	if b.password != "" {
+		req.SetBasicAuth(b.user, b.password)
+	}
+}
+
+// errRefused: OpenCode's server refused lux's credentials (401 or 403).
+var errRefused = errors.New("refused")
+
+// refusal is an error wrapping errRefused if resp is a 401 or 403.
+func refusal(what string, resp *http.Response) error {
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("%w: %s: %s", errRefused, what, resp.Status)
+	}
+	return nil
+}
+
+// refused counts err, a refusal of an observer's request, and ends the open
+// event stream: lux connects again after a backoff, or not at all once the
+// count reaches refusalLimit.
+func (b *opencodeBus) refused(err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.gaveUp != nil {
+		return
+	}
+	if b.refusals++; b.refusals >= refusalLimit {
+		b.gaveUp = err
+	}
+	if b.drop != nil {
+		b.drop()
+	}
+}
+
+// accepted clears the refusals: the server answered a status read.
+func (b *opencodeBus) accepted() {
+	b.mu.Lock()
+	if b.gaveUp == nil {
+		b.refusals = 0
+	}
+	b.mu.Unlock()
+}
+
+// refusing: the server refused the observer since it last accepted a
+// status read. Nothing it says then shows OpenCode busy.
+func (b *opencodeBus) refusing() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.refusals > 0 || b.gaveUp != nil
+}
+
+// givenUp is the refusal that made the observer stop, nil if none did.
+func (b *opencodeBus) givenUp() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.gaveUp
 }
 
 func (b *opencodeBus) url(path string) string {
@@ -135,34 +227,71 @@ type busEvent struct {
 //
 // Every end of the stream, clean or not, is followed by a wait: capped
 // exponential backoff with jitter, back to its start after a stream that
-// stayed up for healthyStream.
-func (b *opencodeBus) follow(ctx context.Context, on func(busEvent), connected, disconnected func()) {
+// stayed up for healthyStream. An observer stops once its requests have
+// been refused refusalLimit times with no status read accepted between
+// (refused), returning the refusal that reached it; otherwise follow
+// returns nil.
+func (b *opencodeBus) follow(ctx context.Context, on func(busEvent), connected, disconnected func()) error {
 	wait := followMin
 	for ctx.Err() == nil {
 		began := time.Now()
-		err := b.followOnce(ctx, on, connected, disconnected)
-		if ctx.Err() != nil {
-			return
+		stream, drop := context.WithCancel(ctx)
+		if b.beforeRegister != nil {
+			b.beforeRegister()
 		}
-		if err == nil {
+		b.mu.Lock()
+		if err := b.gaveUp; err != nil {
+			b.mu.Unlock()
+			drop()
+			return err
+		}
+		b.drop = drop
+		b.mu.Unlock()
+		err := b.followOnce(ctx, stream, on, connected, disconnected)
+		b.mu.Lock()
+		b.drop = nil
+		b.mu.Unlock()
+		dropped := stream.Err() != nil
+		drop()
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err == nil || dropped {
 			err = errors.New("GET /event: the stream ended")
 		}
 		b.mu.Lock()
 		b.lastErr = err
 		b.mu.Unlock()
+		if b.observer && errors.Is(err, errRefused) {
+			b.refused(err)
+		}
+		if err := b.givenUp(); err != nil {
+			return err
+		}
 		if time.Since(began) >= healthyStream {
 			wait = followMin
 		}
 		// Jitter: between half and all of wait.
-		d := wait/2 + time.Duration(mrand.Int64N(int64(wait/2)+1))
-		t := time.NewTimer(d)
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			return
-		case <-t.C:
+		if !b.wait(ctx, wait/2+time.Duration(mrand.Int64N(int64(wait/2)+1))) {
+			return nil
 		}
 		wait = min(wait*2, followMax)
+	}
+	return nil
+}
+
+// wait is one reconnect backoff of d; false if ctx ended first.
+func (b *opencodeBus) wait(ctx context.Context, d time.Duration) bool {
+	if b.pause != nil {
+		return b.pause(ctx, d)
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
 	}
 }
 
@@ -171,20 +300,29 @@ const (
 	followMin     = 100 * time.Millisecond
 	followMax     = 5 * time.Second
 	healthyStream = 10 * time.Second
+	// refusalLimit: an observer's requests refused in a row before it gives
+	// up; with the backoff above, 60 to 120 s of refusals.
+	refusalLimit = 30
 )
 
-func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent), connected, disconnected func()) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.url("/event"), nil)
+// followOnce reads one GET /event stream until it or stream (ctx, or a
+// refused status read) ends. disconnected is skipped only when ctx ends.
+func (b *opencodeBus) followOnce(ctx, stream context.Context, on func(busEvent), connected, disconnected func()) error {
+	req, err := http.NewRequestWithContext(stream, http.MethodGet, b.url("/event"), nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("x-opencode-directory", b.dir)
+	b.authorize(req)
 	resp, err := b.stream.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if err := refusal("GET /event", resp); err != nil {
+		return err
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET /event: %s", resp.Status)
 	}
@@ -205,13 +343,11 @@ func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent), connect
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 64<<10), 64<<20)
 	for sc.Scan() {
-		data, ok := bytes.CutPrefix(sc.Bytes(), []byte("data:"))
-		if !ok {
-			continue
-		}
-		var ev busEvent
-		if json.Unmarshal(bytes.TrimSpace(data), &ev) == nil && ev.Type != "" {
-			on(ev)
+		if data, ok := bytes.CutPrefix(sc.Bytes(), []byte("data:")); ok {
+			var ev busEvent
+			if json.Unmarshal(bytes.TrimSpace(data), &ev) == nil && ev.Type != "" {
+				on(ev)
+			}
 		}
 	}
 	return sc.Err()
@@ -300,6 +436,9 @@ var errNotSent = errors.New("not sent")
 // (starting one if none runs). An error wrapping errNotSent means OpenCode
 // did not take it.
 func (b *opencodeBus) promptAsync(ctx context.Context, session, msgID string, in proto.Input) error {
+	if b.observer {
+		return fmt.Errorf("%w: an observed server is not steered through", errNotSent)
+	}
 	body, _ := json.Marshal(map[string]any{"messageID": msgID, "parts": inputContent(dialectOpenCode, in)})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.url("/session/"+session+"/prompt_async"), bytes.NewReader(body))
 	if err != nil {
@@ -307,6 +446,7 @@ func (b *opencodeBus) promptAsync(ctx context.Context, session, msgID string, in
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-opencode-directory", b.dir)
+	b.authorize(req)
 	resp, err := b.hc.Do(req)
 	if err != nil {
 		var op *net.OpError
@@ -388,11 +528,15 @@ func (b *opencodeBus) get(ctx context.Context, path string, v any) (string, erro
 		return "", err
 	}
 	req.Header.Set("x-opencode-directory", b.dir)
+	b.authorize(req)
 	resp, err := b.hc.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
+	if err := refusal("GET "+path, resp); err != nil {
+		return "", err
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("GET %s: %s", path, resp.Status)
 	}

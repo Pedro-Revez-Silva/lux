@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -52,9 +53,13 @@ type ACP struct {
 	images bool
 	inputs inputLedger
 
-	// OpenCode only.
-	opencode bool
-	bus      *opencodeBus
+	// OpenCode only. bus: OpenCode's server, followed for activity; lux
+	// steers through it and reads receipts from it only when lux built the
+	// command (steerBus). ocUser, ocPassword: its Basic auth, from the
+	// workload's environment (WorkloadEnv).
+	opencode           bool
+	bus                *opencodeBus
+	ocUser, ocPassword string
 	// inflight: session/prompt calls of the running turn not yet
 	// resolved; the turn ends when it drops to 0. turnEnd is the
 	// turn-starting prompt's result, which acp.turn_end reports (joined
@@ -117,15 +122,26 @@ type ACP struct {
 	// connected; statusSeq numbers the status reads dispatched, of which
 	// only the newest applies; statusCancel cancels the one in flight;
 	// statusReads counts those not yet applied or discarded.
-	ocBusy       bool
-	actMu        sync.Mutex
-	shown        bool
-	shownIdle    bool
-	ocGen        int
-	ocUp         bool
+	ocBusy    bool
+	actMu     sync.Mutex
+	shown     bool
+	shownIdle bool
+	ocGen     int
+	ocUp      bool
+	// ocObserved (under actMu) is the latest status on this stream,
+	// before the refusal mask. A successful read can lift that mask even
+	// when a newer event has superseded the read's status.
+	ocObserved   bool
 	statusSeq    int
 	statusCancel context.CancelFunc
 	statusReads  int
+	// statusRead, if set (by a test, before Run), gets the error of each
+	// status read once it is applied or discarded, under actMu; busHandled
+	// gets each bus event once onBus has handled it; statusGot gets each
+	// status read's error as its response is in, before actMu.
+	statusRead func(error)
+	busHandled func(busEvent)
+	statusGot  func(error)
 }
 
 func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
@@ -178,12 +194,20 @@ func (wallClock) afterFunc(d time.Duration, f func()) func() bool {
 // Command: for OpenCode, `opencode acp` also serves its HTTP API on a
 // loopback port (--port), which lux steers through. A command lux did not
 // build (no "acp" argument, a --port of its own, or a resume command) is
-// run as given, and steers go over ACP only.
+// run as given, and steers go over ACP only; if it has a --port of its own,
+// the server there is followed on 127.0.0.1 for the Run's activity alone
+// (an observer bus).
 func (a *ACP) Command(cfg proto.ShimConfig) ([]string, error) {
 	argv, err := command(cfg)
-	if err != nil || !a.opencode || (cfg.Resume && len(cfg.ResumeCommand) > 0) ||
-		!slices.Contains(argv, "acp") || slices.ContainsFunc(argv, func(s string) bool { return strings.HasPrefix(s, "--port") || strings.HasPrefix(s, "--hostname") }) {
+	if err != nil || !a.opencode {
 		return argv, err
+	}
+	if (cfg.Resume && len(cfg.ResumeCommand) > 0) ||
+		!slices.Contains(argv, "acp") || slices.ContainsFunc(argv, func(s string) bool { return strings.HasPrefix(s, "--port") || strings.HasPrefix(s, "--hostname") }) {
+		if port, ok := ownPort(argv); ok {
+			a.bus = newOpencodeObserver(port, workdir(cfg), a.ocUser, a.ocPassword)
+		}
+		return argv, nil
 	}
 	port, perr := freeLoopbackPort()
 	if perr != nil {
@@ -191,6 +215,72 @@ func (a *ACP) Command(cfg proto.ShimConfig) ([]string, error) {
 	}
 	a.bus = newOpencodeBus(port, workdir(cfg))
 	return append(slices.Clone(argv), "--port", strconv.Itoa(port), "--hostname", "127.0.0.1"), nil
+}
+
+// ownPort is the value of a command's last --port N or --port=N argument,
+// if it is a TCP port. A last --port with no value or a bad one is no port:
+// an earlier --port does not stand in for it.
+func ownPort(argv []string) (int, bool) {
+	val := ""
+	for i, s := range argv {
+		switch {
+		case s == "--port":
+			val = ""
+			if i+1 < len(argv) {
+				val = argv[i+1]
+			}
+		case strings.HasPrefix(s, "--port="):
+			val = strings.TrimPrefix(s, "--port=")
+		}
+	}
+	n, err := strconv.Atoi(val)
+	return n, err == nil && n > 0 && n < 1<<16
+}
+
+// OpenCode's server takes HTTP Basic auth when OPENCODE_SERVER_PASSWORD is
+// set in its environment, as user OPENCODE_SERVER_USERNAME, by default
+// "opencode" (OpenCode's server config and `opencode attach --password`).
+const (
+	ocPasswordEnv = "OPENCODE_SERVER_PASSWORD"
+	ocUsernameEnv = "OPENCODE_SERVER_USERNAME"
+	ocDefaultUser = "opencode"
+)
+
+// WorkloadEnv keeps the credentials of OpenCode's server from the
+// workload's environment (KEY=VALUE, the last of a key standing), for an
+// observer bus Command creates.
+func (a *ACP) WorkloadEnv(env []string) {
+	if !a.opencode {
+		return
+	}
+	a.ocUser, a.ocPassword = ocDefaultUser, ""
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		switch k {
+		case ocPasswordEnv:
+			a.ocPassword = v
+		case ocUsernameEnv:
+			a.ocUser = cmp.Or(v, ocDefaultUser)
+		}
+	}
+}
+
+// steerBus is OpenCode's server when lux steers through it and reads
+// receipts from it: only the one lux started (Command). nil for an
+// observer bus, which only the Run's activity follows.
+func (a *ACP) steerBus() *opencodeBus {
+	if a.bus == nil || a.bus.observer {
+		return nil
+	}
+	return a.bus
+}
+
+// observerGaveUp reports, once, an observer bus whose server refused it
+// refusalLimit times in a row (err, the last refusal): it sends nothing
+// more, and the Run's activity is lux's own turns'.
+func (a *ACP) observerGaveUp(err error) {
+	a.sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
+		"opencode: its server refused lux %d times in a row; lux no longer follows its activity: %v", refusalLimit, err)})
 }
 
 func (a *ACP) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Sink) error {
@@ -215,10 +305,13 @@ func (a *ACP) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Si
 		a.bg.Add(1)
 		go func() {
 			defer a.bg.Done()
-			a.bus.follow(ctx, a.onBus, func() {
+			err := a.bus.follow(ctx, a.onBus, func() {
 				a.streamUp()
 				a.settle()
 			}, a.streamDown)
+			if err != nil {
+				a.observerGaveUp(err)
+			}
 		}()
 	}
 	err := a.handshake(cfg)
@@ -464,7 +557,7 @@ func (a *ACP) runCtx() context.Context {
 // not returned, or one not known read, holds its turn end (endHeld) and is
 // settled: that steer may run in a loop after this one.
 func (a *ACP) endTurn(data map[string]any) {
-	if a.bus != nil {
+	if a.steerBus() != nil {
 		a.receipts(a.runCtx())
 		a.mu.Lock()
 		if a.reserved > 0 || len(a.inputs.unread("bus")) > 0 {
@@ -597,7 +690,7 @@ func (a *ACP) anotherLoop() {
 // Also run when the event stream (re)connects; before the ACP turn has
 // ended it only consumes.
 func (a *ACP) settle() {
-	if a.bus == nil {
+	if a.steerBus() == nil {
 		return
 	}
 	a.settleMu.Lock()
@@ -828,7 +921,7 @@ func (a *ACP) steer(in proto.Input) {
 		a.queueInput(in)
 		return
 	}
-	if a.bus != nil {
+	if a.steerBus() != nil {
 		if a.bus.waitConnected(ctx, 5*time.Second) {
 			a.steerHTTP(ctx, session, in)
 			return
@@ -899,7 +992,7 @@ func (a *ACP) steerHTTP(ctx context.Context, session string, in proto.Input) {
 // answering it would read that steer without lux knowing. It waits for the
 // next turn instead.
 func (a *ACP) steerACP(session string, in proto.Input) {
-	unreadHTTP := a.bus != nil && len(a.inputs.unread("bus")) > 0
+	unreadHTTP := a.steerBus() != nil && len(a.inputs.unread("bus")) > 0
 	a.mu.Lock()
 	if !a.busy || a.busTurn || a.stopped || unreadHTTP {
 		a.mu.Unlock()
@@ -941,12 +1034,18 @@ func (a *ACP) queueInput(in proto.Input) {
 // session.idle after the ACP turn has ended settles the Run's work;
 // session.status is the Run's activity (setOpenCodeBusy).
 func (a *ACP) onBus(ev busEvent) {
+	if a.busHandled != nil {
+		defer a.busHandled(ev)
+	}
 	a.mu.Lock()
 	session, bt := a.session, a.busTurn
 	a.mu.Unlock()
 	p := ev.Properties
 	switch ev.Type {
 	case "message.updated":
+		if a.steerBus() == nil {
+			return
+		}
 		if p.Info.SessionID == session {
 			a.bus.observe(p.Info.ID)
 		}
@@ -973,13 +1072,16 @@ func (a *ACP) setOpenCodeBusy(busy bool) {
 	a.actMu.Lock()
 	defer a.actMu.Unlock()
 	a.ocGen++
+	a.ocObserved = busy
 	a.applyOpenCodeBusyLocked(busy)
 }
 
 // applyOpenCodeBusyLocked sets ocBusy and reports the combined activity.
 // Lux's side is idle only with no turn of its own and nothing queued for
-// one, so a turn about to start does not flash idle. Under actMu.
+// one, so a turn about to start does not flash idle. A server refusing an
+// observer is never shown busy. Under actMu.
 func (a *ACP) applyOpenCodeBusyLocked(busy bool) {
+	busy = busy && !a.bus.refusing()
 	a.mu.Lock()
 	a.ocBusy = busy
 	idle := !a.busy && !busy && len(a.queue) == 0
@@ -1005,6 +1107,7 @@ func (a *ACP) streamDown() {
 	defer a.actMu.Unlock()
 	a.ocGen++
 	a.ocUp = false
+	a.ocObserved = false
 	if a.statusCancel != nil {
 		a.statusCancel()
 		a.statusCancel = nil
@@ -1029,7 +1132,7 @@ func (a *ACP) requestStatusLocked() {
 	a.mu.Lock()
 	session := a.session
 	a.mu.Unlock()
-	if session == "" || !a.ocUp {
+	if session == "" || !a.ocUp || a.bus.givenUp() != nil {
 		return
 	}
 	if a.statusCancel != nil {
@@ -1043,14 +1146,37 @@ func (a *ACP) requestStatusLocked() {
 	ok := a.spawn(func() {
 		defer cancel()
 		busy, err := a.bus.sessionBusy(ctx, session)
+		if a.statusGot != nil {
+			a.statusGot(err)
+		}
 		a.actMu.Lock()
 		defer a.actMu.Unlock()
 		a.statusReads--
+		// Only a current read's outcome counts, its auth outcome too: one
+		// a newer read superseded, or whose stream ended, says nothing of
+		// the server now. A bus event since its dispatch (ocGen) outdates
+		// its status, not whether the server accepted lux.
+		current := ctx.Err() == nil && a.statusSeq == seq
 		if a.statusSeq == seq {
 			a.statusCancel = nil
 		}
-		if ctx.Err() == nil && a.ocGen == gen && a.statusSeq == seq {
-			a.applyOpenCodeBusyLocked(err == nil && busy)
+		if current {
+			refused := a.bus.observer && errors.Is(err, errRefused)
+			switch {
+			case refused:
+				a.bus.refused(err)
+			case err == nil:
+				a.bus.accepted()
+			}
+			if a.ocGen == gen {
+				a.ocObserved = err == nil && busy
+			}
+			if refused || err == nil || a.ocGen == gen {
+				a.applyOpenCodeBusyLocked(a.ocObserved)
+			}
+		}
+		if a.statusRead != nil {
+			a.statusRead(err)
 		}
 	})
 	if !ok {

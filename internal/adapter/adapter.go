@@ -122,6 +122,13 @@ type Environment interface {
 	Environment(cfg proto.ShimConfig) map[string]string
 }
 
+// WorkloadEnv is implemented by adapters that read the workload's
+// environment (KEY=VALUE, as it is started with) before Command: OpenCode
+// reads its server's credentials from it.
+type WorkloadEnv interface {
+	WorkloadEnv(env []string)
+}
+
 func New(name string) (Adapter, error) {
 	switch name {
 	case "generic", "":
