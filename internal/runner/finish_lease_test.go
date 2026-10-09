@@ -435,4 +435,10 @@ func TestWelcomeDoesNotFenceAFinishingPlacement(t *testing.T) {
 	if !f.p.isStale() {
 		t.Fatal("a running placement luxd does not list was not fenced off")
 	}
+	// The fence kills in the background: wait for it, so the fake podman is
+	// done writing in the test's directory before its cleanup removes it.
+	waitFor(t, "the fenced placement's container was not killed by id", func() bool {
+		b, _ := os.ReadFile(f.bin + ".killed")
+		return string(b) == "ctr-1\n"
+	})
 }
