@@ -62,7 +62,8 @@ func System() Scope          { return Scope{system: true} }
 
 // Tx runs fn in a transaction with the scope applied. The settings are
 // transaction-local, so a pooled connection never carries one request's
-// tenant into the next.
+// tenant into the next. What fn registered with BeforeCommit runs in the
+// transaction after fn returns without error.
 func (s *Store) Tx(ctx context.Context, sc Scope, fn func(pgx.Tx) error) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if sc.system {
@@ -77,8 +78,53 @@ func (s *Store) Tx(ctx context.Context, sc Scope, fn func(pgx.Tx) error) error {
 				return err
 			}
 		}
-		return fn(tx)
+		h := &hookedTx{Tx: tx}
+		if err := fn(h); err != nil {
+			return err
+		}
+		return h.runHooks()
 	})
+}
+
+// hookedTx is the pgx.Tx Store.Tx hands to its fn: it carries the work
+// BeforeCommit defers to the transaction's end.
+type hookedTx struct {
+	pgx.Tx
+	keys  map[string]bool
+	hooks []func() error
+}
+
+func (h *hookedTx) runHooks() error {
+	// A hook may register another; each runs once.
+	for len(h.hooks) > 0 {
+		fn := h.hooks[0]
+		h.hooks = h.hooks[1:]
+		if err := fn(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// BeforeCommit has fn run in tx once fn of Store.Tx has returned without
+// error, before the commit: once per key, however often it is registered,
+// in the order first registered. It reports false, registering nothing,
+// for a transaction Store.Tx did not begin (a savepoint, or one begun on
+// the pool directly): the caller then does the work itself.
+func BeforeCommit(tx pgx.Tx, key string, fn func() error) bool {
+	h, ok := tx.(*hookedTx)
+	if !ok {
+		return false
+	}
+	if h.keys[key] {
+		return true
+	}
+	if h.keys == nil {
+		h.keys = map[string]bool{}
+	}
+	h.keys[key] = true
+	h.hooks = append(h.hooks, fn)
+	return true
 }
 
 // Migrate applies pending migrations as the database owner, then makes sure

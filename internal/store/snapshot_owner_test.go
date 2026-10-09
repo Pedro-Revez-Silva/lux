@@ -49,7 +49,7 @@ func TestSnapshotOwnerUpgrade(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"037_snapshot_records", "038_pool_id", "039_luxd_alive", "040_launch_outcome", "041_pool_samples", "042_dashboard_indexes", "043_run_input_events", "044_run_input_events_backfill", "045_event_cover", "046_event_type", "047_placement_memory_limit", "048_hosts_pool_registered", "049_wakeable_servers", "050_prompt_attachments", "051_stored_bytes", "052_stored_bytes_backfill", "053_run_expiry", "054_snapshot_cleanup", "055_host_capabilities", "056_run_terminated", "057_runs_resting_succeeded", "058_artifact_versions", "059_run_submitter"}
+			want := []string{"037_snapshot_records", "038_pool_id", "039_luxd_alive", "040_launch_outcome", "041_pool_samples", "042_dashboard_indexes", "043_run_input_events", "044_run_input_events_backfill", "045_event_cover", "046_event_type", "047_placement_memory_limit", "048_hosts_pool_registered", "049_wakeable_servers", "050_prompt_attachments", "051_stored_bytes", "052_stored_bytes_backfill", "053_run_expiry", "054_snapshot_cleanup", "055_host_capabilities", "056_run_terminated", "057_runs_resting_succeeded", "058_artifact_versions", "059_run_submitter", "060_run_stage"}
 			if from == "030_servers" {
 				want = append([]string{"031_pool_template_tags", "032_default_pool", "033_run_pool_owner", "034_pool_host_events", "035_snapshot_refused"}, want...)
 			}

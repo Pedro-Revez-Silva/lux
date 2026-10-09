@@ -426,7 +426,8 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 			if err := json.Unmarshal(f.Data, &st); err != nil {
 				return err
 			}
-			kicked = true
+			// A start's progress frees no capacity and queues no Run.
+			kicked = st.State != "starting"
 			return s.applyStatus(ctx, tx, tenantID, f.RunID, f.Epoch, st)
 		case proto.MsgAdapterEvent:
 			var ev proto.AdapterEvent

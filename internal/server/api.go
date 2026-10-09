@@ -506,6 +506,9 @@ type Run struct {
 	PlacementWaitSeconds  float64     `json:"placementWaitSeconds" doc:"The part of placementSeconds spent waiting for a host (needing one until assigned)."`
 	PlacementStartSeconds float64     `json:"placementStartSeconds" doc:"The part spent starting on the host (assigned until the workload started, or the placement ended without starting)."`
 	Placing               bool        `json:"placing,omitempty" doc:"The Run is being placed now: waiting for a host, or starting on one; placementSeconds grows from the response's time on."`
+	Stage                 string      `json:"stage" enum:"waiting,image,volumes,repositories,container,running,stopping,stopped,lost,succeeded,failed,terminated" doc:"Where the Run is now (docs/concepts.md#stages): waiting for a host; image, volumes, repositories, container while it starts on one; running; stopping (stageReason says why); or its resting state. A stage event announces each change."`
+	StageSince            time.Time   `json:"stageSince" doc:"When the stage began: one recorded time. volumes, repositories, container and running begin at the runner's marks, on its host's clock (running at luxd's started_at for a runner that reports no containerStarted); waiting, image (acceptedAt), stopping and a resting state at luxd's."`
+	StageReason           string      `json:"stageReason,omitempty" doc:"For stopping: the stop's reason (stop, terminate, drain, preempt, migrate, timeout, disk)."`
 	Placements            []Placement `json:"placements,omitempty"`
 	Usage                 *RunUsage   `json:"usage,omitempty"`
 	// Resume: on GET /v1/runs/{id} of a Run resume accepts by its state
@@ -547,6 +550,7 @@ type Placement struct {
 	AcceptedAt         *time.Time `json:"acceptedAt,omitempty"`
 	ImageReadyAt       *time.Time `json:"imageReadyAt,omitempty"`
 	VolumesRestoredAt  *time.Time `json:"volumesRestoredAt,omitempty"`
+	ReposReadyAt       *time.Time `json:"reposReadyAt,omitempty" doc:"Its repositories were cloned and a resume's sync fetched (at once without repositories)."`
 	ContainerStartedAt *time.Time `json:"containerStartedAt,omitempty"`
 	WorkloadStartedAt  *time.Time `json:"workloadStartedAt,omitempty"`
 	StopRequestedAt    *time.Time `json:"stopRequestedAt,omitempty"`
@@ -582,7 +586,7 @@ type RunUsage struct {
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
 	coalesce(rh.name, ''), coalesce(rp.host_id, ''), coalesce(rpool.name, ''), coalesce(r.pool_id, ''), rr.seconds, rr.since,
-	rpt.wait, rpt.start, rpt.placing, ` + resumableSQL
+	rpt.wait, rpt.start, rpt.placing, ` + resumableSQL + `, ` + stageColumns
 
 // runsFrom: a Run with its tenant, its current placement's host, and its
 // runtime (rr). Runtime is the sum over its placements of started_at
@@ -627,15 +631,17 @@ func runPlacementJoin(now string) string {
 // since it last needed one; start, the seconds from assignment until its
 // workload started, else until luxd saw it running (started_at: runners
 // that never report the workload's start), else until it ended; one still
-// starting counts to now. placing: either is still counting. now is the
-// clock (a cursor's, when a page sorts by it).
+// starting counts to now. placing: either is still counting. last_ended:
+// the latest placement end (the Run's stage). now is the clock (a
+// cursor's, when a page sorts by it).
 func placementTimeSQL(now string) string {
 	return `SELECT
 			coalesce(sum(greatest(0, extract(epoch FROM x.created_at - x.req))), 0)::float8
 				+ CASE WHEN r.state IN ` + queuedRunStates + ` THEN greatest(0, extract(epoch FROM ` + now + ` - coalesce(r.needs_host_since, max(x.ended_at), r.created_at)))::float8 ELSE 0 END AS wait,
 			coalesce(sum(greatest(0, extract(epoch FROM coalesce(x.workload_started_at, x.started_at, x.ended_at,
 				CASE WHEN x.state IN ` + livePlacementStates + ` THEN ` + now + ` ELSE x.created_at END) - x.created_at))), 0)::float8 AS start,
-			r.state IN ` + queuedRunStates + ` OR coalesce(bool_or(x.workload_started_at IS NULL AND x.started_at IS NULL AND x.ended_at IS NULL AND x.state IN ` + livePlacementStates + `), false) AS placing
+			r.state IN ` + queuedRunStates + ` OR coalesce(bool_or(x.workload_started_at IS NULL AND x.started_at IS NULL AND x.ended_at IS NULL AND x.state IN ` + livePlacementStates + `), false) AS placing,
+			max(x.ended_at) AS last_ended
 		FROM (SELECT p.created_at, p.ended_at, p.workload_started_at, p.started_at, p.state,
 				coalesce(p.needed_since, lag(p.ended_at) OVER (ORDER BY p.epoch), r.created_at) AS req
 			FROM placements p WHERE p.run_id = r.id) x`
@@ -643,10 +649,15 @@ func placementTimeSQL(now string) string {
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
-	err := row.Scan(&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
+	var stage stageInputs
+	err := row.Scan(append([]any{&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
 		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
-		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince, &r.PlacementWaitSeconds, &r.PlacementStartSeconds, &r.Placing, &r.Resumable)
+		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince, &r.PlacementWaitSeconds, &r.PlacementStartSeconds, &r.Placing, &r.Resumable},
+		stage.scanTargets()...)...)
 	r.PlacementSeconds = r.PlacementWaitSeconds + r.PlacementStartSeconds
+	stage.State, stage.CreatedAt = r.State, r.CreatedAt
+	st := deriveStage(stage)
+	r.Stage, r.StageSince, r.StageReason = st.Stage, st.Since, st.Reason
 	if info, ok := spec.Adapters[r.Spec.Workload.Adapter]; ok && info.Steer.Lands != "" {
 		st := info.Steer
 		r.Steer = &st
@@ -746,6 +757,9 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 			ev["poolOwner"] = o
 		}
 		if err := addEvent(ctx, tx, p.TenantID, id, 0, "submitted", ev); err != nil {
+			return err
+		}
+		if err := noteStage(ctx, tx, id); err != nil {
 			return err
 		}
 		if err := insertSpecServers(ctx, tx, p.TenantID, id, p.Actor(), sp); err != nil {
@@ -1085,7 +1099,7 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 			return err
 		}
 		rows, err := tx.Query(ctx, `SELECT p.epoch, p.host_id, h.name, p.state, p.exit_code, p.exit_reason, p.stop_reason,
-				p.created_at, p.accepted_at, p.image_ready_at, p.volumes_restored_at, p.container_started_at, p.workload_started_at,
+				p.created_at, p.accepted_at, p.image_ready_at, p.volumes_restored_at, p.repos_ready_at, p.container_started_at, p.workload_started_at,
 				p.stop_requested_at, p.exited_at, p.snapshot_done_at, p.uploaded_at,
 				p.peak_memory_bytes, p.peak_disk_bytes, p.peak_pids, p.cpu_seconds, p.net_rx_bytes, p.net_tx_bytes, p.snapshot_bytes, p.memory_limit
 			FROM placements p JOIN hosts h ON h.id = p.host_id WHERE p.run_id = $1 ORDER BY p.epoch`, id)
@@ -1097,7 +1111,7 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 		for rows.Next() {
 			var pl Placement
 			if err := rows.Scan(&pl.Epoch, &pl.Host, &pl.HostName, &pl.State, &pl.ExitCode, &pl.ExitReason, &pl.StopReason,
-				&pl.AssignedAt, &pl.AcceptedAt, &pl.ImageReadyAt, &pl.VolumesRestoredAt, &pl.ContainerStartedAt, &pl.WorkloadStartedAt,
+				&pl.AssignedAt, &pl.AcceptedAt, &pl.ImageReadyAt, &pl.VolumesRestoredAt, &pl.ReposReadyAt, &pl.ContainerStartedAt, &pl.WorkloadStartedAt,
 				&pl.StopRequestedAt, &pl.ExitedAt, &pl.SnapshotDoneAt, &pl.UploadedAt,
 				&pl.PeakMemoryBytes, &pl.PeakDiskBytes, &pl.PeakPids, &pl.CPUSeconds, &pl.NetRxBytes, &pl.NetTxBytes, &pl.SnapshotBytes, &pl.MemoryLimit); err != nil {
 				return err

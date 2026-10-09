@@ -2175,6 +2175,29 @@ components:
           type: string
         spec:
           $ref: "#/components/schemas/RunSpec"
+        stage:
+          description: "Where the Run is now (docs/concepts.md#stages): waiting for a host; image, volumes, repositories, container while it starts on one; running; stopping (stageReason says why); or its resting state. A stage event announces each change."
+          enum:
+            - waiting
+            - image
+            - volumes
+            - repositories
+            - container
+            - running
+            - stopping
+            - stopped
+            - lost
+            - succeeded
+            - failed
+            - terminated
+          type: string
+        stageReason:
+          description: "For stopping: the stop's reason (stop, terminate, drain, preempt, migrate, timeout, disk)."
+          type: string
+        stageSince:
+          description: "When the stage began: one recorded time. volumes, repositories, container and running begin at the runner's marks, on its host's clock (running at luxd's started_at for a runner that reports no containerStarted); waiting, image (acceptedAt), stopping and a resting state at luxd's."
+          format: date-time
+          type: string
         state:
           type: string
         stateReason:
@@ -2320,6 +2343,10 @@ components:
         peakPids:
           format: int64
           type: integer
+        reposReadyAt:
+          description: Its repositories were cloned and a resume's sync fetched (at once without repositories).
+          format: date-time
+          type: string
         snapshotBytes:
           format: int64
           type: integer

@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // submitted runs lux with args against a fake luxd and returns the JSON body
@@ -161,5 +162,22 @@ func TestResumeSecretSuppliedAndRemoved(t *testing.T) {
 	}
 	if posted {
 		t.Fatal("a request was POSTed despite the conflict")
+	}
+}
+
+// lux get prints the Run's stage, its reason while stopping, and since when.
+func TestGetPrintsTheStage(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"run_1","state":"stopping","stage":"stopping","stageReason":"migrate",
+			"stageSince":"2026-10-09T12:00:05Z","createdAt":"2026-10-09T12:00:00Z","spec":{}}`))
+	})
+	out, err := runCLI(t, h, "get", "run_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	since, _ := time.Parse(time.RFC3339, "2026-10-09T12:00:05Z")
+	if want := "stage:     stopping (migrate) since " + since.Local().Format(time.RFC3339) + "\n"; !strings.Contains(out, want) {
+		t.Errorf("lux get printed:\n%s\nwant a line %q", out, want)
 	}
 }

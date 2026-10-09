@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -267,6 +268,9 @@ func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason 
 	if err := addEvent(ctx, tx, tenantID, runID, epoch, "state", data); err != nil {
 		return err
 	}
+	if err := noteStage(ctx, tx, runID); err != nil {
+		return err
+	}
 	return endServers(ctx, tx, tenantID, runID, state)
 }
 
@@ -285,8 +289,16 @@ func enqueueCost(ctx context.Context, tx pgx.Tx, runID, reason string) error {
 	return err
 }
 
-// applyStatus moves a Run forward from what its runner reports.
+// applyStatus moves a Run forward from what its runner reports, and
+// announces the stage that leaves it in.
 func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, st proto.Status) error {
+	if err := s.applyStatusOnly(ctx, tx, tenantID, runID, epoch, st); err != nil {
+		return err
+	}
+	return noteStage(ctx, tx, runID)
+}
+
+func (s *Server) applyStatusOnly(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, st proto.Status) error {
 	t := st.Times
 	_, err := tx.Exec(ctx, `UPDATE placements SET
 			image_ready_at       = coalesce(image_ready_at, $3),
@@ -294,10 +306,11 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 			container_started_at = coalesce(container_started_at, $5),
 			workload_started_at  = coalesce(workload_started_at, $6),
 			exited_at            = coalesce(exited_at, $7),
-			memory_limit         = coalesce(memory_limit, nullif($8::bigint, 0))
+			memory_limit         = coalesce(memory_limit, nullif($8::bigint, 0)),
+			repos_ready_at       = coalesce(repos_ready_at, $9)
 		WHERE run_id = $1 AND epoch = $2`, runID, epoch,
 		msToTime(t["imageReady"]), msToTime(t["volumesRestored"]), msToTime(t["containerStarted"]),
-		msToTime(t["workloadStarted"]), msToTime(t["exited"]), st.MemoryLimit)
+		msToTime(t["workloadStarted"]), msToTime(t["exited"]), st.MemoryLimit, msToTime(t["reposReady"]))
 	if err != nil {
 		return err
 	}
@@ -320,10 +333,17 @@ func (s *Server) applyStatus(ctx context.Context, tx pgx.Tx, tenantID, runID str
 
 	switch st.State {
 	case "starting":
-		if _, err := tx.Exec(ctx, `UPDATE placements SET state = 'starting' WHERE run_id = $1 AND epoch = $2 AND state = 'assigned'`, runID, epoch); err != nil {
+		// A starting report proves the runner took the assignment, even if
+		// its ack was lost. One for a placement that already ended (a move's
+		// exit, then a late report) moves nothing: the Run has no placement.
+		var live bool
+		err := tx.QueryRow(ctx, `UPDATE placements SET state = 'starting', accepted_at = coalesce(accepted_at, now())
+			WHERE run_id = $1 AND epoch = $2 AND state IN ('assigned', 'starting')
+			RETURNING true`, runID, epoch).Scan(&live)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		if runState == StateScheduled || runState == StateResuming || runState == StateProvisioning {
+		if live && (runState == StateScheduled || runState == StateResuming || runState == StateProvisioning) {
 			return setRunState(ctx, tx, tenantID, runID, StateStarting, "", epoch)
 		}
 	case "running":
@@ -499,6 +519,14 @@ func (s *Server) placementLost(ctx context.Context, tx pgx.Tx, runID string, epo
 // lost is not how the Run ends, so its resumePolicy is not applied. A Run
 // with a terminate pending ends terminated instead.
 func (s *Server) requeueUnstartedPlacement(ctx context.Context, tx pgx.Tx, tenantID, runID string, epoch int, why string, later *laterEvents, a proto.Assign) error {
+	// The Run never stopped waiting: its stage keeps the wait's start
+	// (an earlier requeue's, else this placement's), while placement time
+	// counts this placement's wait and a new one from now.
+	var waitingSince *time.Time
+	if err := tx.QueryRow(ctx, `SELECT coalesce(r.waiting_since, p.needed_since) FROM runs r
+		JOIN placements p ON p.run_id = r.id AND p.epoch = $2 WHERE r.id = $1`, runID, epoch).Scan(&waitingSince); err != nil {
+		return err
+	}
 	state, err := s.losePlacement(ctx, tx, runID, epoch, why, later, true)
 	if err != nil || state != StateLost {
 		return err
@@ -506,7 +534,7 @@ func (s *Server) requeueUnstartedPlacement(ctx context.Context, tx pgx.Tx, tenan
 	if err := s.requestResume(ctx, tx, tenantID, runID, a.Input, why); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE runs SET pending_sync = $2 WHERE id = $1`, runID, a.Sync)
+	_, err = tx.Exec(ctx, `UPDATE runs SET pending_sync = $2, waiting_since = $3 WHERE id = $1`, runID, a.Sync, waitingSince)
 	return err
 }
 

@@ -340,6 +340,10 @@ class GitServer:
     def requests(self) -> list[str]:
         return self.sh("cat /repos/requests.log 2>/dev/null; true").splitlines()
 
+    def slow(self, repo: str, seconds: float) -> None:
+        """Every clone or fetch of repo waits seconds first (0: none)."""
+        self.sh(f"echo {seconds} > /repos/{repo}.git/delay")
+
 
 def _q(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"

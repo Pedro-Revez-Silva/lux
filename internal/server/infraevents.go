@@ -48,6 +48,8 @@ import (
 //  3. the cost-host advisory locks, in host id order (lockCostHost);
 //  4. host rows, FOR NO KEY UPDATE, in id order;
 //  5. event streams, last: no row or advisory lock is requested after one.
+//     The one exception, announceStage (a BeforeCommit hook), re-locks a
+//     Run row its transaction already holds, so it never waits.
 //
 // Where each writer takes its stream locks, after every other lock:
 //

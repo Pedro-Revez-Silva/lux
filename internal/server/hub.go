@@ -496,6 +496,12 @@ func (s *Server) ackMessage(ctx context.Context, hostID string, id int64) error 
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var typ, runID string
 		var epoch int
+		// An assignment's Run first, then the message: the order refuseSync
+		// and reports lock them in.
+		if err := tx.QueryRow(ctx, `SELECT 1 FROM runs WHERE id = (SELECT run_id FROM host_messages
+				WHERE id = $1 AND host_id = $2 AND type = $3 AND acked_at IS NULL) FOR UPDATE`, id, hostID, proto.MsgAssign).Scan(new(int)); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
 		// An acked message is never read again (redelivery reads acked_at
 		// IS NULL only): its image bytes go with the ack.
 		err := tx.QueryRow(ctx, `UPDATE host_messages SET acked_at = now(),
@@ -511,8 +517,12 @@ func (s *Server) ackMessage(ctx context.Context, hostID string, id int64) error 
 			return err
 		}
 		if typ == proto.MsgAssign {
-			_, err = tx.Exec(ctx, `UPDATE placements SET accepted_at = coalesce(accepted_at, now())
-				WHERE run_id = $1 AND epoch = $2`, runID, epoch)
+			if _, err = tx.Exec(ctx, `UPDATE placements SET accepted_at = coalesce(accepted_at, now())
+				WHERE run_id = $1 AND epoch = $2`, runID, epoch); err != nil {
+				return err
+			}
+			// Accepted: the Run leaves waiting, if this is its current placement.
+			err = noteStage(ctx, tx, runID)
 		}
 		return err
 	})

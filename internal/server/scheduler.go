@@ -489,6 +489,9 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	if err := addEvent(ctx, tx, r.TenantID, r.ID, epoch, "state", map[string]any{"state": StateScheduled, "host": h.ID, "pool": h.Pool, "poolId": h.PoolID, "snapshotId": r.SnapshotID}); err != nil {
 		return err
 	}
+	if err := noteStage(ctx, tx, r.ID); err != nil {
+		return err
+	}
 	placed := map[string]any{"run": r.ID, "epoch": epoch, "host": h.ID, "resources": r.Spec.Resources}
 	if err := hostEvent(ctx, tx, h.ID, evPlacementAssign, placed); err != nil {
 		return err
@@ -624,7 +627,7 @@ func (s *Server) requestResume(ctx context.Context, tx pgx.Tx, tenantID, runID s
 	// what was pending (a migration's).
 	_, err := tx.Exec(ctx, `UPDATE runs SET state = 'resuming', state_reason = $3, pending_input = coalesce($2, pending_input), updated_at = now(),
 			state_changed_at = CASE WHEN state <> 'resuming' THEN now() ELSE state_changed_at END,
-			exit_code = NULL, finished_at = NULL, needs_host_since = now()
+			exit_code = NULL, finished_at = NULL, needs_host_since = now(), waiting_since = NULL
 		WHERE id = $1`, runID, in, why)
 	if err != nil {
 		return err
@@ -637,5 +640,8 @@ func (s *Server) requestResume(ctx context.Context, tx pgx.Tx, tenantID, runID s
 	if err := enqueueCost(ctx, tx, runID, "state:"+StateResuming); err != nil {
 		return err
 	}
-	return addEvent(ctx, tx, tenantID, runID, 0, "state", map[string]any{"state": StateResuming, "reason": why})
+	if err := addEvent(ctx, tx, tenantID, runID, 0, "state", map[string]any{"state": StateResuming, "reason": why}); err != nil {
+		return err
+	}
+	return noteStage(ctx, tx, runID)
 }

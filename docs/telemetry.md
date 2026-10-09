@@ -12,6 +12,7 @@ every Run, placement and host. The API returns all of it, and
 | `firstScheduledAt` | First assigned to a host. |
 | `firstStartedAt` | First reached `running`. |
 | `finishedAt` | Reached a terminal state. |
+| `stage`, `stageSince` | Where it is now and since when ([stages](concepts.md#stages)); `stageReason` while stopping. |
 | `usage` | Rolled up over placements: peak memory, disk and PIDs (maxima), CPU seconds and network bytes (sums), placement count, and `queueSeconds` (requested → first workload start). |
 
 ## Placements
@@ -24,12 +25,20 @@ Each stint on a host, in `placements[]`:
 | `acceptedAt` | The runner acknowledged it. |
 | `imageReadyAt` | The image was pulled or built. |
 | `volumesRestoredAt` | State volumes were restored (or found locally). |
+| `reposReadyAt` | Its repositories were cloned and a resume's sync fetched; the same instant as `volumesRestoredAt`, near enough, for a spec without repositories. |
 | `containerStartedAt` | The container started. |
 | `workloadStartedAt` | The init script finished and the workload was started. |
 | `stopRequestedAt` | A stop, terminate, drain or timeout was requested (`stopReason` says which). |
 | `exitedAt` | The container exited. |
 | `snapshotDoneAt` | Its state was saved on the host. |
 | `uploadedAt` | All its blobs reached S3. |
+
+`assignedAt`, `acceptedAt`, `stopRequestedAt` and the ends are luxd's
+clock; `imageReadyAt` through `workloadStartedAt` are the runner's marks,
+on its host's clock, and so is `exitedAt` when the runner reports it
+(luxd's time of the exit report otherwise). The runner sends each start
+mark as it reaches it, in a `starting` status carrying every mark so far;
+the Run's [stage](concepts.md#stages) follows from them.
 
 Resource figures are read from the container's cgroup (v2):
 

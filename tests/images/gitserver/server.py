@@ -9,6 +9,7 @@ import base64
 import http.server
 import os
 import subprocess
+import time
 
 TOKEN = os.environ["GIT_TOKEN"]
 ROOT = "/repos"
@@ -35,6 +36,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
         path, _, query = self.path.partition("?")
+        # A repository with a delay file answers its ref advertisement that
+        # many seconds late: a clone or fetch of it is slow.
+        repo = path.split(".git/", 1)[0]
+        if path.endswith("/info/refs") and os.path.exists(f"{ROOT}{repo}.git/delay"):
+            with open(f"{ROOT}{repo}.git/delay") as f:
+                time.sleep(float(f.read().strip() or 0))
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b""
         env = {

@@ -175,6 +175,14 @@ func newFirewall(extra []netip.Prefix, lookup func(context.Context, string) ([]n
 	return f
 }
 
+// Unloaded is a Firewall that keeps its Runs' rules in memory and loads
+// nothing into nftables, and resolves no names: for tests of the runner
+// that drive a placement through its network setup without root.
+func Unloaded() *Firewall {
+	return newFirewall(nil, func(context.Context, string) ([]netip.Addr, error) { return nil, nil },
+		func(string) error { return nil })
+}
+
 // Chain and set names derive from the bridge interface, which is already
 // a valid, unique nftables identifier.
 func chainName(iface string) string { return "run_" + iface }

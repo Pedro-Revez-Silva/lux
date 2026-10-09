@@ -314,6 +314,13 @@ func (a *app) getCmd() *cobra.Command {
 				fmt.Fprintf(w, " [%s]", run.Activity)
 			}
 			fmt.Fprintln(w)
+			if run.Stage != "" {
+				fmt.Fprintf(w, "stage:     %s", run.Stage)
+				if run.StageReason != "" {
+					fmt.Fprintf(w, " (%s)", run.StageReason)
+				}
+				fmt.Fprintf(w, " since %s\n", run.StageSince.Local().Format(time.RFC3339))
+			}
 			if run.ExitCode != nil {
 				fmt.Fprintf(w, "exit code: %d\n", *run.ExitCode)
 			}

@@ -32,7 +32,7 @@ lux run -f spec.yaml [--follow | --wait] [--name N] [-l k=v] [--pool P] [--idemp
 lux run --image alpine -- echo hello           # a quick generic Run
 lux run --image alpine --pool arm64 -- uname -m
 lux ls [--state running,stopped] [-l team=x] [--resumable] [--host H] [--limit N]   # with RUNTIME and COST columns; --resumable omits Runs whose only snapshot report was refused, and resumePolicy never
-lux get <run>                                  # state, placements, usage
+lux get <run>                                  # state, stage, placements, usage
 lux logs <run> [-f] [--since <cursor>] [--events] [--stderr=false] [--server NAME | --servers]
 lux events <run>                               # lifecycle events
 lux wait <run> [--state s1,s2] [--timeout 5m]  # default: until it ends; exits with its code

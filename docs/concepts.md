@@ -79,6 +79,38 @@ only hosts of its own pool and tenant (or its chosen host) that the luxd
 writing the reason is connected to, per missing resource or constraint,
 without host names or their usage; the reason is at most 512 bytes.
 
+### Stages
+
+A Run's **stage** (`stage`, `stageSince` and, while stopping,
+`stageReason` on `GET /v1/runs` and `GET /v1/runs/{id}`) says where it
+is on its way to running, and since when, finer than its state while it
+starts. luxd derives it from the Run and its current placement:
+
+| `stage` | While | `stageSince` | Clock |
+| --- | --- | --- | --- |
+| `waiting` | No live placement (`submitted`, `provisioning`, `resuming`), or one assigned whose runner has not accepted it. | When the Run last needed a host: since a resume or a move's end, else its previous placement's end, else its creation (where placement time starts counting). An assignment its host refused at delivery, placed again, keeps the wait's start. | luxd |
+| `image` | Accepted; pulling or building the image. | `acceptedAt` | luxd |
+| `volumes` | Restoring the state volumes. | `imageReadyAt` | runner |
+| `repositories` | Cloning repositories and fetching a resume's sync. A spec without repositories passes through it at once. | `volumesRestoredAt` | runner |
+| `container` | Creating and starting the container. | `reposReadyAt` | runner |
+| `running` | The container started (init, then the workload, run in it: `state` is `starting` until luxd sees the shim up). | `containerStartedAt`; luxd's `started_at` for a runner that reports no container start. | runner (luxd on fallback) |
+| `stopping` | A stop was asked of its live placement: the workload winds down, then the state volumes are snapshotted and reported. `stageReason` is the stop's: `stop`, `terminate`, `drain`, `preempt`, `migrate`, `timeout`, `disk`. | `stopRequestedAt` | luxd |
+| `stopped`, `lost`, `succeeded`, `failed`, `terminated` | Its state, resting. | When it entered that state: its placement's end, or a later change (a terminate, an expiry). | luxd |
+
+`running` starts at `containerStartedAt`, where `container` ends, so the
+start stages follow one another with no gap on one clock. A move (`drain`,
+`preempt`, `migrate`) is `stopping`, then `waiting` (since its placement
+ended) and the start stages on the next host: its placement's end and its
+resume are one change, so it is never `stopped`. The runner reports each
+start mark as it reaches it, and luxd keeps the first time reported for
+each.
+
+Each change of stage is a **`stage`** event on the Run (and the
+tenant's feed): `{stage, since, epoch, reason?}`, once per change and in
+order, so a client following events need not poll. One change of the Run
+announces only the stage it leaves the Run in, and a redelivered or late
+report that leaves the stage as it was emits nothing.
+
 ## Volumes and snapshots
 
 A spec declares **volumes**, which are named directories in the container:

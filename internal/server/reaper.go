@@ -442,6 +442,10 @@ func (s *Server) requestStop(ctx context.Context, tx pgx.Tx, tenantID, runID, re
 			return "", err
 		}
 	}
+	// A later stop's reason (a terminate) can replace the stopping one's.
+	if err := noteStage(ctx, tx, runID); err != nil {
+		return "", err
+	}
 	return hostID, nil
 }
 
