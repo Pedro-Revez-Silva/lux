@@ -130,16 +130,17 @@ type busEvent struct {
 // follow reads GET /event until ctx ends, reconnecting while the server is
 // not up yet or the stream drops, and hands each event to on. connected
 // runs each time the stream is (re)established, before its first event:
-// what happened while it was down is not replayed.
+// what happened while it was down is not replayed. disconnected runs each
+// time an established stream ends, unless ctx has ended.
 //
 // Every end of the stream, clean or not, is followed by a wait: capped
 // exponential backoff with jitter, back to its start after a stream that
 // stayed up for healthyStream.
-func (b *opencodeBus) follow(ctx context.Context, on func(busEvent), connected func()) {
+func (b *opencodeBus) follow(ctx context.Context, on func(busEvent), connected, disconnected func()) {
 	wait := followMin
 	for ctx.Err() == nil {
 		began := time.Now()
-		err := b.followOnce(ctx, on, connected)
+		err := b.followOnce(ctx, on, connected, disconnected)
 		if ctx.Err() != nil {
 			return
 		}
@@ -172,7 +173,7 @@ const (
 	healthyStream = 10 * time.Second
 )
 
-func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent), connected func()) error {
+func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent), connected, disconnected func()) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.url("/event"), nil)
 	if err != nil {
 		return err
@@ -194,6 +195,9 @@ func (b *opencodeBus) followOnce(ctx context.Context, on func(busEvent), connect
 		b.mu.Lock()
 		b.connected = false
 		b.mu.Unlock()
+		if disconnected != nil && ctx.Err() == nil {
+			disconnected()
+		}
 	}()
 	if connected != nil {
 		connected()
@@ -363,6 +367,18 @@ func (b *opencodeBus) sessionBusy(ctx context.Context, session string) (bool, er
 	}
 	s, ok := st[session]
 	return ok && s.Type != "idle", nil
+}
+
+// busyStatus reads a session.status type: busy and retry are a running
+// loop, idle is none; known is false for any other type.
+func busyStatus(typ string) (busy, known bool) {
+	switch typ {
+	case "busy", "retry":
+		return true, true
+	case "idle":
+		return false, true
+	}
+	return false, false
 }
 
 // get decodes a JSON GET and returns its x-next-cursor header.

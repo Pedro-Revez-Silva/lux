@@ -106,6 +106,26 @@ type ACP struct {
 	closed bool
 	// bg: the adapter's own goroutines, joined when Run returns.
 	bg sync.WaitGroup
+
+	// ocBusy (under mu): OpenCode's bus reports a loop running for the
+	// session (session.status busy or retry), whoever started it; cleared
+	// by idle and whenever the stream is down. The Run's activity is busy
+	// while ocBusy or lux's own turn is. actMu orders activity reports;
+	// shown and shownIdle (under actMu) are the last one reported; ocGen
+	// (under actMu) counts the bus status events handled and the stream's
+	// connects and disconnects. Under actMu too: ocUp, the stream is
+	// connected; statusSeq numbers the status reads dispatched, of which
+	// only the newest applies; statusCancel cancels the one in flight;
+	// statusReads counts those not yet applied or discarded.
+	ocBusy       bool
+	actMu        sync.Mutex
+	shown        bool
+	shownIdle    bool
+	ocGen        int
+	ocUp         bool
+	statusSeq    int
+	statusCancel context.CancelFunc
+	statusReads  int
 }
 
 func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
@@ -195,7 +215,10 @@ func (a *ACP) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Si
 		a.bg.Add(1)
 		go func() {
 			defer a.bg.Done()
-			a.bus.follow(ctx, a.onBus, func() { a.settle() })
+			a.bus.follow(ctx, a.onBus, func() {
+				a.streamUp()
+				a.settle()
+			}, a.streamDown)
 		}()
 	}
 	err := a.handshake(cfg)
@@ -298,7 +321,11 @@ func (a *ACP) setSession(id string) {
 	a.session = id
 	a.mu.Unlock()
 	a.sink.Session(id)
-	a.sink.Activity(true)
+	a.activity(true)
+	// A stream that connected before the session was known read no status.
+	if a.bus != nil {
+		a.requestStatus()
+	}
 }
 
 // drain sends the next queued input as a prompt, if the agent is idle.
@@ -323,13 +350,18 @@ func (a *ACP) drain() {
 		a.mu.Unlock()
 		a.inputs.fail(a.sink, in, errNoImages)
 		a.drain()
+		// The queue that kept the Run busy may now be empty with no turn
+		// started; no turn end will report that.
+		if a.bus != nil {
+			a.showCombined()
+		}
 		return
 	}
 	a.busy, a.inflight, a.turnEnd = true, 1, nil
 	session := a.session
 	a.mu.Unlock()
 
-	a.sink.Activity(false)
+	a.activity(false)
 	wait, err := a.rpc.start("session/prompt", map[string]any{"sessionId": session, "prompt": inputContent(dialectACP, in)})
 	if err != nil {
 		a.inputs.fail(a.sink, in, err)
@@ -350,18 +382,19 @@ func (a *ACP) drain() {
 }
 
 // spawn runs f on a goroutine Run joins before it returns; none once Run
-// is returning.
-func (a *ACP) spawn(f func()) {
+// is returning. It reports whether f was started.
+func (a *ACP) spawn(f func()) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed {
-		return
+		return false
 	}
 	a.bg.Add(1)
 	go func() {
 		defer a.bg.Done()
 		f()
 	}()
+	return true
 }
 
 // promptDone is a session/prompt of the running turn resolving; the last
@@ -448,7 +481,7 @@ func (a *ACP) endTurn(data map[string]any) {
 	idle := len(a.queue) == 0
 	a.mu.Unlock()
 	if idle {
-		a.sink.Activity(true)
+		a.activity(true)
 	}
 	a.drain()
 }
@@ -749,7 +782,7 @@ func (a *ACP) busTurnEnded() {
 		a.reportTurnEnd(map[string]any{"stopReason": "end_turn", "source": "opencode-bus"})
 	}
 	if idle {
-		a.sink.Activity(true)
+		a.activity(true)
 	}
 	a.drain()
 }
@@ -905,7 +938,8 @@ func (a *ACP) queueInput(in proto.Input) {
 
 // onBus follows OpenCode's bus: an assistant step answering a steer lux
 // sent has read it and the steers sent before it (bus.answered);
-// session.idle after the ACP turn has ended settles the Run's work.
+// session.idle after the ACP turn has ended settles the Run's work;
+// session.status is the Run's activity (setOpenCodeBusy).
 func (a *ACP) onBus(ev busEvent) {
 	a.mu.Lock()
 	session, bt := a.session, a.busTurn
@@ -919,11 +953,153 @@ func (a *ACP) onBus(ev busEvent) {
 		if p.Info.Role == "assistant" && p.Info.SessionID == session && p.Info.ParentID != "" {
 			a.read(p.Info.ParentID)
 		}
+	case "session.status":
+		if busy, known := busyStatus(p.Status.Type); known && session != "" && p.SessionID == session {
+			a.setOpenCodeBusy(busy)
+		}
 	case "session.idle":
+		if session != "" && p.SessionID == session {
+			a.setOpenCodeBusy(false)
+		}
 		if p.SessionID == session && bt {
 			a.settle()
 		}
 	}
+}
+
+// setOpenCodeBusy records whether OpenCode runs a loop for the session and
+// reports the Run's activity if that changes it.
+func (a *ACP) setOpenCodeBusy(busy bool) {
+	a.actMu.Lock()
+	defer a.actMu.Unlock()
+	a.ocGen++
+	a.applyOpenCodeBusyLocked(busy)
+}
+
+// applyOpenCodeBusyLocked sets ocBusy and reports the combined activity.
+// Lux's side is idle only with no turn of its own and nothing queued for
+// one, so a turn about to start does not flash idle. Under actMu.
+func (a *ACP) applyOpenCodeBusyLocked(busy bool) {
+	a.mu.Lock()
+	a.ocBusy = busy
+	idle := !a.busy && !busy && len(a.queue) == 0
+	a.mu.Unlock()
+	a.showLocked(idle)
+}
+
+// streamUp is the event stream (re)connecting: events from while it was
+// down are not replayed, so OpenCode's status is read, off the stream's
+// goroutine, which goes on to read events at once.
+func (a *ACP) streamUp() {
+	a.actMu.Lock()
+	defer a.actMu.Unlock()
+	a.ocGen++
+	a.ocUp = true
+	a.requestStatusLocked()
+}
+
+// streamDown is an established event stream ending: OpenCode's side counts
+// as idle, and a status read in flight is cancelled and never applied.
+func (a *ACP) streamDown() {
+	a.actMu.Lock()
+	defer a.actMu.Unlock()
+	a.ocGen++
+	a.ocUp = false
+	if a.statusCancel != nil {
+		a.statusCancel()
+		a.statusCancel = nil
+	}
+	a.applyOpenCodeBusyLocked(false)
+}
+
+// requestStatus reads OpenCode's status for the session on a joined
+// goroutine, while the event stream is up: on (re)connect (streamUp), once
+// the session is known, and when lux's turn ends while the bus last said
+// busy. An error reads as not busy. Only the newest read applies, and only
+// if no bus status event, connect or disconnect came after its dispatch
+// (ocGen); a newer read cancels the one in flight.
+func (a *ACP) requestStatus() {
+	a.actMu.Lock()
+	defer a.actMu.Unlock()
+	a.requestStatusLocked()
+}
+
+// requestStatusLocked is requestStatus under actMu.
+func (a *ACP) requestStatusLocked() {
+	a.mu.Lock()
+	session := a.session
+	a.mu.Unlock()
+	if session == "" || !a.ocUp {
+		return
+	}
+	if a.statusCancel != nil {
+		a.statusCancel()
+	}
+	ctx, cancel := context.WithCancel(a.runCtx())
+	a.statusSeq++
+	gen, seq := a.ocGen, a.statusSeq
+	a.statusCancel = cancel
+	a.statusReads++
+	ok := a.spawn(func() {
+		defer cancel()
+		busy, err := a.bus.sessionBusy(ctx, session)
+		a.actMu.Lock()
+		defer a.actMu.Unlock()
+		a.statusReads--
+		if a.statusSeq == seq {
+			a.statusCancel = nil
+		}
+		if ctx.Err() == nil && a.ocGen == gen && a.statusSeq == seq {
+			a.applyOpenCodeBusyLocked(err == nil && busy)
+		}
+	})
+	if !ok {
+		a.statusReads--
+		a.statusCancel = nil
+		cancel()
+	}
+}
+
+// activity reports what lux's own turns say of the Run's activity. With
+// OpenCode's server it publishes the combined activity as it is now, not
+// the caller's idle, which another turn may have made stale; an idle
+// request that finds OpenCode busy re-reads its status, in case its idle
+// event raced ahead of the ACP result.
+func (a *ACP) activity(idle bool) {
+	if a.bus == nil {
+		a.sink.Activity(idle)
+		return
+	}
+	a.actMu.Lock()
+	a.mu.Lock()
+	combinedIdle := !a.busy && !a.ocBusy && len(a.queue) == 0
+	reread := idle && a.ocBusy && !a.busy
+	a.mu.Unlock()
+	a.showLocked(combinedIdle)
+	a.actMu.Unlock()
+	if reread {
+		a.requestStatus()
+	}
+}
+
+// showCombined reports the combined activity as it is now (OpenCode's
+// server only).
+func (a *ACP) showCombined() {
+	a.actMu.Lock()
+	defer a.actMu.Unlock()
+	a.mu.Lock()
+	idle := !a.busy && !a.ocBusy && len(a.queue) == 0
+	a.mu.Unlock()
+	a.showLocked(idle)
+}
+
+// showLocked reports idle unless it is what was last reported. Under actMu.
+func (a *ACP) showLocked(idle bool) {
+	if a.shown && a.shownIdle == idle {
+		return
+	}
+	a.shown, a.shownIdle = true, idle
+	a.sink.Activity(idle)
 }
 
 func (a *ACP) handleNotification(m rpcMsg) {

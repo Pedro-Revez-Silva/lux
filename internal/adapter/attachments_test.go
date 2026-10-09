@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -259,6 +260,60 @@ func TestOpenCodeSteerACPWithoutImagesFails(t *testing.T) {
 	w.resolve(first, ocResult)
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
 		"failed img2: the agent does not take images", "turn_end", "idle")
+}
+
+// ocNoImagesQueued starts OpenCode with its HTTP server configured but its
+// event stream unavailable, delivers an image while initialize is
+// unanswered (so it is queued), then completes the handshake without image
+// support.
+func ocNoImagesQueued(t *testing.T, cfg proto.ShimConfig) (*agentWire, *inputSink) {
+	t.Helper()
+	b := newFakeBus(t)
+	b.setEventFail(true)
+	a := NewOpenCode()
+	a.bus = newOpencodeBus(b.port(), "/workspace")
+	w, sink := startWire(t, a, cfg)
+	id, _ := w.next("initialize")
+	a.Deliver(withImage("img", "look"))
+	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}`)
+	id, _ = w.next("session/new")
+	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{"sessionId":"` + ocSession + `"}}`)
+	return w, sink
+}
+
+// An image queued before the handshake, to an agent without image support,
+// is the only input: it fails, no prompt is sent, and the Run, shown busy
+// while it was queued, ends idle with nothing left to run.
+func TestOpenCodeQueuedImageRejectedEndsIdle(t *testing.T) {
+	w, sink := ocNoImagesQueued(t, proto.ShimConfig{})
+	sink.wait(t, "failed img")
+	w.exit()
+	if rest := w.rest(); len(rest) != 0 {
+		t.Fatalf("sent after session/new: %q", rest)
+	}
+	want := []string{"busy", "failed img: the agent does not take images", "idle"}
+	if got := sink.lines(); !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// The same image queued behind the initial prompt's turn: when that turn
+// ends, the image fails and the Run goes idle.
+func TestOpenCodeImageQueuedBehindTurnRejectedEndsIdle(t *testing.T) {
+	w, sink := ocNoImagesQueued(t, proto.ShimConfig{Prompt: "go"})
+	first, _ := w.next("session/prompt")
+	sink.wait(t, "accepted prompt")
+	w.resolve(first, ocResult)
+	sink.wait(t, "failed img")
+	w.exit()
+	if rest := w.rest(); len(rest) != 0 {
+		t.Fatalf("sent after the first prompt: %q", rest)
+	}
+	want := []string{"busy", "accepted prompt next_step receipt=false", "turn_end",
+		"failed img: the agent does not take images", "idle"}
+	if got := sink.lines(); !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
 }
 
 // bigImage is an input whose image data is n bytes (the adapter does not

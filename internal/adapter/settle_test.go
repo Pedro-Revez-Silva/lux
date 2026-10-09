@@ -202,7 +202,7 @@ func TestOpenCodeNoACPFallbackWhileHTTPSteerUnread(t *testing.T) {
 	w.resolve(second, ocResult)
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
 		"accepted http next_step receipt=true", "consumed http", "turn_end",
-		"busy", "accepted fallback next_step receipt=false", "turn_end", "idle")
+		"accepted fallback next_step receipt=false", "turn_end", "idle")
 	wantPosts(t, b, 2, "the HTTP steer and the refused one")
 }
 
@@ -249,7 +249,7 @@ func TestOpenCodeOwnACPFallbackNeverResendsReadSteer(t *testing.T) {
 	wantPosts(t, b, 2, "the original two")
 	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
 		"accepted http next_step receipt=true", "turn_end", "failed http: "+uncertainNoStep,
-		"busy", "accepted fallback next_step receipt=false", "turn_end", "idle")
+		"accepted fallback next_step receipt=false", "turn_end", "idle")
 }
 
 // After an interrupt, OpenCode refuses the steer sent again (400): it

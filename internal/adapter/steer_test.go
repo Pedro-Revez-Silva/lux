@@ -124,12 +124,33 @@ func (s *inputSink) waitLast(t *testing.T, want string) {
 // agentWire is the agent's end of an adapter's stdio: the test reads what
 // the adapter sends and writes what the agent answers.
 type agentWire struct {
-	t    *testing.T
-	in   *bufio.Scanner
-	out  io.WriteCloser
-	sent chan map[string]json.RawMessage
-	// done closes when the adapter's Run has returned.
-	done chan struct{}
+	t      *testing.T
+	in     *bufio.Scanner
+	inPipe io.Closer
+	out    io.WriteCloser
+	sent   chan map[string]json.RawMessage
+	// done closes when the adapter's Run has returned; scanned once every
+	// line the adapter wrote is in sent.
+	done, scanned chan struct{}
+}
+
+// rest is the method of each message the adapter sent that next did not
+// take, after Run has returned (exit).
+func (w *agentWire) rest() []string {
+	w.t.Helper()
+	w.inPipe.Close()
+	await(w.t, w.scanned, "the adapter's output read")
+	var out []string
+	for {
+		select {
+		case m := <-w.sent:
+			var method string
+			_ = json.Unmarshal(m["method"], &method)
+			out = append(out, method)
+		default:
+			return out
+		}
+	}
 }
 
 func startWire(t *testing.T, ad Adapter, cfg proto.ShimConfig) (*agentWire, *inputSink) {
@@ -143,10 +164,11 @@ func startWireSink(t *testing.T, ad Adapter, cfg proto.ShimConfig, sink Sink) *a
 	t.Helper()
 	toAgent, fromAdapter := io.Pipe()
 	fromAgent, toAdapter := io.Pipe()
-	w := &agentWire{t: t, in: bufio.NewScanner(toAgent), out: toAdapter, sent: make(chan map[string]json.RawMessage, 64), done: make(chan struct{})}
+	w := &agentWire{t: t, in: bufio.NewScanner(toAgent), inPipe: toAgent, out: toAdapter, sent: make(chan map[string]json.RawMessage, 64), done: make(chan struct{}), scanned: make(chan struct{})}
 	// Lines with images run to megabytes.
 	w.in.Buffer(make([]byte, 64<<10), 64<<20)
 	go func() {
+		defer close(w.scanned)
 		for w.in.Scan() {
 			var m map[string]json.RawMessage
 			_ = json.Unmarshal(w.in.Bytes(), &m)

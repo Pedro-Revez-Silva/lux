@@ -152,6 +152,25 @@ Per agent:
   from two (a new loop that answers a steer before its `prompt_async`
   returns looks like the turn's own step seen late), it reports one end,
   after the last loop: one turn may hold two loops, never an early end.
+  **Activity** combines two sources: the Run is busy while a turn lux
+  started runs or OpenCode's bus reports the Run's session `busy` or
+  `retry` (`session.status`), whoever started that loop (a client calling
+  `prompt_async` directly, for example); idle once both are idle
+  (`session.status` `idle` or `session.idle`). When lux's turn ends while
+  the bus last said busy, the Run stays busy and lux reads
+  `GET /session/status` once to confirm. Busy is never inferred from an
+  error: while the event stream is down OpenCode's side counts as idle, and
+  on reconnect, or once the Run's session is known, it is read from
+  `GET /session/status` (a failed read is idle; only the newest read
+  counts, and none after the stream drops). Reconnects back off as for
+  steering (100 ms doubling to 5 s). There is no polling: an idle event
+  lost while the stream stays up leaves the Run busy until the next status
+  event, reconnect or end of a lux turn.
+  Without OpenCode's server, activity follows lux's turns only, as `acp`.
+  **Interrupt** reaches only turns lux started: a Run shown busy by a loop
+  a client started over OpenCode's HTTP API alone is not cancelled.
+  `lux interrupt` succeeds and sends nothing; an interrupt carrying input
+  sends that input as a prompt, and the loop is not cancelled.
 - **Generic ACP** agents keep a queue: the ACP spec does not say what a
   second prompt during a turn does.
 
@@ -184,7 +203,11 @@ Header values come from secrets and are never in the command line. See
 
 - **Idle or busy.** The Run's `activity` field says whether an agent is
   working or waiting for input. `lux ls` shows `running (waiting for
-  input)` instead of leaving you to guess whether it is hung.
+  input)` instead of leaving you to guess whether it is hung. Most adapters
+  know only the turns lux started. `opencode` with OpenCode's server up also
+  follows OpenCode's own status for the Run's session, so a loop a client
+  started over OpenCode's HTTP API (`prompt_async`) shows the Run busy too
+  (the OpenCode notes under [Images](#images)).
 - **Acknowledged input.** Every `lux steer` gets a request id. What happens
   to it is reported in phases (see [Input: accepted and
   consumed](#input-accepted-and-consumed)): `input.delivered` when the agent

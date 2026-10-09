@@ -23,14 +23,22 @@ const ocSession = "ses_f0d8b1671ffexBr8v2rWwmuXTt"
 // first prompt's session/prompt; it returns that prompt's RPC id.
 func ocStarted(t *testing.T, a *ACP) (*agentWire, *inputSink, string) {
 	t.Helper()
-	w, sink := startWire(t, a, proto.ShimConfig{Prompt: "Run `sleep 20 && echo FIRST`"})
+	sink := &inputSink{}
+	w, first := ocStartedOn(t, a, sink, sink)
+	return w, sink, first
+}
+
+// ocStartedOn is ocStarted reporting to sink, whose log is log.
+func ocStartedOn(t *testing.T, a *ACP, sink Sink, log *inputSink) (*agentWire, string) {
+	t.Helper()
+	w := startWireSink(t, a, proto.ShimConfig{Prompt: "Run `sleep 20 && echo FIRST`"}, sink)
 	id, _ := w.next("initialize")
 	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"agentInfo":{"name":"OpenCode","version":"1.18.31"}}}`)
 	id, _ = w.next("session/new")
 	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{"sessionId":"` + ocSession + `"}}`)
 	first, _ := w.next("session/prompt")
-	sink.wait(t, "accepted prompt")
-	return w, sink, first
+	log.wait(t, "accepted prompt")
+	return w, first
 }
 
 // The result both prompts of a joined turn get (opencode-acp-prompt-1).
@@ -124,8 +132,14 @@ type fakeBus struct {
 	// drop ends the open event stream.
 	drop chan struct{}
 	gets int
-	// statusFail: GET /session/status answers 500.
+	// statusFail: GET /session/status answers 500; statusGets counts
+	// those GETs. statusQ, if set, gets each one as it arrives, with the
+	// answer it took then, and it waits for its release.
 	statusFail bool
+	statusGets int
+	statusQ    chan heldStatus
+	// eventFail: GET /event answers 503.
+	eventFail bool
 	// dropParts: posted keeps no text, so a test can measure the adapter's
 	// heap alone.
 	dropParts bool
@@ -137,7 +151,12 @@ func newFakeBus(t *testing.T) *fakeBus {
 	mux.HandleFunc("GET /event", func(w http.ResponseWriter, r *http.Request) {
 		b.mu.Lock()
 		b.gets++
+		fail := b.eventFail
 		b.mu.Unlock()
+		if fail {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"type\":\"server.connected\",\"properties\":{}}\n\n")
 		w.(http.Flusher).Flush()
@@ -190,8 +209,22 @@ func newFakeBus(t *testing.T) *fakeBus {
 	})
 	mux.HandleFunc("GET /session/status", func(w http.ResponseWriter, r *http.Request) {
 		b.mu.Lock()
-		loop, fail := b.loop, b.statusFail
+		b.statusGets++
+		q, loop, fail := b.statusQ, b.loop, b.statusFail
 		b.mu.Unlock()
+		if q != nil {
+			h := heldStatus{busy: loop, release: make(chan struct{}), gone: r.Context().Done()}
+			select {
+			case q <- h:
+			case <-r.Context().Done():
+				return
+			}
+			select {
+			case <-h.release:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		if fail {
 			http.Error(w, "down", http.StatusInternalServerError)
 			return
@@ -235,6 +268,75 @@ func (b *fakeBus) setStatus(code int) {
 func (b *fakeBus) setStatusFail(fail bool) {
 	b.mu.Lock()
 	b.statusFail = fail
+	b.mu.Unlock()
+}
+
+// heldStatus is a GET /session/status waiting to answer busy (the loop as
+// it was when the request arrived) until release closes; gone closes if
+// the client gives up on it first.
+type heldStatus struct {
+	busy    bool
+	release chan struct{}
+	gone    <-chan struct{}
+}
+
+// pending fails if the client has given up on h.
+func (h heldStatus) pending(t *testing.T, when string) {
+	t.Helper()
+	select {
+	case <-h.gone:
+		t.Fatalf("%s: the held status read was abandoned", when)
+	default:
+	}
+}
+
+// holdStatus makes each GET /session/status from now on wait for its
+// release (nextStatus); off answers them at once again.
+func (b *fakeBus) holdStatus(on bool) {
+	b.mu.Lock()
+	if on && b.statusQ == nil {
+		b.statusQ = make(chan heldStatus)
+	} else if !on {
+		b.statusQ = nil
+	}
+	b.mu.Unlock()
+}
+
+// nextStatus is the next held GET /session/status, once it has arrived.
+func (b *fakeBus) nextStatus(t *testing.T) heldStatus {
+	t.Helper()
+	b.mu.Lock()
+	q := b.statusQ
+	b.mu.Unlock()
+	select {
+	case h := <-q:
+		return h
+	case <-time.After(5 * time.Second):
+		t.Fatal("no GET /session/status")
+	}
+	return heldStatus{}
+}
+
+// waitHandled waits until the adapter has applied or discarded every status
+// read it dispatched.
+func waitHandled(t *testing.T, a *ACP) {
+	t.Helper()
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		a.actMu.Lock()
+		n := a.statusReads
+		a.actMu.Unlock()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(end) {
+			t.Fatalf("%d status reads still in flight", n)
+		}
+	}
+}
+
+func (b *fakeBus) setEventFail(fail bool) {
+	b.mu.Lock()
+	b.eventFail = fail
 	b.mu.Unlock()
 }
 
@@ -288,6 +390,14 @@ func onBus(t *testing.T, a *ACP, ev string) {
 
 const ocIdle = `{"type":"session.idle","properties":{"sessionID":"` + ocSession + `"}}`
 
+func ocStatus(typ string) string {
+	return ocSessionStatus(ocSession, typ)
+}
+
+func ocSessionStatus(session, typ string) string {
+	return `{"type":"session.status","properties":{"sessionID":"` + session + `","status":{"type":"` + typ + `"}}}`
+}
+
 func ocWithBus(t *testing.T) (*ACP, *fakeBus, *agentWire, *inputSink, string) {
 	t.Helper()
 	return ocWithBusClock(t, nil)
@@ -295,6 +405,14 @@ func ocWithBus(t *testing.T) (*ACP, *fakeBus, *agentWire, *inputSink, string) {
 
 // ocWithBusClock is ocWithBus with settle on clk (a wall clock if nil).
 func ocWithBusClock(t *testing.T, clk *testClock) (*ACP, *fakeBus, *agentWire, *inputSink, string) {
+	t.Helper()
+	sink := &inputSink{}
+	a, b, w, first := ocWithBusOn(t, clk, sink, sink)
+	return a, b, w, sink, first
+}
+
+// ocWithBusOn is ocWithBusClock reporting to sink, whose log is log.
+func ocWithBusOn(t *testing.T, clk *testClock, sink Sink, log *inputSink) (*ACP, *fakeBus, *agentWire, string) {
 	t.Helper()
 	b := newFakeBus(t)
 	a := NewOpenCode()
@@ -304,13 +422,11 @@ func ocWithBusClock(t *testing.T, clk *testClock) (*ACP, *fakeBus, *agentWire, *
 		a.clock, a.settleEvery = clk, time.Second
 	}
 	b.setLoop(true) // the first prompt's loop
-	w, sink, first := ocStarted(t, a)
-	for end := time.Now().Add(5 * time.Second); !a.bus.isConnected(); time.Sleep(5 * time.Millisecond) {
-		if time.Now().After(end) {
-			t.Fatal("bus never connected")
-		}
-	}
-	return a, b, w, sink, first
+	w, first := ocStartedOn(t, a, sink, log)
+	// Connected (streamUp has run) and its status read handled.
+	waitGen(t, a, 1)
+	waitHandled(t, a)
+	return a, b, w, first
 }
 
 // noConsumed fails if anything was reported read.
@@ -517,6 +633,387 @@ func TestOpenCodeLateSteerKeepsRunBusy(t *testing.T) {
 		"accepted late next_step receipt=true", "consumed late", "turn_end", "turn_end", "idle")
 }
 
+// A loop a client starts over OpenCode's HTTP API (prompt_async, not
+// through lux) shows the Run busy until OpenCode reports the session idle;
+// retry is busy, and OpenCode's idle pair (session.status idle, then
+// session.idle) is one idle.
+func TestOpenCodeHTTPTurnShowsBusy(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	b.setLoop(false)
+	w.resolve(first, ocResult)
+	sink.waitLast(t, "idle")
+	b.setLoop(true)
+	b.events <- ocStatus("busy")
+	sink.waitLast(t, "busy")
+	gen := busGen(a)
+	b.events <- ocStatus("retry")
+	b.events <- ocStatus("busy")
+	waitGen(t, a, gen+2) // retry and busy handled
+	b.setLoop(false)
+	gen = busGen(a)
+	b.events <- ocStatus("idle")
+	b.events <- ocIdle
+	waitGen(t, a, gen+2) // both of the idle pair handled
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle", "busy", "idle")
+	if a.bus.isConnected() {
+		t.Fatal("the event stream outlived Run")
+	}
+}
+
+// lux's ACP turn ends while a loop a client started over HTTP still runs:
+// the Run stays busy, with no idle in between, until OpenCode reports the
+// session idle; the status read at the turn's end confirms busy.
+func TestOpenCodeACPTurnEndsWhileHTTPLoopRuns(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	b.holdStatus(true)
+	onBus(t, a, ocStatus("busy"))
+	w.resolve(first, ocResult)
+	sink.wait(t, "turn_end")
+	h := b.nextStatus(t)
+	if !h.busy {
+		t.Fatal("the status read found no loop")
+	}
+	close(h.release)
+	waitHandled(t, a)
+	if l := sink.lines(); l[len(l)-1] != "turn_end" {
+		t.Fatalf("after the status read: %q", l)
+	}
+	b.holdStatus(false)
+	b.setLoop(false)
+	gen := busGen(a)
+	b.events <- ocStatus("idle")
+	b.events <- ocIdle
+	waitGen(t, a, gen+2)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
+}
+
+// The bus said busy and its idle was lost, or raced ahead of the ACP
+// result: when lux's turn ends, OpenCode's status is read again, so the
+// Run goes idle without waiting for another event.
+func TestOpenCodeACPTurnEndRereadsStatus(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	onBus(t, a, ocStatus("busy"))
+	b.setLoop(false)
+	w.resolve(first, ocResult)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
+}
+
+// OpenCode's server goes away during a loop a client started: the Run is
+// not left busy on a status nobody can confirm. The stream's end clears
+// it; a status read that fails on reconnect reads as not busy; and one
+// reconnect asks the server once for each.
+func TestOpenCodeServerDownIsNotBusy(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	b.setLoop(false)
+	w.resolve(first, ocResult)
+	sink.waitLast(t, "idle")
+	onBus(t, a, ocStatus("busy"))
+	sink.waitLast(t, "busy")
+	b.setLoop(true) // OpenCode would say busy, but cannot answer
+	b.setStatusFail(true)
+	b.holdStatus(true)
+	b.mu.Lock()
+	gets0, status0 := b.gets, b.statusGets
+	b.mu.Unlock()
+	b.drop <- struct{}{}
+	sink.waitLast(t, "idle")
+	h := b.nextStatus(t) // the reconnect's read
+	close(h.release)
+	waitHandled(t, a)
+	b.mu.Lock()
+	gets, status := b.gets-gets0, b.statusGets-status0
+	b.mu.Unlock()
+	if gets != 1 || status != 1 || !a.bus.isConnected() {
+		t.Fatalf("one reconnect: %d GET /event, %d GET /session/status, connected %v", gets, status, a.bus.isConnected())
+	}
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle", "busy", "idle")
+}
+
+// The Run ends while a client's loop shows it busy and a status read is in
+// flight: Run returns without waiting on OpenCode, the event stream and
+// the read end with it, and nothing is reported after.
+func TestOpenCodeStopEndsStatusFollowing(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	b.holdStatus(true)
+	onBus(t, a, ocStatus("busy"))
+	w.resolve(first, ocResult)
+	sink.wait(t, "turn_end")
+	b.nextStatus(t) // held, never released
+	_ = a.Stop()
+	w.exit()
+	if a.bus.isConnected() {
+		t.Fatal("the event stream outlived Run")
+	}
+	if got, want := sink.lines(), []string{"idle", "busy", "accepted prompt next_step receipt=false", "turn_end"}; !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// The status read on reconnect does not hold up the event stream: while it
+// waits for OpenCode, a step answering a steer is read (its receipt) and a
+// status event is applied; the read, answering after that event, is
+// superseded by it.
+func TestOpenCodeReconnectStatusReadDoesNotBlockEvents(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	a.Deliver(proto.Input{RequestID: "s", Text: "x"})
+	sink.wait(t, "accepted s")
+	msgID := b.postedID(t, 0)
+	b.holdStatus(true)
+	b.drop <- struct{}{}
+	h := b.nextStatus(t) // the reconnect's read, held
+	b.events <- b.answer(msgID)
+	sink.wait(t, "consumed s")
+	gen := busGen(a)
+	b.events <- ocStatus("idle")
+	waitGen(t, a, gen+1)
+	h.pending(t, "events handled") // handled while the read was still held
+	close(h.release)               // answers busy: the loop still runs
+	waitHandled(t, a)
+	b.holdStatus(false)
+	b.setLoop(false)
+	w.resolve(first, ocResult)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted s next_step receipt=true", "consumed s", "turn_end", "idle")
+}
+
+// A status read dispatched while the stream was up answers busy only after
+// the stream has dropped, and it cannot reconnect: OpenCode's side stays
+// idle while nothing can tell lux it went idle.
+func TestOpenCodeStatusReadAcrossDisconnectStaysIdle(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	b.holdStatus(true)
+	onBus(t, a, ocStatus("busy"))
+	w.resolve(first, ocResult)
+	h := b.nextStatus(t) // the turn end's read; the loop runs
+	b.setEventFail(true)
+	gen := busGen(a)
+	b.drop <- struct{}{}
+	waitGen(t, a, gen+1) // the disconnect
+	sink.waitLast(t, "idle")
+	close(h.release)
+	waitHandled(t, a)
+	if l := sink.lines(); l[len(l)-1] != "idle" || a.bus.isConnected() {
+		t.Fatalf("disconnected, after the held read answered busy: %q", l)
+	}
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle")
+}
+
+// Two status reads overlap with no bus event between them: the older, which
+// saw OpenCode busy, answers last, after the newer saw it idle. The newer
+// stands.
+func TestOpenCodeOlderStatusReadDoesNotOverwriteNewer(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	b.holdStatus(true)
+	onBus(t, a, ocStatus("busy"))
+	w.resolve(first, ocResult)
+	older := b.nextStatus(t) // the first turn's end; the loop runs
+	b.setLoop(false)
+	a.Deliver(proto.Input{RequestID: "next", Text: "y"})
+	second, _ := w.next("session/prompt")
+	sink.wait(t, "accepted next")
+	w.resolve(second, ocResult)
+	newer := b.nextStatus(t) // the second turn's end; no loop
+	if !older.busy || newer.busy {
+		t.Fatalf("snapshots: older busy %v, newer busy %v", older.busy, newer.busy)
+	}
+	close(newer.release)
+	sink.waitLast(t, "idle")
+	close(older.release)
+	waitHandled(t, a)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end",
+		"accepted next next_step receipt=false", "turn_end", "idle")
+}
+
+// Only the Run's own session counts: status of another client's session or
+// of a child session, and a status type lux does not know, change nothing;
+// the own session's session.idle alone clears busy.
+func TestOpenCodeOtherSessionsDoNotChangeActivity(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	b.setLoop(false)
+	w.resolve(first, ocResult)
+	sink.waitLast(t, "idle")
+	onBus(t, a, ocSessionStatus("ses_other", "busy"))
+	onBus(t, a, ocSessionStatus("ses_child", "retry"))
+	onBus(t, a, ocStatus("compacting"))
+	onBus(t, a, `{"type":"session.idle","properties":{"sessionID":"ses_other"}}`)
+	if l := sink.lines(); l[len(l)-1] != "idle" || len(l) != 5 {
+		t.Fatalf("after other sessions' status: %q", l)
+	}
+	onBus(t, a, ocStatus("busy"))
+	onBus(t, a, ocSessionStatus("ses_other", "idle"))
+	onBus(t, a, ocIdle)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle", "busy", "idle")
+}
+
+// The stream drops while OpenCode runs a client's loop and comes back with
+// that loop still running and no new busy event: the read on reconnect
+// shows the Run busy again.
+func TestOpenCodeReconnectRecoversBusy(t *testing.T) {
+	a, b, w, sink, first := ocWithBus(t)
+	b.setLoop(false)
+	w.resolve(first, ocResult)
+	sink.waitLast(t, "idle")
+	b.setLoop(true)
+	onBus(t, a, ocStatus("busy"))
+	b.holdStatus(true)
+	b.drop <- struct{}{}
+	sink.waitLast(t, "idle")
+	h := b.nextStatus(t)
+	close(h.release)
+	sink.waitLast(t, "busy")
+	waitHandled(t, a)
+	b.holdStatus(false)
+	b.setLoop(false)
+	gen := busGen(a)
+	b.events <- ocIdle
+	waitGen(t, a, gen+1)
+	checkLines(t, w, sink, "idle", "busy", "accepted prompt next_step receipt=false", "turn_end", "idle", "busy", "idle", "busy", "idle")
+}
+
+// busGen is the count of bus status events, connects and disconnects the
+// adapter has handled.
+func busGen(a *ACP) int {
+	a.actMu.Lock()
+	defer a.actMu.Unlock()
+	return a.ocGen
+}
+
+// waitGen waits until the adapter has handled bus status events,
+// connects and disconnects up to gen.
+func waitGen(t *testing.T, a *ACP, gen int) {
+	t.Helper()
+	for end := time.Now().Add(5 * time.Second); busGen(a) < gen; time.Sleep(time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatalf("bus generation %d, want %d", busGen(a), gen)
+		}
+	}
+}
+
+// nthEndSink holds the adapter's nth acp.turn_end report (from 1) until
+// release closes; entered closes when it is reached, finished once it has
+// been logged.
+type nthEndSink struct {
+	*inputSink
+	n                          int
+	ends                       int
+	entered, release, finished chan struct{}
+}
+
+func newNthEndSink(n int) *nthEndSink {
+	return &nthEndSink{
+		inputSink: &inputSink{},
+		n:         n,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+		finished:  make(chan struct{}),
+	}
+}
+
+func (s *nthEndSink) Event(typ string, v any) {
+	if typ == "acp.turn_end" {
+		s.mu.Lock()
+		s.ends++
+		held := s.ends == s.n
+		s.mu.Unlock()
+		if held {
+			close(s.entered)
+			<-s.release
+			defer close(s.finished)
+		}
+	}
+	s.inputSink.Event(typ, v)
+}
+
+func await(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// settled waits until no settle is running: busTurnEnded, which only
+// settle calls, has returned.
+func settled(a *ACP) {
+	a.settleMu.Lock()
+	a.settleMu.Unlock() //nolint:staticcheck // the lock itself is the barrier
+}
+
+// lateSteerHeldEnd drives a turn whose late steer runs a loop of its own,
+// up to busTurnEnded holding that loop's turn end (sink's 2nd), with
+// OpenCode's loop over and its bus status oc.
+func lateSteerHeldEnd(t *testing.T, oc string) (*ACP, *fakeBus, *agentWire, *nthEndSink) {
+	t.Helper()
+	sink := newNthEndSink(2)
+	a, b, w, first := ocWithBusOn(t, nil, sink, sink.inputSink)
+	a.Deliver(proto.Input{RequestID: "late", Text: "x"})
+	sink.wait(t, "accepted late")
+	msgID := b.postedID(t, 0)
+	w.resolve(first, ocResult)
+	waitBusTurn(t, a)
+	b.events <- b.answer(msgID)
+	sink.wait(t, "consumed late")
+	b.setLoop(false)
+	onBus(t, a, ocStatus(oc))
+	await(t, sink.entered, "the late loop's turn end")
+	return a, b, w, sink
+}
+
+// The late loop's end has cleared lux's turn when a new input starts the
+// next one, before that end's idle is published: the Run stays busy (no
+// idle while the new prompt runs), and no second busy is reported.
+func TestOpenCodeOldTurnEndDoesNotIdleNewTurn(t *testing.T) {
+	a, _, w, sink := lateSteerHeldEnd(t, "idle")
+	a.Deliver(proto.Input{RequestID: "next", Text: "y"})
+	second, _ := w.next("session/prompt")
+	sink.wait(t, "accepted next")
+	close(sink.release)
+	await(t, sink.finished, "the held turn end")
+	settled(a)
+	if l := sink.lines(); l[len(l)-1] != "turn_end" {
+		t.Fatalf("after the old turn's end, with the new prompt running: %q", l)
+	}
+	w.resolve(second, ocResult)
+	checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted late next_step receipt=true", "consumed late", "turn_end",
+		"accepted next next_step receipt=false", "turn_end", "turn_end", "idle")
+}
+
+// OpenCode's bus reports the session idle after the late loop's end has
+// cleared lux's turn and before that end publishes its idle: one idle.
+func TestOpenCodeBusIdleBeforeTurnIdleIsOne(t *testing.T) {
+	a, _, w, sink := lateSteerHeldEnd(t, "busy")
+	onBus(t, a, ocStatus("idle"))
+	sink.waitLast(t, "idle")
+	close(sink.release)
+	await(t, sink.finished, "the held turn end")
+	settled(a)
+	checkLines(t, w, sink.inputSink, "idle", "busy", "accepted prompt next_step receipt=false",
+		"accepted late next_step receipt=true", "consumed late", "turn_end", "idle", "turn_end")
+}
+
+// A resumed session OpenCode already runs a loop for, with the event
+// stream up before session/load answers and no busy event after: once the
+// session is known its status is read, and the Run shows busy.
+func TestOpenCodeResumeReadsStatusOnceSessionKnown(t *testing.T) {
+	b := newFakeBus(t)
+	b.setLoop(true)
+	a := NewOpenCode()
+	a.bus = newOpencodeBus(b.port(), "/workspace")
+	w, sink := startWire(t, a, proto.ShimConfig{Resume: true, SessionID: ocSession})
+	id, _ := w.next("initialize")
+	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}`)
+	id, _ = w.next("session/load")
+	waitGen(t, a, 1) // streamUp has run, with the session still unknown
+	w.send(`{"jsonrpc":"2.0","id":` + id + `,"result":{}}`)
+	sink.wait(t, "busy")
+	w.exit()
+	if got := sink.lines(); !slices.Equal(got, []string{"idle", "busy"}) {
+		t.Fatalf("got %q", got)
+	}
+}
+
 // waitBusTurn waits until the adapter has handled the ACP turn's result.
 func waitBusTurn(t *testing.T, a *ACP) {
 	t.Helper()
@@ -659,6 +1156,7 @@ func TestOpenCodeFallsBackToACP(t *testing.T) {
 	a.Deliver(proto.Input{RequestID: "s", Text: "x"})
 	second, _ := w.next("session/prompt")
 	sink.wait(t, "accepted s next_step receipt=false")
+	b.setLoop(false)
 	w.resolve(first, ocResult)
 	w.resolve(second, ocResult)
 	sink.waitLast(t, "idle")
@@ -687,7 +1185,7 @@ func TestOpenCodeBusRetriesUnansweredStream(t *testing.T) {
 	b := newOpencodeBus(srv.Listener.Addr().(*net.TCPAddr).Port, "/")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go b.follow(ctx, func(busEvent) {}, nil)
+	go b.follow(ctx, func(busEvent) {}, nil, nil)
 	if !b.waitConnected(context.Background(), 8*time.Second) {
 		t.Fatalf("never connected: %v", b.err())
 	}
@@ -728,7 +1226,7 @@ func TestOpenCodeBusBacksOffAfterCleanEOF(t *testing.T) {
 	b := newOpencodeBus(srv.Listener.Addr().(*net.TCPAddr).Port, "/")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); b.follow(ctx, func(busEvent) {}, nil) }()
+	go func() { defer close(done); b.follow(ctx, func(busEvent) {}, nil, nil) }()
 	time.Sleep(200 * time.Millisecond)
 	cancel()
 	<-done
