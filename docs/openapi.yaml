@@ -10,16 +10,24 @@ components:
         createdAt:
           format: date-time
           type: string
+        description:
+          description: What the Run said the file is, when it published it.
+          type: string
         epoch:
           format: int64
           type: integer
         id:
           type: string
         path:
+          description: "Where the file was: its path on a volume, or /.lux/artifacts/<name> for one the Run published."
           type: string
         sha256:
           type: string
         size:
+          format: int64
+          type: integer
+        version:
+          description: "1 for the first file at this path in the Run, then one more for each new one: none is replaced."
           format: int64
           type: integer
       type: object
@@ -3234,7 +3242,7 @@ components:
             - "null"
         beforeStop:
           $ref: "#/components/schemas/BeforeStop"
-          description: "A command run in the container on every stop, before the workload is signalled: a stop asked for, a terminate, a timeout, a drain. Its output is the Run's; what it writes into $LUX_ARTIFACTS is collected. It cannot run when the container dies or its host is lost."
+          description: "A command run in the container on every stop, before the workload is signalled: a stop asked for, a terminate, a timeout, a drain. Its output is the Run's; it can publish files as artifacts (/.lux/bin/lux-shim publish FILE). It cannot run when the container dies or its host is lost."
         command:
           items:
             type: string
@@ -5571,7 +5579,10 @@ paths:
       tags:
         - runs
     get:
-      description: Needs the `read` scope.
+      description: |-
+        Each path's latest version, or with versions=all every version. A Run publishes a file (lux-shim publish) as it runs; artifacts.paths are collected at each exit. Ordered by path, then version.
+
+        Needs the `read` scope.
       operationId: listArtifacts
       parameters:
         - description: The Run's id.
@@ -5580,6 +5591,17 @@ paths:
           required: true
           schema:
             description: The Run's id.
+            type: string
+        - description: "latest (the default): each path's latest version; all: every version."
+          explode: false
+          in: query
+          name: versions
+          schema:
+            description: "latest (the default): each path's latest version; all: every version."
+            enum:
+              - latest
+              - all
+              - ""
             type: string
       responses:
         "200":

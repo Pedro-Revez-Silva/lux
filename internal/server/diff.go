@@ -147,7 +147,7 @@ func (s *Server) askDiff(ctx context.Context, hostID, runID string, epoch int, b
 
 // keepAPatch is how to keep a Run's changes past its stop.
 const keepAPatch = "resume it, or save a patch at stop with workload.beforeStop " +
-	"(git add -N . && git diff --binary <base> > $LUX_ARTIFACTS/final.patch) and fetch it with lux artifacts"
+	"(git add -N . && git diff --binary <base> > /tmp/final.patch && /.lux/bin/lux-shim publish /tmp/final.patch) and fetch it with lux artifacts"
 
 // notRunning is the answer for a Run whose container is not running: one
 // not up yet, or one that has stopped (or is ending).

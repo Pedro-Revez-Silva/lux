@@ -162,7 +162,7 @@ func (a *app) snapshotsCmd() *cobra.Command {
 
 func (a *app) artifactsCmd() *cobra.Command {
 	var dir string
-	var del bool
+	var del, allVersions bool
 	cmd := &cobra.Command{
 		Use:   "artifacts <run>",
 		Short: "List (or download, or delete) the files a Run produced",
@@ -184,7 +184,11 @@ func (a *app) artifactsCmd() *cobra.Command {
 			var resp struct {
 				Artifacts []server.Artifact `json:"artifacts"`
 			}
-			if err := a.c.Do(ctxOf(cmd), "GET", "/v1/runs/"+args[0]+"/artifacts", nil, &resp); err != nil {
+			path := "/v1/runs/" + args[0] + "/artifacts"
+			if allVersions {
+				path += "?versions=all"
+			}
+			if err := a.c.Do(ctxOf(cmd), "GET", path, nil, &resp); err != nil {
 				return err
 			}
 			if dir != "" {
@@ -192,7 +196,11 @@ func (a *app) artifactsCmd() *cobra.Command {
 				// rejected one leaves nothing behind.
 				dsts := make([]string, len(resp.Artifacts))
 				for i, art := range resp.Artifacts {
-					dst, err := downloadPath(dir, art.Epoch, art.Path)
+					version := 0
+					if allVersions {
+						version = art.Version
+					}
+					dst, err := downloadPath(dir, art.Epoch, art.Path, version)
 					if err != nil {
 						return err
 					}
@@ -227,27 +235,40 @@ func (a *app) artifactsCmd() *cobra.Command {
 			if dir == "" {
 				var rows [][]string
 				for _, art := range resp.Artifacts {
-					rows = append(rows, []string{art.ID, fmt.Sprint(art.Epoch), art.Path, bytesHuman(art.Size), art.ContentType})
+					rows = append(rows, []string{art.ID, fmt.Sprint(art.Epoch), art.Path, fmt.Sprint(art.Version), bytesHuman(art.Size), art.ContentType,
+						oneLine(art.Description)})
 				}
-				a.table("ID\tEPOCH\tPATH\tSIZE\tTYPE", rows)
+				a.table("ID\tEPOCH\tPATH\tVERSION\tSIZE\tTYPE\tDESCRIPTION", rows)
 			}
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&dir, "download", "", "download every artifact into this directory")
+	cmd.Flags().StringVar(&dir, "download", "", "download each path's latest version (with --all-versions, every version) into this directory")
+	cmd.Flags().BoolVar(&allVersions, "all-versions", false, "every version of each path, not only the latest")
 	cmd.Flags().BoolVar(&del, "delete", false, "delete every artifact of a terminated Run (retention never does)")
 	cmd.MarkFlagsMutuallyExclusive("download", "delete")
+	cmd.MarkFlagsMutuallyExclusive("all-versions", "delete")
 	return cmd
 }
 
-// downloadPath is where an artifact goes under dir: <epoch>/<its path>.
-// The path is the Run's to choose, so it must stay inside dir.
-func downloadPath(dir string, epoch int, artPath string) (string, error) {
+// downloadPath is where an artifact goes under dir: <epoch>/<its path>,
+// with ".v<version>" after its name when version is not 0 (every
+// version is downloaded, and a path's may share an epoch). The path is
+// the Run's to choose, so it must stay inside dir.
+func downloadPath(dir string, epoch int, artPath string, version int) (string, error) {
 	rel := filepath.FromSlash(strings.TrimPrefix(artPath, "/"))
 	if !filepath.IsLocal(rel) {
 		return "", fmt.Errorf("%s: path outside the download directory", artPath)
 	}
+	if version != 0 {
+		rel += ".v" + fmt.Sprint(version)
+	}
 	return filepath.Join(dir, fmt.Sprint(epoch), rel), nil
+}
+
+// oneLine is s on one table line.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // download fetches an artifact (luxd streams it) into dst, atomically.

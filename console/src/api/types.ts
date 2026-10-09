@@ -468,6 +468,8 @@ export interface Artifact {
   id: string;
   epoch: number;
   path: string;
+  version: number;
+  description: string;
   contentType: string;
   size: number;
   sha256: string;

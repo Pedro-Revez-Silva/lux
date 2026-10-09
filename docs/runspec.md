@@ -22,7 +22,7 @@ workload:
   user: agent                   # default: the image's USER
   grace: 30s                    # graceful stop before SIGKILL
   beforeStop:                   # run in the container on every stop, first
-    command: [sh, -c, "git -C /workspace/repos/api diff > $LUX_ARTIFACTS/final.patch"]
+    command: [sh, -c, "git -C /workspace/repos/api diff > /tmp/final.patch && /.lux/bin/lux-shim publish /tmp/final.patch"]
     timeout: 10s                # default 10s or half of `grace`; at most `grace`
   resume: { command: [...] }    # generic only: what to run on resume
   mcpServers:                   # remote MCP servers the agent is given
@@ -471,8 +471,9 @@ workload is still whole, and only then signals the workload. It runs as
 the workload's user, with its environment and working directory; its
 output is the Run's (and the shim's own record brackets it with
 `lux.beforeStop` events: `start`, then `done` with the exit code and
-whether it timed out). Anything it writes
-into `$LUX_ARTIFACTS` is collected with the placement's artifacts.
+whether it timed out). It can [publish](#artifacts) files: the shim
+is still up while it runs, and what it publishes is reported before the
+placement's end.
 
 It is bounded: after `timeout` (default 10s, or half the grace if that is
 shorter, so the workload keeps the rest) its process group is killed
@@ -485,7 +486,7 @@ leaves the container up until the hook is done. A container that dies, or a host
 nothing, so the last state a caller has is whatever the Run wrote before.
 The hook runs once per placement, only after the workload has started.
 
-`lux diff` works only while a Run is running; to keep a repository's changes past a stop, save a patch: `command: [sh, -c, "cd /workspace/repos/app && git add -N . && git diff --binary <base> > $LUX_ARTIFACTS/final.patch"]`, then fetch it with `lux artifacts`.
+`lux diff` works only while a Run is running; to keep a repository's changes past a stop, save a patch and publish it: `command: [sh, -c, "cd /workspace/repos/app && git add -N . && git diff --binary <base> > /tmp/final.patch && /.lux/bin/lux-shim publish /tmp/final.patch"]`, then fetch it with `lux artifacts`.
 
 ## Servers
 
@@ -543,27 +544,61 @@ leaving the Run `stopped` and its state volume snapshotted.
 ## Artifacts
 
 Artifacts are files a Run produces, kept after it ends and downloadable
-with `lux artifacts <run> --download DIR`. They are collected **on every
-exit** (a stop, a failure, a terminate, not only success), per placement:
+with `lux artifacts <run> --download DIR`. There are two kinds:
 
-- files matching `artifacts.paths`: absolute globs on the Run's volumes,
-  where `*` matches within a directory and `**` any depth
-  (`/workspace/out/**`, `/workspace/**/*.xml`);
-- anything the workload writes into `$LUX_ARTIFACTS` while it runs,
-  listed as `/.lux/artifacts/<name>`. That directory is emptied once
-  collected, so each placement publishes its own.
+- **Published**: the workload runs, inside its container,
+
+  ```sh
+  /.lux/bin/lux-shim publish FILE [--name NAME] [--description TEXT] [--content-type TYPE]
+  ```
+
+  and FILE becomes an artifact while the Run keeps running, listed as
+  `/.lux/artifacts/<name>`. `--name` defaults to FILE's base name and may
+  have sub-directories (`design/notes.md`); it must be relative, with no
+  `.` or `..` segment, no control characters, and segments of at most 255
+  bytes. The command sends FILE's bytes to the shim, which keeps its own
+  copy before it answers: one JSON line, `{"id", "name", "size",
+  "sha256"}`; on failure it says why and exits non-zero. FILE may be
+  changed or deleted straight after. The content type is TYPE, else
+  guessed from the name and the first bytes. A `beforeStop` command can
+  publish too.
+- **Collected**: files matching `artifacts.paths`, absolute globs on the
+  Run's volumes where `*` matches within a directory and `**` any depth
+  (`/workspace/out/**`, `/workspace/**/*.xml`), are collected **on every
+  exit** (a stop, a failure, a terminate, not only success).
+
+Nothing else is collected: a file written anywhere without publishing it,
+and not under `artifacts.paths`, stays where it is.
 
 Each artifact is stored like a snapshot blob (uploaded through luxd to S3)
-with its size, sha256 and content type, and listed by placement epoch.
-Downloads stream through luxd as the file the Run wrote.
+with its size, sha256 and content type, and listed with the placement
+epoch that made it. When it is uploaded and can be downloaded, the Run's
+event stream gets `artifact.published` `{artifactId, path, name, version,
+description, size, sha256, contentType}`, once per artifact. Downloads
+stream through luxd as the file the Run wrote.
+
+**Versions.** Nothing is overwritten: each new file at a path (a name
+published again, or a collected file whose content changed) is the next
+version of that path, from 1. A collected file the same as its path's
+latest version is not recorded again. `lux artifacts` and `GET
+/v1/runs/{id}/artifacts` list each path's latest version;
+`--all-versions` (`?versions=all`) lists them all.
+
+**Delivery.** A published file is reported to luxd as soon as the runner
+has stored it, and uploaded in the background; everything published
+before the container exits is reported before the placement's end. A
+host lost before the runner reported a file loses that file.
 
 Artifacts are never deleted by time, not even with the Run's snapshots and
 output after retention. Once a Run has been terminated, its
 owner deletes them with `lux artifacts <run> --delete` (`DELETE
 /v1/runs/{id}/artifacts`); a download after that is 410 `gone`.
 
-Limits: 1000 artifacts per placement, 1 GiB per file. Symlinks are never
-collected: a workload's link could point anywhere on the host.
+Limits: 1000 collected and 1000 published artifacts per placement (past
+them, an `artifacts.failed` event), 1 GiB per file (a publish over it
+fails; it is never truncated). Symlinks are never collected: a
+workload's link could point anywhere on the host; publishing reads
+FILE as the workload user.
 
 ## Git
 

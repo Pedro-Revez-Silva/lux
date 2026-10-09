@@ -5,8 +5,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,13 +19,73 @@ import (
 
 func TestDownloadPathStaysInside(t *testing.T) {
 	for _, bad := range []string{"/../../etc/passwd", "../x", "/workspace/../../x", "/", ""} {
-		if p, err := downloadPath("/tmp/d", 1, bad); err == nil {
+		if p, err := downloadPath("/tmp/d", 1, bad, 0); err == nil {
 			t.Errorf("%q → %q: want refused", bad, p)
 		}
 	}
-	p, err := downloadPath("/tmp/d", 2, "/workspace/out/a.txt")
+	p, err := downloadPath("/tmp/d", 2, "/workspace/out/a.txt", 0)
 	if err != nil || p != filepath.FromSlash("/tmp/d/2/workspace/out/a.txt") {
 		t.Errorf("got %q, %v", p, err)
+	}
+	p, err = downloadPath("/tmp/d", 2, "/.lux/artifacts/notes.md", 3)
+	if err != nil || p != filepath.FromSlash("/tmp/d/2/.lux/artifacts/notes.md.v3") {
+		t.Errorf("got %q, %v", p, err)
+	}
+}
+
+// artifacts lists the latest versions, with their version and description;
+// --all-versions asks for every version; --download --all-versions writes
+// each version to its own file.
+func TestArtifactsVersions(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.URL.RequestURI())
+		if strings.HasPrefix(r.URL.Path, "/v1/artifacts/") {
+			_, _ = w.Write([]byte(strings.TrimPrefix(r.URL.Path, "/v1/artifacts/")))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		arts := []server.Artifact{{ID: "a2", Epoch: 1, Path: "/.lux/artifacts/n.md", Version: 2, Description: "the\nsecond", Size: 2}}
+		if r.URL.Query().Get("versions") == "all" {
+			arts = append([]server.Artifact{{ID: "a1", Epoch: 1, Path: "/.lux/artifacts/n.md", Version: 1, Description: "first", Size: 2}}, arts...)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"artifacts": arts})
+	}))
+	defer srv.Close()
+	run := func(args ...string) string {
+		t.Helper()
+		var out strings.Builder
+		a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: io.Discard}
+		root := a.root()
+		root.SetArgs(append([]string{"--url", srv.URL, "--api-key", "k", "artifacts", "run_1"}, args...))
+		if err := root.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	lines := strings.Split(strings.TrimSpace(run()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "VERSION") || !strings.Contains(lines[0], "DESCRIPTION") ||
+		!strings.HasSuffix(lines[1], "the second") || strings.Fields(lines[1])[3] != "2" {
+		t.Fatalf("table:\n%s", strings.Join(lines, "\n"))
+	}
+	if n := strings.Count(run("--all-versions"), "/.lux/artifacts/n.md"); n != 2 {
+		t.Fatalf("--all-versions listed %d", n)
+	}
+	dir := t.TempDir()
+	run("--all-versions", "--download", dir)
+	for f, want := range map[string]string{"1/.lux/artifacts/n.md.v1": "a1", "1/.lux/artifacts/n.md.v2": "a2"} {
+		if b, err := os.ReadFile(filepath.Join(dir, f)); err != nil || string(b) != want {
+			t.Errorf("%s: %q %v", f, b, err)
+		}
+	}
+	dir = t.TempDir()
+	run("--download", dir)
+	if b, err := os.ReadFile(filepath.Join(dir, "1/.lux/artifacts/n.md")); err != nil || string(b) != "a2" {
+		t.Errorf("latest download: %q %v", b, err)
+	}
+	want := []string{"/v1/runs/run_1/artifacts", "/v1/runs/run_1/artifacts?versions=all", "/v1/runs/run_1/artifacts?versions=all"}
+	if got := slices.DeleteFunc(slices.Clone(seen), func(s string) bool { return strings.HasPrefix(s, "/v1/artifacts/") }); !slices.Equal(got[:3], want) {
+		t.Fatalf("requests %v", seen)
 	}
 }
 

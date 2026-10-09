@@ -50,7 +50,8 @@ func snapshotA() proto.SnapshotDone {
 	}
 }
 
-// snapshotB is a well-formed report for rb with only its own new blobs.
+// snapshotB is a well-formed report for rb with only its own new blobs,
+// its artifact a new version of /out/b.txt.
 func snapshotB(snapID string, epoch int) proto.SnapshotDone {
 	return proto.SnapshotDone{
 		Manifest: proto.Manifest{SnapshotID: snapID, RunID: "rb", Epoch: epoch, Volumes: []proto.VolumeSnapshot{
@@ -58,7 +59,7 @@ func snapshotB(snapID string, epoch int) proto.SnapshotDone {
 		}},
 		Output: &proto.BlobInfo{BlobID: "bB-out-" + snapID, Size: 21, SHA256: "b-out"},
 		Artifacts: []proto.Artifact{{BlobInfo: proto.BlobInfo{BlobID: "bB-art-" + snapID, Size: 31, SHA256: "b-art"},
-			Path: "/out/b.txt", ContentType: "text/plain", FileSize: 32, FileSHA256: "b-file"}},
+			Path: "/out/b.txt", ContentType: "text/plain", FileSize: 32, FileSHA256: "b-file-" + snapID}},
 	}
 }
 

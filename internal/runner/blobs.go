@@ -1,16 +1,19 @@
 package runner
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -99,16 +102,30 @@ func (r *Runner) snapshotRecords() map[string]*snapshotRecord {
 		if !strings.HasSuffix(name, ".json") {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(r.cfg.DataDir, "snapshots", name))
-		if err != nil {
-			continue
-		}
-		var rec snapshotRecord
-		if json.Unmarshal(b, &rec) == nil {
-			out[strings.TrimSuffix(name, ".json")] = &rec
+		if rec, err := readRecordFile(filepath.Join(r.cfg.DataDir, "snapshots", name)); err == nil {
+			out[strings.TrimSuffix(name, ".json")] = rec
 		}
 	}
 	return out
+}
+
+// readRecord is the record named id, or an fs.ErrNotExist.
+func (r *Runner) readRecord(id string) (*snapshotRecord, error) {
+	r.recordMu.Lock()
+	defer r.recordMu.Unlock()
+	return readRecordFile(r.recordPath(id))
+}
+
+func readRecordFile(path string) (*snapshotRecord, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var rec snapshotRecord
+	if err := json.Unmarshal(b, &rec); err != nil {
+		return nil, err
+	}
+	return &rec, nil
 }
 
 // uploader uploads blobs in the background, oldest first, retrying until
@@ -142,7 +159,13 @@ func (u *uploader) loop(ctx context.Context) {
 }
 
 func (u *uploader) pass(ctx context.Context) {
-	for snapID, rec := range u.r.snapshotRecords() {
+	// A Run's state.json is read once per pass, and only for records with
+	// something to upload: a Run keeps up to maxPublished records besides
+	// its snapshots', long after their uploads finished.
+	staleEpochs := map[string]int{}
+	records := u.r.snapshotRecords()
+	for _, snapID := range uploadOrder(records) {
+		rec := records[snapID]
 		// Only once luxd has the report that lists them: before, it does
 		// not know the blobs (and answers 404). A record that will never be
 		// reported (its placement was fenced off, or a later placement of
@@ -154,7 +177,15 @@ func (u *uploader) pass(ctx context.Context) {
 			}
 			continue
 		}
-		if u.r.isStaleRun(rec.RunID, rec.Epoch) {
+		if !rec.Discard && allUploaded(rec) {
+			continue
+		}
+		stale, ok := staleEpochs[rec.RunID]
+		if !ok {
+			stale = u.r.staleEpoch(rec.RunID)
+			staleEpochs[rec.RunID] = stale
+		}
+		if rec.Epoch == stale {
 			continue
 		}
 		done := true
@@ -190,10 +221,39 @@ func (u *uploader) pass(ctx context.Context) {
 	}
 }
 
+// uploadOrder: snapshots' records before published artifacts' (a resume
+// elsewhere waits for a snapshot), each group oldest first.
+func uploadOrder(records map[string]*snapshotRecord) []string {
+	ids := slices.Collect(maps.Keys(records))
+	slices.SortFunc(ids, func(a, b string) int {
+		ra, rb := records[a], records[b]
+		return cmp.Or(cmp.Compare(btoi(ra.Published != nil), btoi(rb.Published != nil)),
+			cmp.Compare(ra.Created, rb.Created), strings.Compare(a, b))
+	})
+	return ids
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func allUploaded(rec *snapshotRecord) bool {
+	for _, up := range rec.Uploads {
+		if !up.Done {
+			return false
+		}
+	}
+	return true
+}
+
 // markReported records that luxd has a snapshot's report; and so an
-// earlier record of the same placement (same epoch: a restarted runner
-// finished it again), whose report went through before the runner could
-// mark it. Other placements' records are theirs alone.
+// earlier snapshot record of the same placement (same epoch: a restarted
+// runner finished it again), whose report went through before the runner
+// could mark it. Other placements' records, and published artifacts'
+// (reported on their own), are theirs alone.
 func (r *Runner) markReported(snapID string) {
 	var runID string
 	var epoch int
@@ -202,7 +262,7 @@ func (r *Runner) markReported(snapID string) {
 		runID, epoch = rec.RunID, rec.Epoch
 	})
 	for id, rec := range r.snapshotRecords() {
-		if id != snapID && !rec.Reported && rec.RunID == runID && rec.Epoch == epoch {
+		if id != snapID && !rec.Reported && rec.Published == nil && rec.RunID == runID && rec.Epoch == epoch {
 			r.updateRecord(id, func(rec *snapshotRecord) { rec.Reported = true })
 		}
 	}
@@ -217,15 +277,8 @@ func (r *Runner) snapshotAcked(snapID string, ack proto.Ack) {
 		return
 	}
 	r.log.Warn("luxd refused the snapshot report; deleting its files", "snapshot", snapID)
-	r.recordMu.Lock()
-	b, err := os.ReadFile(r.recordPath(snapID))
-	r.recordMu.Unlock()
-	if err != nil {
-		return
-	}
-	var rec snapshotRecord
-	if json.Unmarshal(b, &rec) == nil {
-		removeSnapshotFiles(r, snapID, &rec)
+	if rec, err := r.readRecord(snapID); err == nil {
+		removeSnapshotFiles(r, snapID, rec)
 	}
 }
 
@@ -244,14 +297,9 @@ func (r *Runner) unreportable(rec *snapshotRecord) bool {
 func (r *Runner) updateRecord(snapID string, fn func(*snapshotRecord)) {
 	r.recordMu.Lock()
 	defer r.recordMu.Unlock()
-	b, err := os.ReadFile(r.recordPath(snapID))
-	if err != nil {
-		return
-	}
-	var rec snapshotRecord
-	if json.Unmarshal(b, &rec) == nil {
-		fn(&rec)
-		_ = r.saveSnapshotRecord(snapID, &rec)
+	if rec, err := readRecordFile(r.recordPath(snapID)); err == nil {
+		fn(rec)
+		_ = r.saveSnapshotRecord(snapID, rec)
 	}
 }
 
@@ -271,9 +319,14 @@ func (u *uploader) upload(ctx context.Context, up pendingUpload) error {
 	return u.r.api.upload(ctx, up.BlobID, f, fi.Size())
 }
 
-func (r *Runner) isStaleRun(runID string, epoch int) bool {
+// staleEpoch is the epoch of runID's placement that was fenced off on this
+// host, or -1.
+func (r *Runner) staleEpoch(runID string) int {
 	st, err := readRunState(r.runDir(runID))
-	return err == nil && st.Stale && st.Epoch == epoch
+	if err != nil || !st.Stale {
+		return -1
+	}
+	return st.Epoch
 }
 
 // discard deletes the local copy of a Run's state: luxd says it resumed

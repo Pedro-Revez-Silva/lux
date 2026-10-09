@@ -91,6 +91,9 @@ type placement struct {
 	// memoryLimit: the container's memory limit, once this placement
 	// started it (0 when re-adopted).
 	memoryLimit int64
+	// published: the artifact ids of lux.artifact records seen, toward
+	// maxPublished. Only the one goroutine handling them uses it.
+	published map[string]bool
 }
 
 func newPlacement(r *Runner, a proto.Assign, prev *placement) *placement {
@@ -661,11 +664,10 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 		time.Sleep(time.Second)
 	}
 	// luxd has the snapshot (or refused it): its blobs can be uploaded (or
-	// deleted), and what the workload published can go.
+	// deleted).
 	if sd.Manifest.SnapshotID != "" {
 		p.r.snapshotAcked(sd.Manifest.SnapshotID, ack)
 	}
-	p.clearPublished(ctx)
 	p.r.uploads.kick()
 
 	st := proto.Status{State: "exited", ExitCode: &exit.Code, Reason: exit.Reason, Message: exit.Message,
@@ -980,7 +982,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 		Env:          sp.Env,
 		GraceSec:     sp.Workload.Grace.Seconds(),
 		Secrets:      sp.Secrets,
-		ArtifactsDir: "/.lux/run/artifacts",
+		ArtifactsDir: proto.ShimRunDir + "/" + stagingDir,
 		MCPServers:   sp.Workload.MCPServers,
 		Services:     sp.Workload.Services,
 	}
@@ -1174,7 +1176,9 @@ func (p *placement) kill(ctx context.Context) {
 // ---- events from the output file --------------------------------------------
 
 // tailEvents follows the placement's output file and forwards what the
-// adapter learned (session id, idle/busy, input acks) to luxd.
+// adapter learned (session id, idle/busy, input acks) to luxd, and the
+// artifacts the workload published. It returns once the container has
+// exited and every record is handled.
 func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 	path, err := p.outputPath(ctx, p.epoch)
 	if err != nil {
@@ -1185,9 +1189,23 @@ func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 		case <-exited:
 			return true
 		default:
-			return false
 		}
+		return false
 	}
+	// Published artifacts are handled in order, off the tailer (a large one
+	// takes a while to store); all of them before tailEvents returns, so
+	// before finish reports the placement's snapshot.
+	// Once maxPublished records are pending (luxd unreachable), the tailer
+	// blocks on this send, and with it idle/busy and input-ack events.
+	pub := make(chan proto.StagedArtifact, maxPublished)
+	pubDone := make(chan struct{})
+	go func() {
+		defer close(pubDone)
+		for a := range pub {
+			p.onPublished(ctx, a)
+		}
+	}()
+	defer func() { close(pub); <-pubDone }()
 	_ = tailRecords(ctx, path, 0, true, done, func(rec proto.Record) error {
 		if rec.Ch == "server" {
 			p.onServerRecord(ctx, rec)
@@ -1242,6 +1260,11 @@ func (p *placement) tailEvents(ctx context.Context, exited <-chan struct{}) {
 			if d.Phase == "start" {
 				p.mark("workloadStarted")
 				go p.report(ctx, proto.MsgStatus, p.runningStatus())
+			}
+		case proto.EvArtifact:
+			var a proto.StagedArtifact
+			if json.Unmarshal(ev.Data, &a) == nil {
+				pub <- a
 			}
 		}
 		if ae != nil {

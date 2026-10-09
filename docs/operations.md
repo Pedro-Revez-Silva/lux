@@ -78,6 +78,7 @@ since older releases lack both the file and the commands it names:
 | --- | --- |
 | `validate` | run `luxd [--config FILE] validate` against the host's configuration before migrating or switching to the release. |
 | `resume-policy` | let tenants submit a RunSpec with `resumePolicy` `restart`, `manual` or `never` ([resume policy](runspec.md#resume-policy)), once every luxd sharing the database runs such a release: an older luxd treats the Run as `auto`, and one that rewrites its spec drops the field for good. |
+| `artifact-publish` | tell workloads to publish with `/.lux/bin/lux-shim publish` ([artifacts](runspec.md#artifacts)) once every luxd and then every runner runs such a release (luxd first: an older luxd refuses a runner's `artifact.published` report, and the runner retries it until luxd is upgraded). Such a runner no longer collects what a workload writes into the old `$LUX_ARTIFACTS` directory, nor sets the variable: a workload that still writes there loses those files. |
 | `egress-wildcards` | let tenants submit a RunSpec with a wildcard host rule in `network.egress`, `*.<domain>` ([network egress](runspec.md#network-egress)), once every luxd and runner runs such a release: an older luxd refuses the spec, and an older runner allows no name under it. |
 
 A release with no `FEATURES` file, or no `validate` line, predates
@@ -301,6 +302,15 @@ reach S3 in the background:
    they expire (`expire_after_days`, default 90) plus retention, and those
    bytes count toward `max_storage_bytes`: clients should terminate Runs
    they will not resume.
+
+   **Upgrading** to migration 058 (artifact versions): it numbers every
+   existing artifact per Run and path, in one pass over `artifacts`. A
+   luxd older than it cannot record artifacts afterwards (its insert has
+   no version): with several luxds sharing the database, a snapshot
+   report that lands on an older one is refused with an error and the
+   runner retries it, so move them all to the new release promptly.
+   Artifacts reads and writes block for the length of the migration on a
+   large table; run `VACUUM artifacts` afterwards.
 
 Keys are `tenants/<tenant>/runs/<run>/<blob>`. Encrypt the bucket at rest
 (SSE-KMS on AWS).

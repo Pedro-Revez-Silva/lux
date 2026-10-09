@@ -371,8 +371,9 @@ func (e *staleError) Error() string {
 	return fmt.Sprintf("stale epoch %d for %s (current %d)", e.epoch, e.runID, e.current)
 }
 
-// applyReport applies one report. refused: a snapshot.done that was not
-// recorded (see applySnapshotDone).
+// applyReport applies one report. refused: a snapshot.done or
+// artifact.published that was not recorded (see applySnapshotDone,
+// applyArtifactPublished).
 func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) (refused bool, err error) {
 	switch f.Type {
 	case proto.MsgHeartbeat:
@@ -413,10 +414,10 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 		if placementHost != hostID || placementState == "lost" {
 			return &staleError{f.RunID, f.Epoch, current}
 		}
-		// Snapshots and uploads from an older placement on this host are
-		// still wanted: they are that placement's final state. Status and
-		// adapter events are not.
-		if f.Epoch != current && f.Type != proto.MsgSnapshotDone {
+		// Snapshots, published artifacts and uploads from an older
+		// placement on this host are still wanted: they are that
+		// placement's final state. Status and adapter events are not.
+		if f.Epoch != current && f.Type != proto.MsgSnapshotDone && f.Type != proto.MsgArtifactPublished {
 			return &staleError{f.RunID, f.Epoch, current}
 		}
 		switch f.Type {
@@ -440,6 +441,13 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 			}
 			kicked = true
 			refused, err = s.applySnapshotDone(ctx, tx, tenantID, hostID, f.RunID, f.Epoch, current, sd)
+			return err
+		case proto.MsgArtifactPublished:
+			var ap proto.ArtifactPublished
+			if err := json.Unmarshal(f.Data, &ap); err != nil {
+				return err
+			}
+			refused, err = applyArtifactPublished(ctx, tx, tenantID, hostID, f.RunID, f.Epoch, ap)
 			return err
 		case proto.MsgRunEvent:
 			var ev proto.RunEvent

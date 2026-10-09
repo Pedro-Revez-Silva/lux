@@ -264,6 +264,19 @@ leaves them out unless asked: `servers=true` for everything,
 `lux logs --server web`), so a client that knows nothing of servers
 never sees them mixed into the workload's output.
 
+## Artifacts
+
+**Artifacts** are the files a Run hands back. A workload publishes one
+while it runs by calling `/.lux/bin/lux-shim publish FILE --name NAME
+[--description TEXT]` in its container: the shim takes a copy of the
+bytes, the runner reports it to luxd and uploads it, and the Run's event
+stream gets `artifact.published` once it can be downloaded. The Run keeps
+running throughout. Files matching the spec's `artifacts.paths` are
+collected at every exit instead. Nothing a workload merely writes to disk
+becomes an artifact. Publishing a name again makes a new version; nothing
+is overwritten. A host lost before its runner reported a published file
+loses it. See [the RunSpec](runspec.md#artifacts).
+
 ## Servers
 
 A **server** is a named URL that reaches a port in a Run, optionally with a

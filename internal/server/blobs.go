@@ -33,13 +33,13 @@ func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
 	}
 	id := r.PathValue("id")
 	hostName := r.URL.Query().Get("host")
-	var tenantID, runID, want, location, hostID string
+	var tenantID, runID, want, location, hostID, kind string
 	var epoch int
 	err = s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
-		return tx.QueryRow(r.Context(), `SELECT b.tenant_id, b.run_id, b.epoch, b.sha256, b.location, coalesce(b.host_id, '')
+		return tx.QueryRow(r.Context(), `SELECT b.tenant_id, b.run_id, b.epoch, b.sha256, b.location, coalesce(b.host_id, ''), b.kind
 			FROM blobs b JOIN hosts h ON h.id = b.host_id
 			WHERE b.id = $1 AND h.token_id = $2 AND h.name = $3`, id, tok.ID, hostName).
-			Scan(&tenantID, &runID, &epoch, &want, &location, &hostID)
+			Scan(&tenantID, &runID, &epoch, &want, &location, &hostID, &kind)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errf(http.StatusNotFound, "not_found", "no blob %s from this host", id)
@@ -78,7 +78,15 @@ func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
 				return err
 			}
 		}
-		return markUploaded(r.Context(), tx, runID, epoch)
+		if err := markUploaded(r.Context(), tx, runID, epoch); err != nil {
+			return err
+		}
+		// Only the upload that moved the blob to s3 adds the event, and
+		// last: event streams come after every row lock.
+		if tag.RowsAffected() == 0 || kind != "artifact" {
+			return nil
+		}
+		return artifactUploaded(r.Context(), tx, id)
 	})
 	if err != nil {
 		return err
@@ -94,8 +102,9 @@ func (s *Server) serveBlobUpload(w http.ResponseWriter, r *http.Request) error {
 
 // markUploaded records what a placement has in S3 after one of its blobs
 // arrived: its snapshot once every volume is a volume blob of the same Run
-// and placement (epoch) in S3, the placement once none of its blobs is left
-// on the host.
+// and placement (epoch) in S3, the placement once it has reported its
+// snapshot and none of its blobs is left on the host (a published
+// artifact's upload while it runs is not the placement's).
 func markUploaded(ctx context.Context, tx pgx.Tx, runID string, epoch int) error {
 	if _, err := tx.Exec(ctx, `UPDATE snapshots s SET uploaded = true
 		WHERE s.run_id = $1 AND s.epoch = $2 AND NOT s.uploaded AND NOT EXISTS (
@@ -106,7 +115,7 @@ func markUploaded(ctx context.Context, tx pgx.Tx, runID string, epoch int) error
 		return err
 	}
 	_, err := tx.Exec(ctx, `UPDATE placements p SET uploaded_at = now()
-		WHERE p.run_id = $1 AND p.epoch = $2 AND p.uploaded_at IS NULL AND NOT EXISTS (
+		WHERE p.run_id = $1 AND p.epoch = $2 AND p.uploaded_at IS NULL AND p.snapshot_done_at IS NOT NULL AND NOT EXISTS (
 			SELECT 1 FROM blobs b WHERE b.run_id = $1 AND b.epoch = $2 AND b.location = 'host')`, runID, epoch)
 	return err
 }
@@ -152,12 +161,19 @@ func (s *Server) serveRunnerBlobDownload(w http.ResponseWriter, r *http.Request)
 type Artifact struct {
 	ID          string    `json:"id"`
 	Epoch       int       `json:"epoch"`
-	Path        string    `json:"path"`
+	Path        string    `json:"path" doc:"Where the file was: its path on a volume, or /.lux/artifacts/<name> for one the Run published."`
+	Version     int       `json:"version" doc:"1 for the first file at this path in the Run, then one more for each new one: none is replaced."`
+	Description string    `json:"description" doc:"What the Run said the file is, when it published it."`
 	ContentType string    `json:"contentType"`
 	Size        int64     `json:"size"`
 	SHA256      string    `json:"sha256"`
 	Available   bool      `json:"available"`
 	CreatedAt   time.Time `json:"createdAt"`
+}
+
+type listArtifactsInput struct {
+	RunPath
+	Versions string `query:"versions" enum:"latest,all," doc:"latest (the default): each path's latest version; all: every version."`
 }
 
 type listArtifactsOutput struct {
@@ -166,22 +182,24 @@ type listArtifactsOutput struct {
 	} `nameHint:"ArtifactList"`
 }
 
-func (s *Server) listArtifacts(ctx context.Context, in *RunPath) (*listArtifactsOutput, error) {
+func (s *Server) listArtifacts(ctx context.Context, in *listArtifactsInput) (*listArtifactsOutput, error) {
 	p := principal(ctx)
 	out := []Artifact{}
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		if err := requireRun(ctx, tx, in.ID); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT a.id, a.epoch, a.path, a.content_type, a.size, a.sha256, b.location = 's3', a.created_at
-			FROM artifacts a JOIN blobs b ON b.id = a.blob_id WHERE a.run_id = $1 ORDER BY a.epoch, a.path`, in.ID)
+		rows, err := tx.Query(ctx, `SELECT a.id, a.epoch, a.path, a.version, a.description, a.content_type, a.size, a.sha256, b.location = 's3', a.created_at
+			FROM artifacts a JOIN blobs b ON b.id = a.blob_id
+			WHERE a.run_id = $1 AND ($2 OR a.version = (SELECT max(l.version) FROM artifacts l WHERE l.run_id = a.run_id AND md5(l.path) = md5(a.path) AND l.path = a.path))
+			ORDER BY a.path, a.version`, in.ID, in.Versions == "all")
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var a Artifact
-			if err := rows.Scan(&a.ID, &a.Epoch, &a.Path, &a.ContentType, &a.Size, &a.SHA256, &a.Available, &a.CreatedAt); err != nil {
+			if err := rows.Scan(&a.ID, &a.Epoch, &a.Path, &a.Version, &a.Description, &a.ContentType, &a.Size, &a.SHA256, &a.Available, &a.CreatedAt); err != nil {
 				return err
 			}
 			out = append(out, a)

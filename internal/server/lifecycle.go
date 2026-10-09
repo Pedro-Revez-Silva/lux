@@ -665,12 +665,24 @@ func insertSnapshot(ctx context.Context, tx pgx.Tx, tenantID, hostID, runID, pla
 		}
 	}
 	for _, a := range sd.Artifacts {
+		// The latest version again: nothing is recorded, not even its blob,
+		// whose upload luxd then answers 404 (the runner counts it done). A
+		// blob id already recorded goes on to insertBlob's check.
+		var blobKnown bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM blobs WHERE id = $1)`, a.BlobID).Scan(&blobKnown); err != nil {
+			return err
+		}
+		latestSHA, latest, err := latestArtifact(ctx, tx, runID, a.Path)
+		if err != nil {
+			return err
+		}
+		if !blobKnown && latest > 0 && latestSHA == a.FileSHA256 {
+			continue
+		}
 		if err := insertBlob(ctx, tx, tenantID, runID, epoch, hostID, a.BlobID, "artifact", a.Path, a.Size, a.SHA256, sd.Manifest.SnapshotID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO artifacts (id, tenant_id, run_id, epoch, path, blob_id, content_type, size, sha256, snapshot_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT DO NOTHING`,
-			ids.New(ids.Artifact), tenantID, runID, epoch, a.Path, a.BlobID, a.ContentType, a.FileSize, a.FileSHA256, sd.Manifest.SnapshotID); err != nil {
+		if err := insertArtifact(ctx, tx, tenantID, runID, epoch, ids.New(ids.Artifact), sd.Manifest.SnapshotID, "", a); err != nil {
 			return err
 		}
 	}
@@ -750,14 +762,26 @@ func recordedBlobsMatch(ctx context.Context, tx pgx.Tx, runID string, epoch int,
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if count != len(sd.Artifacts) {
-		return &foreignBlobError{snapID}
-	}
 	for _, a := range sd.Artifacts {
-		if stored[a] == 0 {
+		if stored[a] > 0 {
+			stored[a]--
+			count--
+			continue
+		}
+		// Not recorded, as the same content as its path's latest version
+		// was not: its blob must be unknown and that content recorded.
+		var known bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM blobs WHERE id = $1)
+			OR NOT EXISTS (SELECT 1 FROM artifacts WHERE run_id = $2 AND md5(path) = md5($3) AND path = $3 AND sha256 = $4)`,
+			a.BlobID, runID, a.Path, a.FileSHA256).Scan(&known); err != nil {
+			return err
+		}
+		if known {
 			return &foreignBlobError{a.BlobID}
 		}
-		stored[a]--
+	}
+	if count != 0 {
+		return &foreignBlobError{snapID}
 	}
 	return nil
 }

@@ -79,6 +79,8 @@ export function RunSnapshots({ run, live }: { run: Run; live: boolean }) {
   const artCols = useMemo<Column<Artifact>[]>(
     () => [
       { key: "path", header: "Path", cell: (a) => <span className="mono">{a.path}</span>, sortValue: (a) => a.path, lead: true },
+      { key: "description", header: "Description", cell: (a) => <span className="muted">{a.description}</span>, optional: true },
+      { key: "version", header: "Version", cell: (a) => a.version, sortValue: (a) => a.version, align: "right", mono: true, width: 80, optional: true },
       { key: "epoch", header: "Epoch", cell: (a) => a.epoch, sortValue: (a) => a.epoch, align: "right", mono: true, width: 72, optional: true },
       { key: "type", header: "Type", cell: (a) => <span className="muted">{a.contentType}</span>, width: 170, optional: true },
       { key: "size", header: "Size", cell: (a) => formatBytes(a.size), sortValue: (a) => a.size, align: "right", mono: true, width: 96 },
@@ -107,7 +109,7 @@ export function RunSnapshots({ run, live }: { run: Run; live: boolean }) {
       <Card flush title="Snapshots" subtitle="state volumes captured at each exit">
         {snaps.error && !snaps.data ? <ErrorBlock compact error={snaps.error} onRetry={snaps.refetch} /> : <Table columns={snapCols} rows={snaps.data ?? []} rowKey={(s) => s.id} loading={snaps.loading} empty="No snapshots." dense />}
       </Card>
-      <Card flush title="Artifacts" subtitle="files collected from the spec's artifact paths">
+      <Card flush title="Artifacts" subtitle="files the run published, and those collected from the spec's artifact paths: each path's latest version">
         {arts.error && !arts.data ? <ErrorBlock compact error={arts.error} onRetry={arts.refetch} /> : <Table columns={artCols} rows={arts.data ?? []} rowKey={(a) => a.id} loading={arts.loading} defaultSort={{ key: "path", dir: "asc" }} empty="No artifacts." dense />}
       </Card>
     </div>

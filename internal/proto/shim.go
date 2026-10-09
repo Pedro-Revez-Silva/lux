@@ -70,7 +70,8 @@ type ShimConfig struct {
 	MadeParents []string `json:"madeParents,omitempty"`
 	// Secrets by name: how each is exposed (values arrive with "start").
 	Secrets []spec.Secret `json:"secrets,omitempty"`
-	// ArtifactsDir is watched for on-demand artifacts ($LUX_ARTIFACTS).
+	// ArtifactsDir is where the shim stages what `lux-shim publish` sends
+	// (root's, closed to the workload) until the runner has taken it.
 	ArtifactsDir string `json:"artifactsDir,omitempty"`
 	// MCPServers as the spec has them: header values are secret names.
 	MCPServers []spec.MCPServer `json:"mcpServers,omitempty"`
@@ -192,7 +193,10 @@ const (
 	EvStop         = "lux.stop"       // {"reason"}
 	EvBeforeStop   = "lux.beforeStop" // {"phase": "start"|"done", "exitCode", "timedOut"}
 	EvWarning      = "lux.warning"    // {"message"}
-	EvArtifact     = "lux.artifact"   // {"path"}
+	// EvArtifact: a published file is staged, whole, as file (on the
+	// runtime volume): {"id", "name", "description", "contentType",
+	// "size", "sha256", "file"}.
+	EvArtifact = "lux.artifact"
 	// EvServer is a server process's start or exit, a ch=server record
 	// naming the server: {"phase": "start"|"exit", "gen", "pid"?,
 	// "exitCode"?, "error"?}.

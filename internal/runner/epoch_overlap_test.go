@@ -321,7 +321,7 @@ func TestAckedSnapshotUploadsAcrossTheHandover(t *testing.T) {
 			} else {
 				f.waitLease(t, 2, "starting")
 			}
-			if f.r.isStaleRun("run1", 1) {
+			if f.r.staleEpoch("run1") == 1 {
 				t.Error("epoch 1's acked snapshot is skipped by the uploader")
 			}
 			f.wantUploaded(t)

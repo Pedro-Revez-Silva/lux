@@ -196,9 +196,8 @@ const RuntimeInputsDir = "/.lux/run/inputs"
 // It is .lux-inputs at the root of a state volume, so a snapshot carries
 // it through stop, resume and migration: the one holding the adapter's
 // session, else the one holding home, else the first; a volume whose root
-// is inside a git checkout is skipped for the next. $LUX_ARTIFACTS is on
-// the runtime volume, never a state volume. With no state volume left it
-// is RuntimeInputsDir.
+// is inside a git checkout is skipped for the next. With no state volume
+// left it is RuntimeInputsDir.
 func (s *RunSpec) InputsDir(home string) (dir, root string) {
 	var cands []string
 	for _, p := range Adapters[s.Workload.Adapter].StatePaths {

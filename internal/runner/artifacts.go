@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"mime"
-	"net/http"
 	"os"
 	"path"
 	"slices"
@@ -22,25 +20,26 @@ import (
 	"github.com/marcioapm/lux/internal/proto"
 )
 
-// Artifacts are files a Run produces, collected on every exit:
+// Artifacts are files a Run produces:
 //
 //   - files matching the spec's artifacts.paths (globs, ** for any depth),
-//     on the Run's volumes;
-//   - whatever the workload put in $LUX_ARTIFACTS (the runtime volume's
-//     artifacts directory), published under /.lux/artifacts/<name>.
+//     on the Run's volumes, collected on every exit;
+//   - files the workload publishes with `lux-shim publish`, as it runs
+//     (publish.go), listed under /.lux/artifacts/<name>.
 //
 // The workload controls every one of those files and directories, so the
 // runner (root, on the host) reads them only through an os.Root per volume:
-// nothing it opens, renames or removes can resolve outside the volume,
-// whatever symlinks the workload made. Symlinks are never collected.
+// nothing it opens can resolve outside the volume, whatever symlinks the
+// workload made. Symlinks are never collected.
 //
 // Each artifact becomes a blob, uploaded like the snapshot. Its FileSize
 // and FileSHA256 are the file's (what a download returns), not the blob's.
 
-// Limits: an artifact set is for results, not a second snapshot.
+// Limits: an artifact set is for results, not a second snapshot. The
+// count is per placement's exit collection; publishes have their own.
 const (
 	maxArtifacts     = 1000
-	maxArtifactBytes = 1 << 30 // per file
+	maxArtifactBytes = proto.MaxArtifactBytes
 )
 
 var errTooMany = fmt.Errorf("more than %d artifacts: the rest were skipped", maxArtifacts)
@@ -60,7 +59,7 @@ func (c *collector) add(root *os.Root, rel, name string) {
 		}
 		return
 	}
-	a, err := c.p.artifactBlob(root, rel, name)
+	a, err := c.p.artifactBlob(ids.New(ids.Blob), root, rel, name, "")
 	if err != nil {
 		c.errs = append(c.errs, fmt.Errorf("%s: %w", name, err))
 		return
@@ -96,10 +95,6 @@ func (p *placement) collectArtifacts(ctx context.Context) ([]proto.Artifact, err
 			c.walkVolume(mp, v.Path, inner, patterns)
 		}
 	}
-	// Published on demand, in $LUX_ARTIFACTS.
-	if rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID)); err == nil {
-		c.collectPublished(rt)
-	}
 	return c.out, errors.Join(c.errs...)
 }
 
@@ -134,60 +129,9 @@ func (c *collector) walkVolume(mountpoint, mountPath string, inner []string, pat
 	})
 }
 
-// publishedAside is where collected $LUX_ARTIFACTS wait, in the runtime
-// volume, until luxd has the report that lists them.
-const publishedAside = "artifacts.collected"
-
-// collectPublished takes what the workload put in $LUX_ARTIFACTS. The
-// runner first moves that directory aside (within the runtime volume,
-// through the Root), then collects from there. If the runner restarts
-// before luxd has the report, the moved-aside directory is collected
-// again; it is removed only once the report went through (clearPublished).
-func (c *collector) collectPublished(rt string) {
-	root, err := os.OpenRoot(rt)
-	if err != nil {
-		c.errs = append(c.errs, err)
-		return
-	}
-	defer root.Close()
-	if _, err := root.Lstat(publishedAside); errors.Is(err, fs.ErrNotExist) {
-		if fi, err := root.Lstat("artifacts"); err == nil && fi.IsDir() {
-			if err := root.Rename("artifacts", publishedAside); err != nil {
-				c.errs = append(c.errs, err)
-				return
-			}
-		}
-	}
-	aside, err := root.OpenRoot(publishedAside)
-	if err != nil {
-		return // nothing published
-	}
-	defer aside.Close()
-	_ = fs.WalkDir(aside.FS(), ".", func(rel string, d fs.DirEntry, err error) error {
-		if c.full {
-			return fs.SkipAll
-		}
-		if err == nil && d.Type().IsRegular() {
-			c.add(aside, rel, path.Join("/.lux/artifacts", rel))
-		}
-		return nil
-	})
-}
-
-// clearPublished removes collected $LUX_ARTIFACTS, once reported.
-func (p *placement) clearPublished(ctx context.Context) {
-	rt, err := p.r.mountpoint(ctx, runtimeVolume(p.runID))
-	if err != nil {
-		return
-	}
-	if root, err := os.OpenRoot(rt); err == nil {
-		_ = root.RemoveAll(publishedAside)
-		root.Close()
-	}
-}
-
-// artifactBlob stores one file as a blob (zstd, like every blob).
-func (p *placement) artifactBlob(root *os.Root, rel, name string) (proto.Artifact, error) {
+// artifactBlob stores one file as a blob (zstd, like every blob). ctype ""
+// is detected from the name and the first bytes.
+func (p *placement) artifactBlob(blobID string, root *os.Root, rel, name, ctype string) (proto.Artifact, error) {
 	f, err := root.OpenFile(rel, os.O_RDONLY|oNoFollow, 0)
 	if err != nil {
 		return proto.Artifact{}, err
@@ -205,9 +149,8 @@ func (p *placement) artifactBlob(root *os.Root, rel, name string) (proto.Artifac
 	}
 	head := make([]byte, 512)
 	n, _ := io.ReadFull(f, head)
-	ctype := mime.TypeByExtension(path.Ext(name))
 	if ctype == "" {
-		ctype = http.DetectContentType(head[:n])
+		ctype = proto.DetectContentType(name, head[:n])
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return proto.Artifact{}, err
@@ -215,7 +158,6 @@ func (p *placement) artifactBlob(root *os.Root, rel, name string) (proto.Artifac
 	// The file's own size and hash, as a download returns it.
 	h := sha256.New()
 	var size int64
-	blobID := ids.New(ids.Blob)
 	blobSize, blobSum, err := p.r.writeBlobLevel(blobID, compressionFor(ctype), func(w io.Writer) error {
 		var err error
 		size, err = io.Copy(io.MultiWriter(w, h), io.LimitReader(f, maxArtifactBytes))

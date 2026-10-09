@@ -76,6 +76,10 @@ const (
 	MsgOutputEnd     = "output.end"
 	MsgRunEvent      = "run.event"
 	MsgHostEvicting  = "host.evicting"
+	// MsgArtifactPublished: a file the workload published (lux-shim
+	// publish), its blob on the host. Acked; Ack.Refused means luxd will
+	// never ask for the blob.
+	MsgArtifactPublished = "artifact.published"
 )
 
 type Hello struct {
@@ -425,6 +429,15 @@ type Artifact struct {
 	FileSHA256  string `json:"fileSha256"`
 }
 
+// ArtifactPublished is MsgArtifactPublished's data. ID is the artifact id
+// the shim assigned: luxd's artifact id too, so a report sent again (a
+// restarted runner re-reads the output file) is recognised.
+type ArtifactPublished struct {
+	ID          string `json:"id"`
+	Description string `json:"description,omitempty"`
+	Artifact
+}
+
 // EvDiskExceeded: a placement wrote more than its resources.disk (its
 // writable layer and state volumes). luxd stops it.
 const EvDiskExceeded = "disk.exceeded"
@@ -567,9 +580,10 @@ type PushResult struct {
 
 // Ack is the data of an ack, when there is any.
 type Ack struct {
-	// Refused: luxd accepted a snapshot.done report but did not record it
-	// (it did not match its Run's records). Its blobs will not be asked
-	// for: the runner does not upload them and may delete them.
+	// Refused: luxd accepted a snapshot.done or artifact.published report
+	// but did not record it (it did not match its Run's records). Its blobs
+	// will not be asked for: the runner does not upload them and may delete
+	// them.
 	Refused bool `json:"refused,omitempty"`
 }
 

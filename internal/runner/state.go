@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -117,6 +118,8 @@ type pendingUpload struct {
 	Done   bool   `json:"done"`
 }
 
+// snapshotRecord is a placement's snapshot's blobs (named by the snapshot
+// id), or one published artifact's (named by the artifact id).
 type snapshotRecord struct {
 	RunID   string          `json:"runId"`
 	Epoch   int             `json:"epoch"`
@@ -129,6 +132,9 @@ type snapshotRecord struct {
 	// that, luxd answers an upload with 404 (it does not know the blob
 	// yet), which must not count as done.
 	Reported bool `json:"reported,omitempty"`
+	// Published, on a published artifact's record (named by its artifact
+	// id): the report, once its one blob is written.
+	Published *proto.ArtifactPublished `json:"published,omitempty"`
 }
 
 type egressState struct {

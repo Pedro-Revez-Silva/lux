@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"slices"
 	"strings"
@@ -306,11 +307,17 @@ func (o *Output) EndLine(ch string) {
 // first so records stay in order: all of it at a boundary (an event that
 // ends any text in progress), else up to a safe cut, so an event mid-reply
 // does not release the start of a secret.
-func (o *Output) Event(typ string, data any) {
+func (o *Output) Event(typ string, data any) { _ = o.TryEvent(typ, data) }
+
+// errOutputClosed: the shim is ending; nothing more is recorded.
+var errOutputClosed = errors.New("the Run's container is ending")
+
+// TryEvent is Event that says whether the record reached the file.
+func (o *Output) TryEvent(typ string, data any) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.closed {
-		return
+		return errOutputClosed
 	}
 	all := boundary(typ, data)
 	for _, b := range slices.Clone(o.order) {
@@ -321,7 +328,7 @@ func (o *Output) Event(typ string, data any) {
 		}
 	}
 	o.event(typ, data)
-	o.w.Flush()
+	return o.w.Flush()
 }
 
 // boundary reports whether an event ends any text in progress: a turn's

@@ -2,7 +2,8 @@
 // mounts it read-only at /.lux/bin/lux-shim and makes it the entrypoint;
 // images need nothing lux-specific. See internal/shim. `lux-shim diff` is
 // the runner's live diff, run with podman exec (shim.Diff); `lux-shim sync`
-// moves checkouts to new commits (shim.Sync).
+// moves checkouts to new commits (shim.Sync); `lux-shim publish FILE` is
+// the workload's: it makes FILE an artifact of the Run (shim.Publish).
 package main
 
 import (
@@ -17,6 +18,9 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "sync" {
 		os.Exit(shim.Sync(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "publish" {
+		os.Exit(shim.Publish(os.Args[2:]))
 	}
 	os.Exit(shim.Main())
 }

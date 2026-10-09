@@ -187,7 +187,9 @@ func (s *Server) routes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "listArtifacts", Method: http.MethodGet, Path: "/v1/runs/{id}/artifacts", Tags: []string{"runs"},
 		Summary: "List a Run's artifacts",
-		Errors:  []int{http.StatusNotFound},
+		Description: "Each path's latest version, or with versions=all every version. A Run publishes a file (lux-shim publish) as it runs; " +
+			"artifacts.paths are collected at each exit. Ordered by path, then version.",
+		Errors: []int{http.StatusNotFound},
 	}, "read", s.listArtifacts)
 	register(s, api, huma.Operation{
 		OperationID: "deleteArtifacts", Method: http.MethodDelete, Path: "/v1/runs/{id}/artifacts", Tags: []string{"runs"},

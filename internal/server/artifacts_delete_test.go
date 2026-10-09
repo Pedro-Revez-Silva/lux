@@ -43,7 +43,7 @@ func TestDeleteArtifacts(t *testing.T) {
 	// Another terminated Run of rb's tenant, with an artifact of its own.
 	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, finished_at) VALUES ('rc', 't2', '{}', 'terminated', 1, now())`)
 	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, location, s3_key) VALUES ('bC-art', 't2', 'rc', 1, 'artifact', '/c', 's3', 'rc/bC-art')`)
-	execSQL(t, s, ctx, `INSERT INTO artifacts (id, tenant_id, run_id, epoch, path, blob_id) VALUES ('aC', 't2', 'rc', 1, '/c', 'bC-art')`)
+	execSQL(t, s, ctx, `INSERT INTO artifacts (id, tenant_id, run_id, epoch, path, blob_id, version) VALUES ('aC', 't2', 'rc', 1, '/c', 'bC-art', 1)`)
 	before := len(f.Deleted())
 
 	if code, _ := callJSON(t, s, t1, http.MethodDelete, "/v1/runs/rb/artifacts"); code != http.StatusNotFound {

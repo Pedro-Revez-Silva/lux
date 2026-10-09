@@ -2,8 +2,9 @@
 
 The shim runs it in the container before the workload is signalled — for a
 stop asked for, a terminate, a timeout — as the workload's user with its
-environment. What it writes into $LUX_ARTIFACTS is collected like any
-artifact, and a hook that overruns is cut off rather than holding the stop.
+environment. What it publishes (lux-shim publish) is an artifact like any
+other, there after the stop, and a hook that overruns is cut off rather
+than holding the stop.
 """
 
 from __future__ import annotations
@@ -19,7 +20,8 @@ WORKSPACE = [{"name": "workspace", "path": "/workspace", "kind": "state"}]
 # The workload keeps a counter going; the hook records where it got to, so
 # the test can see the hook ran while the workload was still whole.
 WORK = "mkdir -p /workspace && i=0; while true; do i=$((i+1)); echo $i > /workspace/count; sleep 0.2; done"
-HOOK = ["sh", "-c", "echo hook-ran; cp /workspace/count $LUX_ARTIFACTS/final-count; echo \"$HOME\" > $LUX_ARTIFACTS/hook-home"]
+PUBLISH = "/.lux/bin/lux-shim publish"
+HOOK = ["sh", "-c", f"echo hook-ran; {PUBLISH} /workspace/count --name final-count; echo \"$HOME\" > /tmp/hook-home; {PUBLISH} /tmp/hook-home"]
 
 
 def hooked(**extra) -> dict:
@@ -41,7 +43,7 @@ def artifact_paths(lux, run_id: str) -> list[str]:
     return sorted(a["path"] for a in arts)
 
 
-def test_runs_before_a_stop_and_its_files_are_collected(lux, runners, hosts, tmp_path):
+def test_runs_before_a_stop_and_what_it_publishes_is_kept(lux, runners, hosts, tmp_path):
     runners.start(hosts[0])
     run_id = lux.submit(hooked())
     started(lux, run_id)
@@ -76,7 +78,7 @@ def test_runs_before_a_timeout_stop(lux, runners, hosts):
 def test_an_overrunning_hook_is_cut_off_and_the_stop_goes_on(lux, runners, hosts):
     runners.start(hosts[0])
     spec = generic(ALPINE_IMAGE, "sh", "-c", WORK, volumes=WORKSPACE)
-    spec["workload"]["beforeStop"] = {"command": ["sh", "-c", "echo slow > $LUX_ARTIFACTS/began; sleep 600"], "timeout": "3s"}
+    spec["workload"]["beforeStop"] = {"command": ["sh", "-c", f"echo slow > /tmp/began; {PUBLISH} /tmp/began; sleep 600"], "timeout": "3s"}
     run_id = lux.submit(spec)
     started(lux, run_id)
     t0 = time.monotonic()
@@ -90,7 +92,7 @@ def test_a_hook_that_leaves_a_child_running_does_not_hold_the_stop(lux, runners,
     must not keep the stop waiting: the child goes with the hook."""
     runners.start(hosts[0])
     spec = generic(ALPINE_IMAGE, "sh", "-c", WORK, volumes=WORKSPACE)
-    spec["workload"]["beforeStop"] = {"command": ["sh", "-c", "sleep 600 & echo left > $LUX_ARTIFACTS/left"], "timeout": "10s"}
+    spec["workload"]["beforeStop"] = {"command": ["sh", "-c", f"sleep 600 & echo left > /tmp/left; {PUBLISH} /tmp/left"], "timeout": "10s"}
     run_id = lux.submit(spec)
     started(lux, run_id)
     t0 = time.monotonic()
@@ -105,7 +107,7 @@ def test_the_hook_does_not_lengthen_the_grace(lux, runners, hosts):
     runners.start(hosts[0])
     spec = generic(ALPINE_IMAGE, "sh", "-c", "trap '' TERM INT; " + WORK, volumes=WORKSPACE)
     spec["workload"]["grace"] = "8s"
-    spec["workload"]["beforeStop"] = {"command": ["sh", "-c", "sleep 5; echo x > $LUX_ARTIFACTS/x"], "timeout": "8s"}
+    spec["workload"]["beforeStop"] = {"command": ["sh", "-c", f"sleep 5; echo x > /tmp/x; {PUBLISH} /tmp/x"], "timeout": "8s"}
     run_id = lux.submit(spec)
     started(lux, run_id)
     t0 = time.monotonic()
@@ -116,11 +118,11 @@ def test_the_hook_does_not_lengthen_the_grace(lux, runners, hosts):
 
 def test_a_workload_that_ends_during_the_hook_does_not_cut_it_short(lux, runners, hosts):
     """The workload exits on its own while the hook runs: the container
-    stays until the hook is done, so what it writes is still collected."""
+    stays until the hook is done, so what it publishes is still kept."""
     runners.start(hosts[0])
     spec = generic(ALPINE_IMAGE, "sh", "-c", "echo $$ > /workspace/pid; " + WORK, volumes=WORKSPACE)
     # The hook ends the workload itself, then keeps working for a while.
-    spec["workload"]["beforeStop"] = {"command": ["sh", "-c", "kill -KILL $(cat /workspace/pid); sleep 3; echo late > $LUX_ARTIFACTS/late; echo hook-finished"], "timeout": "10s"}
+    spec["workload"]["beforeStop"] = {"command": ["sh", "-c", f"kill -KILL $(cat /workspace/pid); sleep 3; echo late > /tmp/late; {PUBLISH} /tmp/late; echo hook-finished"], "timeout": "10s"}
     run_id = lux.submit(spec)
     started(lux, run_id)
     lux.run("stop", run_id, "--wait")

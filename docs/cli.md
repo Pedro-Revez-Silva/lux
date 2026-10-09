@@ -177,9 +177,13 @@ prints git-style stat lines instead, and `-o json` the whole result
 ## Files
 
 ```bash
-lux artifacts <run> [--download DIR]
-lux artifacts <run> --delete    # a terminated Run's artifacts, from storage; retention never deletes them
+lux artifacts <run> [--download DIR]   # each path's latest version, with its description
+lux artifacts <run> --all-versions [--download DIR]
+lux artifacts <run> --delete    # a terminated Run's artifacts, every version, from storage; retention never deletes them
 ```
+
+`--download` writes each artifact to `DIR/<epoch>/<path>`; with
+`--all-versions`, to `DIR/<epoch>/<path>.v<version>`.
 
 ## Hosts and pools
 

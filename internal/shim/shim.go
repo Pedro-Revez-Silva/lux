@@ -176,6 +176,9 @@ func (s *Shim) run() int {
 	s.env = env
 	s.mu.Unlock()
 	s.prepareVolumes()
+	if err := s.startPublish(); err != nil {
+		s.out.Event(proto.EvWarning, map[string]any{"message": "lux-shim publish: " + err.Error()})
+	}
 	if err := s.prepareInputs(); err != nil {
 		s.out.Event(proto.EvWarning, map[string]any{"message": "$LUX_INPUTS: " + err.Error()})
 	}
@@ -305,6 +308,7 @@ func (s *Shim) finish(info proto.ExitInfo) int {
 	_ = os.WriteFile(path+".tmp", b, 0o644)
 	_ = os.Rename(path+".tmp", path)
 	os.Remove(proto.ShimSocket)
+	os.Remove(proto.ShimPublishSocket)
 	return info.ExitCode
 }
 
@@ -665,9 +669,6 @@ func (s *Shim) environment(secrets map[string]string) []string {
 	env["USER"] = s.user.name
 	env["LUX_RUN_ID"] = s.cfg.RunID
 	env["LUX_EPOCH"] = strconv.Itoa(s.cfg.Epoch)
-	if s.cfg.ArtifactsDir != "" {
-		env["LUX_ARTIFACTS"] = s.cfg.ArtifactsDir
-	}
 	if s.cfg.InputsDir != "" {
 		env["LUX_INPUTS"] = s.cfg.InputsDir
 	}
@@ -773,7 +774,7 @@ func withAdapterEnv(env []string, ad adapter.Adapter, cfg proto.ShimConfig) []st
 
 // mkdirForWorkload creates dir and its missing parents, for a path the
 // shim (root) makes on the workload's behalf: a secret under the user's
-// home (say ~/.config/tool/key), the artifacts directory. Directories it
+// home (say ~/.config/tool/key). Directories it
 // creates inside the workload's own space (its home, or a volume) are the
 // workload user's, so the workload can write next to them; anything else
 // it creates stays root's. Directories that already existed are never
@@ -822,11 +823,6 @@ func (s *Shim) workloadOwns(path string) bool {
 // user, so a non-root workload can write to it, and the directories the
 // runner's engine-store mounts made on the way (cfg.MadeParents).
 func (s *Shim) prepareVolumes() {
-	// $LUX_ARTIFACTS: the workload's to write, whoever it runs as.
-	if s.cfg.ArtifactsDir != "" {
-		_ = s.mkdirForWorkload(s.cfg.ArtifactsDir)
-		_ = os.Chown(s.cfg.ArtifactsDir, s.user.uid, s.user.gid)
-	}
 	if s.user.uid == 0 {
 		return
 	}
