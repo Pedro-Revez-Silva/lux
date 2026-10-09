@@ -144,7 +144,7 @@ def test_scopes_are_enforced(env, lux):
 
 
 def test_resource_defaults_and_requests_reach_the_container(lux, runners, hosts):
-    """A Run without resources gets the defaults (2 CPUs, 8 GiB, 1024
+    """A Run without resources gets the defaults (2 CPUs, 8 GiB, 4096
     processes); one that asks gets what it asked for — as the container's
     own cgroup limits, its memory scaled to the host's share (the harness's
     runners offer 64 GiB, more than the machine's MemTotal less headroom)."""
@@ -153,9 +153,9 @@ def test_resource_defaults_and_requests_reach_the_container(lux, runners, hosts)
     default = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", show))
     lux.wait_state(default, "succeeded")
     out = lux.logs(default).split()  # cpu.max is "<quota> <period>"
-    assert out[:2] == ["200000", "100000"] and int(out[2]) == hosts[0].memory_limit(8 << 30) and int(out[3]) == 1024, out
+    assert out[:2] == ["200000", "100000"] and int(out[2]) == hosts[0].memory_limit(8 << 30) and int(out[3]) == 4096, out
     spec = lux.get(default)["spec"]["resources"]
-    assert spec["cpus"] == 2 and spec["memory"] == 8 << 30 and spec["pids"] == 1024, spec
+    assert spec["cpus"] == 2 and spec["memory"] == 8 << 30 and spec["pids"] == 4096, spec
 
     asked = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", show, resources={"cpus": 0.5, "memory": "512Mi", "pids": 64}))
     lux.wait_state(asked, "succeeded")

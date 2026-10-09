@@ -43,7 +43,7 @@ After v1:
 | API on huma v2; `docs/openapi.yaml` generated (`luxd openapi`) | ✅ done |
 | Turn-end usage for Claude Code and Codex | ✅ done |
 | `lux push --expect repo=sha` | ✅ done |
-| Resource defaults per Run (2 CPUs, 8 GiB, 1024 pids; `LUX_DEFAULT_*`) | ✅ done |
+| Resource defaults per Run (2 CPUs, 8 GiB, 4096 pids; `LUX_DEFAULT_*`) | ✅ done |
 | Spot instances: interruption notice → preempt → resume elsewhere | ✅ done |
 | Review + simplify of the above (three review rounds; redaction of split secrets) | ✅ done |
 | Disk limit per Run (`resources.disk`, measured; `--disk` reservation opt-in) | ✅ done |

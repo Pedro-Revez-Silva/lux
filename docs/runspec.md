@@ -120,7 +120,7 @@ artifacts:
   [MemTotal less headroom over what the host offers](concepts.md#memory-the-hosts-terms-scaled-to-what-linux-sees),
   and a placement reports it as `memoryLimit`), `disk` (what it may write: its container's
   writable layer plus its state volumes), `pids` (processes). They default
-  to **2 CPUs, 8 GiB of memory, 20 GiB of disk and 1024 processes**, and an
+  to **2 CPUs, 8 GiB of memory, 20 GiB of disk and 4096 processes**, and an
   operator can change the defaults (`LUX_DEFAULT_CPUS`,
   `LUX_DEFAULT_MEMORY`, `LUX_DEFAULT_DISK`, `LUX_DEFAULT_PIDS` on luxd).
   Sizes accept `512Mi`, `8Gi`, `1G`, or bytes. A Run waits until a host in

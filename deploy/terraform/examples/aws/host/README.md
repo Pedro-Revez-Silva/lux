@@ -84,7 +84,7 @@ outdated_drain_percent = 10
 cpus = 2
 memory = "8Gi"
 disk = "20Gi"
-pids = 1024
+pids = 4096
 
 [luxd.history]                  # sample_every, raw, minutes, hours
 sample_every = "10s"

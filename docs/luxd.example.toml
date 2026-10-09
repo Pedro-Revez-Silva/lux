@@ -36,7 +36,7 @@ secret_key = ""                    # LUX_S3_SECRET_KEY
 cpus = 2                           # LUX_DEFAULT_CPUS
 memory = "8Gi"                     # LUX_DEFAULT_MEMORY
 disk = "20Gi"                      # LUX_DEFAULT_DISK: writable layer plus state volumes
-pids = 1024                        # LUX_DEFAULT_PIDS
+pids = 4096                        # LUX_DEFAULT_PIDS
 
 [history]
 sample_every = "10s"               # LUX_SAMPLE_EVERY

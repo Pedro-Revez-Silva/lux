@@ -18,12 +18,12 @@ import (
 	"github.com/marcioapm/lux/internal/store"
 )
 
-// resizeBase is what the resize tests submit; submit adds pids 1024.
+// resizeBase is what the resize tests submit; submit adds the default pids.
 var resizeBase = spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}
 
 // withPids is r as submit stores it: with the default pids.
 func withPids(r spec.Resources) spec.Resources {
-	r.Pids = 1024
+	r.Pids = int64(spec.BuiltinDefaults.Pids)
 	return r
 }
 

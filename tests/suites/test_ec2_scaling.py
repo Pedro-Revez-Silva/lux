@@ -49,7 +49,7 @@ def test_a_waiting_run_gets_a_host_launched(lux, ec2):
     assert by["pool.scale_up"]["data"]["reason"] == "waiting runs" and by["pool.scale_up"]["data"]["waiting"] == 1, by["pool.scale_up"]
     # The Run's resources are the spec defaults (spec.BuiltinDefaults).
     assert by["pool.placement"]["data"] == {"run": run_id, "epoch": 1, "host": host_id,
-                                            "resources": {"cpus": 2, "memory": 8 * GiB, "disk": 20 * GiB, "pids": 1024}}, by["pool.placement"]
+                                            "resources": {"cpus": 2, "memory": 8 * GiB, "disk": 20 * GiB, "pids": 4096}}, by["pool.placement"]
     # A cold pool: no host of its template has registered, so one is launched to learn its capacity.
     up = by["pool.scale_up"]["data"]
     assert {k: up.get(k) for k in ("hosts", "ready", "starting", "planned", "unmet", "blocked", "expected", "unknown")} == \
