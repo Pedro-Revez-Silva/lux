@@ -6,13 +6,20 @@
 //   bun run mock                 # http://localhost:5175/, any key signs in
 //   MOCK_STATE=stopped bun run mock   # the run in another state
 //   MOCK_AUTH=cloudflare-access bun run mock   # signed in as a person, no key
+//   MOCK_COST_CURRENCIES=USD,EUR bun run mock   # cost in two currencies (mockCosts.ts)
+//   MOCK_ROLE=tenant bun run mock   # a tenant key (acme): no tenant picker, its own costs and key names
 import index from "./index.html";
+import { COST_TENANTS, costLabels, costSummary, submittedBy } from "./mockCosts.ts";
+import { history, poolCost, poolMetrics, POOLS } from "./mockHistory.ts";
 
 const RUN_ID = "run_k3jq7x2mfa9vbn4z";
 const HOST_ID = "host_7f2cq9m1x0";
 const HOST = "gp-eu-west-1-c4";
 const runState = process.env.MOCK_STATE ?? "running";
 const consoleAuth = process.env.MOCK_AUTH ?? "key";
+const tenantRole = process.env.MOCK_ROLE === "tenant";
+// A tenant key sees one tenant: acme.
+const callerTenant = tenantRole ? "ten_acme" : null;
 const previewDomain = process.env.MOCK_PREVIEW ?? "lux.example.dev";
 const now = () => new Date().toISOString();
 const ago = (s: number) => new Date(Date.now() - s * 1000).toISOString();
@@ -55,6 +62,7 @@ const run = () => ({
   placements: [1, 2, 3].map((epoch) => ({ epoch, host: HOST_ID, hostName: HOST, state: epoch === 3 && runState === "running" ? "running" : "exited", assignedAt: ago((4 - epoch) * 900), stopReason: epoch < 3 ? "migrate" : runState === "stopped" ? "migrate" : undefined, exitedAt: epoch < 3 || runState !== "running" ? ago((3 - epoch) * 900 + 8) : undefined })),
   usage: { peakMemoryBytes: 1.9 * 1024 ** 3, peakDiskBytes: 0, peakPids: 120, cpuSeconds: 724, netRxBytes: 0, netTxBytes: 0, placements: 3, queueSeconds: 17 },
   servers: servers.map(withUrl),
+  submittedBy: submittedBy("key_ci", callerTenant),
 });
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
@@ -136,8 +144,17 @@ async function api(req: Request, srv: Srv): Promise<Response> {
       return new Response("upgrade failed", { status: 500 });
     }
     if (!authed(req)) return json({ error: { code: "unauthorized", message: "no key" } }, 401);
+    if (p === "/v1/whoami" && tenantRole) return json({ operator: false, tenant: "acme", tenantId: "ten_acme", keyId: "key_ci", scopes: ["read", "run"], consoleAuth, previewDomain: previewDomain || null });
     if (p === "/v1/whoami") return json(consoleAuth === "cloudflare-access" ? { operator: true, tenant: "", tenantId: "", email: "ada@example.com", name: "Ada Lovelace", scopes: ["read", "run"], consoleAuth, previewDomain: previewDomain || null } : { operator: true, tenant: "", tenantId: "", keyId: "key_op", scopes: ["read", "run"], consoleAuth, previewDomain: previewDomain || null });
-    if (p === "/v1/tenants") return json({ tenants: [{ id: "ten_acme", name: "acme", retentionDays: 30, expireAfterDays: 90, activeRuns: 1, runs: 12, hosts: 2, storedBytes: 0, createdAt: ago(86400) }] });
+    if (p === "/v1/tenants") return json({ tenants: COST_TENANTS.map((t, i) => ({ ...t, retentionDays: 30, expireAfterDays: 90, activeRuns: 1 - i, runs: 12, hosts: 2, storedBytes: 0, createdAt: ago(86400) })) });
+    if (p === "/v1/costs") {
+      const r = costSummary(u, callerTenant);
+      return json(r.body, r.status);
+    }
+    if (p === "/v1/costs/labels") {
+      const r = costLabels(u, callerTenant);
+      return json(r.body, r.status);
+    }
     if (p === "/v1/runs") return json({ runs: [run()] });
     if (p === `/v1/runs/${RUN_ID}`) return json(run());
     if (p === "/v1/servers") {
@@ -202,10 +219,13 @@ async function api(req: Request, srv: Srv): Promise<Response> {
     if (p === `/v1/runs/${RUN_ID}/output`) return new Response("event: end\ndata: {}\n\n", { headers: { "content-type": "text/event-stream" } });
     if (p.startsWith(`/v1/runs/${RUN_ID}/`)) return json(p.endsWith("history") ? { from: ago(3600), to: now(), resolution: 60, samples: [] } : { snapshots: [], artifacts: [], events: [] });
     if (p === "/v1/status") return json({ runs: { running: 1 }, busy: 1, idle: 0, queued: 0, startLatency: { n: 0 }, hosts: { ready: 2 }, capacity: { cpus: 16, memory: 64 * 1024 ** 3, disk: 0, runs: 8 }, allocated: { cpus: 4, memory: 8 * 1024 ** 3, disk: 0, runs: 1 } });
-    if (p === "/v1/history") return json({ from: ago(3600), to: now(), resolution: 60, samples: [] });
+    if (p === "/v1/history") return json(history(u));
     if (p === "/v1/hosts") return json({ hosts: [] });
     if (p === "/v1/hosts/summary") return json({ live: 2, capacity: { cpus: 16, memory: 64 * 1024 ** 3 }, allocated: { cpus: 4, memory: 8 * 1024 ** 3 } });
-    if (p === "/v1/pools") return json({ pools: [] });
+    if (p === "/v1/pools") return json({ pools: POOLS });
+    if (p === "/v1/pools/stats") return json({ pools: [] });
+    const pm = p.match(/^\/v1\/pools\/([a-z0-9-]+)\/(metrics|cost)$/);
+    if (pm) return json(pm[2] === "metrics" ? poolMetrics(u, pm[1]!) : poolCost(u, pm[1]!));
     return notFound(p);
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Button, Card, ListPriceNote, PageHeader, Pagination, rangeText, RUN_STATE_LIST, runStateStyle, sortInWords, Table, TimeSeriesChart } from "@lux/design-system";
 import { api, useQuery, type RunListParams } from "../../api/index.ts";
+import { historyRes, stepNote, stepOfRes } from "../every.ts";
 import { usePaged } from "../paged.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
@@ -45,12 +46,13 @@ export function Runs() {
 
   // The charts: the tenant scope's history over the global range, not the
   // table's rows (its filters do not narrow them).
-  const history = useScopedQuery(`history:${scope.range}`, (t, sig) => api.history(t, scope.range, sig), { interval: 30_000 });
+  const trend = scope.step("trend");
+  const res = historyRes(trend);
+  const history = useScopedQuery(`history:${scope.range}:${res}`, (t, sig) => api.history(t, scope.range, sig, res), { interval: 30_000 });
   const h = history.data?.samples;
   const level = useSeries(h, [(x) => x.runs?.running, (x) => x.queued]);
   const flow = useSeries(h, [(x) => x.started, (x) => x.finished]);
-  const res = history.data?.resolution;
-  const every = res === 0 ? "10s" : res === 60 ? "1m" : res === 3600 ? "1h" : undefined;
+  const step = stepNote(trend, stepOfRes(history.data?.resolution));
   const range = rangeText(scope.range);
 
   // Show a host id filter by name (a name filter is shown as typed).
@@ -82,10 +84,10 @@ export function Runs() {
       />
       <ErrorStrip error={history.error} />
       <div className="grid grid-2">
-        <Card title="Runs over time" subtitle={`running and queued · ${range}${every ? ` · ${every} samples` : ""}${filtered ? " · all runs in scope, not filtered" : ""}`}>
+        <Card title="Runs over time" subtitle={`running and queued · ${range} · ${step}${filtered ? " · all runs in scope, not filtered" : ""}`}>
           <TimeSeriesChart x={level.x} ys={level.ys} series={[{ label: "Running", color: 1, area: true }, { label: "Queued", color: 2 }]} unit="count" />
         </Card>
-        <Card title="Started / finished" subtitle={`per ${every ?? "sample"} · ${range}${filtered ? " · all runs in scope, not filtered" : ""}`}>
+        <Card title="Started / finished" subtitle={`${step} · ${range}${filtered ? " · all runs in scope, not filtered" : ""}`}>
           <TimeSeriesChart x={flow.x} ys={flow.ys} series={[{ label: "Started", color: 1, step: true }, { label: "Finished", color: 3, step: true }]} unit="count" />
         </Card>
       </div>

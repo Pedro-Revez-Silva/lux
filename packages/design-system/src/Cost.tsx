@@ -61,10 +61,13 @@ export interface MoneyAmount {
   amount: string;
 }
 
-/** An amount as formatMoney rounds it; when rounding changed it, the exact value is in a Tooltip. */
-export function Money({ amount, currency }: MoneyAmount) {
-  const shown = formatMoney(amount, currency);
-  if (!moneyIsRounded(amount)) return <span className="money">{shown}</span>;
+/** Rounding of a headline figure (a KPI, a ranked list): whole cents. */
+export const CENTS = 2;
+
+/** An amount as formatMoney rounds it (to `decimals`, default 4); when rounding changed it, the exact value is in a Tooltip. */
+export function Money({ amount, currency, decimals }: MoneyAmount & { decimals?: number }) {
+  const shown = formatMoney(amount, currency, decimals == null ? {} : { decimals });
+  if (!moneyIsRounded(amount, decimals)) return <span className="money">{shown}</span>;
   return (
     <Tooltip content={`Exactly ${formatMoneyExact(amount, currency)}`}>
       <span className="money money-rounded" tabIndex={0}>
@@ -75,13 +78,13 @@ export function Money({ amount, currency }: MoneyAmount) {
 }
 
 /** One figure per currency, never added across currencies; an en dash when there are none. */
-export function MoneyList({ amounts, large, className }: { amounts: MoneyAmount[] | null | undefined; large?: boolean; className?: string }) {
+export function MoneyList({ amounts, large, decimals, className }: { amounts: MoneyAmount[] | null | undefined; large?: boolean; decimals?: number; className?: string }) {
   const cls = ["money-list", large ? "money-list-lg" : "", className ?? ""];
   if (!amounts || amounts.length === 0) return <span className={[...cls, "muted"].join(" ").trim()}>–</span>;
   return (
     <span className={[...cls, "num"].join(" ").trim()}>
       {amounts.map((a) => (
-        <Money key={a.currency} amount={a.amount} currency={a.currency} />
+        <Money key={a.currency} amount={a.amount} currency={a.currency} decimals={decimals} />
       ))}
     </span>
   );

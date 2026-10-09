@@ -51,10 +51,12 @@ test("Stored: a sample without the fields is a gap, not zero", () => {
 });
 
 /** The Overview, as role at url. History answers one sample: uPlot needs a canvas happy-dom lacks, and draws from two. */
-async function render(role: "tenant" | "operator", url: string) {
+async function render(role: "tenant" | "operator", url: string, answer?: (path: string) => unknown) {
   api.signIn("k");
   api.setRole(role);
   const fake = fakeApi((path) => {
+    const a = answer?.(path);
+    if (a !== undefined) return a;
     if (path.startsWith("/v1/history")) return { from: iso(0), to: iso(60), resolution: 60, samples: SAMPLES.slice(0, 1) };
     if (path.startsWith("/v1/status")) return { runs: {}, busy: 0, idle: 0, queued: 0, startLatency: { n: 0 }, hosts: {}, capacity: { cpus: 0, memory: 0 }, allocated: { cpus: 0, memory: 0 } };
     return {};
@@ -73,6 +75,7 @@ async function render(role: "tenant" | "operator", url: string) {
   await sleep(50);
   return {
     fake,
+    el,
     card: () => [...el.querySelectorAll(".card")].find((c) => c.querySelector(".card-title")?.textContent === "Stored"),
     done: async () => {
       await act(async () => root.unmount());
@@ -103,3 +106,201 @@ for (const c of [
     }
   });
 }
+
+const costCalls = (calls: string[]) => calls.filter((u) => u.startsWith("/v1/costs?")).map((u) => new URL(u, "http://x").searchParams);
+const historyCall = (calls: string[]) => new URL(calls.find((u) => u.startsWith("/v1/history"))!, "http://x").searchParams;
+
+test("the Cost panel's filters and Every reach every cost request, and Every the history's res", async () => {
+  const p = await render("tenant", "http://localhost/?range=7d&every=hour&label=app%3Da&label=app%3Db&nolabel=phase");
+  try {
+    const costs = costCalls(p.fake.calls);
+    expect(costs.length).toBeGreaterThan(0);
+    for (const q of costs) {
+      expect(q.getAll("label")).toEqual(["app=a", "app=b"]);
+      expect(q.getAll("nolabel")).toEqual(["phase"]);
+    }
+    // Family is the default breakdown: one request sends interval, the family + series one.
+    expect(costs.filter((q) => q.has("interval")).map((q) => q.get("interval"))).toEqual(["hour"]);
+    const labels = p.fake.calls.find((u) => u.startsWith("/v1/costs/labels"));
+    expect(labels).toBeDefined();
+    expect(historyCall(p.fake.calls).get("res")).toBe("3600");
+  } finally {
+    await p.done();
+  }
+});
+
+test("Every Auto sends no history res", async () => {
+  const p = await render("tenant", "http://localhost/?range=7d");
+  try {
+    expect(historyCall(p.fake.calls).has("res")).toBe(false);
+  } finally {
+    await p.done();
+  }
+});
+
+for (const [cost, rank, showFilter] of [
+  ["all", "all", {}],
+  ["compute", "compute", { family: "compute" }],
+  ["external", "external", { nofamily: "compute" }],
+] as const) {
+  test(`?cost=${cost}: every summary that lists values is folded ranked by ${rank}; only the breakdown series filters by family`, async () => {
+    const p = await render("operator", `http://localhost/?by=key&cost=${cost}`);
+    try {
+      const costs = costCalls(p.fake.calls);
+      const of = (g: string[]) => costs.filter((q) => JSON.stringify(q.getAll("group")) === JSON.stringify(g));
+      const filterOf = (q: URLSearchParams) => ({ family: q.get("family") ?? undefined, nofamily: q.get("nofamily") ?? undefined });
+      for (const [g, top] of [
+        [["key"], "7"],
+        [["key", "family"], "7"],
+        [["run", "family"], "10"],
+        [["tenant", "family"], "10"],
+      ] as const) {
+        const qs = of([...g]);
+        expect(qs.length).toBe(1);
+        expect([qs[0]!.get("top"), qs[0]!.get("rank")]).toEqual([top, rank]);
+      }
+      expect(filterOf(of(["key"])[0]!)).toEqual({ family: undefined, nofamily: undefined, ...showFilter });
+      for (const g of [["key", "family"], ["run", "family"], ["tenant", "family"], ["family"]]) {
+        expect(filterOf(of(g)[0]!)).toEqual({ family: undefined, nofamily: undefined });
+      }
+      // The family summary is not folded: it asks for runs, not top.
+      expect([of(["family"])[0]!.get("runs"), of(["family"])[0]!.has("top")]).toEqual(["true", false]);
+      // No summary is grouped by a value and run: Runs per value come with the fold.
+      expect(costs.some((q) => q.getAll("group").length === 2 && q.getAll("group")[1] === "run")).toBe(false);
+    } finally {
+      await p.done();
+    }
+  });
+}
+
+const costRow = (group: Record<string, string>, amount: string, extra: Record<string, unknown> = {}) => ({ group, currency: "USD", amount, ...extra });
+// One hourly bucket: two would draw a uPlot chart, which needs a canvas happy-dom lacks.
+const summary = (totals: unknown[], series: unknown[] = [], extra: Record<string, unknown> = {}) => ({ from: iso(0), to: iso(3600), basis: "list", totals, series, ...extra });
+const groupsOf = (path: string) => new URL(path, "http://x").searchParams.getAll("group").join(",");
+const cellsOf = (el: Element, heading: string) =>
+  [...el.querySelectorAll(".card")]
+    .find((c) => c.querySelector(".card-title")?.textContent === heading)!
+    .querySelectorAll("tbody tr");
+
+test("the peak Run is asked folded to one Run, ranked by Show, over the peak bucket", async () => {
+  const p = await render("tenant", "http://localhost/?cost=compute", (path) => {
+    if (!path.startsWith("/v1/costs?")) return undefined;
+    if (groupsOf(path) === "family") return summary([costRow({ family: "compute" }, "5")], [costRow({ family: "compute" }, "5", { at: iso(0) })]);
+    return summary([]);
+  });
+  try {
+    const peak = costCalls(p.fake.calls).filter((q) => groupsOf(`/?${q}`) === "run,family" && q.has("from"));
+    expect(peak.length).toBe(1);
+    expect([peak[0]!.get("top"), peak[0]!.get("rank"), peak[0]!.get("from"), peak[0]!.get("to")]).toEqual(["1", "compute", iso(0), iso(3600)]);
+  } finally {
+    await p.done();
+  }
+});
+
+test("By family: each family's Runs from the family summary's runs, per currency", async () => {
+  const p = await render("tenant", "http://localhost/", (path) => {
+    if (!path.startsWith("/v1/costs?")) return undefined;
+    if (groupsOf(path) === "family") return summary([costRow({ family: "compute" }, "5", { runs: 3 }), costRow({ family: "ai" }, "2", { runs: 1 }), costRow({ family: "ai" }, "1", { runs: 2, currency: "EUR" })]);
+    return summary([]);
+  });
+  try {
+    const rows = [...cellsOf(p.el, "By family")].map((r) => [...r.querySelectorAll("td")].map((td) => td.textContent));
+    expect(rows.map((r) => [r[0], r[1]])).toEqual([
+      ["ai", "2"],
+      ["Compute", "3"],
+      ["ai", "1"],
+    ]);
+  } finally {
+    await p.done();
+  }
+});
+
+test("Other's count is the Show-filtered series call's, not the split's", async () => {
+  const p = await render("tenant", "http://localhost/?by=key&cost=external", (path) => {
+    if (!path.startsWith("/v1/costs?")) return undefined;
+    const g = groupsOf(path);
+    if (g === "family") return summary([costRow({ family: "ai" }, "9")]);
+    if (g === "key") return summary([costRow({ key: "k1" }, "4"), costRow({ key: "(other)" }, "5", { other: true })], [costRow({ key: "k1" }, "4", { at: iso(0) }), costRow({ key: "(other)" }, "5", { at: iso(0), other: true })], { otherCount: { USD: 2 } });
+    if (g === "key,family") return summary([costRow({ key: "k1", family: "ai" }, "4", { runs: 1 }), costRow({ key: "(other)", family: "ai" }, "5", { runs: 6, other: true })], [], { otherCount: { USD: 5 } });
+    return summary([]);
+  });
+  try {
+    const names = [...cellsOf(p.el, "By API key")].map((r) => r.querySelector("td")!.textContent);
+    expect(names).toEqual(["k1", "Other (2)"]);
+  } finally {
+    await p.done();
+  }
+});
+
+test("with Break down by API key, Runs from before key tracking are noted with their count", async () => {
+  const p = await render("tenant", "http://localhost/?by=key", (path) => {
+    if (!path.startsWith("/v1/costs?")) return undefined;
+    const g = groupsOf(path);
+    if (g === "family") return summary([costRow({ family: "ai" }, "9")]);
+    if (g === "key,family") return summary([costRow({ key: "(none)", family: "ai" }, "4", { runs: 4 }), costRow({ key: "k1", family: "ai" }, "5", { runs: 1 })]);
+    return summary([]);
+  });
+  try {
+    expect(p.el.querySelector(".cost-panel")!.textContent).toContain("4 Runs in this range were submitted before Lux recorded the submitting key");
+  } finally {
+    await p.done();
+  }
+});
+
+test("Break down by Label with the keys failing: the breakdown falls back to app, never 'Loading…' under the error", async () => {
+  const failed = () => new Response(JSON.stringify({ error: { code: "internal", message: "labels unavailable" } }), { status: 500, headers: { "Content-Type": "application/json" } });
+  const p = await render("tenant", "http://localhost/?by=label", (path) => (path.startsWith("/v1/costs/labels") ? failed() : undefined));
+  try {
+    await sleep(50);
+    const panel = p.el.querySelector(".cost-panel")!;
+    expect(panel.textContent).toContain("labels unavailable");
+    expect(panel.querySelector(".cost-charts")!.textContent).not.toContain("Loading");
+    expect(costCalls(p.fake.calls).some((q) => q.getAll("group").includes("label:app"))).toBe(true);
+  } finally {
+    await p.done();
+  }
+});
+
+test("Break down by Label names its key in the URL once the keys are known", async () => {
+  let release!: () => void;
+  const keysArrive = new Promise<void>((r) => (release = r));
+  const p = await render("tenant", "http://localhost/", (path) => (path.startsWith("/v1/costs/labels") ? keysArrive.then(() => ({ from: iso(0), to: iso(60), keys: [{ key: "team", runs: 3 }, { key: "app", runs: 2 }] })) : undefined));
+  try {
+    const radio = (name: string) => [...p.el.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="Break down by"] [role="radio"]')].find((b) => b.textContent === name)!;
+    const before = history.length;
+    // Before the keys arrive: by=label, no key yet, and no breakdown call (it would name a key luxd may not have).
+    await act(async () => radio("Label").click());
+    expect(new URLSearchParams(location.search).get("by")).toBe("label");
+    expect(history.length).toBe(before);
+    expect(costCalls(p.fake.calls).some((q) => q.getAll("group").some((g) => g.startsWith("label:")))).toBe(false);
+    // Then the default key, app, replaces it (no history entry).
+    await act(async () => release());
+    await sleep(20);
+    expect(location.search).toContain("by=label%3Aapp");
+    expect(history.length).toBe(before);
+    // Once known, a click writes the key at once.
+    await act(async () => radio("Family").click());
+    expect(new URLSearchParams(location.search).get("by")).toBeNull();
+    await act(async () => radio("Label").click());
+    expect(location.search).toContain("by=label%3Aapp");
+  } finally {
+    await p.done();
+  }
+});
+
+test("a cost request that fails shows the error, never also 'No cost'", async () => {
+  const tooLarge = () => new Response(JSON.stringify({ error: { code: "too_large", message: "cost response exceeds 10000 rows" } }), { status: 413, headers: { "Content-Type": "application/json" } });
+  const p = await render("tenant", "http://localhost/?by=key", (path) => {
+    if (!path.startsWith("/v1/costs?")) return undefined;
+    const q = new URL(path, "http://x").searchParams;
+    if (q.getAll("group").includes("key") && q.has("interval")) return tooLarge();
+    return { from: iso(0), to: iso(3600), basis: "list", totals: q.getAll("group").join() === "family" ? [{ group: { family: "compute" }, currency: "USD", amount: "1" }] : [], series: [] };
+  });
+  try {
+    const panel = p.el.querySelector(".cost-panel")!;
+    expect(panel.textContent).toContain("10000 rows");
+    expect(panel.querySelector(".cost-charts")!.textContent).not.toContain("cost in this range");
+  } finally {
+    await p.done();
+  }
+});

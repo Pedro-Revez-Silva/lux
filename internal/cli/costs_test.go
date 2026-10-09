@@ -280,6 +280,36 @@ func TestCostsCommand(t *testing.T) {
 	}
 }
 
+// Label filters go to luxd as label and nolabel; by key names each submitter.
+func TestCostsLabelsAndKeys(t *testing.T) {
+	sum := server.CostSummaryBody{From: costT0, To: costT0.Add(time.Hour), Basis: "list",
+		Totals: []server.CostSummaryRow{
+			{Group: map[string]string{"key": "key_a"}, Currency: "USD", Amount: "1"},
+			{Group: map[string]string{"key": "key_old"}, Currency: "USD", Amount: "2"},
+			{Group: map[string]string{"key": "email:ada@example.com"}, Currency: "USD", Amount: "3"},
+			{Group: map[string]string{"key": "key_op"}, Currency: "USD", Amount: "4"},
+			{Group: map[string]string{"key": "(none)"}, Currency: "USD", Amount: "5"},
+		},
+		Keys: []server.CostKeyInfo{{ID: "email:ada@example.com", Email: "ada@example.com"}, {ID: "key_a", Name: "ci-bot"},
+			{ID: "key_old", Name: "old-bot", Revoked: true}, {ID: "key_op", Operator: true}},
+	}
+	f := &fakeLuxd{bodies: map[string]any{"/v1/costs": sum}}
+	out, err := runCLI(t, f, "costs", "--by", "key", "-l", "app=jervasion", "--label", "app=a=b", "--no-label", "phase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "/v1/costs?group=key&label=app%3Djervasion&label=app%3Da%3Db&nolabel=phase&since=7d"
+	if got := f.seen[len(f.seen)-1]; got != want {
+		t.Errorf("query\n got %s\nwant %s", got, want)
+	}
+	lineWith(t, out, "KEY", "TOTAL")
+	lineWith(t, out, "ci-bot", "1", "USD")
+	lineWith(t, out, "old-bot", "(revoked)", "2", "USD")
+	lineWith(t, out, "ada@example.com", "3", "USD")
+	lineWith(t, out, "operator", "key", "4", "USD")
+	lineWith(t, out, "(none)", "5", "USD")
+}
+
 func TestCostsSinceAndFrom(t *testing.T) {
 	f := &fakeLuxd{bodies: map[string]any{"/v1/costs": fixtureSummary()}}
 	if _, err := runCLI(t, f, "costs", "--since", "1d", "--from", "2026-09-01T00:00:00Z"); err == nil {

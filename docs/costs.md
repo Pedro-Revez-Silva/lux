@@ -1009,10 +1009,48 @@ This is the summary endpoint. It takes the range parameters that
 `HistoryQuery` already has (`since`, `from`, `to`, plus `tenant` for
 operators), and also:
 
-- `group`: `tenant` (operators), `pool`, `host`, `family`, `run`, or
-  `label:<key>`, repeatable for two levels;
-- `family`: filter by family;
-- `interval`: `hour` or `day`, to return a series instead of totals.
+- `group`: `tenant` (operators), `pool`, `host`, `family`, `run`, `key`,
+  or `label:<key>`, repeatable for two levels;
+- `family`: filter by family; `nofamily`: every family but this one (not
+  both: 400);
+- `label`: `key=value` (split at the first `=`), repeatable: only Runs
+  with that label. Repeating a key accepts any of its values (OR); different
+  keys must all match (AND);
+- `nolabel`: a key, repeatable: only Runs without that label;
+- `interval`: `hour` or `day`, to return a series instead of totals;
+- `top`: 1 to 50 (else 422), with a `group`: fold the first group to its
+  top N values (below);
+- `rank`: with `top`, `all` (default), `compute` or `external` (else 422);
+  a 400 when it counts none of the families `family`/`nofamily` keep;
+- `runs=true`: without `top`, each `totals` row carries `runs` too (the
+  Runs with any cost under its first-group value).
+
+**Top N.** With `top=N`, the first group's values are ranked per currency
+(never across currencies) by their total over the range of what `rank`
+counts (`compute`: the compute family; `external`: every other family),
+largest first, ties by value (byte order). A value with no such cost ranks
+last. Every value past the N-th is folded into one row per second-group
+value and currency, in `totals` and in `series`, marked `other: true`; its
+first-group value reads `(other)`. A real value literally named `(other)`
+(a label value can be) stays a row of its own, without `other`: `other` is
+what tells the fold apart. `(none)` (no label, no submitter, no pool) is
+never folded and does not count toward N. The second group
+(`family`, `run`, ...) is kept as it is under the fold. Each `totals` row
+then carries `runs`: the Runs with cost that `rank` counts under that
+first-group value (across the second group, so the same on each of its
+rows). `otherCount: {currency: n}` says how many values the `other: true` rows
+hold, per currency; a currency with nothing folded is absent. The 10,000-row
+limit applies to the folded rows, so a breakdown of any cardinality is
+bounded by N + 2 values per bucket. With `group=run`, `runs` names only the
+kept Runs.
+
+Label keys in `label`, `nolabel` and `group=label:<key>` are values bound
+to the query, never SQL text; a `label` or `nolabel` key that is not a
+valid label key (letters, digits, `.`, `_`, `/`, `-`) is a 400. A filter
+applies to every part of the response read from Runs' cost: `totals`,
+`series`, and the names in `runs` and `keys`. `unallocated` and `hosts`
+(cost charged to no Run, so with no labels) are left out of a filtered
+summary.
 
 Both cost range endpoints use `[from, to)` over whole UTC hour buckets.
 An omitted `to` is now; an omitted `from` is one hour before `to` (or
@@ -1038,8 +1076,31 @@ allocated vs unallocated. Tenants never get these fields.
 Grouped by `family`, the response has `families: [{family, displayName,
 color}]`, resolved as a Run's `byFamily` is (the first usable plugin's
 describe; `Compute` for compute), so a family reads the same everywhere.
-Grouped by `run`, it has `runs: [{id, name}]` for the Runs in `totals`,
-read in the same snapshot, so a list of top Runs needs no call per Run.
+Grouped by `run`, it has `runs: [{id, name, labels}]` for the Runs in
+`totals`, read in the same snapshot, so a list of top Runs needs no call
+per Run.
+
+Grouped by `key`, the group value is who submitted the Run
+(`runs.submitted_by_key`, `submitted_by_email`, recorded at submit since
+migration 058): an API key id, `email:<address>` for a person signed in
+through Cloudflare Access, or `(none)` for Runs from before luxd recorded
+it. The response has `keys: [{id, name?, operator?, revoked?, email?}]`
+for each submitter in `totals` but `(none)`. A tenant gets the names of
+its own keys only: an operator's key that submitted one of its Runs is
+`{id, operator: true}` without a name. Operators get every name, also
+when narrowed to a tenant.
+
+A Run's label `app` names the tool that submitted it (jervasion sets
+`app=jervasion`). It is a convention, not enforced; the console's Cost
+panel breaks down by `label:app` by default when the key is present.
+
+### `GET /v1/costs/labels`
+
+The label keys present on Runs with cost in the range, each with its
+number of Runs (`keys: [{key, runs}]`, most Runs first), for a picker. It
+takes the same range, `tenant`, `label` and `nolabel` parameters as
+`GET /v1/costs`, reads in the same tenant scope, and has the same limits.
+A key's values and their cost come from `GET /v1/costs?group=label:<key>`.
 
 ### `GET /v1/hosts/{id}/cost`
 
@@ -1069,9 +1130,12 @@ cost is visible exactly when the Run is. It is not stored on `runs`.
   by family (item, source, amount, currency, from–to, final or estimate),
   and each source's status and `answeredAt`.
 - `lux costs [--since 7d | --from T [--to T]] [--by G]... [--family F]
-  [--interval hour|day]`: `--by` is `tenant` (operators), `pool`, `host`,
-  `family`, `run` or `label:K`, at most twice. An operator without
-  `--tenant` also gets the unallocated total and, by `host`, each host's
+  [--label K=V]... [--no-label K]... [--interval hour|day]`: `--by` is
+  `tenant` (operators), `pool`, `host`, `family`, `run`, `key` or
+  `label:K`, at most twice; by `key`, rows show the key's name (`(revoked)`
+  after a revoked one), a person's email, or `operator key`. `--label`
+  and `--no-label` are the summary's `label` and `nolabel`. An operator
+  without `--tenant` or a label filter also gets the unallocated total and, by `host`, each host's
   allocated and unallocated. luxd's 400 and 413 messages are printed as
   they are.
 - `lux ls` has a COST column: the total for one currency, `multi` for
@@ -1111,21 +1175,64 @@ is fixed to slot 1).
   `—` while pending, and a leading `~` when the total may still change (an
   estimate part, or `incomplete`). Its Tooltip names the status and gives
   the exact amounts.
-- **Host page**: allocated vs unallocated per hour, stacked, from
+- **Host page**: allocated vs unallocated per hour (or per UTC day with
+  Every Day), stacked, from
   `/v1/hosts/{id}/cost` (a tenant sees its allocated part only), and, for
   operators, the rate periods in a `KeyValue` (price per hour, and the
   source once: `static`, `on-demand` or `spot`). Shown to those who can see
   the host's history.
-- **Overview**, over the page's range (1h reads 6h: costs are hourly):
-  - cost per hour (per day at 30d), stacked by family, one chart per
-    currency, labelled and coloured as on the Run page;
-  - top tenants (operators across tenants) and top Runs, each ranked per
-    currency; a Run is shown by name with its id beside it (the summary's
-    `runs`);
-  - a Cost tile and, for an operator viewing all tenants, an
-    **Unallocated** tile.
+- **Overview, the Cost section**, over the page's range (1h reads 6h:
+  costs are hourly), bucketed by the top bar's **Every** (`?every=`): Auto
+  is hourly up to 24h and daily from 7d; Hour and Day are taken as asked;
+  Minute stays hourly ("cost is never finer than an hour"). Built from the
+  design system's cost panel pieces (gallery section "costpanel"):
+  - **Show** (`?cost=`): All, Compute (the compute family) or External
+    (every other family). A hidden side is drawn faint, never dropped.
+  - **Break down by** (`?by=`): Family (default), Label (a label key, `app`
+    by default when Runs carry it: `?by=label:<key>`), API key (who
+    submitted the Runs, `group=key`), Pool, and Tenant (operators viewing
+    all tenants only). The chart stacks by the breakdown: the top 7 values
+    by cost, the rest as Other, Runs without the value as a grey band
+    ("(no app label)", "Before key tracking"), never dropped. luxd does the
+    fold (`top=7`, ranked by Show), so no breakdown grows with how many
+    values there are: the series is asked with Show as a family filter,
+    and the table's Compute/External split and Runs per value come from one
+    more folded summary grouped by the breakdown and family. Top Runs and
+    Top tenants are `top=10` summaries, and the peak's Run a `top=1` one.
+    When a cost request fails, the error is shown and the chart area does
+    not also claim there is no cost.
+  - **Label filters** (`?label=key=value`, repeated: one key's values OR,
+    different keys AND; `?nolabel=key` for "is not set"): chips and a
+    "＋ Label filter" picker (keys from `/v1/costs/labels`, values with their
+    cost from `/v1/costs?group=label:<key>`, biggest first, searchable,
+    and "(not set)"). They apply to every figure of the section, the
+    previous window and the peak included; unallocated host time, which
+    belongs to no Run, is left out while filtering. The filter bar says
+    the other Overview charts are not per-label.
+  - **KPIs**: Total (vs the previous window), then Compute and External
+    (Family) or the top two values of the breakdown with their share and
+    Runs, then the peak hour or day with what dominated it (the Run, or the
+    value).
+  - **By <breakdown>**: name, Runs, Compute, External, Total, Share; with
+    Label a row adds its value as a filter. With Family it is the By family
+    table, with the unallocated host time under it for operators viewing
+    all tenants.
+  - **Top Runs**: name, id, its labels as chips (the breakdown's key and
+    `app` first), its Compute/External split, its cost. "All Runs →" opens
+    the Runs list with the same label filter when it is one `key=value`
+    (the list's `label` filter cannot express more).
+  - **Top tenants** beside them (operators across tenants, unless the
+    breakdown is Tenant).
+  - With API key, an info strip says how many Runs in the range were
+    submitted before Lux recorded the submitting key.
   - Not built: plugin health (last answer, failing since). No endpoint
     exposes plugin state.
+- **Run page**: "Submitted by" in the facts: the key's name (a "revoked"
+  pill after a revoked one), the person's email, "Operator key" for an
+  operator's key a tenant may not name, or "not recorded" for Runs from
+  before key tracking.
+- **Pool page, Cost tab**: the page's Every (hour or day); otherwise as
+  before.
 - Every page with money says "list price" once, explained in a Tooltip.
   Amounts are never added across currencies. An amount rounded for display
   shows its exact value in a Tooltip (`Money`).

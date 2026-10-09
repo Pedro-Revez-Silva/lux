@@ -21,7 +21,7 @@ outside `/v1/` and `/runner/` that is not a built file returns
 routes client-side with the History API (`src/app/router.tsx`, at the root).
 `/v1/...` and `/runner/...` keep their own JSON errors and 404s, and luxd
 redirects the old `/console/...` paths to the same page at `/`.
-The tenant and time range live in the query string so links carry their scope.
+The tenant, time range and step (Every) live in the query string so links carry their scope.
 
 ### Against a real luxd
 
@@ -47,7 +47,12 @@ with three servers, the servers API, a fake shell behind the exec
 WebSocket, an event stream that stays open. Any key signs in.
 `MOCK_STATE=stopped` makes the run stopped, `MOCK_AUTH=cloudflare-access`
 signs in a person instead of a key, `MOCK_PREVIEW=` (empty) turns previews
-off, `MOCK_OPEN_DELAY=<ms>` holds the shell's opening. For layout, states
+off, `MOCK_OPEN_DELAY=<ms>` holds the shell's opening, `MOCK_ROLE=tenant`
+signs in a tenant key (acme), `MOCK_COST_CURRENCIES=USD,EUR` adds a
+second currency. Its costs (`mockCosts.ts`) have labelled Runs (`app`,
+repository, phase), named, revoked and operator keys, a person, and Runs
+from before key tracking; its history and pool metrics (`mockHistory.ts`)
+follow `res`. For layout, states
 and screenshots only: nothing it answers is real. `tests/console_mock/`
 drives it in a headless browser (`cd tests && uv run pytest console_mock`;
 `LUX_TEST_CHROME` names a Chrome when Playwright's own is not installed).
@@ -88,7 +93,7 @@ Run-scoped calls (`/runs/{id}/…`, `/hosts/{id}/…`, `/artifacts/…`) do not 
 
 | Route | Page | Data |
 | --- | --- | --- |
-| `/` | Overview: stat tiles, charts over the selected range, live activity feed | `/status` (5s), `/history?since=` (30s), `/events` SSE |
+| `/` | Overview: stat tiles, trend charts over the selected range at the page's step, the Cost section (Show, Break down by family / label / API key / pool / tenant, label filters; KPIs, stacked bars, By &lt;breakdown&gt;, Top Runs with labels, Top tenants: `docs/costs.md` §9), live activity feed | `/status` (5s), `/history?since=&res=` (30s), `/costs?group=&label=&nolabel=&interval=` and `/costs/labels` (60s), `/events` SSE |
 | `/runs` | Runs over time and started/finished charts (the tenant scope's history over the global range; table filters do not narrow them), then the Runs table with state presets and chips, resumable/host/label filters; every column (Placement time and Cost included) sorts on the server across every match; cursor pages (First / Previous / Next, page size) | `/runs?sort=&dir=&limit=` with `next`/`prev`/`at` cursors (5s), `/history?since=` (30s) |
 | `/runs/:id` | Header + actions (Terminal, Stop, Terminate, Resume, Migrate), tabs (`?tab=`): Output (SSE), Servers (the run's `servers`; Add server with a lifetime, Attach server… (one of the tenant's unattached servers), start/stop/restart, remove, or detach a kept one, wake and lifetime tags, a log per server), Timeline (per-epoch waterfall), Resources (charts, epoch marks), Events, Snapshots & artifacts, Spec | `/runs/{id}` (3s while active), `/runs/{id}/output`, `/runs/{id}/servers/{name}/log`, `/history`, `/events`, `/snapshots`, `/artifacts` |
 | `/runs/:id/terminal` | A shell in the run's container: xterm.js over the exec WebSocket, font size (persisted), terminal colours (Match console / Solarized light / Solarized dark: this terminal only, `lux.terminal.theme`, changed in place without reconnecting; the console theme stays in the top bar), Reconnect, Open in new tab; exited / lost overlays; an empty state while the run is not running | `/runs/{id}` (5s), `GET /runs/{id}/exec` (WebSocket; `POST /runs/{id}/tickets` first with a key) |
@@ -131,5 +136,19 @@ principles, density, breakpoints and tokens are documented there.
 The shell (`src/app/Shell.tsx`, `shell.css`) owns the sidebar (full, rail,
 drawer; the collapse arrow at its top, who is signed in and "Sign out" at
 its foot), the top bar (section name, live indicator, tenant and range
-pickers, density and theme toggles; folded into one menu on phones) and the
-scrolling content area.
+pickers, the Every picker, density and theme toggles; folded into one menu
+on phones) and the scrolling content area.
+
+**Every** (`?every=`, `src/app/every.ts`, the design system's
+`StepPicker`) sets the step of every chart that follows the page's range:
+Auto lets each chart pick (trends: the finest history kept, at most 2,000
+points; cost: hourly up to 24h, daily from 7d), Minute, Hour or Day apply
+to them all. Trend charts ask `/v1/history` (and host, pool and control
+history) for `res` 60, 3600 or 86400; cost charts ask for `interval` hour
+or day and stay hourly with Minute, and say so. A chart that cannot take
+the step keeps its own and says why in its subtitle ("per hour · cost is
+never finer than an hour"). A choice that would give fewer than 3
+or more than 2,000 points to every kind of chart is greyed with the
+reason, and in the URL reads as Auto. Links carry it with the tenant and
+range. A Run's own resources (its lifetime, not the range) do not follow
+it.

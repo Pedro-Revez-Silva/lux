@@ -145,6 +145,12 @@ func (s *Server) routes(api huma.API) {
 		Errors:  []int{http.StatusBadRequest},
 	}, "read", s.costSummary)
 	register(s, api, huma.Operation{
+		OperationID: "costLabels", Method: http.MethodGet, Path: "/v1/costs/labels", Tags: []string{"costs"},
+		Summary:     "The label keys on Runs with cost in a range",
+		Description: "Each key with how many Runs with cost in the range carry it, after the label and nolabel filters. A key's values and their cost: GET /v1/costs?group=label:<key>.",
+		Errors:      []int{http.StatusBadRequest},
+	}, "read", s.costLabels)
+	register(s, api, huma.Operation{
 		OperationID: "pushRun", Method: http.MethodPost, Path: "/v1/runs/{id}/push", Tags: []string{"runs"},
 		Summary: "Push a running Run's repositories",
 		Description: "To the spec's git.push branch, with the runner's credentials. The outcome arrives as a git.push event carrying the request id: " +
@@ -506,9 +512,10 @@ type Run struct {
 	// (stopped, lost, failed, succeeded), what a resume would take.
 	Resume *Resumability `json:"resume,omitempty"`
 	// Servers: on GET /v1/runs/{id}, its servers.
-	Servers []RunServer   `json:"servers,omitzero" doc:"On GET /v1/runs/{id}: the Run's servers."`
-	Cost    *RunCostBrief `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
-	Resize  *Resize       `json:"resize,omitempty" doc:"In a resume's answer, when it asked to change resources: what it asked for and what the Run has from now on."`
+	Servers     []RunServer   `json:"servers,omitzero" doc:"On GET /v1/runs/{id}: the Run's servers."`
+	SubmittedBy *RunSubmitter `json:"submittedBy,omitempty" doc:"On GET /v1/runs/{id}: who submitted it, the API key or the person signed in. Absent for Runs submitted before luxd recorded it."`
+	Cost        *RunCostBrief `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
+	Resize      *Resize       `json:"resize,omitempty" doc:"In a resume's answer, when it asked to change resources: what it asked for and what the Run has from now on."`
 }
 
 // Resumability says whether a Run can be resumed now, and from what.
@@ -727,9 +734,10 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		stored.Placement.Pool = rp.Name
 		var prompt []spec.Attachment
 		stored, prompt = splitPromptAttachments(stored)
-		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_id, needs_host_since, prompt_attachments)
-			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now(), $9)`,
-			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID, prompt)
+		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_id, needs_host_since, prompt_attachments,
+				submitted_by_key, submitted_by_email)
+			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now(), $9, nullif($10, ''), nullif($11, ''))`,
+			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID, prompt, p.KeyID, p.Email)
 		if err != nil {
 			return err
 		}
@@ -1048,12 +1056,32 @@ func (s *Server) listRunsPage(ctx context.Context, p Principal, pg *paging, wher
 	return out, nil
 }
 
+// trailingCols scans a row's columns after the ones scanRun reads into dest.
+type trailingCols struct {
+	pgx.Row
+	dest []any
+}
+
+func (t trailingCols) Scan(d ...any) error { return t.Row.Scan(append(d, t.dest...)...) }
+
 func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) (*Run, error) {
 	var run *Run
 	err := s.db.Tx(ctx, store.Tenant(tenantID), func(tx pgx.Tx) error {
 		var err error
-		run, err = scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.id = $1`, id))
-		if err != nil || !detail {
+		if !detail {
+			run, err = scanRun(tx.QueryRow(ctx, `SELECT `+runColumns+` FROM `+runsFrom+` WHERE r.id = $1`, id))
+			return err
+		}
+		// The submitter's key as this scope sees it: RLS shows a tenant its own keys only.
+		var sub submitterRow
+		run, err = scanRun(trailingCols{tx.QueryRow(ctx, `SELECT `+runColumns+`, r.submitted_by_key, r.submitted_by_email,
+				sk.name, sk.tenant_id, coalesce(sk.revoked_at IS NOT NULL, false)
+			FROM `+runsFrom+` LEFT JOIN api_keys sk ON sk.id = r.submitted_by_key WHERE r.id = $1`, id),
+			[]any{&sub.key, &sub.email, &sub.name, &sub.keyTenant, &sub.revoked}})
+		if err != nil {
+			return err
+		}
+		if run.SubmittedBy, err = s.submitter(ctx, tx, principal(ctx), sub); err != nil {
 			return err
 		}
 		rows, err := tx.Query(ctx, `SELECT p.epoch, p.host_id, h.name, p.state, p.exit_code, p.exit_reason, p.stop_reason,
@@ -1118,6 +1146,62 @@ type RunPath struct {
 
 type runOutput struct {
 	Body *Run
+}
+
+// RunSubmitter is who submitted a Run: an API key, or a person signed in.
+type RunSubmitter struct {
+	KeyID   string `json:"keyId,omitempty"`
+	KeyName string `json:"keyName,omitempty" doc:"Absent for an operator's key when a tenant asks."`
+	Revoked bool   `json:"revoked,omitempty"`
+	Email   string `json:"email,omitempty"`
+}
+
+type submitterRow struct {
+	key, email, name, keyTenant *string
+	revoked                     bool
+}
+
+// keyName is an API key's name, and whether it is revoked, as p may see
+// them: operators see every key, a tenant its own keys only. Both the
+// Run's submittedBy and the costs summary's keys use it.
+func keyName(p Principal, keyTenant *string, name string, revoked bool) (string, bool) {
+	if p.Operator || p.TenantID != "" && keyTenant != nil && *keyTenant == p.TenantID {
+		return name, revoked
+	}
+	return "", false
+}
+
+// submitter is who submitted a Run the caller already sees. An operator
+// narrowed to a tenant reads under that tenant's RLS, which hides platform
+// keys: their name is read as the system in the same transaction, which an
+// operator may always do.
+func (s *Server) submitter(ctx context.Context, tx pgx.Tx, p Principal, r submitterRow) (*RunSubmitter, error) {
+	if r.key == nil && r.email == nil {
+		return nil, nil
+	}
+	if r.key != nil && r.name == nil && p.Operator && p.TenantID != "" {
+		if _, err := tx.Exec(ctx, `SELECT set_config('lux.system', 'on', true)`); err != nil {
+			return nil, err
+		}
+		err := tx.QueryRow(ctx, `SELECT name, tenant_id, revoked_at IS NOT NULL FROM api_keys WHERE id = $1`, *r.key).Scan(&r.name, &r.keyTenant, &r.revoked)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, `SELECT set_config('lux.system', '', true)`); err != nil {
+			return nil, err
+		}
+	}
+	sub := &RunSubmitter{}
+	if r.key != nil {
+		sub.KeyID = *r.key
+	}
+	if r.email != nil {
+		sub.Email = *r.email
+	}
+	if r.name != nil {
+		sub.KeyName, sub.Revoked = keyName(p, r.keyTenant, *r.name, r.revoked)
+	}
+	return sub, nil
 }
 
 func (s *Server) getRun(ctx context.Context, in *RunPath) (*runOutput, error) {

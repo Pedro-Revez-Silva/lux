@@ -3,8 +3,8 @@
 // the path, the query (page filters) and the global scope (scope.tsx).
 import { useMemo, useSyncExternalStore } from "react";
 
-/** Query keys that make up the global scope; links keep them across pages. */
-const SCOPE_KEYS = ["tenant", "range"] as const;
+/** Query keys that make up the global scope; links keep them across pages (cost: the Overview Cost panel's Show). */
+const SCOPE_KEYS = ["tenant", "range", "every", "cost"] as const;
 
 const listeners = new Set<() => void>();
 function notify() {
@@ -35,11 +35,14 @@ function navigate(to: string, opts: { replace?: boolean } = {}) {
   notify();
 }
 
-/** Set (or, with null, remove) query parameters on the current page. */
-export function setSearchParams(updates: Record<string, string | null>, opts: { replace?: boolean } = { replace: true }) {
+/** Set (or, with null or [], remove) query parameters on the current page; an array sets a repeated parameter. */
+export function setSearchParams(updates: Record<string, string | string[] | null>, opts: { replace?: boolean } = { replace: true }) {
   const u = new URL(window.location.href);
   for (const [k, v] of Object.entries(updates)) {
-    if (v == null || v === "") u.searchParams.delete(k);
+    if (Array.isArray(v)) {
+      u.searchParams.delete(k);
+      for (const x of v) u.searchParams.append(k, x);
+    } else if (v == null || v === "") u.searchParams.delete(k);
     else u.searchParams.set(k, v);
   }
   if (u.search === window.location.search) return;

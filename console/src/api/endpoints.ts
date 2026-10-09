@@ -1,6 +1,6 @@
 // Typed calls, one per endpoint. Lists are unwrapped from their envelope.
 import { download, request } from "./client.ts";
-import type { Artifact, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, HostSummary, LifecycleEvent, MigrateRequest, Page, PageParams, Pool, PoolCost, PoolMetrics, PoolStats, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, TenantServer, TenantServerList, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
+import type { Artifact, CostLabels, CostSummary, CostSummaryParams, Event, History, Host, HostCost, HostListParams, HostSummary, LifecycleEvent, MigrateRequest, Page, PageParams, Pool, PoolCost, PoolMetrics, PoolStats, ResumeRequest, Run, RunCost, RunListParams, Server, ServerInput, ServerLogLine, TenantServer, TenantServerList, Snapshot, Status, StreamTicket, Tenant, WhoAmI } from "./types.ts";
 
 type Sig = AbortSignal | undefined;
 /** Tenant scope of a list call: a tenant id or name, or undefined for all the key sees. */
@@ -11,7 +11,7 @@ export const api = {
   // Check a key without changing the session.
   whoamiAs: (key: string, signal?: Sig) => request<WhoAmI>("/whoami", { headers: { Authorization: `Bearer ${key}` }, signal }),
   status: (tenant: Scope, signal?: Sig) => request<Status>("/status", { tenant, signal }),
-  history: (tenant: Scope, since: string, signal?: Sig) => request<History>("/history", { tenant, query: { since }, signal }),
+  history: (tenant: Scope, since: string, signal?: Sig, res?: number) => request<History>("/history", { tenant, query: { since, res }, signal }),
 
   runs: (tenant: Scope, p: RunListParams, signal?: Sig) =>
     request<{ runs: Run[] }>("/runs", { tenant, query: { state: p.state?.join(","), resumable: p.resumable, host: p.host, label: p.label, before: p.before, limit: p.limit }, signal }).then((r) => r.runs),
@@ -26,7 +26,9 @@ export const api = {
   downloadArtifact: (a: Artifact) => download(`/artifacts/${enc(a.id)}`, a.path.split("/").pop() || a.id),
   runCost: (id: string, signal?: Sig) => request<RunCost>(`/runs/${enc(id)}/cost`, { signal }),
   costs: (tenant: Scope, p: CostSummaryParams, signal?: Sig) =>
-    request<CostSummary>("/costs", { tenant, query: { group: p.group, family: p.family, interval: p.interval, since: p.since, from: p.from, to: p.to }, signal }),
+    request<CostSummary>("/costs", { tenant, query: { group: p.group, family: p.family, nofamily: p.nofamily, interval: p.interval, top: p.top, rank: p.rank, runs: p.runs, since: p.since, from: p.from, to: p.to, label: p.label, nolabel: p.nolabel }, signal }),
+  /** The label keys on Runs with cost in the range (after the filters), most Runs first. */
+  costLabels: (tenant: Scope, p: Pick<CostSummaryParams, "since" | "label" | "nolabel">, signal?: Sig) => request<CostLabels>("/costs/labels", { tenant, query: { since: p.since, label: p.label, nolabel: p.nolabel }, signal }),
 
   stopRun: (id: string) => request<Run>(`/runs/${enc(id)}/stop`, { method: "POST" }),
   terminateRun: (id: string) => request<Run>(`/runs/${enc(id)}/terminate`, { method: "POST" }),
@@ -67,7 +69,7 @@ export const api = {
     }).then((r) => toPage(r.hosts, r)),
   host: (id: string, signal?: Sig) => request<Host>(`/hosts/${enc(id)}`, { signal }),
   hostSummary: (tenant: Scope, signal?: Sig) => request<HostSummary>("/hosts/summary", { tenant, signal }),
-  hostHistory: (id: string, since: string, signal?: Sig) => request<History>(`/hosts/${enc(id)}/history`, { query: { since }, signal }),
+  hostHistory: (id: string, since: string, signal?: Sig, res?: number) => request<History>(`/hosts/${enc(id)}/history`, { query: { since, res }, signal }),
   hostCost: (id: string, since: string, signal?: Sig) => request<HostCost>(`/hosts/${enc(id)}/cost`, { query: { since }, signal }),
   drainHost: (id: string, forceEvict = false) => request<{ draining: boolean; host: string }>(`/hosts/${enc(id)}/drain`, { method: "POST", body: { forceEvict } }),
 
@@ -83,7 +85,7 @@ export const api = {
   makePoolDefault: (tenant: Scope, name: string) => request<Pool>("/pools", { method: "POST", tenant, body: { name, isDefault: true } }),
   /** Every pool's figures over since, in one read. */
   poolStats: (tenant: Scope, since: string, signal?: Sig) => request<{ pools: PoolStats[] }>("/pools/stats", { tenant, query: { since }, signal }).then((r) => r.pools),
-  poolMetrics: (name: string, tenant: Scope, owner: PoolOwner | undefined, since: string, signal?: Sig) => request<PoolMetrics>(`/pools/${enc(name)}/metrics`, { tenant, query: { owner, since }, signal }),
+  poolMetrics: (name: string, tenant: Scope, owner: PoolOwner | undefined, since: string, signal?: Sig, res?: number) => request<PoolMetrics>(`/pools/${enc(name)}/metrics`, { tenant, query: { owner, since, res }, signal }),
   poolCost: (name: string, tenant: Scope, owner: PoolOwner | undefined, since: string, interval: "hour" | "day", signal?: Sig) =>
     request<PoolCost>(`/pools/${enc(name)}/cost`, { tenant, query: { owner, since, interval }, signal }),
   /** A page of a pool's events in a sort's order. owner: which pool of that name, where a tenant's and the platform's share it; undefined: the server's default. */

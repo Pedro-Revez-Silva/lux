@@ -4,6 +4,7 @@ import { IconChevronLeft, IconChevronRight, IconClose, IconGlobe, IconGrid, Icon
 import { liveLabel, signOut, useLiveState, useSession } from "../api/index.ts";
 import { isPlainClick, Link, usePath } from "./router.tsx";
 import { useScope } from "./scope.tsx";
+import { ScopeStep } from "./ScopeStep.tsx";
 
 interface NavItem {
   to: string;
@@ -238,6 +239,7 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
             <div className="topbar-wide">
               {operator && <TenantPicker tenants={tenants} value={scope.tenant} onChange={scope.setTenant} />}
               <TimeRangePicker value={scope.range} onChange={scope.setRange} />
+              <ScopeStep />
               <span className="topbar-sep" aria-hidden="true" />
               {densityButton}
               {themeButton}
@@ -257,6 +259,10 @@ export function Shell({ tenants, operator, title, children }: ShellProps) {
                   <div className="topbar-pop-row">
                     <span className="topbar-pop-label">Range</span>
                     <TimeRangePicker value={scope.range} onChange={scope.setRange} />
+                  </div>
+                  <div className="topbar-pop-row">
+                    <span className="topbar-pop-label">Every</span>
+                    <ScopeStep />
                   </div>
                   <div className="topbar-pop-row">
                     <span className="topbar-pop-label">Appearance</span>

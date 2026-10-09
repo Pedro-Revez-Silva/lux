@@ -313,7 +313,7 @@ scope (a notification carries nothing), so an event reaches a browser or
 
 The columns above are lifecycle times, peaks and totals. Use over time is
 kept as samples, in these tables, at three resolutions (`res`: 0 raw, 60,
-3600 seconds):
+3600 seconds; reads can also fold the hours into days, below):
 
 | Table | Written | What |
 | --- | --- | --- |
@@ -380,3 +380,15 @@ counters as rates. `/v1/history` carries the control host (`control`)
 only for an operator key reading the whole system: never for
 a tenant key, nor for an operator's `?tenant=`. See
 [Operators](operators.md#history).
+
+A read can also ask for `res=86400`, UTC days. Days are not stored: the
+read folds each day's hourly samples with the same rule per column as the
+stored rollups (a level's mean of the hours' means, a counter's maximum,
+a p95 the maximum and a p50 the mean of the hours' values, flows summed,
+states the day's last hour). So days reach back as far as hours are kept
+(`LUX_HISTORY_HOURS`, 400 days by default). As with the stored
+resolutions, a range gets the buckets that start in it; a day with no
+hourly samples is a gap (no point), and today folds the hours rolled up
+so far. A pool's metrics (`/v1/pools/{name}/metrics`) take `res=86400`
+too. Without `res`, a read still gets the finest resolution kept for its
+range, never days.

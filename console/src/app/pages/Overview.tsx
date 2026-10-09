@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { Card, formatBytes, formatCores, formatCount, formatDuration, formatElapsed, PageHeader, rangeText, SectionHeader, StatTile, STORAGE_KIND_LIST, storageKindStyle, TimeSeriesChart, type StorageKind } from "@lux/design-system";
 import { api, useNow, type Sample } from "../../api/index.ts";
+import { historyRes, stepNote, stepOfRes, stepSentence } from "../every.ts";
 import { go } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, seriesFrom, useSeries, type SeriesData } from "./common.tsx";
@@ -29,7 +30,9 @@ export function Overview() {
   const now = useNow();
   // Status counts hosts too, which have no events: it keeps polling.
   const status = useScopedQuery("status", api.status, { interval: 5000 });
-  const history = useScopedQuery(`history:${scope.range}`, (t, s) => api.history(t, scope.range, s), { interval: 30_000 });
+  const trend = scope.step("trend");
+  const res = historyRes(trend);
+  const history = useScopedQuery(`history:${scope.range}:${res}`, (t, s) => api.history(t, scope.range, s, res), { interval: 30_000 });
   const st = status.data;
   const runs = st?.runs ?? {};
   const hosts = st?.hosts ?? {};
@@ -45,13 +48,13 @@ export function Overview() {
 
   const loading = status.loading;
   const lostHosts = hosts.lost ?? 0;
-  const resolution = history.data?.resolution;
-  const interval = resolution === 0 ? "10s" : resolution === 60 ? "1m" : resolution === 3600 ? "1h" : undefined;
+  // What the samples are, as luxd answered; until then, what was asked for.
+  const step = stepNote(trend, stepOfRes(history.data?.resolution));
   const where = scope.apiTenant ? `tenant ${scope.apiTenant}` : scope.operator ? "all tenants" : "your runs and hosts";
 
   return (
     <div className="page page-wide">
-      <PageHeader title="Overview" description={<span>{where} · charts over the {rangeText(scope.range)}</span>} />
+      <PageHeader title="Overview" description={<span>{where} · charts over the {rangeText(scope.range)} · {stepSentence(scope.range, scope.every)}</span>} />
       {status.error && !st && <ErrorBlock error={status.error} onRetry={status.refetch} />}
       {status.error && st && <ErrorStrip error={`Showing stale numbers: the last refresh failed (${status.error}).`} />}
       <div className="grid grid-stats">
@@ -65,13 +68,13 @@ export function Overview() {
       </div>
       <div className="overview-grid">
         <div className="stack overview-charts">
-          <SectionHeader title="Trends" note={interval ? `${interval} samples` : undefined} />
+          <SectionHeader title="Trends" note={step} />
           <ErrorStrip error={history.error} />
           <div className="grid grid-charts">
             <Card title="Runs" subtitle="running and queued">
               <TimeSeriesChart x={runSeries.x} ys={runSeries.ys} series={[{ label: "Running", color: 1, area: true }, { label: "Queued", color: 2 }]} unit="count" />
             </Card>
-            <Card title="Started / finished" subtitle={interval ? `per ${interval} interval` : "per interval"}>
+            <Card title="Started / finished" subtitle={step}>
               <TimeSeriesChart x={flow.x} ys={flow.ys} series={[{ label: "Started", color: 1, step: true }, { label: "Finished", color: 3, step: true }]} unit="count" />
             </Card>
             <Card title="Start latency" subtitle="submit to first workload start">

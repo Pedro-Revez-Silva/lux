@@ -271,8 +271,8 @@ func (s *Server) rollupHistory(ctx context.Context) error {
 	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		for i := 1; i < len(rs); i++ {
 			from, to := rs[i-1].res, rs[i].res
-			for _, q := range []string{rollupHosts, rollupPlacements, rollupSystem, rollupPools, rollupControl, rollupControlDisks} {
-				if _, err := tx.Exec(ctx, q, from, to); err != nil {
+			for _, r := range rollups {
+				if _, err := tx.Exec(ctx, r.insert(), from, to); err != nil {
 					return err
 				}
 			}
@@ -310,49 +310,109 @@ const (
 		AND at < to_timestamp(floor(extract(epoch FROM now() - interval '1 minute') / $2::int) * $2::int)`
 )
 
+// rollup is how one history table folds a bucket of samples into one: per
+// key, each column's aggregate. The stored rollups (raw to minutes, minutes
+// to hours) and the daily view read from hours are both built from it.
+type rollup struct {
+	table string
+	keys  []string
+	cols  []string
+	aggs  []string
+	match string // rollupSince's per-key condition
+}
+
+func (r rollup) insert() string {
+	pos := len(r.keys) + 2
+	return fmt.Sprintf(`INSERT INTO %s (%s, res, at, %s)
+		SELECT %s, $2::int, %s, %s
+		FROM %s s WHERE res = $1::int AND %s
+		GROUP BY %s, %d ON CONFLICT DO NOTHING`,
+		r.table, strings.Join(r.keys, ", "), strings.Join(r.cols, ", "),
+		strings.Join(r.keys, ", "), rollupBucket, strings.Join(r.aggs, ", "),
+		r.table, fmt.Sprintf(rollupSince, r.table, r.match),
+		strings.Join(r.keys, ", "), pos)
+}
+
+// resDay is the daily resolution. It is not stored: a read folds the hourly
+// samples of each UTC day as the stored rollups fold theirs (rollup).
+const resDay = 86400
+
+// source is what a read at res selects from in place of r.table, to be
+// aliased by the caller: the table, or for resDay its hours folded into
+// UTC days. As with a stored resolution, a read gets the buckets that start
+// in its range: the days starting from fromParam through toParam (bind
+// parameters), each with all its hours. A day with no hourly samples has no
+// row; the current day folds the hours rolled up so far.
+func (r rollup) source(res int, fromParam, toParam string) string {
+	if res != resDay {
+		return r.table
+	}
+	sel := make([]string, len(r.cols))
+	for i, c := range r.cols {
+		sel[i] = r.aggs[i] + " AS " + c
+	}
+	return fmt.Sprintf(`(SELECT %s, %d AS res, to_timestamp(floor(extract(epoch FROM at) / %d) * %d) AS at, %s
+		FROM %s WHERE res = 3600 AND at >= to_timestamp(ceil(extract(epoch FROM %s::timestamptz) / %d) * %d)
+			AND at < %s::timestamptz + interval '1 day'
+		GROUP BY %s, %d)`,
+		strings.Join(r.keys, ", "), resDay, resDay, resDay, strings.Join(sel, ", "),
+		r.table, fromParam, resDay, resDay, toParam,
+		strings.Join(r.keys, ", "), len(r.keys)+2)
+}
+
+// procRollup is procRow's columns and their aggregates.
+func procRollup() (cols, aggs []string) {
+	for _, c := range (&procRow{}).columns() {
+		cols, aggs = append(cols, c.name), append(aggs, c.rollup)
+	}
+	return cols, aggs
+}
+
 var (
-	rollupHosts = `INSERT INTO host_samples (host_id, res, at, cpu_seconds, mem_bytes, disk_bytes, placements, alloc_cpus, alloc_mem, ` + procCols + `)
-		SELECT host_id, $2::int, ` + rollupBucket + `, max(cpu_seconds), avg(mem_bytes)::bigint, avg(disk_bytes)::bigint,
-			round(avg(placements))::int, avg(alloc_cpus), avg(alloc_mem)::bigint, ` + rollupProc + `
-		FROM host_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "host_samples", "d.host_id = s.host_id") + `
-		GROUP BY host_id, 3 ON CONFLICT DO NOTHING`
-	rollupPlacements = `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, cpu_seconds, mem_bytes, disk_bytes, pids, net_rx, net_tx)
-		SELECT run_id, epoch, tenant_id, $2::int, ` + rollupBucket + `, max(cpu_seconds), avg(mem_bytes)::bigint, max(disk_bytes),
-			round(avg(pids))::int, max(net_rx), max(net_tx)
-		FROM placement_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "placement_samples", "d.run_id = s.run_id AND d.epoch = s.epoch") + `
-		GROUP BY run_id, epoch, tenant_id, 5 ON CONFLICT DO NOTHING`
+	procNames, procAggs = procRollup()
+	hostRollup          = rollup{table: "host_samples", keys: []string{"host_id"},
+		cols: append([]string{"cpu_seconds", "mem_bytes", "disk_bytes", "placements", "alloc_cpus", "alloc_mem"}, procNames...),
+		aggs: append([]string{"max(cpu_seconds)", "avg(mem_bytes)::bigint", "avg(disk_bytes)::bigint",
+			"round(avg(placements))::int", "avg(alloc_cpus)", "avg(alloc_mem)::bigint"}, procAggs...),
+		match: "d.host_id = s.host_id"}
+	placementRollup = rollup{table: "placement_samples", keys: []string{"run_id", "epoch", "tenant_id"},
+		cols:  []string{"cpu_seconds", "mem_bytes", "disk_bytes", "pids", "net_rx", "net_tx"},
+		aggs:  []string{"max(cpu_seconds)", "avg(mem_bytes)::bigint", "max(disk_bytes)", "round(avg(pids))::int", "max(net_rx)", "max(net_tx)"},
+		match: "d.run_id = s.run_id AND d.epoch = s.epoch"}
 	// Runs and hosts by state are the bucket's last sample; stored bytes
 	// are levels.
-	rollupSystem = `INSERT INTO system_samples (tenant_id, res, at, runs, busy, idle, queued, started, finished, start_p50, start_p95,
-			hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem, stored_volume, stored_output, stored_artifact, stored_context)
-		SELECT tenant_id, $2::int, ` + rollupBucket + `, (array_agg(runs ORDER BY at DESC))[1], round(avg(busy))::int, round(avg(idle))::int,
-			round(avg(queued))::int, sum(started)::int, sum(finished)::int, avg(start_p50), max(start_p95),
-			(array_agg(hosts ORDER BY at DESC))[1], avg(cap_cpus), avg(cap_mem)::bigint, avg(alloc_cpus), avg(alloc_mem)::bigint,
-			avg(stored_volume)::bigint, avg(stored_output)::bigint, avg(stored_artifact)::bigint, avg(stored_context)::bigint
-		FROM system_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "system_samples", "d.tenant_id = s.tenant_id") + `
-		GROUP BY tenant_id, 3 ON CONFLICT DO NOTHING`
+	systemRollup = rollup{table: "system_samples", keys: []string{"tenant_id"},
+		cols: []string{"runs", "busy", "idle", "queued", "started", "finished", "start_p50", "start_p95",
+			"hosts", "cap_cpus", "cap_mem", "alloc_cpus", "alloc_mem", "stored_volume", "stored_output", "stored_artifact", "stored_context"},
+		aggs: []string{"(array_agg(runs ORDER BY at DESC))[1]", "round(avg(busy))::int", "round(avg(idle))::int",
+			"round(avg(queued))::int", "sum(started)::int", "sum(finished)::int", "avg(start_p50)", "max(start_p95)",
+			"(array_agg(hosts ORDER BY at DESC))[1]", "avg(cap_cpus)", "avg(cap_mem)::bigint", "avg(alloc_cpus)", "avg(alloc_mem)::bigint",
+			"avg(stored_volume)::bigint", "avg(stored_output)::bigint", "avg(stored_artifact)::bigint", "avg(stored_context)::bigint"},
+		match: "d.tenant_id = s.tenant_id"}
 	// A pool's levels are averaged, its hosts by state the bucket's last,
 	// its flows (starts, finishes, launches) summed.
-	rollupPools = `INSERT INTO pool_samples (pool_id, tenant_id, res, at, hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem, running, queued,
-			started, finished, launches, launch_failures)
-		SELECT pool_id, tenant_id, $2::int, ` + rollupBucket + `, (array_agg(hosts ORDER BY at DESC))[1], avg(cap_cpus), avg(cap_mem)::bigint,
-			avg(alloc_cpus), avg(alloc_mem)::bigint, round(avg(running))::int, round(avg(queued))::int,
-			sum(started)::int, sum(finished)::int, sum(launches)::int, sum(launch_failures)::int
-		FROM pool_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "pool_samples", "d.pool_id = s.pool_id AND d.tenant_id = s.tenant_id") + `
-		GROUP BY pool_id, tenant_id, 4 ON CONFLICT DO NOTHING`
+	poolRollup = rollup{table: "pool_samples", keys: []string{"pool_id", "tenant_id"},
+		cols: []string{"hosts", "cap_cpus", "cap_mem", "alloc_cpus", "alloc_mem", "running", "queued",
+			"started", "finished", "launches", "launch_failures"},
+		aggs: []string{"(array_agg(hosts ORDER BY at DESC))[1]", "avg(cap_cpus)", "avg(cap_mem)::bigint",
+			"avg(alloc_cpus)", "avg(alloc_mem)::bigint", "round(avg(running))::int", "round(avg(queued))::int",
+			"sum(started)::int", "sum(finished)::int", "sum(launches)::int", "sum(launch_failures)::int"},
+		match: "d.pool_id = s.pool_id AND d.tenant_id = s.tenant_id"}
 	// The control host, per luxd process (on its machine): CPU a counter,
 	// memory and connections levels, totals (cores, memory, disk) their
 	// maximum; the database size and disk use the bucket's mean; luxd's
 	// process as the hosts' runner.
-	rollupControl = `INSERT INTO control_samples (instance, hostname, res, at, cpu_seconds, cpus, mem_bytes, mem_total, db_bytes, db_connections, ` + procCols + `)
-		SELECT instance, hostname, $2::int, ` + rollupBucket + `, max(cpu_seconds), max(cpus), avg(mem_bytes)::bigint, max(mem_total),
-			avg(db_bytes)::bigint, round(avg(db_connections))::int, ` + rollupProc + `
-		FROM control_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "control_samples", "d.instance = s.instance") + `
-		GROUP BY instance, hostname, 4 ON CONFLICT DO NOTHING`
-	rollupControlDisks = `INSERT INTO control_disk_samples (instance, path, res, at, used_bytes, free_bytes, total_bytes)
-		SELECT instance, path, $2::int, ` + rollupBucket + `, avg(used_bytes)::bigint, avg(free_bytes)::bigint, max(total_bytes)
-		FROM control_disk_samples s WHERE res = $1::int AND ` + fmt.Sprintf(rollupSince, "control_disk_samples", "d.instance = s.instance AND d.path = s.path") + `
-		GROUP BY instance, path, 4 ON CONFLICT DO NOTHING`
+	controlRollup = rollup{table: "control_samples", keys: []string{"instance", "hostname"},
+		cols: append([]string{"cpu_seconds", "cpus", "mem_bytes", "mem_total", "db_bytes", "db_connections"}, procNames...),
+		aggs: append([]string{"max(cpu_seconds)", "max(cpus)", "avg(mem_bytes)::bigint", "max(mem_total)",
+			"avg(db_bytes)::bigint", "round(avg(db_connections))::int"}, procAggs...),
+		match: "d.instance = s.instance"}
+	controlDiskRollup = rollup{table: "control_disk_samples", keys: []string{"instance", "path"},
+		cols:  []string{"used_bytes", "free_bytes", "total_bytes"},
+		aggs:  []string{"avg(used_bytes)::bigint", "avg(free_bytes)::bigint", "max(total_bytes)"},
+		match: "d.instance = s.instance AND d.path = s.path"}
+
+	rollups = []rollup{hostRollup, placementRollup, systemRollup, poolRollup, controlRollup, controlDiskRollup}
 )
 
 // Sample is one point of history. Which fields are set depends on what it
@@ -450,7 +510,7 @@ func (p *procRow) dest() []any {
 	return d
 }
 
-// procColumnSQL is procCols, rollupProc and a placeholder list, from
+// procColumnSQL is procCols and a placeholder list, from
 // procRow.columns.
 func procColumnSQL(f func(i int, c procColumn) string) string {
 	var out []string
@@ -461,8 +521,7 @@ func procColumnSQL(f func(i int, c procColumn) string) string {
 }
 
 var (
-	procCols   = procColumnSQL(func(_ int, c procColumn) string { return c.name })
-	rollupProc = procColumnSQL(func(_ int, c procColumn) string { return c.rollup })
+	procCols = procColumnSQL(func(_ int, c procColumn) string { return c.name })
 	// The raw sample inserts, with the process columns' placeholders.
 	insertHostSample = `INSERT INTO host_samples (host_id, res, at, cpu_seconds, mem_bytes, disk_bytes, placements, alloc_cpus, alloc_mem, ` + procCols + `)
 		SELECT $1, 0, now(), $2, $3, $4, count(*), coalesce(sum((pl.resources->>'cpus')::float8), 0), coalesce(sum((pl.resources->>'memory')::int8), 0),
@@ -545,7 +604,7 @@ type HistoryQuery struct {
 	Since string `query:"since" doc:"How far back from now: a Go duration or a number of days (7d). Default 1h." example:"24h"`
 	From  string `query:"from" doc:"The start (RFC 3339), instead of since."`
 	To    string `query:"to" doc:"The end (RFC 3339); default now."`
-	Res   string `query:"res" doc:"Resolution in seconds: 0 (raw), 60 or 3600. Default: the finest kept for the range."`
+	Res   string `query:"res" doc:"Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."`
 }
 
 // historyRange resolves a HistoryQuery: since (default 1h) or from/to, and
@@ -572,10 +631,10 @@ func (s *Server) historyRange(q HistoryQuery) (from, to time.Time, res int, err 
 	res = s.pickResolution(from, to)
 	switch v := q.Res; v {
 	case "":
-	case "0", "60", "3600":
+	case "0", "60", "3600", "86400":
 		fmt.Sscan(v, &res)
 	default:
-		return from, to, 0, errf(http.StatusBadRequest, "bad_request", "res must be 0, 60 or 3600")
+		return from, to, 0, errf(http.StatusBadRequest, "bad_request", "res must be 0, 60, 3600 or 86400")
 	}
 	return from, to, res, nil
 }
@@ -654,7 +713,7 @@ func (s *Server) hostHistory(ctx context.Context, in *hostHistoryInput) (*histor
 			}
 		}
 		rows, err := tx.Query(ctx, `SELECT at, cpu_seconds, mem_bytes, disk_bytes, placements, alloc_cpus, alloc_mem, `+procCols+`
-			FROM host_samples WHERE host_id = $1 AND res = $2 AND at BETWEEN $3 AND $4 ORDER BY at`, id, res, from, to)
+			FROM `+hostRollup.source(res, "$3", "$4")+` s WHERE host_id = $1 AND res = $2 AND at BETWEEN $3 AND $4 ORDER BY at`, id, res, from, to)
 		if err != nil {
 			return err
 		}
@@ -698,7 +757,7 @@ func (s *Server) runHistory(ctx context.Context, in *runHistoryInput) (*historyO
 			return err
 		}
 		rows, err := tx.Query(ctx, `SELECT epoch, at, cpu_seconds, mem_bytes, disk_bytes, pids, net_rx, net_tx
-			FROM placement_samples WHERE run_id = $1 AND res = $2 AND at BETWEEN $3 AND $4 ORDER BY epoch, at`,
+			FROM `+placementRollup.source(res, "$3", "$4")+` s WHERE run_id = $1 AND res = $2 AND at BETWEEN $3 AND $4 ORDER BY epoch, at`,
 			in.ID, res, from, to)
 		if err != nil {
 			return err
@@ -739,7 +798,7 @@ func (s *Server) systemHistory(ctx context.Context, in *HistoryQuery) (*historyO
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT at, runs, busy, idle, queued, started, finished, start_p50, start_p95,
 				hosts, cap_cpus, cap_mem, alloc_cpus, alloc_mem, stored_volume, stored_output, stored_artifact, stored_context
-			FROM system_samples WHERE tenant_id = $1 AND res = $2 AND at BETWEEN $3 AND $4 ORDER BY at`, p.TenantID, res, from, to)
+			FROM `+systemRollup.source(res, "$3", "$4")+` s WHERE tenant_id = $1 AND res = $2 AND at BETWEEN $3 AND $4 ORDER BY at`, p.TenantID, res, from, to)
 		if err != nil {
 			return err
 		}

@@ -1,7 +1,8 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { measuredAxisSize } from "./axisSize.ts";
+import { barRange, barSegments, barStep, bucketText, stackData, stackTotal, type BarSegment } from "./chartData.ts";
 import { formatClock, formatTimestamp, formatUnit, type Unit } from "./format.ts";
 import { niceScale, niceSplits } from "./scale.ts";
 import { cssVar, useDensity, useTheme } from "./theme.ts";
@@ -41,8 +42,19 @@ export interface TimeSeriesChartProps {
    * and shows as missing in the tooltip, which also lists the total.
    */
   stacked?: boolean;
+  /**
+   * Draw each x as a bar for the bucket starting there (an amount per
+   * bucket, such as cost per hour), not a line through the points. Buckets
+   * are as wide as the smallest step of x. With `stacked` the bars stack. A
+   * missing value draws no bar: an empty bucket, never a zero.
+   */
+  bars?: boolean;
   /** ISO 4217 code for unit "money". */
   currency?: string;
+  /** Extra text at the legend's right end (what a bar is, say). */
+  legendNote?: ReactNode;
+  /** Text after a legend entry's label (its total, say), by series index. */
+  legendValues?: (ReactNode | undefined)[];
   className?: string;
 }
 
@@ -54,6 +66,10 @@ export interface ChartMark {
 const MAX_SERIES = 8;
 /** Fill of a stacked band: stronger than a line's 10% wash, so neighbouring bands read apart. */
 const STACK_ALPHA = 0.28;
+/** A bar's share of its bucket, and its widest, in CSS px. */
+const BAR_SIZE: [number, number, number] = [0.78, 56, 1];
+// uPlot's BarsPathBuilderFacetUnit.ScaleValue: a const enum, which isolated modules cannot read.
+const SCALE_VALUE = 1 as uPlot.Series.BarsPathBuilderFacetUnit;
 
 /** The --chart-h token as a number, tracking density and viewport changes. */
 function useChartHeight(): number {
@@ -90,24 +106,18 @@ interface Hover {
   left: number;
   top: number;
   plotLeft: number;
+  /** Bars: the hovered bucket's left edge and width in the plot, CSS px. */
+  bucket?: { left: number; width: number; top: number; height: number };
 }
 
-/** uPlot line chart: crosshair + one tooltip for every series, unit-aware axes, theme-aware, resizes. */
-/** Running sums of the visible series, bottom first; hidden ones keep their raw values (they are not drawn). */
-function stackData(ys: (number | null | undefined)[][], hidden: Set<number>, n: number): (number | null)[][] {
-  const acc: (number | null)[] = new Array(n).fill(null);
-  return ys.map((y, si) => {
-    if (hidden.has(si)) return y.map((v) => v ?? null);
-    return acc.map((a, i) => {
-      const v = y[i];
-      const next = v == null ? a : (a ?? 0) + v;
-      acc[i] = next;
-      return next;
-    });
-  });
+/** The x/y data uPlot plots: stacked sums for bands, each bar's top for bars, else the values. */
+function plotData(x: number[], ys: (number | null | undefined)[][], hidden: Set<number>, stacked: boolean | undefined, segments: BarSegment[] | null): uPlot.AlignedData {
+  if (segments) return [x, ...segments.map((s) => s.y1)] as uPlot.AlignedData;
+  return [x, ...(stacked ? stackData(ys, hidden, x.length) : ys)] as uPlot.AlignedData;
 }
 
-export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heightProp, zeroBase = true, yMax, legend, marks, stacked, currency, className }: TimeSeriesChartProps) {
+/** uPlot line or bar chart: crosshair + one tooltip for every series, unit-aware axes, theme-aware, resizes. */
+export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heightProp, zeroBase = true, yMax, legend, marks, stacked, bars, currency, legendNote, legendValues, className }: TimeSeriesChartProps) {
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
   const { resolved } = useTheme();
@@ -123,7 +133,11 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
   const seriesKey = JSON.stringify(seriesProp);
   const series = useMemo(() => seriesProp, [seriesKey]);
   const colors = useMemo(() => series.map((s, i) => seriesColor(s, i)), [series, resolved]);
-  const data = useMemo(() => [x, ...(stacked ? stackData(ys, hidden, x.length) : ys)] as uPlot.AlignedData, [x, ys, stacked, hidden]);
+  const segments = useMemo(() => (bars ? barSegments(ys, hidden, x.length, !!stacked) : null), [bars, ys, hidden, x.length, stacked]);
+  // The bar paths read their bottoms here, so new data needs no rebuild.
+  const segmentsRef = useRef(segments);
+  segmentsRef.current = segments;
+  const data = useMemo(() => plotData(x, ys, hidden, stacked, segments), [x, ys, stacked, hidden, segments]);
   const fmt = (v: number | null | undefined) => formatUnit(v, unit, currency);
 
   useLayoutEffect(() => {
@@ -139,6 +153,14 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
     // one a whole step at or below the smallest, so no point sits outside.
     const nice = zeroBase && yMax == null;
     let step = 0;
+    const barPaths = (si: number) =>
+      uPlot.paths.bars!({
+        size: BAR_SIZE,
+        disp: {
+          y0: { unit: SCALE_VALUE, values: () => segmentsRef.current?.[si]?.y0 ?? [] },
+          y1: { unit: SCALE_VALUE, values: () => segmentsRef.current?.[si]?.y1 ?? [] },
+        },
+      });
 
     const opts: uPlot.Options = {
       width: el.clientWidth || 300,
@@ -146,14 +168,19 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
       padding: [8, 12, 0, 0],
       cursor: {
         y: false,
-        points: { size: 8, width: 2, fill: (u, i) => (u.series[i]!.stroke as () => string)(), stroke: () => cssVar("--bg-surface") },
+        points: bars ? { show: false } : { size: 8, width: 2, fill: (u, i) => (u.series[i]!.stroke as () => string)(), stroke: () => cssVar("--bg-surface") },
         drag: { x: false, y: false, setScale: false },
       },
       legend: { show: false },
       scales: {
-        x: { time: true },
+        // Bars: half a bucket of room at either end, so the edge bars are whole.
+        x: { time: true, range: bars ? (u, min, max) => barRange(u.data[0] as number[]) ?? [min, max] : undefined },
         y: {
           range: (_u, min, max) => {
+            if (bars) {
+              min = Math.min(min, 0);
+              max = Math.max(max, 0);
+            }
             if (!nice) return [zeroBase ? 0 : min, yMax ?? (max === 0 ? 1 : max * 1.05)];
             const s = niceScale(min, max, Math.max(2, Math.floor(height / 50)));
             step = s.step;
@@ -188,21 +215,33 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
       ],
       series: [
         {},
-        ...series.map((s, i) => ({
-          label: s.label,
-          stroke: colors[i],
-          width: 2,
-          dash: s.dashed ? [4, 4] : undefined,
-          fill: stacked ? hexWithAlpha(colors[i]!, STACK_ALPHA) : s.area ? hexWithAlpha(colors[i]!, 0.1) : undefined,
-          paths: s.step ? uPlot.paths.stepped!({ align: 1 }) : undefined,
-          // A value with no neighbour draws no line: mark it with a dot.
-          points: { show: false, filter: isolatedPoints, size: 6, width: 0, fill: colors[i] },
-          spanGaps: false,
-          show: !hidden.has(i),
-        })),
+        ...series.map((s, i) =>
+          bars
+            ? {
+                label: s.label,
+                stroke: colors[i],
+                fill: colors[i],
+                width: 0,
+                paths: barPaths(i),
+                points: { show: false },
+                show: !hidden.has(i),
+              }
+            : {
+                label: s.label,
+                stroke: colors[i],
+                width: 2,
+                dash: s.dashed ? [4, 4] : undefined,
+                fill: stacked ? hexWithAlpha(colors[i]!, STACK_ALPHA) : s.area ? hexWithAlpha(colors[i]!, 0.1) : undefined,
+                paths: s.step ? uPlot.paths.stepped!({ align: 1 }) : undefined,
+                // A value with no neighbour draws no line: mark it with a dot.
+                points: { show: false, filter: isolatedPoints, size: 6, width: 0, fill: colors[i] },
+                spanGaps: false,
+                show: !hidden.has(i),
+              },
+        ),
       ],
-      // Each visible band's fill is clipped to the one below it.
-      bands: stacked ? stackBands(series.length, hidden) : undefined,
+      // Each visible band's fill is clipped to the one below it; bars carry their own bottoms.
+      bands: stacked && !bars ? stackBands(series.length, hidden) : undefined,
       hooks: {
         draw: [
           (u) => {
@@ -234,8 +273,16 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
               setHover(null);
               return;
             }
+            const plotLeft = u.bbox.left / uPlot.pxRatio;
+            let bucket: Hover["bucket"];
+            if (bars) {
+              const xs = u.data[0] as number[];
+              const w = barStep(xs);
+              const l = u.valToPos(xs[idx]! - w / 2, "x");
+              bucket = { left: l + plotLeft, width: u.valToPos(xs[idx]! + w / 2, "x") - l, top: u.bbox.top / uPlot.pxRatio, height: u.bbox.height / uPlot.pxRatio };
+            }
             // cursor.left is relative to the plot area, which starts after the measured y axis.
-            setHover({ idx, left: u.cursor.left ?? 0, top: u.cursor.top ?? 0, plotLeft: u.bbox.left / uPlot.pxRatio });
+            setHover({ idx, left: u.cursor.left ?? 0, top: u.cursor.top ?? 0, plotLeft, bucket });
           },
         ],
       },
@@ -256,7 +303,7 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
       plot.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolved, height, unit, currency, zeroBase, yMax, series, colors, hidden, stacked, x.length < 2]);
+  }, [resolved, height, unit, currency, zeroBase, yMax, series, colors, hidden, stacked, bars, x.length < 2]);
 
   useEffect(() => {
     plot.current?.setData(data);
@@ -278,7 +325,7 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
   const flip = hover ? hover.left > width * 0.6 : false;
 
   return (
-    <div className={["tschart", className ?? ""].join(" ").trim()}>
+    <div className={["tschart", bars ? "tschart-bars" : "", className ?? ""].join(" ").trim()}>
       {x.length < 2 ? (
         <div className="tschart-empty muted" style={{ height }}>
           {x.length === 0 ? "No samples in this range." : "Waiting for a second sample."}
@@ -286,9 +333,10 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
       ) : (
         <div className="tschart-plot" ref={host} style={{ height }} />
       )}
+      {hover?.bucket && <div className="tschart-bucket" style={{ left: hover.bucket.left, width: hover.bucket.width, top: hover.bucket.top, height: hover.bucket.height }} aria-hidden="true" />}
       {hover && x[hover.idx] != null && (
         <div className={flip ? "tschart-tip is-left" : "tschart-tip"} style={{ left: hover.left + hover.plotLeft, top: 8 }}>
-          <div className="tschart-tip-time mono">{formatTimestamp(x[hover.idx]! * 1000)}</div>
+          <div className="tschart-tip-time mono">{bars ? bucketText(x[hover.idx]!, barStep(x)) : formatTimestamp(x[hover.idx]! * 1000)}</div>
           {series.map((s, i) =>
             hidden.has(i) ? null : (
               <div className="tschart-tip-row" key={s.label}>
@@ -307,14 +355,17 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
           )}
         </div>
       )}
-      {showLegend && (
+      {(showLegend || legendNote) && (
         <div className="tschart-legend">
-          {series.map((s, i) => (
-            <button key={s.label} type="button" className={hidden.has(i) ? "tschart-legend-item is-hidden" : "tschart-legend-item"} onClick={() => toggle(i)} aria-pressed={!hidden.has(i)}>
-              <span className="tschart-key" style={{ background: colors[i], borderStyle: s.dashed ? "dashed" : undefined }} />
-              {s.label}
-            </button>
-          ))}
+          {showLegend &&
+            series.map((s, i) => (
+              <button key={s.label} type="button" className={hidden.has(i) ? "tschart-legend-item is-hidden" : "tschart-legend-item"} onClick={() => toggle(i)} aria-pressed={!hidden.has(i)}>
+                <span className="tschart-key" style={{ background: colors[i], borderStyle: s.dashed ? "dashed" : undefined }} />
+                <span className="tschart-legend-label">{s.label}</span>
+                {legendValues?.[i] != null && <span className="tschart-legend-value num">{legendValues[i]}</span>}
+              </button>
+            ))}
+          {legendNote && <span className="tschart-legend-note">{legendNote}</span>}
         </div>
       )}
     </div>
@@ -324,16 +375,6 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
 function stackBands(n: number, hidden: Set<number>): uPlot.Band[] {
   const visible = Array.from({ length: n }, (_, i) => i).filter((i) => !hidden.has(i));
   return visible.slice(1).map((upper, k) => ({ series: [upper + 1, visible[k]! + 1] as [number, number] }));
-}
-
-/** The sum at one x of the visible series; null when none has a value there. */
-function stackTotal(ys: (number | null | undefined)[][], hidden: Set<number>, idx: number): number | null {
-  let total: number | null = null;
-  ys.forEach((y, i) => {
-    const v = y[idx];
-    if (!hidden.has(i) && v != null) total = (total ?? 0) + v;
-  });
-  return total;
 }
 
 /** Indices of values with no value on either side: a line or band cannot show them. */

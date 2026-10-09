@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Badge, Button, Card, Code, ConfirmDialog, formatBytes, formatCores, formatDuration, formatRelative, formatTimestamp, formatTimestampZone, hostDisplayState, IdChip, KeyValue, PageHeader, RelativeTime, StatePill, Table, TimeSeriesChart, Timeline, useToast, type Column } from "@lux/design-system";
 import { api, errorText, useNow, useQuery, type Host, type HostPlacement, type Run } from "../../api/index.ts";
+import { historyRes, stepNote, stepOfRes } from "../every.ts";
 import { go, Link } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, poolPath, RunLink, RunNameLink, runColumns, runPath, useSeries } from "./common.tsx";
@@ -14,7 +15,10 @@ export function HostPage({ id }: { id: string }) {
   const now = useNow();
   const toast = useToast();
   const host = useQuery(`host:${id}`, (s) => api.host(id, s), { interval: 5000 });
-  const history = useQuery(`host-history:${id}:${scope.range}`, (s) => api.hostHistory(id, scope.range, s), { interval: 30_000 });
+  const trend = scope.step("trend");
+  const res = historyRes(trend);
+  const history = useQuery(`host-history:${id}:${scope.range}:${res}`, (s) => api.hostHistory(id, scope.range, s, res), { interval: 30_000 });
+  const step = stepNote(trend, stepOfRes(history.data?.resolution));
   // By host id: tenant-independent, and an operator sees every tenant's runs there.
   const recent = useScopedQuery(`host-runs:${id}`, (t, s) => api.runs(t, { host: id, limit: 50 }, s), { interval: 15_000, live: 60_000 });
   const [drainOpen, setDrainOpen] = useState(false);
@@ -125,16 +129,16 @@ export function HostPage({ id }: { id: string }) {
 
       <ErrorStrip error={history.error} />
       <div className="grid grid-charts">
-        <Card title="CPU" subtitle="used cores vs capacity, and allocated">
+        <Card title="CPU" subtitle={`used cores vs capacity, and allocated · ${step}`}>
           <TimeSeriesChart x={cpu.x} ys={cpu.ys} series={[{ label: "Used", color: 1, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }, { label: "Allocated", color: 2 }]} unit="cores" />
         </Card>
-        <Card title="Memory" subtitle="used vs capacity, and allocated">
+        <Card title="Memory" subtitle={`used vs capacity, and allocated · ${step}`}>
           <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Used", color: 7, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }, { label: "Allocated", color: 2 }]} unit="bytes" />
         </Card>
-        <Card title="Disk" subtitle="used vs capacity">
+        <Card title="Disk" subtitle={`used vs capacity · ${step}`}>
           <TimeSeriesChart x={disk.x} ys={disk.ys} series={[{ label: "Used", color: 4, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="bytes" />
         </Card>
-        <Card title="Placements" subtitle="live placements vs run capacity">
+        <Card title="Placements" subtitle={`live placements vs run capacity · ${step}`}>
           <TimeSeriesChart x={placements.x} ys={placements.ys} series={[{ label: "Placements", color: 3, step: true, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="count" />
         </Card>
         <ProcessCards title="Runner" what="the lux-runner process, not podman or its containers" processes={runners} />

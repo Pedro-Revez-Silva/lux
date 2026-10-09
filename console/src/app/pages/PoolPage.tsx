@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { Badge, Card, compareMoney, EmptyState, familyDisplay, formatBytes, formatClock, formatCores, formatCount, formatElapsed, KeyValue, ListPriceNote, Money, MoneyList, PageHeader, rangeText, SectionHeader, StatTile, Table, Tabs, TimeSeriesChart, useNow, type Column } from "@lux/design-system";
 import { api, type Pool, type PoolCost, type PoolMetrics, type PoolOwner } from "../../api/index.ts";
+import { costInterval, costRange, historyRes, stepNote, stepOfRes } from "../every.ts";
 import { go, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostPath, labelsText, PageSkeleton, RunLink, RunNameLink, runPath } from "./common.tsx";
@@ -30,7 +31,9 @@ export function PoolPage({ name }: { name: string }) {
   const pool: Pool | undefined = matches[0];
   const ambiguous = scope.showTenant && matches.length > 1;
   const poolOwner: PoolOwner | undefined = pool ? (pool.platform ? "platform" : "tenant") : owner;
-  const metrics = useScopedQuery(`pool-metrics:${name}:${poolOwner}:${scope.range}`, (t, s) => api.poolMetrics(name, t, poolOwner, scope.range, s), { interval: 30_000, enabled: pool != null && !ambiguous });
+  const trend = scope.step("trend");
+  const res = historyRes(trend);
+  const metrics = useScopedQuery(`pool-metrics:${name}:${poolOwner}:${scope.range}:${res}`, (t, s) => api.poolMetrics(name, t, poolOwner, scope.range, s, res), { interval: 30_000, enabled: pool != null && !ambiguous });
 
   if (pools.error && !pools.data) {
     return (
@@ -99,7 +102,7 @@ export function PoolPage({ name }: { name: string }) {
       />
       <ErrorStrip error={pools.error ?? metrics.error} />
       <PoolTiles pool={pool} metrics={metrics.data} loading={metrics.loading} />
-      {tab === "metrics" && <PoolCharts metrics={metrics.data} />}
+      {tab === "metrics" && <PoolCharts metrics={metrics.data} step={stepNote(trend, stepOfRes(metrics.data?.resolution))} />}
       {tab === "cost" && <PoolCostTab name={name} owner={poolOwner} operatorView={scope.operator && !scope.apiTenant} />}
       {tab === "hosts" && <PoolHostsTab pool={pool} />}
       {tab === "events" && showEvents && <PoolEvents name={name} owner={poolOwner} />}
@@ -111,16 +114,11 @@ export function PoolPage({ name }: { name: string }) {
   );
 }
 
-/** Costs are hourly: the 1h range reads 6h. */
-function costSince(range: string): string {
-  return range === "1h" ? "6h" : range;
-}
-
 function PoolTiles({ pool, metrics, loading }: { pool: Pool; metrics?: PoolMetrics; loading: boolean }) {
   const scope = useScope();
   const clock = useNow();
   const n = metrics?.now;
-  const since = costSince(scope.range);
+  const since = costRange(scope.range);
   const cost = useScopedQuery(`pool-cost-tile:${pool.id}:${since}`, (t, s) => api.poolCost(pool.name, t, pool.platform ? "platform" : "tenant", since, "hour", s), { interval: 60_000 });
   return (
     <div className="grid grid-stats">
@@ -151,7 +149,7 @@ function poolSeries(m: PoolMetrics | undefined, pick: ((s: PoolMetrics["samples"
   return { x, ys };
 }
 
-function PoolCharts({ metrics }: { metrics?: PoolMetrics }) {
+function PoolCharts({ metrics, step }: { metrics?: PoolMetrics; step: string }) {
   const m = metrics;
   const s = useMemo(
     () => ({
@@ -164,7 +162,6 @@ function PoolCharts({ metrics }: { metrics?: PoolMetrics }) {
     }),
     [m],
   );
-  const every = m?.resolution === 0 ? "sample" : m?.resolution === 60 ? "minute" : m?.resolution === 3600 ? "hour" : "sample";
   if (m && m.samples.length === 0) {
     return (
       <Card>
@@ -175,22 +172,22 @@ function PoolCharts({ metrics }: { metrics?: PoolMetrics }) {
   const cut = m?.historyFrom && Date.parse(m.historyFrom) > Date.parse(m.from) ? ` · history since ${formatClock(m.historyFrom)}` : "";
   return (
     <div className="grid grid-charts">
-      <Card title="CPU" subtitle={`allocated vs capacity${cut}`}>
+      <Card title="CPU" subtitle={`allocated vs capacity · ${step}${cut}`}>
         <TimeSeriesChart x={s.cpu.x} ys={s.cpu.ys} series={[{ label: "Allocated", color: 1, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true, step: true }]} unit="cores" />
       </Card>
-      <Card title="Memory" subtitle={`allocated vs capacity${cut}`}>
+      <Card title="Memory" subtitle={`allocated vs capacity · ${step}${cut}`}>
         <TimeSeriesChart x={s.mem.x} ys={s.mem.ys} series={[{ label: "Allocated", color: 7, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true, step: true }]} unit="bytes" />
       </Card>
-      <Card title="Hosts" subtitle="by state">
+      <Card title="Hosts" subtitle={`by state · ${step}`}>
         <TimeSeriesChart x={s.hosts.x} ys={s.hosts.ys} series={[{ label: "Ready", color: 3, step: true, area: true }, { label: "Provisioning", color: 1, step: true }, { label: "Draining", color: 4, step: true }, { label: "Lost", color: 8, step: true }]} unit="count" />
       </Card>
-      <Card title="Runs" subtitle="running and queued">
+      <Card title="Runs" subtitle={`running and queued · ${step}`}>
         <TimeSeriesChart x={s.runs.x} ys={s.runs.ys} series={[{ label: "Running", color: 1, area: true }, { label: "Queued", color: 2 }]} unit="count" />
       </Card>
-      <Card title="Started / finished" subtitle={`per ${every}`}>
+      <Card title="Started / finished" subtitle={step}>
         <TimeSeriesChart x={s.flow.x} ys={s.flow.ys} series={[{ label: "Started", color: 1, step: true }, { label: "Finished", color: 3, step: true }]} unit="count" />
       </Card>
-      <Card title="Launches" subtitle={`launched vs failed, per ${every}`}>
+      <Card title="Launches" subtitle={`launched vs failed · ${step}`}>
         <TimeSeriesChart x={s.launch.x} ys={s.launch.ys} series={[{ label: "Launched", color: 3, step: true }, { label: "Launch failed", color: 8, step: true }]} unit="count" />
       </Card>
     </div>
@@ -268,9 +265,9 @@ interface HostTimeRow {
 
 function PoolCostTab({ name, owner, operatorView }: { name: string; owner?: PoolOwner; operatorView: boolean }) {
   const scope = useScope();
-  // 30d reads daily.
-  const since = costSince(scope.range);
-  const interval: "hour" | "day" = since === "30d" ? "day" : "hour";
+  const step = scope.step("cost");
+  const since = costRange(scope.range);
+  const interval = costInterval(step);
   const q = useScopedQuery(`pool-cost:${name}:${owner}:${since}:${interval}`, (t, s) => api.poolCost(name, t, owner, since, interval, s), { interval: 60_000 });
   const charts = useMemo(() => familyCharts(q.data), [q.data]);
   const idle = useMemo(() => hostTimeCharts(q.data), [q.data]);
@@ -293,7 +290,7 @@ function PoolCostTab({ name, owner, operatorView }: { name: string; owner?: Pool
   const top = (q.data?.topRuns ?? []).slice().sort((a, b) => a.currency.localeCompare(b.currency) || compareMoney(b.amount, a.amount));
   return (
     <div className="stack">
-      <SectionHeader title="Cost" note={<span className="row">{interval === "hour" ? "hourly" : "daily"} over the last {since}<ListPriceNote /></span>} />
+      <SectionHeader title="Cost" note={<span className="row">{stepNote(step)} over the last {since}<ListPriceNote /></span>} />
       <ErrorStrip error={q.error} />
       <div className="grid grid-2">
         {charts.length === 0 ? (
@@ -302,7 +299,7 @@ function PoolCostTab({ name, owner, operatorView }: { name: string; owner?: Pool
           </Card>
         ) : (
           charts.map((c) => (
-            <Card key={c.currency} title={charts.length > 1 ? `Cost by family · ${c.currency}` : "Cost by family"} subtitle={`stacked, per ${interval}`}>
+            <Card key={c.currency} title={charts.length > 1 ? `Cost by family · ${c.currency}` : "Cost by family"} subtitle={`stacked, ${stepNote(step)}`}>
               <TimeSeriesChart x={c.x} ys={c.ys} series={c.series} unit="money" currency={c.currency} stacked legend />
             </Card>
           ))

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -134,6 +136,78 @@ func TestRollupHistory(t *testing.T) {
 	}
 	if len(hours) != 1 || !hours[0].at.Equal(hour) || hours[0].start != 4 || hours[0].cpu != 30 || hours[0].mem != 250 {
 		t.Fatalf("hour rollup: %+v", hours)
+	}
+}
+
+// The stored minute and hour rollups of a Run's placement and of a pool,
+// read back through the API: net_rx a counter (the bucket's maximum), pids
+// and running levels (the rounded mean), pool starts a flow (the sum).
+func TestRollupPlacementAndPool(t *testing.T) {
+	s := testServer(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state) VALUES ('r1', 't1', '{}', 'running')`)
+	namedPools(t, s, "p", "blue")
+	key := ids.Secret("luxk")
+	execSQL(t, s, ctx, `INSERT INTO api_keys (id, tenant_id, name, key_hash, scopes) VALUES ('ko', NULL, 'o', $1, ARRAY['operator'])`, ids.Hash(key))
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	// Two raw samples in each of two minutes: net_rx climbing, pids 1, 2, 4, 4; running 1, 2, 3, 3.
+	for i, off := range []time.Duration{0, 30 * time.Second, time.Minute, 90 * time.Second} {
+		execSQL(t, s, ctx, `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, cpu_seconds, mem_bytes, pids, net_rx, net_tx)
+			VALUES ('r1', 1, 't1', 0, $1, $2, 100, $3, $4, 0)`, hour.Add(off), float64(i), []int{1, 2, 4, 4}[i], int64(1000*(i+1)))
+		execSQL(t, s, ctx, `INSERT INTO pool_samples (pool_id, tenant_id, res, at, running, started) VALUES ('blue', '', 0, $1, $2, $3)`,
+			hour.Add(off), []int{1, 2, 3, 3}[i], i+1)
+	}
+	if err := s.rollupHistory(ctx); err != nil {
+		t.Fatal(err)
+	}
+	q := "from=" + url.QueryEscape(hour.Add(-time.Second).Format(time.RFC3339)) + "&to=" + url.QueryEscape(hour.Add(time.Hour).Format(time.RFC3339))
+	for _, c := range []struct {
+		res  string
+		want []string
+	}{
+		// Minutes: pids round(1.5) = 2 and 4; the second minute's net_rx 4000 over 60s from 2000.
+		{"60", []string{"pids=2 rx=-", fmt.Sprintf("pids=4 rx=%g", 2000.0/60)}},
+		// The hour, from the minutes: pids round(3) = 3, net_rx the maximum.
+		{"3600", []string{"pids=3 rx=-"}},
+	} {
+		h := historyRequest(t, s, key, "/v1/runs/r1/history?res="+c.res+"&"+q)
+		var got []string
+		for _, sm := range h.Samples {
+			rx := "-"
+			if sm.NetRxRate != nil {
+				rx = fmt.Sprintf("%g", *sm.NetRxRate)
+			}
+			got = append(got, fmt.Sprintf("pids=%d rx=%s", *sm.Pids, rx))
+		}
+		if fmt.Sprint(got) != fmt.Sprint(c.want) {
+			t.Errorf("run res %s: %v, want %v", c.res, got, c.want)
+		}
+	}
+	// The hour's net_rx is the stored maximum, 4000.
+	if rx := queryOne[int64](t, s, `SELECT net_rx FROM placement_samples WHERE res = 3600`); rx != 4000 {
+		t.Errorf("hour net_rx %d, want 4000", rx)
+	}
+	var pool struct {
+		Samples []PoolSample `json:"samples"`
+	}
+	for _, c := range []struct {
+		res     string
+		running []int
+		started []int
+	}{
+		{"60", []int{2, 3}, []int{3, 7}},
+		{"3600", []int{3}, []int{10}},
+	} {
+		pool.Samples = nil
+		if code := getJSON(t, s, key, "/v1/pools/blue/metrics?res="+c.res+"&"+q, &pool); code != http.StatusOK || len(pool.Samples) != len(c.running) {
+			t.Fatalf("pool res %s: %d %+v", c.res, code, pool.Samples)
+		}
+		for i, sm := range pool.Samples {
+			if sm.Running != c.running[i] || sm.Started != c.started[i] {
+				t.Errorf("pool res %s bucket %d: running %d started %d, want %d %d", c.res, i, sm.Running, sm.Started, c.running[i], c.started[i])
+			}
+		}
 	}
 }
 

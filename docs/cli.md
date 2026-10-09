@@ -314,6 +314,7 @@ lux events --all                # every Run's events as they happen
 ```bash
 lux cost <run>                  # totals per currency (final/estimate), families, lines, sources
 lux costs [--since 7d] [--by family] [--by label:team] [--family ai] [--interval day]
+lux costs --by key -l app=jervasion -l app=dude --no-label phase   # who submitted them, filtered by label
 lux costs --from 2026-09-01T00:00:00Z --to 2026-09-08T00:00:00Z --by tenant   # operators
 ```
 
@@ -327,9 +328,13 @@ the same way. A value lux does not have is `—`, never `0`.
   `incomplete` (naming the sources that have not answered), `complete`, or
   `final`.
 - `lux costs --by` takes `tenant` (operators), `pool`, `host`, `family`,
-  `run` or `label:KEY`, up to twice. `--interval hour|day` adds a series.
+  `run`, `key` (who submitted the Runs: the key's name, a person's email,
+  `(none)` before luxd recorded it) or `label:KEY`, up to twice.
+  `--label KEY=VALUE` (`-l`, repeatable: one key's values are
+  alternatives, different keys all apply) and `--no-label KEY` count only
+  matching Runs. `--interval hour|day` adds a series.
   Ranges are whole UTC hours, at most 90 days. With an operator key and no
-  `--tenant`, the hosts' unallocated cost is shown too, and `--by host`
+  `--tenant` or label filter, the hosts' unallocated cost is shown too, and `--by host`
   adds each host's ALLOCATED and UNALLOCATED. A host's allocated plus
   unallocated is its billed cost for those hours and need not equal the sum
   of its Runs' lines: host hours refresh on their own schedule and include

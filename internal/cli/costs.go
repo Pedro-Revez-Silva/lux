@@ -149,16 +149,20 @@ func timeRange(from, to time.Time) string {
 
 func (a *app) costsCmd() *cobra.Command {
 	var since, from, to, family, interval string
-	var by []string
+	var by, labels, noLabels []string
 	cmd := &cobra.Command{
 		Use:   "costs",
 		Short: "Costs over a time range, by currency and up to two groups",
 		Long: `Costs over a range of whole UTC hours (--since, default 7d, as lux
 history; or --from/--to, RFC 3339), per currency, grouped by up to two of
---by tenant (operators), pool, host, family, run or label:KEY. Grouping by
-pool or host applies to compute; other families show as "(none)".
---interval hour|day adds a series (in UTC). With an operator key and no --tenant,
-the hosts' cost not charged to any Run is shown as unallocated.
+--by tenant (operators), pool, host, family, run, key or label:KEY. Grouping by
+pool or host applies to compute; other families show as "(none)". key is
+who submitted the Runs: the API key's name, a person's email, or "(none)"
+for Runs from before luxd recorded it.
+--label KEY=VALUE and --no-label KEY count only matching Runs: repeating a
+key's --label accepts any of its values; different keys must all match.
+--interval hour|day adds a series (in UTC). With an operator key and no --tenant
+or label filter, the hosts' cost not charged to any Run is shown as unallocated.
 
 Amounts are list prices, rounded half-even to 4 decimals; -o json prints
 luxd's response as it came.`,
@@ -178,6 +182,12 @@ luxd's response as it came.`,
 			}
 			for _, g := range by {
 				q.Add("group", g)
+			}
+			for _, l := range labels {
+				q.Add("label", l)
+			}
+			for _, k := range noLabels {
+				q.Add("nolabel", k)
 			}
 			if family != "" {
 				q.Set("family", family)
@@ -200,7 +210,9 @@ luxd's response as it came.`,
 	cmd.Flags().StringVar(&since, "since", "7d", "how far back from now (e.g. 24h, 7d)")
 	cmd.Flags().StringVar(&from, "from", "", "the start (RFC 3339), instead of --since")
 	cmd.Flags().StringVar(&to, "to", "", "the end (RFC 3339); default now")
-	cmd.Flags().StringArrayVar(&by, "by", nil, "group by tenant|pool|host|family|run|label:KEY (repeat for two levels)")
+	cmd.Flags().StringArrayVar(&by, "by", nil, "group by tenant|pool|host|family|run|key|label:KEY (repeat for two levels)")
+	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "only Runs with label KEY=VALUE (repeat: values of one key are alternatives, different keys all apply)")
+	cmd.Flags().StringArrayVar(&noLabels, "no-label", nil, "only Runs without label KEY (repeatable)")
 	cmd.Flags().StringVar(&family, "family", "", "only this family")
 	cmd.Flags().StringVar(&interval, "interval", "", "hour or day: also print a series")
 	return cmd
@@ -214,10 +226,27 @@ func (a *app) renderCostSummary(s *server.CostSummaryBody, by []string, interval
 	for _, g := range by {
 		header = append(header, strings.ToUpper(g))
 	}
+	keyNames := map[string]string{}
+	for _, k := range s.Keys {
+		switch {
+		case k.Email != "":
+			keyNames[k.ID] = k.Email
+		case k.Name != "" && k.Revoked:
+			keyNames[k.ID] = k.Name + " (revoked)"
+		case k.Name != "":
+			keyNames[k.ID] = k.Name
+		case k.Operator:
+			keyNames[k.ID] = "operator key"
+		}
+	}
 	rowOf := func(r server.CostSummaryRow) []string {
 		row := make([]string, 0, len(by)+2)
 		for _, g := range by {
-			row = append(row, r.Group[g])
+			v := r.Group[g]
+			if g == "key" {
+				v = cmpOr(keyNames[v], v)
+			}
+			row = append(row, v)
 		}
 		return append(row, money(r.Amount, r.Currency))
 	}

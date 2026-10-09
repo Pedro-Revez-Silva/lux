@@ -1,5 +1,5 @@
 import { Badge, formatBytes, formatDuration, formatRelative, formatTimestamp, IdChip, KeyValue, PageHeader, StatePill, Tabs } from "@lux/design-system";
-import { isRunActive, useNow, type Run } from "../../api/index.ts";
+import { isRunActive, useNow, type Run, type RunSubmitter } from "../../api/index.ts";
 import { setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, HostLink, labelsText, PageSkeleton, useRun } from "./common.tsx";
@@ -83,6 +83,7 @@ export function RunPage({ id }: { id: string }) {
           { key: "Session", value: run.sessionId ? <IdChip value={run.sessionId} truncate={24} /> : DASH },
           { key: "Snapshot", value: run.snapshotId ? <IdChip value={run.snapshotId} truncate={24} /> : DASH },
           { key: "Labels", value: Object.keys(run.labels ?? {}).length ? <span className="mono">{labelsText(run.labels)}</span> : DASH },
+          { key: "Submitted by", value: <SubmittedBy by={run.submittedBy} /> },
         ]}
       />
 
@@ -112,5 +113,17 @@ export function RunPage({ id }: { id: string }) {
       {tab === "snapshots" && <RunSnapshots run={run} live={live} />}
       {tab === "spec" && <RunSpecView run={run} />}
     </div>
+  );
+}
+
+/** Who submitted the Run: the key by name (mono; "revoked" after one that is), a person by email, or an operator's key a tenant may not name. */
+function SubmittedBy({ by }: { by: RunSubmitter | undefined }) {
+  if (!by) return <span className="muted">not recorded (before key tracking)</span>;
+  if (by.email) return <span>{by.email}</span>;
+  return (
+    <span className="row">
+      {by.keyName ? <span className="mono">{by.keyName}</span> : <span>Operator key</span>}
+      {by.revoked && <Badge tone="neutral">revoked</Badge>}
+    </span>
   );
 }

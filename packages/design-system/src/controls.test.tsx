@@ -6,6 +6,7 @@ import { formatTimestampZone } from "./format.ts";
 import { pageList, Pagination } from "./Pagination.tsx";
 import { DurationCell, RelativeTime } from "./RelativeTime.tsx";
 import { SegmentedControl } from "./SegmentedControl.tsx";
+import { Select } from "./Select.tsx";
 import { StatePill } from "./Badge.tsx";
 import { hostDisplayState } from "./states.ts";
 import { readTerminalScheme, setTerminalScheme, TERMINAL_THEME_KEY, useTerminalScheme } from "./theme.ts";
@@ -105,6 +106,32 @@ describe("in a DOM", () => {
   });
 
   const button = (el: HTMLElement, t: string) => [...el.querySelectorAll("button")].find((b) => b.textContent?.includes(t)) as HTMLButtonElement;
+
+  test("Select: a disabled option shows its reason and cannot be picked, by click or by keys", async () => {
+    const picked: string[] = [];
+    const el = await render(
+      <Select
+        options={[
+          { value: "auto", label: "Auto" },
+          { value: "day", label: "Daily", disabled: "1 bar · too coarse" },
+          { value: "hour", label: "Hourly" },
+        ]}
+        value="auto"
+        onChange={(v) => picked.push(v)}
+      />,
+    );
+    await act(async () => (el.querySelector(".select-trigger") as HTMLElement).click());
+    const opt = (t: string) => [...el.querySelectorAll('[role="option"]')].find((o) => o.textContent?.includes(t)) as HTMLElement;
+    expect(opt("Daily").getAttribute("aria-disabled")).toBe("true");
+    expect(opt("Daily").textContent).toContain("1 bar · too coarse");
+    await act(async () => opt("Daily").click());
+    expect(picked).toEqual([]);
+    // ArrowDown from Auto skips Daily and lands on Hourly.
+    const root = el.querySelector(".select") as HTMLElement;
+    await act(async () => root.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
+    await act(async () => root.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(picked).toEqual(["hour"]);
+  });
 
   test("Pagination, cursor mode: past page 1, First stays on even when the page has lost its previous one", async () => {
     const calls: string[] = [];

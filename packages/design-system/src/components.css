@@ -947,6 +947,17 @@ a.idchip-text:hover {
   font-size: var(--text-xs);
   color: var(--fg-muted);
 }
+.select-opt.is-disabled {
+  color: var(--fg-faint);
+  cursor: not-allowed;
+}
+.select-opt-why {
+  margin-left: auto;
+  padding-left: var(--sp-6);
+  font-size: var(--text-xs);
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
 .select-empty {
   padding: var(--sp-4);
   font-size: var(--text-sm);
@@ -1276,6 +1287,355 @@ a.idchip-text:hover {
   margin-top: var(--sp-2);
   padding-top: var(--sp-2);
   border-top: 1px solid var(--border-soft);
+}
+/* Bars: the hovered bucket is shaded behind its bar instead of a cursor line; keys are swatches. */
+.tschart-bars .tschart-plot {
+  position: relative;
+  z-index: 1;
+}
+.tschart-bars .u-cursor-x {
+  display: none;
+}
+.tschart-bucket {
+  position: absolute;
+  z-index: 0;
+  pointer-events: none;
+  background: var(--bg-subtle);
+}
+.tschart-bars .tschart-key {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-sm);
+}
+.tschart-legend-value {
+  color: var(--fg);
+  margin-left: var(--sp-2);
+}
+.tschart-legend-note {
+  margin-left: auto;
+  align-self: center;
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+/* ---------- Select footer, StepPicker ---------- */
+.select-footer {
+  margin-top: var(--sp-2);
+  padding: var(--sp-4);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--fg-secondary);
+  white-space: normal;
+}
+.step-picker .select-pop {
+  left: auto;
+  right: 0;
+  min-width: max(100%, 300px);
+}
+
+/* ---------- Cost panel: Kpi, SplitBar, BreakdownTable, LabelChips, InfoStrip, FilterBar, LabelFilterPopover ---------- */
+.kpi-strip-box {
+  container-type: inline-size;
+  border-bottom: 1px solid var(--border-soft);
+}
+.kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@container (min-width: 760px) {
+  .kpi-strip {
+    grid-template-columns: 1.3fr repeat(3, minmax(0, 1fr));
+  }
+}
+.kpi {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--pad-card);
+  border-right: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: -1px;
+}
+.kpi:last-child {
+  border-right: 0;
+}
+.kpi-label {
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  min-width: 0;
+}
+.kpi-value {
+  min-height: var(--sp-8);
+}
+.kpi-sub {
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.kpi-sub .money-list {
+  display: inline-flex;
+}
+.kpi.is-muted .kpi-value,
+.kpi.is-muted .kpi-label,
+.kpi.is-muted .money-list-lg {
+  color: var(--fg-faint);
+}
+.kpi.is-muted .color-key-swatch {
+  opacity: 0.45;
+}
+.split-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+  min-width: 0;
+}
+.table .split-bar {
+  margin-top: 0;
+}
+.split-bar-label {
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+  width: 2.5em;
+  flex: none;
+}
+.split-bar-track {
+  display: flex;
+  height: var(--sp-3);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  background: var(--bg-muted);
+  gap: 1px;
+}
+.split-bar-part {
+  min-width: var(--sp-1);
+}
+.split-bar-part.is-faint {
+  opacity: 0.3;
+}
+.breakdown-name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.breakdown-name.is-quiet .color-key-label {
+  color: var(--fg-muted);
+}
+.label-chips {
+  display: inline-flex;
+  gap: var(--sp-2);
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.label-chip {
+  display: inline-block;
+  max-width: 20ch;
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 0 var(--sp-3);
+  border-radius: var(--radius-pill);
+  background: var(--bg-muted);
+  color: var(--fg-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.label-chip:first-child {
+  flex-shrink: 0;
+}
+.label-chip.is-more {
+  color: var(--fg-muted);
+  flex: none;
+}
+.info-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-5);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+.info-strip > svg {
+  flex: none;
+}
+.info-strip-info {
+  background: var(--info-bg);
+  color: var(--info-fg);
+}
+.info-strip-warn {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+}
+.filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3) var(--sp-4);
+  min-width: 0;
+}
+.filter-bar-label {
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+.filter-bar-note {
+  font-size: var(--text-xs);
+  color: var(--fg-faint);
+}
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--control-h-sm);
+  padding: 0 var(--sp-2) 0 var(--sp-4);
+  border-radius: var(--radius-pill);
+  background: var(--accent-subtle);
+  color: var(--accent-text);
+  font-size: var(--text-sm);
+  max-width: 100%;
+}
+.filter-chip-op {
+  color: var(--fg-muted);
+}
+.filter-chip-value {
+  font-weight: var(--weight-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.filter-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-h-sm);
+  height: var(--control-h-sm);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  flex: none;
+}
+.filter-chip-remove:hover {
+  background: var(--bg-subtle);
+}
+.filter-chip-remove:focus-visible,
+.filter-add:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.label-filter {
+  position: relative;
+}
+.filter-add {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--control-h-sm);
+  padding: 0 var(--sp-5);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.filter-add:hover,
+.filter-add[aria-expanded="true"] {
+  background: var(--bg-subtle);
+  color: var(--fg);
+}
+.label-filter-pop {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + var(--sp-2));
+  left: 0;
+  width: min(400px, calc(100vw - 2 * var(--sp-6)));
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-5);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  animation: toast-in var(--dur-fast) var(--ease);
+}
+.label-filter-section {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+.label-filter-key,
+.label-filter-key .select-trigger {
+  width: 100%;
+}
+.label-filter-search {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  height: var(--control-h);
+  padding: 0 var(--sp-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  color: var(--fg-faint);
+}
+.label-filter-search:focus-within {
+  border-color: var(--accent);
+}
+.label-filter-search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  outline: none;
+  font-size: var(--text-md);
+  color: var(--fg);
+}
+.label-filter-values {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow: auto;
+  border-bottom: 1px solid var(--border);
+}
+.label-filter-value {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-md);
+  cursor: pointer;
+  min-width: 0;
+}
+.label-filter-value:hover {
+  background: var(--bg-subtle);
+}
+.label-filter-value input {
+  accent-color: var(--accent);
+  flex: none;
+}
+.label-filter-amount {
+  margin-left: auto;
+  color: var(--fg-secondary);
+  flex: none;
+}
+.label-filter-empty {
+  padding: var(--sp-3) var(--sp-2);
+  font-size: var(--text-sm);
+}
+.label-filter-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-3);
 }
 
 /* ---------- Cost: ColorKey, MoneyList, ListPriceNote ---------- */

@@ -100,6 +100,19 @@ artifacts:
   paths: ["/workspace/out/**"]
 ```
 
+## Labels
+
+`labels` are free-form `key: value` strings. `lux ls -l key=value` and
+`GET /v1/runs?label=key=value` filter Runs by them, and costs can be
+grouped and filtered by them (`lux costs --by label:KEY`, `--label`;
+[Run costs](costs.md)).
+
+By convention, `app` names the tool that submitted the Run: jervasion sets
+`app=jervasion`. The console's Cost panel breaks cost down by `app` by
+default when Runs carry it. luxd does not enforce it. Who submitted a Run
+(the API key, or the person signed in) is recorded apart from its labels,
+as `submittedBy` on `GET /v1/runs/{id}`.
+
 ## Rules
 
 - `image`: exactly one of `ref` or `build`.

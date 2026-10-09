@@ -1,22 +1,29 @@
 import { useMemo } from "react";
-import { Card, EmptyState, familyColor, formatTimestamp, KeyValue, ListPriceNote, Money, TimeSeriesChart, Tooltip, type KeyValueItem, type Series } from "@lux/design-system";
+import { Card, EmptyState, familyColor, formatTimestamp, KeyValue, ListPriceNote, Money, sumMoney, TimeSeriesChart, Tooltip, type KeyValueItem, type Series, type TimeRange } from "@lux/design-system";
 import { api, useQuery, type HostCost as HostCostData, type HostCostRate } from "../../api/index.ts";
+import { costRange, stepNote } from "../every.ts";
+import { useScope } from "../scope.tsx";
 import { ErrorStrip } from "./common.tsx";
 
 /**
- * A host's compute cost per hour: allocated to Runs and, for operators,
- * unallocated, stacked; and (operators) its rate periods. Shown to those who
- * can read the host's history: operators, and a tenant for its own host.
+ * A host's compute cost per hour or UTC day (the page's step): allocated to
+ * Runs and, for operators, unallocated, stacked; and (operators) its rate
+ * periods. Shown to those who can read the host's history: operators, and a
+ * tenant for its own host.
  */
-export function HostCost({ id, range, operator }: { id: string; range: string; operator: boolean }) {
+export function HostCost({ id, range, operator }: { id: string; range: TimeRange; operator: boolean }) {
+  const scope = useScope();
+  const step = scope.step("cost");
+  const daily = step.step === "day";
   // Hourly buckets: the 1h range would chart one or two points.
-  const since = range === "1h" ? "6h" : range;
+  const since = costRange(range);
   const q = useQuery(`host-cost:${id}:${since}`, (s) => api.hostCost(id, since, s), { interval: 30_000 });
   const c = q.data;
   // Stable per response: the host page re-renders on its 10s clock, and a
   // fresh series or ys array would rebuild each chart.
-  const charts = useMemo(() => (c ? byCurrency(c) : []).map((ch) => chartProps(ch, operator)), [c, operator]);
-  const sub = operator ? `allocated to Runs vs unallocated, per hour, over ${since}` : `allocated to your Runs, per hour, over ${since}`;
+  const charts = useMemo(() => (c ? byCurrency(c, daily ? 86400 : 3600) : []).map((ch) => chartProps(ch, operator)), [c, operator, daily]);
+  const per = stepNote(step);
+  const sub = operator ? `allocated to Runs vs unallocated, ${per}, over ${since}` : `allocated to your Runs, ${per}, over ${since}`;
   return (
     <>
       <ErrorStrip error={q.error} />
@@ -57,24 +64,25 @@ function chartProps(ch: CurrencySeries, operator: boolean) {
   return { currency: ch.currency, x: ch.x, ys: operator ? [ch.allocated, ch.unallocated] : [ch.allocated], series: operator ? OPERATOR_SERIES : TENANT_SERIES };
 }
 
-/** One aligned hourly series per currency; an hour without a row is missing (null), not zero. */
-function byCurrency(c: HostCostData): CurrencySeries[] {
-  const from = Math.floor(Date.parse(c.from) / 1000);
+/** One aligned series per currency in buckets of `step` seconds (hours, or UTC days summed exactly from them); a bucket without a row is missing (null), not zero. */
+function byCurrency(c: HostCostData, step: number): CurrencySeries[] {
+  const from = Math.floor(Date.parse(c.from) / 1000 / step) * step;
   const to = Math.floor(Date.parse(c.to) / 1000);
   const x: number[] = [];
-  for (let t = from; t < to; t += 3600) x.push(t);
+  for (let t = from; t < to; t += step) x.push(t);
   const index = new Map(x.map((t, i) => [t, i]));
-  const out = new Map<string, CurrencySeries>();
+  const sums = new Map<string, { allocated: string[][]; unallocated: string[][] }>();
   for (const h of c.hours) {
-    let s = out.get(h.currency);
-    if (!s) out.set(h.currency, (s = { currency: h.currency, x, allocated: x.map(() => null), unallocated: x.map(() => null) }));
-    const i = index.get(Math.floor(Date.parse(h.hour) / 1000));
+    let s = sums.get(h.currency);
+    if (!s) sums.set(h.currency, (s = { allocated: x.map(() => []), unallocated: x.map(() => []) }));
+    const i = index.get(Math.floor(Date.parse(h.hour) / 1000 / step) * step);
     if (i == null) continue;
-    // Chart geometry only: the figures in text come from the strings.
-    s.allocated[i] = Number(h.allocated);
-    s.unallocated[i] = h.unallocated != null ? Number(h.unallocated) : null;
+    s.allocated[i]!.push(h.allocated);
+    if (h.unallocated != null) s.unallocated[i]!.push(h.unallocated);
   }
-  return [...out.values()];
+  // Chart geometry only: the figures in text come from the strings.
+  const num = (a: string[]) => (a.length ? Number(sumMoney(a)) : null);
+  return [...sums].map(([currency, s]) => ({ currency, x, allocated: s.allocated.map(num), unallocated: s.unallocated.map(num) }));
 }
 
 /** Where a rate came from, once: static, on-demand or spot, with the raw source in a tooltip when it says more. */

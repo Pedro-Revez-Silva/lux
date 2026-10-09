@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -74,6 +75,18 @@ func TestCostSummaryScopeAndGroups(t *testing.T) {
 	if code := getJSON(t, s, keys["op"], costPath("&group=host&family=compute"), &got); code != http.StatusOK || len(got.Hosts) != 3 || got.Hosts[0].Allocated != "2" {
 		t.Errorf("host breakdown: %d %+v", code, got)
 	}
+	// Unallocated host time is compute: nofamily=compute drops it and the
+	// host allocations with it; nofamily=ai keeps both.
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["op"], costPath("&group=host&nofamily=compute"), &got); code != http.StatusOK ||
+		len(got.Unallocated) != 0 || len(got.Hosts) != 0 || len(got.Totals) != 1 || got.Totals[0].Amount != "2.5" {
+		t.Errorf("nofamily=compute: %d %+v", code, got)
+	}
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["op"], costPath("&group=host&nofamily=ai"), &got); code != http.StatusOK ||
+		len(got.Unallocated) != 2 || got.Unallocated[1].Amount != "3.25" || len(got.Hosts) != 3 || got.Hosts[0].Allocated != "2" {
+		t.Errorf("nofamily=ai: %d %+v", code, got)
+	}
 }
 
 // Grouped by family, the summary names each family as a Run's byFamily does.
@@ -105,11 +118,11 @@ func TestCostSummaryRunNames(t *testing.T) {
 	s, keys := costReadFixture(t)
 	execSQL(t, s, context.Background(), `UPDATE runs SET name = 'nightly' WHERE id = 'r1'`)
 	var got CostSummaryBody
-	if code := getJSON(t, s, keys["t1"], costPath("&group=run"), &got); code != http.StatusOK || !slices.Equal(got.Runs, []CostRunInfo{{ID: "r1", Name: "nightly"}}) {
+	if code := getJSON(t, s, keys["t1"], costPath("&group=run"), &got); code != http.StatusOK || !reflect.DeepEqual(got.Runs, []CostRunInfo{{ID: "r1", Name: "nightly", Labels: map[string]string{"team": "alpha"}}}) {
 		t.Errorf("tenant: %d %+v", code, got.Runs)
 	}
 	got = CostSummaryBody{}
-	if code := getJSON(t, s, keys["op"], costPath("&group=run"), &got); code != http.StatusOK || !slices.Equal(got.Runs, []CostRunInfo{{ID: "r1", Name: "nightly"}, {ID: "r2"}}) {
+	if code := getJSON(t, s, keys["op"], costPath("&group=run"), &got); code != http.StatusOK || !reflect.DeepEqual(got.Runs, []CostRunInfo{{ID: "r1", Name: "nightly", Labels: map[string]string{"team": "alpha"}}, {ID: "r2"}}) {
 		t.Errorf("operator: %d %+v", code, got.Runs)
 	}
 	// An operator narrowed to one tenant sees that tenant's Runs alone: totals, series and names.
@@ -117,7 +130,7 @@ func TestCostSummaryRunNames(t *testing.T) {
 	if code := getJSON(t, s, keys["op"], costPath("&tenant=t1&group=run&interval=hour"), &got); code != http.StatusOK {
 		t.Fatalf("narrowed operator status %d", code)
 	}
-	if !slices.Equal(got.Runs, []CostRunInfo{{ID: "r1", Name: "nightly"}}) {
+	if !reflect.DeepEqual(got.Runs, []CostRunInfo{{ID: "r1", Name: "nightly", Labels: map[string]string{"team": "alpha"}}}) {
 		t.Errorf("narrowed operator runs: %+v", got.Runs)
 	}
 	totals := map[string]string{}

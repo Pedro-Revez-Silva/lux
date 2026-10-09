@@ -257,10 +257,10 @@ export function formatMoneyExact(amount: string | null | undefined, currency?: s
   return formatMoney(amount, currency, { decimals: Math.max(2, frac.length) });
 }
 
-/** Whether formatMoney shows `amount` rounded, so its exact value differs from the figure. */
-export function moneyIsRounded(amount: string | null | undefined): boolean {
+/** Whether formatMoney shows `amount` rounded (to `decimals`, default MONEY_DECIMALS), so its exact value differs from the figure. */
+export function moneyIsRounded(amount: string | null | undefined, decimals = MONEY_DECIMALS): boolean {
   const v = amount == null ? null : parseMoney(amount);
-  return v != null && (v < 0n ? -v : v) % 10n ** BigInt(MONEY_SCALE - MONEY_DECIMALS) !== 0n;
+  return v != null && (v < 0n ? -v : v) % 10n ** BigInt(MONEY_SCALE - Math.max(0, Math.min(MONEY_SCALE, decimals))) !== 0n;
 }
 
 function withCurrency(number: string, currency?: string | null): string {

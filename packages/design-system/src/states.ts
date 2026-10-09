@@ -213,6 +213,24 @@ export function familyColor(family: string, hint?: string | null): string {
   return `var(--chart-${familySlot(family, hint)})`;
 }
 
+// Every chart slot but compute's.
+const BAND_SLOTS: readonly number[] = [1, 2, 3, 4, 5, 6, 7, 8].filter((s) => s !== familySlot("compute"));
+
+/**
+ * The colour of the breakdown band at rank i (0-based; label values, API
+ * keys, pools, tenants, Runs): never compute's slot, so compute's colour
+ * means compute alone. Past BAND_SLOTS.length bands the slots repeat;
+ * Other and "(none)" are not bands here (OTHER_BAND_COLOR, NONE_BAND_COLOR).
+ */
+export function bandColor(i: number): string {
+  return `var(--chart-${BAND_SLOTS[i % BAND_SLOTS.length]})`;
+}
+
+/** Every value folded past the top ones: neutral, darker than (none)'s. */
+export const OTHER_BAND_COLOR = "var(--st-neutral-fg)";
+/** Cost with no value for the breakdown ("(none)"): the neutral dot. */
+export const NONE_BAND_COLOR = "var(--st-neutral-dot)";
+
 export interface FamilyInfo {
   family: string;
   displayName?: string | null;

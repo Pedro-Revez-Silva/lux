@@ -1,5 +1,5 @@
 // Deterministic fake data for the style guide. Seeded so reloads look the same.
-import { AnsiDecoder, type HostState, type LogLine, type RunState, type ServerInfo, type Tenant, type TimelineStage } from "../src/index.ts";
+import { AnsiDecoder, bandColor, NONE_BAND_COLOR, OTHER_BAND_COLOR, type HostState, type LogLine, type RunState, type ServerInfo, type Tenant, type TimelineStage } from "../src/index.ts";
 
 function rng(seed: number) {
   let s = seed >>> 0;
@@ -375,4 +375,34 @@ export const fakeCostLines: FakeCostLine[] = [
   { source: "model-gateway", family: "ai", item: "claude-sonnet-4-5", amount: "1.2843", currency: "USD", final: false },
   { source: "model-gateway", family: "ai", item: "text-embedding-3-small", amount: "0.000412", currency: "USD", final: false },
   { source: "render-farm", family: "video", item: "encode-1080p", amount: "2.10", currency: "EUR", final: true },
+];
+
+/** Cost broken down by who submitted it (the Overview's "API key"): names, a revoked key, a person, and Runs from before tracking. */
+export const fakeKeyBreakdown = [
+  { id: "key_ci", label: "ci-review-bot", color: bandColor(0), currency: "USD", runs: 41, compute: "2.71", external: "38.55", total: "41.26", share: 0.7, mono: true },
+  { id: "key_dude", label: "dude-prod", color: bandColor(1), currency: "USD", runs: 23, compute: "0.85", external: "12.12", total: "12.97", share: 0.22, mono: true },
+  { id: "key_old", label: "marcio-laptop", color: bandColor(2), currency: "USD", runs: 4, compute: "0.22", external: "2.73", total: "2.95", share: 0.05, mono: true, pill: "revoked" },
+  { id: "email:ada@example.com", label: "ada@example.com", color: bandColor(3), currency: "USD", runs: 2, compute: "0.05", external: null, total: "0.05", share: 0.001 },
+  { id: "other", label: "Other (3)", color: OTHER_BAND_COLOR, currency: "USD", runs: 3, compute: "0.01", external: "0.02", total: "0.03", share: 0.001, quiet: true },
+  { id: "(none)", label: "Before key tracking", color: NONE_BAND_COLOR, currency: "USD", runs: 6, compute: "0.09", external: "1.68", total: "1.77", share: 0.03, quiet: true },
+];
+
+/** A label's values with their cost, for the label filter picker. */
+export const fakeLabelValues: Record<string, { value: string; amounts: { currency: string; amount: string }[] }[]> = {
+  app: [
+    { value: "jervasion", amounts: [{ currency: "USD", amount: "50.60" }] },
+    { value: "dude", amounts: [{ currency: "USD", amount: "7.39" }] },
+  ],
+  "jervasion.repository": [
+    { value: "absmartly/abs", amounts: [{ currency: "USD", amount: "31.40" }] },
+    { value: "absmartly/sdk-plugins", amounts: [{ currency: "USD", amount: "9.10" }] },
+    { value: "marcioapm/jervasion", amounts: [{ currency: "USD", amount: "7.90" }] },
+    { value: "absmartly/docs", amounts: [{ currency: "USD", amount: "1.20" }] },
+  ],
+};
+
+export const fakeRunLabels: Record<string, string>[] = [
+  { app: "jervasion", "jervasion.repository": "absmartly/abs", "jervasion.pr": "5336" },
+  { app: "dude", "dude.phase": "implement", "dude.ticket": "DASH-41" },
+  {},
 ];

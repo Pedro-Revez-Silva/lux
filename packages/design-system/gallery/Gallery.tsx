@@ -1,8 +1,21 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Badge,
+  BreakdownTable,
   Button,
   Card,
+  CENTS,
+  FilterBar,
+  FilterChip,
+  InfoStrip,
+  Kpi,
+  KpiStrip,
+  KpiSub,
+  LabelChips,
+  LabelFilterPopover,
+  SplitBar,
+  StepPicker,
+  type StepChoice,
   Code,
   COST_STATUS_LIST,
   ColorKey,
@@ -14,6 +27,7 @@ import {
   DurationCell,
   EmptyState,
   EventTable,
+  bandColor,
   familyColor,
   familySlot,
   FamilyKey,
@@ -81,7 +95,7 @@ import {
   type TimeRange,
 } from "../src/index.ts";
 import { IconDots, IconInfo, IconMinus, IconMoon, IconPencil, IconPlus, IconRefresh, IconRows, IconRowsLoose, IconStar, IconSun, IconTerminal, IconWarning } from "../src/icons.tsx";
-import { fakeAnsiLogs, fakeCostLines, fakeCostSeries, fakeHosts, fakeLogs, fakeMultilineLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeServersWakeable, fakeShellScript, fakeStoredSeries, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
+import { fakeAnsiLogs, fakeCostLines, fakeCostSeries, fakeKeyBreakdown, fakeLabelValues, fakeRunLabels, fakeHosts, fakeLogs, fakeMultilineLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeServersWakeable, fakeShellScript, fakeStoredSeries, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
 
 function Section({ id, title, children, note }: { id: string; title: string; note?: ReactNode; children: ReactNode }) {
   return (
@@ -95,7 +109,7 @@ function Section({ id, title, children, note }: { id: string; title: string; not
   );
 }
 
-const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "paging", "tabs", "selects", "charts", "costs", "timeline", "events", "logs", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
+const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "paging", "tabs", "selects", "charts", "costs", "costpanel", "timeline", "events", "logs", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
 
 /** The gallery: a slim bar (brand, theme and density) over the sections. */
 export function Gallery() {
@@ -153,6 +167,7 @@ function Sections() {
         <Selects />
         <Charts />
         <Costs />
+        <CostPanelDemo />
         <TimelineDemo />
         <EventsDemo />
         <Logs />
@@ -418,6 +433,8 @@ const FAMILIES: { family: string; displayName: string; color?: string }[] = [
 
 /** The AI series with one hour refunded: a -$6 credit, more than that hour's compute. */
 const refundHour = (ai: (number | null)[]) => ai.map((v, i) => (i === 18 ? -6 : v));
+// Three hours nothing reported: gaps, not zeros.
+const gapHours = (ai: (number | null)[]) => ai.map((v, i) => (i >= 8 && i < 11 ? null : v));
 
 interface RunCostRow {
   name: string;
@@ -513,6 +530,12 @@ function Costs() {
         <Card title="Cost by family, a refund hour" subtitle="an AI models credit of -$6 in one hour: the y axis goes below zero, with gridlines">
           <TimeSeriesChart x={c.x} ys={refund} series={[{ label: "Compute", color: familyColor("compute") }, { label: "AI models", color: familyColor("ai", "violet") }]} unit="money" currency="USD" stacked />
         </Card>
+        <Card title="Cost per hour, as bars" subtitle="bars stacked: one bar per bucket, an amount, not a rate; a bucket with no figure stays empty">
+          <TimeSeriesChart x={c.x} ys={[c.compute, gapHours(c.ai)]} series={[{ label: "Compute", color: familyColor("compute") }, { label: "AI models", color: familyColor("ai", "violet") }]} unit="money" currency="USD" stacked bars legendValues={["$3.87", "$55.08"]} legendNote="each bar is one hour" />
+        </Card>
+        <Card title="Cost per hour, bars with a refund" subtitle="the credit stacks down from zero, apart from the costs above it">
+          <TimeSeriesChart x={c.x} ys={refund} series={[{ label: "Compute", color: familyColor("compute") }, { label: "AI models", color: familyColor("ai", "violet") }]} unit="money" currency="USD" stacked bars />
+        </Card>
       </div>
       <p className="sg-note">
         familySlot: {FAMILIES.map((f) => `${f.family}${f.color ? ` (${f.color})` : ""} → ${familySlot(f.family, f.color)}`).join(" · ")}. Named hints map to a slot (blue hints avoid slot 1, which is compute&apos;s), <Code>#rrggbb</Code> to the nearest hue, no hint to a slot from the family&apos;s name. A family's slot never depends on its companions: egress and video share slot 4 above, an accepted collision.
@@ -522,6 +545,65 @@ function Costs() {
 }
 
 /* ---------- components ---------- */
+
+function CostPanelDemo() {
+  const [filters, setFilters] = useState<{ key: string; op: string; value: string }[]>([{ key: "app", op: "=", value: "jervasion" }]);
+  const [picked, setPicked] = useState("app");
+  return (
+    <Section id="costpanel" title="Cost panel: KPIs, breakdown, filters" note="The Overview's Cost panel is built from these. A KpiStrip heads a card (the first figure wider); a SplitBar draws parts of one amount (a faint part is hidden by the view, never dropped). BreakdownTable is cost by one dimension with its Runs, Compute and External parts and share; a row can be a filter. Its bands take bandColor() slots in rank order, never compute's blue; Other and (none) are neutral. LabelChips show a Run's labels as key=value, truncated. FilterBar holds FilterChips and the LabelFilterPopover: pick a key, then values with their cost, biggest first, or (not set). InfoStrip explains why some figures read as they do.">
+      <div className="stack">
+        <FilterBar
+          add={
+            <LabelFilterPopover
+              keys={[
+                { key: "app", runs: 70 },
+                { key: "jervasion.repository", runs: 41 },
+                { key: "dude.phase", runs: 23 },
+              ]}
+              initialKey="app"
+              onKeyChange={setPicked}
+              values={(k) => fakeLabelValues[k] ?? []}
+              notSet={(k) => (k === picked ? [{ currency: "USD", amount: "0.40" }] : undefined)}
+              onApply={(f) => setFilters((fs) => [...fs.filter((x) => x.key !== f.key), { key: f.key, op: f.notSet ? "is" : f.values.length > 1 ? "∈" : "=", value: f.notSet ? "not set" : f.values.join(", ") }])}
+            />
+          }
+          note="filters apply to every cost figure below · the other Overview charts are not per-label"
+        >
+          {filters.map((f) => (
+            <FilterChip key={f.key} name={f.key} op={f.op} value={f.value} onRemove={() => setFilters((fs) => fs.filter((x) => x !== f))} />
+          ))}
+        </FilterBar>
+        <Card flush>
+          <KpiStrip>
+            <Kpi label="Total · last 24h" value={<MoneyList amounts={[{ currency: "USD", amount: "58.95" }]} large decimals={CENTS} />}>
+              <KpiSub>▲ 38% vs previous 24h</KpiSub>
+              <SplitBar currency="USD" whole="58.95" parts={[{ amount: "3.92", color: familyColor("compute"), label: "Compute" }, { amount: "55.03", color: "var(--chart-7)", label: "External" }]} />
+            </Kpi>
+            <Kpi label={<ColorKey color={bandColor(0)}>ci-review-bot</ColorKey>} value={<Money amount="41.26" currency="USD" decimals={CENTS} />} sub="70% · 41 Runs" />
+            <Kpi label={<ColorKey color={bandColor(1)}>dude-prod</ColorKey>} value={<Money amount="12.97" currency="USD" decimals={CENTS} />} sub="22% · 23 Runs" />
+            <Kpi label="Peak hour" value={<Money amount="41.40" currency="USD" decimals={CENTS} />} sub="09:00 · ci-review-bot (90%)" />
+          </KpiStrip>
+          <div style={{ padding: "var(--pad-card)" }}>
+            <InfoStrip tone="warn">6 Runs in this range were submitted before Lux recorded the submitting key; they show as “Before key tracking”.</InfoStrip>
+          </div>
+        </Card>
+        <div className="grid grid-2">
+          <Card title="By API key" subtitle="last 24h · the key's name as it is now" flush>
+            <BreakdownTable lead="API key" rows={fakeKeyBreakdown} />
+          </Card>
+          <Card title="Labels" subtitle="LabelChips: a Run's labels, app first, three at most" flush>
+            <div className="stack" style={{ padding: "var(--pad-card)" }}>
+              {fakeRunLabels.map((l, i) => (
+                <LabelChips key={i} labels={l} first={["app"]} />
+              ))}
+              <SplitBar currency="USD" whole="10" scale={0.6} parts={[{ amount: "4", color: familyColor("compute"), label: "Compute", faint: true }, { amount: "6", color: "var(--chart-7)", label: "External" }]} />
+            </div>
+          </Card>
+        </div>
+      </div>
+    </Section>
+  );
+}
 
 function Buttons() {
   return (
@@ -875,8 +957,9 @@ function Selects() {
   const [pool, setPool] = useState("default");
   const [range, setRange] = useState<TimeRange>("24h");
   const [tenant, setTenant] = useState("*");
+  const [step, setStep] = useState<StepChoice>("auto");
   return (
-    <Section id="selects" title="Select, TenantPicker, TimeRangePicker" note="Presets as rows, selection marked by a bold check, hover as a ghost wash. In the console the tenant and range pickers sit in the top bar and scope every page.">
+    <Section id="selects" title="Select, TenantPicker, TimeRangePicker, StepPicker" note="Presets as rows, selection marked by a bold check, hover as a ghost wash. In the console the tenant and range pickers sit in the top bar and scope every page.">
       <div className="sg-row">
         <TenantPicker tenants={fakeTenants} value={tenant} onChange={setTenant} />
         <Select
@@ -899,7 +982,24 @@ function Selects() {
         />
         <TimeRangePicker value={range} onChange={setRange} />
         <TimeRangePicker value={range} onChange={setRange} size="md" />
+        <StepPicker
+          value={step}
+          onChange={setStep}
+          resolved="min/hour"
+          options={[
+            { value: "auto", hint: "each chart picks" },
+            { value: "minute", hint: "1,440 points" },
+            { value: "hour", hint: "24 points" },
+            { value: "day", disabled: "1 point · too coarse" },
+          ]}
+          note={
+            <>
+              <strong>Auto</strong> for 24h: trends per minute, cost per hour. A fixed choice applies to every chart on the page. Cost is never finer than an hour.
+            </>
+          }
+        />
       </div>
+      <p className="sg-note">StepPicker: the page's step beside the range (“Every”). Auto shows what it resolved to; a choice the range cannot use is greyed with the reason; the footer says what each kind of chart does with it.</p>
     </Section>
   );
 }

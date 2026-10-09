@@ -143,6 +143,15 @@ export interface Run {
   servers?: Server[];
   /** In GET /v1/runs only (not GET /v1/runs/{id}); absent means unknown, not zero. */
   cost?: RunCostBrief;
+  /** In GET /v1/runs/{id} only: the API key (its name when the caller may see it) or the person that submitted it; absent before luxd recorded it. */
+  submittedBy?: RunSubmitter;
+}
+
+export interface RunSubmitter {
+  keyId?: string;
+  keyName?: string;
+  revoked?: boolean;
+  email?: string;
 }
 
 export type ServerState = "stopped" | "starting" | "ready" | "unreachable" | "exited";
@@ -345,6 +354,10 @@ export interface CostSummaryRow {
   group?: Record<string, string>;
   currency: string;
   amount: string;
+  /** With top or runs, on totals: the Runs with cost (that rank counts, with top) under the first group's value. */
+  runs?: number;
+  /** With top: the fold of every value past the top N (its value reads "(other)"); a real value of that name lacks it. */
+  other?: boolean;
 }
 
 export interface HostAllocation {
@@ -367,8 +380,28 @@ export interface CostSummary {
   hosts?: HostAllocation[];
   /** Grouped by family: each family's displayName and colour hint, as in a Run's byFamily. */
   families?: CostFamily[];
-  /** Grouped by run: each Run's name (empty when it has none). */
-  runs?: { id: string; name?: string }[];
+  /** Grouped by run: each Run's name (empty when it has none) and labels. */
+  runs?: { id: string; name?: string; labels?: Record<string, string> }[];
+  /** Grouped by key: each submitter but "(none)" (Runs from before luxd recorded who submitted them). */
+  keys?: CostKey[];
+  /** With top: per currency, how many values the other: true rows hold. */
+  otherCount?: Record<string, number>;
+}
+
+/** Who submitted Runs: an API key (id; its name when the caller may see it), or a person (id "email:<address>"). */
+export interface CostKey {
+  id: string;
+  name?: string;
+  operator?: boolean;
+  revoked?: boolean;
+  email?: string;
+}
+
+/** GET /v1/costs/labels. */
+export interface CostLabels {
+  from: string;
+  to: string;
+  keys: { key: string; runs: number }[];
 }
 
 export interface CostFamily {
@@ -378,13 +411,25 @@ export interface CostFamily {
 }
 
 export interface CostSummaryParams {
-  /** Up to two: tenant (operators), pool, host, family, run, label:key. */
+  /** Up to two: tenant (operators), pool, host, family, run, key, label:key. */
   group?: string[];
   family?: string;
+  /** Every family but this one. */
+  nofamily?: string;
   interval?: "hour" | "day";
+  /** 1–50: fold the first group past its top N values per currency into rows marked `other: true`. */
+  top?: number;
+  /** With top: the cost that ranks (all, compute, external). */
+  rank?: "all" | "compute" | "external";
+  /** Without top: totals rows carry runs too. */
+  runs?: boolean;
   since?: string;
   from?: string;
   to?: string;
+  /** key=value; one key repeated: any of its values; different keys: all. */
+  label?: string[];
+  /** Label keys the Runs must not have. */
+  nolabel?: string[];
 }
 
 export interface HostCostHour {

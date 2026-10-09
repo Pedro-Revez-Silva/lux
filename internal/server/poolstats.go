@@ -303,8 +303,8 @@ func (s *Server) poolMetrics(ctx context.Context, in *poolMetricsInput) (*poolMe
 		}
 		rows, err = tx.Query(ctx, `SELECT w.at, w.hosts, w.cap_cpus, w.cap_mem, w.launches, w.launch_failures,
 				`+own("alloc_cpus")+`, `+own("alloc_mem")+`, `+own("running")+`, `+own("queued")+`, `+own("started")+`, `+own("finished")+`
-			FROM pool_samples w
-			LEFT JOIN pool_samples t ON $5 <> '' AND t.pool_id = w.pool_id AND t.tenant_id = $5 AND t.res = w.res AND t.at = w.at
+			FROM `+poolRollup.source(res, "$3", "$4")+` w
+			LEFT JOIN `+poolRollup.source(res, "$3", "$4")+` t ON $5 <> '' AND t.pool_id = w.pool_id AND t.tenant_id = $5 AND t.res = w.res AND t.at = w.at
 			WHERE w.pool_id = $1 AND w.tenant_id = '' AND w.res = $2 AND w.at BETWEEN $3 AND $4 ORDER BY w.at`,
 			pool.ID, res, from, to, p.TenantID)
 		if err != nil {
@@ -318,7 +318,17 @@ func (s *Server) poolMetrics(ctx context.Context, in *poolMetricsInput) (*poolMe
 		}); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, `SELECT min(at) FROM pool_samples WHERE pool_id = $1 AND tenant_id = '' AND res = $2`, pool.ID, res).Scan(&out.Body.HistoryFrom)
+		// A day's samples are folded from its hours: the first day is the
+		// one holding the first hour.
+		stored := min(res, 3600)
+		if err := tx.QueryRow(ctx, `SELECT min(at) FROM pool_samples WHERE pool_id = $1 AND tenant_id = '' AND res = $2`, pool.ID, stored).Scan(&out.Body.HistoryFrom); err != nil {
+			return err
+		}
+		if res == resDay && out.Body.HistoryFrom != nil {
+			day := out.Body.HistoryFrom.UTC().Truncate(24 * time.Hour)
+			out.Body.HistoryFrom = &day
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err

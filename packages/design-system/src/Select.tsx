@@ -8,6 +8,10 @@ export interface SelectOption<V extends string = string> {
   text?: string;
   description?: ReactNode;
   group?: string;
+  /** Shown greyed and not pickable; the text says why (shown on the right, and as the option's title). */
+  disabled?: string;
+  /** A quiet note on the right of a pickable option ("24 points"). */
+  hint?: string;
 }
 
 export interface SelectProps<V extends string = string> {
@@ -25,11 +29,13 @@ export interface SelectProps<V extends string = string> {
   className?: string;
   /** Minimum trigger width. */
   width?: number;
+  /** Below the options in the menu: what the choices mean. */
+  footer?: ReactNode;
 }
 
 /** Listbox-style select with optional filter. Presets listed as rows, selection marked by a check. */
 export function Select<V extends string>(props: SelectProps<V>) {
-  const { options, value, onChange, placeholder = "Select…", prefix, icon, searchable, size = "md", disabled, className, width } = props;
+  const { options, value, onChange, placeholder = "Select…", prefix, icon, searchable, size = "md", disabled, className, width, footer } = props;
   const id = useId();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -57,8 +63,14 @@ export function Select<V extends string>(props: SelectProps<V>) {
   }, [open, options, value]);
 
   const pick = (v: V) => {
+    if (options.find((o) => o.value === v)?.disabled) return;
     onChange(v);
     setOpen(false);
+  };
+  // Arrow keys step over disabled options.
+  const step = (from: number, dir: 1 | -1) => {
+    for (let i = from + dir; i >= 0 && i < filtered.length; i += dir) if (!filtered[i]!.disabled) return i;
+    return from;
   };
 
   const onKey = (e: React.KeyboardEvent) => {
@@ -68,13 +80,16 @@ export function Select<V extends string>(props: SelectProps<V>) {
       return;
     }
     if (!open) return;
-    if (e.key === "Escape") setOpen(false);
-    else if (e.key === "ArrowDown") {
+    if (e.key === "Escape") {
+      // Closes this menu only, not a dialog the select sits in.
+      e.stopPropagation();
+      setOpen(false);
+    } else if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActive((i) => Math.min(filtered.length - 1, i + 1));
+      setActive((i) => step(i, 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setActive((i) => Math.max(0, i - 1));
+      setActive((i) => step(i, -1));
     } else if (e.key === "Enter") {
       e.preventDefault();
       const o = filtered[active];
@@ -128,8 +143,10 @@ export function Select<V extends string>(props: SelectProps<V>) {
                   <div
                     role="option"
                     aria-selected={o.value === value}
-                    className={["select-opt", i === active ? "is-active" : "", o.value === value ? "is-selected" : ""].join(" ").trim()}
-                    onMouseEnter={() => setActive(i)}
+                    aria-disabled={o.disabled ? true : undefined}
+                    title={o.disabled}
+                    className={["select-opt", i === active ? "is-active" : "", o.value === value ? "is-selected" : "", o.disabled ? "is-disabled" : ""].join(" ").trim()}
+                    onMouseEnter={() => !o.disabled && setActive(i)}
                     onClick={() => pick(o.value)}
                   >
                     <span className="select-check">{o.value === value && <IconCheck size={14} strokeWidth={2.5} />}</span>
@@ -137,11 +154,13 @@ export function Select<V extends string>(props: SelectProps<V>) {
                       <span className="select-opt-label">{o.label}</span>
                       {o.description && <span className="select-opt-desc">{o.description}</span>}
                     </span>
+                    {o.disabled ? <span className="select-opt-why">{o.disabled}</span> : o.hint && <span className="select-opt-why">{o.hint}</span>}
                   </div>
                 </li>
               );
             })}
           </ul>
+          {footer && <div className="select-footer">{footer}</div>}
         </div>
       )}
     </div>

@@ -691,6 +691,84 @@
 .feed-card {
   min-width: 0;
 }
+
+/* Overview Cost panel: one card (KPI strip over the charts), then the
+   breakdown table (and Top tenants) beside Top Runs. Laid out by the chart column's width (.overview-charts
+   is a container), so it fits beside the feed. */
+.cost-panel .section-head {
+  align-items: center;
+}
+.cost-panel .section-head .section-note {
+  margin-right: auto;
+}
+.cost-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-4) var(--sp-6);
+}
+.cost-control {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+.cost-control-label {
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+.cost-change + .cost-change {
+  margin-left: var(--sp-4);
+}
+.cost-charts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  padding: var(--pad-card);
+}
+.cost-chart-currency {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg-secondary);
+  margin-bottom: var(--sp-3);
+}
+.cost-lower {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--gap);
+  align-items: start;
+}
+.cost-side {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--gap);
+  align-items: start;
+}
+@container (min-width: 1000px) {
+  .cost-lower {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+  }
+}
+.cost-name {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.35;
+  padding: var(--sp-2) 0;
+}
+.cost-name-sub {
+  font-weight: var(--weight-normal);
+}
+.cost-name-sub .id-link,
+.cost-name-sub a {
+  font-size: var(--text-xs);
+}
+.cost-unallocated {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
 .feed {
   list-style: none;
   margin: 0;
