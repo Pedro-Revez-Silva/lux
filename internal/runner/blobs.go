@@ -383,6 +383,11 @@ func (r *Runner) readopt(ctx context.Context) {
 		if st.Spec != nil {
 			p.assign = &proto.Assign{RunID: st.RunID, TenantID: st.TenantID, Epoch: st.Epoch, Spec: *st.Spec}
 		}
+		// A state written before the container id was recorded: the Run's
+		// name, which nothing else on this host holds before readopt ends.
+		if st.Container == "" && (st.Phase == "started" || st.Phase == "exited") {
+			st.Container = containerName(st.RunID)
+		}
 		switch st.Phase {
 		case "reported":
 			p.phase = "done"
@@ -392,7 +397,7 @@ func (r *Runner) readopt(ctx context.Context) {
 			r.log.Info("re-adopting exited placement", "run", st.RunID, "epoch", st.Epoch)
 			go func() { defer close(p.done); p.finish(context.WithoutCancel(ctx), st.Exit) }()
 		case "started":
-			cs, _ := r.pm.Inspect(ctx, containerName(st.RunID))
+			cs, _ := r.pm.Inspect(ctx, st.Container)
 			if !cs.Exists {
 				p.phase = "done"
 				close(p.done)
@@ -404,7 +409,7 @@ func (r *Runner) readopt(ctx context.Context) {
 				// moment without its egress rules.
 				if err := p.applyEgress(ctx, p.state.Egress); err != nil {
 					r.log.Error("re-adopt: egress; killing the container", "run", st.RunID, "err", err)
-					_ = r.pm.Kill(ctx, containerName(st.RunID), "KILL")
+					_ = r.pm.Kill(ctx, st.Container, "KILL")
 				}
 				p.phase = "running"
 				if p.stopWhy != "" {

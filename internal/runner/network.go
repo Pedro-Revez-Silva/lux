@@ -39,7 +39,7 @@ func (p *placement) setupNetwork(ctx context.Context, sp spec.RunSpec) (podman.N
 	p.mu.Lock()
 	p.state.Egress = es
 	p.mu.Unlock()
-	if err := writeRunState(p.dir, p.state); err != nil {
+	if err := p.saveState(); err != nil {
 		return net, err
 	}
 	return net, p.applyEgress(ctx, es)

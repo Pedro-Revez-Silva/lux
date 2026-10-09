@@ -95,7 +95,7 @@ func (p *placement) setBases(repo, commit string, moved bool) {
 		p.state.SyncBases = map[string]string{}
 	}
 	p.state.SyncBases[repo] = commit
-	_ = writeRunState(p.dir, p.state)
+	_ = p.saveStateLocked()
 }
 
 // execShim runs `lux-shim <sub> <args as JSON>` in a Run's container as

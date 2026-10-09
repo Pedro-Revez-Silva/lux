@@ -151,7 +151,7 @@ func (p *placement) dropRepo(name string) {
 	defer p.mu.Unlock()
 	drop(&p.assign.Spec)
 	drop(p.state.Spec)
-	_ = writeRunState(p.dir, p.state)
+	_ = p.saveStateLocked()
 }
 
 // scrubURL is err's message with url scrubbed of userinfo.

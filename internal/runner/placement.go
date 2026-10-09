@@ -43,6 +43,13 @@ type placement struct {
 	epoch    int
 	assign   *proto.Assign // nil when re-adopted after a runner restart
 	dir      string
+	// prev is the Run's earlier placement on this host when this one was
+	// assigned: this one touches nothing of the Run's until prev is done.
+	// Set before run starts; cleared under mu once prev is done, because a
+	// later placement's waitPrevious reads it under mu.
+	prev *placement
+	// nudge wakes waitPrevious to re-check a stop or a fence.
+	nudge chan struct{}
 
 	mu      sync.Mutex
 	state   *runState
@@ -52,11 +59,13 @@ type placement struct {
 	// cancelStart ends the steps before the container starts (an image
 	// build, a pull, a clone) when the placement is stopped meanwhile.
 	cancelStart context.CancelFunc
-	shimConn    net.Conn
-	shimEnc     *json.Encoder
-	done        chan struct{}
-	session     string      // latest session id the adapter reported
-	user        passwd.User // who the workload runs as
+	// cancelExport ends finish's volume exports; nil outside them.
+	cancelExport context.CancelFunc
+	shimConn     net.Conn
+	shimEnc      *json.Encoder
+	done         chan struct{}
+	session      string      // latest session id the adapter reported
+	user         passwd.User // who the workload runs as
 	// env is what the runner places things by in the workload's
 	// environment (workloadEnv: HOME, XDG_DATA_HOME); made are the
 	// directories the engine stores' mounts make, for the shim to hand over.
@@ -84,11 +93,11 @@ type placement struct {
 	memoryLimit int64
 }
 
-func newPlacement(r *Runner, a proto.Assign) *placement {
+func newPlacement(r *Runner, a proto.Assign, prev *placement) *placement {
 	return &placement{
 		r: r, runID: a.RunID, tenantID: a.TenantID, epoch: a.Epoch, assign: &a,
-		dir: r.runDir(a.RunID), phase: "assigned",
-		done: make(chan struct{}),
+		dir: r.runDir(a.RunID), phase: "assigned", prev: prev,
+		done: make(chan struct{}), nudge: make(chan struct{}, 1),
 	}
 }
 
@@ -96,6 +105,18 @@ func containerName(runID string) string    { return "lux-" + runID }
 func volumeName(runID, name string) string { return "lux-" + runID + "-" + name }
 func runtimeVolume(runID string) string    { return "lux-" + runID + "--rt" }
 func networkName(runID string) string      { return "lux-" + runID }
+
+// container is the id of the container this placement created; "" before
+// its create succeeded. Every podman call about this placement's own
+// container goes by it: another epoch of the Run may hold the Run's name.
+func (p *placement) container() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.state == nil {
+		return ""
+	}
+	return p.state.Container
+}
 
 func (p *placement) runningStatus() proto.Status {
 	p.mu.Lock()
@@ -132,14 +153,40 @@ func (p *placement) finishing() bool {
 	return p.phase == "exited"
 }
 
+// markStale fences the placement off: it reports nothing more, and writes
+// nothing more under p.dir, which the Run's next placement here owns. The
+// fence itself is recorded once, before that placement starts.
 func (p *placement) markStale() {
 	p.mu.Lock()
-	p.stale = true
+	defer p.mu.Unlock()
+	if p.stale {
+		return
+	}
 	if p.state != nil {
 		p.state.Stale = true
-		_ = writeRunState(p.dir, p.state)
+		_ = p.saveStateLocked()
 	}
-	p.mu.Unlock()
+	p.stale = true
+	p.wake()
+	// One still starting stops: it would make a container for nothing.
+	if p.cancelStart != nil {
+		p.cancelStart()
+	}
+}
+
+// saveStateLocked persists the run state, unless the placement is fenced
+// off: then the Run's next placement here owns p.dir. p.mu must be held.
+func (p *placement) saveStateLocked() error {
+	if p.stale || p.state == nil {
+		return nil
+	}
+	return writeRunState(p.dir, p.state)
+}
+
+func (p *placement) saveState() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.saveStateLocked()
 }
 
 func (p *placement) isStale() bool {
@@ -148,17 +195,40 @@ func (p *placement) isStale() bool {
 	return p.stale
 }
 
+// abandonSnapshot cancels finish's volume exports if they are under way.
+// Past them the snapshot is completed and reported as usual.
+func (p *placement) abandonSnapshot() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cancelExport != nil {
+		p.cancelExport()
+	}
+}
+
 func (p *placement) setPhase(ph string) {
 	p.mu.Lock()
 	p.phase = ph
 	p.mu.Unlock()
 }
 
-func (p *placement) waitDone(d time.Duration) {
-	select {
-	case <-p.done:
-	case <-time.After(d):
+// removeTimeout bounds finish's removal of its container.
+const removeTimeout = time.Minute
+
+// handoverWait bounds how long a placement waits for the Run's previous
+// placement on this host to end. That one is killed, abandoning its volume
+// exports (sampleSlow's walk of the volumes ignores the cancel, so on very
+// many files this is not immediate), or past them: its reports outlast a
+// host lease only while the host is cut off from luxd, and its container's
+// removal takes at most removeTimeout plus podman's WaitDelay.
+func (r *Runner) handoverWait() time.Duration {
+	if r.handover > 0 {
+		return r.handover
 	}
+	lease := time.Duration(r.lease.Load())
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+	return lease + removeTimeout + podman.WaitDelay
 }
 
 func (p *placement) logf(msg string, args ...any) {
@@ -174,13 +244,16 @@ func (p *placement) mark(key string) {
 	if _, ok := p.state.Times[key]; !ok {
 		p.state.Times[key] = time.Now().UnixMilli()
 	}
-	_ = writeRunState(p.dir, p.state)
+	_ = p.saveStateLocked()
 }
 
 func (p *placement) times() map[string]int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	t := map[string]int64{}
+	if p.state == nil {
+		return t
+	}
 	for k, v := range p.state.Times {
 		t[k] = v
 	}
@@ -251,7 +324,89 @@ func (p *placement) restoreState() {
 	p.mu.Lock()
 	p.state = st
 	p.mu.Unlock()
-	_ = writeRunState(p.dir, st)
+	_ = p.saveState()
+}
+
+// waitPrevious waits, up to handoverWait, for the Run's previous placement
+// on this host to end (its snapshot reported, or its fenced teardown done):
+// until then its container, volumes and run state are its own. A stop or
+// a fence of this placement ends the wait.
+func (p *placement) waitPrevious() error {
+	wait := p.r.handoverWait()
+	deadline := time.NewTimer(wait)
+	defer deadline.Stop()
+	// prev may itself have been waiting for an older one: wait down the
+	// chain. A placement drops its prev only once that one is done.
+	for prev := p.prev; prev != nil; {
+		select {
+		case <-prev.done:
+			prev.mu.Lock()
+			next := prev.prev
+			prev.mu.Unlock()
+			prev = next
+		case <-p.nudge:
+			if p.pendingStop() != "" {
+				return errStoppedBeforeStart
+			}
+			if p.isStale() {
+				return errStale
+			}
+		case <-deadline.C:
+			p.logf("the previous placement here did not end in time", "previous", prev.epoch, "waited", wait)
+			return fmt.Errorf("the Run's epoch %d on this host did not end within %s", prev.epoch, wait)
+		}
+	}
+	p.mu.Lock()
+	p.prev = nil
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *placement) wake() {
+	select {
+	case p.nudge <- struct{}{}:
+	default:
+	}
+}
+
+var errStoppedBeforeStart = errors.New("stopped before start")
+
+// startEnd is the exit code and reason of a placement that ended without
+// running its workload, in state "failed" or "exited" (stopped).
+func startEnd(state string) (int, string) {
+	if state == "exited" {
+		return 0, "stopped"
+	}
+	return 125, "start-failed"
+}
+
+// reportStartEnd reports the end of a placement that never ran its
+// workload, until luxd has it or the placement is fenced off.
+func (p *placement) reportStartEnd(ctx context.Context, state, msg string) {
+	p.setPhase("exited")
+	code, reason := startEnd(state)
+	for p.report(ctx, proto.MsgStatus, proto.Status{State: state, ExitCode: &code, Reason: reason, Message: msg, Times: p.times()}) != nil {
+		if p.isStale() || ctx.Err() != nil {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	p.setPhase("done")
+}
+
+// failBeforeStart ends a placement that never took over the Run on this
+// host: its run state and everything else under p.dir stay the previous
+// placement's, so nothing is written there.
+func (p *placement) failBeforeStart(ctx context.Context, err error) {
+	msg := "handover: " + err.Error()
+	switch {
+	case errors.Is(err, errStale):
+		p.setPhase("done")
+	case errors.Is(err, errStoppedBeforeStart):
+		p.reportStartEnd(ctx, "exited", msg)
+	default:
+		p.reportStartEnd(ctx, "failed", msg)
+	}
 }
 
 // run takes a placement from assignment to its final report.
@@ -263,6 +418,10 @@ func (p *placement) run(ctx context.Context) {
 	// else: not runner memory past it, not state.json.
 	prompt := a.PromptAttachments
 	a.PromptAttachments = nil
+	if err := p.waitPrevious(); err != nil {
+		p.failBeforeStart(ctx, err)
+		return
+	}
 	p.restoreState()
 	p.setPhase("starting")
 	go p.report(ctx, proto.MsgStatus, proto.Status{State: "starting"})
@@ -370,17 +529,23 @@ func (p *placement) run(ctx context.Context) {
 		fail("container", err)
 		return
 	}
-	if err := p.r.pm.Start(ctx, containerName(p.runID)); err != nil {
+	ctr := p.container()
+	if err := p.r.pm.Start(ctx, ctr); err != nil {
 		fail("start", err)
 		return
 	}
+	// Fenced while it was being made: a kill then may have found it
+	// created but not yet running.
+	if p.isStale() {
+		p.kill(ctx)
+	}
 	p.mark("containerStarted")
 	p.state.Phase = "started"
-	_ = writeRunState(p.dir, p.state)
+	_ = p.saveState()
 	p.mu.Lock()
 	p.memoryLimit = p.r.mem.limit(int64(sp.Resources.Memory))
 	p.mu.Unlock()
-	if st, err := p.r.pm.Inspect(ctx, containerName(p.runID)); err == nil {
+	if st, err := p.r.pm.Inspect(ctx, ctr); err == nil {
 		p.mu.Lock()
 		p.cgroup = st.CgroupPath
 		p.mu.Unlock()
@@ -388,7 +553,7 @@ func (p *placement) run(ctx context.Context) {
 
 	if err := p.startShim(ctx, a); err != nil {
 		p.logf("shim start failed", "err", err)
-		_ = p.r.pm.Kill(ctx, containerName(p.runID), "KILL")
+		_ = p.r.pm.Kill(ctx, ctr, "KILL")
 	} else {
 		p.setPhase("running")
 		go p.report(ctx, proto.MsgStatus, p.runningStatus())
@@ -410,7 +575,8 @@ func (p *placement) supervise(ctx context.Context) {
 	defer stopChecks()
 	go p.checkServers(checkCtx)
 
-	code, err := p.r.pm.Wait(ctx, containerName(p.runID))
+	ctr := p.container()
+	code, err := p.r.pm.Wait(ctx, ctr)
 	if err != nil {
 		p.logf("podman wait failed", "err", err)
 	}
@@ -425,10 +591,9 @@ func (p *placement) supervise(ctx context.Context) {
 	<-tailDone
 
 	exit := p.readExit(code)
-	if st, err := p.r.pm.Inspect(ctx, containerName(p.runID)); err == nil && st.OOMKilled {
+	if st, err := p.r.pm.Inspect(ctx, ctr); err == nil && st.OOMKilled {
 		exit.Reason, exit.Message = "oom", "killed: out of memory"
 	}
-	p.setPhase("exited")
 	p.finish(ctx, exit)
 }
 
@@ -454,13 +619,17 @@ func (p *placement) readExit(code int) *exitRecord {
 // finish snapshots the state volumes and reports: snapshot first, so that
 // by the time luxd sees the Run stopped its snapshot is recorded.
 func (p *placement) finish(ctx context.Context, exit *exitRecord) {
+	exportCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	p.mu.Lock()
+	p.phase = "exited"
+	p.cancelExport = cancel
 	p.state.Exit = exit
 	p.state.Phase = "exited"
 	p.state.LastExitAt = time.Now().UnixMilli()
 	p.mu.Unlock()
-	_ = writeRunState(p.dir, p.state)
-	p.sampleSlow(ctx)
+	_ = p.saveState()
+	p.sampleSlow(exportCtx)
 	usage := p.usage()
 
 	if p.isStale() {
@@ -468,7 +637,15 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 		p.setPhase("done")
 		return
 	}
-	sd, err := p.snapshot(ctx)
+	sd, err := p.snapshot(ctx, exportCtx)
+	p.mu.Lock()
+	p.cancelExport = nil
+	p.mu.Unlock()
+	if err != nil && exportCtx.Err() != nil {
+		p.logf("snapshot abandoned: the Run's next epoch was assigned here", "err", err)
+		p.setPhase("done")
+		return
+	}
 	if err != nil {
 		p.logf("snapshot failed", "err", err)
 		sd = &proto.SnapshotDone{Error: err.Error(), OutputSeq: exit.OutputSeq}
@@ -509,7 +686,7 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	p.mu.Unlock()
 	if id != "" {
 		// A hung podman must not keep the placement in "exited" indefinitely.
-		rmCtx, cancel := context.WithTimeout(ctx, time.Minute)
+		rmCtx, cancel := context.WithTimeout(ctx, removeTimeout)
 		if err := p.r.pm.Remove(rmCtx, id); err != nil {
 			p.r.log.Warn("removing the stopped container failed", "run", p.runID, "epoch", p.epoch, "container", id, "err", err)
 		}
@@ -522,7 +699,7 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	p.mu.Lock()
 	p.state.Phase = "reported"
 	p.mu.Unlock()
-	_ = writeRunState(p.dir, p.state)
+	_ = p.saveState()
 	p.setPhase("done")
 	p.logf("placement ended", "exit", exit.Code, "reason", exit.Reason)
 }
@@ -531,30 +708,13 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 // Its state volumes are unchanged, so the snapshot is the one it started
 // from.
 func (p *placement) finishWithoutContainer(ctx context.Context, state, msg string) {
-	code := 125
-	if state == "exited" {
-		code = 0
-	}
-	p.setPhase("exited")
-	exit := &exitRecord{Code: code, Reason: "start-failed", Message: msg, Failed: state == "failed"}
-	if state == "exited" {
-		exit.Reason = "stopped"
-	}
+	code, reason := startEnd(state)
 	p.mu.Lock()
-	p.state.Exit = exit
+	p.state.Exit = &exitRecord{Code: code, Reason: reason, Message: msg, Failed: state == "failed"}
 	p.state.Phase = "exited"
 	p.mu.Unlock()
-	_ = writeRunState(p.dir, p.state)
-	if p.isStale() {
-		return
-	}
-	for p.report(ctx, proto.MsgStatus, proto.Status{State: state, ExitCode: &code, Reason: exit.Reason, Message: msg, Times: p.times()}) != nil {
-		if p.isStale() || ctx.Err() != nil {
-			return
-		}
-		time.Sleep(time.Second)
-	}
-	p.setPhase("done")
+	_ = p.saveState()
+	p.reportStartEnd(ctx, state, msg)
 }
 
 // ---- volumes ----------------------------------------------------------------
@@ -654,7 +814,7 @@ func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, resume 
 	// From here the volumes are this placement's and will diverge from
 	// the snapshot.
 	p.state.VolumesSnapshot = ""
-	return writeRunState(p.dir, p.state)
+	return p.saveState()
 }
 
 // restoreVolume imports one volume from a local snapshot file if this host
@@ -754,7 +914,7 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 	p.mu.Lock()
 	p.state.Container = id
 	p.mu.Unlock()
-	return writeRunState(p.dir, p.state)
+	return p.saveState()
 }
 
 // createArgs is how the placement's container is made; the image is last.
@@ -889,7 +1049,7 @@ func (p *placement) dialShim(ctx context.Context) error {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("shim socket: %w", err)
 		}
-		st, _ := p.r.pm.Inspect(ctx, containerName(p.runID))
+		st, _ := p.r.pm.Inspect(ctx, p.container())
 		if st.Exists && !st.Running {
 			return errors.New("container exited before the shim was ready")
 		}
@@ -954,12 +1114,13 @@ func (p *placement) requestStop(ctx context.Context, reason string) {
 	phase := p.phase
 	if p.state != nil {
 		p.state.StopReason = p.stopWhy
-		_ = writeRunState(p.dir, p.state)
+		_ = p.saveStateLocked()
 	}
 	if phase == "starting" && p.cancelStart != nil {
 		p.cancelStart()
 	}
 	p.mu.Unlock()
+	p.wake()
 	switch {
 	case phase == "running":
 		p.setPhase("stopping")
@@ -987,7 +1148,9 @@ func (p *placement) sendStop(ctx context.Context, reason string) {
 	}
 	short := p.r.evictionGrace(grace)
 	if err := p.sendShim(proto.ShimMsg{Type: proto.ShimStop, Reason: reason, GraceSec: short.Seconds()}); err != nil {
-		go p.r.pm.Stop(context.WithoutCancel(ctx), containerName(p.runID), min(grace, short))
+		if ctr := p.container(); ctr != "" {
+			go p.r.pm.Stop(context.WithoutCancel(ctx), ctr, min(grace, short))
+		}
 	}
 }
 
@@ -1003,7 +1166,9 @@ func (p *placement) interrupt(ctx context.Context) {
 
 // kill ends a stale placement at once: its Run lives elsewhere now.
 func (p *placement) kill(ctx context.Context) {
-	_ = p.r.pm.Kill(ctx, containerName(p.runID), "KILL")
+	if ctr := p.container(); ctr != "" {
+		_ = p.r.pm.Kill(ctx, ctr, "KILL")
+	}
 }
 
 // ---- events from the output file --------------------------------------------
@@ -1179,8 +1344,9 @@ func (p *placement) usage() *proto.Usage {
 func (p *placement) sampleSlow(ctx context.Context) {
 	p.mu.Lock()
 	var vols []volumeRef
+	var ctr string
 	if p.state != nil {
-		vols = p.mounts()
+		vols, ctr = p.mounts(), p.state.Container
 	}
 	p.mu.Unlock()
 	var (
@@ -1198,18 +1364,20 @@ func (p *placement) sampleSlow(ctx context.Context) {
 			}
 		})
 	}
-	wg.Go(func() {
-		if out, err := p.r.pm.Run(ctx, "container", "inspect", "--size", "--format", "{{.SizeRw}}", containerName(p.runID)); err == nil {
-			var n int64
-			fmt.Sscan(strings.TrimSpace(string(out)), &n)
-			add(n)
-		}
-	})
-	wg.Go(func() {
-		var err error
-		st, err = p.r.pm.Stats(ctx, containerName(p.runID))
-		statsOK = err == nil
-	})
+	if ctr != "" {
+		wg.Go(func() {
+			if out, err := p.r.pm.Run(ctx, "container", "inspect", "--size", "--format", "{{.SizeRw}}", ctr); err == nil {
+				var n int64
+				fmt.Sscan(strings.TrimSpace(string(out)), &n)
+				add(n)
+			}
+		})
+		wg.Go(func() {
+			var err error
+			st, err = p.r.pm.Stats(ctx, ctr)
+			statsOK = err == nil
+		})
+	}
 	wg.Wait()
 	p.checkDisk(ctx, disk)
 	p.mu.Lock()
@@ -1266,8 +1434,9 @@ func dirSize(root string) int64 {
 
 // snapshot exports every state volume (zstd), compresses the output file,
 // and records them for upload. The local volumes now hold exactly this
-// snapshot, so a resume here moves nothing.
-func (p *placement) snapshot(ctx context.Context) (*proto.SnapshotDone, error) {
+// snapshot, so a resume here moves nothing. exportCtx covers the volume
+// exports only.
+func (p *placement) snapshot(ctx, exportCtx context.Context) (*proto.SnapshotDone, error) {
 	snapID := ids.New(ids.Snapshot)
 	rec := &snapshotRecord{RunID: p.runID, Epoch: p.epoch, Created: time.Now().UnixMilli()}
 	sd := &proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: snapID, RunID: p.runID, Epoch: p.epoch, Volumes: []proto.VolumeSnapshot{}}}
@@ -1277,8 +1446,12 @@ func (p *placement) snapshot(ctx context.Context) (*proto.SnapshotDone, error) {
 			continue
 		}
 		blobID := ids.New(ids.Blob)
-		size, sum, err := p.r.writeBlob(blobID, func(w io.Writer) error { return p.r.pm.VolumeExport(ctx, v.Volume, w) })
+		size, sum, err := p.r.writeBlob(blobID, func(w io.Writer) error { return p.r.pm.VolumeExport(exportCtx, v.Volume, w) })
 		if err != nil {
+			// No record lists the blobs already written: nothing else removes them.
+			for _, up := range rec.Uploads {
+				os.Remove(up.Path)
+			}
 			return nil, fmt.Errorf("export %s: %w", v.Name, err)
 		}
 		sd.Manifest.Volumes = append(sd.Manifest.Volumes, proto.VolumeSnapshot{Name: v.Name, Path: v.Path, BlobID: blobID, Size: size, SHA256: sum})
@@ -1313,7 +1486,7 @@ func (p *placement) snapshot(ctx context.Context) (*proto.SnapshotDone, error) {
 	p.mu.Lock()
 	p.state.VolumesSnapshot, p.state.VolumesEpoch = snapID, p.epoch
 	p.mu.Unlock()
-	_ = writeRunState(p.dir, p.state)
+	_ = p.saveState()
 	return sd, nil
 }
 

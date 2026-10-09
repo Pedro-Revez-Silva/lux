@@ -33,6 +33,10 @@ func New() *Podman { return &Podman{Bin: "podman"} }
 // ErrNotFound is returned when a container, volume or image does not exist.
 var ErrNotFound = errors.New("not found")
 
+// WaitDelay is how long a cancelled podman call (Run) has after its SIGTERM
+// before it is killed.
+const WaitDelay = 30 * time.Second
+
 func (p *Podman) cmd(ctx context.Context, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, p.Bin, args...)
 }
@@ -70,7 +74,7 @@ func (p *Podman) run(ctx context.Context, env []string, args ...string) ([]byte,
 	// Cancelled: ask podman to stop (it cleans up what it started), and
 	// kill it only if it has not after a while.
 	c.Cancel = func() error { return c.Process.Signal(syscall.SIGTERM) }
-	c.WaitDelay = 30 * time.Second
+	c.WaitDelay = WaitDelay
 	c.Stdout, c.Stderr = &stdout, &stderr
 	if err := c.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
@@ -271,6 +275,9 @@ func (p *Podman) VolumeExport(ctx context.Context, name string, w io.Writer) err
 	var stderr bytes.Buffer
 	c := p.cmd(ctx, "volume", "export", name)
 	c.Stdout, c.Stderr = w, &stderr
+	// Cancelled: killed; a child of podman's still holding stdout does not
+	// keep Run waiting past WaitDelay.
+	c.WaitDelay = WaitDelay
 	if err := c.Run(); err != nil {
 		return fmt.Errorf("podman volume export %s: %v: %s", name, err, strings.TrimSpace(stderr.String()))
 	}

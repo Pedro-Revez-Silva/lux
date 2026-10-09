@@ -190,6 +190,24 @@ container. Under `--userns=auto` that needed more than the commonly cited
     that is now empty, which a resume on another host never has. The
     runner removes a placement's container once its stop is reported; its
     volumes stay.
+  - One epoch of a Run at a time on a host. Every epoch's container has
+    the Run's name, and they share its volumes and run state. When luxd
+    assigns a newer epoch while an older one is still on the host, the
+    newer epoch touches nothing of the Run's until the older one is done:
+    - an older epoch whose workload may still run is fenced off (it
+      reports nothing more and writes no run state) and killed;
+    - an older epoch exporting a snapshot luxd has not acked abandons the
+      export: luxd assigns over it only once it is lost, and would refuse
+      that snapshot, or it is a re-export after a restart, whose original
+      luxd already holds;
+    - an older epoch whose snapshot luxd acked finishes as usual (its
+      container is removed, its snapshot uploaded).
+
+    That wait is bounded by a host lease, plus the minute a finishing
+    epoch has to remove its container, plus the 30 s podman gets to exit
+    once that minute is up; past it, the newer epoch fails to start and
+    says why. A placement kills, stops and waits on only the container it
+    created, by its ID, never by the Run's name.
 
 ## Exec, attach, ports
 

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marcioapm/lux/internal/egress"
 	"github.com/marcioapm/lux/internal/gitws"
 	"github.com/marcioapm/lux/internal/podman"
 	"github.com/marcioapm/lux/internal/proto"
@@ -19,12 +20,21 @@ import (
 
 // finishFixture is a runner heartbeating every second to a fake luxd that
 // acks every report and keeps them, with a placement of run1 (epoch 1,
-// one state volume) whose container has exited. Its podman's volume
-// export blocks until release is called. $0.ctr holds the id of the Run's
-// container while one exists (the placement's, ctr-1); `rm -f` removes it
-// by that id or the Run's container name, and `volume rm` its volume's file.
-// `rmi` records the image it removes in $0.rmi. The placement's image is
-// img, which lux pulled for t1.
+// one state volume) whose container has exited. Its podman:
+//   - `volume export` blocks until release is called; it exits 1 while
+//     $0.failexport exists, and returns at once for a volume X while
+//     $0.fast.X exists;
+//   - `rm -f` blocks while $0.holdrm exists (touching $0.removing, then
+//     logging "removed <target>");
+//   - `network create` blocks while $0.holdnet exists (touching
+//     $0.netcreating), then fails;
+//   - `container inspect X` prints $0.inspect.X if it exists;
+//   - $0.ctr holds the id of the Run's container while one exists (the
+//     placement's, ctr-1); `rm -f` removes it by that id or the Run's
+//     container name, and `volume rm` its volume's file;
+//   - `rmi` records the image it removes in $0.rmi.
+//
+// The placement's image is img, which lux pulled for t1.
 type finishFixture struct {
 	r       *Runner
 	p       *placement
@@ -34,6 +44,12 @@ type finishFixture struct {
 	reports []proto.Frame
 	// ctrAtStatus: whether the container existed when luxd got the status.
 	ctrAtStatus []bool
+	// holdEpoch: reports about this epoch are kept in held, unanswered,
+	// until ackHeld or nackHeld answers them.
+	holdEpoch int
+	held      []proto.Frame
+	// uploaded: the blob ids PUT to the fake luxd (serveUploads).
+	uploaded []string
 }
 
 func newFinishFixture(t *testing.T) *finishFixture {
@@ -44,11 +60,27 @@ func newFinishFixture(t *testing.T) *finishFixture {
 echo "$*" >> "$0.log"
 case "$1 $2" in
 "volume export")
+  [ -e "$0.failexport" ] && exit 1
+  if [ -e "$0.fast.$3" ]; then echo volume-data; exit 0; fi
   touch "$0.exporting"
   while [ ! -e "$0.release" ]; do sleep 0.05; done
   echo volume-data ;;
-"rm -f") case "$5" in lux-run1|"$(cat "$0.ctr")") rm -f "$0.ctr" ;; esac ;;
+"rm -f")
+  if [ -e "$0.holdrm" ]; then
+    touch "$0.removing"
+    while [ -e "$0.holdrm" ]; do sleep 0.05; done
+    echo "removed $5" >> "$0.log"
+  fi
+  case "$5" in lux-run1|"$(cat "$0.ctr")") rm -f "$0.ctr" ;; esac ;;
+"network create")
+  if [ -e "$0.holdnet" ]; then
+    touch "$0.netcreating"
+    while [ -e "$0.holdnet" ]; do sleep 0.05; done
+  fi
+  exit 1 ;;
 "volume rm") rm -f "$0.vol.$4" ;;
+"kill -s") echo "$4" >> "$0.killed" ;;
+"container inspect") [ -e "$0.inspect.$3" ] && cat "$0.inspect.$3" || exit 1 ;;
 "rmi "*) echo "$2" >> "$0.rmi" ;;
 *) exit 1 ;;
 esac
@@ -75,6 +107,7 @@ esac
 	r.conn = newConn(r)
 	r.conn.polling = true
 	r.uploads = newUploader(r)
+	r.egress = &egress.Firewall{}
 	r.lease.Store(int64(3 * time.Second))
 	r.mounts.Store(runtimeVolume("run1"), filepath.Join(dir, "rt"))
 	r.mounts.Store(volumeName("run1", "data"), data)
@@ -98,6 +131,11 @@ esac
 			r.conn.mu.Unlock()
 			for _, fr := range reports {
 				f.mu.Lock()
+				if f.holdEpoch != 0 && fr.Epoch == f.holdEpoch && fr.Type != proto.MsgHeartbeat {
+					f.held = append(f.held, fr)
+					f.mu.Unlock()
+					continue
+				}
 				f.reports = append(f.reports, fr)
 				if fr.Type == proto.MsgStatus {
 					_, err := os.Stat(bin + ".ctr")
@@ -119,6 +157,16 @@ esac
 }
 
 func (f *finishFixture) release() { _ = os.WriteFile(f.bin+".release", nil, 0o600) }
+
+// waitDone waits up to d for the placement to end; false if it has not.
+func (p *placement) waitDone(d time.Duration) bool {
+	select {
+	case <-p.done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
 
 const finishImage = "ghcr.io/a/img:1"
 
@@ -338,6 +386,25 @@ func TestReadoptedFinishingPlacementRemovesItsContainer(t *testing.T) {
 	}
 	if b, err := os.ReadFile(filepath.Join(f.data, "state")); err != nil || string(b) != "kept" {
 		t.Errorf("the state volume holds %q (%v), want its data", b, err)
+	}
+}
+
+// A volume export that fails with no next epoch assigned is not abandoned:
+// luxd is told the snapshot failed, then that the Run ended.
+func TestFailedExportIsReported(t *testing.T) {
+	f := newFinishFixture(t)
+	writeFile(t, f.bin+".failexport", "")
+	f.exitedAsSupervised(context.Background())
+	mustEnd(t, f.p, "the placement never ended")
+	if got := f.types(); len(got) != 2 || got[0] != proto.MsgSnapshotDone || got[1] != proto.MsgStatus {
+		t.Fatalf("reports %v, want snapshot.done then status", got)
+	}
+	f.mu.Lock()
+	data := f.reports[slices.IndexFunc(f.reports, func(fr proto.Frame) bool { return fr.Type == proto.MsgSnapshotDone })].Data
+	f.mu.Unlock()
+	var sd proto.SnapshotDone
+	if err := json.Unmarshal(data, &sd); err != nil || sd.Error == "" {
+		t.Fatalf("snapshot.done %+v (%v), want its error", sd, err)
 	}
 }
 

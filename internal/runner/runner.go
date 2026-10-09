@@ -126,6 +126,8 @@ type Runner struct {
 	shimSyncModes bool
 	// mem scales a Run's resources.memory to its container's limit.
 	mem memoryScale
+	// handover, when set, replaces handoverWait's bound. Tests only.
+	handover time.Duration
 }
 
 // mountpoint is where a volume's data is on this host. It never changes for
@@ -481,15 +483,24 @@ func (r *Runner) assign(ctx context.Context, a proto.Assign) {
 		r.log.Warn("ignoring assign for an older epoch", "run", a.RunID, "epoch", a.Epoch, "have", old.epoch)
 		return
 	}
-	p := newPlacement(r, a)
+	p := newPlacement(r, a, old)
 	r.placements[a.RunID] = p
 	r.mu.Unlock()
-	if old != nil && old.liveState() != "" && !old.finishing() {
-		// The same Run again with a newer epoch while the old one still
-		// runs here: luxd gave up on the old one.
-		old.markStale()
-		old.kill(ctx)
-		old.waitDone(30 * time.Second)
+	if old != nil {
+		// p touches nothing of the Run's until old is done (waitPrevious).
+		// An old one whose workload may still run is one luxd gave up on:
+		// fenced and killed. A finishing one is not fenced, as in
+		// onWelcome: a snapshot luxd acked is the Run's and must upload.
+		// One still exporting has sent no snapshot.done, which luxd would
+		// refuse (it assigns over a placement only once lost) or already
+		// holds (a re-export after a restart): the export is abandoned. A
+		// later stale nack still fences it.
+		if old.liveState() != "" && !old.finishing() {
+			old.markStale()
+			old.kill(ctx)
+		} else {
+			old.abandonSnapshot()
+		}
 	}
 	go p.run(context.WithoutCancel(ctx))
 	if r.evictBy.Load() != nil {

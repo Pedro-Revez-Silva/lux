@@ -95,7 +95,7 @@ func newResizeFixture(t *testing.T, now spec.Resources, local string) *resizeFix
 	vols := []spec.Volume{{Name: "data", Path: "/data", Kind: "state"}}
 	a := &proto.Assign{RunID: "run1", TenantID: "t1", Epoch: 2, Spec: spec.RunSpec{Volumes: vols, Resources: now},
 		Resume: &proto.ResumeInfo{Snapshot: manifest}}
-	p := newPlacement(r, *a)
+	p := newPlacement(r, *a, nil)
 	p.state = &runState{RunID: "run1", TenantID: "t1", Epoch: 2, VolumesSnapshot: local,
 		Volumes: []volumeRef{{Name: "data", Volume: volumeName("run1", "data"), Path: "/data", Kind: "state"}}}
 	if err := os.MkdirAll(p.dir, 0o700); err != nil {
