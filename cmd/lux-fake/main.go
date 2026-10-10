@@ -41,6 +41,10 @@
 //	                       (streamable HTTP), with {"text": <text>}; report it
 //	                       as the protocol's tool events and reply with the
 //	                       result's text
+//	compact [remote]       compact the conversation, reported as the protocol
+//	                       reports a real compaction (compact.go), with a
+//	                       summary naming every prompt so far; remote: with
+//	                       no summary text, as Codex's remote compaction
 //
 // Anything else is echoed back as "you said: …".
 package main
@@ -130,6 +134,9 @@ type agent struct {
 	tool func(call toolCall)
 	// shell reports a shell tool call the same way (shell.go).
 	shell func(call shellCall)
+	// compact reports a compaction with its summary (compact.go); nil
+	// where the protocol has no way to say so.
+	compact func(summary string)
 }
 
 // prompt is a user message and the client's id for it; images describes
@@ -480,6 +487,8 @@ func (a *agent) runLine(line string, cancel chan struct{}) bool {
 		server, rest, _ := strings.Cut(rest, " ")
 		tool, text, _ := strings.Cut(rest, " ")
 		a.say(a.mcpCall(server, tool, text))
+	case "compact":
+		a.runCompact(rest == "remote")
 	default:
 		a.say("you said: " + line)
 	}
@@ -640,7 +649,10 @@ func acp() {
 		}
 	}
 	oc.run = func(p prompt) { runLoop(p, nil) }
-	oc.listen(os.Args)
+	if oc.listen(os.Args) {
+		// OpenCode reports a compaction only on its bus.
+		a.compact = oc.compact
+	}
 	for sc := scanner(); sc.Scan(); {
 		var m rpcMsg
 		if json.Unmarshal(sc.Bytes(), &m) != nil {
@@ -786,6 +798,7 @@ func streamJSON() {
 			"content": []map[string]any{{"type": "tool_result", "tool_use_id": c.ID, "content": out, "is_error": c.Cancelled || c.ExitCode != 0}}}})
 	}
 	a.setMCP(claudeMCP(os.Args))
+	a.compact = claudeCompact(a)
 	if i := slices.Index(os.Args, "--resume"); i >= 0 && i+1 < len(os.Args) {
 		if err := a.loadSession(os.Args[i+1]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -954,12 +967,17 @@ func appServer() {
 		}
 	}
 	a.setMCP(codexMCP(os.Args))
+	a.compact = codexCompact(a, func() string {
+		turnMu.Lock()
+		defer turnMu.Unlock()
+		return turnID
+	})
 	reply := func(id json.RawMessage, result any) { a.send(map[string]any{"id": id, "result": result}) }
 	fail := func(id json.RawMessage, err error) {
 		a.send(map[string]any{"id": id, "error": map[string]any{"code": -32600, "message": err.Error()}})
 	}
 	thread := func() map[string]any {
-		return map[string]any{"thread": map[string]any{"id": a.session, "status": map[string]string{"type": "idle"}}}
+		return map[string]any{"thread": map[string]any{"id": a.session, "path": a.codexRollout(), "status": map[string]string{"type": "idle"}}}
 	}
 	for sc := scanner(); sc.Scan(); {
 		var m rpcMsg

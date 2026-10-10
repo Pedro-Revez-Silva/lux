@@ -54,6 +54,9 @@ type Sink interface {
 	InputConsumed(requestID string)
 	// InputFailed: the input was not delivered, or the agent dropped it.
 	InputFailed(in proto.Input, err error)
+	// Compacted: the agent compacted its conversation (proto.EvCompacted).
+	// The sink redacts and caps the summary.
+	Compacted(c proto.Compaction)
 }
 
 // Delivery is when an accepted input reaches the agent's model.
@@ -489,6 +492,16 @@ func unreadWhy(stopped bool) error {
 		return errStoppedUnread
 	}
 	return errExitedUnread
+}
+
+// reportCompacted writes the record, then, if err says why its summary
+// could not be read, a warning: "<what> <session> was compacted; …".
+func reportCompacted(sink Sink, what string, c proto.Compaction, err error) {
+	sink.Compacted(c)
+	if err != nil {
+		sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
+			"%s %s was compacted; its summary could not be read: %v", what, c.SessionID, err)})
+	}
 }
 
 // lineWriter serializes JSON lines to a process's stdin.

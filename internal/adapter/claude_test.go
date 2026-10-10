@@ -1,6 +1,9 @@
 package adapter
 
 import (
+	"encoding/json"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -203,5 +206,175 @@ func TestClaudeQueuedLineFailsWhenTheAgentExits(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("queued line failed %d times: %q", n, sink.lines())
+	}
+}
+
+// testdataLines is testdata/name's lines.
+func testdataLines(t *testing.T, name string) []string {
+	t.Helper()
+	b, err := os.ReadFile("testdata/" + name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(b)), "\n")
+}
+
+// clCompact is what claude 2.1.207 writes for a /compact
+// (testdata/claude-2.1.207-compact.jsonl): compact_boundary, the summary
+// as a synthetic user line, then the command's output.
+func clCompact(t *testing.T) []string {
+	t.Helper()
+	return testdataLines(t, "claude-2.1.207-compact.jsonl")
+}
+
+// clCompactSummary is the content of clCompact's summary line.
+func clCompactSummary(t *testing.T) string {
+	t.Helper()
+	var line struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(clCompact(t)[1]), &line); err != nil {
+		t.Fatal(err)
+	}
+	return line.Message.Content
+}
+
+// claudeEvents is inputSink logging each event's type, and each claude.*
+// event's data, in order.
+type claudeEvents struct{ *inputSink }
+
+func (s claudeEvents) Event(typ string, data any) {
+	if strings.HasPrefix(typ, "claude.") || typ == proto.EvWarning {
+		b, _ := json.Marshal(data)
+		s.add(typ + " " + string(b))
+	}
+	s.inputSink.Event(typ, data)
+}
+
+// A compaction is one lux.compacted, after the boundary and its summary
+// line, with the boundary's trigger and token counts and the summary as
+// Claude Code gave its model. The raw lines are still relayed.
+func TestClaudeCompactionIsReported(t *testing.T) {
+	log := &inputSink{}
+	c := NewClaude()
+	w := startWireSink(t, c, proto.ShimConfig{}, claudeEvents{log})
+	w.send(clInit)
+	lines := clCompact(t)
+	for _, l := range lines {
+		w.send(l)
+	}
+	w.send(clResult)
+	log.wait(t, "turn_end")
+	w.exit()
+	summary := clCompactSummary(t)
+	want, _ := json.Marshal(proto.Compaction{SessionID: "4238a343-9196-4242-a5d3-c8ccd4d1ed94", Trigger: "manual",
+		PreTokens: ptr(int64(36663)), PostTokens: ptr(int64(972)), Summary: summary})
+	if got := log.compactions(); !slices.Equal(got, []string{"compacted " + string(want)}) {
+		t.Fatalf("got %q", got)
+	}
+	var relayed []string
+	for _, l := range log.lines() {
+		if typ, _, ok := strings.Cut(l, " "); ok && strings.HasPrefix(typ, "claude.") && typ != "claude.turn_end" {
+			relayed = append(relayed, typ)
+		}
+	}
+	if want := []string{"claude.system", "claude.system", "claude.user", "claude.user", "claude.result"}; !slices.Equal(relayed, want) {
+		t.Fatalf("relayed %q, want %q", relayed, want)
+	}
+	// The record directly follows the boundary's relay, read with the
+	// summary line, which is relayed right after it.
+	l := log.lines()
+	at := slices.Index(l, "compacted "+string(want))
+	if at < 1 || !strings.Contains(l[at-1], `"subtype":"compact_boundary"`) ||
+		at+1 >= len(l) || !strings.HasPrefix(l[at+1], "claude.user ") || !strings.Contains(l[at+1], `"isSynthetic":true`) {
+		t.Fatalf("record not between the boundary and the summary line: %q", l)
+	}
+	if !strings.Contains(summary, "PERIWINKLE") {
+		t.Fatalf("testdata summary %q", summary)
+	}
+}
+
+// A boundary its summary line does not follow is still reported, without
+// a summary, directly after the boundary's relay, then a warning.
+func TestClaudeCompactionWithoutSummary(t *testing.T) {
+	log := &inputSink{}
+	c := NewClaude()
+	w := startWireSink(t, c, proto.ShimConfig{}, claudeEvents{log})
+	w.send(clInit)
+	w.send(strings.Replace(clCompact(t)[0], `"manual"`, `"auto"`, 1))
+	w.send(clResult)
+	log.wait(t, "turn_end")
+	w.exit()
+	want, _ := json.Marshal(proto.Compaction{SessionID: "4238a343-9196-4242-a5d3-c8ccd4d1ed94", Trigger: "auto",
+		PreTokens: ptr(int64(36663)), PostTokens: ptr(int64(972))})
+	if got := log.compactions(); !slices.Equal(got, []string{"compacted " + string(want)}) {
+		t.Fatalf("got %q", got)
+	}
+	l := log.lines()
+	at := slices.Index(l, "compacted "+string(want))
+	if at < 1 || !strings.Contains(l[at-1], `"subtype":"compact_boundary"`) || at+1 >= len(l) ||
+		l[at+1] != `lux.warning {"message":"claude: compacted, but no summary line followed its compact_boundary"}` {
+		t.Fatalf("not boundary, record, warning: %q", l)
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// The summary is the user line whose uuid is the boundary's anchor_uuid
+// (or, with no anchor, a synthetic one), with lines of other types
+// relayed before it; any other line, or the end of output, means none.
+func TestClaudeCompactionSummaryLine(t *testing.T) {
+	cl, summary := clCompact(t), clCompactSummary(t)
+	const status = `{"type":"system","subtype":"status","status":"compacting","session_id":"4238a343-9196-4242-a5d3-c8ccd4d1ed94"}`
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		exit  bool
+		// summary: the record carries it; else it has none, and a warning
+		// follows it.
+		summary bool
+		// before: the relay right before the record.
+		before string
+	}{
+		// The /compact replay line (string content, not the anchor) is not
+		// the summary.
+		{"replay line first", []string{cl[0], cl[2], clResult}, false, false, `"subtype":"compact_boundary"`},
+		{"no anchor", []string{strings.Replace(cl[0], `"anchor_uuid":"5ed60a81-a8d3-43cc-a453-ff6dba87b048",`, "", 1), cl[1], clResult},
+			false, true, `"subtype":"compact_boundary"`},
+		{"status line between", []string{cl[0], status, cl[1], clResult}, false, true, `"subtype":"status"`},
+		{"boundary then exit", []string{cl[0]}, true, false, `"subtype":"compact_boundary"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := &inputSink{}
+			w := startWireSink(t, NewClaude(), proto.ShimConfig{}, claudeEvents{log})
+			w.send(clInit)
+			for _, l := range tc.lines {
+				w.send(l)
+			}
+			if !tc.exit {
+				log.wait(t, "turn_end")
+			}
+			w.exit()
+			got := log.compactions()
+			if len(got) != 1 {
+				t.Fatalf("got %q", got)
+			}
+			var c proto.Compaction
+			_ = json.Unmarshal([]byte(strings.TrimPrefix(got[0], "compacted ")), &c)
+			if want := map[bool]string{true: summary}[tc.summary]; c.Summary != want {
+				t.Fatalf("summary %.80q, want %.80q", c.Summary, want)
+			}
+			l := log.lines()
+			at := slices.Index(l, got[0])
+			if at < 1 || !strings.Contains(l[at-1], tc.before) {
+				t.Fatalf("not after %s: %q", tc.before, l)
+			}
+			warning := `lux.warning {"message":"claude: compacted, but no summary line followed its compact_boundary"}`
+			if tc.summary == (at+1 < len(l) && l[at+1] == warning) || tc.summary == log.has("lux.warning") {
+				t.Fatalf("warning: %q", l)
+			}
+		})
 	}
 }

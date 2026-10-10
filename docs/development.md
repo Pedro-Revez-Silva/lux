@@ -301,7 +301,12 @@ without line breaks, as real agents' do. `sh <command>` runs a command as
 the agent's shell tool, reported as each protocol reports a real one
 (Claude Code's `Bash` tool_use and tool_result, Codex's
 `commandExecution` item, OpenCode's `execute` tool_call), so the steering
-tests assert the same tool events on fake and real variants.
+tests assert the same tool events on fake and real variants. `compact`
+compacts the conversation as each protocol reports it (Claude Code's
+`compact_boundary` and summary line, Codex's `contextCompaction` item and
+rollout entry, OpenCode's stored summary and `session.compacted`), with a
+summary naming every prompt so far; `compact remote` gives Codex's remote
+compaction, with no summary text.
 
 ### EC2 pools: fake by default, real nightly
 

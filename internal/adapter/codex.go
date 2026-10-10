@@ -1,15 +1,20 @@
 package adapter
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -47,9 +52,28 @@ type Codex struct {
 	// (before lux checks whether its turn has ended) and "done" (a test
 	// seam for interleavings).
 	onSteer func(stage, requestID string)
+	// rollout: thread.path, where Codex writes each compaction's summary.
+	rollout string
+	// rolloutBase: the compacted entries the rollout held at thread
+	// start or resume, which are not this Run's.
+	rolloutBase int
+	// baseErr: why rolloutBase is unknown; no entry is then taken.
+	baseErr error
+	// reported: the contextCompaction items reported, by id.
+	reported map[string]bool
+	// ctx ends with Run; bg joins the summary reads waiting on the rollout.
+	ctx context.Context
+	bg  sync.WaitGroup
+	// rolloutMu guards rolloutOff, how far the rollout has been read, and
+	// compacted, the compacted entries read so far.
+	rolloutMu  sync.Mutex
+	rolloutOff int64
+	compacted  []compactedEntry
+	// compactionWait bounds waiting for a compaction's rollout entry.
+	compactionWait time.Duration
 }
 
-func NewCodex() *Codex { return &Codex{} }
+func NewCodex() *Codex { return &Codex{compactionWait: 10 * time.Second} }
 
 // CredentialFiles: Codex reads its key from ~/.codex/auth.json (what
 // `codex login --with-api-key` writes), not from OPENAI_API_KEY in the
@@ -117,8 +141,9 @@ func (c *Codex) call(method string, params any) (json.RawMessage, error) {
 }
 
 func (c *Codex) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink Sink) error {
+	ctx, cancel := context.WithCancel(ctx)
 	c.mu.Lock()
-	c.sink = sink
+	c.sink, c.ctx = sink, ctx
 	c.mu.Unlock()
 	c.rpc.attach(p.Stdin)
 	go pump(p.Stderr, sink.Stderr)
@@ -140,6 +165,8 @@ func (c *Codex) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink 
 		c.drain()
 	}
 	<-done
+	cancel()
+	c.bg.Wait()
 	c.mu.Lock()
 	why := unreadWhy(c.stopped)
 	c.mu.Unlock()
@@ -161,11 +188,13 @@ func (c *Codex) handshake(cfg proto.ShimConfig, sink Sink) error {
 	c.mu.Unlock()
 	cwd := workdir(cfg)
 	var res json.RawMessage
+	resumed := false
 	if cfg.Resume && cfg.SessionID != "" {
 		res, err = c.call("thread/resume", map[string]any{"threadId": cfg.SessionID})
 		if err != nil {
 			sink.Event(proto.EvWarning, map[string]any{"message": "thread/resume failed, starting a new thread: " + err.Error()})
 		}
+		resumed = res != nil
 	}
 	if res == nil {
 		res, err = c.call("thread/start", map[string]any{"cwd": cwd})
@@ -180,15 +209,31 @@ func (c *Codex) handshake(cfg proto.ShimConfig, sink Sink) error {
 	}
 	var r struct {
 		Thread struct {
-			ID string `json:"id"`
+			ID   string `json:"id"`
+			Path string `json:"path"`
 		} `json:"thread"`
 	}
 	if err := json.Unmarshal(res, &r); err != nil || r.Thread.ID == "" {
 		return errors.New("no thread id")
 	}
 	c.mu.Lock()
-	c.thread = r.Thread.ID
+	c.thread, c.rollout = r.Thread.ID, r.Thread.Path
 	c.mu.Unlock()
+	if r.Thread.Path != "" {
+		// A resumed thread's earlier compactions are not this Run's. A new
+		// thread's rollout may not exist yet: it holds none. Any other
+		// failure leaves the base unknown, so no entry is guessed at.
+		prior, err := c.compactedEntries()
+		if errors.Is(err, os.ErrNotExist) && !resumed {
+			err = nil
+		}
+		if err != nil {
+			sink.Event(proto.EvWarning, map[string]any{"message": "codex: the thread's rollout could not be read; compactions are reported without a summary: " + err.Error()})
+		}
+		c.mu.Lock()
+		c.rolloutBase, c.baseErr = len(prior), err
+		c.mu.Unlock()
+	}
 	sink.Session(r.Thread.ID)
 	sink.Activity(true)
 	return nil
@@ -323,6 +368,14 @@ func (c *Codex) handleRequest(m rpcMsg) {
 }
 
 func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
+	// compaction: a contextCompaction item that completed, reported once
+	// its codex.item/completed is relayed.
+	var compaction *string
+	defer func() {
+		if compaction != nil {
+			c.compactionCompleted(*compaction)
+		}
+	}()
 	switch m.Method {
 	case "turn/started":
 		var p struct {
@@ -397,6 +450,7 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 	case "item/completed":
 		var p struct {
 			Item struct {
+				ID   string `json:"id"`
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"item"`
@@ -406,6 +460,9 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 			sink.Stdout([]byte(p.Item.Text))
 			sink.EndMessage()
 		}
+		if p.Item.Type == "contextCompaction" {
+			compaction = &p.Item.ID
+		}
 	}
 	// Streamed text (item/agentMessage/delta, item/reasoning/textDelta,
 	// command output, …), so a secret split across deltas is redacted whole.
@@ -414,6 +471,183 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 		return
 	}
 	sink.Event("codex."+m.Method, json.RawMessage(m.Params))
+}
+
+// compactionCompleted reports a compaction once, as its item completes,
+// with the summary read off the rollout (the app-server's item carries
+// none). Codex writes one compacted entry per compaction, in order: the
+// nth item reported in this Run is the nth entry after rolloutBase.
+//
+// Called on the reader goroutine right after the item/completed relay:
+// when the rollout already holds the entry (Codex writes it in the same
+// millisecond), the record directly follows that relay. Otherwise the
+// entry is waited for off the reader goroutine, and the record comes later.
+func (c *Codex) compactionCompleted(id string) {
+	c.mu.Lock()
+	if c.reported == nil {
+		c.reported = map[string]bool{}
+	}
+	if c.reported[id] {
+		c.mu.Unlock()
+		return
+	}
+	c.reported[id] = true
+	n := c.rolloutBase + len(c.reported) - 1
+	thread, sink, ctx, baseErr := c.thread, c.sink, c.ctx, c.baseErr
+	c.mu.Unlock()
+	report := func(summary string, err error) {
+		reportCompacted(sink, "codex: thread", proto.Compaction{SessionID: thread, Summary: summary}, err)
+	}
+	if baseErr != nil {
+		report("", fmt.Errorf("the rollout's earlier entries are unknown: %w", baseErr))
+		return
+	}
+	if summary, done, err := c.rolloutEntry(n); done {
+		report(summary, err)
+		return
+	}
+	c.bg.Add(1)
+	go func() {
+		defer c.bg.Done()
+		report(c.rolloutSummary(ctx, n))
+	}()
+}
+
+// errRemoteCompaction: Codex wrote the compaction with an empty message.
+// For OpenAI's own provider it compacts remotely: the model gets an
+// encrypted compaction item and no text is exposed.
+var errRemoteCompaction = errors.New("Codex compacted remotely and exposes no summary text")
+
+// rolloutEntry is the message of the rollout's nth compacted entry as the
+// rollout holds it now; done is false while the entry is not written yet.
+//
+//	{"timestamp", "type":"compacted", "payload":{"message", "replacement_history", …}}
+func (c *Codex) rolloutEntry(n int) (summary string, done bool, err error) {
+	if c.rolloutFile() == "" {
+		return "", true, errors.New("Codex named no rollout file for the thread")
+	}
+	entries, err := c.compactedEntries()
+	switch {
+	case err != nil:
+		return "", true, err
+	case len(entries) <= n:
+		return "", false, nil
+	case entries[n].err != nil:
+		return "", true, entries[n].err
+	case entries[n].message == "":
+		return "", true, errRemoteCompaction
+	}
+	return entries[n].message, true, nil
+}
+
+// rolloutSummary waits up to compactionWait for the rollout's nth
+// compacted entry, reading it once more when the wait or the Run ends.
+func (c *Codex) rolloutSummary(ctx context.Context, n int) (string, error) {
+	wait, cancel := context.WithTimeout(ctx, c.compactionWait)
+	defer cancel()
+	for {
+		if summary, done, err := c.rolloutEntry(n); done {
+			return summary, err
+		}
+		if wait.Err() != nil {
+			if ctx.Err() != nil {
+				return "", fmt.Errorf("the Run ended before Codex wrote its compacted entry to %s", c.rolloutFile())
+			}
+			return "", fmt.Errorf("no compacted entry in %s after %s", c.rolloutFile(), c.compactionWait)
+		}
+		select {
+		case <-wait.Done():
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func (c *Codex) rolloutFile() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rollout
+}
+
+// compactedEntry is a compacted entry of the rollout: its message, or why
+// it could not be read.
+type compactedEntry struct {
+	message string
+	err     error
+}
+
+// rolloutLineMax: a rollout line longer than this is skipped, not held.
+const rolloutLineMax = 16 << 20
+
+// compactedEntries reads the rollout's whole lines not read yet, and
+// returns every compacted entry in it so far. The rollout is under the
+// agent's home, which the agent can write: it is opened without following
+// a symlink or blocking on a FIFO, and read only if it is a regular file.
+func (c *Codex) compactedEntries() ([]compactedEntry, error) {
+	c.rolloutMu.Lock()
+	defer c.rolloutMu.Unlock()
+	path := c.rolloutFile()
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil {
+		return nil, err
+	} else if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("the rollout %s is not a regular file (%s)", path, fi.Mode().Type())
+	}
+	if _, err := f.Seek(c.rolloutOff, io.SeekStart); err != nil {
+		return nil, err
+	}
+	r := bufio.NewReaderSize(f, 64<<10)
+	for {
+		line, n, long, err := readLine(r, rolloutLineMax)
+		if err != nil {
+			// A line without its newline is still being written.
+			return slices.Clone(c.compacted), nil
+		}
+		c.rolloutOff += n
+		if long {
+			// Its type is near the start of the line ({"timestamp","type",…}):
+			// a compacted entry still counts, so later ones keep their place.
+			if bytes.Contains(line[:min(len(line), 256)], []byte(`"type":"compacted"`)) {
+				c.compacted = append(c.compacted, compactedEntry{err: fmt.Errorf(
+					"its rollout entry is longer than %d bytes", rolloutLineMax)})
+			}
+			continue
+		}
+		if !bytes.Contains(line, []byte(`"type":"compacted"`)) {
+			continue
+		}
+		var e struct {
+			Type    string `json:"type"`
+			Payload struct {
+				Message string `json:"message"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(line, &e) == nil && e.Type == "compacted" {
+			c.compacted = append(c.compacted, compactedEntry{message: e.Payload.Message})
+		}
+	}
+}
+
+// readLine reads a line through its '\n'. n is its whole length; a line
+// longer than max bytes is read and dropped past its first max bytes, and
+// long is true. An error (io.EOF) means no whole line is left.
+func readLine(r *bufio.Reader, max int) (line []byte, n int64, long bool, err error) {
+	for {
+		chunk, err := r.ReadSlice('\n')
+		n += int64(len(chunk))
+		if room := max - len(line); room > 0 {
+			line = append(line, chunk[:min(room, len(chunk))]...)
+		}
+		switch {
+		case err == nil:
+			return line, n, n > int64(max), nil
+		case !errors.Is(err, bufio.ErrBufferFull):
+			return nil, n, false, err
+		}
+	}
 }
 
 // Deliver steers a running turn natively (turn/steer), or starts a turn.

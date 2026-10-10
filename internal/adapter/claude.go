@@ -122,23 +122,27 @@ func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink
 
 	sc := bufio.NewScanner(p.Stdout)
 	sc.Buffer(make([]byte, 64<<10), 64<<20)
+	// compaction: a compact_boundary whose summary line has not come yet.
+	var compaction *claudeCompaction
 	for sc.Scan() {
 		line := sc.Bytes()
 		var m struct {
 			Type      string `json:"type"`
 			Subtype   string `json:"subtype"`
 			SessionID string `json:"session_id"`
-			Message   struct {
-				Content []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"content"`
+			UUID      string `json:"uuid"`
+			// Content: a list of blocks, or a string (a synthetic message,
+			// such as a compaction's summary).
+			Message struct {
+				Content json.RawMessage `json:"content"`
 			} `json:"message"`
-			Result       string          `json:"result"`
-			Usage        json.RawMessage `json:"usage"`
-			Capabilities []string        `json:"capabilities"`
-			CommandUUID  string          `json:"command_uuid"`
-			State        string          `json:"state"`
+			IsSynthetic     bool            `json:"isSynthetic"`
+			CompactMetadata json.RawMessage `json:"compact_metadata"`
+			Result          string          `json:"result"`
+			Usage           json.RawMessage `json:"usage"`
+			Capabilities    []string        `json:"capabilities"`
+			CommandUUID     string          `json:"command_uuid"`
+			State           string          `json:"state"`
 		}
 		if err := json.Unmarshal(line, &m); err != nil || m.Type == "" {
 			sink.Stdout(append(append([]byte{}, line...), '\n'))
@@ -148,17 +152,29 @@ func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink
 			c.sessionID = m.SessionID
 			sink.Session(m.SessionID)
 		}
+		if compaction != nil && compaction.reportWith(sink, m.Type, m.UUID, m.IsSynthetic, m.Message.Content) {
+			compaction = nil
+		}
 		switch m.Type {
 		case "assistant":
-			for _, b := range m.Message.Content {
+			var blocks []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			_ = json.Unmarshal(m.Message.Content, &blocks)
+			for _, b := range blocks {
 				if b.Type == "text" && b.Text != "" {
 					sink.Stdout([]byte(b.Text))
 					sink.EndMessage()
 				}
 			}
 		case "system":
-			if m.Subtype == "init" {
+			switch m.Subtype {
+			case "init":
 				c.init(slices.Contains(m.Capabilities, "msg_lifecycle_v1"))
+			case "compact_boundary":
+				// Reported once the line after it, the summary, is read.
+				compaction = newClaudeCompaction(m.SessionID, m.CompactMetadata)
 			}
 		case "command_lifecycle":
 			c.lifecycleFrame(m.CommandUUID, m.State)
@@ -183,8 +199,63 @@ func (c *Claude) Run(ctx context.Context, p *Process, cfg proto.ShimConfig, sink
 		}
 		sink.Event("claude."+m.Type, json.RawMessage(append([]byte{}, line...)))
 	}
+	if compaction != nil {
+		compaction.report(sink, "")
+	}
 	c.exited()
 	return nil
+}
+
+// claudeCompaction is a compact_boundary waiting for its summary: Claude
+// Code (2.1.207) writes, right after the boundary, the summary it gave its
+// model as a synthetic user line with string content, whose uuid is the
+// boundary's compact_metadata.preserved_segment.anchor_uuid. The same text
+// is the transcript's isCompactSummary message.
+type claudeCompaction struct {
+	c      proto.Compaction
+	anchor string
+}
+
+func newClaudeCompaction(session string, meta json.RawMessage) *claudeCompaction {
+	var md struct {
+		Trigger          string `json:"trigger"`
+		PreTokens        *int64 `json:"pre_tokens"`
+		PostTokens       *int64 `json:"post_tokens"`
+		PreservedSegment struct {
+			AnchorUUID string `json:"anchor_uuid"`
+		} `json:"preserved_segment"`
+	}
+	_ = json.Unmarshal(meta, &md)
+	return &claudeCompaction{anchor: md.PreservedSegment.AnchorUUID,
+		c: proto.Compaction{SessionID: session, Trigger: md.Trigger, PreTokens: md.PreTokens, PostTokens: md.PostTokens}}
+}
+
+// reportWith takes the line after the boundary: it reports the compaction,
+// with the line's text if it is the summary, and returns true; a line of
+// another kind before it (system, stream_event) waits for the next one.
+func (cc *claudeCompaction) reportWith(sink Sink, typ, uuid string, synthetic bool, content json.RawMessage) bool {
+	var text string
+	isText := json.Unmarshal(content, &text) == nil
+	switch {
+	case typ == "user" && isText && (uuid == cc.anchor || cc.anchor == "" && synthetic):
+		cc.report(sink, text)
+	case typ == "user" || typ == "assistant" || typ == "result":
+		cc.report(sink, "")
+	default:
+		return false
+	}
+	return true
+}
+
+// report writes the record before its warning, and before the line that
+// ended the wait is relayed: the record is the next thing a client sees
+// after the boundary, bar lines of other types Claude wrote in between.
+func (cc *claudeCompaction) report(sink Sink, summary string) {
+	cc.c.Summary = summary
+	sink.Compacted(cc.c)
+	if summary == "" {
+		sink.Event(proto.EvWarning, map[string]any{"message": "claude: compacted, but no summary line followed its compact_boundary"})
+	}
 }
 
 // exited fails every line written that Claude Code never started, once

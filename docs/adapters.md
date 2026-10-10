@@ -238,10 +238,91 @@ Header values come from secrets and are never in the command line. See
   (`--request-id`) never sends it twice.
 - **Structured events.** The agent's own protocol messages are kept as
   events in the output (`lux logs --events`). The reply text also goes to
-  stdout, so `lux logs` reads like a conversation.
+  stdout, so `lux logs` reads like a conversation. `claude-code` relays
+  every stream-json line with a `type` as `claude.<type>`, including user
+  lines whose `message.content` is a string (a compaction's summary, a
+  slash command's `<local-command-stdout>` replay); none of those go to
+  stdout.
 - **The session id.** It is stored on the Run and passed back on resume, so
   the conversation continues from its transcript on the restored state
   volume.
+- **Compactions.** When the agent compacts its context, one `lux.compacted`
+  record says so, with the summary it replaced the context with (see
+  [Compactions](#compactions)).
+
+## Compactions
+
+An agent near its context limit, or told to (`/compact`), replaces its
+conversation with a summary it writes and carries on from that. The
+`claude-code`, `codex` and `opencode` adapters report each compaction of
+the Run's session as one `lux.compacted` record in the output (`lux logs
+--events`), whatever the agent's own protocol calls it:
+
+```json
+{"type": "lux.compacted", "data": {"sessionId": "…", "trigger": "manual", "preTokens": 36663, "postTokens": 972, "summary": "…"}}
+```
+
+| Field | |
+| --- | --- |
+| `sessionId` | the session (thread) compacted: the Run's `sessionId` |
+| `trigger` | `auto` (the context was full), `manual` (`/compact`), `overflow` (OpenCode: an automatic compaction in the middle of a step that did not finish), or `""` where the agent does not say |
+| `preTokens`, `postTokens` | the context's size before and after, where the agent gives them (Claude Code) |
+| `summary` | the summary's text, where the agent makes one lux can read; redacted like all output, cut at 64 KiB on a UTF-8 boundary |
+| `summaryTruncated` | `true` when `summary` was cut |
+
+Fields the agent does not give are left out. A summary lux could not read
+leaves `summary` out and adds a `lux.warning` saying why, right after the
+record; the record still comes. Both reads lux waits on are bounded at
+10 s: OpenCode's server answering, and Codex writing the entry to its
+rollout. Codex's rollout is read only as a regular file (not through a
+symlink or from a FIFO), and a line over 16 MiB in it is skipped.
+
+| Adapter | Signal | Summary from | `trigger` | tokens |
+| --- | --- | --- | --- | --- |
+| `claude-code` | `system` `compact_boundary` | the synthetic `user` line right after it | yes | yes |
+| `codex` | `item/completed` of a `contextCompaction` item | the rollout's `compacted` entry; none when Codex compacts remotely (OpenAI's provider) | no | no |
+| `opencode` | bus `session.compacted` for the Run's session | the oldest stored assistant message with `summary: true` newer than the one last reported (`GET /session/{id}/message`); a repeated `session.compacted` gives no second record | yes | no |
+| `acp`, `generic` | — | — | — | — |
+
+The agent's own messages are still kept as they came (`claude.system`,
+`codex.item/*`). The details, verified against each CLI, are in
+[agent-protocols.md](agent-protocols.md).
+
+### Where the record lands
+
+Where the agent's own announcement is relayed too, a client may see both
+and must count the compaction once. Relative to that relay, `lux.compacted`
+lands:
+
+| Adapter | Raw relay | `lux.compacted` |
+| --- | --- | --- |
+| `claude-code` | `claude.system` with `subtype: compact_boundary` | once the line after the boundary is read: directly after the boundary's relay and before the summary line's `claude.user`. Lines of another type Claude Code writes between the boundary and the summary line (`system`, `stream_event`) are relayed first, between the two. With no summary line, the record comes when the next `user`, `assistant` or `result` line (or the end of output) is read, before that line is relayed. |
+| `codex` | `codex.item/completed` with `item.type: contextCompaction` | directly after that relay when the rollout already holds the compaction's entry (Codex writes it in the same millisecond); otherwise later, once the entry is written, up to 10 s after, with Codex's later notifications in between. Never on `item/started`. |
+| `opencode` | none (`session.compacted` is read off OpenCode's bus, not relayed) | 0-10 s after the compaction, once the summary is read; usually after the turn's `acp.turn_end`. |
+
+"Directly after" is among the records the adapter writes from the agent's
+output. Records lux writes for other reasons (`lux.input` for an input
+arriving at that moment, `lux.activity`) can still fall in between. A
+`lux.warning` about the compaction always comes after its record.
+
+### What the record's position says
+
+`lux.compacted` is written at or after the compaction, never before its
+raw relay. It does not mark the exact point in the conversation the
+summary covers up to:
+
+- The record can come after records that followed the compaction: Codex's
+  late rollout entry and OpenCode's summary read can take up to 10 s, and
+  the agent's reply, or new inputs, may be written before it.
+- Codex's automatic compaction opens the turn that the user's input
+  started. That input's `lux.input` comes before the `contextCompaction`
+  item, and the summary does not cover it.
+- Claude Code keeps some messages verbatim beside the summary
+  (`compact_metadata.preserved_segment`); they may not be in its text.
+
+A client rebuilding a conversation from the summary should anchor on the
+turn boundary before the record (the turn the compaction happened in),
+not on the record itself.
 
 ## State paths
 

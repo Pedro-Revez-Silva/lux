@@ -101,6 +101,29 @@ hand-written examples, unless noted otherwise.
   resume succeeded from an unrelated directory; the resumed session kept its original
   `cwd` value from the transcript rather than the process's actual working directory.
   (verified by running)
+- **Compaction** (verified by running, 2026-10-10, 2.1.207, `claude-haiku-4.5`): a
+  `/compact` user line (stream-json; 3 times) writes, in order:
+  ```json
+  {"type":"system","subtype":"compact_boundary","session_id":"4238a343-…","uuid":"277fedcf-…",
+   "compact_metadata":{"trigger":"manual","pre_tokens":36663,"post_tokens":972,
+     "cumulative_dropped_tokens":35691,"duration_ms":12249,
+     "preserved_segment":{"head_uuid":"…","anchor_uuid":"5ed60a81-…","tail_uuid":"…"}, …}}
+  {"type":"user","message":{"role":"user","content":"This session is being continued from a
+   previous conversation that ran out of context. … Summary:\n1. Primary Request and Intent: …"},
+   "session_id":"4238a343-…","uuid":"5ed60a81-…","isReplay":false,"isSynthetic":true}
+  {"type":"user","message":{"role":"user","content":"<local-command-stdout>Compacted </local-command-stdout>"},
+   "isReplay":true, …}
+  ```
+  then a `result` with an empty `result`. The second line is the summary the model is
+  given, its content a string, its `uuid` the boundary's `preserved_segment.anchor_uuid`;
+  it is byte for byte the transcript's `isCompactSummary: true` message (sha1 compared),
+  so the stream is enough. `/compact` after a single exchange answers "Not enough
+  messages to compact." and compacts nothing (2 exchanges suffice).
+  `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` (1 or 5) did not trigger an automatic compaction in
+  a short conversation: the threshold is `min(window × pct, window − 13000)` checked
+  against the context size, and a near-empty conversation never reaches it. lux reports
+  the boundary and the line after it as one `lux.compacted` (trigger, `pre_tokens`,
+  `post_tokens`, summary). Sample: `internal/adapter/testdata/claude-2.1.207-compact.jsonl`.
 
 ---
 
@@ -201,6 +224,36 @@ hand-written examples, unless noted otherwise.
   HTTPS transport and completing normally — an artifact of the local LLM proxy not
   supporting Codex's preferred websocket transport, not a Codex protocol behavior to code
   against. Codex retries automatically and degrades gracefully to HTTPS. (verified by running)
+- **Compaction** (verified by running, 2026-10-10, codex-cli 0.145.0, `gpt-5.6-luna`
+  through the proxy): `thread/compact/start` `{"threadId"}` (result `{}`) runs a turn of
+  its own whose one item is a compaction; an automatic one
+  (`-c model_auto_compact_token_limit=N`, once the context passes N) opens the next
+  turn the same way, before its `userMessage`. Either way the app-server sends
+  ```json
+  {"method":"item/started","params":{"item":{"type":"contextCompaction","id":"01a12680-3221-…"},
+   "threadId":"…","turnId":"…","startedAtMs":1791647298081}}
+  {"method":"item/completed","params":{"item":{"type":"contextCompaction","id":"01a12680-3221-…"},
+   "threadId":"…","turnId":"…","completedAtMs":1791647299823}}
+  ```
+  and no `thread/compacted` (0 of 5). The item has no text, nor does `thread/read`
+  (`{"type":"contextCompaction","id":"item-3"}`). The rollout (`thread.path`) gets a
+  `{"type":"compacted","payload":{"message":…,"replacement_history":[…],"window_id":…}}`
+  entry, then `{"type":"event_msg","payload":{"type":"context_compacted"}}`, as the item
+  completes (same millisecond). `message` depends on the provider:
+  - Codex's built-in `openai` provider (`openai_base_url` set, as lux's tests run it):
+    compacted **remotely** — `message` is `""` and `replacement_history` ends with
+    `{"type":"compaction","encrypted_content":"gAAAA…"}`. No summary text exists
+    anywhere lux can read (2 of 2).
+  - A custom provider (`model_providers.<name>` with `wire_api="responses"`): compacted
+    locally — `message` is the summary given to the model ("Another language model
+    started to solve this problem and produced a summary … - The user asked me to
+    remember the secret word `PERIWINKLE`. …"), also the text of a user message in
+    `replacement_history` (2 of 2).
+  `/compact` sent as turn text is not a command: the model just answers it. lux reports
+  each `contextCompaction` item once, on `item/completed`, as `lux.compacted` with the
+  `message` of the matching rollout entry (the nth of the Run), or without a summary and
+  a `lux.warning` when it is empty. Samples:
+  `internal/adapter/testdata/codex-0.145.0-*.jsonl`.
 
 ---
 
@@ -272,6 +325,9 @@ OpenCode-specific behavior.
   - `GET /event` (server-sent events) is the bus. A model step is an assistant
     `message.updated` whose `info.parentID` is the user message it answers;
     `session.status` (`busy`/`idle`) and `session.idle` mark the loop.
+    `session.compacted` (`{"sessionID"}` only, no summary or token counts) is OpenCode's
+    one sign that it compacted the session's context; ACP has no such update. lux
+    reports it for the Run's session as a `lux.compacted` record (see Compaction below).
   - `POST /session/{id}/prompt_async` with `{"messageID":"msg_…","parts":[{"type":"text","text":…}]}`
     (204) stores the message **under that id** and joins it to the running ACP loop,
     exactly as a second `session/prompt` does. The first assistant `message.updated`
@@ -284,6 +340,37 @@ OpenCode-specific behavior.
     still runs, and the ACP turn never sees it (0/3).
   - The server comes up shortly after ACP answers `session/new`: a client must wait
     for `/event` before relying on it.
+- **Compaction** (verified by running, 2026-10-10, 1.18.18 and 1.18.35 — npm's
+  `latest` — with `claude-haiku-4.5`, 1 run each with a clean bus capture): `/compact`
+  sent as an ACP `session/prompt` (it is in `available_commands_update`) compacts, and
+  its prompt resolves `end_turn`. The bus then carries the summary's assistant
+  `message.updated` (`"mode":"compaction","agent":"compaction","summary":true`), its
+  text part streaming in `message.part.updated`, and once it is done:
+  ```json
+  {"type":"session.compacted","properties":{"sessionID":"ses_…"}}
+  ```
+  ACP gets only `usage_update`s. Neither version emitted any `session.next.compaction.*`
+  event (0 of 113 bus events on 1.18.35): those are defined in the binary
+  (`started {messageID, reason}`, `delta {text}`, `ended {text, …}`) but belong to the
+  v2 session API, which ACP does not use. The summary is in the stored messages,
+  `GET /session/{id}/message` (oldest first; `?limit=N`, the newest N):
+  ```json
+  {"info":{"id":"msg_1267a87e9…","role":"user","summary":{"diffs":[]}, …},
+   "parts":[{"type":"compaction","auto":false, …}]}
+  {"info":{"id":"msg_1267a87f1…","role":"assistant","parentID":"msg_1267a87e9…",
+           "mode":"compaction","agent":"compaction","summary":true,"finish":"stop", …},
+   "parts":[{"type":"step-start"},{"type":"text","text":"## Objective\n- User wants agent to remember … \"PERIWINKLE\" …"},
+            {"type":"step-finish", …}]}
+  ```
+  A user message's `summary` is an object; only the compaction's assistant message has
+  `summary: true`. `auto` is `true` for an automatic compaction, with `overflow: true`
+  when it interrupted a step that did not finish (`SessionCompaction.create` in the
+  binary). lux reads the newest 20 messages on `session.compacted`, takes the oldest
+  `summary: true` assistant message newer than the one it last reported (so two
+  compactions close together each get their own; none newer is a repeated
+  `session.compacted`, reported with a warning and no record), its text parts and the
+  trigger from its parent's compaction part, and reports `lux.compacted`. Sample:
+  `internal/adapter/testdata/opencode-1.18.35-compaction.json`.
 - `session/cancel` while a turn is genuinely in-progress was not cleanly isolated in
   testing (timing meant both test prompts had completed before cancel was sent) — its
   effect on OpenCode specifically is documented for ACP generally (see §4) but not

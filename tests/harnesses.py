@@ -41,6 +41,18 @@ class Caps:
     # Stopping must be SIGINT, which ends the running turn cleanly; SIGTERM
     # would leave it unfinished (Claude Code).
     stop_is_sigint: bool = False
+    # The adapter reports the agent's compactions as lux.compacted.
+    reports_compaction: bool = False
+    # ... with the summary text the agent made (Codex compacting through
+    # OpenAI's provider does it remotely: no text).
+    compaction_summary: bool = False
+    # The real agent compacts when sent "/compact" as input; otherwise its
+    # compaction is forced with compact_args and a large turn.
+    compact_command: bool = False
+    # The event type under which the adapter relays the agent's own
+    # announcement of a compaction (claude.system compact_boundary,
+    # codex.item/completed contextCompaction); "" where none is relayed.
+    compaction_relay: str = ""
 
 
 @dataclass(frozen=True)
@@ -62,6 +74,9 @@ class Harness:
     fake_command: list[str] = field(default_factory=lambda: ["lux-fake"])
     # Credential values that must never appear in output.
     secret_values: Callable[[], list[str]] = field(default=lambda: [])
+    # Arguments added to the real command so that its context compacts
+    # after a large turn (without caps.compact_command).
+    compact_args: tuple[str, ...] = ()
 
 
 def _env(name: str) -> str:
@@ -92,7 +107,9 @@ HARNESSES = [
     Harness(
         name="claude",
         adapter="claude-code",
-        caps=Caps(steer_joins_turn=True, steer_receipt=True, steer_in_final_step_is_next_turn=True, stop_is_sigint=True),
+        caps=Caps(steer_joins_turn=True, steer_receipt=True, steer_in_final_step_is_next_turn=True, stop_is_sigint=True,
+                  reports_compaction=True, compaction_summary=True, compact_command=True,
+                  compaction_relay="claude.system"),
         real_command=lambda: ["claude", "--model", _env("LUX_TEST_CLAUDE_MODEL") or "haiku", "--permission-mode", "bypassPermissions"],
         real_secrets=lambda: [{"name": "ANTHROPIC_API_KEY", "value": _env("LUX_TEST_ANTHROPIC_API_KEY")}],
         real_env=lambda: {"ANTHROPIC_BASE_URL": b} if (b := _env("LUX_TEST_ANTHROPIC_BASE_URL")) else {},
@@ -105,8 +122,15 @@ HARNESSES = [
     Harness(
         name="codex",
         adapter="codex",
-        caps=Caps(steer_joins_turn=True, steer_receipt=True),
+        # openai_base_url keeps Codex's built-in openai provider, which
+        # compacts remotely (codex 0.145.0): the rollout's compacted entry
+        # has an empty message, so there is no summary text.
+        caps=Caps(steer_joins_turn=True, steer_receipt=True, reports_compaction=True,
+                  compaction_relay="codex.item/completed"),
         real_command=_codex_command,
+        # Its context with no conversation is about 10k tokens; a turn of
+        # about 3.5k goes past this, and the next turn starts by compacting.
+        compact_args=("-c", "model_auto_compact_token_limit=12500"),
         # An ordinary env secret: the codex adapter writes the auth.json
         # Codex reads.
         real_secrets=lambda: [{"name": "OPENAI_API_KEY", "value": _env("LUX_TEST_OPENAI_API_KEY")}],
@@ -116,7 +140,8 @@ HARNESSES = [
     Harness(
         name="opencode",
         adapter="opencode",
-        caps=Caps(steer_joins_turn=True, steer_receipt=True),
+        caps=Caps(steer_joins_turn=True, steer_receipt=True, reports_compaction=True, compaction_summary=True,
+                  compact_command=True),
         fake_command=["lux-fake", "acp"],
         real_command=lambda: ["opencode", "acp"],
         # Providers in opencode.json, keys in auth.json: real user config, so
@@ -216,6 +241,35 @@ class Variant:
         if not self.real:
             return "echo long-turn\nsleep 60\necho never"
         return "Count slowly from 1 to 200, one number per line, then reply: never"
+
+    def compaction_spec(self, prompt: str) -> dict:
+        """spec, for a Run whose context compaction_steers force."""
+        h = self.harness
+        if self.real and h.compact_args:
+            return self.spec(prompt, workload={"command": h.real_command() + list(h.compact_args)})
+        return self.spec(prompt)
+
+    def compaction_steers(self) -> list[str]:
+        """Inputs, each sent once the agent is idle, after which its context
+        has been compacted once: on the next input at the latest."""
+        if not self.real:
+            return ["compact" if self.caps.compaction_summary else "compact remote"]
+        if self.caps.compact_command:
+            # Claude Code compacts nothing after a single exchange.
+            return ["Reply with just: ok", "/compact"]
+        filler = " ".join(f"lorem{i}" for i in range(1500))
+        return [f"Reply with just: ok. (Filler, ignore it: {filler})"]
+
+    def remember(self, word: str) -> str:
+        if not self.real:
+            return f"echo {word}"
+        return f"Remember the secret word: {word}. Reply with just: ok"
+
+    def recall_word(self) -> str:
+        """Ask for the word remember gave, from the conversation."""
+        if not self.real:
+            return "history"
+        return "Without using any tools: what was the secret word? Reply with just the word."
 
 
 def variants(env) -> list[tuple[Harness, bool]]:

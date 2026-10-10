@@ -59,6 +59,17 @@ func (s *inputSink) InputFailed(in proto.Input, err error) {
 	s.add(fmt.Sprintf("failed %s: %v", in.RequestID, err))
 }
 
+// Compacted logs "compacted <the compaction as JSON>".
+func (s *inputSink) Compacted(c proto.Compaction) {
+	b, _ := json.Marshal(c)
+	s.add("compacted " + string(b))
+}
+
+// compactions are the sink's compacted lines.
+func (s *inputSink) compactions() []string {
+	return slices.DeleteFunc(s.lines(), func(l string) bool { return !strings.HasPrefix(l, "compacted ") })
+}
+
 // checkCarried checks a steer carried past an interrupt: accepted in the
 // interrupted turn, consumed once after that turn's end and before the
 // next one's, never failed, and the Run idle at the end.

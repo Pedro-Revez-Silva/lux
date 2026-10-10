@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/marcioapm/lux/internal/adapter"
 	"github.com/marcioapm/lux/internal/proto"
@@ -180,6 +182,58 @@ func TestInputRecords(t *testing.T) {
 	}
 	if r := recs[6]; r.RequestID != "raw" || r.Phase != "" || r.Error != "dropped" || r.Text != "" {
 		t.Errorf("failed after accepted: %+v", r)
+	}
+}
+
+// A compaction's record carries what the adapter gave, its summary
+// redacted like all output and capped at proto.MaxCompactionSummary on a
+// UTF-8 boundary, with summaryTruncated only when it was cut.
+func TestCompactedRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	red := NewRedactor(map[string]string{"TOKEN": "s3cr3t-value"})
+	out, err := OpenOutput(path, red)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := &sink{s: &Shim{out: out, red: red}}
+	pre, post := int64(36694), int64(1172)
+	k.Compacted(proto.Compaction{SessionID: "s1", Trigger: "manual", PreTokens: &pre, PostTokens: &post, Summary: "the word; s3cr3t-value"})
+	k.Compacted(proto.Compaction{SessionID: "s1", Trigger: "auto"})
+	// "é" is two bytes: the cap falls inside it.
+	k.Compacted(proto.Compaction{SessionID: "s1", Summary: strings.Repeat("a", proto.MaxCompactionSummary-1) + "é"})
+	// The secret straddles the cap: redacted before the cut, and the cut
+	// does not keep half of its marker.
+	k.Compacted(proto.Compaction{SessionID: "s1", Summary: strings.Repeat("y", proto.MaxCompactionSummary-5) + "s3cr3t-value"})
+	out.Close()
+	var got []map[string]any
+	for _, r := range readRecords(t, path) {
+		var ev struct {
+			Type string         `json:"type"`
+			Data map[string]any `json:"data"`
+		}
+		if r.Ch == "event" && json.Unmarshal(r.Event, &ev) == nil && ev.Type == proto.EvCompacted {
+			got = append(got, ev.Data)
+		}
+	}
+	if len(got) != 4 {
+		t.Fatalf("got %d records: %v", len(got), got)
+	}
+	want0 := map[string]any{"sessionId": "s1", "trigger": "manual", "preTokens": float64(36694), "postTokens": float64(1172),
+		"summary": "the word; [REDACTED:TOKEN]"}
+	if !reflect.DeepEqual(got[0], want0) {
+		t.Errorf("full: %v", got[0])
+	}
+	if want := map[string]any{"sessionId": "s1", "trigger": "auto"}; !reflect.DeepEqual(got[1], want) {
+		t.Errorf("no summary: %v", got[1])
+	}
+	s, _ := got[2]["summary"].(string)
+	if len(s) != proto.MaxCompactionSummary-1 || !utf8.ValidString(s) || got[2]["summaryTruncated"] != true {
+		t.Errorf("capped: %d bytes, valid %v, truncated %v", len(s), utf8.ValidString(s), got[2]["summaryTruncated"])
+	}
+	s, _ = got[3]["summary"].(string)
+	if strings.Contains(s, "s3cr") || strings.Contains(s, "[REDA") || s != strings.Repeat("y", proto.MaxCompactionSummary-5) ||
+		got[3]["summaryTruncated"] != true {
+		t.Errorf("straddling: ends %q, truncated %v", s[max(0, len(s)-20):], got[3]["summaryTruncated"])
 	}
 }
 

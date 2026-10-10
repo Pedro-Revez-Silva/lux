@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,16 +34,24 @@ type opencodeServer struct {
 	subs []chan []byte
 	n    int
 	// msgs: the session's stored messages; busy: a loop runs.
-	msgs []map[string]string
+	msgs []storedMsg
 	busy bool
 	// run starts a loop for a prompt when none is running.
 	run func(p prompt)
 }
 
-func (o *opencodeServer) listen(args []string) {
+// storedMsg is a stored message as GET /session/{id}/message lists it.
+type storedMsg struct {
+	info  map[string]any
+	parts []any
+}
+
+// listen serves OpenCode's server when args has --port; false if it does
+// not.
+func (o *opencodeServer) listen(args []string) bool {
 	i := slices.Index(args, "--port")
 	if i < 0 || i+1 >= len(args) {
-		return
+		return false
 	}
 	host := "127.0.0.1"
 	if j := slices.Index(args, "--hostname"); j >= 0 && j+1 < len(args) {
@@ -51,7 +60,7 @@ func (o *opencodeServer) listen(args []string) {
 	l, err := net.Listen("tcp", net.JoinHostPort(host, args[i+1]))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "opencode server:", err)
-		return
+		return false
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /event", o.events)
@@ -59,6 +68,7 @@ func (o *opencodeServer) listen(args []string) {
 	mux.HandleFunc("GET /session/{id}/message", o.messages)
 	mux.HandleFunc("GET /session/status", o.sessionStatus)
 	go http.Serve(l, mux)
+	return true
 }
 
 func (o *opencodeServer) events(w http.ResponseWriter, r *http.Request) {
@@ -111,9 +121,13 @@ func (o *opencodeServer) messages(w http.ResponseWriter, r *http.Request) {
 	o.mu.Lock()
 	out := []map[string]any{}
 	for _, m := range o.msgs {
-		out = append(out, map[string]any{"info": m, "parts": []any{}})
+		out = append(out, map[string]any{"info": m.info, "parts": m.parts})
 	}
 	o.mu.Unlock()
+	// ?limit=N: the newest N, oldest first, as OpenCode pages.
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n < len(out) {
+		out = out[len(out)-n:]
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }
@@ -130,8 +144,17 @@ func (o *opencodeServer) sessionStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (o *opencodeServer) store(m map[string]string) {
+	info := map[string]any{}
+	for k, v := range m {
+		info[k] = v
+	}
+	o.storeWhole(info, []any{})
+}
+
+// storeWhole stores a message with its parts.
+func (o *opencodeServer) storeWhole(info map[string]any, parts []any) {
 	o.mu.Lock()
-	o.msgs = append(o.msgs, m)
+	o.msgs = append(o.msgs, storedMsg{info, parts})
 	o.mu.Unlock()
 }
 

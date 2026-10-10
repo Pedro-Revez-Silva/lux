@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -470,6 +471,108 @@ type storedMessage struct {
 		Role     string `json:"role"`
 		ParentID string `json:"parentID"`
 	} `json:"info"`
+}
+
+// compactionMessage is what lux reads of a stored message to find a
+// compaction: the summary is an assistant message with info.summary true
+// (a user message's summary is an object), whose text parts are the
+// summary; its parent is the user message holding the compaction part
+// ({"type":"compaction","auto","overflow"?}). opencode 1.18.35.
+type compactionMessage struct {
+	Info struct {
+		ID       string          `json:"id"`
+		Role     string          `json:"role"`
+		ParentID string          `json:"parentID"`
+		Summary  json.RawMessage `json:"summary"`
+	} `json:"info"`
+	Parts []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		Auto     bool   `json:"auto"`
+		Overflow bool   `json:"overflow"`
+	} `json:"parts"`
+}
+
+func (m compactionMessage) isSummary() bool {
+	return m.Info.Role == "assistant" && string(bytes.TrimSpace(m.Info.Summary)) == "true"
+}
+
+// compactionWindow: the newest messages read for a compaction's summary;
+// by the time session.compacted is handled the loop may have stored a few
+// more after it (an auto compaction's synthetic "continue" and its reply).
+const compactionWindow = 20
+
+// errCompactionReported: the session's newest summary is one already
+// reported; session.compacted came again for the same compaction.
+var errCompactionReported = errors.New("no summary newer than the one already reported")
+
+// compaction reads a compaction of the session: the oldest summary message
+// with an id above after (the summary last reported; ids ascend, whatever
+// order the page has), its text and its trigger, and the summary's id. So
+// two compactions close together each get their own summary.
+// errCompactionReported if the page holds summaries, none newer than after.
+func (b *opencodeBus) compaction(ctx context.Context, session, after string) (summary, trigger, id string, err error) {
+	var page []compactionMessage
+	if _, err := b.get(ctx, "/session/"+session+"/message?limit="+strconv.Itoa(compactionWindow), &page); err != nil {
+		return "", "", "", err
+	}
+	at, older := -1, false
+	for i, m := range page {
+		if !m.isSummary() {
+			continue
+		}
+		if m.Info.ID <= after {
+			older = true
+		} else if at < 0 || m.Info.ID < page[at].Info.ID {
+			at = i
+		}
+	}
+	switch {
+	case at < 0 && older:
+		return "", "", "", errCompactionReported
+	case at < 0:
+		return "", "", "", fmt.Errorf("no summary message among the session's newest %d", compactionWindow)
+	}
+	m := page[at]
+	var text strings.Builder
+	for _, p := range m.Parts {
+		if p.Type == "text" {
+			text.WriteString(p.Text)
+		}
+	}
+	for _, u := range page {
+		if u.Info.ID != m.Info.ParentID {
+			continue
+		}
+		for _, p := range u.Parts {
+			if p.Type == "compaction" {
+				trigger = map[bool]string{true: "auto", false: "manual"}[p.Auto]
+				if p.Overflow {
+					trigger = "overflow"
+				}
+			}
+		}
+	}
+	if text.Len() == 0 {
+		return "", trigger, m.Info.ID, errors.New("its summary message has no text")
+	}
+	return text.String(), trigger, m.Info.ID, nil
+}
+
+// newestSummary is the id of the newest summary message among the
+// session's newest compactionWindow, "" if there is none.
+func (b *opencodeBus) newestSummary(ctx context.Context, session string) (string, error) {
+	var page []compactionMessage
+	if _, err := b.get(ctx, "/session/"+session+"/message?limit="+strconv.Itoa(compactionWindow), &page); err != nil {
+		return "", err
+	}
+	id := ""
+	for _, m := range page {
+		if m.isSummary() && m.Info.ID > id {
+			id = m.Info.ID
+		}
+	}
+	return id, nil
 }
 
 // messagesSince lists the session's stored messages, newest page first, back

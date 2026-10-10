@@ -142,6 +142,12 @@ type ACP struct {
 	statusRead func(error)
 	busHandled func(busEvent)
 	statusGot  func(error)
+	// compactionTimeout bounds reading a compaction's summary.
+	compactionTimeout time.Duration
+	// compactionMu runs one compaction's summary read at a time, so each
+	// sees lastSummary, the summary the one before it reported.
+	compactionMu sync.Mutex
+	lastSummary  string
 }
 
 func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
@@ -149,7 +155,8 @@ func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
 // NewOpenCode is the ACP adapter for OpenCode.
 func NewOpenCode() *ACP {
 	return &ACP{ready: make(chan struct{}), opencode: true, steerKick: make(chan struct{}, 1),
-		suspect: map[string]time.Time{}, resent: map[string]bool{}, admittedLate: map[string]bool{}, settleEvery: time.Second, clock: wallClock{}}
+		suspect: map[string]time.Time{}, resent: map[string]bool{}, admittedLate: map[string]bool{}, settleEvery: time.Second, clock: wallClock{},
+		compactionTimeout: 10 * time.Second}
 }
 
 // settleClock is the time settle reads and schedules its next look by.
@@ -365,6 +372,7 @@ func (a *ACP) handshake(cfg proto.ShimConfig) error {
 		_, err := a.rpc.call("session/load", map[string]any{"sessionId": cfg.SessionID, "cwd": cwd, "mcpServers": mcp})
 		a.setLoading(false)
 		if err == nil {
+			a.seedLastSummary(cfg.SessionID)
 			a.setSession(cfg.SessionID)
 			return nil
 		}
@@ -1032,7 +1040,8 @@ func (a *ACP) queueInput(in proto.Input) {
 // onBus follows OpenCode's bus: an assistant step answering a steer lux
 // sent has read it and the steers sent before it (bus.answered);
 // session.idle after the ACP turn has ended settles the Run's work;
-// session.status is the Run's activity (setOpenCodeBusy).
+// session.status is the Run's activity (setOpenCodeBusy); session.compacted
+// of the Run's session is reported as lux.compacted (compacted).
 func (a *ACP) onBus(ev busEvent) {
 	if a.busHandled != nil {
 		defer a.busHandled(ev)
@@ -1063,7 +1072,66 @@ func (a *ACP) onBus(ev busEvent) {
 		if p.SessionID == session && bt {
 			a.settle()
 		}
+	case "session.compacted":
+		if session != "" && p.SessionID == session {
+			a.compacted(session)
+		}
 	}
+}
+
+// compacted reports a compaction of the session as lux.compacted, with the
+// summary read from OpenCode's stored messages (session.compacted carries
+// none), off the bus goroutine and within compactionTimeout. Unread, the
+// record goes without it, and a warning says why. A session.compacted
+// whose summary was already reported is a duplicate: no record. One that
+// comes as the Run ends (no read can start) is reported without a summary,
+// on the bus goroutine, which the Run's end waits for.
+func (a *ACP) compacted(session string) {
+	started := a.spawn(func() {
+		a.compactionMu.Lock()
+		defer a.compactionMu.Unlock()
+		ctx, cancel := context.WithTimeout(a.runCtx(), a.compactionTimeout)
+		defer cancel()
+		summary, trigger, id, err := a.bus.compaction(ctx, session, a.lastSummary)
+		if errors.Is(err, errCompactionReported) {
+			a.sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
+				"opencode: session %s was compacted again, with %s", session, err)})
+			return
+		}
+		if id != "" {
+			a.lastSummary = id
+		}
+		if err != nil && a.runCtx().Err() != nil {
+			err = errRunEndedBeforeSummary
+		}
+		reportCompacted(a.sink, "opencode: session", proto.Compaction{SessionID: session, Trigger: trigger, Summary: summary}, err)
+	})
+	if !started {
+		reportCompacted(a.sink, "opencode: session", proto.Compaction{SessionID: session}, errRunEndedBeforeSummary)
+	}
+}
+
+var errRunEndedBeforeSummary = errors.New("the Run ended before it was read")
+
+// seedLastSummary sets lastSummary to the newest summary a resumed session
+// already holds, so the Run's first compaction does not report an earlier
+// Run's. Runs before setSession, so no compaction read races it. Unread,
+// lastSummary stays empty.
+func (a *ACP) seedLastSummary(session string) {
+	if a.bus == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(a.runCtx(), a.compactionTimeout)
+	defer cancel()
+	id, err := a.bus.newestSummary(ctx, session)
+	if err != nil {
+		a.sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
+			"opencode: the resumed session %s's earlier summaries could not be read; its first compaction may report one of them: %v", session, err)})
+		return
+	}
+	a.compactionMu.Lock()
+	a.lastSummary = id
+	a.compactionMu.Unlock()
 }
 
 // setOpenCodeBusy records whether OpenCode runs a loop for the session and

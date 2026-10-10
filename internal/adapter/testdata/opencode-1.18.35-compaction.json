@@ -1,0 +1,99 @@
+[
+  {
+    "info": {
+      "id": "msg_1267a87e9001kkEgB3y8UtALJF",
+      "sessionID": "ses_ed9857deaffeXFKEQqWNKkiIp2",
+      "role": "user",
+      "time": {
+        "created": 1791646926825
+      },
+      "summary": {
+        "diffs": []
+      },
+      "agent": "build",
+      "model": {
+        "providerID": "llmproxy-anthropic",
+        "modelID": "claude-haiku-4.5"
+      }
+    },
+    "parts": [
+      {
+        "id": "prt_1267a87eb001n1sx9hN7J7EE7l",
+        "sessionID": "ses_ed9857deaffeXFKEQqWNKkiIp2",
+        "messageID": "msg_1267a87e9001kkEgB3y8UtALJF",
+        "type": "compaction",
+        "auto": false
+      }
+    ]
+  },
+  {
+    "info": {
+      "id": "msg_1267a87f100174Olqe0UtU1lRk",
+      "sessionID": "ses_ed9857deaffeXFKEQqWNKkiIp2",
+      "role": "assistant",
+      "time": {
+        "created": 1791646926833,
+        "completed": 1791646928222
+      },
+      "parentID": "msg_1267a87e9001kkEgB3y8UtALJF",
+      "modelID": "claude-haiku-4.5",
+      "providerID": "llmproxy-anthropic",
+      "mode": "compaction",
+      "agent": "compaction",
+      "path": {
+        "cwd": "/var/tmp/lux-cmp-probe/oc/work",
+        "root": "/"
+      },
+      "summary": true,
+      "cost": 0,
+      "tokens": {
+        "total": 582,
+        "input": 472,
+        "output": 110,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      },
+      "finish": "stop"
+    },
+    "parts": [
+      {
+        "id": "prt_1267a8a810017ZtP5ISuoB5E2H",
+        "sessionID": "ses_ed9857deaffeXFKEQqWNKkiIp2",
+        "messageID": "msg_1267a87f100174Olqe0UtU1lRk",
+        "type": "step-start"
+      },
+      {
+        "id": "prt_1267a8a830014n2YZP91iIPMAn",
+        "sessionID": "ses_ed9857deaffeXFKEQqWNKkiIp2",
+        "messageID": "msg_1267a87f100174Olqe0UtU1lRk",
+        "type": "text",
+        "text": "## Objective\n- User wants agent to remember and retain the secret word \"PERIWINKLE\" for future reference\n\n## Important Details\n- Secret word: PERIWINKLE\n- User confirmed understanding with \"ok\" response\n\n## Work State\n### Completed\n- Secret word acknowledged and stored\n\n### Active\n- (none)\n\n### Blocked\n- (none)\n\n## Next Move\n1. (none)\n2. (none)\n\n## Relevant Files\n- (none)",
+        "time": {
+          "start": 1791646927491,
+          "end": 1791646928211
+        }
+      },
+      {
+        "id": "prt_1267a8d5a001D0X8sMw0nmqt6m",
+        "sessionID": "ses_ed9857deaffeXFKEQqWNKkiIp2",
+        "messageID": "msg_1267a87f100174Olqe0UtU1lRk",
+        "type": "step-finish",
+        "reason": "stop",
+        "cost": 0,
+        "tokens": {
+          "total": 582,
+          "input": 472,
+          "output": 110,
+          "reasoning": 0,
+          "cache": {
+            "read": 0,
+            "write": 0
+          }
+        }
+      }
+    ]
+  }
+]
