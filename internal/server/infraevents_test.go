@@ -86,6 +86,10 @@ func (p *failingProvider) Instances(context.Context, json.RawMessage, map[string
 	return nil, p.err
 }
 
+func (p *failingProvider) Volumes(context.Context, json.RawMessage, []string) (map[string][]HostVolume, error) {
+	return nil, p.err
+}
+
 // infraFixture: tenant t1 with an ec2 pool "burst" (pool1), a ready host h1
 // in it, and a Run r1 waiting for that pool.
 func infraFixture(t *testing.T, s *Server, ctx context.Context) {

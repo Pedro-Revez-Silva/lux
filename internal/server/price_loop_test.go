@@ -25,6 +25,10 @@ func (p *blockingPriceProvider) SpotHistory(ctx context.Context, _, _ string, _,
 	return nil, errors.New("unexpected spot request")
 }
 
+func (p *blockingPriceProvider) BlockStorage(context.Context, string, string) (BlockStoragePrice, error) {
+	return BlockStoragePrice{}, errors.New("unexpected block storage request")
+}
+
 func TestPriceRefreshDoesNotBlockLaunchOrCostDrain(t *testing.T) {
 	s := testServer(t)
 	p := &blockingPriceProvider{started: make(chan time.Time, 1)}

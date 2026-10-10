@@ -37,6 +37,10 @@ func (p *fakeLaunchProvider) Instances(ctx context.Context, template json.RawMes
 	return nil, nil
 }
 
+func (p *fakeLaunchProvider) Volumes(context.Context, json.RawMessage, []string) (map[string][]HostVolume, error) {
+	return nil, nil
+}
+
 // launch puts RunnerURL into LUX_URL for the runner's env, defaulting to
 // PublicURL when RunnerURL is unset (server.go's cfg.RunnerURL =
 // cmp.Or(cfg.RunnerURL, cfg.PublicURL), applied in New).

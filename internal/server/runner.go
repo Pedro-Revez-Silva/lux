@@ -147,7 +147,7 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 				last_heartbeat = now(), lost_at = NULL
 			WHERE id = $1
 			RETURNING hourly_price IS NOT NULL
-				OR EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = $1 AND r.valid_to IS NULL AND r.source = 'static')`,
+				OR EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = $1 AND r.family = 'compute' AND r.valid_to IS NULL AND r.source = 'static')`,
 			hostID, labels, h.Arch, h.Capacity, versions, caches, nonNil(h.LocalSnapshots), h.ProviderID, nonNil(causes), draining, nonNil(h.Capabilities)).Scan(&priced)
 		if err != nil {
 			return err
@@ -316,7 +316,7 @@ func syncProviderCapacity(ctx context.Context, tx pgx.Tx, hostID string, registe
 	), at AS (SELECT clock_timestamp() AS instant),
 		closed AS (
 			UPDATE host_rates r SET valid_to = (SELECT instant FROM at)
-			FROM host h WHERE r.host_id = h.id AND r.valid_to IS NULL
+			FROM host h WHERE r.host_id = h.id AND r.family = 'compute' AND r.valid_to IS NULL
 				AND r.valid_from < (SELECT instant FROM at)
 				AND (r.cap_cpus <> h.cpus OR r.cap_memory <> h.memory)
 			RETURNING r.host_id, r.per_hour, r.currency, r.source
@@ -330,7 +330,7 @@ func syncProviderCapacity(ctx context.Context, tx pgx.Tx, hostID string, registe
 		AND pc.instance_type = h.instance_type AND pc.os = 'Linux'
 	WHERE $2 AND h.market = 'on-demand' AND pc.fetched_at <= h.registered_at
 		AND (h.cpus > 0 OR h.memory > 0)
-		AND NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.valid_to IS NULL)
+		AND NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.family = 'compute' AND r.valid_to IS NULL)
 		AND NOT EXISTS (SELECT 1 FROM closed)`, hostID, registering)
 	return err
 }

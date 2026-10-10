@@ -295,6 +295,7 @@ components:
           format: date-time
           type: string
         hosts:
+          description: "Grouped by host, unfiltered: each host's allocated and unallocated cost per family and currency, with the visibility of unallocated."
           items:
             $ref: "#/components/schemas/HostAllocation"
           type:
@@ -336,6 +337,7 @@ components:
             - array
             - "null"
         unallocated:
+          description: "Unfiltered summaries: hosts' cost charged to no Run, per family and currency. An operator over every tenant: every host's; a tenant (or an operator narrowed to one): the hosts of its own pools, never a platform pool's."
           items:
             $ref: "#/components/schemas/CostSummaryRow"
           type:
@@ -351,6 +353,9 @@ components:
           format: date-time
           type: string
         currency:
+          type: string
+        family:
+          description: "On unallocated rows: the host-tied family (compute or block-storage)."
           type: string
         group:
           additionalProperties:
@@ -721,6 +726,11 @@ components:
         versions:
           additionalProperties: {}
           type: object
+        volumes:
+          description: "The block-storage volumes deleted with it, as the provider reported them (assumed: supplied by an operator for a host from before luxd recorded them); absent while not known, and for a host that registered itself."
+          items:
+            $ref: "#/components/schemas/HostVolume"
+          type: array
         zone:
           description: The availability zone the provider launched it in.
           type: string
@@ -731,6 +741,9 @@ components:
         allocated:
           type: string
         currency:
+          type: string
+        family:
+          description: "A host-tied family: compute or block-storage."
           type: string
         hostId:
           type: string
@@ -770,16 +783,23 @@ components:
           type: string
         currency:
           type: string
+        family:
+          description: "A host-tied family: compute or block-storage."
+          type: string
         hour:
           format: date-time
           type: string
         unallocated:
+          description: Operators, and the tenant owning the host's pool; absent for a tenant on a platform pool's host.
           type: string
       type: object
     HostCostRate:
       additionalProperties: false
       properties:
         currency:
+          type: string
+        family:
+          description: "A host-tied family: compute or block-storage."
           type: string
         from:
           format: date-time
@@ -946,6 +966,23 @@ components:
           description: Hosts not terminated.
           format: int64
           type: integer
+      type: object
+    HostVolume:
+      additionalProperties: false
+      properties:
+        assumed:
+          type: boolean
+        iops:
+          format: int64
+          type: integer
+        sizeGiB:
+          format: int64
+          type: integer
+        throughputMiBps:
+          format: int64
+          type: integer
+        type:
+          type: string
       type: object
     Image:
       additionalProperties: false
@@ -1473,23 +1510,23 @@ components:
           format: date-time
           type: string
         hostSeries:
-          description: "Operators: host time per bucket, allocated and idle."
+          description: Host time per bucket and family, allocated and idle; visible as idle.
           items:
             $ref: "#/components/schemas/PoolHostTime"
           type:
             - array
             - "null"
         hosts:
-          description: "Operators: host time per host in the range, allocated and idle."
+          description: Host time per host and family in the range, allocated and idle; visible as idle.
           items:
             $ref: "#/components/schemas/PoolHostTime"
           type:
             - array
             - "null"
         idle:
-          description: "Operators: host time no Run reserved, per currency. Not part of totals."
+          description: Host time no Run reserved, per family and currency. Not part of totals. Operators over every tenant, and the tenant owning the pool; never a platform pool's to a tenant.
           items:
-            $ref: "#/components/schemas/MoneyAmount"
+            $ref: "#/components/schemas/PoolIdle"
           type:
             - array
             - "null"
@@ -1508,14 +1545,14 @@ components:
           format: date-time
           type: string
         topRuns:
-          description: The costliest Runs, up to 10 per currency, costliest first.
+          description: The costliest Runs by the pool's machines, up to 10 per currency, costliest first.
           items:
             $ref: "#/components/schemas/PoolTopRun"
           type:
             - array
             - "null"
         totals:
-          description: The Runs' cost on the pool in the range, per currency.
+          description: The Runs' cost of the pool's machines in the range (compute and block storage; never AI or other external families), per currency.
           items:
             $ref: "#/components/schemas/MoneyAmount"
           type:
@@ -1546,12 +1583,26 @@ components:
           type: string
         currency:
           type: string
+        family:
+          description: "A host-tied family: compute or block-storage."
+          type: string
         hostId:
           type: string
         hostName:
           type: string
         unallocated:
           description: "Host time no Run reserved: idle."
+          type: string
+      type: object
+    PoolIdle:
+      additionalProperties: false
+      properties:
+        amount:
+          type: string
+        currency:
+          type: string
+        family:
+          description: "A host-tied family: compute or block-storage."
           type: string
       type: object
     PoolList:
@@ -1685,7 +1736,7 @@ components:
           format: double
           type: number
         cost:
-          description: "The cost of the Runs on it in the range, per currency; empty: none reported."
+          description: "The cost of the Runs on its machines (compute and block storage) in the range, per currency; empty: none reported."
           items:
             $ref: "#/components/schemas/MoneyAmount"
           type:
@@ -4911,7 +4962,7 @@ paths:
   /v1/pools/stats:
     get:
       description: |-
-        Per pool the caller sees (as GET /v1/pools): hosts by state, CPU allocated of capacity (ready and draining hosts), Runs first started in the range with an hourly count, launches the provider refused in the range, and the cost of the Runs on it in the range, per currency (list prices; never summed across currencies; absent: none reported, not zero). A tenant's figures on a shared platform pool are its own Runs', allocation and cost; hosts and capacity are the pool's.
+        Per pool the caller sees (as GET /v1/pools): hosts by state, CPU allocated of capacity (ready and draining hosts), Runs first started in the range with an hourly count, launches the provider refused in the range, and the cost of the Runs on its machines (compute and block storage) in the range, per currency (list prices; never summed across currencies; absent: none reported, not zero). A tenant's figures on a shared platform pool are its own Runs', allocation and cost; hosts and capacity are the pool's.
 
         Needs the `read` scope.
       operationId: poolStats
@@ -5044,7 +5095,7 @@ paths:
   /v1/pools/{name}/cost:
     get:
       description: |-
-        List prices, per currency, never summed across currencies. `series`: the cost of the Runs on it by family per hour (day for ranges over 7 days): compute on its hosts, and other families of Runs bound to it. `topRuns`: its costliest Runs in the range. Operators not narrowed to a tenant also get the pool's host time: `hosts` (per host, allocated to Runs and idle) and `hostSeries`; idle time is apart from the Runs' cost, never added to it. A tenant sees only its own Runs' cost.
+        List prices, per currency, never summed across currencies. A pool's cost is its machines': compute and block storage on its hosts, never AI or other external families. `series`: the Runs' cost on it by family per hour (day for ranges over 7 days). `topRuns`: its costliest Runs in the range. The pool's host time per family: `idle`, `hosts` (per host, allocated to Runs and idle) and `hostSeries`; idle time is apart from the Runs' cost, never added to it. A tenant sees only its own Runs' cost, and the host time of its own pools only (never a platform pool's); an operator narrowed to a tenant sees what that tenant sees.
 
         Needs the `read` scope.
       operationId: poolCost

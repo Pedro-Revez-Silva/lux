@@ -31,7 +31,7 @@ func (a *app) costCmd() *cobra.Command {
 		Use:   "cost <run>",
 		Short: "What a Run cost: totals per currency, families, lines and sources",
 		Long: `What a Run cost, as its cost sources reported it: compute (the hosts it
-ran on) and each cost plugin. Totals are per currency, never added across
+ran on: the Compute and Block storage families) and each cost plugin. Totals are per currency, never added across
 currencies, and split into the final part and the estimate that may still
 change. The status is pending until a source reports, incomplete while a
 source has not answered, complete, or final once every source has settled.
@@ -156,13 +156,15 @@ func (a *app) costsCmd() *cobra.Command {
 		Long: `Costs over a range of whole UTC hours (--since, default 7d, as lux
 history; or --from/--to, RFC 3339), per currency, grouped by up to two of
 --by tenant (operators), pool, host, family, run, key or label:KEY. Grouping by
-pool or host applies to compute; other families show as "(none)". key is
+pool or host applies to compute and block storage; other families show as "(none)". key is
 who submitted the Runs: the API key's name, a person's email, or "(none)"
 for Runs from before luxd recorded it.
 --label KEY=VALUE and --no-label KEY count only matching Runs: repeating a
 key's --label accepts any of its values; different keys must all match.
---interval hour|day adds a series (in UTC). With an operator key and no --tenant
-or label filter, the hosts' cost not charged to any Run is shown as unallocated.
+--interval hour|day adds a series (in UTC). Without a label filter, the
+hosts' cost not charged to any Run is shown as unallocated, per family
+(compute, block storage): an operator's over every host, or, with a tenant
+key or --tenant, that of the tenant's own pools' hosts.
 
 Amounts are list prices, rounded half-even to 4 decimals; -o json prints
 luxd's response as it came.`,
@@ -278,18 +280,19 @@ func (a *app) renderCostSummary(s *server.CostSummaryBody, by []string, interval
 	}
 	if len(s.Unallocated) > 0 {
 		fmt.Fprintln(w)
-		amounts := make([]string, 0, len(s.Unallocated))
+		rows := make([][]string, 0, len(s.Unallocated))
 		for _, r := range s.Unallocated {
-			amounts = append(amounts, money(r.Amount, r.Currency))
+			rows = append(rows, []string{cmpOr(r.Family, "compute"), money(r.Amount, r.Currency)})
 		}
-		fmt.Fprintf(w, "unallocated (hosts' cost charged to no Run): %s\n", strings.Join(amounts, ", "))
+		fmt.Fprintln(w, "unallocated (hosts' cost charged to no Run):")
+		a.table("FAMILY\tUNALLOCATED", rows)
 	}
 	if len(s.Hosts) > 0 {
 		fmt.Fprintln(w)
 		rows := make([][]string, 0, len(s.Hosts))
 		for _, h := range s.Hosts {
-			rows = append(rows, []string{h.HostID, money(h.Allocated, h.Currency), money(h.Unallocated, h.Currency)})
+			rows = append(rows, []string{h.HostID, cmpOr(h.Family, "compute"), money(h.Allocated, h.Currency), money(h.Unallocated, h.Currency)})
 		}
-		a.table("HOST\tALLOCATED\tUNALLOCATED", rows)
+		a.table("HOST\tFAMILY\tALLOCATED\tUNALLOCATED", rows)
 	}
 }

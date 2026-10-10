@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -35,6 +36,16 @@ func validPrice(price, currency string) error {
 	return nil
 }
 
+// trimmedDecimal drops a decimal's trailing fractional zeros, exactly: the
+// Pricing API answers "0.0960000000", ten digits that numeric(24, 9) holds
+// as nine. Anything else is returned as given, for validPrice to judge.
+func trimmedDecimal(v string) string {
+	if strings.Contains(v, ".") {
+		return strings.TrimSuffix(strings.TrimRight(v, "0"), ".")
+	}
+	return v
+}
+
 // syncStaticRate keeps a host's 'static' rate periods in step with its
 // price and advertised capacity, in the caller's (system) transaction,
 // which holds the host row locked (FOR UPDATE): if either changed, the open
@@ -56,7 +67,7 @@ func syncStaticRate(ctx context.Context, tx pgx.Tx, hostID string, registering b
 		closed AS (
 			UPDATE host_rates r SET valid_to = (SELECT at FROM at)
 			FROM hosts h
-			WHERE h.id = $1 AND r.host_id = h.id AND r.valid_to IS NULL AND r.source = 'static'
+			WHERE h.id = $1 AND r.host_id = h.id AND r.family = 'compute' AND r.valid_to IS NULL AND r.source = 'static'
 			  AND (h.hourly_price IS DISTINCT FROM r.per_hour OR h.price_currency IS DISTINCT FROM r.currency
 			       OR coalesce((h.capacity->>'cpus')::float8, 0) <> r.cap_cpus
 			       OR coalesce((h.capacity->>'memory')::int8, 0) <> r.cap_memory)
@@ -68,7 +79,7 @@ func syncStaticRate(ctx context.Context, tx pgx.Tx, hostID string, registering b
 		WHERE h.id = $1 AND h.hourly_price IS NOT NULL
 		  AND (coalesce((h.capacity->>'cpus')::float8, 0) > 0 OR coalesce((h.capacity->>'memory')::int8, 0) > 0)
 		  AND (EXISTS (SELECT 1 FROM closed)
-		       OR NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.valid_to IS NULL))`, hostID, registering)
+		       OR NOT EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.family = 'compute' AND r.valid_to IS NULL))`, hostID, registering)
 	return err
 }
 

@@ -2174,6 +2174,7 @@ type Host struct {
 	InstanceType  *string               `json:"instanceType,omitempty" doc:"The instance type the provider launched; absent for a host that registered itself."`
 	Zone          *string               `json:"zone,omitempty" doc:"The availability zone the provider launched it in."`
 	Market        *string               `json:"market,omitempty" enum:"on-demand,spot" doc:"on-demand or spot, as the provider launched it."`
+	Volumes       *[]HostVolume         `json:"volumes,omitempty" doc:"The block-storage volumes deleted with it, as the provider reported them (assumed: supplied by an operator for a host from before luxd recorded them); absent while not known, and for a host that registered itself."`
 	LastHeartbeat *time.Time            `json:"lastHeartbeat,omitempty"`
 	Times         map[string]*time.Time `json:"times" doc:"Its lifecycle. A host whose launch failed has no terminateRequested or terminated: no instance ever ran."`
 	Launch        *HostLaunch           `json:"launch,omitempty" doc:"How luxd's launch of it went; absent for a host that registered itself, or one from before launches were recorded."`
@@ -2225,7 +2226,7 @@ const hostColumns = `h.id, h.name, coalesce(ht.name, ''), coalesce(hp.name, ''),
 	h.provider_id, h.instance_type, h.zone, h.market, h.last_heartbeat,
 	h.provision_requested_at, h.provisioned_at, h.registered_at, h.first_placement_at, h.last_placement_ended_at,
 	h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at,
-	h.launch_outcome, h.launch_finished_at, ` + hostLaunchError + ``
+	h.launch_outcome, h.launch_finished_at, ` + hostLaunchError + `, h.volumes`
 
 // hostSeesProviderError, for SQL on hosts h with $1 as visibleHosts: a
 // platform host's provider error (account ids, role ARNs) is only for a
@@ -2281,7 +2282,7 @@ func hostScanDest(h *Host) hostDest {
 	var launchErr string
 	fields := []any{&h.ID, &h.Name, &h.Tenant, &h.Pool, &h.PoolID, &h.State, &h.StateReason, &h.Draining, &h.Labels, &h.Capacity, &h.Versions,
 		&h.Platform, &h.LiveRuns, &h.Allocated, &h.ProviderID, &h.InstanceType, &h.Zone, &h.Market, &h.LastHeartbeat,
-		&t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7], &t[8], &t[9], &outcome, &launched, &launchErr}
+		&t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7], &t[8], &t[9], &outcome, &launched, &launchErr, &h.Volumes}
 	return hostDest{fields, func() {
 		h.Times = map[string]*time.Time{
 			"provisionRequested": t[0], "provisioned": t[1], "registered": t[2], "firstPlacement": t[3],

@@ -7,6 +7,7 @@ import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostPath, labelsText, PageSkeleton, RunLink, RunNameLink, runPath } from "./common.tsx";
 import { HostsList } from "./Hosts.tsx";
 import { PagedEvents } from "./PagedEvents.tsx";
+import { sumHostTime, sumIdle } from "./poolHostTime.ts";
 
 /** The Pools page's poll: this page's too. */
 const POLL = 15_000;
@@ -132,7 +133,7 @@ function PoolTiles({ pool, metrics, loading }: { pool: Pool; metrics?: PoolMetri
         tone={(n?.launchFailures ?? 0) > 0 ? "danger" : "default"}
         unit={n?.lastLaunchFailure ? `last ${formatClock(n.lastLaunchFailure)}${n.lastLaunchError ? ` · ${n.lastLaunchError.slice(0, 40)}` : ""}` : pool.provider === "static" ? "static pool" : undefined}
       />
-      <StatTile label={`Cost (${since})`} loading={cost.loading} value={<MoneyList amounts={cost.data?.totals} />} unit={cost.data?.idle?.length ? <>list price · <MoneyList amounts={cost.data.idle} /> idle</> : "list price"} />
+      <StatTile label={`Cost (${since})`} loading={cost.loading} value={<MoneyList amounts={cost.data?.totals} />} unit={cost.data?.idle?.length ? <>list price · <MoneyList amounts={sumIdle(cost.data.idle)} /> idle</> : "list price"} />
     </div>
   );
 }
@@ -229,13 +230,14 @@ function familyCharts(d: PoolCost | undefined): FamilyChart[] {
   });
 }
 
-/** Host time per bucket, allocated and idle, per currency. */
+/** Host time per bucket, allocated and idle, per currency, its families summed. */
 function hostTimeCharts(d: PoolCost | undefined): FamilyChart[] {
   if (!d?.hostSeries?.length) return [];
   const { x, index } = bucketAxis(d);
-  return [...new Set(d.hostSeries.map((r) => r.currency))].sort().map((currency) => {
+  const rows = sumHostTime(d.hostSeries);
+  return [...new Set(rows.map((r) => r.currency))].sort().map((currency) => {
     const ys = [x.map((): number | null => null), x.map((): number | null => null)];
-    for (const r of d.hostSeries!.filter((h) => h.currency === currency)) {
+    for (const r of rows.filter((h) => h.currency === currency)) {
       const i = index.get(Math.floor(Date.parse(r.at!) / 1000));
       if (i != null) {
         ys[0]![i] = Number(r.allocated);
@@ -324,7 +326,7 @@ function PoolCostTab({ name, owner, operatorView }: { name: string; owner?: Pool
           <Card title="Cost by host" subtitle="operators only · allocated / idle" flush>
             <Table
               columns={hostCols}
-              rows={(q.data?.hosts ?? []).map((h) => ({ hostId: h.hostId ?? "", hostName: h.hostName ?? h.hostId ?? "", currency: h.currency, allocated: h.allocated, unallocated: h.unallocated }))}
+              rows={sumHostTime(q.data?.hosts ?? []).map((h) => ({ hostId: h.hostId ?? "", hostName: h.hostName ?? h.hostId ?? "", currency: h.currency, allocated: h.allocated, unallocated: h.unallocated }))}
               rowKey={(h) => `${h.currency}:${h.hostId}`}
               defaultSort={{ key: "allocated", dir: "desc" }}
               onRowClick={(h) => go(hostPath(h.hostId))}

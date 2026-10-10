@@ -39,6 +39,9 @@ func (p *planningProvider) Terminate(_ context.Context, _ json.RawMessage, id st
 func (p *planningProvider) Instances(context.Context, json.RawMessage, map[string]string) (map[string]Instance, error) {
 	return p.instances, nil
 }
+func (p *planningProvider) Volumes(context.Context, json.RawMessage, []string) (map[string][]HostVolume, error) {
+	return nil, nil
+}
 
 func planningFixture(t *testing.T, count int) (*Server, poolRow, *planningProvider) {
 	t.Helper()

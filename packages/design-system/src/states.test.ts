@@ -40,9 +40,16 @@ test("a family's colour does not depend on its companions", () => {
   expect(color([{ family: "family0" }, { family: "ai", color: "violet" }], "ai")).toBe("var(--chart-7)");
 });
 
+test("block storage is always --chart-3, whatever its hint or companions, and never compute's colour", () => {
+  expect(familyColor("block-storage")).toBe("var(--chart-3)");
+  expect(color([{ family: "block-storage", color: "violet" }], "block-storage")).toBe("var(--chart-3)");
+  expect(color([{ family: "compute" }, { family: "ai", color: "violet" }, { family: "block-storage", displayName: "Block storage" }], "block-storage")).toBe("var(--chart-3)");
+  expect(familyColor("block-storage")).not.toBe(familyColor("compute"));
+});
+
 test("labels: the displayName, else Compute for compute, else the key", () => {
-  const d = familyDisplay([{ family: "compute" }, { family: "ai", displayName: "AI models" }, { family: "egress" }]);
-  expect([d.get("compute")!.label, d.get("ai")!.label, d.get("egress")!.label]).toEqual(["Compute", "AI models", "egress"]);
+  const d = familyDisplay([{ family: "compute" }, { family: "ai", displayName: "AI models" }, { family: "egress" }, { family: "block-storage" }]);
+  expect([d.get("compute")!.label, d.get("ai")!.label, d.get("egress")!.label, d.get("block-storage")!.label]).toEqual(["Compute", "AI models", "egress", "Block storage"]);
 });
 
 test("each storage kind has its own label and categorical slot, never compute's", () => {

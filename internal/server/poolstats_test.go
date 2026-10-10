@@ -36,7 +36,7 @@ type costBody struct {
 	PoolID     string
 	Totals     []MoneyAmount
 	TopRuns    []PoolTopRun
-	Idle       []MoneyAmount
+	Idle       []PoolIdle
 	Hosts      []PoolHostTime
 	HostSeries []PoolHostTime
 }
@@ -85,7 +85,7 @@ func poolFixture(t *testing.T, s *Server, ctx context.Context) map[string]string
 // from wrong: a tenant b host on the shared pool (tenant a must not count
 // it), two launch failures on p-a (one in range, one 3 days old) and one on
 // the shared platform pool whose error names an account, a retired pool, a
-// plugin-family cost line with no pool_id (it goes by ra's pool), a
+// plugin-family cost line with no pool_id (not a pool's cost), a
 // tenant b launch failure on the shared pool (the newest), 11 more
 // Runs on the shared pool with cost, and a second queued Run.
 func poolFixtureMore(t *testing.T, s *Server, ctx context.Context) {
@@ -160,10 +160,10 @@ func TestPoolFigures(t *testing.T) {
 	if sh := a["p-shared"]; fmt.Sprint(sh.RunsHourly) != "[11 1]" || sh.RunsStarted != 12 {
 		t.Errorf("a's shared pool: hourly %v started %d, want [11 1] and 12", sh.RunsHourly, sh.RunsStarted)
 	}
-	// Cost on the shared pool for a: ra's compute 0.10 and llm 0.02 (no
-	// pool_id: by ra's pool), and 0.01..0.11 EUR.
-	if c := money(a["p-shared"].Cost); c["USD"] != "0.12" || c["EUR"] != "0.66" {
-		t.Errorf("a's shared cost %v, want USD 0.12, EUR 0.66", c)
+	// Cost on the shared pool for a: ra's compute 0.10 (its llm 0.02 is no
+	// pool's), and 0.01..0.11 EUR.
+	if c := money(a["p-shared"].Cost); c["USD"] != "0.1" || c["EUR"] != "0.66" {
+		t.Errorf("a's shared cost %v, want USD 0.1, EUR 0.66", c)
 	}
 	if op := stats("op", "?since=2h")["p-shared"]; op.Hosts["ready"] != 2 || op.CapacityCPUs != 24 || op.LaunchFailures != 2 {
 		t.Errorf("operator's shared pool: %+v", op)
@@ -279,8 +279,8 @@ func TestPoolFigures(t *testing.T) {
 		t.Errorf("p-a sample launches/failures %s, want 1/2", got)
 	}
 
-	// Cost: the costliest 10 per currency; the plugin family by its Run's
-	// pool; host time only for an operator not narrowed to a tenant.
+	// Cost: the costliest 10 per currency; no plugin family; a platform
+	// pool's host time only for an operator not narrowed to a tenant.
 	var c costBody
 	get("a", "/v1/pools/shared/cost?owner=platform&since=6h", &c)
 	var eur []string
@@ -292,18 +292,18 @@ func TestPoolFigures(t *testing.T) {
 	if want := "[rx10=0.11 rx09=0.1 rx08=0.09 rx07=0.08 rx06=0.07 rx05=0.06 rx04=0.05 rx03=0.04 rx02=0.03 rx01=0.02]"; fmt.Sprint(eur) != want {
 		t.Errorf("EUR top runs %v, want %s", eur, want)
 	}
-	if got := money(c.Totals); got["USD"] != "0.12" || got["EUR"] != "0.66" {
+	if got := money(c.Totals); got["USD"] != "0.1" || got["EUR"] != "0.66" {
 		t.Errorf("a's shared cost totals %v", got)
 	}
 	c = costBody{}
 	get("op", "/v1/pools/shared/cost?owner=platform&since=6h&tenant=a", &c)
-	if len(c.Idle) != 0 || len(c.Hosts) != 0 || len(c.HostSeries) != 0 || money(c.Totals)["USD"] != "0.12" {
+	if len(c.Idle) != 0 || len(c.Hosts) != 0 || len(c.HostSeries) != 0 || money(c.Totals)["USD"] != "0.1" {
 		t.Errorf("operator narrowed to a: idle %v hosts %v series %v totals %v", c.Idle, c.Hosts, c.HostSeries, c.Totals)
 	}
 }
 
-// topRuns: the 10 costliest Runs per currency, summed over hours and
-// families (a family without pool_id by the Run's pool), ties broken by Run
+// topRuns: the 10 costliest Runs per currency, summed over hours and the
+// host-tied families (a family without pool_id is no pool's), ties broken by Run
 // id, with a cut inside a tie, each Run's name and whether it is an
 // estimate (a non-final cost line).
 func TestPoolCostTopRunsTiesAndCut(t *testing.T) {
@@ -331,7 +331,7 @@ func TestPoolCostTopRunsTiesAndCut(t *testing.T) {
 			}
 		}
 	}
-	// t04's plugin family has no pool_id: it counts on the pool t04 is bound to.
+	// t04's plugin family has no pool_id: no pool's cost, even the one t04 is bound to.
 	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, amount) VALUES
 		($1, 'ta', 't04', 'llm', 'llm', 'USD', 0.25)`, hour)
 	// A costlier Run on another pool is not this pool's.
@@ -357,8 +357,8 @@ func TestPoolCostTopRunsTiesAndCut(t *testing.T) {
 	want := []string{
 		"EUR e10/e10-n=0.1", "EUR e09/e09-n=0.09", "EUR e08/e08-n=0.08", "EUR e07/e07-n=0.07", "EUR e06/e06-n=0.06",
 		"EUR e00/e00-n=0.05", "EUR e05/e05-n=0.05", "EUR rb/run-b=0.05", "EUR e04/e04-n=0.04", "EUR e03/e03-n=0.03",
-		"USD t00/t00-n=0.5", "USD t04/t04-n=0.45", "USD t08/t08-n=0.4", "USD rb/run-b=0.3", "USD t01/t01-n=0.3",
-		"USD t02/t02-n=~0.3", "USD t03/t03-n=0.3", "USD ra/run-a=0.1", "USD t05/t05-n=0.1", "USD t06/t06-n=0.1",
+		"USD t00/t00-n=0.5", "USD t08/t08-n=0.4", "USD rb/run-b=0.3", "USD t01/t01-n=0.3", "USD t02/t02-n=~0.3",
+		"USD t03/t03-n=0.3", "USD t04/t04-n=0.2", "USD ra/run-a=0.1", "USD t05/t05-n=0.1", "USD t06/t06-n=0.1",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("top runs:\n got  %v\n want %v", got, want)
@@ -369,6 +369,15 @@ func money(ms []MoneyAmount) map[string]string {
 	out := map[string]string{}
 	for _, m := range ms {
 		out[m.Currency] = m.Amount
+	}
+	return out
+}
+
+// idleOf is a pool's idle time by "family currency".
+func idleOf(ms []PoolIdle) map[string]string {
+	out := map[string]string{}
+	for _, m := range ms {
+		out[m.Family+" "+m.Currency] = m.Amount
 	}
 	return out
 }
@@ -431,7 +440,7 @@ func TestPoolMetricsAndCostTenantIsolation(t *testing.T) {
 		if (len(c.Idle) > 0) != want.idle || (len(c.Hosts) > 0) != want.hostDetail {
 			t.Errorf("%s: idle %v hosts %v", who, c.Idle, c.Hosts)
 		}
-		if want.idle && (money(c.Idle)["USD"] != "0.25" || c.Hosts[0].Allocated != "0.4") {
+		if want.idle && (idleOf(c.Idle)["compute USD"] != "0.25" || c.Hosts[0].Allocated != "0.4") {
 			t.Errorf("operator idle %v hosts %+v", c.Idle, c.Hosts)
 		}
 	}

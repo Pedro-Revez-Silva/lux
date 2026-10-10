@@ -19,6 +19,10 @@ type fakePriceProvider struct {
 
 	onDemandCalls int
 	spotCalls     []spotPriceCall
+
+	blockStorage      map[string]BlockStoragePrice
+	blockStorageErr   error
+	blockStorageCalls []string
 }
 
 type fakeOnDemandAnswer struct {
@@ -52,6 +56,19 @@ func (p *fakePriceProvider) SpotHistory(_ context.Context, zone, kind string, fr
 	return p.spot[i], nil
 }
 
+// BlockStorage answers blockStorage[volume type], or blockStorageErr.
+func (p *fakePriceProvider) BlockStorage(_ context.Context, region, kind string) (BlockStoragePrice, error) {
+	p.blockStorageCalls = append(p.blockStorageCalls, region+"/"+kind)
+	if p.blockStorageErr != nil {
+		return BlockStoragePrice{}, p.blockStorageErr
+	}
+	price, ok := p.blockStorage[kind]
+	if !ok {
+		return BlockStoragePrice{}, errors.New("unexpected block storage price request")
+	}
+	return price, nil
+}
+
 func providerPriceServer(t *testing.T, p PriceProvider) *Server {
 	t.Helper()
 	s := testServer(t)
@@ -64,6 +81,8 @@ func providerPriceServer(t *testing.T, p PriceProvider) *Server {
 	return s
 }
 
+// insertProviderHost adds a launched host whose volumes are known to be
+// none ([]): its cost is compute alone.
 func insertProviderHost(t *testing.T, s *Server, tenant, pool, provider, id, market string, from time.Time) {
 	t.Helper()
 	ctx := context.Background()
@@ -71,9 +90,9 @@ func insertProviderHost(t *testing.T, s *Server, tenant, pool, provider, id, mar
 		VALUES ($1, $2, $3, $4)`, "pool-"+tenant+"-"+provider+"-"+pool, tenant, pool, provider)
 	execSQL(t, s, ctx, `INSERT INTO hosts
 		(id, tenant_id, name, pool_id, state, provider_id, provision_requested_at, registered_at,
-		 instance_type, market, zone, launch_template, capacity)
+		 instance_type, market, zone, launch_template, capacity, volumes)
 		VALUES ($1, $2, $1, $3, 'ready', 'i-' || $1::text, $4, $4, 'm7i.large', $5, 'us-east-1a',
-		        '{"region":"us-east-1"}', jsonb_build_object('cpus', 4, 'memory', $6::int8))`,
+		        '{"region":"us-east-1"}', jsonb_build_object('cpus', 4, 'memory', $6::int8), '[]')`,
 		id, tenant, "pool-"+tenant+"-"+provider+"-"+pool, from, market, int64(16)<<30)
 }
 
@@ -161,6 +180,32 @@ func TestProviderPricesOnDemandCacheRefreshAndRetry(t *testing.T) {
 	after := providerRates(t, s, "od")
 	if len(after) != 2 || after[0].perHour != "0.1" || after[0].open || after[1].perHour != "0.2" || !after[1].open || !after[0].to.Equal(after[1].from) {
 		t.Fatalf("successful refresh did not close then replace the period: %+v", after)
+	}
+}
+
+// The Pricing API quotes ten fractional digits ("0.0960000000", as
+// internal/ec2's fixture); onDemandPrice caches and returns it as the exact
+// nine-digit value, and the host gets a usable period at it.
+func TestProviderPricesOnDemandTenDigitAnswer(t *testing.T) {
+	p := &fakePriceProvider{onDemand: []fakeOnDemandAnswer{{rate: HourlyRate{PerHour: "0.0960000000", Currency: "USD"}}}}
+	s := providerPriceServer(t, p)
+	from := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	execSQL(t, s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	insertProviderHost(t, s, "t1", "burst", "ec2", "od", MarketOnDemand, from)
+
+	rate, err := s.onDemandPrice(context.Background(), "ec2", "us-east-1", "m7i.large")
+	if err != nil || rate != (HourlyRate{PerHour: "0.096", Currency: "USD"}) {
+		t.Fatalf("onDemandPrice = %+v, %v", rate, err)
+	}
+	if got := cachedProviderRate(t, s); got != "0.096" {
+		t.Fatalf("cached %q", got)
+	}
+	s.refreshPrices(context.Background())
+	if p.onDemandCalls != 1 {
+		t.Errorf("cached price not reused: %d calls", p.onDemandCalls)
+	}
+	if got := providerRates(t, s, "od"); len(got) != 1 || got[0].perHour != "0.096" || !got[0].open {
+		t.Errorf("rates %+v", got)
 	}
 }
 

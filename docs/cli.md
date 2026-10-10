@@ -326,16 +326,19 @@ the same way. A value lux does not have is `—`, never `0`.
 
 - `lux cost` prints the status: `pending` (nothing reported yet),
   `incomplete` (naming the sources that have not answered), `complete`, or
-  `final`.
+  `final`. The compute source's lines are two families: Compute (the
+  machine) and Block storage (its disk, item e.g. `gp3:100GiB`).
 - `lux costs --by` takes `tenant` (operators), `pool`, `host`, `family`,
   `run`, `key` (who submitted the Runs: the key's name, a person's email,
   `(none)` before luxd recorded it) or `label:KEY`, up to twice.
   `--label KEY=VALUE` (`-l`, repeatable: one key's values are
   alternatives, different keys all apply) and `--no-label KEY` count only
   matching Runs. `--interval hour|day` adds a series.
-  Ranges are whole UTC hours, at most 90 days. With an operator key and no
-  `--tenant` or label filter, the hosts' unallocated cost is shown too, and `--by host`
-  adds each host's ALLOCATED and UNALLOCATED. A host's allocated plus
+  Ranges are whole UTC hours, at most 90 days. Without a label filter, the
+  hosts' unallocated cost is shown too, per family (compute, block-storage):
+  an operator's over every host, a tenant's (or `--tenant`'s) over the hosts
+  of its own pools, never a platform pool's; `--by host`
+  adds each host's FAMILY, ALLOCATED and UNALLOCATED. A host's allocated plus
   unallocated is its billed cost for those hours and need not equal the sum
   of its Runs' lines: host hours refresh on their own schedule and include
   idle time.

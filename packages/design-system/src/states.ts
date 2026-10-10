@@ -183,13 +183,15 @@ function hexHue(hex: string): number | null {
 }
 
 /**
- * The chart slot (1..8) of a cost family: compute is fixed to slot 1; a
+ * The chart slot (1..8) of a cost family: lux's own families are fixed
+ * (compute slot 1, block storage slot 3); a
  * plugin's colour hint (a name, or #rrggbb matched by nearest hue) picks a
  * slot; otherwise the family's name picks one of slots 2..8, so a family
  * keeps its colour wherever it appears. Raw colour values are never used.
  */
 export function familySlot(family: string, hint?: string | null): number {
   if (family === "compute") return 1;
+  if (family === "block-storage") return 3;
   const h = hint?.trim().toLowerCase();
   if (h) {
     const named = HINT_SLOTS[h];
@@ -245,10 +247,13 @@ export interface FamilyInfo {
 export function familyDisplay(families: readonly FamilyInfo[]): Map<string, { label: string; color: string }> {
   const out = new Map<string, { label: string; color: string }>();
   for (const f of families) {
-    if (!out.has(f.family)) out.set(f.family, { label: f.displayName || (f.family === "compute" ? "Compute" : f.family), color: familyColor(f.family, f.color) });
+    if (!out.has(f.family)) out.set(f.family, { label: f.displayName || FAMILY_LABELS[f.family] || f.family, color: familyColor(f.family, f.color) });
   }
   return out;
 }
+
+// Labels of lux's own families, when luxd's displayName is absent.
+const FAMILY_LABELS: Record<string, string> = { compute: "Compute", "block-storage": "Block storage" };
 
 /* ---------- stored bytes by blob kind ---------- */
 

@@ -166,7 +166,8 @@ currencies:
 **Families** are open. lux stores and shows whatever strings arrive. A
 plugin's describe endpoint may give a display name and a colour hint for
 its families (section 4). An unknown family is shown by its raw name with a
-neutral colour. `compute` is lux's own family.
+neutral colour. `compute` and `block-storage` are lux's own families
+(display names "Compute" and "Block storage").
 
 ## 2. Compute cost (built in)
 
@@ -379,6 +380,54 @@ For A above, 1,080 CPU seconds against 2 CPU × 1,800 s is 30%, and a
 3 GiB peak against 8 GiB is 38%. The API returns these as
 `efficiency.cpu` and `efficiency.memoryPeak` / `memoryAvg`.
 
+### Block storage (built in)
+
+**Built** (migrations `061`–`065`, `internal/server/blockstorage*.go`,
+`costqueue.go`, `costhourly.go`). A provider host's volumes that live and
+die with it (an EC2 runner's root disk: created with the instance,
+`DeleteOnTermination`) cost their **provisioned** size, IOPS and throughput
+for the host's whole billed window, used or not. Block storage is its own
+family, `block-storage` ("Block storage"), never folded into `compute`: a
+bigger disk must not look like a dearer machine.
+
+It is shared exactly like compute. A host's block-storage rate is one
+`host_rates` period (`family = 'block-storage'`) from
+`provision_requested_at` to `terminated_at` (or open while the host lives):
+the disk exists the whole billed window and its size is fixed. Its
+`per_hour` is the sum of the volumes' hourly list prices (section 3), its
+`cap_cpus`/`cap_memory` the host's, as for its compute periods, so the same
+formula applies with the disk's rate in place of the machine's:
+
+```
+charged_bs(p) = rate_bs(h) × share(p) / max(1, S(h, t))
+unalloc_bs(h) = rate_bs(h) × max(0, 1 − S(h, t))
+```
+
+`computeCost` is the one function for both: it is given the family's rate
+periods. Within each host-hour piece, allocated + unallocated block storage
+is the disk's cost, as for compute. In the worked example, with the host's
+100 GiB gp3 disk at eu-north-1's list price (8.36 USD a month, 0.011452055
+an hour): A, B and C pay 1/8, 3/8 and 1/8 of the disk-hour and 3/8 is
+unallocated; with D (`S = 1.25` in 10:30–10:45), B, C and D pay 0.4, 0.4
+and 0.2 of that quarter-hour, unallocated 0.
+
+No rate is borrowed from another host: a host's block storage is priced
+from its own recorded volumes or it is **missing**. A host whose volumes
+are not known yet (`hosts.volumes` NULL) makes each of its placements'
+block storage missing: the compute source is `incomplete` (named in
+`last_error`), never zero. A host the provider reports with no volume
+deleted with it (`[]`), and every static host, has no block storage.
+
+**Run lines.** `cost_placement_snapshots` is per (placement, family). The
+drainer writes a `block-storage` snapshot next to each provider placement's
+compute one, priced by the host's own period (`resolveOwnRate`) through the
+same `pricePlacementSnapshot`, with the same freeze rules: frozen when the
+placement has ended and is priced, never repriced. Lines: source `compute`,
+family `block-storage`, item the volumes' types and sizes (`gp3:100GiB`;
+several joined by `+` in a stable order), `details.placements` as compute's
+without `market`/`zone`. The compute source is final only when both
+families are final for every placement.
+
 ## 3. Prices
 
 ### Sources
@@ -396,16 +445,36 @@ For A above, 1,080 CPU seconds against 2 CPU × 1,800 s is 30%, and a
 - **List prices only.** Savings Plans, Reserved Instances, EDP or other
   discounts, credits, and tax appear only in the provider's bill. lux
   shows list-price costs and says so in the UI and the API
-  (`"basis": "list"`). Storage and network (EBS, S3, data transfer) are not
-  included either. A cost plugin could report them.
+  (`"basis": "list"`). A host's own volumes are priced (block storage,
+  below); S3, snapshots and data transfer are not. A cost plugin could
+  report them.
+- **EBS** (block storage): the Pricing API, `GetProducts` on `AmazonEC2`,
+  filtered by `regionCode` and `volumeApiName` (the volume type). Three
+  products answer: productFamily `Storage` (unit `GB-Mo`), `System
+  Operation` with group `EBS IOPS` (`IOPS-Mo`) and `Provisioned Throughput`
+  (`GiBps-mo`: per **GiB/s**-month, so one MiB/s costs 1/1024 of it; the
+  real eu-north-1 answer for gp3 is 42.8032 USD per GiBps-mo, 0.0418 per
+  MiBps-mo). A month is **730 hours** (AWS's own convention for monthly
+  prices). What each type bills (`ebsTypes`):
+
+  | Type | Billed |
+  | --- | --- |
+  | `gp3` | storage; IOPS above 3000; throughput above 125 MiB/s |
+  | `io1`, `io2` | storage; every provisioned IOPS (io2's cheaper tiers above 32,000 IOPS are not modelled) |
+  | `gp2`, `st1`, `sc1`, `standard` | storage only (`standard`'s per-I/O charge is usage, not provisioned) |
+
+  A type not in the table, or a billed dimension without a price, is
+  missing, never zero. For a gp3 100 GiB disk at 3000 IOPS and 125 MiB/s in
+  eu-north-1: 100 × 0.0836 = 8.36 USD a month, 0.011452055 an hour.
 
 **IAM** luxd needs on top of what it has today (`ec2:RunInstances`,
 `ec2:TerminateInstances`, `ec2:DescribeInstances`, `ec2:CreateTags`):
 
 - `pricing:GetProducts`
 - `ec2:DescribeSpotPriceHistory`
+- `ec2:DescribeVolumes` (block storage, below)
 
-Both are read-only and cannot be scoped to a resource (`Resource: "*"`).
+All are read-only and cannot be scoped to a resource (`Resource: "*"`).
 The endpoint overrides that already exist for tests (`LUX_EC2_ENDPOINT`)
 need a twin for pricing (`LUX_PRICING_ENDPOINT`), so the fake EC2 in the
 test suite can serve prices.
@@ -426,6 +495,20 @@ ALTER TABLE hosts ADD COLUMN instance_type text;   -- from the reply, not the te
 ALTER TABLE hosts ADD COLUMN zone text;            -- Placement.AvailabilityZone
 ALTER TABLE hosts ADD COLUMN market text CHECK (market IN ('on-demand', 'spot'));
 ```
+
+**Volumes** (**built**: migration `061_host_volumes.sql`): `hosts.volumes
+jsonb`, the block-storage volumes that live and die with the instance
+(`DeleteOnTermination`; a volume that outlives it is not its cost), e.g.
+`[{"type":"gp3","sizeGiB":100,"iops":3000,"throughputMiBps":125}]`. NULL
+means not known yet. The provisioner's provider check (every
+`provider_check_every`) asks `Provider.Volumes` for every live provider
+host whose volumes are NULL: for EC2, one paged `DescribeVolumes` filtered
+by `attachment.instance-id` per region per pass (at most 200 ids per call).
+It never runs in the runner's hello and never holds up a launch. A failed
+call leaves the hosts NULL (block storage missing, retried at the next
+pass), never empty. `GET /v1/hosts[/{id}]` returns them as `volumes`,
+omitted while NULL; `"assumed": true` marks volumes an operator supplied
+for a host launched before luxd recorded them (section 5, backfill).
 
 Rate periods for each host. A new period starts when the price changes
 (spot) or when the advertised capacity changes on a re-hello:
@@ -448,6 +531,20 @@ CREATE TABLE host_rates (
 **Built**: this table, in migration `021_host_rates.sql`, with a unique
 index allowing one open period per host and a CHECK that a period closes
 after it opens. Static and EC2 provider prices write periods.
+
+**Per family** (**built**: migration `062_host_rates_family.sql`):
+`family text NOT NULL DEFAULT 'compute'` (`'compute'` or
+`'block-storage'`; existing rows are compute), `details jsonb`, primary key
+`(host_id, family, valid_from)` and one open period per (host, family).
+Every compute reader and writer filters `family = 'compute'`. The price
+refresh opens a host's block-storage period once its volumes are known:
+one period over the billed window (above), `source` `<provider>-ebs-pricing`
+(`ec2-ebs-pricing`), `details` = `{volumes, prices: {<type>: {currency,
+perGBMonth, perIOPSMonth, perGiBpsMonth}}, hoursPerMonth: 730}`. Opening it
+moves the host's host-hour cursor back to its start (within retention), so
+hours already refreshed are rebuilt with the new family. A host whose
+volumes cannot be priced (unknown type, no cached or fetched price) gets no
+period and its block storage stays missing.
 
 A provider's first period takes its capacity from the instance type, or
 opens at the host's first hello: before then `hosts.capacity` is empty,
@@ -479,6 +576,11 @@ every `provider_check_every`) would tighten the start. See open question 5.
   A cached price known before the first hello opens a rate at registration;
   otherwise a successful later fetch starts a rate when it becomes known.
   A failure leaves the earlier time incomplete.
+- EBS unit prices share `price_cache`, one row per (region, volume type,
+  dimension): `os = 'EBS'`, `instance_type = '<type>:<unit>'` (`gp3:GB-Mo`,
+  `gp3:IOPS-Mo`, `gp3:GiBps-Mo`), the monthly unit price in `per_hour`.
+  Same refresh and the same fallback to a stale cached answer when the API
+  fails (`PriceProvider.BlockStorage`, `blockStoragePrice`).
 - Spot prices are requested for live hosts sharing a (provider, zone,
   instance type) key over a recent 24-hour lookback. Only the latest valid
   observation is applied to each live host. A terminated host with no rate
@@ -769,8 +871,10 @@ An **ended** Run (`succeeded`, `failed`, `terminated`) becomes final like this:
    they back off and retry, up to `costs.settle_give_up` (7 days). After
    that, the source is `incomplete` for good and flagged to operators.
 4. `compute` is final when the Run has ended, every placement has ended
-   and each has a frozen, priced snapshot. There is no spot-specific
-   24-hour settlement wait. Plugin settlement is independent of compute.
+   and each has a frozen, priced snapshot of every lux family that applies
+   to it (compute; block storage on a provider host with volumes). There is
+   no spot-specific 24-hour settlement wait. Plugin settlement is
+   independent of compute.
 5. The Run is **final** when every source is final. Lines are then marked
    `final = true`.
 
@@ -831,6 +935,53 @@ After that these Runs stay quiet until resumed.
 - Spot compute has no separate settlement clock: an ended Run becomes
   compute-final as soon as every ended placement has a priced snapshot.
   Later spot observations do not revise frozen placement amounts.
+
+### Backfilling block storage
+
+**Built** (`luxd admin costs backfill-volumes`, `internal/server/backfill.go`).
+Hosts launched before luxd recorded volumes have `volumes` NULL, so their
+block storage is missing and Runs that already had a final cost have no
+block-storage line. luxd never guesses a disk: the operator states the
+launch template's, e.g. for the aiverse runner template:
+
+```sh
+luxd admin costs backfill-volumes --pool burst [--tenant acme] \
+  --volume type=gp3,size=100,iops=3000,throughput=125 [--dry-run]
+```
+
+For that pool's provider hosts with `volumes` NULL (live or terminated),
+in batches of 100 hosts, one transaction per host (its Runs locked first,
+then its cost-host lock, then the host, as the drainer does):
+
+1. records the given volumes, each marked `"assumed": true` (shown in
+   `GET /v1/hosts` and in the rate's `details`);
+2. opens the host's block-storage period over its billed window at today's
+   list price (cached or fetched; a price that cannot be had stops the
+   command before that host);
+3. re-queues every Run placed on it, finished ones included: a `final`
+   compute source goes back to `ok` and its lines become estimates until
+   the drainer evaluates it again. Compute snapshots are frozen and are not
+   touched; the new block-storage snapshots are written, frozen and the
+   source is final again. A Run whose compute is final without a finalized
+   compute snapshot for every placement (it went final before migration
+   027) is not re-queued, since evaluating it would price its compute anew:
+   the report lists it under `skipped`, with the reason;
+4. moves the host's host-hour cursor back to its start (within
+   `costs.hourly` retention), so its allocated and unallocated rows are
+   rebuilt per family.
+
+A host still live when luxd first records its volumes (one launched before
+the upgrade) needs no backfill: the price refresh that opens its period
+does steps 2–4 itself, in the same lock order, so the Runs already final
+on it gain their block-storage lines too.
+
+It prints `{dryRun, poolId, hosts: [{id, from, to, perHour, hours, runs}],
+hours, runs, skipped: [{run, host, reason}]}`; `--dry-run` prints the same
+and changes nothing. A second run
+finds no host with `volumes` NULL and changes nothing. This is the one
+exception to "frozen amounts are never revised", and only in the sense of
+**adding a family that did not exist**: no frozen compute amount, rate or
+snapshot is changed; a Run gains block-storage lines it never had.
 
 ## 6. Sessions: where the full list comes from
 
@@ -896,11 +1047,11 @@ once.
 | `cost_pending` | per Run with work due | system | deleted when done |
 | `cost_ticks` | per tick | system | 1 day |
 | `run_sessions` | per (Run, epoch, session) | tenant (RLS) | as long as the Run |
-| `hosts` + 5 columns, `host_rates` | per host / price period | system | as long as the host row |
-| `price_cache` | per (provider, region, type, OS) | system | overwritten |
-| `cost_placement_snapshots` | per placement, frozen when ended and priced | tenant (RLS) | as long as the placement |
+| `hosts` + 6 columns, `host_rates` | per host / price period and family | system | as long as the host row |
+| `price_cache` | per (provider, region, type, OS), EBS per (region, volume type, dimension) | system | overwritten |
+| `cost_placement_snapshots` | per (placement, family), frozen when ended and priced | tenant (RLS) | as long as the placement |
 | `cost_host_refresh`, `cost_host_turn` | host-hour cursor and work priority | system | as long as needed for host-hour refresh |
-| `cost_hourly` | per hour × (tenant, Run, source, family, currency), plus host rows | tenant rows RLS, host rows system | `costs.hourly` (default 400d, like `history.hours`) |
+| `cost_hourly` | per hour × (tenant, Run, source, family, currency), plus host rows per (host, family, currency) | tenant rows RLS; host rows system, and readable by the tenant owning the host's pool | `costs.hourly` (default 400d, like `history.hours`) |
 
 **Relation to history.** Cost is money, not a sample, so it doesn't go in
 `host_samples` or `placement_samples`. Those samples are expired after 48h
@@ -924,8 +1075,13 @@ and occupancy, so their amounts can differ. A plugin line is spread evenly
 over its `from`–`to` hours, because the protocol gives one amount per item,
 not a time series.
 Plugin charts are approximate in time and exact in total only while all
-hours are retained. Host rows hold `allocated` and `unallocated` per host
-per hour. A bounded refresh advances through each host's billed window,
+hours are retained. Host rows hold `allocated` and `unallocated` per host,
+hour, family (`compute`, `block-storage`) and currency (migration
+`064_cost_hourly_family.sql`: the host-row CHECK allows both families and
+`cost_hourly_host` is unique per `(host_id, hour, family, currency)`); the
+refresh runs `computeCost` once per family over that family's periods.
+Only compute's missing time is kept as `cost_host_hour_gaps`; a
+block-storage period, once opened, rewinds the cursor itself. A bounded refresh advances through each host's billed window,
 including idle hours, and revisits the current open hour; old hours outside
 retention are not rebuilt. Host refresh uses a per-host cursor and retries
 open hours; when `costs.batch` is one, a durable turn alternates priority
@@ -939,10 +1095,15 @@ Visibility follows the existing rules (RLS and `principal`):
 
 - A **tenant key** sees its own Runs' lines, totals, sources' status
   (without `last_error` text), and its own hosts' allocation.
-- **Unallocated** compute, `host_rates`, platform hosts' cost, plugin
-  health, and anything not tied to a Run are **operators only**. An
-  operator's `?tenant=` sees what that tenant would see, as with
-  `/v1/history`.
+- **Unallocated** host time (compute and block storage) of the hosts in a
+  tenant's **own** (non-platform) pools is that tenant's: on `GET
+  /v1/costs` (`unallocated`, by-host rows), `GET /v1/hosts/{id}/cost` and
+  `GET /v1/pools/{name}/cost` (migration `065_cost_hourly_tenant_hosts.sql`:
+  an RLS policy lets a tenant read the host rows whose pool is its own).
+- A **platform** pool's unallocated time, `host_rates`, platform hosts'
+  cost, plugin health, and anything not tied to a Run are **operators
+  only**. An operator's `?tenant=` sees what that tenant would see, as
+  with `/v1/history`.
 
 ### `GET /v1/runs/{id}/cost`
 
@@ -1066,12 +1227,27 @@ repeatable-read snapshot with the request's tenant scope; only an operator
 without a tenant scope receives system-wide host allocations.
 
 Amounts in a range come from `cost_hourly`. Grouping by `pool` or `host`
-applies only to compute lines (the only ones tied to a host). Other
+applies only to the host-tied families (`compute`, `block-storage`). Other
 families appear under `"(none)"`.
 
-For an operator without `tenant`, the response also has
-`unallocated: [{currency, amount}]` and, grouped by `host`, each host's
-allocated vs unallocated. Tenants never get these fields.
+Without a label filter, the response also has `unallocated: [{family,
+currency, amount}]` and, grouped by `host`, `hosts: [{hostId, family,
+currency, allocated, unallocated}]`, one row per host-tied family. An
+operator over every tenant gets every host's; a tenant (or an operator
+narrowed to one) the hosts of its own pools only, never a platform pool's.
+Example (tenant `acme`, one host in its own pool, a 1h range):
+
+```json
+"unallocated": [
+  {"family": "block-storage", "currency": "USD", "amount": "0.008589041"},
+  {"family": "compute", "currency": "USD", "amount": "0.3"}],
+"hosts": [
+  {"hostId": "host_…", "family": "block-storage", "currency": "USD", "allocated": "0.002863014", "unallocated": "0.008589041"},
+  {"hostId": "host_…", "family": "compute", "currency": "USD", "allocated": "0.1", "unallocated": "0.3"}]
+```
+
+Before block storage, `unallocated` rows had no `family` and were for
+operators over every tenant only; `hosts` rows had no `family`.
 
 Grouped by `family`, the response has `families: [{family, displayName,
 color}]`, resolved as a Run's `byFamily` is (the first usable plugin's
@@ -1104,10 +1280,24 @@ A key's values and their cost come from `GET /v1/costs?group=label:<key>`.
 
 ### `GET /v1/hosts/{id}/cost`
 
-This returns a host's allocated and unallocated cost per hour over a range,
-plus its rate periods. It follows the same rule as `hostHistory`: operators,
-and the host's own tenant (for its own host). A platform host's cost is the
-operators'.
+This returns a host's allocated and unallocated cost per hour and family
+(`hours: [{hour, family, currency, allocated, unallocated?}]`) over a
+range, plus, for operators, its rate periods with their family (`rates:
+[{family, from, to?, perHour, currency, source}]`). It follows the same
+rule as `hostHistory`: operators, and the host's own tenant (for its own
+host). A platform host's cost is the operators'. The host's tenant reads
+`unallocated` only while the host is in one of its own pools.
+
+### `GET /v1/pools/{name}/cost`
+
+A pool's cost is its machines': `totals`, `series` and `topRuns` count
+only the host-tied families (`compute`, `block-storage`) of Runs on its
+hosts. AI and other external families, which belong to no host, are not a
+pool's cost (before, other families of Runs bound to the pool were
+counted). Its host time per family, `idle: [{family, currency, amount}]`,
+`hostSeries` and `hosts` (`[{at?, hostId?, hostName?, family, currency,
+allocated, unallocated}]`), is returned to an operator over every tenant
+and to the tenant owning the pool; never a platform pool's to a tenant.
 
 ### Runs list
 
@@ -1134,9 +1324,10 @@ cost is visible exactly when the Run is. It is not stored on `runs`.
   `tenant` (operators), `pool`, `host`, `family`, `run`, `key` or
   `label:K`, at most twice; by `key`, rows show the key's name (`(revoked)`
   after a revoked one), a person's email, or `operator key`. `--label`
-  and `--no-label` are the summary's `label` and `nolabel`. An operator
-  without `--tenant` or a label filter also gets the unallocated total and, by `host`, each host's
-  allocated and unallocated. luxd's 400 and 413 messages are printed as
+  and `--no-label` are the summary's `label` and `nolabel`. Without a
+  label filter it also prints the unallocated total per family and, by
+  `host`, each host's allocated and unallocated per family (as visible to
+  the key, above). luxd's 400 and 413 messages are printed as
   they are.
 - `lux ls` has a COST column: the total for one currency, `multi` for
   several, and `—` while `pending`. A leading `~` marks a total that may
@@ -1159,7 +1350,11 @@ shown in UTC, like its buckets.
 `TimeSeriesChart`, `Tooltip`, `EmptyState`, `MoneyList`, `ListPriceNote`,
 and `familyDisplay` for each family's label and colour (describe
 `displayName`, and its `color` hint mapped to a `--chart-N` token; compute
-is fixed to slot 1).
+is fixed to slot 1, block storage to slot 3). The Run page and the By
+family table list Block storage as its own family row from
+`byFamily`/`families`; the Runs list's `cost` carries per-currency totals
+only (no families), so its tooltip has no family row to add. The pool and
+host cost screens that split host time by family come in a later change.
 
 - **Run page, Cost card** (the "Resources & cost" tab, above
   `RunResources`), from `GET /v1/runs/{id}/cost`, polled every 15s while

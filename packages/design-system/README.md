@@ -251,7 +251,8 @@ when incomplete, which sources it waits on).
 
 Cost family colours (`familySlot`, `familyColor`): a
 family maps to a categorical `--chart-N` slot, never a raw colour.
-`compute` is always `--chart-1`. A plugin's describe `color` hint picks the
+`compute` is always `--chart-1` and `block-storage` (lux's own Block
+storage family) always `--chart-3`, whatever their hint. A plugin's describe `color` hint picks the
 slot: a name (`violet` → 7, `amber` → 4, `orange` → 2, `teal` → 3, `pink`
 → 5, `green` → 6, `red` → 8; blue names go to 7, as slot 1 is compute's)
 or `#rrggbb` by nearest hue. Without a hint the family's name picks one of

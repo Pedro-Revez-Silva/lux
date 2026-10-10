@@ -227,11 +227,15 @@ type costFamilyMeta struct {
 
 type costFamilies map[string]costFamilyMeta
 
-// lookup is a family's display name and colour hint: Compute for compute,
-// the first usable plugin's describe otherwise, empty when none names it.
+// lookup is a family's display name and colour hint: lux's own families
+// (Compute, Block storage) first, the first usable plugin's describe
+// otherwise, empty when none names it.
 func (f costFamilies) lookup(family string) (string, string) {
-	if family == "compute" {
+	switch family {
+	case familyCompute:
 		return "Compute", ""
+	case familyBlockStorage:
+		return "Block storage", ""
 	}
 	d := f[family]
 	return d.name, d.color
@@ -244,7 +248,7 @@ func (s *Server) costFamilyMetadata() costFamilies {
 		p.mu.RLock()
 		if p.usable {
 			for family, d := range p.desc.Families {
-				if family == "compute" {
+				if family == familyCompute || family == familyBlockStorage {
 					continue
 				}
 				if first, ok := families[family]; ok {

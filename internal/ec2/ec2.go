@@ -580,6 +580,57 @@ func (p *Provider) Instances(ctx context.Context, template json.RawMessage, tags
 	return out, nil
 }
 
+// Volumes is one DescribeVolumes call (paged) filtered by
+// attachment.instance-id for every id given, all in the template's region.
+// Only attachments with DeleteOnTermination count: a volume that outlives
+// the instance is not its cost. An instance with attachments but none
+// deleted with it maps to an empty slice; one with no attachment at all is
+// absent (its volumes are not attached yet).
+func (p *Provider) Volumes(ctx context.Context, template json.RawMessage, providerIDs []string) (map[string][]server.HostVolume, error) {
+	t, err := parse(template)
+	if err != nil {
+		return nil, err
+	}
+	if len(providerIDs) == 0 {
+		return map[string][]server.HostVolume{}, nil
+	}
+	c, err := p.client(ctx, t.Region)
+	if err != nil {
+		return nil, err
+	}
+	want := map[string]bool{}
+	for _, id := range providerIDs {
+		want[id] = true
+	}
+	out := map[string][]server.HostVolume{}
+	pages := awsec2.NewDescribeVolumesPaginator(c, &awsec2.DescribeVolumesInput{
+		Filters: []types.Filter{{Name: aws.String("attachment.instance-id"), Values: providerIDs}},
+	})
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("ec2 DescribeVolumes: %w", err)
+		}
+		for _, v := range page.Volumes {
+			for _, a := range v.Attachments {
+				id := aws.ToString(a.InstanceId)
+				if !want[id] {
+					continue
+				}
+				if _, seen := out[id]; !seen {
+					out[id] = []server.HostVolume{}
+				}
+				if !aws.ToBool(a.DeleteOnTermination) {
+					continue
+				}
+				out[id] = append(out[id], server.HostVolume{Type: string(v.VolumeType), SizeGiB: int64(aws.ToInt32(v.Size)),
+					IOPS: int64(aws.ToInt32(v.Iops)), ThroughputMiBps: int64(aws.ToInt32(v.Throughput))})
+			}
+		}
+	}
+	return out, nil
+}
+
 func isNotFound(err error) bool {
 	var ae smithy.APIError
 	return errors.As(err, &ae) && ae.ErrorCode() == "InvalidInstanceID.NotFound"

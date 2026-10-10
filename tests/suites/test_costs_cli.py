@@ -49,8 +49,14 @@ def test_cost_cli(lux, tenant_factory, operator, runners, hosts):
     assert out.count("list price") == 1, out
     assert re.search(r"^FAMILY\s+TOTAL$", out, re.M), out
     assert re.search(r"^compute\s+[\d.<]+ USD$", out, re.M), out
-    # A tenant never sees the unallocated total.
-    assert "unallocated" not in out and "unallocated" not in summary, out
+    # The host is in the tenant's own pool: it sees the host time no Run
+    # was charged for, per host-tied family (never a platform pool's).
+    # Host hours refresh on their own schedule: wait for the first.
+    own = wait_until(lambda: (lambda c: c if any(r["family"] == "compute" and r["currency"] == "USD"
+                                                 for r in c.get("unallocated", [])) else None)(
+        lux.json("costs", "--since", "1h")), 60, 1, "the tenant never saw its own pool's unallocated host time")
+    assert {r["family"] for r in own["unallocated"]} <= {"compute", "block-storage"}, own
+    assert "unallocated (hosts' cost charged to no Run):" in lux.run("costs", "--since", "1h").stdout
 
     # The Runs list: one currency is its amount, as `lux cost` rounds it.
     # The Run has ended, so its compute line no longer changes.
@@ -69,20 +75,24 @@ def test_cost_cli(lux, tenant_factory, operator, runners, hosts):
     assert re.search(r"^total:\s+—$", lux.run("cost", pending).stdout, re.M)
     lux.run("terminate", pending)
 
-    # Another tenant sees neither the Run's cost nor its summary.
+    # Another tenant sees neither the Run's cost, its summary, nor the
+    # host time of a pool it does not own.
     other = tenant_factory()
     assert other.run("cost", run_id, check=False).returncode == 3
-    assert not other.json("costs", "--since", "1h")["totals"]
+    theirs = other.json("costs", "--since", "1h")
+    assert not theirs["totals"] and not theirs.get("unallocated"), theirs
 
-    # An operator narrowed to the tenant sees what it sees; without a
-    # tenant, also the hosts' cost charged to no Run.
+    # An operator narrowed to the tenant sees what it sees (its own pools'
+    # host time included); without a tenant, every host's.
     narrowed = operator.json("costs", "--since", "1h", "--by", "run", "--tenant", lux.tenant_id)
-    assert [r["group"]["run"] for r in narrowed["totals"]] == [run_id] and "unallocated" not in narrowed, narrowed
+    assert [r["group"]["run"] for r in narrowed["totals"]] == [run_id], narrowed
+    assert any(r["family"] == "compute" and r["currency"] == "USD" for r in narrowed.get("unallocated", [])), narrowed
     # The database is the session's: other tests' hosts may add to these.
     assert any(r["currency"] == "USD" for r in operator.json("costs", "--since", "1h")["unallocated"])
     out = operator.run("costs", "--since", "1h", "--by", "host").stdout
-    assert re.search(r"^unallocated \(hosts' cost charged to no Run\): .*[\d.<]+ USD", out, re.M), out
-    assert re.search(r"^HOST\s+ALLOCATED\s+UNALLOCATED$", out, re.M), out
+    # The database is the session's: other hosts may add other families' rows.
+    assert re.search(r"^unallocated \(hosts' cost charged to no Run\):\nFAMILY\s+UNALLOCATED\n(?:\S+\s+\S+ USD\n)*compute\s+[\d.<]+ USD$", out, re.M), out
+    assert re.search(r"^HOST\s+FAMILY\s+ALLOCATED\s+UNALLOCATED$", out, re.M), out
 
     # The priced host's row shows luxd's amounts as `lux costs` rounds them.
     # Its hours refresh on their own schedule, so the text is compared with
@@ -91,7 +101,7 @@ def test_cost_cli(lux, tenant_factory, operator, runners, hosts):
 
     def host_row():
         return next((h for h in operator.json("costs", "--since", "1h", "--by", "host")["hosts"]
-                     if h["hostId"] == host_id and h["currency"] == "USD"), None)
+                     if h["hostId"] == host_id and h["family"] == "compute" and h["currency"] == "USD"), None)
 
     def shown_host():
         before = host_row()
@@ -101,7 +111,7 @@ def test_cost_cli(lux, tenant_factory, operator, runners, hosts):
     row, out = wait_until(shown_host, 30, 1, f"host {host_id} never had a stable allocation row")
     allocated, unallocated = money(row["allocated"]), money(row["unallocated"])
     assert (allocated, unallocated) != ("0", "0"), row
-    want = rf"^{re.escape(host_id)}\s+{re.escape(allocated)} USD\s+{re.escape(unallocated)} USD$"
+    want = rf"^{re.escape(host_id)}\s+compute\s+{re.escape(allocated)} USD\s+{re.escape(unallocated)} USD$"
     assert re.search(want, out, re.M), (row, out)
 
 

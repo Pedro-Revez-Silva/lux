@@ -371,6 +371,11 @@ func (s *Server) priceLoop(ctx context.Context) {
 		refreshCtx, cancel := context.WithTimeout(ctx, refreshTimeout)
 		s.refreshPrices(refreshCtx)
 		cancel()
+		// Its own budget: a compute refresh that uses up its 30 s must not
+		// starve block storage on every pass.
+		refreshCtx, cancel = context.WithTimeout(ctx, refreshTimeout)
+		s.refreshBlockStorage(refreshCtx)
+		cancel()
 		wait(ctx, nil, every)
 	}
 }

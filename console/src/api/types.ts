@@ -883,6 +883,8 @@ export interface PoolHostTime {
   at?: string;
   hostId?: string;
   hostName?: string;
+  /** compute or block-storage. */
+  family?: string;
   currency: string;
   allocated: string;
   unallocated: string;

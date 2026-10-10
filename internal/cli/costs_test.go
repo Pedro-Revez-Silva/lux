@@ -115,12 +115,15 @@ func fixtureRunCost() server.RunCost {
 		},
 		ByFamily: []server.CostTotal{
 			{Family: "ai", DisplayName: "AI models", Color: "violet", Currency: "USD", Amount: "1.28431", Final: "0", Estimate: "1.28431"},
+			{Family: "block-storage", DisplayName: "Block storage", Currency: "USD", Amount: "0.0115", Final: "0.0115", Estimate: "0"},
 			{Family: "compute", DisplayName: "Compute", Currency: "USD", Amount: "0.150000001", Final: "0.150000001", Estimate: "0"},
 			{Family: "video", Currency: "EUR", Amount: "2.5", Final: "0", Estimate: "2.5"},
 		},
 		Lines: []server.CostLine{
 			{RunID: "run_1", Source: "model-gateway", Family: "ai", Item: "large-model-v3", Amount: "1.28431", Currency: "USD",
 				From: costT0, To: costT0.Add(41 * time.Minute), Details: map[string]any{"requests": 57}, Reported: answered},
+			{RunID: "run_1", Source: "compute", Family: "block-storage", Item: "gp3:100GiB", Amount: "0.0115", Currency: "USD",
+				From: costT0, To: costT0.Add(time.Hour), Final: true, Details: map[string]any{}, Reported: answered},
 			{RunID: "run_1", Source: "compute", Family: "compute", Item: "m7i.2xlarge", Amount: "0.150000001", Currency: "USD",
 				From: costT0, To: costT0.Add(time.Hour), Final: true, Details: map[string]any{}, Reported: answered},
 			{RunID: "run_1", Source: "video-gw", Family: "video", Item: "", Amount: "2.5", Currency: "EUR",
@@ -170,10 +173,12 @@ func TestCostCommand(t *testing.T) {
 	}
 	lineWith(t, out, "AI", "models", "(ai)", "1.2843", "USD")
 	lineWith(t, out, "Compute", "(compute)", "0.15", "USD")
+	lineWith(t, out, "Block", "storage", "(block-storage)", "0.0115", "USD", "0.0115", "USD", "0", "USD")
 	lineWith(t, out, "video", "2.5", "EUR")
 	// Lines by family, with item, amount, currency, window and kind.
 	lineWith(t, out, "AI", "models", "(ai)", "large-model-v3", "model-gateway", "1.2843", "USD", "estimate")
 	lineWith(t, out, "m7i.2xlarge", "compute", "0.15", "USD", "final")
+	lineWith(t, out, "Block", "storage", "(block-storage)", "gp3:100GiB", "compute", "0.0115", "USD", "final")
 	lineWith(t, out, "video", "—", "video-gw", "2.5", "EUR", "estimate")
 	// Sources: status and answeredAt; one that never answered shows —.
 	lineWith(t, out, "compute", "final", costT0.Add(90*time.Minute).Local().Format("15:04:05"))
@@ -225,8 +230,9 @@ func fixtureSummary() server.CostSummaryBody {
 			{At: &costT0, Group: map[string]string{"family": "compute"}, Currency: "USD", Amount: "0.1"},
 			{At: &day2, Group: map[string]string{"family": "compute"}, Currency: "USD", Amount: "0.050000001"},
 		},
-		Unallocated: []server.CostSummaryRow{{Currency: "USD", Amount: "0.75"}},
-		Hosts:       []server.HostAllocation{{HostID: "host_a", Currency: "USD", Allocated: "1.23456", Unallocated: "0.25"}},
+		Unallocated: []server.CostSummaryRow{{Family: "block-storage", Currency: "USD", Amount: "0.05"}, {Family: "compute", Currency: "USD", Amount: "0.75"}},
+		Hosts: []server.HostAllocation{{HostID: "host_a", Family: "block-storage", Currency: "USD", Allocated: "0.0123", Unallocated: "0.004"},
+			{HostID: "host_a", Family: "compute", Currency: "USD", Allocated: "1.23456", Unallocated: "0.25"}},
 	}
 }
 
@@ -249,16 +255,20 @@ func TestCostsCommand(t *testing.T) {
 	lineWith(t, out, "DAY", "FAMILY", "AMOUNT")
 	lineWith(t, out, "Sep", "26", "compute", "0.1", "USD")
 	lineWith(t, out, "Sep", "27", "compute", "0.05", "USD")
-	lineWith(t, out, "unallocated", "0.75", "USD")
+	lineWith(t, out, "unallocated")
+	lineWith(t, out, "FAMILY", "UNALLOCATED")
+	lineWith(t, out, "compute", "0.75", "USD")
+	lineWith(t, out, "block-storage", "0.05", "USD")
 
 	out, err = runCLI(t, f, "costs", "--by", "host")
 	if err != nil {
 		t.Fatal(err)
 	}
-	lineWith(t, out, "HOST", "ALLOCATED", "UNALLOCATED")
-	h := fixtureSummary().Hosts[0]
-	row := append([]string{h.HostID}, strings.Fields(money(h.Allocated, h.Currency))...)
-	lineWith(t, out, append(row, strings.Fields(money(h.Unallocated, h.Currency))...)...)
+	lineWith(t, out, "HOST", "FAMILY", "ALLOCATED", "UNALLOCATED")
+	for _, h := range fixtureSummary().Hosts {
+		row := append([]string{h.HostID, h.Family}, strings.Fields(money(h.Allocated, h.Currency))...)
+		lineWith(t, out, append(row, strings.Fields(money(h.Unallocated, h.Currency))...)...)
+	}
 
 	_, err = runCLI(t, f, "costs", "--from", "2026-09-01T00:00:00Z", "--to", "2026-09-02T00:00:00Z",
 		"--by", "tenant", "--by", "label:team", "--family", "ai", "--tenant", "acme")

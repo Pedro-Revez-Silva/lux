@@ -26,7 +26,7 @@ func (s *Server) poolRoutes(api huma.API) {
 		OperationID: "poolStats", Method: http.MethodGet, Path: "/v1/pools/stats", Tags: []string{"pools"},
 		Summary: "Every pool's figures, in one read",
 		Description: "Per pool the caller sees (as GET /v1/pools): hosts by state, CPU allocated of capacity (ready and draining hosts), Runs first started in the range with an hourly count, launches the provider refused in the range, " +
-			"and the cost of the Runs on it in the range, per currency (list prices; never summed across currencies; absent: none reported, not zero). " +
+			"and the cost of the Runs on its machines (compute and block storage) in the range, per currency (list prices; never summed across currencies; absent: none reported, not zero). " +
 			"A tenant's figures on a shared platform pool are its own Runs', allocation and cost; hosts and capacity are the pool's.",
 		Errors: []int{http.StatusBadRequest},
 	}, "read", s.poolStats)
@@ -41,9 +41,9 @@ func (s *Server) poolRoutes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "poolCost", Method: http.MethodGet, Path: "/v1/pools/{name}/cost", Tags: []string{"pools", "costs"},
 		Summary: "What a pool cost",
-		Description: "List prices, per currency, never summed across currencies. `series`: the cost of the Runs on it by family per hour (day for ranges over 7 days): compute on its hosts, and other families of Runs bound to it. " +
-			"`topRuns`: its costliest Runs in the range. Operators not narrowed to a tenant also get the pool's host time: `hosts` (per host, allocated to Runs and idle) and `hostSeries`; idle time is apart from the Runs' cost, never added to it. " +
-			"A tenant sees only its own Runs' cost.",
+		Description: "List prices, per currency, never summed across currencies. A pool's cost is its machines': compute and block storage on its hosts, never AI or other external families. `series`: the Runs' cost on it by family per hour (day for ranges over 7 days). " +
+			"`topRuns`: its costliest Runs in the range. The pool's host time per family: `idle`, `hosts` (per host, allocated to Runs and idle) and `hostSeries`; idle time is apart from the Runs' cost, never added to it. " +
+			"A tenant sees only its own Runs' cost, and the host time of its own pools only (never a platform pool's); an operator narrowed to a tenant sees what that tenant sees.",
 		Errors: []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict},
 	}, "read", s.poolCost)
 }
@@ -68,7 +68,7 @@ type PoolStats struct {
 	RunsStarted    int            `json:"runsStarted" doc:"Runs first started in the range (a tenant: its own)."`
 	RunsHourly     []int          `json:"runsHourly" doc:"The same per hour of the range, oldest first."`
 	LaunchFailures int            `json:"launchFailures" doc:"Launches the provider refused in the range."`
-	Cost           []MoneyAmount  `json:"cost" doc:"The cost of the Runs on it in the range, per currency; empty: none reported."`
+	Cost           []MoneyAmount  `json:"cost" doc:"The cost of the Runs on its machines (compute and block storage) in the range, per currency; empty: none reported."`
 }
 
 type poolStatsInput struct {
@@ -360,9 +360,17 @@ type PoolHostTime struct {
 	At          *time.Time `json:"at,omitempty"`
 	HostID      string     `json:"hostId,omitempty"`
 	HostName    string     `json:"hostName,omitempty"`
+	Family      string     `json:"family" doc:"A host-tied family: compute or block-storage."`
 	Currency    string     `json:"currency"`
 	Allocated   string     `json:"allocated" doc:"Host time reserved by Runs (their compute cost comes from it)."`
 	Unallocated string     `json:"unallocated" doc:"Host time no Run reserved: idle."`
+}
+
+// PoolIdle is a pool's unallocated host time of one family and currency.
+type PoolIdle struct {
+	Family   string `json:"family" doc:"A host-tied family: compute or block-storage."`
+	Currency string `json:"currency"`
+	Amount   string `json:"amount"`
 }
 
 type PoolTopRun struct {
@@ -386,35 +394,34 @@ type poolCostOutput struct {
 		To         time.Time        `json:"to"`
 		Basis      string           `json:"basis"`
 		Interval   string           `json:"interval"`
-		Totals     []MoneyAmount    `json:"totals" doc:"The Runs' cost on the pool in the range, per currency."`
+		Totals     []MoneyAmount    `json:"totals" doc:"The Runs' cost of the pool's machines in the range (compute and block storage; never AI or other external families), per currency."`
 		Series     []PoolCostPoint  `json:"series" doc:"The same by family and bucket; a bucket without a row is no cost reported, not zero."`
 		Families   []CostFamilyInfo `json:"families,omitempty"`
-		TopRuns    []PoolTopRun     `json:"topRuns" doc:"The costliest Runs, up to 10 per currency, costliest first."`
-		Idle       []MoneyAmount    `json:"idle,omitempty" doc:"Operators: host time no Run reserved, per currency. Not part of totals."`
-		HostSeries []PoolHostTime   `json:"hostSeries,omitempty" doc:"Operators: host time per bucket, allocated and idle."`
-		Hosts      []PoolHostTime   `json:"hosts,omitempty" doc:"Operators: host time per host in the range, allocated and idle."`
+		TopRuns    []PoolTopRun     `json:"topRuns" doc:"The costliest Runs by the pool's machines, up to 10 per currency, costliest first."`
+		Idle       []PoolIdle       `json:"idle,omitempty" doc:"Host time no Run reserved, per family and currency. Not part of totals. Operators over every tenant, and the tenant owning the pool; never a platform pool's to a tenant."`
+		HostSeries []PoolHostTime   `json:"hostSeries,omitempty" doc:"Host time per bucket and family, allocated and idle; visible as idle."`
+		Hosts      []PoolHostTime   `json:"hosts,omitempty" doc:"Host time per host and family in the range, allocated and idle; visible as idle."`
 	} `nameHint:"PoolCost"`
 }
 
 // poolRunCost is a FROM item c of the Runs' cost_hourly rows on the pools
 // pool (SQL comparing a pool id: "= $1", "= ANY($1)") in [from, to): c.pool,
-// c.hour, c.run_id, c.family, c.currency, c.amount. A Run's cost is its
-// pool's: compute by the host it ran on (the row's pool_id), other families
-// (no pool_id) by the pool the Run is bound to. The two are read apart,
-// which is coalesce(c.pool_id, r.pool_id) pool, so the first is served by
-// cost_hourly_pool_hour instead of a join to runs for every row in range.
+// c.hour, c.run_id, c.family, c.currency, c.amount. A pool's cost is its
+// machines': the host-tied families (compute, block storage), by the host
+// each placement ran on (the row's pool_id). AI and other external families
+// belong to no host and are not a pool's cost.
 func poolRunCost(pool, from, to string) string {
 	return `(SELECT c.pool_id AS pool, c.hour, c.run_id, c.family, c.currency, c.amount FROM cost_hourly c
 			WHERE c.run_id IS NOT NULL AND c.pool_id ` + pool + ` AND c.hour >= ` + from + ` AND c.hour < ` + to + `
-		UNION ALL
-		SELECT r.pool_id, c.hour, c.run_id, c.family, c.currency, c.amount FROM cost_hourly c JOIN runs r ON r.id = c.run_id
-			WHERE c.run_id IS NOT NULL AND c.pool_id IS NULL AND r.pool_id ` + pool + ` AND c.hour >= ` + from + ` AND c.hour < ` + to + `) c`
+				AND c.family IN ('compute', 'block-storage')) c`
 }
 
 // poolCost reads cost_hourly by the pool's id: Runs' cost under the
-// caller's scope (RLS gives a tenant its own rows only), and, for an
-// operator over every tenant, the pool's host time. Buckets are whole
-// hours, as GET /v1/costs has them.
+// caller's scope (RLS gives a tenant its own rows only), and the pool's host
+// time per family: an operator over every tenant reads any pool's, a tenant
+// (or an operator narrowed to one) its own pools' only (RLS,
+// cost_hourly_own_hosts), never a platform pool's. Buckets are whole hours,
+// as GET /v1/costs has them.
 func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutput, error) {
 	p := principal(ctx)
 	from, to, _, err := s.historyRange(in.HistoryQuery)
@@ -491,28 +498,32 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 		name, color := meta.lookup(f)
 		b.Families = append(b.Families, CostFamilyInfo{Family: f, DisplayName: name, Color: color})
 	}
-	if !p.Operator || p.TenantID != "" {
+	if p.TenantID != "" && (pool.TenantID == nil || *pool.TenantID != p.TenantID) {
 		return out, nil
 	}
-	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		const hostRows = `c.run_id IS NULL AND c.pool_id = $1 AND c.hour >= $2 AND c.hour < $3`
-		rows, err := tx.Query(ctx, `SELECT c.currency, trim_scale(sum(c.unallocated))::text FROM cost_hourly c WHERE `+hostRows+` GROUP BY 1 ORDER BY 1`, pool.ID, from, to)
+	// RLS (cost_hourly_own_hosts) is the guard; the pool is the tenant's own
+	// (checked above), so c.pool_id = $1 needs no further predicate.
+	const hostRows = `c.run_id IS NULL AND c.pool_id = $1 AND c.hour >= $2 AND c.hour < $3`
+	err = s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT c.family, c.currency, trim_scale(sum(c.unallocated))::text FROM cost_hourly c WHERE `+hostRows+`
+			GROUP BY 1, 2 ORDER BY 2, 1`, pool.ID, from, to)
 		if err != nil {
 			return err
 		}
-		if b.Idle, err = pgx.CollectRows(rows, pgx.RowToStructByPos[MoneyAmount]); err != nil {
+		if b.Idle, err = pgx.CollectRows(rows, pgx.RowToStructByPos[PoolIdle]); err != nil {
 			return err
 		}
-		rows, err = tx.Query(ctx, `SELECT `+bucket+`, '', '', c.currency, trim_scale(sum(c.allocated))::text, trim_scale(sum(c.unallocated))::text
-			FROM cost_hourly c WHERE `+hostRows+` GROUP BY 1, 4 ORDER BY 1, 4`, pool.ID, from, to)
+		rows, err = tx.Query(ctx, `SELECT `+bucket+`, '', '', c.family, c.currency, trim_scale(sum(c.allocated))::text, trim_scale(sum(c.unallocated))::text
+			FROM cost_hourly c WHERE `+hostRows+` GROUP BY 1, 4, 5 ORDER BY 1, 5, 4`, pool.ID, from, to)
 		if err != nil {
 			return err
 		}
 		if b.HostSeries, err = pgx.CollectRows(rows, pgx.RowToStructByPos[PoolHostTime]); err != nil {
 			return err
 		}
-		rows, err = tx.Query(ctx, `SELECT NULL::timestamptz, c.host_id, h.name, c.currency, trim_scale(sum(c.allocated))::text, trim_scale(sum(c.unallocated))::text
-			FROM cost_hourly c JOIN hosts h ON h.id = c.host_id WHERE `+hostRows+` GROUP BY 2, 3, 4 ORDER BY 4, sum(c.allocated) + sum(c.unallocated) DESC, 2`, pool.ID, from, to)
+		rows, err = tx.Query(ctx, `SELECT NULL::timestamptz, c.host_id, h.name, c.family, c.currency, trim_scale(sum(c.allocated))::text, trim_scale(sum(c.unallocated))::text
+			FROM cost_hourly c JOIN hosts h ON h.id = c.host_id WHERE `+hostRows+`
+			GROUP BY 2, 3, 4, 5 ORDER BY 5, sum(sum(c.allocated) + sum(c.unallocated)) OVER (PARTITION BY c.host_id, c.currency) DESC, 2, 4`, pool.ID, from, to)
 		if err != nil {
 			return err
 		}

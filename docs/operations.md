@@ -42,7 +42,8 @@ arrive, a few seconds late.
    message; the running luxd is untouched.
 2. Run `luxd migrate` with the owner's DSN. It applies what is new and is
    safe to run again; running luxds keep working meanwhile, except while a
-   migration builds an index. 045 and 046 index the pool and host events
+   migration builds an index, and except in a release whose note below
+   says otherwise (056; 062–064). 045 and 046 index the pool and host events
    tables in their migration's transaction: until each commits, anything
    luxd does that records an event (heartbeats, registration, placements,
    drains) waits — about 3–4 s per million events for the two together.
@@ -61,13 +62,32 @@ arrive, a few seconds late.
    With several luxds sharing the database, stop every one before 056
    runs and start them again on the new binary (step 3) once it has
    committed, so that no request reaches an older luxd.
+   For a release with 062–066 (block storage as its own cost family),
+   grant the EC2 role `ec2:DescribeVolumes` **before** deploying it
+   ([EC2 pools](#ec2-pools)): until a host's volumes are known, every Run
+   on an EC2 host stays `incomplete` and is retried hourly; hosts that
+   terminate before the grant need `luxd admin costs backfill-volumes`
+   ([below](#block-storage-of-hosts-launched-before-luxd-recorded-volumes)).
+   062–064 each take an ACCESS EXCLUSIVE lock in their transaction: 062 on
+   `host_rates`, 063 on `cost_placement_snapshots`, 064 on `cost_hourly`,
+   which revalidates its CHECK and rebuilds `cost_hourly_host` in about
+   3.2 s per 4.4 million `cost_hourly` rows; 062 and 063 are sub-second at
+   ordinary sizes. Until each commits, cost writes and cost reads
+   (dashboards) wait. 066 builds `cost_hourly_host_pool_hour` the same
+   way (about 3 s per 5 million rows), holding back cost writes only.
+   Running luxds do **not** keep working through this release: once 062
+   and 063 commit, an older luxd's cost writes (the cost drainer and the
+   price refresh) fail with "no unique or exclusion constraint matching the
+   ON CONFLICT specification" until it is restarted on the new binary.
+   No data is lost: the cost queue and the price refresh retry them. So
+   migrate and then restart (or roll) every luxd promptly.
 3. Restart (or roll) every `luxd serve` onto the new binary; for a release
    with 056 and several luxds, start every one of them, all stopped in
    step 2: do not roll.
 
 Migrate first: a luxd newer than its schema does not check it, and fails
 requests that touch what is missing (luxds older than the schema keep
-working). Configuration through the environment alone keeps working: a
+working, except across the releases with 056 and with 062–064 above). Configuration through the environment alone keeps working: a
 configuration file is optional.
 
 Each Linux release tarball has a `FEATURES` file at its root, one feature
@@ -197,6 +217,7 @@ luxd admin create-tenant --name acme [--max-runs N] [--max-hosts N] [--retention
 luxd admin create-key --tenant T --scopes read,run
 luxd admin create-operator-key [--name N]       # every tenant: see docs/operators.md
 luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BYTES] [--retention-days N] [--expire-after-days N]
+luxd admin costs backfill-volumes --pool P [--tenant T] --volume type=gp3,size=100,iops=3000,throughput=125 [--dry-run]   # see EC2 pools
 ```
 
 - `--max-runs`: Runs that are not stopped or finished. Checked when a Run
@@ -666,10 +687,13 @@ What an instance needs:
   `DescribeInstanceTypes` (a template's `instanceType`'s memory, passed to
   the runner as `LUX_RUNNER_MEMORY`; without it the launch still goes
   ahead, logged, and the host offers its MemTotal), plus
-  `pricing:GetProducts` for on-demand prices and
-  `ec2:DescribeSpotPriceHistory` for spot prices, from its standard AWS
-  configuration (environment or instance role). Both pricing actions are
-  read-only and require `Resource: "*"`; the runner needs neither. The
+  `pricing:GetProducts` for on-demand and EBS prices,
+  `ec2:DescribeSpotPriceHistory` for spot prices and `ec2:DescribeVolumes`
+  for each host's block-storage volumes (their size and type price its
+  block storage; without it a host's block storage stays missing, never
+  zero), from its standard AWS
+  configuration (environment or instance role). These three actions are
+  read-only and require `Resource: "*"`; the runner needs none. The
   Pricing API uses `LUX_COSTS_PRICING_REGION` regardless of the host's
   region. `LUX_EC2_ENDPOINT` and `LUX_PRICING_ENDPOINT` override their
   respective endpoints for tests.
@@ -682,6 +706,35 @@ with an unrecognized value is refused, not left to fail at boot:
 | `ignition` (default) | An Ignition v3.4.0 config for Fedora CoreOS. | The default: no packages to install, fastest boot. |
 | `script` | A `#!/bin/bash` script cloud-init runs. | A stock Fedora Cloud, Ubuntu, Debian or AL2023 AMI. |
 | `env` | Plain `KEY=value` lines (`LUX_URL`, `LUX_HOST_TOKEN`, `LUX_HOST_NAME`, `LUX_EC2_IMDS`, `LUX_RUNNER_MEMORY` when luxd knows the instance type's memory, and `LUX_NESTED` for a nested pool). | A custom AMI with its own boot script, from before self-update. |
+
+### Block storage of hosts launched before luxd recorded volumes
+
+luxd prices each EC2 host's own disk (the volumes deleted with the
+instance) as the **Block storage** cost family, from `DescribeVolumes`
+([costs](costs.md#block-storage-built-in)). Hosts launched before that have
+no recorded volumes, so their block storage is missing. State the launch
+template's disk once per pool to fill it in, history included:
+
+```bash
+luxd admin costs backfill-volumes --pool burst --dry-run \
+  --volume type=gp3,size=100,iops=3000,throughput=125
+luxd admin costs backfill-volumes --pool burst \
+  --volume type=gp3,size=100,iops=3000,throughput=125
+```
+
+`--tenant` (id or name) picks a tenant's pool; without it, the platform's.
+`--volume` repeats for several volumes (`size` in GiB, `throughput` in
+MiB/s; `iops` and `throughput` optional). It records the volumes on the
+pool's hosts whose volumes are unknown, marked `"assumed": true`, prices
+them at today's list price, re-evaluates the Runs placed on them (finished
+ones gain a block-storage line; their compute amounts do not change) and
+rebuilds the hosts' hourly rows within `costs.hourly`. It prints the hosts,
+hours and Runs it touched (or would, with `--dry-run`), and under `skipped`
+the Runs it leaves alone: those whose compute went final before compute
+snapshots existed (migration 027), which re-evaluating would reprice.
+Running it again changes nothing. It needs `pricing:GetProducts` (or a
+fresh cached price) and luxd's database settings, like the other admin
+commands.
 
 ### Nested containers on an EC2 pool
 

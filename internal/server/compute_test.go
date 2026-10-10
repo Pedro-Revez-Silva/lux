@@ -560,7 +560,7 @@ func loadHost(t *testing.T, s *Server, hostID string, from, to time.Time) hostCo
 	var in hostCompute
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var err error
-		in, err = loadHostCompute(ctx, tx, hostID, from, to)
+		in, err = loadHostCompute(ctx, tx, hostID, familyCompute, from, to)
 		return err
 	}); err != nil {
 		t.Fatal(err)

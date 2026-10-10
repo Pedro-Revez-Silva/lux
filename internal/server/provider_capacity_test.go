@@ -26,7 +26,7 @@ func TestProviderHelloCapacitySplitsRunCost(t *testing.T) {
 	var before hostCompute
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var err error
-		before, err = loadHostCompute(ctx, tx, "capacity-host", from, from.Add(time.Hour))
+		before, err = loadHostCompute(ctx, tx, "capacity-host", familyCompute, from, from.Add(time.Hour))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -89,7 +89,7 @@ func TestProviderHelloCapacitySplitsRunCost(t *testing.T) {
 	var in hostCompute
 	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var err error
-		in, err = loadHostCompute(ctx, tx, "capacity-host", from, end)
+		in, err = loadHostCompute(ctx, tx, "capacity-host", familyCompute, from, end)
 		return err
 	}); err != nil {
 		t.Fatal(err)

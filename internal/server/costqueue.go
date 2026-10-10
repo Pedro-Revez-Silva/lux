@@ -466,12 +466,15 @@ func loadComputeRuns(ctx context.Context, tx pgx.Tx, runs []string) (map[string]
 	return evals, now, err
 }
 
-// computeLines gathers placements' amounts into one line per Run, item and
-// currency.
+// computeLines gathers placements' amounts into one line per Run, family,
+// item and currency.
 type computeLines struct {
 	now   time.Time
-	byRun map[string]map[[2]string]*computeLine // run → (item, currency) →
+	byRun map[string]map[lineKey]*computeLine
 }
+
+// lineKey is a line's family, item and currency.
+type lineKey struct{ family, item, currency string }
 
 type computeLine struct {
 	amount     *big.Rat
@@ -481,7 +484,7 @@ type computeLine struct {
 }
 
 func newComputeLines(now time.Time) *computeLines {
-	return &computeLines{now: now, byRun: map[string]map[[2]string]*computeLine{}}
+	return &computeLines{now: now, byRun: map[string]map[lineKey]*computeLine{}}
 }
 
 // lines is one Run's lines, by item. An item priced in more than one
@@ -490,13 +493,13 @@ func newComputeLines(now time.Time) *computeLines {
 func (b *computeLines) lines(runID string) []costReport {
 	perItem := map[string]int{}
 	for k := range b.byRun[runID] {
-		perItem[k[0]]++
+		perItem[k.item]++
 	}
 	var out []costReport
 	for k, l := range b.byRun[runID] {
-		item := k[0]
+		item := k.item
 		if perItem[item] > 1 {
-			item += ":" + k[1]
+			item += ":" + k.currency
 		}
 		slices.SortFunc(l.placements, func(a, b map[string]any) int {
 			return cmp.Or(a["from"].(time.Time).Compare(b["from"].(time.Time)), cmp.Compare(a["epoch"].(int), b["epoch"].(int)))
@@ -505,10 +508,12 @@ func (b *computeLines) lines(runID string) []costReport {
 		if l.missing {
 			details["missingRate"] = true
 		}
-		out = append(out, costReport{Family: "compute", Item: item, Amount: moneyString(l.amount), Currency: k[1],
+		out = append(out, costReport{Family: k.family, Item: item, Amount: moneyString(l.amount), Currency: k.currency,
 			From: l.from, To: l.to, Details: details})
 	}
-	slices.SortFunc(out, func(a, b costReport) int { return strings.Compare(a.Item, b.Item) })
+	slices.SortFunc(out, func(a, b costReport) int {
+		return cmp.Or(strings.Compare(a.Family, b.Family), strings.Compare(a.Item, b.Item))
+	})
 	return out
 }
 
@@ -570,137 +575,11 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, _ *c
 	if err := tx.QueryRow(ctx, `SELECT source FROM cost_sources WHERE run_id = $1 AND source = 'compute' FOR UPDATE`, runID).Scan(&locked); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
-	rows, err := tx.Query(ctx, `SELECT p.id, p.run_id, p.epoch, coalesce((p.resources->>'cpus')::float8, 0),
-		coalesce((p.resources->>'memory')::int8, 0), p.created_at, p.ended_at,
-		h.id, h.provision_requested_at IS NOT NULL,
-		coalesce(h.instance_type, h.launch_template->>'instanceType', ''), coalesce(h.market, ''), coalesce(h.zone, ''),
-		s.rate_from, s.per_hour::text, s.currency, s.cap_cpus, s.cap_memory, s.amount::text, s.priced_to, coalesce(s.finalized, false)
-		FROM placements p JOIN hosts h ON h.id = p.host_id
-		LEFT JOIN cost_placement_snapshots s ON s.placement_id = p.id
-		WHERE p.run_id = $1 ORDER BY p.created_at, p.id`, runID)
-	if err != nil {
-		return err
-	}
-	type entry struct {
-		p                 placementWindow
-		hostID            string
-		h                 costHost
-		rateFrom          *time.Time
-		perHour, currency *string
-		capCPUs           *float64
-		capMemory         *int64
-		amount            *string
-		pricedTo          *time.Time
-		final             bool
-	}
-	var entries []entry
-	for rows.Next() {
-		var v entry
-		if err := rows.Scan(&v.p.ID, &v.p.RunID, &v.p.Epoch, &v.p.CPUs, &v.p.Memory, &v.p.From, &v.p.To,
-			&v.hostID, &v.h.Provider, &v.h.Type, &v.h.Market, &v.h.Zone,
-			&v.rateFrom, &v.perHour, &v.currency, &v.capCPUs, &v.capMemory, &v.amount, &v.pricedTo, &v.final); err != nil {
-			rows.Close()
-			return err
-		}
-		entries = append(entries, v)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return err
-	}
 	b := newComputeLines(now)
-	for i := range entries {
-		v := &entries[i]
-		if v.final {
-			continue
-		}
-		end := now
-		if v.p.To != nil {
-			end = *v.p.To
-		} else {
-			e.Open = true
-		}
-		rate, err := resolvePlacementRate(ctx, tx, v.hostID, v.p.From)
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && !hasCapacity(rate)) {
-			e.Missing = append(e.Missing, fmt.Sprintf("placement %s on host %s has no rate", v.p.ID, v.hostID))
-			if _, err := tx.Exec(ctx, `INSERT INTO cost_placement_snapshots (placement_id, run_id, tenant_id, host_id)
-				VALUES ($1,$2,$3,$4) ON CONFLICT (placement_id) DO UPDATE SET
-				rate_from=NULL, per_hour=NULL, currency=NULL, cap_cpus=NULL, cap_memory=NULL,
-				amount=NULL, priced_to=NULL WHERE NOT cost_placement_snapshots.finalized`, v.p.ID, runID, e.TenantID, v.hostID); err != nil {
-				return err
-			}
-			v.amount, v.perHour, v.currency = nil, nil, nil
-			continue
-		}
-		if err != nil {
+	for _, family := range hostFamilies {
+		if err := writeFamilySnapshots(ctx, tx, runID, family, &e, b, now); err != nil {
 			return err
 		}
-		amount, err := pricePlacementSnapshot(ctx, tx, v.p, v.hostID, rate, end)
-		if err != nil {
-			return err
-		}
-		a := moneyString(amount)
-		v.amount, v.perHour, v.currency = &a, &rate.PerHour, &rate.Currency
-		v.capCPUs, v.capMemory, v.rateFrom, v.pricedTo = &rate.CapCPUs, &rate.CapMemory, &rate.From, &end
-		v.final = v.p.To != nil
-		if _, err := tx.Exec(ctx, `INSERT INTO cost_placement_snapshots
-			(placement_id, run_id, tenant_id, host_id, rate_from, per_hour, currency, cap_cpus, cap_memory, amount, priced_to, finalized)
-			VALUES ($1,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10::numeric,$11,$12)
-			ON CONFLICT (placement_id) DO UPDATE SET rate_from=EXCLUDED.rate_from, per_hour=EXCLUDED.per_hour,
-			currency=EXCLUDED.currency, cap_cpus=EXCLUDED.cap_cpus, cap_memory=EXCLUDED.cap_memory,
-			amount=EXCLUDED.amount, priced_to=EXCLUDED.priced_to, finalized=EXCLUDED.finalized
-			WHERE NOT cost_placement_snapshots.finalized`, v.p.ID, runID, e.TenantID, v.hostID,
-			rate.From, rate.PerHour, rate.Currency, rate.CapCPUs, rate.CapMemory, a, end, v.final); err != nil {
-			return err
-		}
-	}
-	// Reconstruct hourly allocations using the frozen rate and the current
-	// host occupancy; finalized amounts are never recalculated.
-	for _, v := range entries {
-		if v.p.To == nil {
-			e.Open = true
-		}
-		if !v.final && (v.amount == nil || v.currency == nil) && !slices.ContainsFunc(e.Missing, func(m string) bool { return strings.Contains(m, v.p.ID) }) {
-			e.Missing = append(e.Missing, fmt.Sprintf("placement %s on host %s has no rate", v.p.ID, v.hostID))
-		}
-		if !v.final && v.p.To != nil {
-			e.Missing = append(e.Missing, fmt.Sprintf("placement %s on host %s is not finalized", v.p.ID, v.hostID))
-		}
-		if v.amount == nil || v.currency == nil {
-			continue
-		}
-		end := now
-		if v.pricedTo != nil {
-			end = *v.pricedTo
-		}
-		amount := mustRat(*v.amount)
-		r := ratePeriod{PerHour: *v.perHour, Currency: *v.currency, CapCPUs: *v.capCPUs, CapMemory: *v.capMemory}
-		sh, _ := share(v.p, &r).Float64()
-		d := map[string]any{"epoch": v.p.Epoch, "hostId": v.hostID, "from": v.p.From, "to": v.p.To,
-			"cpus": v.p.CPUs, "memory": v.p.Memory, "amount": *v.amount,
-			"share": sh, "ratePerHour": *v.perHour, "finalized": v.final}
-		if v.h.Market != "" {
-			d["market"] = v.h.Market
-		}
-		if v.h.Zone != "" {
-			d["zone"] = v.h.Zone
-		}
-		if b.byRun[runID] == nil {
-			b.byRun[runID] = map[[2]string]*computeLine{}
-		}
-		k := [2]string{v.h.item(), *v.currency}
-		l := b.byRun[runID][k]
-		if l == nil {
-			l = &computeLine{amount: new(big.Rat), from: v.p.From, to: end}
-			b.byRun[runID][k] = l
-		}
-		l.amount.Add(l.amount, amount)
-		l.from, l.to = minTime(l.from, v.p.From), maxTime(l.to, end)
-		l.placements = append(l.placements, d)
-		allocateCostHours(v.p.From, end, amount, func(hour time.Time, allocated *big.Rat) {
-			e.Hours = append(e.Hours, computeHour{hour, v.hostID, *v.currency, allocated})
-		})
 	}
 	e.Lines = b.lines(runID)
 	if len(e.Missing) > 0 {
@@ -738,12 +617,197 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, _ *c
 	if err := replaceComputeHours(ctx, tx, e.TenantID, runID, e.Hours, s.cfg.Costs.Hourly); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, attempts, next_at, settles_left, last_error)
+	_, err := tx.Exec(ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, attempts, next_at, settles_left, last_error)
 		VALUES ($1,$2,'compute',$3,now(),$4,$5,NULL,$6)
 		ON CONFLICT (run_id, source) DO UPDATE SET status=EXCLUDED.status, answered_at=EXCLUDED.answered_at,
 		attempts=EXCLUDED.attempts, next_at=EXCLUDED.next_at, settles_left=NULL, last_error=EXCLUDED.last_error`,
 		runID, e.TenantID, status, attempts, nextAt, lastError)
 	return err
+}
+
+// snapshotEntry is one placement and its snapshot of one family.
+type snapshotEntry struct {
+	p                 placementWindow
+	hostID            string
+	h                 costHost
+	volumes           *[]HostVolume
+	rateFrom          *time.Time
+	perHour, currency *string
+	capCPUs           *float64
+	capMemory         *int64
+	amount            *string
+	pricedTo          *time.Time
+	final             bool
+}
+
+// writeFamilySnapshots refreshes a Run's unfrozen placement snapshots of one
+// host-tied family and adds their amounts to b and e.Hours; what has no
+// usable rate goes to e.Missing. Block storage is a provider host's own:
+// a placement on a host that registered itself, or on one with no volume
+// deleted with it (volumes []), has none; one whose volumes are not known
+// yet (NULL) is missing.
+func writeFamilySnapshots(ctx context.Context, tx pgx.Tx, runID, family string, e *computeEval, b *computeLines, now time.Time) error {
+	rows, err := tx.Query(ctx, `SELECT p.id, p.run_id, p.epoch, coalesce((p.resources->>'cpus')::float8, 0),
+		coalesce((p.resources->>'memory')::int8, 0), p.created_at, p.ended_at,
+		h.id, h.provision_requested_at IS NOT NULL,
+		coalesce(h.instance_type, h.launch_template->>'instanceType', ''), coalesce(h.market, ''), coalesce(h.zone, ''), h.volumes,
+		s.rate_from, s.per_hour::text, s.currency, s.cap_cpus, s.cap_memory, s.amount::text, s.priced_to, coalesce(s.finalized, false)
+		FROM placements p JOIN hosts h ON h.id = p.host_id
+		LEFT JOIN cost_placement_snapshots s ON s.placement_id = p.id AND s.family = $2
+		WHERE p.run_id = $1 AND ($2 = 'compute' OR (h.provision_requested_at IS NOT NULL
+			AND (h.volumes IS NULL OR jsonb_array_length(h.volumes) > 0)))
+		ORDER BY p.created_at, p.id`, runID, family)
+	if err != nil {
+		return err
+	}
+	var entries []snapshotEntry
+	for rows.Next() {
+		var v snapshotEntry
+		if err := rows.Scan(&v.p.ID, &v.p.RunID, &v.p.Epoch, &v.p.CPUs, &v.p.Memory, &v.p.From, &v.p.To,
+			&v.hostID, &v.h.Provider, &v.h.Type, &v.h.Market, &v.h.Zone, &v.volumes,
+			&v.rateFrom, &v.perHour, &v.currency, &v.capCPUs, &v.capMemory, &v.amount, &v.pricedTo, &v.final); err != nil {
+			rows.Close()
+			return err
+		}
+		entries = append(entries, v)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	noRate := func(v *snapshotEntry) string {
+		return fmt.Sprintf("placement %s on host %s has no %s rate", v.p.ID, v.hostID, family)
+	}
+	var missing []string
+	for i := range entries {
+		v := &entries[i]
+		if v.final {
+			continue
+		}
+		end := now
+		if v.p.To != nil {
+			end = *v.p.To
+		} else {
+			e.Open = true
+		}
+		var rate ratePeriod
+		if family == familyCompute {
+			rate, err = resolvePlacementRate(ctx, tx, v.hostID, v.p.From)
+		} else {
+			rate, err = resolveOwnRate(ctx, tx, v.hostID, family, v.p.From)
+		}
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && !hasCapacity(rate)) {
+			missing = append(missing, noRate(v))
+			if _, err := tx.Exec(ctx, `INSERT INTO cost_placement_snapshots (placement_id, family, run_id, tenant_id, host_id)
+				VALUES ($1,$5,$2,$3,$4) ON CONFLICT (placement_id, family) DO UPDATE SET
+				rate_from=NULL, per_hour=NULL, currency=NULL, cap_cpus=NULL, cap_memory=NULL,
+				amount=NULL, priced_to=NULL WHERE NOT cost_placement_snapshots.finalized`, v.p.ID, runID, e.TenantID, v.hostID, family); err != nil {
+				return err
+			}
+			v.amount, v.perHour, v.currency = nil, nil, nil
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		amount, err := pricePlacementSnapshot(ctx, tx, v.p, v.hostID, rate, end)
+		if err != nil {
+			return err
+		}
+		a := moneyString(amount)
+		v.amount, v.perHour, v.currency = &a, &rate.PerHour, &rate.Currency
+		v.capCPUs, v.capMemory, v.rateFrom, v.pricedTo = &rate.CapCPUs, &rate.CapMemory, &rate.From, &end
+		v.final = v.p.To != nil
+		if _, err := tx.Exec(ctx, `INSERT INTO cost_placement_snapshots
+			(placement_id, family, run_id, tenant_id, host_id, rate_from, per_hour, currency, cap_cpus, cap_memory, amount, priced_to, finalized)
+			VALUES ($1,$13,$2,$3,$4,$5,$6::numeric,$7,$8,$9,$10::numeric,$11,$12)
+			ON CONFLICT (placement_id, family) DO UPDATE SET rate_from=EXCLUDED.rate_from, per_hour=EXCLUDED.per_hour,
+			currency=EXCLUDED.currency, cap_cpus=EXCLUDED.cap_cpus, cap_memory=EXCLUDED.cap_memory,
+			amount=EXCLUDED.amount, priced_to=EXCLUDED.priced_to, finalized=EXCLUDED.finalized
+			WHERE NOT cost_placement_snapshots.finalized`, v.p.ID, runID, e.TenantID, v.hostID,
+			rate.From, rate.PerHour, rate.Currency, rate.CapCPUs, rate.CapMemory, a, end, v.final, family); err != nil {
+			return err
+		}
+	}
+	// Reconstruct hourly allocations using the frozen rate and the current
+	// host occupancy; finalized amounts are never recalculated.
+	for _, v := range entries {
+		if v.p.To == nil {
+			e.Open = true
+		}
+		if !v.final && (v.amount == nil || v.currency == nil) && !slices.Contains(missing, noRate(&v)) {
+			missing = append(missing, noRate(&v))
+		}
+		if !v.final && v.p.To != nil {
+			missing = append(missing, fmt.Sprintf("placement %s on host %s: %s is not finalized", v.p.ID, v.hostID, family))
+		}
+		if v.amount == nil || v.currency == nil {
+			continue
+		}
+		end := now
+		if v.pricedTo != nil {
+			end = *v.pricedTo
+		}
+		amount := mustRat(*v.amount)
+		r := ratePeriod{PerHour: *v.perHour, Currency: *v.currency, CapCPUs: *v.capCPUs, CapMemory: *v.capMemory}
+		sh, _ := share(v.p, &r).Float64()
+		d := map[string]any{"epoch": v.p.Epoch, "hostId": v.hostID, "from": v.p.From, "to": v.p.To,
+			"cpus": v.p.CPUs, "memory": v.p.Memory, "amount": *v.amount,
+			"share": sh, "ratePerHour": *v.perHour, "finalized": v.final}
+		item := volumesItem(v.volumes)
+		if family == familyCompute {
+			item = v.h.item()
+			if v.h.Market != "" {
+				d["market"] = v.h.Market
+			}
+			if v.h.Zone != "" {
+				d["zone"] = v.h.Zone
+			}
+		}
+		if b.byRun[runID] == nil {
+			b.byRun[runID] = map[lineKey]*computeLine{}
+		}
+		k := lineKey{family, item, *v.currency}
+		l := b.byRun[runID][k]
+		if l == nil {
+			l = &computeLine{amount: new(big.Rat), from: v.p.From, to: end}
+			b.byRun[runID][k] = l
+		}
+		l.amount.Add(l.amount, amount)
+		l.from, l.to = minTime(l.from, v.p.From), maxTime(l.to, end)
+		l.placements = append(l.placements, d)
+		allocateCostHours(v.p.From, end, amount, func(hour time.Time, allocated *big.Rat) {
+			e.Hours = append(e.Hours, computeHour{hour, v.hostID, family, *v.currency, allocated})
+		})
+	}
+	e.Missing = append(e.Missing, missing...)
+	return nil
+}
+
+// volumesItem names a block-storage line by its host's volumes: type and
+// size, several joined by "+" in a stable order ("gp3:100GiB",
+// "gp3:100GiB+io2:50GiB").
+func volumesItem(vols *[]HostVolume) string {
+	if vols == nil {
+		return "unknown"
+	}
+	parts := make([]string, 0, len(*vols))
+	for _, v := range sortedVolumes(*vols) {
+		parts = append(parts, fmt.Sprintf("%s:%dGiB", v.Type, v.SizeGiB))
+	}
+	return strings.Join(parts, "+")
+}
+
+// resolveOwnRate is hostID's own period of family covering start, else its
+// latest: no other host's rate is borrowed.
+func resolveOwnRate(ctx context.Context, tx pgx.Tx, hostID, family string, start time.Time) (ratePeriod, error) {
+	var rate ratePeriod
+	err := tx.QueryRow(ctx, `SELECT valid_from, valid_to, per_hour::text, currency, cap_cpus, cap_memory, source
+		FROM host_rates WHERE host_id = $1 AND family = $2
+		ORDER BY (valid_from <= $3 AND (valid_to IS NULL OR valid_to > $3)) DESC, valid_from DESC LIMIT 1`, hostID, family, start).
+		Scan(&rate.From, &rate.To, &rate.PerHour, &rate.Currency, &rate.CapCPUs, &rate.CapMemory, &rate.Source)
+	return rate, err
 }
 
 // resolvePlacementRate prefers an observation covering the placement start,
@@ -762,7 +826,7 @@ func resolvePlacementRate(ctx context.Context, tx pgx.Tx, hostID string, start t
 			WHERE h.id = $1
 		), own_capacity AS (
 			SELECT r.cap_cpus, r.cap_memory FROM host_rates r JOIN target t ON r.host_id = t.id
-			WHERE r.cap_cpus > 0 OR r.cap_memory > 0
+			WHERE r.family = 'compute' AND (r.cap_cpus > 0 OR r.cap_memory > 0)
 			ORDER BY (r.valid_from <= $2) DESC, r.valid_from DESC LIMIT 1
 		), candidates AS (
 			SELECT r.valid_from, r.valid_to, r.per_hour, r.currency, r.source,
@@ -771,7 +835,7 @@ func resolvePlacementRate(ctx context.Context, tx pgx.Tx, hostID string, start t
 				h.id = t.id AS own, r.valid_from <= $2 AND (r.valid_to IS NULL OR r.valid_to > $2) AS covering
 			FROM target t JOIN hosts h ON true
 			LEFT JOIN pools p ON p.id = h.pool_id
-			JOIN host_rates r ON r.host_id = h.id
+			JOIN host_rates r ON r.host_id = h.id AND r.family = 'compute'
 			LEFT JOIN own_capacity c ON true
 			WHERE (h.id = t.id AND t.provider = 'static' AND r.source = 'static')
 				OR (t.provider <> 'static' AND t.kind <> '' AND

@@ -315,7 +315,7 @@ func moneyString(r *big.Rat) string {
 // registered itself: its first hello) to when it was terminated, or is
 // still open. Whatever of it no period covers comes back from computeCost
 // as missing.
-func loadHostCompute(ctx context.Context, tx pgx.Tx, hostID string, from, to time.Time) (hostCompute, error) {
+func loadHostCompute(ctx context.Context, tx pgx.Tx, hostID, family string, from, to time.Time) (hostCompute, error) {
 	in := hostCompute{HostID: hostID, Now: to}
 	if err := tx.QueryRow(ctx, `SELECT greatest(coalesce(provision_requested_at, registered_at, created_at), $2),
 			least(terminated_at, $3)
@@ -323,8 +323,8 @@ func loadHostCompute(ctx context.Context, tx pgx.Tx, hostID string, from, to tim
 		return in, err
 	}
 	rows, err := tx.Query(ctx, `SELECT valid_from, valid_to, per_hour::text, currency, cap_cpus, cap_memory, source
-		FROM host_rates WHERE host_id = $1 AND valid_from < $3 AND (valid_to IS NULL OR valid_to > $2)
-		ORDER BY valid_from`, hostID, from, to)
+		FROM host_rates WHERE host_id = $1 AND family = $4 AND valid_from < $3 AND (valid_to IS NULL OR valid_to > $2)
+		ORDER BY valid_from`, hostID, from, to, family)
 	if err != nil {
 		return in, err
 	}

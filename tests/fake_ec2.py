@@ -1,6 +1,7 @@
 """A fake EC2 for the test suite: an HTTP server speaking the EC2 Query API
 calls lux uses (RunInstances, TerminateInstances, DescribeInstances,
-DescribeInstanceTypes), where an instance is a simulated host container that
+DescribeInstanceTypes, DescribeVolumes), and the Pricing API's GetProducts,
+where an instance is a simulated host container that
 boots lux-runner from its user data, as a real instance's AMI would.
 
 luxd's EC2 provider is pointed at it with LUX_EC2_ENDPOINT, so the real
@@ -15,6 +16,7 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs
 from xml.sax.saxutils import escape
 
@@ -67,6 +69,19 @@ def _parse_env_lines(text: str) -> dict[str, str]:
 # The instance type the fake's launch templates stand for.
 FAKE_TEMPLATE_TYPE = "m7i.large"
 
+# The root volume the fake's launch template gives each instance: gp3,
+# 100 GiB, 3000 IOPS, 125 MiB/s, deleted with the instance.
+FAKE_ROOT_VOLUME = {"type": "gp3", "size": 100, "iops": 3000, "throughput": 125, "deleteOnTermination": True}
+
+# A real Pricing API answer for gp3 in eu-north-1 (0.0836 per GB-Mo, 0.0052
+# per IOPS-Mo, 42.8032 per GiBps-mo), one product per page; luxd's own
+# provider tests read the same file.
+_EBS_FIXTURE = Path(__file__).resolve().parent.parent / "internal" / "ec2" / "testdata" / "ebs-pricing-eu-north-1.json"
+EBS_PRICING = {("eu-north-1", "gp3"): json.loads(_EBS_FIXTURE.read_text())}
+
+# On-demand list prices the fake quotes (made up), by (region, type).
+ON_DEMAND_PRICES = {("eu-north-1", FAKE_TEMPLATE_TYPE): "0.1000000000", ("us-east-1", FAKE_TEMPLATE_TYPE): "0.1000000000"}
+
 # The capacity shortages a dry run never answers (EC2 does not test
 # capacity for one); every other injected failure fails it too.
 DRY_RUN_UNTESTED = frozenset({"InsufficientInstanceCapacity", "InsufficientCapacity"})
@@ -102,6 +117,15 @@ class FakeEC2:
         # much as the harness's runners offer by default, so a launched
         # host packs as a static one does.
         self.type_memory_mib = RUNNER_MEMORY >> 20
+        # The volumes every launched instance gets, as its launch template's
+        # block device mappings would give them (the aiverse template's root
+        # disk); each instance keeps the list it launched with. A test may
+        # change it before a launch, or set volumes_error to fail
+        # DescribeVolumes as a missing ec2:DescribeVolumes would.
+        self.volumes = [dict(FAKE_ROOT_VOLUME)]
+        self.volumes_error = ""
+        # Each GetProducts' filters, {field: value}, in order.
+        self.pricing_calls: list[dict] = []
         self.server = ThreadingHTTPServer((env.gateway, 0), self._handler())
         self.url = f"http://{env.gateway}:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -180,6 +204,15 @@ class FakeEC2:
 
             def do_POST(self):
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
+                if self.headers.get("X-Amz-Target", "").endswith(".GetProducts"):
+                    code, out = fake._get_products(json.loads(body or "{}"))
+                    data = json.dumps(out).encode()
+                    self.send_response(code)
+                    self.send_header("Content-Type", "application/x-amz-json-1.1")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 q = {k: v[0] for k, v in parse_qs(body).items()}
                 action = q.get("Action", "")
                 if q.get("DryRun") != "true":
@@ -238,7 +271,8 @@ class FakeEC2:
                                    "userdata": userdata,
                                    "launchTemplate": lt_id or lt_name,
                                    "instanceType": q.get("InstanceType"), "subnet": q.get("SubnetId"),
-                                   "market": q.get("InstanceMarketOptions.MarketType")}
+                                   "market": q.get("InstanceMarketOptions.MarketType"),
+                                   "volumes": [dict(v) for v in self.volumes]}
         threading.Thread(target=self._boot, args=(iid,), daemon=True).start()
         if self.lose_reply:
             self.lose_reply = False
@@ -357,6 +391,60 @@ class FakeEC2:
                 f"</instanceState><tagSet>{_tags(self.instances[i]['tags'])}</tagSet></item>" for i in chosen)
         return (f'<DescribeInstancesResponse xmlns="{NS}"><reservationSet><item><reservationId>r-0</reservationId>'
                 f"<instancesSet>{items}</instancesSet></item></reservationSet></DescribeInstancesResponse>")
+
+    def _DescribeVolumes(self, q):
+        """The volumes attached to the instances an attachment.instance-id
+        filter names (unknown ids match nothing, as EC2's filters do), each
+        with its one attachment; terminated instances have none left."""
+        if self.volumes_error:
+            raise FakeError(self.volumes_error, "not authorized to perform ec2:DescribeVolumes (fake)")
+        wanted: set[str] = set()
+        i = 1
+        while f"Filter.{i}.Name" in q:
+            if q[f"Filter.{i}.Name"] == "attachment.instance-id":
+                wanted |= set(_list(q, f"Filter.{i}.Value"))
+            i += 1
+        items = ""
+        with self.lock:
+            for iid in sorted(wanted):
+                inst = self.instances.get(iid)
+                if not inst or inst["state"] == "terminated":
+                    continue
+                for n, v in enumerate(inst.get("volumes", [])):
+                    items += (f"<item><volumeId>vol-{iid[2:]}-{n}</volumeId><size>{v['size']}</size>"
+                              f"<volumeType>{escape(v['type'])}</volumeType><iops>{v.get('iops', 0)}</iops>"
+                              f"<throughput>{v.get('throughput', 0)}</throughput><status>in-use</status>"
+                              f"<attachmentSet><item><volumeId>vol-{iid[2:]}-{n}</volumeId><instanceId>{iid}</instanceId>"
+                              f"<device>/dev/xvda</device><status>attached</status>"
+                              f"<deleteOnTermination>{'true' if v.get('deleteOnTermination') else 'false'}</deleteOnTermination>"
+                              f"</item></attachmentSet></item>")
+        return f'<DescribeVolumesResponse xmlns="{NS}"><volumeSet>{items}</volumeSet></DescribeVolumesResponse>'
+
+    # -- the Pricing API (LUX_PRICING_ENDPOINT points here too) -------------
+
+    def _get_products(self, req: dict) -> tuple[int, dict]:
+        """GetProducts on AmazonEC2, as luxd asks it: an instance type's
+        on-demand price (ON_DEMAND_PRICES), or a volume type's EBS products,
+        one page each, from the real eu-north-1 gp3 answer (EBS_PRICING). An
+        unknown key answers no products, as AWS does."""
+        f = {x["Field"]: x["Value"] for x in req.get("Filters", [])}
+        with self.lock:
+            self.pricing_calls.append(f)
+        if "volumeApiName" in f:
+            pages = EBS_PRICING.get((f.get("regionCode"), f["volumeApiName"]), [])
+            i = int(req.get("NextToken") or 0)
+            if i >= len(pages):
+                return 200, {"PriceList": [], "FormatVersion": "aws_v1"}
+            page = dict(pages[i])
+            if i + 1 < len(pages):
+                page["NextToken"] = str(i + 1)
+            return 200, page
+        price = ON_DEMAND_PRICES.get((f.get("regionCode"), f.get("instanceType")))
+        if price is None:
+            return 200, {"PriceList": [], "FormatVersion": "aws_v1"}
+        product = {"product": {"productFamily": "Compute Instance", "attributes": {"instanceType": f["instanceType"]}},
+                   "terms": {"OnDemand": {"T.1": {"priceDimensions": {"T.1.1": {"unit": "Hrs", "pricePerUnit": {"USD": price}}}}}}}
+        return 200, {"PriceList": [json.dumps(product)], "FormatVersion": "aws_v1"}
 
 
 class FakeError(Exception):

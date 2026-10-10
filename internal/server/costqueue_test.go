@@ -756,8 +756,8 @@ func costHosts(t *testing.T, s *Server) {
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, registered_at) VALUES
 		('static', 't1', 'static', 'ready', $1), ('unpriced', 't1', 'unpriced', 'ready', $1), ('late', 't1', 'late', 'ready', $1)`, at("10:00"))
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, provision_requested_at, registered_at, instance_type, market, zone)
-		VALUES ('ec2', 't1', 'ec2', 'ready', $1, $1, 'm7i.2xlarge', 'spot', 'eu-west-1a')`, at("10:00"))
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, provision_requested_at, registered_at, instance_type, market, zone, volumes)
+		VALUES ('ec2', 't1', 'ec2', 'ready', $1, $1, 'm7i.2xlarge', 'spot', 'eu-west-1a', '[]')`, at("10:00"))
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source) VALUES
 		('static', $1, NULL, 0.40, 'USD', 8, $4, 'static'),
 		('late', $2, NULL, 0.40, 'USD', 8, $4, 'static'),
@@ -1763,8 +1763,8 @@ func TestDrainComputeSnapshotOnDemandFiltersRateSource(t *testing.T) {
 	s, keys := costFixture(t)
 	ctx := context.Background()
 	from, end := at("10:00"), at("11:00")
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, provision_requested_at, registered_at, instance_type, market)
-		VALUES ('snap-od', 't1', 'snap-od', 'ready', $1, $1, 'm7i.large', 'on-demand')`, from)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, provision_requested_at, registered_at, instance_type, market, volumes)
+		VALUES ('snap-od', 't1', 'snap-od', 'ready', $1, $1, 'm7i.large', 'on-demand', '[]')`, from)
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source) VALUES
 		('snap-od', $1, $3, 0.40, 'USD', 8, $2, 'aws-pricing'),
 		('snap-od', $3, NULL, 9.00, 'USD', 8, $2, 'aws-spot-history')`, from, 32*gib, from.Add(time.Minute))
@@ -1786,8 +1786,8 @@ func TestDrainComputeSnapshotMissingRateRetriesAndTenantRLS(t *testing.T) {
 	s, keys := costFixture(t)
 	ctx := context.Background()
 	from, end := at("10:00"), at("11:00")
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, provision_requested_at, registered_at, instance_type, market)
-		VALUES ('snap-missing', 't1', 'snap-missing', 'ready', $1, $1, 'm7i.large', 'on-demand')`, from)
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, provision_requested_at, registered_at, instance_type, market, volumes)
+		VALUES ('snap-missing', 't1', 'snap-missing', 'ready', $1, $1, 'm7i.large', 'on-demand', '[]')`, from)
 	placeRun(t, s, "t1", "snap-missing-run", StateRunning, "snap-missing", placementWindow{From: from, To: &end, CPUs: 2, Memory: 8 * gib})
 	finish(t, s, "t1", "snap-missing-run", StateSucceeded)
 	drain(t, s)
@@ -1839,8 +1839,8 @@ func TestDrainComputeItems(t *testing.T) {
 	costHosts(t, s)
 	ctx := context.Background()
 	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, registered_at) VALUES ('eur', 't1', 'eur', 'ready', $1)`, at("10:00"))
-	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, provision_requested_at, registered_at, instance_type, market, zone)
-		VALUES ('od', 't1', 'od', 'ready', $1, $1, 'm7i.large', 'on-demand', 'eu-west-1b')`, at("10:00"))
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, state, provision_requested_at, registered_at, instance_type, market, zone, volumes)
+		VALUES ('od', 't1', 'od', 'ready', $1, $1, 'm7i.large', 'on-demand', 'eu-west-1b', '[]')`, at("10:00"))
 	execSQL(t, s, ctx, `INSERT INTO host_rates (host_id, valid_from, valid_to, per_hour, currency, cap_cpus, cap_memory, source) VALUES
 		('eur', $1, NULL, 0.80, 'EUR', 8, $2, 'static'), ('od', $1, NULL, 0.40, 'USD', 8, $2, 'aws-pricing')`, at("10:00"), 32*gib)
 	whole := place("", 2, 8, "10:00", "11:00") // share 1/4

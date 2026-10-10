@@ -7,6 +7,7 @@
 //	luxd admin create-host-token [--tenant T] [--pool P] [--label k=v]  → {"token"}
 //	luxd admin create-pool --name N --provider static|ec2 [--tenant T] [--shared] [--default] ...
 //	luxd admin set-quota --tenant T [--max-runs N] [--max-hosts N] [--retention-days N] [--expire-after-days N]
+//	luxd admin costs backfill-volumes --pool P [--tenant T] --volume type=gp3,size=100,... [--dry-run]
 //	luxd serve                                    run the API, scheduler and reapers
 //	luxd validate                                 check the configuration as serve would, connecting to nothing
 //	luxd check-config                             the same as validate
@@ -121,7 +122,9 @@ admin commands:
   create-pool --name N --provider static|ec2 [--tenant T] [--shared] [--default[=false]]
               [--min N] [--max N] [--warm N] [--template JSON]
               [--hourly-price D --currency C]   (static pools: hosts' default price)
-  set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BYTES] [--retention-days N] [--expire-after-days N]`)
+  set-quota --tenant T [--max-runs N] [--max-hosts N] [--max-storage BYTES] [--retention-days N] [--expire-after-days N]
+  costs backfill-volumes --pool P [--tenant T] --volume type=gp3,size=100,iops=3000,throughput=125 [--volume ...] [--dry-run]
+              (hosts launched before luxd recorded volumes: their block storage, assumed)`)
 	os.Exit(2)
 }
 
@@ -435,6 +438,9 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		}
 		return out.Encode(map[string]string{"pool": *name})
 
+	case "costs":
+		return adminCosts(ctx, cfg, db, args[1:])
+
 	case "set-quota":
 		tenant := fs.String("tenant", "", "tenant id")
 		maxRuns := fs.Int("max-runs", -1, "max concurrent runs (0: unlimited)")
@@ -460,6 +466,45 @@ func admin(ctx context.Context, cfg config, args []string) error {
 	}
 	usage()
 	return nil
+}
+
+// adminCosts runs luxd admin costs <command>.
+func adminCosts(ctx context.Context, cfg config, db *store.Store, args []string) error {
+	if len(args) == 0 || args[0] != "backfill-volumes" {
+		usage()
+	}
+	fs := flag.NewFlagSet("backfill-volumes", flag.ExitOnError)
+	pool := fs.String("pool", "", "the pool whose hosts get the volumes")
+	tenant := fs.String("tenant", "", "the pool's tenant (id or name; empty: a platform pool)")
+	dryRun := fs.Bool("dry-run", false, "print what would be done, change nothing")
+	var volumes []server.HostVolume
+	fs.Func("volume", "a volume every host of the pool launched with: type=gp3,size=100,iops=3000,throughput=125 (repeatable)", func(s string) error {
+		v, err := server.ParseVolume(s)
+		if err == nil {
+			volumes = append(volumes, v)
+		}
+		return err
+	})
+	fs.Parse(args[1:])
+	if *pool == "" || len(volumes) == 0 {
+		return errors.New("--pool and at least one --volume are required")
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	srv := server.New(server.Config{Costs: server.CostsConfig{
+		Hourly:        cfg.Costs.Hourly.Duration,
+		PricesRefresh: cfg.Costs.Compute.PricesRefresh.Duration,
+		Prices: map[string]server.PriceProvider{
+			"ec2": ec2.NewPrices(cfg.Costs.Compute.PricingRegion, cfg.Costs.Compute.PricingEndpoint, cfg.EC2.Endpoint),
+		},
+	}}, db, nil, log)
+	rep, err := srv.BackfillVolumes(ctx, server.BackfillVolumes{Pool: *pool, Tenant: *tenant, Volumes: volumes, DryRun: *dryRun})
+	if err != nil {
+		return err
+	}
+	for _, sk := range rep.Skipped {
+		log.Warn("backfill-volumes: Run not re-evaluated", "run", sk.Run, "host", sk.Host, "reason", sk.Reason)
+	}
+	return json.NewEncoder(os.Stdout).Encode(rep)
 }
 
 // optional is s, or nil when empty: a tenant flag left out means the platform.

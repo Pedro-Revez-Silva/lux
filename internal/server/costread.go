@@ -114,10 +114,12 @@ type CostSummaryRow struct {
 	Amount   string            `json:"amount"`
 	Runs     *int              `json:"runs,omitempty" doc:"With top or runs, on totals: the Runs with cost (that rank counts, with top) under this row's first-group value, across the second group."`
 	Other    bool              `json:"other,omitempty" doc:"With top: the first-group value is the fold of every value past the top N, not a value of its own (a real value may also read (other))."`
+	Family   string            `json:"family,omitempty" doc:"On unallocated rows: the host-tied family (compute or block-storage)."`
 }
 
 type HostAllocation struct {
 	HostID      string `json:"hostId"`
+	Family      string `json:"family" doc:"A host-tied family: compute or block-storage."`
 	Currency    string `json:"currency"`
 	Allocated   string `json:"allocated"`
 	Unallocated string `json:"unallocated"`
@@ -129,8 +131,8 @@ type CostSummaryBody struct {
 	Basis       string           `json:"basis"`
 	Totals      []CostSummaryRow `json:"totals"`
 	Series      []CostSummaryRow `json:"series,omitempty"`
-	Unallocated []CostSummaryRow `json:"unallocated,omitempty"`
-	Hosts       []HostAllocation `json:"hosts,omitempty"`
+	Unallocated []CostSummaryRow `json:"unallocated,omitempty" doc:"Unfiltered summaries: hosts' cost charged to no Run, per family and currency. An operator over every tenant: every host's; a tenant (or an operator narrowed to one): the hosts of its own pools, never a platform pool's."`
+	Hosts       []HostAllocation `json:"hosts,omitempty" doc:"Grouped by host, unfiltered: each host's allocated and unallocated cost per family and currency, with the visibility of unallocated."`
 	Families    []CostFamilyInfo `json:"families,omitempty" doc:"Grouped by family: each family in totals, with the displayName and color byFamily has on a Run's cost."`
 	Runs        []CostRunInfo    `json:"runs,omitempty" doc:"Grouped by run: each Run in totals with its name and labels."`
 	Keys        []CostKeyInfo    `json:"keys,omitempty" doc:"Grouped by key: each submitter in totals. (none) is Runs from before luxd recorded who submitted them."`
@@ -396,17 +398,27 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 			}
 		}
 		// Unallocated cost belongs to no Run, so it has no labels to filter.
-		if p.Operator && p.TenantID == "" && !filtered {
+		// Host rows are read in the caller's scope: an operator over every
+		// tenant sees every host's, a tenant (or an operator narrowed to one)
+		// only those of hosts in its own pools (RLS, cost_hourly_own_hosts).
+		// The explicit pool predicate lets the planner use
+		// cost_hourly_host_pool_hour per owned pool instead of filtering every
+		// tenant's host rows.
+		if !filtered {
+			args, ownPools := []any{from, to, in.Family, in.NoFamily}, ""
+			if p.TenantID != "" {
+				args, ownPools = append(args, p.TenantID), ` AND pool_id IN (SELECT id FROM pools WHERE tenant_id = $5)`
+			}
 			out.Body.Unallocated = []CostSummaryRow{}
-			rows, err := tx.Query(ctx, `SELECT currency, trim_scale(sum(unallocated))::text FROM cost_hourly
-				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3) AND ($4 = '' OR family <> $4)
-				GROUP BY currency ORDER BY currency`, from, to, in.Family, in.NoFamily)
+			rows, err := tx.Query(ctx, `SELECT family, currency, trim_scale(sum(unallocated))::text FROM cost_hourly
+				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3) AND ($4 = '' OR family <> $4)`+ownPools+`
+				GROUP BY family, currency ORDER BY currency, family`, args...)
 			if err != nil {
 				return err
 			}
 			for rows.Next() {
 				var row CostSummaryRow
-				if err := rows.Scan(&row.Currency, &row.Amount); err != nil {
+				if err := rows.Scan(&row.Family, &row.Currency, &row.Amount); err != nil {
 					rows.Close()
 					return err
 				}
@@ -423,17 +435,17 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 				return err
 			}
 			out.Body.Hosts = []HostAllocation{}
-			rows, err = tx.Query(ctx, `SELECT host_id, currency, trim_scale(sum(allocated))::text,
+			rows, err = tx.Query(ctx, `SELECT host_id, family, currency, trim_scale(sum(allocated))::text,
 				trim_scale(sum(unallocated))::text FROM cost_hourly
-				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3) AND ($4 = '' OR family <> $4)
-				GROUP BY host_id, currency ORDER BY host_id, currency`, from, to, in.Family, in.NoFamily)
+				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3) AND ($4 = '' OR family <> $4)`+ownPools+`
+				GROUP BY host_id, family, currency ORDER BY host_id, currency, family`, args...)
 			if err != nil {
 				return err
 			}
 			defer rows.Close()
 			for rows.Next() {
 				var row HostAllocation
-				if err := rows.Scan(&row.HostID, &row.Currency, &row.Allocated, &row.Unallocated); err != nil {
+				if err := rows.Scan(&row.HostID, &row.Family, &row.Currency, &row.Allocated, &row.Unallocated); err != nil {
 					return err
 				}
 				out.Body.Hosts = append(out.Body.Hosts, row)
@@ -621,11 +633,13 @@ type hostCostInput struct {
 }
 type hostCostHour struct {
 	Hour        time.Time `json:"hour"`
+	Family      string    `json:"family" doc:"A host-tied family: compute or block-storage."`
 	Currency    string    `json:"currency"`
 	Allocated   string    `json:"allocated"`
-	Unallocated *string   `json:"unallocated,omitempty"`
+	Unallocated *string   `json:"unallocated,omitempty" doc:"Operators, and the tenant owning the host's pool; absent for a tenant on a platform pool's host."`
 }
 type hostCostRate struct {
+	Family   string     `json:"family" doc:"A host-tied family: compute or block-storage."`
 	From     time.Time  `json:"from"`
 	To       *time.Time `json:"to,omitempty"`
 	PerHour  string     `json:"perHour"`
@@ -661,9 +675,13 @@ func (s *Server) hostCost(ctx context.Context, in *hostCostInput) (*hostCostOutp
 		if err != nil {
 			return err
 		}
+		// A tenant reads its own host's cost, and its unallocated part only
+		// while the host is in one of its own pools, never a platform pool.
+		seesUnallocated := p.TenantID == ""
 		if p.TenantID != "" {
 			var own bool
-			if err := tx.QueryRow(ctx, `SELECT tenant_id IS NOT DISTINCT FROM $2 FROM hosts WHERE id = $1`, id, p.TenantID).Scan(&own); err != nil {
+			if err := tx.QueryRow(ctx, `SELECT h.tenant_id IS NOT DISTINCT FROM $2, coalesce(pl.tenant_id = $2, false)
+				FROM hosts h LEFT JOIN pools pl ON pl.id = h.pool_id WHERE h.id = $1`, id, p.TenantID).Scan(&own, &seesUnallocated); err != nil {
 				return err
 			}
 			if !own {
@@ -671,20 +689,20 @@ func (s *Server) hostCost(ctx context.Context, in *hostCostInput) (*hostCostOutp
 			}
 		}
 		out.Body.HostID = id
-		rows, err := tx.Query(ctx, `SELECT hour, currency, trim_scale(sum(allocated))::text,
+		rows, err := tx.Query(ctx, `SELECT hour, family, currency, trim_scale(sum(allocated))::text,
 			trim_scale(sum(unallocated))::text FROM cost_hourly
 			WHERE host_id = $1 AND run_id IS NULL AND hour >= $2 AND hour < $3
-			GROUP BY hour, currency ORDER BY hour, currency`, id, from, to)
+			GROUP BY hour, family, currency ORDER BY hour, currency, family`, id, from, to)
 		if err != nil {
 			return err
 		}
 		for rows.Next() {
 			var h hostCostHour
-			if err := rows.Scan(&h.Hour, &h.Currency, &h.Allocated, &h.Unallocated); err != nil {
+			if err := rows.Scan(&h.Hour, &h.Family, &h.Currency, &h.Allocated, &h.Unallocated); err != nil {
 				rows.Close()
 				return err
 			}
-			if p.TenantID != "" {
+			if !seesUnallocated {
 				h.Unallocated = nil
 			}
 			out.Body.Hours = append(out.Body.Hours, h)
@@ -702,16 +720,16 @@ func (s *Server) hostCost(ctx context.Context, in *hostCostInput) (*hostCostOutp
 		if p.TenantID != "" {
 			return nil
 		}
-		rows, err = tx.Query(ctx, `SELECT valid_from, valid_to, trim_scale(per_hour)::text, currency, source
+		rows, err = tx.Query(ctx, `SELECT family, valid_from, valid_to, trim_scale(per_hour)::text, currency, source
 			FROM host_rates WHERE host_id = $1 AND valid_from < $3 AND (valid_to IS NULL OR valid_to > $2)
-			ORDER BY valid_from`, id, from, to)
+			ORDER BY family DESC, valid_from`, id, from, to)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var r hostCostRate
-			if err := rows.Scan(&r.From, &r.To, &r.PerHour, &r.Currency, &r.Source); err != nil {
+			if err := rows.Scan(&r.Family, &r.From, &r.To, &r.PerHour, &r.Currency, &r.Source); err != nil {
 				return err
 			}
 			out.Body.Rates = append(out.Body.Rates, r)

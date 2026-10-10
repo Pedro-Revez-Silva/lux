@@ -28,6 +28,22 @@ type Provider interface {
 	// Instances lists the provider's hosts carrying all the given tags,
 	// by provider id.
 	Instances(ctx context.Context, template json.RawMessage, tags map[string]string) (map[string]Instance, error)
+	// Volumes lists the block-storage volumes attached to the given hosts
+	// (by provider id, all in template's region) that are deleted with
+	// them. A host absent from the answer has no attachment yet; an empty
+	// slice: attachments, none deleted with it.
+	Volumes(ctx context.Context, template json.RawMessage, providerIDs []string) (map[string][]HostVolume, error)
+}
+
+// HostVolume is one block-storage volume of a host: its type, provisioned size,
+// IOPS and throughput. Assumed: supplied by an operator for a host launched
+// before luxd recorded volumes, not read from the provider.
+type HostVolume struct {
+	Type            string `json:"type"`
+	SizeGiB         int64  `json:"sizeGiB"`
+	IOPS            int64  `json:"iops,omitempty"`
+	ThroughputMiBps int64  `json:"throughputMiBps,omitempty"`
+	Assumed         bool   `json:"assumed,omitempty"`
 }
 
 // Checker is a Provider that can tell, without launching, whether a pool
@@ -159,6 +175,12 @@ func (s *Server) provision(ctx context.Context) error {
 		if err := s.reconcilePool(ctx, prov, pl, checkAlive); err != nil {
 			s.log.Warn("pool", "pool", pl.Name, "err", err)
 		}
+	}
+	if checkAlive {
+		if ok, err := s.holdProvisionLease(ctx); !ok {
+			return err
+		}
+		s.recordVolumes(ctx)
 	}
 	return nil
 }
