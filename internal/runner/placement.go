@@ -1513,14 +1513,21 @@ func dirSize(root string) int64 {
 
 // snapshot exports every state volume (zstd), compresses the output file,
 // and records them for upload. The local volumes now hold exactly this
-// snapshot, so a resume here moves nothing. exportCtx covers the volume
-// exports only.
+// snapshot, so a resume here moves nothing. A Run whose resumePolicy is
+// never is not resumed, so its state volumes are not exported: its
+// manifest lists none, and no local copy is claimed. exportCtx covers the
+// volume exports only.
 func (p *placement) snapshot(ctx, exportCtx context.Context) (*proto.SnapshotDone, error) {
 	snapID := ids.New(ids.Snapshot)
 	rec := &snapshotRecord{RunID: p.runID, Epoch: p.epoch, Created: time.Now().UnixMilli()}
 	sd := &proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: snapID, RunID: p.runID, Epoch: p.epoch, Volumes: []proto.VolumeSnapshot{}}}
 	sd.Manifest.SessionID = p.sessionID()
-	for _, v := range p.state.Volumes {
+	exportVolumes := p.assign == nil || !spec.RefusesResume(p.assign.Spec.ResumePolicy)
+	vols := p.state.Volumes
+	if !exportVolumes {
+		vols = nil
+	}
+	for _, v := range vols {
 		if v.Kind != "state" {
 			continue
 		}
@@ -1563,7 +1570,13 @@ func (p *placement) snapshot(ctx, exportCtx context.Context) (*proto.SnapshotDon
 		return nil, err
 	}
 	p.mu.Lock()
-	p.state.VolumesSnapshot, p.state.VolumesEpoch = snapID, p.epoch
+	if exportVolumes {
+		p.state.VolumesSnapshot, p.state.VolumesEpoch = snapID, p.epoch
+	} else {
+		// The volumes match no manifest: heartbeats list no local copy, and
+		// prepareVolumes never reuses them for a resume.
+		p.state.VolumesSnapshot = ""
+	}
 	p.mu.Unlock()
 	_ = p.saveState()
 	return sd, nil

@@ -198,6 +198,8 @@ lux moves a Run when a force-evicting drain (`lux hosts drain --force-evict`,
   never`, `exit code 1; resumePolicy never`, `stop; resumePolicy never`,
   `host lost: missed heartbeats; resumePolicy never`,
   or for a move `preempt: not resumed (resumePolicy never)` (or `drain`).
+  Its state volumes are not snapshotted on exit: its snapshot lists no
+  volume, and only its output and artifacts are uploaded.
   `lux migrate` refuses it with 409 `not_movable`, as `manual`. A requested
   resume of one still resting from an older luxd is refused whatever its
   state: 409 `not_resumable`, "resumePolicy never: this Run cannot be

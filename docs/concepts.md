@@ -116,7 +116,9 @@ report that leaves the stage as it was emits nothing.
 A spec declares **volumes**, which are named directories in the container:
 
 - `state` volumes are **snapshotted every time the container exits**,
-  however it exits. These are the only thing guaranteed to survive a move.
+  however it exits, except in a Run whose `resumePolicy` is `never`: its
+  snapshot lists no volume ([resume policy](runspec.md#resume-policy)).
+  These are the only thing guaranteed to survive a move.
   Put the git checkout and the agent's session transcript here.
 - `ephemeral` volumes start empty on every placement.
 - File secrets live on a tmpfs, which is never part of a snapshot.
