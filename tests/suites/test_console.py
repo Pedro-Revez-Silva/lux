@@ -308,7 +308,7 @@ def test_host_page_charts_its_runner_process(page, operator, lux, runners, hosts
     # (the page reads history every 30s).
     wait_until(lambda: any("runner" in s for s in operator.json("history", "--host", host_id, "--since", "5m")["samples"]),
                60, 1, "no runner sample")
-    page.sign_in(operator.api_key, f"/hosts/{host_id}?range=1h")
+    page.sign_in(operator.api_key, f"/hosts/{host_id}?tab=metrics&range=1h")
     for card in ("Runner CPU", "Runner memory", "Runner goroutines"):
         expect(page.get_by_role("heading", name=card, exact=True)).to_have_count(1, timeout=15_000)
     expect(page.get_by_text(re.compile(r"^the lux-runner process, not podman or its containers · (\d+ processes, a line each.* · the newest )?started "))).to_have_count(1, timeout=15_000)
@@ -332,6 +332,8 @@ def test_control_host_row_is_the_operators_whole_system_view(page, env, operator
     # Narrowed to a tenant, the row is gone.
     page.goto(env.luxd_url + f"/?tenant={a.tenant_id}")
     page.get_by_text(re.compile(rf"^tenant {re.escape(a.tenant_id)} · charts over")).wait_for(timeout=15_000)
+    # Anchor on Activity, where Control host would render: the absences below are not vacuous.
+    expect(page.get_by_role("heading", name="Trends", exact=True)).to_have_count(1)
     expect(page.get_by_role("heading", name="Control host", exact=True)).to_have_count(0)
     expect(page.get_by_role("heading", name="Postgres size", exact=True)).to_have_count(0)
     expect(page.get_by_role("heading", name="luxd CPU", exact=True)).to_have_count(0)
@@ -634,11 +636,11 @@ def test_overview_cost_panel(page, env, lux, runners, hosts, cost_plugin):
         expect(panel.get_by_role("radio", name="Tenant", exact=True)).to_have_count(0)
         expect(page.get_by_role("heading", name="Top tenants", exact=True)).to_have_count(0)
         expect(page.get_by_text(re.compile(r"^Unallocated"))).to_have_count(0)
-    page.sign_in(lux.api_key, "/")
-    _both_themes(page, env, "/", check)
+    page.sign_in(lux.api_key, "/?tab=cost")
+    _both_themes(page, env, "/?tab=cost", check)
 
     # Show External: the Compute KPI is muted, the chart has no Compute series.
-    page.goto(env.luxd_url + "/")
+    page.goto(env.luxd_url + "/?tab=cost")
     expect(card.locator(".tschart-plot canvas")).to_have_count(1, timeout=15_000)
     panel.get_by_role("radio", name="External", exact=True).click()
     expect(page).to_have_url(re.compile(r"[?&]cost=external(&|$)"))
@@ -647,12 +649,15 @@ def test_overview_cost_panel(page, env, lux, runners, hosts, cost_plugin):
     expect(_legend_label(card.locator(".tschart-legend"), "AI models")).to_have_count(1)
 
     # Every Day: the top bar's step, carried on links; the panel and the trends are daily.
-    page.goto(env.luxd_url + "/?range=7d&cost=external")
+    page.goto(env.luxd_url + "/?tab=cost&range=7d&cost=external")
     page.locator(".topbar-wide .step-picker .select-trigger").click()
     page.get_by_role("option", name=re.compile(r"^Day")).click()
     expect(page).to_have_url(re.compile(r"[?&]every=day(&|$)"))
     expect(panel.locator(".section-note")).to_contain_text("per day")
     expect(card.locator(".kpi-label")).to_contain_text(["Peak day"])
+    page.get_by_role("tab", name="Activity", exact=True).click()
+    expect(page.get_by_role("tab", name="Activity", exact=True)).to_have_attribute("aria-selected", "true")
+    expect(page).to_have_url(re.compile(r"[?&]every=day(&|$)"))
     expect(page.locator(".section-head", has_text="Trends")).to_contain_text("per day")
     expect(page.get_by_role("link", name="Runs", exact=True).first).to_have_attribute("href", re.compile(r"every=day"))
     # Day is too coarse for 24h: the menu says so and does not take it.
@@ -665,7 +670,7 @@ def test_overview_cost_panel(page, env, lux, runners, hosts, cost_plugin):
     page.keyboard.press("Escape")
 
     # Break down by Label app: the chart stacks by app, the costed Run's app leads the table.
-    page.goto(env.luxd_url + "/")
+    page.goto(env.luxd_url + "/?tab=cost")
     expect(card.locator(".tschart-plot canvas")).to_have_count(1, timeout=15_000)
     panel.get_by_role("radio", name="Label", exact=True).click()
     expect(page).to_have_url(re.compile(r"[?&]by=label%3Aapp(&|$)"))
@@ -720,7 +725,7 @@ def test_overview_stored_chart_stacks_bytes_by_kind(page, env, lux):
     ]}
     page.route(HISTORY, lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(body)))
     try:
-        page.sign_in(lux.api_key, "/")
+        page.sign_in(lux.api_key, "/?tab=storage")
         card = page.locator("section.card", has=page.get_by_role("heading", name="Stored", exact=True))
         expect(card.locator(".tschart-plot canvas")).to_have_count(1, timeout=15_000)
         expect(card.locator(".tschart-legend").get_by_role("button")).to_have_text(["Snapshots", "Output", "Artifacts"])
@@ -820,7 +825,7 @@ def test_operator_overview_has_unallocated_and_top_tenants(page, env, operator, 
     """All tenants: the Cost panel's By family has the unallocated host time
     under it, Top tenants beside it, and Tenant is a breakdown; narrowed to
     one tenant, neither."""
-    page.sign_in(operator.api_key, "/")
+    page.sign_in(operator.api_key, "/?tab=cost")
     panel = page.locator(".cost-panel")
     expect(panel.get_by_role("heading", name="Top tenants", exact=True)).to_have_count(1, timeout=15_000)
     expect(panel.locator(".cost-unallocated")).to_contain_text("Unallocated host time")
@@ -831,7 +836,7 @@ def test_operator_overview_has_unallocated_and_top_tenants(page, env, operator, 
     # Top tenants would repeat the breakdown: it gives way to it.
     expect(panel.get_by_role("heading", name="Top tenants", exact=True)).to_have_count(0)
     # Narrowed to one tenant: no Top tenants, no Tenant breakdown, no unallocated host time.
-    page.goto(env.luxd_url + f"/?tenant={lux.tenant_id}")
+    page.goto(env.luxd_url + f"/?tab=cost&tenant={lux.tenant_id}")
     expect(panel.get_by_role("heading", name="By family", exact=True)).to_have_count(1, timeout=15_000)
     expect(panel.get_by_role("heading", name="Top tenants", exact=True)).to_have_count(0)
     expect(panel.get_by_role("radio", name="Tenant", exact=True)).to_have_count(0)
@@ -842,13 +847,13 @@ def test_operator_overview_has_unallocated_and_top_tenants(page, env, operator, 
 def test_host_page_shows_cost_to_its_owner_and_rates_to_operators(page, env, lux, operator, runners, hosts):
     # More than 4 decimals: shown rounded, the exact rate one hover away.
     host_id = _priced_host(lux, runners, hosts[0], price="0.041666667")
-    page.sign_in(lux.api_key, f"/hosts/{host_id}")
+    page.sign_in(lux.api_key, f"/hosts/{host_id}?tab=cost")
     expect(page.get_by_text(re.compile(r"^allocated to your Runs, per hour"))).to_have_count(1, timeout=15_000)
     # Rate periods and unallocated are the operators'.
     expect(page.get_by_role("heading", name="Rate periods", exact=True)).to_have_count(0)
     assert not page.errors, page.errors
     # Init scripts run in order: the operator's key now wins on every load.
-    page.sign_in(operator.api_key, f"/hosts/{host_id}")
+    page.sign_in(operator.api_key, f"/hosts/{host_id}?tab=cost")
 
     def check(theme):
         rates = page.locator("section.card", has=page.get_by_role("heading", name="Rate periods", exact=True))
@@ -860,7 +865,7 @@ def test_host_page_shows_cost_to_its_owner_and_rates_to_operators(page, env, lux
         expect(rates.get_by_text("static", exact=True)).to_have_count(1)
         expect(rates.get_by_text(re.compile(r"static price|\(static\)"))).to_have_count(0)
         expect(page.get_by_text(re.compile(r"^allocated to Runs vs unallocated, per hour"))).to_have_count(1)
-    _both_themes(page, env, f"/hosts/{host_id}", check)
+    _both_themes(page, env, f"/hosts/{host_id}?tab=cost", check)
 
 
 def test_rename_a_pool_through_the_dialog(page, lux, runners, hosts):
@@ -949,7 +954,7 @@ def test_host_page_shows_its_events(page, env, lux, runners, hosts):
     host_id = wait_until(lambda: next((h["id"] for h in lux.json("hosts", "ls")
                                        if h["name"] == hosts[0].name and h["state"] == "ready"), None),
                          30, 1, "the host never registered")
-    page.sign_in(lux.api_key, f"/hosts/{host_id}")
+    page.sign_in(lux.api_key, f"/hosts/{host_id}?tab=events")
     card = page.locator(".card", has=page.get_by_role("heading", name="Events", exact=True))
     expect(card).to_have_count(1, timeout=15_000)
     expect(card.locator("tr", has_text="host.registered")).to_have_count(1, timeout=15_000)
