@@ -375,3 +375,82 @@ test("a cost request that fails shows the error, never also 'No cost'", async ()
     await p.done();
   }
 });
+
+const BS_FAMILIES = [costRow({ family: "ai" }, "625.76", { runs: 312 }), costRow({ family: "block-storage" }, "0.71", { runs: 341 }), costRow({ family: "compute" }, "6.61", { runs: 341 })];
+const UNALLOCATED = [
+  { family: "block-storage", currency: "USD", amount: "0.67" },
+  { family: "compute", currency: "USD", amount: "6.27" },
+];
+const familyAnswer = (path: string) => {
+  if (!path.startsWith("/v1/costs?")) return undefined;
+  // luxd sends no displayName for block-storage on older answers: the console names it anyway.
+  if (groupsOf(path) === "family") return summary(BS_FAMILIES, [], { unallocated: UNALLOCATED, families: [{ family: "ai", displayName: "AI models", color: "violet" }, { family: "compute", displayName: "Compute" }] });
+  return summary([]);
+};
+const kpis = (el: Element) => [...el.querySelectorAll(".kpi")].map((k) => [k.querySelector(".kpi-label")?.textContent, k.querySelector(".kpi-value")?.textContent]);
+
+test("Overview Cost by family: Block storage is its own KPI and row, apart from Compute and External", async () => {
+  const p = await render("operator", "http://localhost/?tab=cost", familyAnswer);
+  try {
+    await until(() => kpis(p.el).some(([l]) => l === "Block storage"), "the Block storage KPI");
+    expect(kpis(p.el).slice(0, 4)).toEqual([
+      ["Total · last 24 hours", "$633.08"],
+      ["Compute", "$6.61"],
+      ["Block storage", "$0.71"],
+      ["External", "$625.76"],
+    ]);
+    // Block storage is 0.11% of the total: a non-zero share under 1% reads <1%, never 0%.
+    const bs = [...p.el.querySelectorAll(".kpi")].find((k) => k.querySelector(".kpi-label")?.textContent === "Block storage")!;
+    expect(bs.textContent).toContain("<1% · the disks");
+    const rows = [...cellsOf(p.el, "By family")].map((r) => [...r.querySelectorAll("td")].map((td) => td.textContent));
+    expect(rows).toEqual([
+      ["AI models", "312", "–", "–", "$625.76", "$625.76", "99%"],
+      ["Compute", "341", "$6.61", "–", "–", "$6.61", "1%"],
+      ["Block storage", "341", "–", "$0.71", "–", "$0.71", "<1%"],
+    ]);
+  } finally {
+    await p.done();
+  }
+});
+
+test("Show External: the total is every family but compute and says so; the External KPI is the plugins' alone", async () => {
+  const p = await render("operator", "http://localhost/?tab=cost&cost=external", familyAnswer);
+  try {
+    await until(() => kpis(p.el).some(([l]) => l === "Block storage"), "the Block storage KPI");
+    expect(kpis(p.el).slice(0, 4)).toEqual([
+      ["Non-compute total · last 24 hours", "$626.47"],
+      ["Compute", "$6.61"],
+      ["Block storage", "$0.71"],
+      ["External", "$625.76"],
+    ]);
+    const option = [...p.el.querySelectorAll<HTMLElement>('[role="radiogroup"][aria-label="Show"] [role="radio"]')].find((b) => b.textContent === "External")!;
+    expect(option.getAttribute("title")).toBe("Every family but compute: block storage and what cost plugins report");
+  } finally {
+    await p.done();
+  }
+});
+
+test("Overview Cost: unallocated host time is split into Compute and Block storage; a tenant sees its own pools' when luxd sends them", async () => {
+  for (const [role, url] of [
+    ["operator", "http://localhost/?tab=cost"],
+    ["tenant", "http://localhost/?tab=cost"],
+  ] as const) {
+    const p = await render(role, url, familyAnswer);
+    try {
+      await until(() => p.el.querySelector(".cost-unallocated [data-unallocated]") != null, "the unallocated split");
+      const u = p.el.querySelector(".cost-unallocated")!;
+      expect(u.querySelector('[data-unallocated="compute"]')!.textContent).toBe("Compute $6.27");
+      expect(u.querySelector('[data-unallocated="block-storage"]')!.textContent).toBe("Block storage $0.67");
+    } finally {
+      await p.done();
+    }
+  }
+  // luxd sends a tenant no unallocated rows when it has no pool of its own: nothing is shown, not $0.
+  const p = await render("tenant", "http://localhost/?tab=cost", (path) => (path.startsWith("/v1/costs?") && groupsOf(path) === "family" ? summary(BS_FAMILIES, [], { unallocated: [] }) : familyAnswer(path)));
+  try {
+    await until(() => kpis(p.el).some(([l]) => l === "Block storage"), "the panel");
+    expect(p.el.querySelector(".cost-unallocated")).toBeNull();
+  } finally {
+    await p.done();
+  }
+});

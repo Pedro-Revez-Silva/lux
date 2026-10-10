@@ -1451,6 +1451,27 @@ a.idchip-text:hover {
     grid-template-columns: 1.3fr repeat(3, minmax(0, 1fr));
   }
 }
+/* Five figures (Total, three sides, the peak): 3 + 2 on six columns while
+   four across would orphan the fifth, one row once each has room. */
+@container (760px <= width < 960px) {
+  .kpi-strip:has(> :nth-child(5):last-child) {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+  .kpi-strip:has(> :nth-child(5):last-child) > :nth-child(-n + 3) {
+    grid-column: span 2;
+  }
+  .kpi-strip:has(> :nth-child(5):last-child) > :nth-child(n + 4) {
+    grid-column: span 3;
+  }
+  .kpi-strip:has(> :nth-child(5):last-child) > :nth-child(3) {
+    border-right: 0;
+  }
+}
+@container (min-width: 960px) {
+  .kpi-strip:has(> :nth-child(5):last-child) {
+    grid-template-columns: 1.3fr repeat(4, minmax(0, 1fr));
+  }
+}
 .kpi {
   display: flex;
   flex-direction: column;

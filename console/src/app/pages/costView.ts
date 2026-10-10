@@ -11,15 +11,28 @@ export type CostShow = "all" | "compute" | "external";
 export type CostInterval = "hour" | "day";
 
 export const COMPUTE = "compute";
+/** lux's own disk family: shown apart from compute and from the plugins' families (the "external" side). */
+export const BLOCK_STORAGE = "block-storage";
 
 /** ?cost=: compute or external; anything else is All. */
 export function parseShow(v: string | null): CostShow {
   return v === "compute" || v === "external" ? v : "all";
 }
 
-/** Whether a family counts under show. */
+/**
+ * Whether a family counts under show. Show is luxd's family filter: compute
+ * is family=compute, external nofamily=compute, so Show External is every
+ * family but compute: block storage counts under it (its total reads
+ * "Non-compute total"), while the External KPI is the plugins' families alone.
+ */
 export function shows(show: CostShow, family: string): boolean {
   return show === "all" || (show === "compute") === (family === COMPUTE);
+}
+
+/** Which of a split's three sides a family is on: compute, block storage, or what plugins report. */
+export type Side = "compute" | "blockStorage" | "external";
+export function sideOf(family: string): Side {
+  return family === COMPUTE ? "compute" : family === BLOCK_STORAGE ? "blockStorage" : "external";
 }
 
 /** What the panel breaks cost down by. A label breakdown without a key takes the default key (defaultLabelKey). */
@@ -101,7 +114,7 @@ export function runsListPath(fs: LabelFilter[]): string {
 const INTERVAL_HOURS: Record<CostInterval, number> = { hour: 1, day: 24 };
 
 /** Amounts of one currency, exact; null when there are none (no figure is not a zero). */
-function sum(amounts: string[]): string | null {
+export function sum(amounts: string[]): string | null {
   return amounts.length ? sumMoney(amounts) : null;
 }
 
@@ -111,7 +124,7 @@ export function push<K, V>(m: Map<K, V[]>, k: K, v: V): void {
   else m.set(k, [v]);
 }
 
-function byCurrency<T extends { currency: string }>(rows: T[]): Map<string, T[]> {
+export function byCurrency<T extends { currency: string }>(rows: readonly T[]): Map<string, T[]> {
   const m = new Map<string, T[]>();
   for (const r of rows) push(m, r.currency, r);
   return new Map([...m].sort(([a], [b]) => a.localeCompare(b)));
@@ -145,17 +158,26 @@ export interface SideTotals {
   currency: string;
   all: string | null;
   compute: string | null;
+  blockStorage: string | null;
+  /** Every family but compute and block storage: what cost plugins report. */
   external: string | null;
 }
 
-/** Per currency, the total and its Compute and External parts; a side with no row is null, not zero. */
+/** Per currency, the total and its Compute, Block storage and External parts; a side with no row is null, not zero. */
 export function sideTotals(rows: CostSummaryRow[]): SideTotals[] {
   return [...byCurrency(rows)].map(([currency, rs]) => ({
     currency,
     all: sum(rs.map((r) => r.amount)),
-    compute: sum(rs.filter((r) => familyOf(r) === COMPUTE).map((r) => r.amount)),
-    external: sum(rs.filter((r) => familyOf(r) !== COMPUTE).map((r) => r.amount)),
+    compute: sum(rs.filter((r) => sideOf(familyOf(r)) === "compute").map((r) => r.amount)),
+    blockStorage: sum(rs.filter((r) => sideOf(familyOf(r)) === "blockStorage").map((r) => r.amount)),
+    external: sum(rs.filter((r) => sideOf(familyOf(r)) === "external").map((r) => r.amount)),
   }));
+}
+
+/** Unallocated host time per family (luxd's unallocated rows): compute and block storage apart, each per currency; a family with no row is absent. A row without family (a luxd from before block storage) is compute. */
+export function unallocatedSides(rows: CostSummaryRow[] | null | undefined): { compute: MoneyTotal[]; blockStorage: MoneyTotal[] } {
+  const of = (family: string) => [...byCurrency((rows ?? []).filter((r) => (r.family ?? COMPUTE) === family))].map(([currency, rs]) => ({ currency, amount: sumMoney(rs.map((r) => r.amount))! }));
+  return { compute: of(COMPUTE), blockStorage: of(BLOCK_STORAGE) };
 }
 
 /** A ratio of two amounts of one currency, for a share or a bar's length; display only. */
@@ -174,11 +196,10 @@ export interface FamilyChart {
   totals: string[];
 }
 
-/** Families in the order the panel shows them: compute first, then by key. */
+/** Families in the order the panel shows them: compute, block storage, then by key. */
 export function familyOrder(a: string, b: string): number {
-  if (a === COMPUTE) return -1;
-  if (b === COMPUTE) return 1;
-  return a.localeCompare(b);
+  const rank = (f: string) => (f === COMPUTE ? 0 : f === BLOCK_STORAGE ? 1 : 2);
+  return rank(a) - rank(b) || a.localeCompare(b);
 }
 
 // Every bucket of the range: one with no row is a gap, not a zero.
@@ -455,8 +476,9 @@ export function breakdownCharts(d: CostSummary | undefined, dim: string, interva
 export interface BreakdownRow {
   band: Band;
   currency: string;
-  /** The band's compute and external parts; null when it has none (not zero). */
+  /** The band's compute, block-storage and external parts; null when it has none (not zero). */
   compute: string | null;
+  blockStorage: string | null;
   external: string | null;
   /** What show counts. */
   amount: string;
@@ -482,11 +504,11 @@ export function breakdownRows(rows: CostSummaryRow[], dim: string, show: CostSho
     for (const r of rs) if (r.runs != null) runs.set(valueOf(r, dim), r.runs);
     for (const band of bands.get(currency) ?? []) {
       const mine = rs.filter((r) => band.values.includes(valueOf(r, dim)));
-      const part = (compute: boolean) => sum(mine.filter((r) => (familyOf(r) === COMPUTE) === compute).map((r) => r.amount));
+      const part = (side: Side) => sum(mine.filter((r) => sideOf(familyOf(r)) === side).map((r) => r.amount));
       const amount = sum(mine.filter((r) => shows(show, familyOf(r))).map((r) => r.amount));
       if (amount == null) continue;
       const known = band.values.filter((v) => runs.has(v));
-      out.push({ band, currency, compute: part(true), external: part(false), amount, share: ratio(amount, totals.get(currency)), runs: known.length ? known.reduce((n, v) => n + runs.get(v)!, 0) : null });
+      out.push({ band, currency, compute: part("compute"), blockStorage: part("blockStorage"), external: part("external"), amount, share: ratio(amount, totals.get(currency)), runs: known.length ? known.reduce((n, v) => n + runs.get(v)!, 0) : null });
     }
   }
   return out;

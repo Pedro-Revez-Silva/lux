@@ -7,10 +7,12 @@
 //   MOCK_STATE=stopped bun run mock   # the run in another state
 //   MOCK_AUTH=cloudflare-access bun run mock   # signed in as a person, no key
 //   MOCK_COST_CURRENCIES=USD,EUR bun run mock   # cost in two currencies (mockCosts.ts)
-//   MOCK_ROLE=tenant bun run mock   # a tenant key (acme): no tenant picker, its own costs and key names
+//   MOCK_ROLE=tenant bun run mock   # a tenant key (acme): no tenant picker, its own costs and key names;
+//                                   # the platform pool "default" hides its unallocated host time, its own pool "ci" shows it
 import index from "./index.html";
 import { COST_TENANTS, costLabels, costSummary, submittedBy } from "./mockCosts.ts";
-import { history, hostCost, hostHistory, poolCost, poolMetrics, POOLS } from "./mockHistory.ts";
+import { history, hostHistory, poolMetrics, POOLS } from "./mockHistory.ts";
+import { costHost, hostCost, poolCost, runCost } from "./mockHostCost.ts";
 
 const RUN_ID = "run_k3jq7x2mfa9vbn4z";
 const HOST_ID = "host_7f2cq9m1x0";
@@ -109,18 +111,41 @@ const HOSTS = [
     instanceType: "m8g.2xlarge",
     zone: "eu-west-1b",
     market: "spot",
-    lastHeartbeat: ago(26 * 3600),
-    times: hostTimes(30 * 3600, { lastPlacementEnded: ago(27 * 3600), terminateRequested: ago(26 * 3600), terminated: ago(26 * 3600 - 50) }),
-    launch: { outcome: "launched", requestedAt: ago(30 * 3600), finishedAt: ago(30 * 3600 - 41) },
+    lastHeartbeat: ago(29 * 60),
+    times: hostTimes(5 * 3600, { lastPlacementEnded: ago(30 * 60), terminateRequested: ago(29 * 60 + 50), terminated: ago(29 * 60) }),
+    launch: { outcome: "launched", requestedAt: ago(5 * 3600), finishedAt: ago(5 * 3600 - 41) },
     placements: [],
   },
-];
+  {
+    id: "host_acme0ci001",
+    name: "acme-ci-1",
+    tenant: "acme",
+    pool: "ci",
+    poolId: "pool_acme_ci01",
+    state: "ready",
+    draining: false,
+    labels: {},
+    capacity: { cpus: 8, memory: 32 * 1024 ** 3, disk: 50 * 1024 ** 3, runs: 4 },
+    allocated: {},
+    versions: { runner: "v0.31.0" },
+    platform: false,
+    liveRuns: 0,
+    providerId: "i-0acme0c1a0b1c2d3",
+    instanceType: "m8g.xlarge",
+    zone: "eu-west-1a",
+    market: "on-demand",
+    lastHeartbeat: ago(6),
+    times: hostTimes(2 * 86400, { firstPlacement: null }),
+    launch: { outcome: "launched", requestedAt: ago(2 * 86400), finishedAt: ago(2 * 86400 - 35) },
+    placements: [],
+  },
+].map((h) => ({ ...h, ...(costHost(h.id)?.volumes ? { volumes: costHost(h.id)!.volumes } : {}) }));
 
-/** GET /v1/hosts: live hosts by default, ended ones with lifecycle=all or ended; one page. */
+/** GET /v1/hosts: live hosts by default, ended ones with lifecycle=all or ended; one page. A tenant sees its own and the platform's. */
 function hostsList(u: URL) {
   const life = u.searchParams.get("lifecycle") ?? (u.searchParams.get("all") === "true" ? "all" : "live");
   const ended = (h: (typeof HOSTS)[number]) => h.state === "terminated";
-  return HOSTS.filter((h) => (life === "all" ? true : life === "ended" ? ended(h) : !ended(h)));
+  return HOSTS.filter((h) => (!tenantRole || h.platform || h.tenant === "acme") && (life === "all" ? true : life === "ended" ? ended(h) : !ended(h)));
 }
 
 function hostEvents(h: (typeof HOSTS)[number]) {
@@ -147,7 +172,8 @@ const run = () => ({
   secrets: [],
   createdAt: ago(46 * 60),
   firstStartedAt: ago(46 * 60 - 17),
-  placements: [1, 2, 3].map((epoch) => ({ epoch, host: HOST_ID, hostName: HOST, state: epoch === 3 && runState === "running" ? "running" : "exited", assignedAt: ago((4 - epoch) * 900), stopReason: epoch < 3 ? "migrate" : runState === "stopped" ? "migrate" : undefined, exitedAt: epoch < 3 || runState !== "running" ? ago((3 - epoch) * 900 + 8) : undefined })),
+  // Epoch 1 ran on gp-eu-west-1-b2 (since terminated, its volumes never known); 2 and 3 on the run's host.
+  placements: [1, 2, 3].map((epoch) => ({ epoch, host: epoch === 1 ? "host_9p4tz6c1mh" : HOST_ID, hostName: epoch === 1 ? "gp-eu-west-1-b2" : HOST, state: epoch === 3 && runState === "running" ? "running" : "exited", assignedAt: ago((4 - epoch) * 900), stopReason: epoch < 3 ? "migrate" : runState === "stopped" ? "migrate" : undefined, exitedAt: epoch < 3 || runState !== "running" ? ago((3 - epoch) * 900 + 8) : undefined })),
   usage: { peakMemoryBytes: 1.9 * 1024 ** 3, peakDiskBytes: 0, peakPids: 120, cpuSeconds: 724, netRxBytes: 0, netTxBytes: 0, placements: 3, queueSeconds: 17 },
   servers: servers.map(withUrl),
   submittedBy: submittedBy("key_ci", callerTenant),
@@ -305,6 +331,7 @@ async function api(req: Request, srv: Srv): Promise<Response> {
       return json({ events: [] });
     }
     if (p === `/v1/runs/${RUN_ID}/output`) return new Response("event: end\ndata: {}\n\n", { headers: { "content-type": "text/event-stream" } });
+    if (p === `/v1/runs/${RUN_ID}/cost`) return json(runCost(RUN_ID, run().placements.map((x) => ({ epoch: x.epoch, hostId: x.host, assignedAt: x.assignedAt, exitedAt: x.exitedAt }))));
     if (p.startsWith(`/v1/runs/${RUN_ID}/`)) return json(p.endsWith("history") ? { from: ago(3600), to: now(), resolution: 60, samples: [] } : { snapshots: [], artifacts: [], events: [] });
     if (p === "/v1/status") return json({ runs: { running: 1 }, busy: 1, idle: 0, queued: 0, startLatency: { n: 0 }, hosts: { ready: 2 }, capacity: { cpus: 16, memory: 64 * 1024 ** 3, disk: 0, runs: 8 }, allocated: { cpus: 4, memory: 8 * 1024 ** 3, disk: 0, runs: 1 } });
     if (p === "/v1/history") return json(history(u));
@@ -312,17 +339,24 @@ async function api(req: Request, srv: Srv): Promise<Response> {
     if (p === "/v1/hosts/summary") return json({ live: 2, capacity: { cpus: 16, memory: 64 * 1024 ** 3 }, allocated: { cpus: 4, memory: 8 * 1024 ** 3 } });
     const hm = p.match(/^\/v1\/hosts\/([a-z0-9_]+)(?:\/(history|cost|events))?$/);
     if (hm) {
-      const h = HOSTS.find((x) => x.id === hm[1]);
+      const h = hostsList(new URL("http://x/?lifecycle=all")).find((x) => x.id === hm[1]);
       if (!h) return notFound(`host ${hm[1]}`);
       if (hm[2] === "history") return json(hostHistory(u));
-      if (hm[2] === "cost") return json(hostCost(u, h.id, !tenantRole));
+      // A host's cost is its owner's or the operators': a tenant gets 403 for a platform host.
+      if (hm[2] === "cost") return tenantRole && h.platform ? json({ error: { code: "forbidden", message: "a host's cost is its owner's or the operators'" } }, 403) : json(hostCost(u, h.id, callerTenant ?? u.searchParams.get("tenant"), h.platform ? null : "ten_acme"));
       if (hm[2] === "events") return json({ events: hostEvents(h) });
       return json(h);
     }
-    if (p === "/v1/pools") return json({ pools: POOLS });
+    const visiblePools = POOLS.filter((x) => !tenantRole || x.platform || x.tenant === "acme");
+    if (p === "/v1/pools") return json({ pools: visiblePools });
     if (p === "/v1/pools/stats") return json({ pools: [] });
     const pm = p.match(/^\/v1\/pools\/([a-z0-9-]+)\/(metrics|cost)$/);
-    if (pm) return json(pm[2] === "metrics" ? poolMetrics(u, pm[1]!) : poolCost(u, pm[1]!));
+    if (pm) {
+      const pool = visiblePools.find((x) => x.name === pm[1]);
+      if (!pool) return notFound(`pool ${pm[1]}`);
+      // An operator's ?tenant= sees what that tenant would see.
+      return json(pm[2] === "metrics" ? poolMetrics(u, pm[1]!) : poolCost(u, { id: pool.id, tenantId: pool.platform ? null : "ten_acme" }, callerTenant ?? u.searchParams.get("tenant")));
+    }
     return notFound(p);
 }
 

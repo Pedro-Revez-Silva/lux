@@ -27,6 +27,7 @@ import {
   CostStatusBadge,
   DurationCell,
   EmptyState,
+  fadedCss,
   EventTable,
   bandColor,
   familyColor,
@@ -595,7 +596,25 @@ function PartsDemo() {
             <PartBar label="One part" parts={[{ label: "Compute", value: 4, color: familyColor("compute") }]} />
             <PartBar label="A tiny part" height={8} parts={[{ label: "AI models", value: 625.76, text: "$625.76", color: familyColor("ai", "violet") }, { label: "Compute", value: 6.61, text: "$6.61", color: familyColor("compute") }, { label: "Block storage", value: 0.71, text: "$0.71", color: "var(--chart-3)" }]} />
             <PartBar label="Nothing" parts={[{ label: "Compute", value: 0, color: familyColor("compute") }]} />
+            <PartBar
+              label="Charged to runs vs unallocated"
+              height={8}
+              parts={[
+                { label: "Block storage · runs", value: 0.71, text: "$0.71", color: "var(--chart-3)" },
+                { label: "Block storage · unallocated", value: 0.67, text: "$0.67", color: fadedCss("var(--chart-3)") },
+              ]}
+            />
           </div>
+        </Card>
+      </div>
+      <p className="sg-note">The last bar: one family split into charged to runs and unallocated, the unallocated part in fadedCss(colour), the DOM twin of a chart series' faded shade (the same FADE_KEEP mix toward --bg-surface), so a PartBar under a chart reads like its legend.</p>
+      <h3 className="sg-h3">.grid-2-1: a main card and a narrower one beside it</h3>
+      <div className="grid grid-2-1">
+        <Card title="Host cost per day" subtitle="two thirds">
+          <EmptyState compact title="The chart" />
+        </Card>
+        <Card title="Who paid" subtitle="one third">
+          <EmptyState compact title="Its summary" />
         </Card>
       </div>
       <Card title="Meter" subtitle="a ratio in a table cell: 46px track, the percentage to its right in mono" flush>
@@ -680,6 +699,39 @@ function CostPanelDemo() {
           <Card title="By API key" subtitle="last 24h · the key's name as it is now" flush>
             <BreakdownTable lead="API key" rows={fakeKeyBreakdown} />
           </Card>
+          <Card title="By family" subtitle="blockStorage: lux's disk family in its own column; a small share reads <1%" flush>
+            <BreakdownTable
+              lead="Family"
+              blockStorage
+              rows={[
+                { id: "ai", label: "AI models", color: familyColor("ai", "violet"), currency: "USD", runs: 312, compute: null, blockStorage: null, external: "625.76", total: "625.76", share: 0.988 },
+                { id: "compute", label: "Compute", color: familyColor("compute"), currency: "USD", runs: 341, compute: "6.61", blockStorage: null, external: null, total: "6.61", share: 0.0104 },
+                { id: "block-storage", label: "Block storage", color: familyColor("block-storage"), currency: "USD", runs: 341, compute: null, blockStorage: "0.71", external: null, total: "0.71", share: 0.0011 },
+              ]}
+            />
+          </Card>
+        </div>
+        <Card flush>
+          <KpiStrip>
+            <Kpi label="Total · last 7 days" value={<MoneyList amounts={[{ currency: "USD", amount: "633.08" }]} large decimals={CENTS} />} sub="five figures: 3 + 2 from 760px, five across from 960px" />
+            <Kpi label={<ColorKey color={familyColor("compute")}>Compute</ColorKey>} value={<Money amount="6.61" currency="USD" decimals={CENTS} />} sub="1% · host time Runs reserved" />
+            <Kpi label={<ColorKey color={familyColor("block-storage")}>Block storage</ColorKey>} value={<Money amount="0.71" currency="USD" decimals={CENTS} />} sub="0% · the disks" />
+            <Kpi label={<ColorKey color="var(--chart-7)">External</ColorKey>} value={<Money amount="625.76" currency="USD" decimals={CENTS} />} sub="99% · reported by cost plugins" />
+            <Kpi label="Peak day" value={<Money amount="141.40" currency="USD" decimals={CENTS} />} sub="Thu, Oct 8" />
+          </KpiStrip>
+        </Card>
+        <div style={{ maxWidth: 880 }} data-gallery="kpi-strip-5-narrow">
+          <Card flush>
+            <KpiStrip>
+              <Kpi label="Total · 880px container" value={<MoneyList amounts={[{ currency: "USD", amount: "633.08" }]} large decimals={CENTS} />} sub="five figures, 760–959px: 3 + 2, no orphan" />
+              <Kpi label={<ColorKey color={familyColor("compute")}>Compute</ColorKey>} value={<Money amount="6.61" currency="USD" decimals={CENTS} />} sub="1% · host time Runs reserved" />
+              <Kpi label={<ColorKey color={familyColor("block-storage")}>Block storage</ColorKey>} value={<Money amount="0.71" currency="USD" decimals={CENTS} />} sub="<1% · the disks" />
+              <Kpi label={<ColorKey color="var(--chart-7)">External</ColorKey>} value={<Money amount="625.76" currency="USD" decimals={CENTS} />} sub="99% · reported by cost plugins" />
+              <Kpi label="Peak day" value={<Money amount="141.40" currency="USD" decimals={CENTS} />} sub="Thu, Oct 8" />
+            </KpiStrip>
+          </Card>
+        </div>
+        <div className="grid grid-2">
           <Card title="Labels" subtitle="LabelChips: a Run's labels, app first, three at most" flush>
             <div className="stack" style={{ padding: "var(--pad-card)" }}>
               {fakeRunLabels.map((l, i) => (
@@ -812,7 +864,7 @@ function States() {
 function Stats() {
   const series = useMemo(() => fakeSeries(48, 1800), []);
   return (
-    <Section id="stats" title="StatTile" note="Compact: a 12px muted label (with a ColorKey swatch when the figure is one family or series), the value at --text-2xl, its unit or note on the line under it, an optional signed delta and sparkline. lead tints the one figure a page is about; tone=warn is money you would want back, danger a count that needs action. .grid-stats goes 2 → 3 → 5 across; a row of exactly four goes 2 + 2 then 4 across, one of exactly six 3 + 3 then 6 on the widest content.">
+    <Section id="stats" title="StatTile" note="Compact: a 12px muted label (with a ColorKey swatch when the figure is one family or series), the value at --text-2xl, its unit or note on the line under it, an optional signed delta and sparkline. lead tints the one figure a page is about; tone=warn is money you would want back, danger a count that needs action. .grid-stats goes 2 → 3 → 5 across; a row of exactly four goes 2 + 2 then 4 across, one of exactly three stays 3 across, one of exactly six 3 + 3 then 6 on the widest content.">
       <h3 className="sg-h3">A cost row: lead, swatches, warn</h3>
       <div className="grid grid-stats">
         <StatTile lead label="Host cost (7d)" value="$14.26" unit="list price · 121 host-hours" />
@@ -820,6 +872,12 @@ function Stats() {
         <StatTile label="Block storage" swatch="var(--chart-3)" value="$1.38" unit="100 GB gp3 · $0.0115/h" />
         <StatTile label="Unallocated" tone="warn" value="$6.94" unit="49% — no run reserved it" />
         <StatTile label="Utilisation" value="51%" unit="charged to runs ÷ host cost" />
+      </div>
+      <h3 className="sg-h3">A row of exactly three: what a reader may see of a cost (no unallocated)</h3>
+      <div className="grid grid-stats">
+        <StatTile lead label="Charged to your Runs (7d)" value="$7.32" unit="list price · compute and block storage" />
+        <StatTile label="Compute" swatch={familyColor("compute")} value="$6.61" unit="your Runs' share of the machines" />
+        <StatTile label="Block storage" swatch="var(--chart-3)" value="$0.71" unit="your Runs' share of the disks" />
       </div>
       <h3 className="sg-h3">Deltas, sparklines, tones, loading</h3>
       <div className="grid grid-stats">

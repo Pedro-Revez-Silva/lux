@@ -7,6 +7,8 @@ import { formatTimestamp, formatUnit, type Unit } from "./format.ts";
 import { niceScale, niceSplits } from "./scale.ts";
 import { cssVar, useDensity, useTheme } from "./theme.ts";
 
+export { fadedCss } from "./chartData.ts";
+
 export interface Series {
   label: string;
   /** Categorical slot 1..8 (fixed order, never cycled) or an explicit CSS color. */

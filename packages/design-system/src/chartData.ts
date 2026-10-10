@@ -129,6 +129,15 @@ export function chartColors(base: readonly string[], faded: readonly (boolean | 
   return base.map((c, i) => (faded[i] ? fadedColor(c, surface) : c));
 }
 
+/**
+ * The same faded shade in CSS, for the DOM (a PartBar segment, a swatch):
+ * `color` (a token such as var(--chart-3)) mixed toward the card surface,
+ * keeping FADE_KEEP, so it matches the chart's faded series.
+ */
+export function fadedCss(color: string): string {
+  return `color-mix(in srgb, ${color} ${Math.round(FADE_KEEP * 100)}%, var(--bg-surface))`;
+}
+
 /** A UTC calendar date, "2026-10-09". */
 function utcDate(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);

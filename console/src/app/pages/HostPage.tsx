@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
-import { Badge, Button, Card, Code, ConfirmDialog, formatBytes, formatCores, formatDuration, formatRelative, formatTimestamp, formatTimestampZone, hostDisplayState, IdChip, KeyValue, PageHeader, RelativeTime, StatePill, Table, Tabs, TimeSeriesChart, Timeline, useToast, type Column } from "@lux/design-system";
+import { Badge, Button, Card, Code, ConfirmDialog, formatBytes, formatCores, formatDuration, formatRelative, formatTimestamp, formatTimestampZone, hostDisplayState, IdChip, KeyValue, PageHeader, RelativeTime, StatePill, Table, Tabs, TimeSeriesChart, Timeline, Tooltip, useToast, type Column } from "@lux/design-system";
 import { api, errorText, useNow, useQuery, type Host, type HostPlacement, type Run } from "../../api/index.ts";
 import { historyRes, stepNote, stepOfRes } from "../every.ts";
 import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, poolPath, RunLink, RunNameLink, runColumns, runPath, useSeries } from "./common.tsx";
 import { HostCost } from "./HostCost.tsx";
+import { volumeText } from "./hostCostView.ts";
 import { hostStages } from "./hostStages.ts";
 import { PagedEvents } from "./PagedEvents.tsx";
 import { ProcessCards, runnerProcesses } from "./ProcessCards.tsx";
@@ -76,8 +77,9 @@ export function HostPage({ id }: { id: string }) {
   if (forceOnly) dialogDescription = `Its ${liveRunsText} will be stopped and resumed elsewhere.`;
   else if (h.liveRuns)
     dialogDescription = `No new placements will be assigned. Its ${liveRunsText} ${oneRun ? "finishes where it is" : "finish where they are"}, unless forced. A provisioned host is terminated once empty.`;
-  // The host history rule: operators, and a tenant for its own host (a tenant sees no other non-platform host).
-  const showCost = scope.operator || !h.platform;
+  // A host's cost is its owner's or the operators'. The read carries ?tenant=, so luxd 403s an operator
+  // narrowed to a tenant on a platform host, as it does for the host's events.
+  const showCost = (scope.operator && !scope.apiTenant) || !h.platform;
   const showEvents = hostEventsVisible(h.platform, scope);
   // A tab the reader cannot open reads as Overview, like an unknown one; ?tab= is left as is.
   const hidden = (requestedTab === "cost" && !showCost) || (requestedTab === "events" && !showEvents);
@@ -136,6 +138,7 @@ export function HostPage({ id }: { id: string }) {
                 items={[
                   { key: "Provider id", value: h.providerId ? <IdChip value={h.providerId} /> : DASH },
                   { key: "Instance type", value: h.instanceType ? <span className="mono">{h.instanceType}</span> : DASH },
+                  { key: "Volumes", value: <VolumesValue host={h} /> },
                   { key: "Heartbeat", value: h.lastHeartbeat ? `${formatRelative(h.lastHeartbeat, now)} (${formatTimestamp(h.lastHeartbeat)})` : DASH },
                   { key: "Capacity", value: `${formatCores(h.capacity.cpus)} · ${formatBytes(h.capacity.memory)} · ${formatBytes(h.capacity.disk)} disk · ${h.capacity.runs} runs` },
                   { key: "Allocated", value: `${formatCores(h.allocated.cpus ?? 0)} · ${formatBytes(h.allocated.memory ?? 0)} · ${formatBytes(h.allocated.disk ?? 0)} disk · ${h.liveRuns} live` },
@@ -176,7 +179,9 @@ export function HostPage({ id }: { id: string }) {
         </>
       )}
 
-      {tab === "cost" && <HostCost id={h.id} range={scope.range} operator={scope.operator} />}
+      {/* HostCost's read carries ?tenant=, so luxd answers a narrowed operator as that tenant. With hours, unallocated shows when luxd sent it;
+          with none, and for the rate periods, operator = scope.operator && !scope.apiTenant, which is luxd's rule for the narrowed read. */}
+      {tab === "cost" && <HostCost host={h} range={scope.range} operator={scope.operator && !scope.apiTenant} />}
 
       {tab === "runs" && (
         <Card flush title="Recent runs on this host" subtitle="any epoch, newest first, up to 50" actions={<Link to={hostRunsPath(id)}>All runs on this host</Link>}>
@@ -205,6 +210,30 @@ export function HostPage({ id }: { id: string }) {
         onCancel={() => setDrainOpen(false)}
       />
     </div>
+  );
+}
+
+/**
+ * The host's own block-storage volumes: "100 GiB gp3 · 3000 IOPS · 125 MiB/s",
+ * marked assumed when an operator supplied them. Absent volumes are not
+ * known yet on a launched host, and none on one that registered itself.
+ */
+function VolumesValue({ host: h }: { host: Host }) {
+  if (h.volumes == null) return h.times.provisionRequested ? <span className="muted">not known yet</span> : DASH;
+  if (h.volumes.length === 0) return <span className="muted">none deleted with it</span>;
+  return (
+    <span className="stack stack-tight" data-host-volumes>
+      {h.volumes.map((v, i) => (
+        <span key={i} className="row">
+          <span>{volumeText([v], true)}</span>
+          {v.assumed && (
+            <Tooltip content="Supplied by an operator for a host launched before luxd recorded volumes (luxd admin costs backfill-volumes), not read from the provider.">
+              <Badge tone="warn">assumed</Badge>
+            </Tooltip>
+          )}
+        </span>
+      ))}
+    </span>
   );
 }
 

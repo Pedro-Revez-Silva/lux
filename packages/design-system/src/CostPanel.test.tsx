@@ -99,6 +99,25 @@ describe("cost panel components", () => {
     expect(bar.querySelector(".split-bar-label")?.textContent).toBe("EUR");
   });
 
+  test("BreakdownTable with blockStorage: its own column between Compute and External, a dash where a row has none", async () => {
+    const el = await render(
+      <BreakdownTable
+        lead="Family"
+        blockStorage
+        rows={[
+          { id: "compute", label: "Compute", color: "red", currency: "USD", runs: 3, compute: "6.61", blockStorage: null, external: null, total: "6.61", share: 0.9 },
+          { id: "block-storage", label: "Block storage", color: "green", currency: "USD", runs: 3, compute: null, blockStorage: "0.71", external: null, total: "0.71", share: 0.001 },
+        ]}
+      />,
+    );
+    expect([...el.querySelectorAll("thead th")].map((th) => th.textContent?.replace(/[↑↓↕]/g, ""))).toEqual(["Family", "Runs", "Compute", "Block storage", "External", "Total", "Share"]);
+    expect([...el.querySelectorAll("tbody tr")].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent))).toEqual([
+      ["Compute", "3", "$6.61", "–", "–", "$6.61", "90%"],
+      // A non-zero share under half a percent is <1%, never 0%.
+      ["Block storage", "3", "–", "$0.71", "–", "$0.71", "<1%"],
+    ]);
+  });
+
   describe("LabelFilterPopover", () => {
     const VALUES = [
       { value: "dude", amounts: [{ currency: "USD", amount: "7.39" }] },

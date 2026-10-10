@@ -6,6 +6,7 @@ import {
   ColorKey,
   EmptyState,
   familyColor,
+  familyDisplay,
   FilterBar,
   FilterChip,
   formatMoney,
@@ -16,6 +17,7 @@ import {
   LabelChips,
   LabelFilterPopover,
   ListPriceNote,
+  meterText,
   Money,
   MoneyList,
   rangeText,
@@ -44,6 +46,7 @@ import {
   breakdownCharts,
   breakdownGroup,
   breakdownRows,
+  BLOCK_STORAGE,
   changes,
   COMPUTE,
   defaultLabelKey,
@@ -66,9 +69,11 @@ import {
   runsPerFamily,
   shownTotals,
   showFamily,
+  sideOf,
   sideTotals,
   TOP_VALUES,
   topSplit,
+  unallocatedSides,
   type Band,
   type Breakdown,
   type BreakdownKind,
@@ -77,6 +82,7 @@ import {
   type FamilyRow,
   type LabelFilter,
   type Peak,
+  type Side,
   type SideTotals,
   type SplitRow,
 } from "./costView.ts";
@@ -86,9 +92,10 @@ const POLL = 60_000;
 const LABEL_KEYS_POLL = 10 * 60_000;
 /** Top Runs and Top tenants: the summaries' top=N. */
 const TOP_ROWS = 10;
-/** External is every family but compute: one colour for the group, apart from compute's. */
+/** External is every family but compute and block storage: one colour for the group, apart from both. */
 const EXTERNAL_COLOR = "var(--chart-7)";
 const COMPUTE_COLOR = familyColor(COMPUTE);
+const BLOCK_STORAGE_COLOR = familyColor(BLOCK_STORAGE);
 const SHOW_WORD: Record<CostShow, string> = { all: "total", compute: "compute", external: "external" };
 const BY_LABEL: Record<BreakdownKind, string> = { family: "Family", label: "Label", key: "API key", pool: "Pool", tenant: "Tenant" };
 
@@ -184,7 +191,7 @@ export function OverviewCost() {
   const showOptions = [
     { value: "all" as const, label: "All" },
     { value: "compute" as const, label: <ColorKey color={COMPUTE_COLOR}>Compute</ColorKey>, title: "Host time Runs reserved (the compute family)" },
-    { value: "external" as const, label: <ColorKey color={EXTERNAL_COLOR}>External</ColorKey>, title: "Every other family: what cost plugins report (AI models and others)" },
+    { value: "external" as const, label: <ColorKey color={EXTERNAL_COLOR}>External</ColorKey>, title: "Every family but compute: block storage and what cost plugins report" },
   ];
   const kinds: BreakdownKind[] = scope.showTenant ? ["family", "label", "key", "pool", "tenant"] : ["family", "label", "key", "pool"];
   const byOptions = kinds.map((k) => ({ value: k, label: BY_LABEL[k] }));
@@ -242,6 +249,7 @@ export function OverviewCost() {
           {family ? (
             <>
               <SideKpi side="compute" show={show} loading={loading} sides={sides} unit="host time Runs reserved" />
+              <SideKpi side="blockStorage" show={show} loading={loading} sides={sides} unit="the disks of the hosts Runs reserved" />
               <SideKpi side="external" show={show} loading={loading} sides={sides} unit="reported by cost plugins" />
             </>
           ) : (
@@ -286,7 +294,7 @@ export function OverviewCost() {
       <div className="cost-lower">
         <div className="cost-side">
           {family ? (
-            <Card title="By family" subtitle={words} flush footer={scope.showTenant && show !== "external" && !filtered ? <Unallocated amounts={byFamily.data?.unallocated} loading={loading} /> : undefined}>
+            <Card title="By family" subtitle={words} flush footer={!filtered && (scope.showTenant || (byFamily.data?.unallocated?.length ?? 0) > 0) ? <Unallocated amounts={byFamily.data?.unallocated} loading={loading} /> : undefined}>
               <FamilyTable rows={familyRows(all, show)} meta={meta} loading={loading} runs={familyRuns} />
             </Card>
           ) : (
@@ -294,6 +302,7 @@ export function OverviewCost() {
               <BreakdownTable
                 lead={by.kind === "label" ? by.key : BY_LABEL[by.kind]}
                 loading={loading}
+                blockStorage
                 rows={dimRows.map((r): BreakdownTableRow => ({
                   id: r.band.id,
                   label: label(r.band),
@@ -301,6 +310,7 @@ export function OverviewCost() {
                   currency: r.currency,
                   runs: r.runs,
                   compute: r.compute,
+                  blockStorage: r.blockStorage,
                   external: r.external,
                   total: r.amount,
                   share: r.share,
@@ -380,10 +390,12 @@ function CostFilters({ filters, since, keys, fq, prefer }: { filters: LabelFilte
   );
 }
 
-const pct = (r: number | null) => (r == null ? null : `${Math.round(r * 100)}%`);
+// meterText's rule: a non-zero share that rounds to 0% reads <1%.
+const pct = (r: number | null) => (r == null ? null : meterText(r));
 
 function TotalKpi({ show, words, since, loading, shown, sides, change, filtered }: { show: CostShow; words: string; since: string; loading: boolean; shown: MoneyTotal[]; sides: SideTotals[]; change: ReturnType<typeof changes>; filtered: boolean }) {
-  const label = show === "all" ? "Total" : show === "compute" ? "Compute total" : "External total";
+  // Show External is luxd's nofamily=compute: block storage is in this total, not in the External KPI beside it.
+  const label = show === "all" ? "Total" : show === "compute" ? "Compute total" : "Non-compute total";
   const one = shown.length === 1;
   const lines = change.filter((c) => c.ratio != null);
   return (
@@ -405,27 +417,31 @@ function TotalKpi({ show, words, since, loading, shown, sides, change, filtered 
         </KpiSub>
       )}
       {sides.map((s) => (
-        <SplitBar key={s.currency} currency={s.currency} whole={s.all} label={sides.length > 1 ? s.currency : undefined} parts={splitParts(s.compute, s.external, show)} />
+        <SplitBar key={s.currency} currency={s.currency} whole={s.all} label={sides.length > 1 ? s.currency : undefined} parts={splitParts(s.compute, s.blockStorage, s.external, show)} />
       ))}
     </Kpi>
   );
 }
 
-/** Compute and External as SplitBar parts; the side Show hides is drawn faint, never dropped. */
-function splitParts(compute: string | null, external: string | null, show: CostShow) {
+/** Compute, Block storage and External as SplitBar parts; a side Show hides is drawn faint, never dropped. Block storage counts under External (luxd's nofamily=compute), so only Compute hides it. */
+function splitParts(compute: string | null, blockStorage: string | null, external: string | null, show: CostShow) {
   return [
     { amount: compute, color: COMPUTE_COLOR, label: "Compute", faint: show === "external" },
+    { amount: blockStorage, color: BLOCK_STORAGE_COLOR, label: "Block storage", faint: show === "compute" },
     { amount: external, color: EXTERNAL_COLOR, label: "External", faint: show === "compute" },
   ];
 }
 
-function SideKpi({ side, show, loading, sides, unit }: { side: "compute" | "external"; show: CostShow; loading: boolean; sides: SideTotals[]; unit: string }) {
+const SIDE_LABEL: Record<Side, string> = { compute: "Compute", blockStorage: "Block storage", external: "External" };
+const SIDE_COLOR: Record<Side, string> = { compute: COMPUTE_COLOR, blockStorage: BLOCK_STORAGE_COLOR, external: EXTERNAL_COLOR };
+
+function SideKpi({ side, show, loading, sides, unit }: { side: Side; show: CostShow; loading: boolean; sides: SideTotals[]; unit: string }) {
   const amounts = sides.flatMap((s) => (s[side] == null ? [] : [{ currency: s.currency, amount: s[side]! }]));
-  const hidden = show !== "all" && show !== side;
+  const hidden = side === "compute" ? show === "external" : show === "compute";
   const share = sides.length === 1 ? pct(ratio(sides[0]![side], sides[0]!.all)) : null;
   return (
     <Kpi
-      label={<ColorKey color={side === "compute" ? COMPUTE_COLOR : EXTERNAL_COLOR}>{side === "compute" ? "Compute" : "External"}</ColorKey>}
+      label={<ColorKey color={SIDE_COLOR[side]}>{SIDE_LABEL[side]}</ColorKey>}
       loading={loading}
       muted={hidden}
       value={<MoneyList amounts={amounts} large decimals={CENTS} />}
@@ -487,8 +503,8 @@ function PeakKpi({ interval, show, loading, peaks: ps, children }: { interval: C
   );
 }
 
-const partOf = (r: SplitRow, side: "compute" | "external") => {
-  const parts = r.parts.filter((p) => (p.family === COMPUTE) === (side === "compute")).map((p) => p.amount);
+const partOf = (r: SplitRow, side: Side) => {
+  const parts = r.parts.filter((p) => sideOf(p.family) === side).map((p) => p.amount);
   return parts.length ? sumMoney(parts) : null;
 };
 
@@ -509,7 +525,7 @@ function SplitTable({ rows, loading, show, lead, name, sub, labels, onClick, emp
       ),
     },
     ...(labels ? [{ key: "labels", header: "Labels", width: "34%", cell: labels }] : []),
-    ...(compact ? [] : [{ key: "split", header: "Split", width: labels ? "16%" : "30%", cell: (r: SplitRow) => <SplitBar parts={splitParts(partOf(r, "compute"), partOf(r, "external"), show)} whole={r.all} currency={r.currency} scale={Number(r.all) / (max.get(r.currency) || 1)} /> }]),
+    ...(compact ? [] : [{ key: "split", header: "Split", width: labels ? "16%" : "30%", cell: (r: SplitRow) => <SplitBar parts={splitParts(partOf(r, "compute"), partOf(r, "blockStorage"), partOf(r, "external"), show)} whole={r.all} currency={r.currency} scale={Number(r.all) / (max.get(r.currency) || 1)} /> }]),
     // Ordering only: the figure is formatted from the string.
     { key: "amount", header: "Cost", cell: (r) => <Money amount={r.amount} currency={r.currency} decimals={CENTS} />, align: "right", mono: true, width: 96 },
   ];
@@ -517,25 +533,39 @@ function SplitTable({ rows, loading, show, lead, name, sub, labels, onClick, emp
 }
 
 function FamilyTable({ rows, meta, loading, runs }: { rows: FamilyRow[]; meta: ReturnType<typeof familyMeta>; loading: boolean; runs?: Map<string, number> }) {
+  // Labels as everywhere else (familyDisplay): Block storage reads so even when luxd sends no displayName.
+  const display = familyDisplay(rows.map((r) => meta.get(r.family) ?? { family: r.family }));
   return (
     <BreakdownTable
       lead="Family"
       loading={loading}
+      blockStorage
       rows={rows.map((r) => {
-        const m = meta.get(r.family);
-        const compute = r.family === COMPUTE;
-        return { id: r.family, label: m?.displayName ?? (compute ? "Compute" : r.family), color: familyColor(r.family, m?.color), currency: r.currency, runs: runs ? (runs.get(familyCurrency(r.family, r.currency)) ?? 0) : null, compute: compute ? r.amount : null, external: compute ? null : r.amount, total: r.amount, share: r.share };
+        const d = display.get(r.family)!;
+        const side = sideOf(r.family);
+        return { id: r.family, label: d.label, color: d.color, currency: r.currency, runs: runs ? (runs.get(familyCurrency(r.family, r.currency)) ?? 0) : null, compute: side === "compute" ? r.amount : null, blockStorage: side === "blockStorage" ? r.amount : null, external: side === "external" ? r.amount : null, total: r.amount, share: r.share };
       })}
       empty="No family has a cost in this range."
     />
   );
 }
 
+/** Host time no Run reserved, beside the Runs' cost and never added to it: Compute and Block storage apart. */
 function Unallocated({ amounts, loading }: { amounts: CostSummaryRow[] | undefined; loading: boolean }) {
+  const u = unallocatedSides(amounts);
   return (
     <div className="cost-unallocated" title="Host time no Run reserved: apart from the Runs' cost, never added to it">
       <span>Unallocated host time</span>
-      {loading ? null : <MoneyList amounts={amounts} decimals={CENTS} />}
+      {loading ? null : (
+        <span className="row">
+          <span data-unallocated="compute">
+            <ColorKey color={COMPUTE_COLOR}>Compute</ColorKey> <MoneyList amounts={u.compute} decimals={CENTS} />
+          </span>
+          <span data-unallocated="block-storage">
+            <ColorKey color={BLOCK_STORAGE_COLOR}>Block storage</ColorKey> <MoneyList amounts={u.blockStorage} decimals={CENTS} />
+          </span>
+        </span>
+      )}
     </div>
   );
 }

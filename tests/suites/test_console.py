@@ -16,7 +16,7 @@ import psycopg
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, expect
 
-from conftest import generic
+from conftest import FAKE_EC2_TIMERS, fake_only, generic
 from env import ALPINE_IMAGE, wait_until
 from fake_cost_plugin import FakeCostPlugin
 
@@ -621,9 +621,9 @@ def test_overview_cost_panel(page, env, lux, runners, hosts, cost_plugin):
         swatch = lambda label: _legend_item(legend, label).locator(".tschart-key").evaluate("e => getComputedStyle(e).backgroundColor")
         compute, ai = swatch("Compute"), swatch("AI models")
         assert compute != ai and "0, 0, 0, 0" not in compute + ai, (theme, compute, ai)
-        # The KPI strip: a dollar total, Compute and External, the peak hour.
+        # The KPI strip: a dollar total, Compute, Block storage and External, the peak hour.
         expect(card.locator(".kpi").first.locator(".money-list-lg")).to_have_text(re.compile(r"^\$\d"))
-        expect(card.locator(".kpi-label")).to_contain_text(["Total", "Compute", "External", "Peak hour"])
+        expect(card.locator(".kpi-label")).to_contain_text(["Total", "Compute", "Block storage", "External", "Peak hour"])
         # Top Runs leads with the Run's name, its id under it, its labels as chips.
         top = panel.locator("section.card", has=page.get_by_role("heading", name="Top Runs", exact=True))
         row = top.get_by_role("row").filter(has=page.get_by_role("link", name=name, exact=True))
@@ -632,10 +632,16 @@ def test_overview_cost_panel(page, env, lux, runners, hosts, cost_plugin):
         expect(row.locator(".label-chip").first).to_have_text("app=e2e-app")
         expect(row.get_by_text(re.compile(r"^\$\d"))).to_have_count(1)
         expect(panel.get_by_role("heading", name="By family", exact=True)).to_have_count(1)
-        # A tenant: no Tenant breakdown, no tenant table, no unallocated host time.
+        # A tenant: no Tenant breakdown, no tenant table.
         expect(panel.get_by_role("radio", name="Tenant", exact=True)).to_have_count(0)
         expect(page.get_by_role("heading", name="Top tenants", exact=True)).to_have_count(0)
-        expect(page.get_by_text(re.compile(r"^Unallocated"))).to_have_count(0)
+        # Its host is in its own pool (a tenant's host token joins its default pool), so the
+        # host time no Run reserved is its own: compute, and a dash for block storage (a static host has no disk).
+        unallocated = panel.locator(".cost-unallocated")
+        expect(unallocated.locator('[data-unallocated="compute"]')).to_have_text(re.compile(r"^Compute <?\$\d"), timeout=15_000)
+        expect(unallocated.locator('[data-unallocated="block-storage"]')).to_have_text("Block storage –")
+    # The host-hour rows come from their own refresh, after the Run's lines.
+    wait_until(lambda: lux.api("/v1/costs?since=24h").json().get("unallocated"), 120, 2, "no unallocated host time for the tenant's own host")
     page.sign_in(lux.api_key, "/?tab=cost")
     _both_themes(page, env, "/?tab=cost", check)
 
@@ -682,7 +688,8 @@ def test_overview_cost_panel(page, env, lux, runners, hosts, cost_plugin):
     def app_usd():
         totals = lux.api("/v1/costs?since=24h&group=label:app").json()["totals"]
         return _cents(next(r["amount"] for r in totals if r["group"]["label:app"] == "e2e-app" and r["currency"] == "USD"))
-    _ui_matches_api(page, app_row.locator("td").nth(4), app_usd, "By app e2e-app Total")
+    # Columns: app, Runs, Compute, Block storage, External, Total, Share.
+    _ui_matches_api(page, app_row.locator("td").nth(5), app_usd, "By app e2e-app Total")
 
     # A row is a filter: app = e2e-app, in the URL and on every figure.
     app_row.click()
@@ -823,19 +830,22 @@ def test_overview_memory_chart_fits_its_y_labels_and_tooltip_follows_the_cursor(
 
 def test_operator_overview_has_unallocated_and_top_tenants(page, env, operator, lux):
     """All tenants: the Cost panel's By family has the unallocated host time
-    under it, Top tenants beside it, and Tenant is a breakdown; narrowed to
-    one tenant, neither."""
+    under it, Compute and Block storage apart, Top tenants beside it, and
+    Tenant is a breakdown; narrowed to one tenant with no pool of its own,
+    neither."""
     page.sign_in(operator.api_key, "/?tab=cost")
     panel = page.locator(".cost-panel")
     expect(panel.get_by_role("heading", name="Top tenants", exact=True)).to_have_count(1, timeout=15_000)
     expect(panel.locator(".cost-unallocated")).to_contain_text("Unallocated host time")
+    expect(panel.locator('.cost-unallocated [data-unallocated="compute"]')).to_contain_text("Compute")
+    expect(panel.locator('.cost-unallocated [data-unallocated="block-storage"]')).to_contain_text("Block storage")
     expect(panel.get_by_role("radio", name="Tenant", exact=True)).to_have_count(1)
     panel.get_by_role("radio", name="Tenant", exact=True).click()
     expect(page).to_have_url(re.compile(r"[?&]by=tenant(&|$)"))
     expect(panel.get_by_role("heading", name="By tenant", exact=True)).to_have_count(1)
     # Top tenants would repeat the breakdown: it gives way to it.
     expect(panel.get_by_role("heading", name="Top tenants", exact=True)).to_have_count(0)
-    # Narrowed to one tenant: no Top tenants, no Tenant breakdown, no unallocated host time.
+    # Narrowed to one tenant: no Top tenants, no Tenant breakdown; the tenant has no pool of its own, so no unallocated host time.
     page.goto(env.luxd_url + f"/?tab=cost&tenant={lux.tenant_id}")
     expect(panel.get_by_role("heading", name="By family", exact=True)).to_have_count(1, timeout=15_000)
     expect(panel.get_by_role("heading", name="Top tenants", exact=True)).to_have_count(0)
@@ -845,11 +855,16 @@ def test_operator_overview_has_unallocated_and_top_tenants(page, env, operator, 
 
 
 def test_host_page_shows_cost_to_its_owner_and_rates_to_operators(page, env, lux, operator, runners, hosts):
+    """A tenant's static host is in its own pool: its owner sees its host
+    cost, unallocated included, and no rate periods; operators also see the
+    rate periods, each with its family (a static host has compute only)."""
     # More than 4 decimals: shown rounded, the exact rate one hover away.
     host_id = _priced_host(lux, runners, hosts[0], price="0.041666667")
     page.sign_in(lux.api_key, f"/hosts/{host_id}?tab=cost")
-    expect(page.get_by_text(re.compile(r"^allocated to your Runs, per hour"))).to_have_count(1, timeout=15_000)
-    # Rate periods and unallocated are the operators'.
+    expect(page.get_by_text(re.compile(r"^charged to Runs vs unallocated, per hour"))).to_have_count(1, timeout=15_000)
+    tiles = page.locator(".host-cost .stat-label")
+    expect(tiles).to_have_text(["Host cost (24h)", "Compute", "Block storage", "Unallocated", "Utilisation"])
+    # Rate periods are the operators'.
     expect(page.get_by_role("heading", name="Rate periods", exact=True)).to_have_count(0)
     assert not page.errors, page.errors
     # Init scripts run in order: the operator's key now wins on every load.
@@ -861,11 +876,21 @@ def test_host_page_shows_cost_to_its_owner_and_rates_to_operators(page, env, lux
         rates.locator(".money-rounded").hover()
         expect(page.get_by_role("tooltip")).to_have_text("Exactly $0.041666667")
         page.mouse.move(0, 0)
+        # Each period names its family; a static host has compute only.
+        expect(rates.locator("tbody tr").locator("td").first).to_have_text("Compute")
+        expect(rates.get_by_text("Block storage")).to_have_count(0)
         # The source once: "static", not "static price (static)".
         expect(rates.get_by_text("static", exact=True)).to_have_count(1)
         expect(rates.get_by_text(re.compile(r"static price|\(static\)"))).to_have_count(0)
-        expect(page.get_by_text(re.compile(r"^allocated to Runs vs unallocated, per hour"))).to_have_count(1)
+        expect(page.get_by_text(re.compile(r"^charged to Runs vs unallocated, per hour"))).to_have_count(1)
     _both_themes(page, env, f"/hosts/{host_id}?tab=cost", check)
+    # Narrowed to the host's tenant, the operator reads its cost as that tenant
+    # (?tenant= on the read): unallocated of its own pool, no rate periods.
+    with page.expect_request(lambda r: f"/v1/hosts/{host_id}/cost" in r.url and f"tenant={lux.tenant_id}" in r.url, timeout=15_000):
+        page.goto(env.luxd_url + f"/hosts/{host_id}?tab=cost&tenant={lux.tenant_id}")
+    expect(tiles).to_have_text(["Host cost (24h)", "Compute", "Block storage", "Unallocated", "Utilisation"], timeout=15_000)
+    expect(page.get_by_role("heading", name="Rate periods", exact=True)).to_have_count(0)
+    assert not page.errors, page.errors
 
 
 def test_rename_a_pool_through_the_dialog(page, lux, runners, hosts):
@@ -1097,4 +1122,124 @@ def test_pool_events_pages_stay_put_as_new_events_arrive(page, env, tenant_facto
     backward = walk("‹ Previous", 4)
     expect(pager).to_contain_text("Page 1 · events 1–50")
     assert backward == forward[::-1], backward
+    assert not page.errors, page.errors
+
+
+@pytest.fixture
+def priced_ec2(env, ec2, lux):
+    """luxd with the fake EC2 and its Pricing API (on-demand and gp3 list
+    prices), second-scale cost ticks; the tenant's pool burst is removed
+    after the test, and its instances with it."""
+    fake_only(ec2)
+    env.stop_luxd()
+    env.start_luxd(LUX_EC2_ENDPOINT=ec2.url, LUX_PRICING_ENDPOINT=ec2.url, AWS_ACCESS_KEY_ID="fake",
+                   AWS_SECRET_ACCESS_KEY="fake", AWS_REGION="us-east-1", LUX_COSTS_EVERY="5s",
+                   LUX_COSTS_PRICES_REFRESH="5s", **FAKE_EC2_TIMERS)
+    yield ec2
+    lux.run("pools", "rm", "burst", check=False)
+    wait_until(lambda: not ec2.running(), 90, 0.3, "the removed pool's instances were not terminated")
+
+
+def _cents_shown(amount) -> str:
+    """formatMoney to the cent: a non-zero amount under half a cent is the bound "<$0.01", never $0.00."""
+    d = Decimal(amount)
+    return "<$0.01" if d > 0 and d.quantize(Decimal("0.01"), ROUND_HALF_EVEN) == 0 else _cents(d)
+
+
+@pytest.mark.ec2
+def test_pool_cost_tab_and_run_placements_with_block_storage(page, env, lux, priced_ec2):
+    """A launched host has a disk: its pool's Cost tab shows compute and block
+    storage apart, each charged to Runs or unallocated, as the API reads
+    them, and the Run's cost lists its placement with both."""
+    ec2 = priced_ec2
+    lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps({**ec2.template, "region": "eu-north-1"}), "--max", "1", "--min", "1")
+    host = wait_until(lambda: next((h for h in lux.json("hosts", "ls") if h["pool"] == "burst" and h["state"] == "ready" and h.get("volumes")), None),
+                      120, 0.5, "the pool's host never registered with its volumes")
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sleep", "3", placement={"pool": "burst"}))
+    lux.wait_state(run_id, "succeeded", timeout=120)
+    seen = {}
+
+    def final_cost():
+        seen["cost"] = c = lux.json("cost", run_id)
+        return c if c["status"] == "final" else None
+    try:
+        cost = wait_until(final_cost, 120, 1, "the Run's cost never became final")
+    except AssertionError as e:
+        raise AssertionError(f"{e}: {seen.get('cost')}") from None
+    lines = {l["family"]: l for l in cost["lines"]}
+    assert set(lines) == {"compute", "block-storage"}, cost["lines"]
+
+    # The host's hours are refreshed apart from the Run's lines: wait for both families' rows.
+    def pool_cost():
+        c = lux.api("/v1/pools/burst/cost?since=24h&interval=hour").json()
+        fams = {(h["hostId"], h["family"]) for h in c.get("hosts") or []}
+        return c if {(host["id"], "compute"), (host["id"], "block-storage")} <= fams else None
+    api = wait_until(pool_cost, 120, 2, "the pool's host time never split by family")
+
+    page.sign_in(lux.api_key, "/pools/burst?tab=cost")
+    tab = page.locator(".pool-cost")
+    # The tenant owns the pool: every tile, unallocated included.
+    expect(tab.locator(".stat-label")).to_have_text(["Host cost (24h)", "Compute", "Block storage", "Unallocated", "Utilisation"], timeout=15_000)
+    # Block storage's line names the host's disk, as luxd recorded it.
+    expect(tab.locator(".stat", has_text="Block storage").locator(".stat-unit")).to_contain_text("100 GiB gp3")
+    legend = tab.locator(".host-cost-chart .tschart-legend-label")
+    expect(legend).to_have_text(["Compute · runs", "Compute · unallocated", "Block storage · runs", "Block storage · unallocated"])
+
+    # Who paid and Cost by host match the API, per family. Host rows grow each refresh (the hour is open):
+    # read both until they agree.
+    hosts_card = page.locator(".card", has=page.locator(".card-title", has_text="Cost by host"))
+    row = hosts_card.locator("tbody tr", has_text=host["name"])
+
+    def who_paid_matches():
+        page.reload()
+        c = lux.api("/v1/pools/burst/cost?since=24h&interval=hour").json()
+        series = c.get("hostSeries") or []
+        card = page.locator(".card", has=page.locator(".card-title", has_text="Who paid"))
+        try:
+            card.locator("tbody tr").nth(2).wait_for(timeout=15_000)
+            row.wait_for(timeout=15_000)
+        except PlaywrightTimeoutError:
+            return False
+        rows = card.locator("tbody tr").evaluate_all("rs => rs.map(r => [...r.querySelectorAll('td')].map(td => td.textContent))")
+        want = []
+        for fam in ("compute", "block-storage"):
+            alloc = sum(Decimal(r["allocated"]) for r in series if r["family"] == fam)
+            idle = sum(Decimal(r["unallocated"]) for r in series if r["family"] == fam)
+            want.append((_cents_shown(alloc), _cents_shown(idle), _cents_shown(alloc + idle)))
+        got = [tuple(r[1:4]) for r in rows[:2]]
+        # Cost by host: Host, Up, Compute, Block storage, Total, Unallocated, Utilisation; each family its own figure.
+        mine = {h["family"]: h for h in c.get("hosts") or [] if h["hostId"] == host["id"]}
+        fam_total = lambda f: str(Decimal(mine[f]["allocated"]) + Decimal(mine[f]["unallocated"]))
+        want_host = [_dollars(fam_total("compute")), _dollars(fam_total("block-storage")),
+                     _dollars(str(Decimal(fam_total("compute")) + Decimal(fam_total("block-storage")))),
+                     _dollars(str(Decimal(mine["compute"]["unallocated"]) + Decimal(mine["block-storage"]["unallocated"])))]
+        got_host = row.locator("td").all_inner_texts()[2:6]
+        seen["who"] = (got, want, got_host, want_host)
+        return (got == want and got_host == want_host) or None
+    try:
+        wait_until(who_paid_matches, 60, 2, "Who paid or Cost by host does not match the pool's host time per family")
+    except AssertionError as e:
+        raise AssertionError(f"{e}: {seen.get('who')}") from None
+    cells = row.locator("td").all_inner_texts()
+    assert re.fullmatch(r"\d+\.\d h", cells[1]) and re.fullmatch(r"(<1|\d+)%|–", cells[6]), cells
+    assert api["idle"] and {i["family"] for i in api["idle"]} == {"compute", "block-storage"}, api["idle"]
+    expect(tab.get_by_text("AI models")).to_have_count(0)
+    expect(tab.locator(".callout")).to_have_text("Pool cost is the machines only — instance and disk. AI and other external costs belong to Runs.")
+    # A host opens on its Cost tab: its rate periods say which family each is.
+    row.get_by_role("link").click()
+    page.wait_for_url(re.compile(rf"/hosts/{host['id']}\?tab=cost"))
+    expect(page.locator(".host-cost .stat-label")).to_contain_text(["Block storage"], timeout=15_000)
+
+    # The Run's placement: compute and block storage side by side, as the lines' details have them.
+    page.goto(env.luxd_url + f"/runs/{run_id}?tab=resources")
+    card = page.locator(".run-placements-cost")
+    expect(card.locator("tbody tr")).to_have_count(1, timeout=15_000)
+    [pc] = lines["compute"]["details"]["placements"]
+    [pb] = lines["block-storage"]["details"]["placements"]
+    cells = card.locator("tbody tr td").all_inner_texts()
+    assert cells[0] == str(pc["epoch"]) and cells[1] == host["name"], cells
+    assert cells[4] == _dollars(pc["amount"]) and cells[5] == _dollars(pb["amount"]), (cells, pc["amount"], pb["amount"])
+    assert cells[6] == _dollars(str(Decimal(pc["amount"]) + Decimal(pb["amount"]))), cells
+    # The lines table names the family as luxd does, with its own swatch.
+    expect(page.locator("section.card.run-cost").get_by_role("cell", name="Block storage")).to_have_count(1)
     assert not page.errors, page.errors

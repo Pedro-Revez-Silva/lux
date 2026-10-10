@@ -639,12 +639,13 @@ type hostCostHour struct {
 	Unallocated *string   `json:"unallocated,omitempty" doc:"Operators, and the tenant owning the host's pool; absent for a tenant on a platform pool's host."`
 }
 type hostCostRate struct {
-	Family   string     `json:"family" doc:"A host-tied family: compute or block-storage."`
-	From     time.Time  `json:"from"`
-	To       *time.Time `json:"to,omitempty"`
-	PerHour  string     `json:"perHour"`
-	Currency string     `json:"currency"`
-	Source   string     `json:"source"`
+	Family   string         `json:"family" doc:"A host-tied family: compute or block-storage."`
+	From     time.Time      `json:"from"`
+	To       *time.Time     `json:"to,omitempty"`
+	PerHour  string         `json:"perHour"`
+	Currency string         `json:"currency"`
+	Source   string         `json:"source"`
+	Details  map[string]any `json:"details,omitempty" doc:"What the period was priced from: for block storage, the volumes, the unit prices per volume type (perGBMonth, perIOPSMonth, perGiBpsMonth) and hoursPerMonth."`
 }
 type hostCostOutput struct {
 	Body struct {
@@ -720,7 +721,7 @@ func (s *Server) hostCost(ctx context.Context, in *hostCostInput) (*hostCostOutp
 		if p.TenantID != "" {
 			return nil
 		}
-		rows, err = tx.Query(ctx, `SELECT family, valid_from, valid_to, trim_scale(per_hour)::text, currency, source
+		rows, err = tx.Query(ctx, `SELECT family, valid_from, valid_to, trim_scale(per_hour)::text, currency, source, details
 			FROM host_rates WHERE host_id = $1 AND valid_from < $3 AND (valid_to IS NULL OR valid_to > $2)
 			ORDER BY family DESC, valid_from`, id, from, to)
 		if err != nil {
@@ -729,7 +730,7 @@ func (s *Server) hostCost(ctx context.Context, in *hostCostInput) (*hostCostOutp
 		defer rows.Close()
 		for rows.Next() {
 			var r hostCostRate
-			if err := rows.Scan(&r.Family, &r.From, &r.To, &r.PerHour, &r.Currency, &r.Source); err != nil {
+			if err := rows.Scan(&r.Family, &r.From, &r.To, &r.PerHour, &r.Currency, &r.Source, &r.Details); err != nil {
 				return err
 			}
 			out.Body.Rates = append(out.Body.Rates, r)

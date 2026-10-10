@@ -1,13 +1,14 @@
 import { useMemo } from "react";
-import { Badge, Card, compareMoney, EmptyState, familyDisplay, formatBytes, formatClock, formatCores, formatCount, formatElapsed, KeyValue, ListPriceNote, Money, MoneyList, PageHeader, rangeText, SectionHeader, StatTile, Table, Tabs, TimeSeriesChart, useNow, type Column } from "@lux/design-system";
+import { Badge, Callout, Card, CENTS, compareMoney, EmptyState, formatBytes, formatClock, formatCores, formatCount, formatElapsed, KeyValue, Meter, Money, MoneyList, PageHeader, rangeText, StatTile, Table, Tabs, TimeSeriesChart, useNow, type Column } from "@lux/design-system";
 import { api, type Pool, type PoolCost, type PoolMetrics, type PoolOwner } from "../../api/index.ts";
 import { costInterval, costRange, historyRes, stepNote, stepOfRes } from "../every.ts";
-import { go, setSearchParams, useSearchParams } from "../router.tsx";
+import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostPath, labelsText, PageSkeleton, RunLink, RunNameLink, runPath } from "./common.tsx";
+import { HostCostChart, HostCostTiles, pick, WhoPaidCard } from "./HostCostParts.tsx";
+import { hostCharts, hostCostRows, hostHours, sumPerCurrency, volumeSummary, whoPaid, type HostChart, type HostCostRow, type WhoPaid } from "./hostCostView.ts";
 import { HostsList } from "./Hosts.tsx";
 import { PagedEvents } from "./PagedEvents.tsx";
-import { sumHostTime, sumIdle } from "./poolHostTime.ts";
 
 /** The Pools page's poll: this page's too. */
 const POLL = 15_000;
@@ -103,7 +104,7 @@ export function PoolPage({ name }: { name: string }) {
       <ErrorStrip error={pools.error ?? metrics.error} />
       <PoolTiles pool={pool} metrics={metrics.data} loading={metrics.loading} />
       {tab === "metrics" && <PoolCharts metrics={metrics.data} step={stepNote(trend, stepOfRes(metrics.data?.resolution))} />}
-      {tab === "cost" && <PoolCostTab name={name} owner={poolOwner} operatorView={scope.operator && !scope.apiTenant} />}
+      {tab === "cost" && <PoolCostTab name={name} owner={poolOwner} />}
       {tab === "hosts" && <PoolHostsTab pool={pool} />}
       {tab === "events" && showEvents && <PoolEvents name={name} owner={poolOwner} />}
       <p className="page-note">
@@ -133,8 +134,29 @@ function PoolTiles({ pool, metrics, loading }: { pool: Pool; metrics?: PoolMetri
         tone={(n?.launchFailures ?? 0) > 0 ? "danger" : "default"}
         unit={n?.lastLaunchFailure ? `last ${formatClock(n.lastLaunchFailure)}${n.lastLaunchError ? ` · ${n.lastLaunchError.slice(0, 40)}` : ""}` : pool.provider === "static" ? "static pool" : undefined}
       />
-      <StatTile label={`Cost (${since})`} loading={cost.loading} value={<MoneyList amounts={cost.data?.totals} />} unit={cost.data?.idle?.length ? <>list price · <MoneyList amounts={sumIdle(cost.data.idle)} /> idle</> : "list price"} />
+      <PoolCostTile since={since} cost={cost.data} loading={cost.loading} />
     </div>
+  );
+}
+
+/**
+ * The pool's cost over the range: its host cost (compute and block storage,
+ * Runs' and unallocated) and the unallocated part, one figure each per
+ * currency. A reader who may not see unallocated gets its Runs' cost alone.
+ */
+function PoolCostTile({ since, cost, loading }: { since: string; cost?: PoolCost; loading: boolean }) {
+  const visible = cost?.idle != null;
+  if (!visible) return <StatTile label={`Cost (${since})`} loading={loading} value={<MoneyList amounts={cost?.totals} decimals={CENTS} />} unit={cost ? <>list price · charged to your Runs</> : "list price"} />;
+  // The same figure as the Cost tab's lead tile: whoPaid's host cost per currency.
+  const host = pick(whoPaid(cost.hostSeries ?? []), (p) => p.all.total);
+  const idle = sumPerCurrency(cost.idle ?? []);
+  return (
+    <StatTile
+      label={`Host cost (${since})`}
+      loading={loading}
+      value={<MoneyList amounts={host} decimals={CENTS} />}
+      unit={idle.length ? <>list price · <MoneyList amounts={idle} decimals={CENTS} /> unallocated</> : "list price"}
+    />
   );
 }
 
@@ -194,60 +216,6 @@ function PoolCharts({ metrics, step }: { metrics?: PoolMetrics; step: string }) 
   );
 }
 
-interface FamilyChart {
-  currency: string;
-  x: number[];
-  ys: (number | null)[][];
-  series: { label: string; color: string }[];
-}
-
-/** Every bucket of the range, in epoch seconds, and each one's position. */
-function bucketAxis(d: PoolCost): { x: number[]; index: Map<number, number> } {
-  const step = d.interval === "hour" ? 3600 : 86400;
-  const start = Math.floor(Date.parse(d.from) / 1000 / step) * step;
-  const end = Math.floor(Date.parse(d.to) / 1000);
-  const x: number[] = [];
-  for (let t = start; t < end; t += step) x.push(t);
-  return { x, index: new Map(x.map((t, i) => [t, i])) };
-}
-
-/** One stacked chart per currency: a series per family over every bucket (a bucket without a row is a gap, not zero). */
-function familyCharts(d: PoolCost | undefined): FamilyChart[] {
-  if (!d?.series.length) return [];
-  const { x, index } = bucketAxis(d);
-  const meta = new Map((d.families ?? []).map((f) => [f.family, f]));
-  return [...new Set(d.series.map((r) => r.currency))].sort().map((currency) => {
-    const rows = d.series.filter((r) => r.currency === currency);
-    const families = [...new Set(rows.map((r) => r.family))].sort((a, b) => (a === "compute" ? -1 : b === "compute" ? 1 : a.localeCompare(b)));
-    const display = familyDisplay(families.map((f) => meta.get(f) ?? { family: f }));
-    const ys = families.map(() => x.map((): number | null => null));
-    for (const r of rows) {
-      const i = index.get(Math.floor(Date.parse(r.at) / 1000));
-      // Chart geometry only: figures in text come from the strings.
-      if (i != null) ys[families.indexOf(r.family)]![i] = Number(r.amount);
-    }
-    return { currency, x, ys, series: families.map((f) => display.get(f)!) };
-  });
-}
-
-/** Host time per bucket, allocated and idle, per currency, its families summed. */
-function hostTimeCharts(d: PoolCost | undefined): FamilyChart[] {
-  if (!d?.hostSeries?.length) return [];
-  const { x, index } = bucketAxis(d);
-  const rows = sumHostTime(d.hostSeries);
-  return [...new Set(rows.map((r) => r.currency))].sort().map((currency) => {
-    const ys = [x.map((): number | null => null), x.map((): number | null => null)];
-    for (const r of rows.filter((h) => h.currency === currency)) {
-      const i = index.get(Math.floor(Date.parse(r.at!) / 1000));
-      if (i != null) {
-        ys[0]![i] = Number(r.allocated);
-        ys[1]![i] = Number(r.unallocated);
-      }
-    }
-    return { currency, x, ys, series: [{ label: "Allocated to runs", color: "var(--chart-1)" }, { label: "Idle (unallocated)", color: "var(--st-neutral-dot)" }] };
-  });
-}
-
 interface TopRun {
   id: string;
   name?: string;
@@ -256,22 +224,19 @@ interface TopRun {
   estimate: boolean;
 }
 
-interface HostTimeRow {
-  hostId: string;
-  hostName: string;
-  currency: string;
-  allocated: string;
-  unallocated: string;
-}
-
-function PoolCostTab({ name, owner, operatorView }: { name: string; owner?: PoolOwner; operatorView: boolean }) {
+/**
+ * The pool's Cost tab: its machines only (compute and block storage, apart).
+ * Host time is the pool's whole cost, charged to Runs or unallocated; a
+ * reader who may not see unallocated (a tenant on a platform pool: luxd
+ * omits idle, hostSeries and hosts) gets its own Runs' figures alone.
+ */
+function PoolCostTab({ name, owner }: { name: string; owner?: PoolOwner }) {
   const scope = useScope();
   const step = scope.step("cost");
   const since = costRange(scope.range);
   const interval = costInterval(step);
   const q = useScopedQuery(`pool-cost:${name}:${owner}:${since}:${interval}`, (t, s) => api.poolCost(name, t, owner, since, interval, s), { interval: 60_000 });
-  const charts = useMemo(() => familyCharts(q.data), [q.data]);
-  const idle = useMemo(() => hostTimeCharts(q.data), [q.data]);
+  const v = useMemo(() => poolCostView(q.data), [q.data]);
   const topCols = useMemo<Column<TopRun>[]>(
     () => [
       { key: "name", header: "Run", cell: (r) => <RunNameLink id={r.id} name={r.name} />, sortValue: (r) => r.name || r.id, lead: true },
@@ -280,66 +245,78 @@ function PoolCostTab({ name, owner, operatorView }: { name: string; owner?: Pool
     ],
     [],
   );
-  const hostCols = useMemo<Column<HostTimeRow>[]>(
-    () => [
-      { key: "name", header: "Host", cell: (h) => h.hostName, sortValue: (h) => h.hostName, lead: true },
-      { key: "allocated", header: "Allocated", cell: (h) => <Money amount={h.allocated} currency={h.currency} />, sortValue: (h) => Number(h.allocated), align: "right", mono: true, width: 120 },
-      { key: "idle", header: "Idle", cell: (h) => <span className="muted"><Money amount={h.unallocated} currency={h.currency} /></span>, sortValue: (h) => Number(h.unallocated), align: "right", mono: true, width: 120 },
-    ],
-    [],
-  );
   const top = (q.data?.topRuns ?? []).slice().sort((a, b) => a.currency.localeCompare(b.currency) || compareMoney(b.amount, a.amount));
+  const loading = q.loading && !q.data;
+  const per = interval === "hour" ? "hour" : "day";
+  if (q.error && !q.data) return <ErrorBlock error={q.error} onRetry={q.refetch} />;
   return (
-    <div className="stack">
-      <SectionHeader title="Cost" note={<span className="row">{stepNote(step)} over the last {since}<ListPriceNote /></span>} />
+    <div className="stack pool-cost">
       <ErrorStrip error={q.error} />
-      <div className="grid grid-2">
-        {charts.length === 0 ? (
-          <Card title="Cost by family" subtitle={`over the last ${since}`}>
-            <EmptyState compact title={q.loading ? "Loading…" : "No cost recorded in this range"} description={q.loading ? undefined : "No figure is not a zero: nothing has been costed yet."} />
-          </Card>
-        ) : (
-          charts.map((c) => (
-            <Card key={c.currency} title={charts.length > 1 ? `Cost by family · ${c.currency}` : "Cost by family"} subtitle={`stacked, ${stepNote(step)}`}>
-              <TimeSeriesChart x={c.x} ys={c.ys} series={c.series} unit="money" currency={c.currency} stacked legend />
-            </Card>
-          ))
-        )}
-        {operatorView &&
-          (idle.length === 0 ? (
-            <Card title="Host time" subtitle="allocated to runs vs idle">
-              <EmptyState compact title={q.loading ? "Loading…" : "No host time recorded in this range"} />
-            </Card>
-          ) : (
-            idle.map((c) => (
-              <Card key={c.currency} title={idle.length > 1 ? `Host time · ${c.currency}` : "Host time"} subtitle="allocated to runs vs idle · idle is not in the runs' cost">
-                <TimeSeriesChart x={c.x} ys={c.ys} series={c.series} unit="money" currency={c.currency} stacked legend />
-              </Card>
-            ))
-          ))}
-      </div>
-      <div className="grid grid-2">
-        <Card title="Top runs in this pool" subtitle={`by cost, over the last ${since}`} flush>
-          <Table columns={topCols} rows={top} rowKey={(r) => `${r.currency}:${r.id}`} defaultSort={{ key: "cost", dir: "desc" }} onRowClick={(r) => go(runPath(r.id))} loading={q.loading} loadingRows={3} empty="No Run has a cost here in this range." dense />
+      <HostCostTiles since={since} paid={v.paid} hours={v.hours} volumes={v.volumes} unallocated={v.visible} loading={loading} />
+      {v.visible ? (
+        <div className="grid grid-2-1">
+          <div className="stack">
+            <HostCostChart charts={v.charts} title={`Host cost per ${per}`} subtitle="compute and block storage, each split into what Runs reserved and what they did not" loading={loading} step={interval} />
+          </div>
+          <WhoPaidCard paid={v.paid} loading={loading} />
+        </div>
+      ) : (
+        <HostCostChart charts={v.charts} title={`Charged to your Runs per ${per}`} subtitle="your Runs' share of the machines: compute and block storage" loading={loading} step={interval} />
+      )}
+      {v.visible && (
+        <Card title="Cost by host" subtitle="costliest first · utilisation = charged to Runs ÷ host cost" flush>
+          <HostCostTable rows={v.hosts} loading={loading} />
         </Card>
-        {operatorView && (
-          <Card title="Cost by host" subtitle="operators only · allocated / idle" flush>
-            <Table
-              columns={hostCols}
-              rows={sumHostTime(q.data?.hosts ?? []).map((h) => ({ hostId: h.hostId ?? "", hostName: h.hostName ?? h.hostId ?? "", currency: h.currency, allocated: h.allocated, unallocated: h.unallocated }))}
-              rowKey={(h) => `${h.currency}:${h.hostId}`}
-              defaultSort={{ key: "allocated", dir: "desc" }}
-              onRowClick={(h) => go(hostPath(h.hostId))}
-              loading={q.loading}
-              loadingRows={3}
-              empty="No host time recorded here in this range."
-              dense
-            />
-          </Card>
-        )}
-      </div>
+      )}
+      <Card title="Top runs in this pool" subtitle={`by the cost of its machines, over the last ${since}`} flush>
+        <Table columns={topCols} rows={top} rowKey={(r) => `${r.currency}:${r.id}`} defaultSort={{ key: "cost", dir: "desc" }} onRowClick={(r) => go(runPath(r.id))} loading={loading} loadingRows={3} empty="No Run has a cost here in this range." dense />
+      </Card>
+      <Callout>Pool cost is the machines only — instance and disk. AI and other external costs belong to Runs.</Callout>
     </div>
   );
+}
+
+/** Everything the pool Cost tab shows, from one poolCost answer. */
+export function poolCostView(d: PoolCost | undefined) {
+  // idle is present (maybe empty) exactly when luxd lets the reader see host time.
+  const visible = d?.idle != null;
+  const step = d?.interval === "day" ? 86400 : 3600;
+  if (!d) return { visible: false, paid: [] as WhoPaid[], charts: [] as HostChart[], hosts: [] as HostCostRow[], hours: null, volumes: null };
+  if (!visible) {
+    const runs = d.series.map((r) => ({ t: Date.parse(r.at) / 1000, family: r.family, currency: r.currency, allocated: r.amount }));
+    return { visible, paid: whoPaid(runs), charts: hostCharts(runs, d.from, d.to, step), hosts: [], hours: null, volumes: null };
+  }
+  const series = (d.hostSeries ?? []).map((r) => ({ t: Date.parse(r.at!) / 1000, family: r.family, currency: r.currency, allocated: r.allocated, unallocated: r.unallocated }));
+  const hostRows = d.hosts ?? [];
+  const byHost = new Map(hostRows.filter((h) => h.hostId).map((h) => [h.hostId!, h]));
+  return {
+    visible,
+    paid: whoPaid(series),
+    charts: hostCharts(series, d.from, d.to, step),
+    hosts: hostCostRows(hostRows),
+    hours: hostHours(hostRows),
+    volumes: volumeSummary([...byHost.values()]),
+  };
+}
+
+const money = (a: string | null, currency: string) => (a == null ? DASH : <Money amount={a} currency={currency} />);
+
+function HostCostTable({ rows, loading }: { rows: HostCostRow[]; loading: boolean }) {
+  const multi = new Set(rows.map((r) => r.currency)).size > 1;
+  const cols = useMemo<Column<HostCostRow>[]>(
+    () => [
+      { key: "name", header: "Host", cell: (h) => <Link to={`${hostPath(h.hostId)}?tab=cost`} className="name-link">{h.hostName}</Link>, sortValue: (h) => h.hostName, lead: true },
+      ...(multi ? [{ key: "currency", header: "Currency", cell: (h: HostCostRow) => h.currency, sortValue: (h: HostCostRow) => h.currency, width: 90 }] : []),
+      { key: "up", header: "Up", cell: (h) => (h.hours == null ? DASH : `${h.hours.toFixed(1)} h`), sortValue: (h) => h.hours, align: "right", mono: true, width: 90 },
+      { key: "compute", header: "Compute", cell: (h) => money(h.compute, h.currency), sortValue: (h) => (h.compute == null ? null : Number(h.compute)), align: "right", mono: true, width: 120 },
+      { key: "bs", header: "Block storage", cell: (h) => money(h.blockStorage, h.currency), sortValue: (h) => (h.blockStorage == null ? null : Number(h.blockStorage)), align: "right", mono: true, width: 130 },
+      { key: "total", header: "Total", cell: (h) => <Money amount={h.total} currency={h.currency} />, sortValue: (h) => Number(h.total), align: "right", mono: true, width: 120 },
+      { key: "unallocated", header: "Unallocated", cell: (h) => <span className="muted"><Money amount={h.unallocated} currency={h.currency} /></span>, sortValue: (h) => Number(h.unallocated), align: "right", mono: true, width: 120 },
+      { key: "util", header: "Utilisation", cell: (h) => <Meter value={h.utilisation} />, sortValue: (h) => h.utilisation, align: "right", width: 130 },
+    ],
+    [multi],
+  );
+  return <Table columns={cols} rows={rows} rowKey={(h) => `${h.currency}:${h.hostId}`} defaultSort={{ key: "total", dir: "desc" }} onRowClick={(h) => go(`${hostPath(h.hostId)}?tab=cost`)} loading={loading} loadingRows={3} empty="No host time recorded here in this range." dense />;
 }
 
 function PoolHostsTab({ pool }: { pool: Pool }) {

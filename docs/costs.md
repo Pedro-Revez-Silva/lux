@@ -1298,6 +1298,12 @@ counted). Its host time per family, `idle: [{family, currency, amount}]`,
 `hostSeries` and `hosts` (`[{at?, hostId?, hostName?, family, currency,
 allocated, unallocated}]`), is returned to an operator over every tenant
 and to the tenant owning the pool; never a platform pool's to a tenant.
+Each `hosts` row also carries the host's `hours` (its billed window,
+provision request or registration to termination or now, within the range;
+the same on each of its family rows) and its `volumes` as `GET /v1/hosts`
+has them. `GET /v1/hosts/{id}/cost`'s `rates` carry `details`: for block
+storage, the volumes, the unit prices per volume type and `hoursPerMonth`
+the period was priced from.
 
 ### Runs list
 
@@ -1353,8 +1359,13 @@ and `familyDisplay` for each family's label and colour (describe
 is fixed to slot 1, block storage to slot 3). The Run page and the By
 family table list Block storage as its own family row from
 `byFamily`/`families`; the Runs list's `cost` carries per-currency totals
-only (no families), so its tooltip has no family row to add. The pool and
-host cost screens that split host time by family come in a later change.
+only (no families), so its tooltip has no family row to add.
+
+Pool and host cost are the machines only, compute and block storage, and
+the two are always shown apart, so a bigger disk never reads as a dearer
+machine. A reader luxd gives no host time (a tenant on a platform pool)
+sees its own Runs' figures only, never a zero or a dash for what it may not
+see.
 
 - **Run page, Cost card** (the "Resources & cost" tab, above
   `RunResources`), from `GET /v1/runs/{id}/cost`, polled every 15s while
@@ -1363,6 +1374,11 @@ host cost screens that split host time by family come in a later change.
     `incomplete` (the tooltip names the sources not yet answered);
   - one row per family, with its estimate part when only part is final;
   - a Table of lines (family, item, source, window, status, amount);
+  - Placements under it: one row per placement (epoch, host, window, share,
+    compute, block storage, total) from the compute and block-storage
+    lines' `details.placements`, joined on epoch, host and currency; a
+    placement without block storage (a static host, volumes not known) has
+    an en dash there, not 0;
   - pending: an empty state, "No cost reported yet", never `$0.00`.
   - Not built: reserved vs used efficiency (the API has no such field).
 - **Runs list:** a Cost column from `cost` on `GET /v1/runs`, as `lux ls`
@@ -1370,12 +1386,17 @@ host cost screens that split host time by family come in a later change.
   `—` while pending, and a leading `~` when the total may still change (an
   estimate part, or `incomplete`). Its Tooltip names the status and gives
   the exact amounts.
-- **Host page**, its Cost tab: allocated vs unallocated per hour (or per UTC day with
-  Every Day), stacked, from
-  `/v1/hosts/{id}/cost` (a tenant sees its allocated part only), and, for
-  operators, the rate periods in a `KeyValue` (price per hour, and the
-  source once: `static`, `on-demand` or `spot`). Shown to those who can see
-  the host's history.
+- **Host page**, its Cost tab: tiles (host cost with its host-hours,
+  Compute, Block storage with the host's volumes, Unallocated, Utilisation),
+  and per hour (or per UTC day with Every Day) bars stacked by family, each
+  charged to Runs and unallocated (a lighter shade), from
+  `/v1/hosts/{id}/cost`. A tenant on a platform pool's host sees what its
+  Runs were charged only. Operators also get the rate periods: family,
+  period, price per hour, and the source once (`static`, `on-demand`,
+  `spot`, `EBS list price`), block storage's volumes beside it and its unit
+  prices in a Tooltip. Shown to those who can see the host's history. Its
+  Details list the host's volumes (`100 GiB gp3 · 3000 IOPS · 125 MiB/s`),
+  marked `assumed` when an operator supplied them.
 - **Overview, the Cost tab** (`?tab=cost`), over the page's range (1h reads 6h:
   costs are hourly), bucketed by the top bar's **Every** (`?every=`): Auto
   is hourly up to 24h and daily from 7d; Hour and Day are taken as asked;
@@ -1426,8 +1447,25 @@ host cost screens that split host time by family come in a later change.
   pill after a revoked one), the person's email, "Operator key" for an
   operator's key a tenant may not name, or "not recorded" for Runs from
   before key tracking.
-- **Pool page, Cost tab**: the page's Every (hour or day); otherwise as
-  before.
+- **Pool page, Cost tab**: the page's Every (hour or day), from one
+  `/v1/pools/{name}/cost`. Tiles: host cost (lead, with host-hours), Compute
+  (average per hour), Block storage (the volumes when every host has the
+  same, else how many shapes), Unallocated (its share of host cost) and
+  Utilisation (charged to Runs ÷ host cost). Host cost per hour or day,
+  stacked bars of the four series; "Who paid" (Runs, Unallocated, Total for
+  Compute, Block storage and both, a bar per family); Cost by host (up
+  hours, compute, block storage, total, unallocated, a utilisation meter;
+  costliest first, each host linked to its Cost tab); Top runs; and "Pool
+  cost is the machines only". The summary tile above the tabs is host cost
+  and unallocated, one figure each per currency. Not built: why time was
+  unallocated (booting, ready with no Run, part-filled, waiting to scale
+  down), which needs server-side data.
+- **Overview, Cost tab**: Block storage is a KPI, a By family row and a
+  breakdown column of its own; Show keeps luxd's filter (Compute is
+  `family=compute`, External `nofamily=compute`, so block storage counts
+  under External's total while its figure stays apart). Unallocated host
+  time reads Compute and Block storage apart, for operators over every
+  tenant and for a tenant when luxd sends its own pools'.
 - Every page with money says "list price" once, explained in a Tooltip.
   Amounts are never added across currencies. An amount rounded for display
   shows its exact value in a Tooltip (`Money`).

@@ -59,6 +59,8 @@ export function history(u: URL): unknown {
 export const POOLS = [
   { id: "pool_default01", name: "default", tenant: "", provider: "ec2", minHosts: 1, maxHosts: 8, warmHosts: 1, shared: true, platform: true, isDefault: true },
   { id: "pool_gpu000001", name: "gpu", tenant: "", provider: "ec2", minHosts: 0, maxHosts: 2, warmHosts: 0, shared: false, platform: true },
+  // acme's own pool: its tenant reads its unallocated host time (a platform pool's it never does).
+  { id: "pool_acme_ci01", name: "ci", tenant: "acme", provider: "ec2", minHosts: 1, maxHosts: 4, warmHosts: 0, shared: false, platform: false },
 ];
 
 /** GET /v1/pools/{name}/metrics. */
@@ -96,38 +98,6 @@ export function poolMetrics(u: URL, name: string): unknown {
   };
 }
 
-/** GET /v1/pools/{name}/cost: by family per hour or UTC day. */
-export function poolCost(u: URL, name: string): unknown {
-  const span = SINCE[u.searchParams.get("since") ?? "24h"] ?? 86400;
-  const interval = u.searchParams.get("interval") === "day" ? "day" : "hour";
-  const step = interval === "day" ? 86400 : 3600;
-  const to = Math.ceil(Date.now() / 1000 / 3600) * 3600;
-  const from = to - span;
-  const k = name === "gpu" ? 0.4 : 1;
-  const series: { at: string; family: string; currency: string; amount: string }[] = [];
-  let compute = 0;
-  let ai = 0;
-  for (let t = Math.floor(from / step) * step; t < to; t += step) {
-    const d = wave(t, 86400);
-    const c = Math.round((0.2 + d) * (step / 3600) * 1e4 * k) / 1e4;
-    const a = Math.round((0.5 + d * 3) * (step / 3600) * 1e4 * k) / 1e4;
-    compute += c;
-    ai += a;
-    series.push({ at: new Date(t * 1000).toISOString(), family: "compute", currency: "USD", amount: c.toFixed(4) }, { at: new Date(t * 1000).toISOString(), family: "ai", currency: "USD", amount: a.toFixed(4) });
-  }
-  return {
-    poolId: POOLS.find((p) => p.name === name)?.id ?? name,
-    from: new Date(from * 1000).toISOString(),
-    to: new Date(to * 1000).toISOString(),
-    basis: "list",
-    interval,
-    totals: [{ currency: "USD", amount: (compute + ai).toFixed(4) }],
-    series,
-    families: [{ family: "compute", displayName: "Compute" }, { family: "ai", displayName: "AI models", color: "violet" }],
-    topRuns: [],
-  };
-}
-
 /** GET /v1/hosts/{id}/history: one 16-core host's usage, and its runner process. */
 export function hostHistory(u: URL): unknown {
   const { from, to, res } = range(u);
@@ -147,25 +117,4 @@ export function hostHistory(u: URL): unknown {
     };
   });
   return { from: new Date(from * 1000).toISOString(), to: new Date(to * 1000).toISOString(), resolution: res, samples };
-}
-
-/** GET /v1/hosts/{id}/cost: per hour at $0.384, allocated by its placements, the rest (operators) unallocated. */
-export function hostCost(u: URL, id: string, operator: boolean): unknown {
-  const span = SINCE[u.searchParams.get("since") ?? "24h"] ?? 86400;
-  const to = Math.ceil(Date.now() / 1000 / 3600) * 3600;
-  const from = to - span;
-  const hours = [];
-  for (let t = from; t < to; t += 3600) {
-    const used = 0.2 + wave(t, 86400) * 0.6;
-    hours.push({ hour: new Date(t * 1000).toISOString(), currency: "USD", allocated: (0.384 * used).toFixed(6), ...(operator ? { unallocated: (0.384 * (1 - used)).toFixed(6) } : {}) });
-  }
-  const iso = (t: number) => new Date(t * 1000).toISOString();
-  return {
-    hostId: id,
-    from: iso(from),
-    to: iso(to),
-    basis: "list",
-    hours,
-    ...(operator ? { rates: [{ from: iso(from), perHour: "0.384", currency: "USD", source: "ec2-pricing" }] } : {}),
-  };
 }

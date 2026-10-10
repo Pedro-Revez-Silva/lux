@@ -97,6 +97,8 @@ export interface BreakdownTableRow {
   currency: string;
   runs: number | null;
   compute: string | null;
+  /** lux's Block storage family, apart from compute and from the plugins' families; read when the table has blockStorage. */
+  blockStorage?: string | null;
   external: string | null;
   /** What the view counts. */
   total: string;
@@ -117,9 +119,12 @@ export interface BreakdownTableProps {
   /** A row is a filter: clicking adds it. Rows without one are not clickable. */
   onRowClick?: (r: BreakdownTableRow) => void;
   empty?: ReactNode;
+  /** A Block storage column between Compute and External: a bigger disk never reads as dearer compute or as a plugin's cost. */
+  blockStorage?: boolean;
 }
 
-const pct = (r: number | null) => (r == null ? "–" : `${Math.round(r * 100)}%`);
+// A non-zero share that rounds to 0% reads <1% (as partShares has it): a small family is not nothing.
+const pct = (r: number | null) => (r == null ? "–" : r > 0 && Math.round(r * 100) === 0 ? "<1%" : `${Math.round(r * 100)}%`);
 const money = (a: string | null, currency: string) => (a == null ? <span className="muted">–</span> : <Money amount={a} currency={currency} decimals={2} />);
 
 /**
@@ -127,7 +132,7 @@ const money = (a: string | null, currency: string) => (a == null ? <span classNa
  * and External parts, the total the view counts and its share. Shares are
  * per currency; with several currencies each row names its own.
  */
-export function BreakdownTable({ rows, lead, loading, onRowClick, empty = "No cost in this range." }: BreakdownTableProps) {
+export function BreakdownTable({ rows, lead, loading, onRowClick, empty = "No cost in this range.", blockStorage }: BreakdownTableProps) {
   const multi = new Set(rows.map((r) => r.currency)).size > 1;
   const cols: Column<BreakdownTableRow>[] = [
     {
@@ -145,6 +150,7 @@ export function BreakdownTable({ rows, lead, loading, onRowClick, empty = "No co
     },
     { key: "runs", header: "Runs", align: "right", mono: true, width: 64, cell: (r) => (r.runs == null ? <span className="muted">–</span> : r.runs) },
     { key: "compute", header: "Compute", align: "right", mono: true, width: 96, cell: (r) => money(r.compute, r.currency) },
+    ...(blockStorage ? [{ key: "blockStorage", header: "Block storage", align: "right" as const, mono: true, width: 112, cell: (r: BreakdownTableRow) => money(r.blockStorage ?? null, r.currency) }] : []),
     { key: "external", header: "External", align: "right", mono: true, width: 96, cell: (r) => money(r.external, r.currency) },
     { key: "total", header: "Total", align: "right", mono: true, width: 104, cell: (r) => <strong>{money(r.total, r.currency)}</strong> },
     { key: "share", header: multi ? "Share (per currency)" : "Share", align: "right", mono: true, width: multi ? 92 : 64, cell: (r) => pct(r.share) },

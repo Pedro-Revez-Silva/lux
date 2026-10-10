@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { renderToStaticMarkup } from "react-dom/server";
-import { barRange, barSegments, barStep, barTicks, bucketText, chartColors, FADE_KEEP, fadedColor, stackData, stackTotal, timeTickText } from "./chartData.ts";
+import { barRange, barSegments, barStep, barTicks, bucketText, chartColors, FADE_KEEP, fadedColor, fadedCss, stackData, stackTotal, timeTickText } from "./chartData.ts";
 import { TimeSeriesChart } from "./TimeSeriesChart.tsx";
 
 const none = new Set<number>();
@@ -162,6 +162,10 @@ test("fadedColor leaves a colour it cannot read unchanged, never a wrong shade",
 
 test("chartColors fades only the faded series; the others keep their colour", () => {
   expect(chartColors(["#2a78d6", "#2a78d6", "#1baf7a", "#1baf7a"], [false, true, undefined, true], "#ffffff")).toEqual(["#2a78d6", "#a6c6ee", "#1baf7a", fadedColor("#1baf7a", "#ffffff")]);
+});
+
+test("fadedCss is the chart's faded shade for the DOM: the token mixed toward the surface, FADE_KEEP kept", () => {
+  expect(fadedCss("var(--chart-3)")).toBe("color-mix(in srgb, var(--chart-3) 42%, var(--bg-surface))");
 });
 
 test("TimeSeriesChart: a faded series' legend key is the faded shade of its colour", async () => {

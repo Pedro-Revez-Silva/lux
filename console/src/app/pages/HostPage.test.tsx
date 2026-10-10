@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import type { Host, LifecycleEvent } from "../../api/index.ts";
+import type { Host, HostCost, LifecycleEvent } from "../../api/index.ts";
 
 // The page's imports (the router) touch window at load: register the DOM first.
 let HostPage: typeof import("./HostPage.tsx").HostPage;
@@ -77,7 +77,7 @@ async function clickNext(card: Element) {
  * events as cursor pages of 50. url is the page's (its ?tenant= narrows an
  * operator); events are on the Events tab (a launch-failed host has no tabs).
  */
-async function render(h: Host, role: "tenant" | "operator" = "tenant", url = "http://localhost/hosts/h1?tab=events") {
+async function render(h: Host, role: "tenant" | "operator" = "tenant", url = "http://localhost/hosts/h1?tab=events", cost?: HostCost | ((path: string) => HostCost)) {
   api.signIn("k");
   api.setRole(role);
   const fake = fakeApi((path) => {
@@ -85,7 +85,7 @@ async function render(h: Host, role: "tenant" | "operator" = "tenant", url = "ht
       return query(path).next ? { events: events(50, 50), prev: "p2", page: "s2" } : { events: events(100, 50), next: "n1", page: "s1" };
     }
     if (path.startsWith("/v1/hosts/h1/history")) return { from: iso(0), to: iso(60), resolution: 60, samples: [] };
-    if (path.startsWith("/v1/hosts/h1/cost")) return { hostId: "h1", from: iso(0), to: iso(60), basis: "list", hours: [] };
+    if (path.startsWith("/v1/hosts/h1/cost")) return (typeof cost === "function" ? cost(path) : cost) ?? { hostId: "h1", from: iso(0), to: iso(60), basis: "list", hours: [] };
     if (path.startsWith("/v1/hosts/h1")) return h;
     if (path.startsWith("/v1/runs")) return { runs: [] };
     return {};
@@ -181,7 +181,8 @@ test("the host's tabs: Overview by default; each tab shows its own cards and ?ta
     for (const [name, key, titles] of [
       // No runner samples in the fake history: no Runner cards.
       ["Metrics", "metrics", ["CPU", "Memory", "Disk", "Placements"]],
-      ["Cost", "cost", ["Cost"]],
+      // A tenant's own host in its own pool: its host cost, unallocated included (no rate periods: those are the operators').
+      ["Cost", "cost", ["Host cost per hour"]],
       ["Runs", "runs", ["Recent runs on this host"]],
       ["Events", "events", ["Events"]],
     ] as const) {
@@ -287,4 +288,189 @@ test("an ended host's last stage is a point where it ended; a live host's is in 
   const live = hostStages(registered());
   expect(live.at(-1)).toMatchObject({ key: "registered", start: T0 + 10_000, end: null });
   expect(live.some((s) => s.point)).toBe(false);
+});
+
+const HOUR0 = "2026-09-01T12:00:00.000Z";
+const gp3 = { type: "gp3", sizeGiB: 100, iops: 3000, throughputMiBps: 125 };
+/** A host's cost as luxd answers an operator: an hour of each family, its rate periods per family. */
+const opCost: HostCost = {
+  hostId: "h1",
+  from: HOUR0,
+  to: "2026-09-01T13:00:00.000Z",
+  basis: "list",
+  hours: [
+    { hour: HOUR0, family: "block-storage", currency: "USD", allocated: "0.003", unallocated: "0.008" },
+    { hour: HOUR0, family: "compute", currency: "USD", allocated: "0.1", unallocated: "0.3" },
+  ],
+  rates: [
+    { family: "block-storage", from: HOUR0, perHour: "0.011452055", currency: "USD", source: "ec2-ebs-pricing", details: { volumes: [{ ...gp3, assumed: true }], prices: { gp3: { currency: "USD", perGBMonth: "0.0836" } }, hoursPerMonth: 730 } },
+    { family: "compute", from: HOUR0, perHour: "0.4", currency: "USD", source: "ec2-pricing" },
+  ],
+};
+/** The same host as luxd answers a tenant on a platform pool's host: no unallocated, no rates. */
+const runsOnlyCost: HostCost = { ...opCost, rates: undefined, hours: opCost.hours.map(({ unallocated: _, ...h }) => h) };
+/** A range with no hours. */
+const noHours: HostCost = { hostId: "h1", from: HOUR0, to: "2026-09-01T13:00:00.000Z", basis: "list", hours: [] };
+const ec2Host = (over: Partial<Host> = {}) => registered({ times: { provisionRequested: iso(0), registered: iso(10) } as Host["times"], volumes: [gp3], ...over });
+const tiles = (el: Element) => [...el.querySelectorAll(".host-cost .stat")].map((s) => [s.querySelector(".stat-label")?.textContent, s.querySelector(".stat-value")?.textContent]);
+
+test("host Cost tab, operator: tiles with unallocated, a four-series chart and rate periods per family with block storage's details", async () => {
+  const p = await render(ec2Host({ platform: true, tenant: "" }), "operator", "http://localhost/hosts/h1?tab=cost", opCost);
+  try {
+    await until(() => tiles(p.el).length === 5, "the five tiles");
+    expect(tiles(p.el)).toEqual([
+      ["Host cost (24h)", "$0.41"],
+      ["Compute", "$0.40"],
+      ["Block storage", "$0.01"],
+      ["Unallocated", "$0.31"],
+      ["Utilisation", "25%"],
+    ]);
+    expect(cardTitles(p.el)).toEqual(["Host cost per hour", "Rate periods"]);
+    const legend = [...p.el.querySelectorAll(".tschart-legend-label")].map((l) => l.textContent);
+    expect(legend).toEqual(["Compute · runs", "Compute · unallocated", "Block storage · runs", "Block storage · unallocated"]);
+    const rates = [...p.el.querySelectorAll(".card")].find((c) => c.querySelector(".card-title")?.textContent === "Rate periods")!;
+    const rows = [...rates.querySelectorAll("tbody tr")].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent));
+    expect(rows.map((r) => [r[0], r[2], r[3]])).toEqual([
+      ["Block storage", "$0.0115/h", "EBS list price100 GiB gp3 · 3000 IOPS · 125 MiB/s · assumed"],
+      ["Compute", "$0.40/h", "on-demand"],
+    ]);
+  } finally {
+    await p.done();
+  }
+});
+
+test("host Cost tab: a non-zero share under 1% reads <1%, never 0%", async () => {
+  const busy: HostCost = { ...opCost, hours: [{ hour: HOUR0, family: "compute", currency: "USD", allocated: "9.99", unallocated: "0.01" }] };
+  const p = await render(ec2Host({ platform: true, tenant: "" }), "operator", "http://localhost/hosts/h1?tab=cost", busy);
+  try {
+    await until(() => tiles(p.el).length === 5, "the five tiles");
+    const unit = (label: string) => [...p.el.querySelectorAll(".host-cost .stat")].find((s) => s.querySelector(".stat-label")?.textContent === label)!.querySelector(".stat-unit")!.textContent;
+    expect(unit("Unallocated")).toBe("<1% of host cost · no Run reserved it");
+    expect(tiles(p.el)[4]).toEqual(["Utilisation", "100%"]);
+  } finally {
+    await p.done();
+  }
+});
+
+test("host Cost tab, a tenant on its own host: its unallocated too, no rate periods", async () => {
+  const { rates: _, ...own } = opCost;
+  const p = await render(ec2Host(), "tenant", "http://localhost/hosts/h1?tab=cost", own);
+  try {
+    await until(() => tiles(p.el).length === 5, "the five tiles");
+    expect(tiles(p.el)[3]).toEqual(["Unallocated", "$0.31"]);
+    expect(cardTitles(p.el)).toEqual(["Host cost per hour"]);
+  } finally {
+    await p.done();
+  }
+});
+
+const costCalls = (calls: readonly string[]) => calls.filter((c) => c.startsWith("/v1/hosts/h1/cost"));
+
+test("host Cost tab with no hours, an operator narrowed to a tenant on a platform host: that tenant's view, no unallocated and no rate periods", async () => {
+  // luxd 403s a host's cost to a tenant other than its owner, so the narrowed operator gets a tenant's view of a
+  // platform host: a disabled Cost tab, ?tab=cost reading as Overview, and no /cost read.
+  const p = await render(ec2Host({ platform: true, tenant: "" }), "operator", "http://localhost/hosts/h1?tenant=acme&tab=cost", noHours);
+  try {
+    expect(tab(p.el, "Cost").disabled).toBe(true);
+    expect(tab(p.el, "Overview").getAttribute("aria-selected")).toBe("true");
+    expect(new URLSearchParams(location.search).get("tab")).toBe("cost");
+    expect(cardTitles(p.el)).toEqual(["Details", "Lifecycle", "Live placements"]);
+    expect(p.el.querySelector(".host-cost")).toBeNull();
+    expect(costCalls(p.fake.calls)).toEqual([]);
+  } finally {
+    await p.done();
+  }
+  // The same answer to an operator over every tenant: the host's own view, its rate periods card included.
+  const q = await render(ec2Host({ platform: true, tenant: "" }), "operator", "http://localhost/hosts/h1?tab=cost", noHours);
+  try {
+    await until(() => tiles(q.el).length === 5, "the five tiles");
+    expect(costCalls(q.fake.calls).map(query)).toEqual([{ since: "24h" }]);
+    expect(tiles(q.el)[3]![0]).toBe("Unallocated");
+    expect(cardTitles(q.el)).toEqual(["Host cost per hour", "Rate periods"]);
+  } finally {
+    await q.done();
+  }
+});
+
+test("host Cost tab, an operator narrowed to the tenant of its own host: the read carries ?tenant=, and luxd's answer without unallocated renders the tenant's view", async () => {
+  // luxd answers ?tenant=acme as acme: for a host in a platform pool, no unallocated and no rates.
+  const p = await render(ec2Host(), "operator", "http://localhost/hosts/h1?tab=cost", (path) => (query(path).tenant === "acme" ? runsOnlyCost : opCost));
+  try {
+    await until(() => tiles(p.el).length === 5, "the operator's five tiles");
+    expect(costCalls(p.fake.calls).map(query)).toEqual([{ since: "24h" }]);
+    expect(cardTitles(p.el)).toEqual(["Host cost per hour", "Rate periods"]);
+    // Narrowing refetches as the tenant.
+    await act(async () => setSearchParams({ tenant: "acme" }));
+    await until(() => tiles(p.el).length === 3, "the tenant's three tiles");
+    expect(costCalls(p.fake.calls).map(query).at(-1)).toEqual({ since: "24h", tenant: "acme" });
+    expect(tiles(p.el)).toEqual([
+      ["Charged to your Runs (24h)", "$0.10"],
+      ["Compute", "$0.10"],
+      ["Block storage", "<$0.01"],
+    ]);
+    expect(p.el.querySelector(".host-cost")!.textContent).not.toMatch(/nallocated|Utilisation/);
+    expect(cardTitles(p.el)).toEqual(["Charged to your Runs per hour"]);
+  } finally {
+    await p.done();
+  }
+});
+
+test("host Cost tab with no hours, an operator narrowed to the tenant of its own host: the read carries ?tenant=, and it reads as that tenant, no rate periods", async () => {
+  const p = await render(ec2Host(), "operator", "http://localhost/hosts/h1?tenant=acme&tab=cost", noHours);
+  try {
+    await until(() => tiles(p.el).length === 5, "the five tiles");
+    expect(costCalls(p.fake.calls).map(query)).toEqual([{ tenant: "acme", since: "24h" }]);
+    // What a tenant reads of its own host with no hours: unallocated (its own pool's), no rate periods.
+    expect(tiles(p.el).map(([l]) => l)).toEqual(["Host cost (24h)", "Compute", "Block storage", "Unallocated", "Utilisation"]);
+    expect(cardTitles(p.el)).toEqual(["Host cost per hour"]);
+  } finally {
+    await p.done();
+  }
+});
+
+test("host Cost tab, an operator over every tenant on a tenant's host: no ?tenant=, unallocated and rate periods", async () => {
+  const p = await render(ec2Host(), "operator", "http://localhost/hosts/h1?tab=cost", opCost);
+  try {
+    await until(() => tiles(p.el).length === 5, "the five tiles");
+    expect(costCalls(p.fake.calls).map(query)).toEqual([{ since: "24h" }]);
+    expect(tiles(p.el)[3]).toEqual(["Unallocated", "$0.31"]);
+    expect(cardTitles(p.el)).toEqual(["Host cost per hour", "Rate periods"]);
+  } finally {
+    await p.done();
+  }
+});
+
+test("host Cost tab, a tenant's host in a platform pool: luxd omits unallocated, so only what its Runs were charged", async () => {
+  const p = await render(ec2Host(), "tenant", "http://localhost/hosts/h1?tab=cost", runsOnlyCost);
+  try {
+    await until(() => tiles(p.el).length === 3, "the three tiles");
+    expect(tiles(p.el)).toEqual([
+      ["Charged to your Runs (24h)", "$0.10"],
+      ["Compute", "$0.10"],
+      ["Block storage", "<$0.01"],
+    ]);
+    expect(p.el.querySelector(".host-cost")!.textContent).not.toMatch(/nallocated|Utilisation/);
+    expect(cardTitles(p.el)).toEqual(["Charged to your Runs per hour"]);
+  } finally {
+    await p.done();
+  }
+});
+
+test("host Details: its volumes in words, marked assumed when an operator supplied them; not known yet on a launched host without them", async () => {
+  for (const [h, want] of [
+    [ec2Host(), "100 GiB gp3 · 3000 IOPS · 125 MiB/s"],
+    [ec2Host({ volumes: [{ ...gp3, assumed: true }] }), "100 GiB gp3 · 3000 IOPS · 125 MiB/sassumed"],
+    [ec2Host({ volumes: undefined }), "not known yet"],
+    [registered(), "–"],
+  ] as const) {
+    const p = await render(h, "operator", "http://localhost/hosts/h1");
+    try {
+      await until(() => p.el.textContent?.includes("Volumes") ?? false, "the Details card");
+      const details = [...p.el.querySelectorAll(".card")].find((c) => c.querySelector(".card-title")?.textContent === "Details")!;
+      const text = details.textContent!;
+      expect(text).toContain(`Volumes${want}`);
+    } finally {
+      await p.done();
+    }
+  }
 });

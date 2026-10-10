@@ -798,6 +798,10 @@ components:
       properties:
         currency:
           type: string
+        details:
+          additionalProperties: {}
+          description: "What the period was priced from: for block storage, the volumes, the unit prices per volume type (perGBMonth, perIOPSMonth, perGiBpsMonth) and hoursPerMonth."
+          type: object
         family:
           description: "A host-tied family: compute or block-storage."
           type: string
@@ -1524,12 +1528,10 @@ components:
             - array
             - "null"
         idle:
-          description: Host time no Run reserved, per family and currency. Not part of totals. Operators over every tenant, and the tenant owning the pool; never a platform pool's to a tenant.
+          description: "Host time no Run reserved, per family and currency. Not part of totals. Present (maybe empty) exactly when the reader may see the pool's host time: operators over every tenant, and the tenant owning the pool; never a platform pool's to a tenant."
           items:
             $ref: "#/components/schemas/PoolIdle"
-          type:
-            - array
-            - "null"
+          type: array
         interval:
           type: string
         poolId:
@@ -1590,9 +1592,18 @@ components:
           type: string
         hostName:
           type: string
+        hours:
+          description: "Per host: the hours of its billed window (provision request, or registration, to termination or now) within the range; the same on each of its family rows."
+          format: double
+          type: number
         unallocated:
           description: "Host time no Run reserved: idle."
           type: string
+        volumes:
+          description: "Per host: its recorded block-storage volumes, as GET /v1/hosts has them; absent while not known and for a host that registered itself."
+          items:
+            $ref: "#/components/schemas/HostVolume"
+          type: array
       type: object
     PoolIdle:
       additionalProperties: false

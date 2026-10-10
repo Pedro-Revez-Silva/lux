@@ -53,9 +53,14 @@ second currency. Its costs (`mockCosts.ts`) have labelled Runs (`app`,
 repository, phase), named, revoked and operator keys, a person, and Runs
 from before key tracking; its history and pool metrics (`mockHistory.ts`)
 follow `res`. Three platform hosts (the run's, a second ready one and an
-ended one) answer the Hosts list and each host's page: its history with a
-runner process, its hourly cost (unallocated and rate periods for an
-operator) and its events. For layout, states
+ended one) and acme's own `ci` pool host answer the Hosts list and each
+host's page: its history with a runner process, its volumes (one host's
+assumed, the ended one's not known), and its events. Host-tied cost
+(`mockHostCost.ts`) is shaped as luxd's: pool and host cost per family
+(compute and block storage), unallocated to an operator and to a tenant on
+its own pool only (with `MOCK_ROLE=tenant`, `default` hides it and `ci`
+shows it), rate periods with block storage's details, and the Run's cost
+with its placements. For layout, states
 and screenshots only: nothing it answers is real. `tests/console_mock/`
 drives it in a headless browser (`cd tests && uv run pytest console_mock`;
 `LUX_TEST_CHROME` names a Chrome when Playwright's own is not installed).

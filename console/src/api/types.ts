@@ -314,6 +314,25 @@ export interface CostLine {
   reportedAt: string;
 }
 
+/** One priced placement in a compute or block-storage line's details.placements (costqueue.go). */
+export interface CostPlacement {
+  epoch: number;
+  hostId: string;
+  from: string;
+  /** null while the placement is live. */
+  to: string | null;
+  cpus: number;
+  memory: number;
+  amount: string;
+  /** max(cpu share, memory share) of the host's capacity, 0..1. */
+  share: number;
+  ratePerHour: string;
+  finalized: boolean;
+  /** Compute lines only, when the host has them. */
+  market?: string;
+  zone?: string;
+}
+
 /** CostTotal: per currency in totals, per family and currency in byFamily. */
 export interface CostTotal {
   family?: string;
@@ -352,6 +371,8 @@ export interface CostSummaryRow {
   at?: string;
   /** With group: the group's value per group key ("(none)" when absent). */
   group?: Record<string, string>;
+  /** On unallocated rows: the host-tied family (compute or block-storage). */
+  family?: string;
   currency: string;
   amount: string;
   /** With top or runs, on totals: the Runs with cost (that rank counts, with top) under the first group's value. */
@@ -362,6 +383,8 @@ export interface CostSummaryRow {
 
 export interface HostAllocation {
   hostId: string;
+  /** A host-tied family: compute or block-storage. */
+  family: string;
   currency: string;
   allocated: string;
   unallocated: string;
@@ -374,9 +397,9 @@ export interface CostSummary {
   basis: string;
   totals: CostSummaryRow[];
   series?: CostSummaryRow[];
-  /** Operators without a tenant scope only. */
+  /** Unfiltered, per family: an operator over every tenant every host's; a tenant (or an operator narrowed to one) its own pools' hosts only. */
   unallocated?: CostSummaryRow[];
-  /** Operators without a tenant scope, grouped by host. */
+  /** Grouped by host, unfiltered, with the visibility of unallocated. */
   hosts?: HostAllocation[];
   /** Grouped by family: each family's displayName and colour hint, as in a Run's byFamily. */
   families?: CostFamily[];
@@ -434,19 +457,31 @@ export interface CostSummaryParams {
 
 export interface HostCostHour {
   hour: string;
+  /** A host-tied family: compute or block-storage (a string: a family luxd adds later still reads). */
+  family: string;
   currency: string;
   allocated: string;
-  /** Operators only. */
+  /** Operators, and the tenant owning the host's pool; absent for a tenant on a platform pool's host. */
   unallocated?: string;
 }
 
 export interface HostCostRate {
+  family: string;
   from: string;
   to?: string;
   perHour: string;
   currency: string;
-  /** static, or the provider's price source (e.g. ec2-pricing, ec2-spot-history). */
+  /** static, or the provider's price source (e.g. ec2-pricing, ec2-spot-history, ec2-ebs-pricing). */
   source: string;
+  /** Block storage: the volumes and unit prices the period was priced from. */
+  details?: BlockStorageRateDetails;
+}
+
+export interface BlockStorageRateDetails {
+  volumes?: HostVolume[];
+  /** Per volume type. */
+  prices?: Record<string, { currency: string; perGBMonth: string; perIOPSMonth?: string; perGiBpsMonth?: string }>;
+  hoursPerMonth?: number;
 }
 
 /** GET /v1/hosts/{id}/cost. */
@@ -555,6 +590,8 @@ export interface Host {
   instanceType?: string;
   zone?: string;
   market?: "on-demand" | "spot";
+  /** The block-storage volumes deleted with it; absent while not known, and for a host that registered itself. */
+  volumes?: HostVolume[];
   lastHeartbeat?: string;
   times: Record<HostTimeKey, string | null>;
   /** How luxd's launch of it went (provisioned hosts); failed: the provider refused and no instance ran. */
@@ -567,6 +604,16 @@ export interface HostLaunch {
   requestedAt?: string;
   finishedAt?: string;
   error?: string;
+}
+
+/** A provider volume deleted with its host (HostVolume in internal/server). */
+export interface HostVolume {
+  type: string;
+  sizeGiB: number;
+  iops?: number;
+  throughputMiBps?: number;
+  /** Supplied by an operator (luxd admin costs backfill-volumes), not read from the provider. */
+  assumed?: boolean;
 }
 
 export interface Pool {
@@ -883,11 +930,22 @@ export interface PoolHostTime {
   at?: string;
   hostId?: string;
   hostName?: string;
-  /** compute or block-storage. */
-  family?: string;
+  /** A host-tied family: compute or block-storage. */
+  family: string;
   currency: string;
   allocated: string;
   unallocated: string;
+  /** Per host: its billed hours within the range (the same on each family row). */
+  hours?: number;
+  /** Per host: its recorded volumes; absent while not known and for a static host. */
+  volumes?: HostVolume[];
+}
+
+/** A pool's unallocated host time of one family and currency. */
+export interface PoolIdle {
+  family: string;
+  currency: string;
+  amount: string;
 }
 
 export interface PoolCost {
@@ -896,11 +954,13 @@ export interface PoolCost {
   to: string;
   basis: string;
   interval: "hour" | "day";
+  /** The Runs' cost of the pool's machines (compute and block storage), per currency. */
   totals: MoneyTotal[];
   series: { at: string; family: string; currency: string; amount: string }[];
   families?: { family: string; displayName?: string; color?: string }[];
   topRuns: { id: string; name?: string; currency: string; amount: string; estimate: boolean }[];
-  idle?: MoneyTotal[];
+  /** Host time per family: present (maybe []) for operators over every tenant and the pool's owner tenant; absent otherwise (never a platform pool's to a tenant). */
+  idle?: PoolIdle[];
   hostSeries?: PoolHostTime[];
   hosts?: PoolHostTime[];
 }

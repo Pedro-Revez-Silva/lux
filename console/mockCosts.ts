@@ -1,6 +1,7 @@
 // GET /v1/costs and /v1/costs/labels for the mock: hourly cost rows for the
-// last 30 days, of a few Runs across two tenants, in two families (compute,
-// and AI models from a plugin), with a quiet night with no rows (gaps, not
+// last 30 days, of a few Runs across two tenants, in three families
+// (compute, block storage beside it, and AI models from a plugin), with a
+// quiet night with no rows (gaps, not
 // zeros) and an AI spike two hours ago. Runs carry labels (app=jervasion or
 // dude, one without app; repository and phase labels) and who submitted
 // them (two named keys, a revoked one, an operator's, a person, and Runs
@@ -60,7 +61,7 @@ export function submittedBy(by: string | null, tenant: string | null) {
 }
 
 /** A deterministic 0..1 from a seed: the same data on every reload. */
-function noise(seed: number): number {
+export function noise(seed: number): number {
   const x = Math.sin(seed * 12.9898) * 43758.5453;
   return x - Math.floor(x);
 }
@@ -85,6 +86,8 @@ function generate(): { rows: Row[]; unallocated: Map<number, Map<string, number>
         if (noise(seed) > 0.45) return;
         const compute = Math.round((20_000 + noise(seed + 1) * 60_000) * r.compute * scale);
         rows.push({ hour, tenant: r.tenant, run: r.id, family: "compute", currency, micros: compute });
+        // The host's disk, shared by the same reservation: about a twelfth of the machine.
+        rows.push({ hour, tenant: r.tenant, run: r.id, family: "block-storage", currency, micros: Math.round(compute / 12) });
         if (r.ai > 0) {
           let ai = Math.round((40_000 + noise(seed + 2) * 400_000) * r.ai * scale);
           if (h === 2 && ri === 0) ai = Math.round(34_812_345 * scale);
@@ -107,7 +110,8 @@ const money = (micros: number) => {
   return `${neg ? "-" : ""}${s.slice(0, -6)}.${s.slice(-6)}`.replace(/\.?0+$/, "");
 };
 
-const SINCE: Record<string, number> = { "1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720 };
+/** ?since= in hours. */
+export const SINCE: Record<string, number> = { "1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720 };
 const LABEL_KEY = /^[A-Za-z0-9]([A-Za-z0-9._/-]{0,62}[A-Za-z0-9])?$/;
 
 type Bad = { error: { code: string; message: string } };
@@ -151,7 +155,7 @@ export function costSummary(u: URL, tenantOf: string | null = null): { status: n
     if (g === "tenant") return r.tenant;
     if (g === "run") return r.run;
     if (g === "family") return r.family;
-    if (g === "pool") return r.family === "compute" ? run.pool : "(none)";
+    if (g === "pool") return r.family === "compute" || r.family === "block-storage" ? run.pool : "(none)";
     if (g === "key") return run.by ?? "(none)";
     if (g.startsWith("label:")) return run.labels[g.slice("label:".length)] ?? "(none)";
     return "(none)";
@@ -205,7 +209,7 @@ export function costSummary(u: URL, tenantOf: string | null = null): { status: n
   if (Object.keys(otherCount).length) body.otherCount = otherCount;
   if (interval) body.series = aggregate(true);
   const named = (g: string) => [...new Set(totals.filter((t) => !(t.other && groups[0] === g)).map((t) => t.group![g]!))];
-  if (groups.includes("family")) body.families = named("family").sort().map((f) => (f === "ai" ? { family: f, displayName: "AI models", color: "violet" } : f === "compute" ? { family: f, displayName: "Compute" } : { family: f }));
+  if (groups.includes("family")) body.families = named("family").sort().map((f) => (f === "ai" ? { family: f, displayName: "AI models", color: "violet" } : f === "compute" ? { family: f, displayName: "Compute" } : f === "block-storage" ? { family: f, displayName: "Block storage" } : { family: f }));
   if (groups.includes("run")) body.runs = named("run").sort().map((id) => ({ id, name: runInfo(id)?.name ?? "", ...(Object.keys(runInfo(id)?.labels ?? {}).length ? { labels: runInfo(id)!.labels } : {}) }));
   if (groups.includes("key")) {
     body.keys = named("key")
@@ -218,13 +222,23 @@ export function costSummary(u: URL, tenantOf: string | null = null): { status: n
         return { id, ...(named ? { name: k.name } : {}), ...(k.tenant == null ? { operator: true } : {}), ...(k.revoked ? { revoked: true } : {}) };
       });
   }
-  if (!tenant && !s.filtered) {
+  // Unfiltered: host time no Run reserved, per family. An operator over every
+  // tenant: every host's; a tenant (or an operator narrowed to one): its own
+  // pools' hosts only (acme has one, about a fifth of it), never a platform pool's.
+  if (!s.filtered) {
+    const share = !tenant ? 1 : OWN_POOL_SHARE[tenant] ?? 0;
     const idle = new Map<string, number>();
     for (const [h, by] of s.unallocated) if (h >= s.from && h < s.to) for (const [c, v] of by) idle.set(c, (idle.get(c) ?? 0) + v);
-    body.unallocated = [...idle].sort(([a], [b]) => a.localeCompare(b)).map(([currency, v]) => ({ currency, amount: money(v) }));
+    const fams = (q.get("family") ? [q.get("family")!] : ["block-storage", "compute"]).filter((f) => f !== q.get("nofamily"));
+    body.unallocated = share === 0 ? [] : [...idle].sort(([a], [b]) => a.localeCompare(b)).flatMap(([currency, v]) =>
+      fams.filter((f) => f === "compute" || f === "block-storage").map((family) => ({ family, currency, amount: money(Math.round(v * share * (family === "compute" ? 11 / 12 : 1 / 12))) })),
+    );
   }
   return { status: 200, body };
 }
+
+/** The part of the hosts' unallocated time that is in each tenant's own pools. */
+const OWN_POOL_SHARE: Record<string, number> = { ten_acme: 0.2 };
 
 /** GET /v1/costs/labels: the label keys on Runs with cost in range, with their Runs, most first. */
 export function costLabels(u: URL, tenantOf: string | null = null): { status: number; body: unknown } {

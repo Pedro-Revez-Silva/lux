@@ -70,7 +70,7 @@ export const api = {
   host: (id: string, signal?: Sig) => request<Host>(`/hosts/${enc(id)}`, { signal }),
   hostSummary: (tenant: Scope, signal?: Sig) => request<HostSummary>("/hosts/summary", { tenant, signal }),
   hostHistory: (id: string, since: string, signal?: Sig, res?: number) => request<History>(`/hosts/${enc(id)}/history`, { query: { since, res }, signal }),
-  hostCost: (id: string, since: string, signal?: Sig) => request<HostCost>(`/hosts/${enc(id)}/cost`, { query: { since }, signal }),
+  hostCost: (id: string, since: string, tenant: Scope, signal?: Sig) => request<HostCost>(`/hosts/${enc(id)}/cost`, { tenant, query: { since }, signal }),
   drainHost: (id: string, forceEvict = false) => request<{ draining: boolean; host: string }>(`/hosts/${enc(id)}/drain`, { method: "POST", body: { forceEvict } }),
 
   /** A page of a host's events in a sort's order. */

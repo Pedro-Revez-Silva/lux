@@ -147,9 +147,12 @@ the right grid.
 Page widths (`src/layout.css`): `.page` (detail), `.page-list` (tables), `.page-wide`
 (dashboards). Grids: `.grid-stats` (2 / 3 / 5 by container width: under
 720px, from 720px, from 1000px; a row of exactly four goes 2 / 4, one of
-exactly six goes 3 / 6 from 1400px, so no row leaves a gap or an orphan),
-`.grid-charts` (1 / 2 / 3 / 4 by container width), `.grid-2`, `.grid-3`
-(collapse to one column under 900px of content).
+exactly three stays 3, one of exactly six goes 3 / 6 from 1400px, so no row
+leaves a gap or an orphan; a `KpiStrip` of exactly five goes 2 / 3 + 2 on
+six columns from 760px of its container / 5 across from 960px, never 4 + 1),
+`.grid-charts` (1 / 2 / 3 / 4 by container width), `.grid-2`, `.grid-3`,
+`.grid-2-1` (a main card two thirds wide and one beside it: a chart and its
+summary) (collapse to one column under 900px of content).
 
 Tables (`Table`): every column that has a `sortValue` (client sort) or
 `sortable: true` (server sort) sorts. Its header is focusable (Enter or
@@ -373,9 +376,9 @@ Overview's Cost panel is composed of:
 
 | Export | What |
 | --- | --- |
-| `KpiStrip`, `Kpi({label, value, sub?, loading?, muted?})`, `KpiSub` | figures across the top of a card, the first wider; two across in a narrow container, four from 760px; a muted Kpi is a figure the view hides but still states |
+| `KpiStrip`, `Kpi({label, value, sub?, loading?, muted?})`, `KpiSub` | figures across the top of a card, the first wider; two across in a narrow container, four from 760px, and a strip of five (Total, Compute, Block storage, External, peak) 3 + 2 from 760px and five across from 960px; a muted Kpi is a figure the view hides but still states |
 | `SplitBar({parts, whole, currency, label?, scale?})` | parts of one amount as one thin bar, each part its share of `whole`; a `faint` part is hidden by the view, drawn, never dropped; amounts in the title; `scale` sets its length against the largest row |
-| `BreakdownTable({rows, lead, onRowClick?})` | cost by one dimension: swatch and name (mono for ids and label values, `quiet` for the value-less row, a `pill` such as "revoked"), Runs, Compute, External, Total, Share per currency; a missing part is `–`, not $0 |
+| `BreakdownTable({rows, lead, onRowClick?, blockStorage?})` | cost by one dimension: swatch and name (mono for ids and label values, `quiet` for the value-less row, a `pill` such as "revoked"), Runs, Compute, External, Total, Share per currency; `blockStorage` adds a Block storage column between Compute and External (lux's disk family, apart from both); a missing part is `–`, not $0; a non-zero share under 0.5% reads `<1%` |
 | `LabelChips({labels, max?, first?})` | a Run's labels as `key=value` chips, the `first` keys first, `max` shown and the rest counted (`+2`, their text in the title) |
 | `InfoStrip({tone, children})` | a one-line notice inside a card (why some figures read as they do) |
 | `FilterBar({add, note?})`, `FilterChip({name, op, value, onRemove})` | the active filters as removable chips, the add control, and what the filters reach |
@@ -390,6 +393,7 @@ Parts of a whole, ratios and page notes (gallery section "parts"):
 | `Meter({value, color?, decimals?})` | a ratio in a table cell: a 46px track with its fill (default `--chart-1`) and the percentage to its right in mono. The fill clamps to 0..1, the text keeps the true figure (`112%`); null or not finite is an en dash; a non-zero ratio that rounds to zero reads `<1%` (`meterFill`, `meterText`) |
 | `Callout({children, icon?})` | the page's one explanatory sentence ("Pool cost is the machines only…"): a soft info-tinted box, `--text-sm`, between cards. Not a toast, an error strip or an `InfoStrip` (which qualifies figures inside one card) |
 | `TimeSeriesChart` series `faded` | a lighter, opaque shade of the series' colour (`fadedColor`: mixed toward `--bg-surface`, keeping `FADE_KEEP`, 42%), the same in the plot, the legend and the tooltip: one family split into "charged to runs" and "not" (gallery: costs, "Host cost per day") |
+| `fadedCss(color)` | the same faded shade for the DOM: `color-mix()` of a token toward `--bg-surface`, keeping `FADE_KEEP`, so a `PartBar` segment or swatch under a chart matches its faded series (gallery: parts, "Charged to runs vs unallocated") |
 | `TimeSeriesChart` day bars | bars a day or wider put one x tick under each bar (`barTicks`), every k-th when they do not fit. They are UTC-day buckets (cost): the tick names the UTC date (`timeTickText`) and the tooltip the UTC day ("2026-10-09 UTC", `bucketText`), whatever the browser's zone |
 
 A cost family is always named with its `ColorKey` square: rows

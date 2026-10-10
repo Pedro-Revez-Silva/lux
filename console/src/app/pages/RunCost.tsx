@@ -1,24 +1,91 @@
 import { useMemo } from "react";
-import { Card, ColorKey, compareMoney, CostStatusBadge, EmptyState, familyColor, familyDisplay, formatDuration, formatTimestamp, KeyValue, ListPriceNote, Money, MoneyList, Table, Tooltip, type Column, RelativeTime } from "@lux/design-system";
+import { Card, ColorKey, compareMoney, CostStatusBadge, EmptyState, familyColor, familyDisplay, formatDuration, formatTimestamp, KeyValue, ListPriceNote, meterText, Money, MoneyList, Table, Tooltip, type Column, RelativeTime } from "@lux/design-system";
 import { api, isRunActive, useQuery, type CostLine, type CostTotal, type Run, type RunCost as RunCostData } from "../../api/index.ts";
-import { ErrorBlock, ErrorStrip } from "./common.tsx";
+import { DASH, ErrorBlock, ErrorStrip, HostLink } from "./common.tsx";
+import { placementRows, placementTotals, type PlacementRow } from "./hostCostView.ts";
 
-/** The Run's cost: totals per currency, a row per family, and its lines by item. */
+/** The Run's cost: totals per currency, a row per family, its lines by item, and what each placement paid for its host. */
 export function RunCost({ run }: { run: Run }) {
   const q = useQuery(`run-cost:${run.id}`, (s) => api.runCost(run.id, s), { interval: isRunActive(run.state) ? 15_000 : 60_000 });
   const c = q.data;
   if (q.error && !c) return <ErrorBlock error={q.error} onRetry={q.refetch} />;
   return (
-    <Card title="Cost" subtitle={c ? subtitle(c) : undefined} actions={<ListPriceNote />} className="run-cost">
-      <ErrorStrip error={q.error} />
-      {!c ? (
-        <EmptyState compact title="Loading cost…" />
-      ) : c.status === "pending" || c.lines.length === 0 ? (
-        <EmptyState compact title="No cost reported yet" description="Cost is worked out while a Run runs, every couple of minutes, and after it ends. Until the first report there is no figure, not a zero." />
-      ) : (
-        <CostBody cost={c} />
-      )}
+    <>
+      <Card title="Cost" subtitle={c ? subtitle(c) : undefined} actions={<ListPriceNote />} className="run-cost">
+        <ErrorStrip error={q.error} />
+        {!c ? (
+          <EmptyState compact title="Loading cost…" />
+        ) : c.status === "pending" || c.lines.length === 0 ? (
+          <EmptyState compact title="No cost reported yet" description="Cost is worked out while a Run runs, every couple of minutes, and after it ends. Until the first report there is no figure, not a zero." />
+        ) : (
+          <CostBody cost={c} />
+        )}
+      </Card>
+      {c && c.lines.length > 0 && <RunPlacementsCost run={run} lines={c.lines} />}
+    </>
+  );
+}
+
+/**
+ * What each placement paid for its host, from the compute and block-storage
+ * lines' details: one row per placement, Compute and Block storage apart. A
+ * placement without block storage (a static host, or volumes not known) has
+ * an en dash there, not 0.
+ */
+function RunPlacementsCost({ run, lines }: { run: Run; lines: CostLine[] }) {
+  const rows = useMemo(() => placementRows(lines), [lines]);
+  const totals = useMemo(() => placementTotals(rows), [rows]);
+  const names = useMemo(() => new Map((run.placements ?? []).map((p) => [p.host, p.hostName])), [run.placements]);
+  const multi = totals.length > 1;
+  const cols = useMemo<Column<PlacementRow>[]>(
+    () => [
+      { key: "epoch", header: "Epoch", cell: (p) => p.epoch, sortValue: (p) => p.epoch, mono: true, width: 72 },
+      { key: "host", header: "Host", cell: (p) => <HostLink id={p.hostId} name={names.get(p.hostId)} />, sortValue: (p) => names.get(p.hostId) ?? p.hostId, lead: true },
+      { key: "window", header: "Window", cell: (p) => <PlacementWindow from={p.from} to={p.to} />, sortValue: (p) => Date.parse(p.from), sortKind: "time", width: 190 },
+      { key: "share", header: "Share", cell: (p) => (p.share == null ? DASH : meterText(p.share)), sortValue: (p) => p.share, align: "right", mono: true, width: 72 },
+      ...(multi ? [{ key: "currency", header: "Currency", cell: (p: PlacementRow) => p.currency, width: 80 }] : []),
+      { key: "compute", header: "Compute", cell: (p) => (p.compute == null ? DASH : <Money amount={p.compute} currency={p.currency} />), sortValue: (p) => (p.compute == null ? null : Number(p.compute)), align: "right", mono: true, width: 110 },
+      { key: "bs", header: "Block storage", cell: (p) => (p.blockStorage == null ? DASH : <Money amount={p.blockStorage} currency={p.currency} />), sortValue: (p) => (p.blockStorage == null ? null : Number(p.blockStorage)), align: "right", mono: true, width: 120 },
+      { key: "total", header: "Total", cell: (p) => <Money amount={p.total} currency={p.currency} />, sortValue: (p) => Number(p.total), align: "right", mono: true, width: 110 },
+    ],
+    [names, multi],
+  );
+  if (rows.length === 0) return null;
+  return (
+    <Card title="Placements" subtitle="each placement pays its share of the host — share = max(CPU share, memory share) of the machine — for both the instance and its disk" flush className="run-placements-cost">
+      <Table
+        columns={cols}
+        rows={rows}
+        rowKey={(p) => `${p.epoch}:${p.hostId}:${p.currency}`}
+        defaultSort={{ key: "epoch", dir: "asc" }}
+        dense
+        footer={
+          <div className="placements-total">
+            {totals.map((t) => (
+              <span key={t.currency} className="row" data-placements-total={t.currency}>
+                <span className="secondary">{multi ? `Total ${t.currency}` : "Total"}</span>
+                <span className="mono">Compute {t.compute == null ? "–" : <Money amount={t.compute} currency={t.currency} />}</span>
+                <span className="mono">Block storage {t.blockStorage == null ? "–" : <Money amount={t.blockStorage} currency={t.currency} />}</span>
+                <strong className="mono">
+                  <Money amount={t.total} currency={t.currency} />
+                </strong>
+              </span>
+            ))}
+          </div>
+        }
+      />
     </Card>
+  );
+}
+
+function PlacementWindow({ from, to }: { from: string; to: string | null }) {
+  const clock = (t: string) => formatTimestamp(t, { seconds: false }).slice(11);
+  return (
+    <Tooltip content={`${formatTimestamp(from)} – ${to ? formatTimestamp(to) : "now"}`}>
+      <span className="mono">
+        {clock(from)} → {to ? clock(to) : "now"}
+      </span>
+    </Tooltip>
   );
 }
 

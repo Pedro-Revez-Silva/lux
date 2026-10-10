@@ -26,8 +26,8 @@
   min-width: 0;
 }
 /* Stat tiles: 2, 3, then 5 across. A row of exactly four fills the row at
-   four; one of exactly six goes 3 + 3, and 6 across on the widest content,
-   so neither leaves a gap or one orphan. */
+   four; one of exactly three stays at three; one of exactly six goes 3 + 3,
+   and 6 across on the widest content, so none leaves a gap or one orphan. */
 .grid-stats {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -46,6 +46,9 @@
   .grid-stats:has(> :nth-child(4):last-child) {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
+  .grid-stats:has(> :nth-child(3):last-child) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 @container content (min-width: 1400px) {
   .grid-stats:has(> :nth-child(6):last-child) {
@@ -57,6 +60,11 @@
 }
 .grid-3 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+/* A main card and a narrower one beside it (a chart and its summary); the
+   narrow one keeps room for a four-column table. */
+.grid-2-1 {
+  grid-template-columns: minmax(0, 2fr) minmax(400px, 1fr);
 }
 /* Chart cards: one column, then 2, 3 and 4 as their container widens
    (the content area, or the overview's chart column beside the feed). */
@@ -80,7 +88,8 @@
 }
 @container content (max-width: 900px) {
   .grid-2,
-  .grid-3 {
+  .grid-3,
+  .grid-2-1 {
     grid-template-columns: minmax(0, 1fr);
   }
 }

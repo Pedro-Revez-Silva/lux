@@ -849,6 +849,23 @@
   gap: var(--sp-2) var(--sp-6);
   font-size: var(--text-xs);
 }
+/* Under a Run's placements: the sums per currency, right-aligned like the figures above. */
+.placements-total {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-4) var(--pad-cell);
+  border-top: 1px solid var(--border-soft);
+  font-size: var(--text-sm);
+}
+.placements-total .row {
+  gap: var(--sp-6);
+}
+/* Under the flush Who paid table: each family's charged-vs-unallocated bar, at the card's padding. */
+.who-paid-split {
+  padding: var(--pad-card);
+}
 .run-facts {
   padding: var(--sp-2) var(--pad-card);
   background: var(--bg-surface);

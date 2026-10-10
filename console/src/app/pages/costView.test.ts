@@ -33,6 +33,7 @@ import {
   shownTotals,
   sideTotals,
   topSplit,
+  unallocatedSides,
 } from "./costView.ts";
 
 const fam = (family: string, currency: string, amount: string, at?: string): CostSummaryRow => ({ group: { family }, currency, amount, ...(at ? { at } : {}) });
@@ -60,16 +61,50 @@ test("split: Compute is the compute family, External every other, per currency a
     { currency: "USD", amount: "56.13" },
   ]);
   expect(sideTotals(ROWS)).toEqual([
-    { currency: "EUR", all: "2.5", compute: "2", external: "0.5" },
-    { currency: "USD", all: "60", compute: "3.87", external: "56.13" },
+    { currency: "EUR", all: "2.5", compute: "2", blockStorage: null, external: "0.5" },
+    { currency: "USD", all: "60", compute: "3.87", blockStorage: null, external: "56.13" },
   ]);
+});
+
+test("split: Block storage is a side of its own, neither compute nor what plugins report; it counts under External's filter", () => {
+  const rows = [fam("compute", "USD", "6.61"), fam("block-storage", "USD", "0.71"), fam("ai", "USD", "625.76")];
+  expect(sideTotals(rows)).toEqual([{ currency: "USD", all: "633.08", compute: "6.61", blockStorage: "0.71", external: "625.76" }]);
+  // Show is luxd's nofamily=compute: block storage is in External's total, never Compute's.
+  expect(shownTotals(rows, "compute")).toEqual([{ currency: "USD", amount: "6.61" }]);
+  expect(shownTotals(rows, "external")).toEqual([{ currency: "USD", amount: "626.47" }]);
+  expect(familyRows(rows, "all").map((r) => r.family)).toEqual(["ai", "compute", "block-storage"]);
+  // Charts stack compute, then block storage, then the rest; block storage keeps its fixed slot and name.
+  const [c] = familyCharts({ from: T(0), to: T(1), basis: "list", totals: [], series: rows.map((r) => ({ ...r, at: T(0) })), families: [{ family: "block-storage", displayName: "Block storage" }] }, "hour", "all");
+  expect(c!.series).toEqual([
+    { label: "Compute", color: "var(--chart-1)" },
+    { label: "Block storage", color: "var(--chart-3)" },
+    { label: "ai", color: expect.any(String) },
+  ]);
+});
+
+test("unallocatedSides: luxd's unallocated rows as Compute and Block storage, per currency; a row without family is compute", () => {
+  expect(
+    unallocatedSides([
+      { family: "block-storage", currency: "USD", amount: "0.67" },
+      { family: "compute", currency: "USD", amount: "6.27" },
+      { family: "compute", currency: "EUR", amount: "1" },
+      { currency: "USD", amount: "0.01" },
+    ]),
+  ).toEqual({
+    compute: [
+      { currency: "EUR", amount: "1" },
+      { currency: "USD", amount: "6.28" },
+    ],
+    blockStorage: [{ currency: "USD", amount: "0.67" }],
+  });
+  expect(unallocatedSides(undefined)).toEqual({ compute: [], blockStorage: [] });
 });
 
 test("split: a side with no cost is no figure, not zero; a currency with no shown cost is absent", () => {
   const rows = [fam("ai", "USD", "1"), fam("compute", "EUR", "2")];
   expect(sideTotals(rows)).toEqual([
-    { currency: "EUR", all: "2", compute: "2", external: null },
-    { currency: "USD", all: "1", compute: null, external: "1" },
+    { currency: "EUR", all: "2", compute: "2", blockStorage: null, external: null },
+    { currency: "USD", all: "1", compute: null, blockStorage: null, external: "1" },
   ]);
   expect(shownTotals(rows, "compute")).toEqual([{ currency: "EUR", amount: "2" }]);
 });

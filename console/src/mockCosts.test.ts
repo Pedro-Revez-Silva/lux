@@ -37,6 +37,6 @@ test("mock /v1/costs top=N: the fold is other: true, otherCount counts it, nothi
 
 test("mock /v1/costs runs=true: Runs per family without a fold", () => {
   const fam = ask("group=family&runs=true");
-  expect(Object.fromEntries(fam.totals.map((r) => [r.group.family, r.runs]))).toEqual({ ai: 7, compute: 8 });
+  expect(Object.fromEntries(fam.totals.map((r) => [r.group.family, r.runs]))).toEqual({ ai: 7, "block-storage": 8, compute: 8 });
   expect(ask("group=family").totals.every((r) => r.runs === undefined)).toBe(true);
 });
