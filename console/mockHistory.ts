@@ -127,3 +127,45 @@ export function poolCost(u: URL, name: string): unknown {
     topRuns: [],
   };
 }
+
+/** GET /v1/hosts/{id}/history: one 16-core host's usage, and its runner process. */
+export function hostHistory(u: URL): unknown {
+  const { from, to, res } = range(u);
+  const started = new Date((Math.floor(Date.now() / 1000) - 3 * 86400) * 1000).toISOString();
+  const samples = axis(from, to, res).map((t) => {
+    const d = wave(t, 86400);
+    const placements = Math.round(1 + d * 4);
+    return {
+      at: new Date(t * 1000).toISOString(),
+      cpuCores: placements * 1.6 + wave(t, 900) * 0.8,
+      memoryBytes: placements * 5 * 1024 ** 3,
+      diskBytes: (60 + d * 40) * 1024 ** 3,
+      placements,
+      allocCpus: placements * 2,
+      allocMemory: placements * 6 * 1024 ** 3,
+      runner: { started, cpuCores: 0.05 + wave(t, 600) * 0.04, rssBytes: 90 * 1024 ** 2, peakRssBytes: 110 * 1024 ** 2, heapBytes: 40 * 1024 ** 2, goroutines: 60 + Math.round(d * 20) },
+    };
+  });
+  return { from: new Date(from * 1000).toISOString(), to: new Date(to * 1000).toISOString(), resolution: res, samples };
+}
+
+/** GET /v1/hosts/{id}/cost: per hour at $0.384, allocated by its placements, the rest (operators) unallocated. */
+export function hostCost(u: URL, id: string, operator: boolean): unknown {
+  const span = SINCE[u.searchParams.get("since") ?? "24h"] ?? 86400;
+  const to = Math.ceil(Date.now() / 1000 / 3600) * 3600;
+  const from = to - span;
+  const hours = [];
+  for (let t = from; t < to; t += 3600) {
+    const used = 0.2 + wave(t, 86400) * 0.6;
+    hours.push({ hour: new Date(t * 1000).toISOString(), currency: "USD", allocated: (0.384 * used).toFixed(6), ...(operator ? { unallocated: (0.384 * (1 - used)).toFixed(6) } : {}) });
+  }
+  const iso = (t: number) => new Date(t * 1000).toISOString();
+  return {
+    hostId: id,
+    from: iso(from),
+    to: iso(to),
+    basis: "list",
+    hours,
+    ...(operator ? { rates: [{ from: iso(from), perHour: "0.384", currency: "USD", source: "ec2-pricing" }] } : {}),
+  };
+}

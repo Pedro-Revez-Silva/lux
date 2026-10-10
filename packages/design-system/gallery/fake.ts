@@ -360,6 +360,24 @@ export function fakeCostSeries(hours = 24): { x: number[]; compute: number[]; ai
   return { x, compute, ai, video, allocated, unallocated };
 }
 
+/** A pool's host cost per day, compute and block storage, each split into what runs reserved and what they did not. */
+export function fakePoolDaily(days = 8): { x: number[]; computeRuns: number[]; computeIdle: number[]; storageRuns: number[]; storageIdle: number[] } {
+  const r = rng(23);
+  const t0 = Math.floor(NOW / 1000 / 86400) * 86400 - (days - 1) * 86400;
+  const out = { x: [] as number[], computeRuns: [] as number[], computeIdle: [] as number[], storageRuns: [] as number[], storageIdle: [] as number[] };
+  for (let i = 0; i < days; i++) {
+    const busy = 0.15 + r() * 0.85;
+    const hostHours = 4 + busy * 24;
+    const used = 0.3 + r() * 0.5;
+    out.x.push(t0 + i * 86400);
+    out.computeRuns.push(hostHours * 0.107 * used);
+    out.computeIdle.push(hostHours * 0.107 * (1 - used));
+    out.storageRuns.push(hostHours * 0.0115 * used);
+    out.storageIdle.push(hostHours * 0.0115 * (1 - used));
+  }
+  return out;
+}
+
 export interface FakeCostLine {
   source: string;
   family: string;

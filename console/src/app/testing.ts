@@ -1,5 +1,19 @@
 // Test helpers: a stubbed fetch that answers by path, with a /v1/events
-// stream that goes live at once and stays open.
+// stream that goes live at once and stays open; a bounded wait.
+import { act } from "react";
+
+/**
+ * Waits, letting React settle between checks, until done() is true; fails
+ * naming what after timeoutMs.
+ */
+export async function until(done: () => boolean, what: string, timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!done()) {
+    if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`);
+    await act(() => new Promise<void>((r) => setTimeout(r, 5)));
+  }
+}
+
 export interface FakeApi {
   /** The paths (with query) of every request, in order. */
   calls: string[];

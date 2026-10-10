@@ -1,6 +1,7 @@
 // Barrel for the design system.
 export * from "./ansi.ts";
 export * from "./Button.tsx";
+export * from "./Callout.tsx";
 export * from "./Badge.tsx";
 export * from "./Card.tsx";
 export * from "./ConfirmDialog.tsx";
@@ -15,8 +16,10 @@ export * from "./IdleCountdown.tsx";
 export * from "./KeyValue.tsx";
 export * from "./LogView.tsx";
 export * from "./Logo.tsx";
+export * from "./Meter.tsx";
 export * from "./PageHeader.tsx";
 export * from "./Pagination.tsx";
+export * from "./PartBar.tsx";
 export * from "./RelativeTime.tsx";
 export * from "./SegmentedControl.tsx";
 export * from "./Select.tsx";

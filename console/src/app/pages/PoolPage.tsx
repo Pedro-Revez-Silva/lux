@@ -88,7 +88,6 @@ export function PoolPage({ name }: { name: string }) {
         }
         actions={
           <Tabs
-            size="sm"
             value={tab}
             onChange={(t) => setSearchParams({ tab: t === "metrics" ? null : t })}
             items={[

@@ -2,8 +2,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { measuredAxisSize } from "./axisSize.ts";
-import { barRange, barSegments, barStep, bucketText, stackData, stackTotal, type BarSegment } from "./chartData.ts";
-import { formatClock, formatTimestamp, formatUnit, type Unit } from "./format.ts";
+import { barRange, barSegments, barStep, barTicks, bucketText, chartColors, stackData, stackTotal, timeTickText, type BarSegment } from "./chartData.ts";
+import { formatTimestamp, formatUnit, type Unit } from "./format.ts";
 import { niceScale, niceSplits } from "./scale.ts";
 import { cssVar, useDensity, useTheme } from "./theme.ts";
 
@@ -17,6 +17,12 @@ export interface Series {
   step?: boolean;
   /** Dashed, for limits/thresholds. */
   dashed?: boolean;
+  /**
+   * A lighter shade of its colour, the same in the plot, legend and
+   * tooltip: the same family as a neighbour, set apart ("compute, not
+   * charged to runs" beside "compute, runs").
+   */
+  faded?: boolean;
 }
 
 export interface TimeSeriesChartProps {
@@ -132,13 +138,14 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
   // plot; new data alone goes through setData below.
   const seriesKey = JSON.stringify(seriesProp);
   const series = useMemo(() => seriesProp, [seriesKey]);
-  const colors = useMemo(() => series.map((s, i) => seriesColor(s, i)), [series, resolved]);
+  const colors = useMemo(() => chartColors(series.map((s, i) => seriesColor(s, i)), series.map((s) => s.faded), cssVar("--bg-surface")), [series, resolved]);
   const segments = useMemo(() => (bars ? barSegments(ys, hidden, x.length, !!stacked) : null), [bars, ys, hidden, x.length, stacked]);
   // The bar paths read their bottoms here, so new data needs no rebuild.
   const segmentsRef = useRef(segments);
   segmentsRef.current = segments;
   const data = useMemo(() => plotData(x, ys, hidden, stacked, segments), [x, ys, stacked, hidden, segments]);
   const fmt = (v: number | null | undefined) => formatUnit(v, unit, currency);
+  const dayBars = useMemo(() => !!bars && barStep(x) >= 86400, [bars, x]);
 
   useLayoutEffect(() => {
     const el = host.current;
@@ -198,9 +205,11 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
             // From the plotted data, which setData replaces without a rebuild.
             const xs = u.data[0];
             const span = xs.length > 1 ? xs[xs.length - 1]! - xs[0]! : 0;
-            return vals.map((v) => (span <= 86400 ? formatClock(v * 1000).slice(0, 5) : formatTimestamp(v * 1000, { seconds: false }).slice(5, 11)));
+            return vals.map((v) => timeTickText(v, span, dayBars));
           },
           space: 64,
+          // Day (or longer) bars: one tick per bucket, under its bar; a label per day, never a date twice.
+          splits: dayBars ? (u) => barTicks(u.data[0] as number[], u.bbox.width / uPlot.pxRatio, 64) : undefined,
         },
         {
           stroke: label,
@@ -303,7 +312,7 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
       plot.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolved, height, unit, currency, zeroBase, yMax, series, colors, hidden, stacked, bars, x.length < 2]);
+  }, [resolved, height, unit, currency, zeroBase, yMax, series, colors, hidden, stacked, bars, dayBars, x.length < 2]);
 
   useEffect(() => {
     plot.current?.setData(data);
@@ -325,7 +334,7 @@ export function TimeSeriesChart({ x, ys, series: seriesProp, unit, height: heigh
   const flip = hover ? hover.left > width * 0.6 : false;
 
   return (
-    <div className={["tschart", bars ? "tschart-bars" : "", className ?? ""].join(" ").trim()}>
+    <div className={["tschart", bars ? "tschart-bars" : "", stacked ? "tschart-stacked" : "", className ?? ""].join(" ").trim()}>
       {x.length < 2 ? (
         <div className="tschart-empty muted" style={{ height }}>
           {x.length === 0 ? "No samples in this range." : "Waiting for a second sample."}

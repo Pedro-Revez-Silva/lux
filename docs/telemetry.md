@@ -364,7 +364,7 @@ bytes in S3.
 | `stored_context` | `storedContext` | `context`: image build contexts | not charted |
 
 They are levels: a rollup bucket is their mean. The four add up to the
-tenant's bytes in S3. The Overview's **Stored** chart stacks only the first
+tenant's bytes in S3. The Overview's **Stored** chart (its Storage tab) stacks only the first
 three: `stored_context` remains sampled but is always 0 because lux has no
 build context writer yet ([RunSpec](runspec.md)).
 Migration 052 filled them into the samples written before they existed,

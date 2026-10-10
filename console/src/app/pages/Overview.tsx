@@ -1,8 +1,8 @@
 import { useMemo } from "react";
-import { Card, formatBytes, formatCores, formatCount, formatDuration, formatElapsed, PageHeader, rangeText, SectionHeader, StatTile, STORAGE_KIND_LIST, storageKindStyle, TimeSeriesChart, type StorageKind } from "@lux/design-system";
+import { Card, formatBytes, formatCores, formatCount, formatDuration, formatElapsed, PageHeader, rangeText, SectionHeader, StatTile, STORAGE_KIND_LIST, storageKindStyle, Tabs, TimeSeriesChart, type StorageKind } from "@lux/design-system";
 import { api, useNow, type Sample } from "../../api/index.ts";
 import { historyRes, stepNote, stepOfRes, stepSentence } from "../every.ts";
-import { go } from "../router.tsx";
+import { go, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip, seriesFrom, useSeries, type SeriesData } from "./common.tsx";
 import { ActivityFeed } from "./ActivityFeed.tsx";
@@ -25,9 +25,14 @@ export function storedSeries(samples: Sample[] | undefined): SeriesData & { seri
 }
 
 
+const TABS = ["activity", "cost", "storage"] as const;
+type Tab = (typeof TABS)[number];
+
 export function Overview() {
   const scope = useScope();
   const now = useNow();
+  const tabParam = useSearchParams().get("tab");
+  const tab: Tab = TABS.includes(tabParam as Tab) ? (tabParam as Tab) : "activity";
   // Status counts hosts too, which have no events: it keeps polling.
   const status = useScopedQuery("status", api.status, { interval: 5000 });
   const trend = scope.step("trend");
@@ -54,50 +59,75 @@ export function Overview() {
 
   return (
     <div className="page page-wide">
-      <PageHeader title="Overview" description={<span>{where} · charts over the {rangeText(scope.range)} · {stepSentence(scope.range, scope.every)}</span>} />
-      {status.error && !st && <ErrorBlock error={status.error} onRetry={status.refetch} />}
-      {status.error && st && <ErrorStrip error={`Showing stale numbers: the last refresh failed (${status.error}).`} />}
-      <div className="grid grid-stats">
-        <StatTile label="Running" onClick={() => go("/runs?state=running")} loading={loading} value={formatCount(runs.running ?? 0)} unit={st ? `${st.busy} busy · ${st.idle} idle` : undefined} />
-        <StatTile label="Queued" onClick={() => go(`/runs?state=${QUEUED.join(",")}`)} loading={loading} value={formatCount(st?.queued ?? 0)} unit={st?.oldestQueuedAt ? `oldest ${formatElapsed(st.oldestQueuedAt, now)}` : undefined} tone={(st?.queued ?? 0) > 0 && st?.oldestQueuedAt && now - Date.parse(st.oldestQueuedAt) > 300_000 ? "warn" : "default"} />
-        <StatTile label="Start latency (1h)" loading={loading} value={formatDuration(st?.startLatency.p50)} unit={st?.startLatency.n ? `p95 ${formatDuration(st.startLatency.p95)} · n=${st.startLatency.n}` : "no starts"} />
-        <StatTile label="Hosts ready" onClick={() => go("/hosts")} loading={loading} value={formatCount(hosts.ready ?? 0)} unit={`${hosts.draining ?? 0} draining · ${lostHosts} lost`} />
-        {lostHosts > 0 && <StatTile label="Hosts lost" onClick={() => go("/hosts?state=lost")} value={formatCount(lostHosts)} unit="stopped heartbeating" tone="danger" />}
-        <StatTile label="CPU allocated" loading={loading} value={formatCores(st?.allocated.cpus)} unit={`of ${formatCores(st?.capacity.cpus)}`} />
-        <StatTile label="Memory allocated" loading={loading} value={formatBytes(st?.allocated.memory)} unit={`of ${formatBytes(st?.capacity.memory)}`} />
-      </div>
-      <div className="overview-grid">
-        <div className="stack overview-charts">
-          <SectionHeader title="Trends" note={step} />
+      <PageHeader
+        title="Overview"
+        description={<span>{where} · charts over the {rangeText(scope.range)} · {stepSentence(scope.range, scope.every)}</span>}
+        actions={
+          <Tabs
+            value={tab}
+            onChange={(t) => setSearchParams({ tab: t === "activity" ? null : t })}
+            items={[
+              { key: "activity", label: "Activity" },
+              { key: "cost", label: "Cost" },
+              { key: "storage", label: "Storage" },
+            ]}
+          />
+        }
+      />
+      {tab === "activity" && (
+        <>
+          {status.error && !st && <ErrorBlock error={status.error} onRetry={status.refetch} />}
+          {status.error && st && <ErrorStrip error={`Showing stale numbers: the last refresh failed (${status.error}).`} />}
+          <div className="grid grid-stats">
+            <StatTile label="Running" onClick={() => go("/runs?state=running")} loading={loading} value={formatCount(runs.running ?? 0)} unit={st ? `${st.busy} busy · ${st.idle} idle` : undefined} />
+            <StatTile label="Queued" onClick={() => go(`/runs?state=${QUEUED.join(",")}`)} loading={loading} value={formatCount(st?.queued ?? 0)} unit={st?.oldestQueuedAt ? `oldest ${formatElapsed(st.oldestQueuedAt, now)}` : undefined} tone={(st?.queued ?? 0) > 0 && st?.oldestQueuedAt && now - Date.parse(st.oldestQueuedAt) > 300_000 ? "warn" : "default"} />
+            <StatTile label="Start latency (1h)" loading={loading} value={formatDuration(st?.startLatency.p50)} unit={st?.startLatency.n ? `p95 ${formatDuration(st.startLatency.p95)} · n=${st.startLatency.n}` : "no starts"} />
+            {/* Lost hosts ride on this tile, not their own: the row stays six tiles during an incident. Only the lost figure is red; tone would colour the ready count. */}
+            <StatTile label="Hosts ready" onClick={() => go(lostHosts > 0 ? "/hosts?state=lost" : "/hosts")} loading={loading} value={formatCount(hosts.ready ?? 0)} unit={<>{hosts.draining ?? 0} draining · <span className={lostHosts > 0 ? "text-danger" : undefined}>{lostHosts} lost</span></>} />
+            <StatTile label="CPU allocated" loading={loading} value={formatCores(st?.allocated.cpus)} unit={`of ${formatCores(st?.capacity.cpus)}`} />
+            <StatTile label="Memory allocated" loading={loading} value={formatBytes(st?.allocated.memory)} unit={`of ${formatBytes(st?.capacity.memory)}`} />
+          </div>
+          <div className="overview-grid">
+            <div className="stack overview-charts">
+              <SectionHeader title="Trends" note={step} />
+              <ErrorStrip error={history.error} />
+              <div className="grid grid-charts">
+                <Card title="Runs" subtitle="running and queued">
+                  <TimeSeriesChart x={runSeries.x} ys={runSeries.ys} series={[{ label: "Running", color: 1, area: true }, { label: "Queued", color: 2 }]} unit="count" />
+                </Card>
+                <Card title="Started / finished" subtitle={step}>
+                  <TimeSeriesChart x={flow.x} ys={flow.ys} series={[{ label: "Started", color: 1, step: true }, { label: "Finished", color: 3, step: true }]} unit="count" />
+                </Card>
+                <Card title="Start latency" subtitle="submit to first workload start">
+                  <TimeSeriesChart x={latency.x} ys={latency.ys} series={[{ label: "p50", color: 1 }, { label: "p95", color: 2, dashed: true }]} unit="duration" />
+                </Card>
+                <Card title="Hosts" subtitle="by state">
+                  <TimeSeriesChart x={hostSeries.x} ys={hostSeries.ys} series={[{ label: "Ready", color: 3, step: true, area: true }, { label: "Draining", color: 4, step: true }, { label: "Lost", color: 8, step: true }]} unit="count" />
+                </Card>
+                <Card title="CPU" subtitle="allocated vs capacity">
+                  <TimeSeriesChart x={cpu.x} ys={cpu.ys} series={[{ label: "Allocated", color: 1, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="cores" />
+                </Card>
+                <Card title="Memory" subtitle="allocated vs capacity">
+                  <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Allocated", color: 7, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="bytes" />
+                </Card>
+              </div>
+              {scope.operator && !scope.apiTenant && <ControlHost control={history.data?.control} />}
+            </div>
+            <ActivityFeed />
+          </div>
+        </>
+      )}
+      {tab === "cost" && <OverviewCost />}
+      {tab === "storage" && (
+        <>
           <ErrorStrip error={history.error} />
-          <div className="grid grid-charts">
-            <Card title="Runs" subtitle="running and queued">
-              <TimeSeriesChart x={runSeries.x} ys={runSeries.ys} series={[{ label: "Running", color: 1, area: true }, { label: "Queued", color: 2 }]} unit="count" />
-            </Card>
-            <Card title="Started / finished" subtitle={step}>
-              <TimeSeriesChart x={flow.x} ys={flow.ys} series={[{ label: "Started", color: 1, step: true }, { label: "Finished", color: 3, step: true }]} unit="count" />
-            </Card>
-            <Card title="Start latency" subtitle="submit to first workload start">
-              <TimeSeriesChart x={latency.x} ys={latency.ys} series={[{ label: "p50", color: 1 }, { label: "p95", color: 2, dashed: true }]} unit="duration" />
-            </Card>
-            <Card title="Hosts" subtitle="by state">
-              <TimeSeriesChart x={hostSeries.x} ys={hostSeries.ys} series={[{ label: "Ready", color: 3, step: true, area: true }, { label: "Draining", color: 4, step: true }, { label: "Lost", color: 8, step: true }]} unit="count" />
-            </Card>
-            <Card title="CPU" subtitle="allocated vs capacity">
-              <TimeSeriesChart x={cpu.x} ys={cpu.ys} series={[{ label: "Allocated", color: 1, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="cores" />
-            </Card>
-            <Card title="Memory" subtitle="allocated vs capacity">
-              <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Allocated", color: 7, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="bytes" />
-            </Card>
-            <Card title="Stored" subtitle="in S3, by kind">
+          <div className="grid grid-2">
+            <Card title="Stored" subtitle={`in S3, by kind · ${step}`}>
               <TimeSeriesChart x={stored.x} ys={stored.ys} series={stored.series} unit="bytes" stacked />
             </Card>
           </div>
-          <OverviewCost />
-          {scope.operator && !scope.apiTenant && <ControlHost control={history.data?.control} />}
-        </div>
-        <ActivityFeed />
-      </div>
+        </>
+      )}
     </div>
   );
 }

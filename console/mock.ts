@@ -10,7 +10,7 @@
 //   MOCK_ROLE=tenant bun run mock   # a tenant key (acme): no tenant picker, its own costs and key names
 import index from "./index.html";
 import { COST_TENANTS, costLabels, costSummary, submittedBy } from "./mockCosts.ts";
-import { history, poolCost, poolMetrics, POOLS } from "./mockHistory.ts";
+import { history, hostCost, hostHistory, poolCost, poolMetrics, POOLS } from "./mockHistory.ts";
 
 const RUN_ID = "run_k3jq7x2mfa9vbn4z";
 const HOST_ID = "host_7f2cq9m1x0";
@@ -41,6 +41,94 @@ const served = (s: Server, attached: boolean) => {
   return { ...w, state, process: s.state, desired: "up", workdir: s.workdir ?? "", env: {}, afterSync: null, idleAfter: "10m0s", wakeTimeout: "5m0s", expireAfter: s.lifetime === "owner" ? "720h0m0s" : null, owner: "key_mock", runId: attached ? RUN_ID : null, runName: attached ? "agent-refactor-42" : undefined, runState: attached ? runState : undefined, fromSpec: false, lastRequestAt: s.state === "ready" ? ago(18) : null, idleAt: s.state === "ready" ? new Date(Date.now() + 462_000).toISOString() : undefined, wakes: 3, epoch: attached ? 3 : null, stopReason: null, readySince: s.readySince ?? null, createdAt: ago(2 * 86400), updatedAt: ago(3600) };
 };
 const allServed = () => [...servers.map((s) => served(s, true)), served(asleep, false)];
+
+const hostTimes = (created: number, over: Record<string, string | null> = {}) => ({ created: ago(created), provisionRequested: ago(created), provisioned: ago(created - 40), registered: ago(created - 75), firstPlacement: ago(created - 120), lastPlacementEnded: null, drainRequested: null, terminateRequested: null, terminated: null, lost: null, ...over });
+// The run's host, a second ready one, and one that has ended.
+const HOSTS = [
+  {
+    id: HOST_ID,
+    name: HOST,
+    tenant: "",
+    pool: "default",
+    poolId: "pool_default01",
+    state: "ready",
+    draining: false,
+    labels: { zone: "eu-west-1c" },
+    capacity: { cpus: 16, memory: 64 * 1024 ** 3, disk: 200 * 1024 ** 3, runs: 8 },
+    allocated: { cpus: 4, memory: 8 * 1024 ** 3, disk: 40 * 1024 ** 3 },
+    versions: { runner: "v0.31.0", podman: "5.4.1" },
+    platform: true,
+    liveRuns: 1,
+    providerId: "i-0a1b2c3d4e5f60718",
+    instanceType: "m8g.2xlarge",
+    zone: "eu-west-1c",
+    market: "spot",
+    lastHeartbeat: ago(4),
+    times: hostTimes(3 * 86400),
+    launch: { outcome: "launched", requestedAt: ago(3 * 86400), finishedAt: ago(3 * 86400 - 40) },
+    placements: [{ runId: RUN_ID, runName: "agent-refactor-42", tenant: "acme", epoch: 3, state: "running", resources: { cpus: 4, memory: 8 * 1024 ** 3 }, since: ago(15 * 60) }],
+  },
+  {
+    id: "host_3k8wq2n5vz",
+    name: "gp-eu-west-1-a7",
+    tenant: "",
+    pool: "default",
+    poolId: "pool_default01",
+    state: "ready",
+    draining: false,
+    labels: { zone: "eu-west-1a" },
+    capacity: { cpus: 16, memory: 64 * 1024 ** 3, disk: 200 * 1024 ** 3, runs: 8 },
+    allocated: {},
+    versions: { runner: "v0.31.0", podman: "5.4.1" },
+    platform: true,
+    liveRuns: 0,
+    providerId: "i-0f9e8d7c6b5a40312",
+    instanceType: "m8g.2xlarge",
+    zone: "eu-west-1a",
+    market: "spot",
+    lastHeartbeat: ago(7),
+    times: hostTimes(5 * 3600, { firstPlacement: null }),
+    launch: { outcome: "launched", requestedAt: ago(5 * 3600), finishedAt: ago(5 * 3600 - 38) },
+    placements: [],
+  },
+  {
+    id: "host_9p4tz6c1mh",
+    name: "gp-eu-west-1-b2",
+    tenant: "",
+    pool: "default",
+    poolId: "pool_default01",
+    state: "terminated",
+    draining: false,
+    labels: { zone: "eu-west-1b" },
+    capacity: { cpus: 16, memory: 64 * 1024 ** 3, disk: 200 * 1024 ** 3, runs: 8 },
+    allocated: {},
+    versions: { runner: "v0.30.2" },
+    platform: true,
+    liveRuns: 0,
+    providerId: "i-04c3b2a1908f7e6d5",
+    instanceType: "m8g.2xlarge",
+    zone: "eu-west-1b",
+    market: "spot",
+    lastHeartbeat: ago(26 * 3600),
+    times: hostTimes(30 * 3600, { lastPlacementEnded: ago(27 * 3600), terminateRequested: ago(26 * 3600), terminated: ago(26 * 3600 - 50) }),
+    launch: { outcome: "launched", requestedAt: ago(30 * 3600), finishedAt: ago(30 * 3600 - 41) },
+    placements: [],
+  },
+];
+
+/** GET /v1/hosts: live hosts by default, ended ones with lifecycle=all or ended; one page. */
+function hostsList(u: URL) {
+  const life = u.searchParams.get("lifecycle") ?? (u.searchParams.get("all") === "true" ? "all" : "live");
+  const ended = (h: (typeof HOSTS)[number]) => h.state === "terminated";
+  return HOSTS.filter((h) => (life === "all" ? true : life === "ended" ? ended(h) : !ended(h)));
+}
+
+function hostEvents(h: (typeof HOSTS)[number]) {
+  const ev = (id: number, type: string, data: Record<string, unknown>, s: number) => ({ id, type, data, count: 1, time: ago(s) });
+  const out = [ev(4, "host.ready", { from: "registered" }, 3 * 86400 - 80), ev(3, "host.registered", { name: h.name, arch: "arm64", runner: h.versions.runner, providerId: h.providerId }, 3 * 86400 - 75)];
+  if (h.id === HOST_ID) out.unshift(ev(9, "host.placement_assigned", { run: RUN_ID, epoch: 3, host: h.name, resources: { cpus: 4, memory: 8 * 1024 ** 3 } }, 15 * 60), ev(7, "host.placement_ended", { run: RUN_ID, epoch: 2, outcome: "migrated", reason: "rebalance" }, 15 * 60 + 8));
+  return out;
+}
 
 const run = () => ({
   id: RUN_ID,
@@ -220,8 +308,17 @@ async function api(req: Request, srv: Srv): Promise<Response> {
     if (p.startsWith(`/v1/runs/${RUN_ID}/`)) return json(p.endsWith("history") ? { from: ago(3600), to: now(), resolution: 60, samples: [] } : { snapshots: [], artifacts: [], events: [] });
     if (p === "/v1/status") return json({ runs: { running: 1 }, busy: 1, idle: 0, queued: 0, startLatency: { n: 0 }, hosts: { ready: 2 }, capacity: { cpus: 16, memory: 64 * 1024 ** 3, disk: 0, runs: 8 }, allocated: { cpus: 4, memory: 8 * 1024 ** 3, disk: 0, runs: 1 } });
     if (p === "/v1/history") return json(history(u));
-    if (p === "/v1/hosts") return json({ hosts: [] });
+    if (p === "/v1/hosts") return json({ hosts: hostsList(u) });
     if (p === "/v1/hosts/summary") return json({ live: 2, capacity: { cpus: 16, memory: 64 * 1024 ** 3 }, allocated: { cpus: 4, memory: 8 * 1024 ** 3 } });
+    const hm = p.match(/^\/v1\/hosts\/([a-z0-9_]+)(?:\/(history|cost|events))?$/);
+    if (hm) {
+      const h = HOSTS.find((x) => x.id === hm[1]);
+      if (!h) return notFound(`host ${hm[1]}`);
+      if (hm[2] === "history") return json(hostHistory(u));
+      if (hm[2] === "cost") return json(hostCost(u, h.id, !tenantRole));
+      if (hm[2] === "events") return json({ events: hostEvents(h) });
+      return json(h);
+    }
     if (p === "/v1/pools") return json({ pools: POOLS });
     if (p === "/v1/pools/stats") return json({ pools: [] });
     const pm = p.match(/^\/v1\/pools\/([a-z0-9-]+)\/(metrics|cost)$/);

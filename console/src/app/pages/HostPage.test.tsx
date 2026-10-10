@@ -10,6 +10,7 @@ let ScopeProvider: typeof import("../scope.tsx").ScopeProvider;
 let ToastProvider: typeof import("@lux/design-system").ToastProvider;
 let formatTimestamp: typeof import("@lux/design-system").formatTimestamp;
 let fakeApi: typeof import("../testing.ts").fakeApi;
+let until: typeof import("../testing.ts").until;
 let hostStages: typeof import("./hostStages.ts").hostStages;
 let api: typeof import("../../api/index.ts");
 let setSearchParams: typeof import("../router.tsx").setSearchParams;
@@ -18,7 +19,7 @@ beforeAll(async () => {
   ({ HostPage } = await import("./HostPage.tsx"));
   ({ ScopeProvider } = await import("../scope.tsx"));
   ({ ToastProvider, formatTimestamp } = await import("@lux/design-system"));
-  ({ fakeApi } = await import("../testing.ts"));
+  ({ fakeApi, until } = await import("../testing.ts"));
   ({ hostStages } = await import("./hostStages.ts"));
   api = await import("../../api/index.ts");
   ({ setSearchParams } = await import("../router.tsx"));
@@ -74,9 +75,9 @@ async function clickNext(card: Element) {
 /**
  * The host page, signed in as role, with a fake API: the host, and its
  * events as cursor pages of 50. url is the page's (its ?tenant= narrows an
- * operator).
+ * operator); events are on the Events tab (a launch-failed host has no tabs).
  */
-async function render(h: Host, role: "tenant" | "operator" = "tenant", url = "http://localhost/hosts/h1") {
+async function render(h: Host, role: "tenant" | "operator" = "tenant", url = "http://localhost/hosts/h1?tab=events") {
   api.signIn("k");
   api.setRole(role);
   const fake = fakeApi((path) => {
@@ -167,8 +168,77 @@ test("a tenant sees no events of a platform host whose launch failed and reads n
   await noEventsAsTenant(launchFailed({ platform: true, tenant: "" }));
 });
 
+const cardTitles = (el: Element) => [...el.querySelectorAll(".card-title")].map((t) => t.textContent);
+const tab = (el: Element, name: string) => [...el.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent?.startsWith(name))!;
+
+test("the host's tabs: Overview by default; each tab shows its own cards and ?tab= follows", async () => {
+  const p = await render(registered(), "tenant", "http://localhost/hosts/h1");
+  try {
+    expect(tab(p.el, "Overview").getAttribute("aria-selected")).toBe("true");
+    expect(cardTitles(p.el)).toEqual(["Details", "Lifecycle", "Live placements"]);
+    // Nothing of another tab is mounted, so its reads wait for it.
+    expect(p.eventCalls()).toEqual([]);
+    for (const [name, key, titles] of [
+      // No runner samples in the fake history: no Runner cards.
+      ["Metrics", "metrics", ["CPU", "Memory", "Disk", "Placements"]],
+      ["Cost", "cost", ["Cost"]],
+      ["Runs", "runs", ["Recent runs on this host"]],
+      ["Events", "events", ["Events"]],
+    ] as const) {
+      await act(async () => tab(p.el, name).click());
+      await until(() => JSON.stringify(cardTitles(p.el)) === JSON.stringify(titles), `the ${name} tab's cards`);
+      expect(new URLSearchParams(location.search).get("tab")).toBe(key);
+      expect(tab(p.el, name).getAttribute("aria-selected")).toBe("true");
+      expect(cardTitles(p.el)).toEqual([...titles]);
+    }
+    await act(async () => tab(p.el, "Overview").click());
+    expect(new URLSearchParams(location.search).get("tab")).toBeNull();
+  } finally {
+    await p.done();
+  }
+});
+
+test("a tenant on a platform host: Cost and Events are disabled tabs, and ?tab=cost reads as Overview", async () => {
+  const p = await render(registered({ platform: true, tenant: "" }), "tenant", "http://localhost/hosts/h1?tab=cost");
+  try {
+    expect(tab(p.el, "Cost").disabled).toBe(true);
+    expect(tab(p.el, "Events").disabled).toBe(true);
+    expect(tab(p.el, "Overview").getAttribute("aria-selected")).toBe("true");
+    expect(tab(p.el, "Cost").getAttribute("aria-selected")).toBe("false");
+    expect(cardTitles(p.el)).toEqual(["Details", "Lifecycle", "Live placements"]);
+    expect(p.fake.calls.some((c) => c.startsWith("/v1/hosts/h1/cost"))).toBe(false);
+  } finally {
+    await p.done();
+  }
+});
+
+test("an operator on a platform host's Events who narrows to a tenant reads as Overview and reads no events as the tenant", async () => {
+  const p = await render(registered({ platform: true, tenant: "" }), "operator", "http://localhost/hosts/h1?tab=events");
+  try {
+    expect(p.eventsCard()).toBeDefined();
+    await act(async () => setSearchParams({ tenant: "acme" }));
+    await until(() => tab(p.el, "Events").disabled, "the Events tab to disable");
+    expect(new URLSearchParams(location.search).get("tab")).toBe("events");
+    expect(tab(p.el, "Overview").getAttribute("aria-selected")).toBe("true");
+    expect(cardTitles(p.el)).toEqual(["Details", "Lifecycle", "Live placements"]);
+    expect(p.eventCalls().filter((c) => query(c).tenant)).toEqual([]);
+  } finally {
+    await p.done();
+  }
+});
+
+test("an unknown ?tab= reads as Overview", async () => {
+  const p = await render(registered(), "tenant", "http://localhost/hosts/h1?tab=nope");
+  try {
+    expect(tab(p.el, "Overview").getAttribute("aria-selected")).toBe("true");
+    expect(cardTitles(p.el)).toContain("Details");
+  } finally {
+    await p.done();
+  }
+});
+
 test("an operator narrowed to a tenant reads the host's events as that tenant; a scope change starts over at page 1", async () => {
-  const p = await render(registered(), "operator", "http://localhost/hosts/h1?tenant=acme");
+  const p = await render(registered(), "operator", "http://localhost/hosts/h1?tenant=acme&tab=events");
   try {
     expect(query(p.eventCalls()[0]!)).toEqual({ tenant: "acme", sort: "time", dir: "desc", limit: "50" });
     const card = p.eventsCard()!;

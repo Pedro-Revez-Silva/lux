@@ -80,10 +80,80 @@ export function barRange(x: readonly number[]): [number, number] | null {
   return [x[0]! - step / 2, x[x.length - 1]! + step / 2];
 }
 
-/** A bucket [start, start + step) in words, local time: "2026-10-09 19:00–20:00"; a day or longer names both ends in full. */
+/**
+ * Axis ticks for bars: the bucket starts (each bar's centre), every k-th so
+ * ticks stay at least `space` px apart across `width` px.
+ */
+export function barTicks(x: readonly number[], width: number, space: number): number[] {
+  if (x.length === 0) return [];
+  const fit = Math.max(1, Math.floor(width / space));
+  const every = Math.max(1, Math.ceil(x.length / fit));
+  return x.filter((_, i) => i % every === 0);
+}
+
+/** How much of a series' own colour a faded series keeps; the rest is the chart's surface. */
+export const FADE_KEEP = 0.42;
+
+function rgbOf(color: string): [number, number, number] | null {
+  const c = color.trim();
+  const hex = /^#([0-9a-f]{6})$/i.exec(c);
+  if (hex) {
+    const n = parseInt(hex[1]!, 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  const short = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i.exec(c);
+  if (short) return [parseInt(short[1]! + short[1]!, 16), parseInt(short[2]! + short[2]!, 16), parseInt(short[3]! + short[3]!, 16)];
+  const rgb = /^rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)\s*(?:[,/]\s*[\d.]+%?\s*)?\)$/i.exec(c);
+  if (rgb) return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])];
+  return null;
+}
+
+/**
+ * A lighter shade of the same family: `color` mixed toward `surface`,
+ * keeping `keep` of it, as an opaque #rrggbb ("same family, not charged to
+ * runs"). Opaque, not translucent, so a faded bar or band reads the same
+ * over the grid as in the legend and tooltip keys. The canvas cannot
+ * resolve var() or color-mix(): both colours must be concrete; one that is
+ * not #rgb, #rrggbb or rgb() is returned unchanged.
+ */
+export function fadedColor(color: string, surface: string, keep = FADE_KEEP): string {
+  const a = rgbOf(color);
+  const b = rgbOf(surface);
+  if (!a || !b) return color;
+  const mix = a.map((v, i) => Math.round(v * keep + b[i]! * (1 - keep)));
+  return `#${mix.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** A concrete CSS colour per series: the faded ones mixed toward the surface. */
+export function chartColors(base: readonly string[], faded: readonly (boolean | undefined)[], surface: string): string[] {
+  return base.map((c, i) => (faded[i] ? fadedColor(c, surface) : c));
+}
+
+/** A UTC calendar date, "2026-10-09". */
+function utcDate(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
+ * An x-axis tick label: the clock over a day or less, else the month and
+ * day. Day bars are UTC-day buckets (cost), so with `utcDays` a tick names
+ * its UTC date, not the local date of its start.
+ */
+export function timeTickText(v: number, span: number, utcDays = false): string {
+  if (utcDays) return utcDate(v * 1000).slice(5);
+  return span <= 86400 ? formatClock(v * 1000).slice(0, 5) : formatTimestamp(v * 1000, { seconds: false }).slice(5, 11);
+}
+
+/**
+ * A bucket [start, start + step) in words: "2026-10-09 19:00–20:00" in
+ * local time. A day or longer is a UTC-day bucket and is named by its UTC
+ * dates: "2026-10-09 UTC", "2026-10-09 – 2026-10-15 UTC" (last day inclusive).
+ */
 export function bucketText(start: number, step: number): string {
   const from = formatTimestamp(start * 1000, { seconds: false });
   if (step <= 0) return from;
-  const end = (start + step) * 1000;
-  return step < 86400 ? `${from}–${formatClock(end).slice(0, 5)}` : `${from} – ${formatTimestamp(end, { seconds: false })}`;
+  if (step < 86400) return `${from}–${formatClock((start + step) * 1000).slice(0, 5)}`;
+  const first = utcDate(start * 1000);
+  const last = utcDate((start + step) * 1000 - 1);
+  return first === last ? `${first} UTC` : `${first} – ${last} UTC`;
 }

@@ -5,6 +5,9 @@ export interface TooltipProps {
   /** Preferred side; flipped to the opposite one when it would leave the viewport. */
   side?: "top" | "bottom" | "left" | "right";
   children: ReactNode;
+  /** Extra classes on the anchor (a bar segment that must keep its flex sizing). */
+  className?: string;
+  style?: CSSProperties;
 }
 
 type Side = NonNullable<TooltipProps["side"]>;
@@ -18,7 +21,7 @@ const OPPOSITE: Record<Side, Side> = { top: "bottom", bottom: "top", left: "righ
  * parents). Measured when it opens: it flips to the opposite side when its
  * side has no room, and shifts along that side to stay inside the viewport.
  */
-export function Tooltip({ content, side = "top", children }: TooltipProps) {
+export function Tooltip({ content, side = "top", children, className, style }: TooltipProps) {
   const id = useId();
   const [open, setOpen] = useState(false);
   const [placed, setPlaced] = useState<{ side: Side; shift: number }>({ side, shift: 0 });
@@ -46,7 +49,7 @@ export function Tooltip({ content, side = "top", children }: TooltipProps) {
   };
 
   return (
-    <span className="tip-anchor" onMouseEnter={() => show(true)} onMouseLeave={() => show(false)} onFocus={() => show(true)} onBlur={() => show(false)} aria-describedby={open ? id : undefined}>
+    <span className={className ? `tip-anchor ${className}` : "tip-anchor"} style={style} onMouseEnter={() => show(true)} onMouseLeave={() => show(false)} onFocus={() => show(true)} onBlur={() => show(false)} aria-describedby={open ? id : undefined}>
       {children}
       {open && (
         <span ref={tip} role="tooltip" id={id} className={`tip tip-${placed.side}`} data-side={placed.side} style={{ "--tip-shift": `${placed.shift}px` } as CSSProperties}>

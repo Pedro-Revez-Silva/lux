@@ -48,7 +48,7 @@ export function CrumbSep() {
   );
 }
 
-/** A quiet section heading between cards (uppercase label, optional note on the right). */
+/** A heading between groups of cards: sentence-case title, its note beside it, controls on the right. */
 export function SectionHeader({ title, note, actions }: { title: ReactNode; note?: ReactNode; actions?: ReactNode }) {
   return (
     <div className="section-head">

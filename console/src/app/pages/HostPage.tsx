@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
-import { Badge, Button, Card, Code, ConfirmDialog, formatBytes, formatCores, formatDuration, formatRelative, formatTimestamp, formatTimestampZone, hostDisplayState, IdChip, KeyValue, PageHeader, RelativeTime, StatePill, Table, TimeSeriesChart, Timeline, useToast, type Column } from "@lux/design-system";
+import { Badge, Button, Card, Code, ConfirmDialog, formatBytes, formatCores, formatDuration, formatRelative, formatTimestamp, formatTimestampZone, hostDisplayState, IdChip, KeyValue, PageHeader, RelativeTime, StatePill, Table, Tabs, TimeSeriesChart, Timeline, useToast, type Column } from "@lux/design-system";
 import { api, errorText, useNow, useQuery, type Host, type HostPlacement, type Run } from "../../api/index.ts";
 import { historyRes, stepNote, stepOfRes } from "../every.ts";
-import { go, Link } from "../router.tsx";
+import { go, Link, setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope, useScopedQuery } from "../scope.tsx";
 import { DASH, ErrorBlock, ErrorStrip, hostRunsPath, labelsText, PageSkeleton, poolPath, RunLink, RunNameLink, runColumns, runPath, useSeries } from "./common.tsx";
 import { HostCost } from "./HostCost.tsx";
@@ -10,10 +10,15 @@ import { hostStages } from "./hostStages.ts";
 import { PagedEvents } from "./PagedEvents.tsx";
 import { ProcessCards, runnerProcesses } from "./ProcessCards.tsx";
 
+const HOST_TABS = ["overview", "metrics", "cost", "runs", "events"] as const;
+type HostTab = (typeof HOST_TABS)[number];
+
 export function HostPage({ id }: { id: string }) {
   const scope = useScope();
   const now = useNow();
   const toast = useToast();
+  const tabParam = useSearchParams().get("tab");
+  const requestedTab: HostTab = HOST_TABS.includes(tabParam as HostTab) ? (tabParam as HostTab) : "overview";
   const host = useQuery(`host:${id}`, (s) => api.host(id, s), { interval: 5000 });
   const trend = scope.step("trend");
   const res = historyRes(trend);
@@ -71,6 +76,12 @@ export function HostPage({ id }: { id: string }) {
   if (forceOnly) dialogDescription = `Its ${liveRunsText} will be stopped and resumed elsewhere.`;
   else if (h.liveRuns)
     dialogDescription = `No new placements will be assigned. Its ${liveRunsText} ${oneRun ? "finishes where it is" : "finish where they are"}, unless forced. A provisioned host is terminated once empty.`;
+  // The host history rule: operators, and a tenant for its own host (a tenant sees no other non-platform host).
+  const showCost = scope.operator || !h.platform;
+  const showEvents = hostEventsVisible(h.platform, scope);
+  // A tab the reader cannot open reads as Overview, like an unknown one; ?tab= is left as is.
+  const hidden = (requestedTab === "cost" && !showCost) || (requestedTab === "events" && !showEvents);
+  const tab: HostTab = hidden ? "overview" : requestedTab;
   return (
     <div className="page">
       <PageHeader
@@ -96,63 +107,85 @@ export function HostPage({ id }: { id: string }) {
         }
         note={h.stateReason}
         actions={
-          <Button variant="danger" disabled={!canAct} onClick={() => setDrainOpen(true)}>
-            {forceOnly ? "Force evict" : "Drain"}
-          </Button>
+          <>
+            <Tabs
+              value={tab}
+              onChange={(t) => setSearchParams({ tab: t === "overview" ? null : t })}
+              items={[
+                { key: "overview", label: "Overview", count: h.placements?.length || undefined },
+                { key: "metrics", label: "Metrics" },
+                { key: "cost", label: "Cost", disabled: !showCost },
+                { key: "runs", label: "Runs" },
+                { key: "events", label: "Events", disabled: !showEvents },
+              ]}
+            />
+            <Button variant="danger" disabled={!canAct} onClick={() => setDrainOpen(true)}>
+              {forceOnly ? "Force evict" : "Drain"}
+            </Button>
+          </>
         }
       />
       <ErrorStrip error={host.error} />
 
-      <div className="grid grid-2">
-        <Card title="Details">
-          <KeyValue
-            columns={2}
-            items={[
-              { key: "Provider id", value: h.providerId ? <IdChip value={h.providerId} /> : DASH },
-              { key: "Instance type", value: h.instanceType ? <span className="mono">{h.instanceType}</span> : DASH },
-              { key: "Heartbeat", value: h.lastHeartbeat ? `${formatRelative(h.lastHeartbeat, now)} (${formatTimestamp(h.lastHeartbeat)})` : DASH },
-              { key: "Capacity", value: `${formatCores(h.capacity.cpus)} · ${formatBytes(h.capacity.memory)} · ${formatBytes(h.capacity.disk)} disk · ${h.capacity.runs} runs` },
-              { key: "Allocated", value: `${formatCores(h.allocated.cpus ?? 0)} · ${formatBytes(h.allocated.memory ?? 0)} · ${formatBytes(h.allocated.disk ?? 0)} disk · ${h.liveRuns} live` },
-              { key: "Labels", value: Object.keys(h.labels).length ? <span className="mono">{labelsText(h.labels)}</span> : DASH },
-              { key: "Versions", value: Object.keys(h.versions).length ? <span className="mono">{labelsText(h.versions)}</span> : DASH },
-            ]}
-          />
-        </Card>
-        <Card title="Lifecycle">
-          <Timeline stages={hostStages(h)} now={now} />
-        </Card>
-      </div>
+      {tab === "overview" && (
+        <>
+          <div className="grid grid-2">
+            <Card title="Details">
+              <KeyValue
+                columns={2}
+                items={[
+                  { key: "Provider id", value: h.providerId ? <IdChip value={h.providerId} /> : DASH },
+                  { key: "Instance type", value: h.instanceType ? <span className="mono">{h.instanceType}</span> : DASH },
+                  { key: "Heartbeat", value: h.lastHeartbeat ? `${formatRelative(h.lastHeartbeat, now)} (${formatTimestamp(h.lastHeartbeat)})` : DASH },
+                  { key: "Capacity", value: `${formatCores(h.capacity.cpus)} · ${formatBytes(h.capacity.memory)} · ${formatBytes(h.capacity.disk)} disk · ${h.capacity.runs} runs` },
+                  { key: "Allocated", value: `${formatCores(h.allocated.cpus ?? 0)} · ${formatBytes(h.allocated.memory ?? 0)} · ${formatBytes(h.allocated.disk ?? 0)} disk · ${h.liveRuns} live` },
+                  { key: "Labels", value: Object.keys(h.labels).length ? <span className="mono">{labelsText(h.labels)}</span> : DASH },
+                  { key: "Versions", value: Object.keys(h.versions).length ? <span className="mono">{labelsText(h.versions)}</span> : DASH },
+                ]}
+              />
+            </Card>
+            <Card title="Lifecycle">
+              <Timeline stages={hostStages(h)} now={now} />
+            </Card>
+          </div>
 
-      <Card flush title="Live placements" subtitle={`${h.placements?.length ?? 0} on this host`}>
-        <PlacementsTable placements={h.placements ?? []} loading={host.loading} tenant={scope.operator} />
-      </Card>
+          <Card flush title="Live placements" subtitle={`${h.placements?.length ?? 0} on this host`}>
+            <PlacementsTable placements={h.placements ?? []} loading={host.loading} tenant={scope.operator} />
+          </Card>
+        </>
+      )}
 
-      <ErrorStrip error={history.error} />
-      <div className="grid grid-charts">
-        <Card title="CPU" subtitle={`used cores vs capacity, and allocated · ${step}`}>
-          <TimeSeriesChart x={cpu.x} ys={cpu.ys} series={[{ label: "Used", color: 1, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }, { label: "Allocated", color: 2 }]} unit="cores" />
-        </Card>
-        <Card title="Memory" subtitle={`used vs capacity, and allocated · ${step}`}>
-          <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Used", color: 7, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }, { label: "Allocated", color: 2 }]} unit="bytes" />
-        </Card>
-        <Card title="Disk" subtitle={`used vs capacity · ${step}`}>
-          <TimeSeriesChart x={disk.x} ys={disk.ys} series={[{ label: "Used", color: 4, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="bytes" />
-        </Card>
-        <Card title="Placements" subtitle={`live placements vs run capacity · ${step}`}>
-          <TimeSeriesChart x={placements.x} ys={placements.ys} series={[{ label: "Placements", color: 3, step: true, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="count" />
-        </Card>
-        <ProcessCards title="Runner" what="the lux-runner process, not podman or its containers" processes={runners} />
-      </div>
+      {tab === "metrics" && (
+        <>
+          <ErrorStrip error={history.error} />
+          <div className="grid grid-charts">
+            <Card title="CPU" subtitle={`used cores vs capacity, and allocated · ${step}`}>
+              <TimeSeriesChart x={cpu.x} ys={cpu.ys} series={[{ label: "Used", color: 1, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }, { label: "Allocated", color: 2 }]} unit="cores" />
+            </Card>
+            <Card title="Memory" subtitle={`used vs capacity, and allocated · ${step}`}>
+              <TimeSeriesChart x={mem.x} ys={mem.ys} series={[{ label: "Used", color: 7, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }, { label: "Allocated", color: 2 }]} unit="bytes" />
+            </Card>
+            <Card title="Disk" subtitle={`used vs capacity · ${step}`}>
+              <TimeSeriesChart x={disk.x} ys={disk.ys} series={[{ label: "Used", color: 4, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="bytes" />
+            </Card>
+            <Card title="Placements" subtitle={`live placements vs run capacity · ${step}`}>
+              <TimeSeriesChart x={placements.x} ys={placements.ys} series={[{ label: "Placements", color: 3, step: true, area: true }, { label: "Capacity", color: "var(--fg-faint)", dashed: true }]} unit="count" />
+            </Card>
+            <ProcessCards title="Runner" what="the lux-runner process, not podman or its containers" processes={runners} />
+          </div>
+        </>
+      )}
 
-      {/* The host history rule: operators, and a tenant for its own host (a tenant sees no other non-platform host). */}
-      {(scope.operator || !h.platform) && <HostCost id={h.id} range={scope.range} operator={scope.operator} />}
+      {tab === "cost" && <HostCost id={h.id} range={scope.range} operator={scope.operator} />}
 
-      <HostEvents id={id} platform={h.platform} interval={5000} subtitle="registration, placements, drains, termination" />
+      {tab === "runs" && (
+        <Card flush title="Recent runs on this host" subtitle="any epoch, newest first, up to 50" actions={<Link to={hostRunsPath(id)}>All runs on this host</Link>}>
+          <ErrorStrip error={recent.error} />
+          <RecentRuns runs={recent.data ?? []} loading={recent.loading} tenant={scope.showTenant} />
+        </Card>
+      )}
 
-      <Card flush title="Recent runs on this host" subtitle="any epoch, newest first, up to 50" actions={<Link to={hostRunsPath(id)}>All runs on this host</Link>}>
-        <ErrorStrip error={recent.error} />
-        <RecentRuns runs={recent.data ?? []} loading={recent.loading} tenant={scope.showTenant} />
-      </Card>
+      {tab === "events" && <HostEvents id={id} platform={h.platform} interval={5000} subtitle="registration, placements, drains, termination" />}
 
       <ConfirmDialog
         open={drainOpen}
@@ -246,8 +279,12 @@ function LaunchFailedHost({ host: h }: { host: Host }) {
  */
 function HostEvents({ id, platform, interval, subtitle }: { id: string; platform: boolean; interval: number; subtitle: string }) {
   const scope = useScope();
-  if (platform && !(scope.operator && !scope.apiTenant)) return null;
+  if (!hostEventsVisible(platform, scope)) return null;
   return <PagedEvents prefix="host-events" view={`${scope.tenant}|${id}`} fetch={(req, s) => api.hostEventsPage(id, scope.apiTenant, req, s)} interval={interval} subtitle={subtitle} />;
+}
+
+function hostEventsVisible(platform: boolean, scope: { operator: boolean; apiTenant?: string }): boolean {
+  return !platform || (scope.operator && !scope.apiTenant);
 }
 
 function PlacementsTable({ placements, loading, tenant }: { placements: HostPlacement[]; loading: boolean; tenant: boolean }) {

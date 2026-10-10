@@ -9,12 +9,13 @@ let Overview: typeof import("./Overview.tsx").Overview;
 let storedSeries: typeof import("./Overview.tsx").storedSeries;
 let ScopeProvider: typeof import("../scope.tsx").ScopeProvider;
 let fakeApi: typeof import("../testing.ts").fakeApi;
+let until: typeof import("../testing.ts").until;
 let api: typeof import("../../api/index.ts");
 beforeAll(async () => {
   GlobalRegistrator.register();
   ({ Overview, storedSeries } = await import("./Overview.tsx"));
   ({ ScopeProvider } = await import("../scope.tsx"));
-  ({ fakeApi } = await import("../testing.ts"));
+  ({ fakeApi, until } = await import("../testing.ts"));
   api = await import("../../api/index.ts");
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
@@ -87,9 +88,9 @@ async function render(role: "tenant" | "operator", url: string, answer?: (path: 
 }
 
 for (const c of [
-  { name: "a tenant's own view", role: "tenant" as const, url: "http://localhost/", tenant: undefined },
-  { name: "the whole system", role: "operator" as const, url: "http://localhost/", tenant: undefined },
-  { name: "an operator narrowed to a tenant", role: "operator" as const, url: "http://localhost/?tenant=acme", tenant: "acme" },
+  { name: "a tenant's own view", role: "tenant" as const, url: "http://localhost/?tab=storage", tenant: undefined },
+  { name: "the whole system", role: "operator" as const, url: "http://localhost/?tab=storage", tenant: undefined },
+  { name: "an operator narrowed to a tenant", role: "operator" as const, url: "http://localhost/?tab=storage&tenant=acme", tenant: "acme" },
 ]) {
   test(`the Stored card in ${c.name}`, async () => {
     const p = await render(c.role, c.url);
@@ -110,8 +111,78 @@ for (const c of [
 const costCalls = (calls: string[]) => calls.filter((u) => u.startsWith("/v1/costs?")).map((u) => new URL(u, "http://x").searchParams);
 const historyCall = (calls: string[]) => new URL(calls.find((u) => u.startsWith("/v1/history"))!, "http://x").searchParams;
 
+const titles = (el: Element) => [...el.querySelectorAll(".card-title")].map((t) => t.textContent);
+
+test("the Overview's tabs: Activity by default (tiles, trends, feed); Cost and Storage each alone; ?tab= follows a click", async () => {
+  const p = await render("tenant", "http://localhost/");
+  try {
+    const tab = (name: string) => [...p.el.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === name)!;
+    expect([...p.el.querySelectorAll('[role="tab"]')].map((b) => b.textContent)).toEqual(["Activity", "Cost", "Storage"]);
+    expect(tab("Activity").getAttribute("aria-selected")).toBe("true");
+    expect(p.el.querySelectorAll(".stat").length).toBeGreaterThan(0);
+    expect(titles(p.el)).toContain("Runs");
+    expect(titles(p.el)).not.toContain("Stored");
+    expect(p.el.querySelector(".cost-panel")).toBeNull();
+    // The cost panel's reads wait for its tab.
+    expect(costCalls(p.fake.calls)).toEqual([]);
+
+    await act(async () => tab("Cost").click());
+    await until(() => p.el.querySelector(".cost-panel") != null, "the cost panel");
+    expect(new URLSearchParams(location.search).get("tab")).toBe("cost");
+    expect(p.el.querySelectorAll(".stat").length).toBe(0);
+    await until(() => costCalls(p.fake.calls).length > 0, "a cost read");
+
+    await act(async () => tab("Storage").click());
+    await until(() => titles(p.el).includes("Stored"), "the Stored card");
+    expect(new URLSearchParams(location.search).get("tab")).toBe("storage");
+    expect(titles(p.el)).toEqual(["Stored"]);
+
+    await act(async () => tab("Activity").click());
+    expect(new URLSearchParams(location.search).get("tab")).toBeNull();
+  } finally {
+    await p.done();
+  }
+});
+
+test("lost hosts show on the Hosts ready tile, the lost figure in danger; the row stays six tiles either way", async () => {
+  const status = (lost: number) => ({ runs: {}, busy: 0, idle: 0, queued: 0, startLatency: { n: 0 }, hosts: { ready: 3, draining: 1, lost }, capacity: { cpus: 0, memory: 0 }, allocated: { cpus: 0, memory: 0 } });
+  for (const lost of [0, 2]) {
+    const p = await render("operator", "http://localhost/", (path) => (path.startsWith("/v1/status") ? status(lost) : undefined));
+    try {
+      const tiles = [...p.el.querySelectorAll(".stat")];
+      expect(tiles.length).toBe(6);
+      const hosts = tiles.find((t) => t.textContent!.includes("Hosts ready"))!;
+      expect(hosts.querySelector(".stat-unit")!.textContent).toBe(`1 draining · ${lost} lost`);
+      expect(hosts.classList.contains("stat-danger")).toBe(false);
+      expect(hosts.querySelector(".text-danger")?.textContent ?? null).toBe(lost > 0 ? `${lost} lost` : null);
+      await act(async () => (hosts as HTMLElement).click());
+      expect(location.pathname + location.search).toBe(lost > 0 ? "/hosts?state=lost" : "/hosts");
+    } finally {
+      await p.done();
+    }
+  }
+});
+
+test("a failed status read shows on Activity, which it feeds, and not on Cost or Storage", async () => {
+  const failed = () => new Response(JSON.stringify({ error: { code: "internal", message: "status unavailable" } }), { status: 500, headers: { "Content-Type": "application/json" } });
+  const answer = (path: string) => (path.startsWith("/v1/status") ? failed() : undefined);
+  for (const [url, shown] of [
+    ["http://localhost/", true],
+    ["http://localhost/?tab=cost", false],
+    ["http://localhost/?tab=storage", false],
+  ] as const) {
+    const p = await render("tenant", url, answer);
+    try {
+      expect(p.fake.calls.some((u) => u.startsWith("/v1/status"))).toBe(true);
+      expect(p.el.textContent!.includes("status unavailable")).toBe(shown);
+    } finally {
+      await p.done();
+    }
+  }
+});
+
 test("the Cost panel's filters and Every reach every cost request, and Every the history's res", async () => {
-  const p = await render("tenant", "http://localhost/?range=7d&every=hour&label=app%3Da&label=app%3Db&nolabel=phase");
+  const p = await render("tenant", "http://localhost/?tab=cost&range=7d&every=hour&label=app%3Da&label=app%3Db&nolabel=phase");
   try {
     const costs = costCalls(p.fake.calls);
     expect(costs.length).toBeGreaterThan(0);
@@ -144,7 +215,7 @@ for (const [cost, rank, showFilter] of [
   ["external", "external", { nofamily: "compute" }],
 ] as const) {
   test(`?cost=${cost}: every summary that lists values is folded ranked by ${rank}; only the breakdown series filters by family`, async () => {
-    const p = await render("operator", `http://localhost/?by=key&cost=${cost}`);
+    const p = await render("operator", `http://localhost/?tab=cost&by=key&cost=${cost}`);
     try {
       const costs = costCalls(p.fake.calls);
       const of = (g: string[]) => costs.filter((q) => JSON.stringify(q.getAll("group")) === JSON.stringify(g));
@@ -183,7 +254,7 @@ const cellsOf = (el: Element, heading: string) =>
     .querySelectorAll("tbody tr");
 
 test("the peak Run is asked folded to one Run, ranked by Show, over the peak bucket", async () => {
-  const p = await render("tenant", "http://localhost/?cost=compute", (path) => {
+  const p = await render("tenant", "http://localhost/?tab=cost&cost=compute", (path) => {
     if (!path.startsWith("/v1/costs?")) return undefined;
     if (groupsOf(path) === "family") return summary([costRow({ family: "compute" }, "5")], [costRow({ family: "compute" }, "5", { at: iso(0) })]);
     return summary([]);
@@ -198,7 +269,7 @@ test("the peak Run is asked folded to one Run, ranked by Show, over the peak buc
 });
 
 test("By family: each family's Runs from the family summary's runs, per currency", async () => {
-  const p = await render("tenant", "http://localhost/", (path) => {
+  const p = await render("tenant", "http://localhost/?tab=cost", (path) => {
     if (!path.startsWith("/v1/costs?")) return undefined;
     if (groupsOf(path) === "family") return summary([costRow({ family: "compute" }, "5", { runs: 3 }), costRow({ family: "ai" }, "2", { runs: 1 }), costRow({ family: "ai" }, "1", { runs: 2, currency: "EUR" })]);
     return summary([]);
@@ -216,7 +287,7 @@ test("By family: each family's Runs from the family summary's runs, per currency
 });
 
 test("Other's count is the Show-filtered series call's, not the split's", async () => {
-  const p = await render("tenant", "http://localhost/?by=key&cost=external", (path) => {
+  const p = await render("tenant", "http://localhost/?tab=cost&by=key&cost=external", (path) => {
     if (!path.startsWith("/v1/costs?")) return undefined;
     const g = groupsOf(path);
     if (g === "family") return summary([costRow({ family: "ai" }, "9")]);
@@ -233,7 +304,7 @@ test("Other's count is the Show-filtered series call's, not the split's", async 
 });
 
 test("with Break down by API key, Runs from before key tracking are noted with their count", async () => {
-  const p = await render("tenant", "http://localhost/?by=key", (path) => {
+  const p = await render("tenant", "http://localhost/?tab=cost&by=key", (path) => {
     if (!path.startsWith("/v1/costs?")) return undefined;
     const g = groupsOf(path);
     if (g === "family") return summary([costRow({ family: "ai" }, "9")]);
@@ -249,7 +320,7 @@ test("with Break down by API key, Runs from before key tracking are noted with t
 
 test("Break down by Label with the keys failing: the breakdown falls back to app, never 'Loading…' under the error", async () => {
   const failed = () => new Response(JSON.stringify({ error: { code: "internal", message: "labels unavailable" } }), { status: 500, headers: { "Content-Type": "application/json" } });
-  const p = await render("tenant", "http://localhost/?by=label", (path) => (path.startsWith("/v1/costs/labels") ? failed() : undefined));
+  const p = await render("tenant", "http://localhost/?tab=cost&by=label", (path) => (path.startsWith("/v1/costs/labels") ? failed() : undefined));
   try {
     await sleep(50);
     const panel = p.el.querySelector(".cost-panel")!;
@@ -264,7 +335,7 @@ test("Break down by Label with the keys failing: the breakdown falls back to app
 test("Break down by Label names its key in the URL once the keys are known", async () => {
   let release!: () => void;
   const keysArrive = new Promise<void>((r) => (release = r));
-  const p = await render("tenant", "http://localhost/", (path) => (path.startsWith("/v1/costs/labels") ? keysArrive.then(() => ({ from: iso(0), to: iso(60), keys: [{ key: "team", runs: 3 }, { key: "app", runs: 2 }] })) : undefined));
+  const p = await render("tenant", "http://localhost/?tab=cost", (path) => (path.startsWith("/v1/costs/labels") ? keysArrive.then(() => ({ from: iso(0), to: iso(60), keys: [{ key: "team", runs: 3 }, { key: "app", runs: 2 }] })) : undefined));
   try {
     const radio = (name: string) => [...p.el.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="Break down by"] [role="radio"]')].find((b) => b.textContent === name)!;
     const before = history.length;
@@ -290,7 +361,7 @@ test("Break down by Label names its key in the URL once the keys are known", asy
 
 test("a cost request that fails shows the error, never also 'No cost'", async () => {
   const tooLarge = () => new Response(JSON.stringify({ error: { code: "too_large", message: "cost response exceeds 10000 rows" } }), { status: 413, headers: { "Content-Type": "application/json" } });
-  const p = await render("tenant", "http://localhost/?by=key", (path) => {
+  const p = await render("tenant", "http://localhost/?tab=cost&by=key", (path) => {
     if (!path.startsWith("/v1/costs?")) return undefined;
     const q = new URL(path, "http://x").searchParams;
     if (q.getAll("group").includes("key") && q.has("interval")) return tooLarge();

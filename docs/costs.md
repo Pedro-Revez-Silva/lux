@@ -1175,13 +1175,13 @@ is fixed to slot 1).
   `—` while pending, and a leading `~` when the total may still change (an
   estimate part, or `incomplete`). Its Tooltip names the status and gives
   the exact amounts.
-- **Host page**: allocated vs unallocated per hour (or per UTC day with
+- **Host page**, its Cost tab: allocated vs unallocated per hour (or per UTC day with
   Every Day), stacked, from
   `/v1/hosts/{id}/cost` (a tenant sees its allocated part only), and, for
   operators, the rate periods in a `KeyValue` (price per hour, and the
   source once: `static`, `on-demand` or `spot`). Shown to those who can see
   the host's history.
-- **Overview, the Cost section**, over the page's range (1h reads 6h:
+- **Overview, the Cost tab** (`?tab=cost`), over the page's range (1h reads 6h:
   costs are hourly), bucketed by the top bar's **Every** (`?every=`): Auto
   is hourly up to 24h and daily from 7d; Hour and Day are taken as asked;
   Minute stays hourly ("cost is never finer than an hour"). Built from the

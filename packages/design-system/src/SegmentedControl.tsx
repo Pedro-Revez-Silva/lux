@@ -18,8 +18,8 @@ export interface SegmentedControlProps<V extends string> {
 }
 
 /**
- * One choice out of a few, side by side (a radio group drawn as joined
- * buttons): Live / All / Ended, Match console / Solarized light / dark.
+ * One choice out of a few, side by side (a radio group drawn as the Tabs
+ * pills): Live / All / Ended, Match console / Solarized light / dark.
  */
 export function SegmentedControl<V extends string>({ options, value, onChange, label, size = "sm", className }: SegmentedControlProps<V>) {
   return (

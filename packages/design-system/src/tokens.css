@@ -165,6 +165,12 @@
   --shadow-md: 0 2px 8px rgba(22, 24, 29, 0.10), 0 0 0 1px rgba(22, 24, 29, 0.05);
   --shadow-lg: 0 12px 32px rgba(22, 24, 29, 0.18), 0 0 0 1px rgba(22, 24, 29, 0.06);
 
+  /* Pill controls (Tabs, SegmentedControl): a sunken track, a raised choice.
+     The track is a step under --bg-subtle so it still reads on --bg-page. */
+  --seg-track: #ebedf0;
+  --seg-on: var(--bg-surface);
+  --seg-on-shadow: 0 1px 2px rgba(22, 24, 29, 0.08), 0 0 0 1px rgba(22, 24, 29, 0.05);
+
   /* Motion */
   --dur-fast: 100ms;
   --dur-normal: 180ms;
@@ -376,6 +382,11 @@
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
     --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.06);
     --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.08);
+
+    /* Dark raises by lightening: the chosen pill is a step above the track. */
+    --seg-track: #222428;
+    --seg-on: #34373d;
+    --seg-on-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05);
   }
 }
 
@@ -487,6 +498,10 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.06);
   --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.08);
+
+  --seg-track: #222428;
+  --seg-on: #34373d;
+  --seg-on-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.05);
 }
 
 @media (prefers-reduced-motion: reduce) {

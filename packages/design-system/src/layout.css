@@ -25,7 +25,9 @@
   gap: var(--gap);
   min-width: 0;
 }
-/* Stat tiles: 2, 3 or 6 across, so a row of six never leaves orphans. */
+/* Stat tiles: 2, 3, then 5 across. A row of exactly four fills the row at
+   four; one of exactly six goes 3 + 3, and 6 across on the widest content,
+   so neither leaves a gap or one orphan. */
 .grid-stats {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -33,9 +35,20 @@
   .grid-stats {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+  .grid-stats:has(> :nth-child(4):last-child) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@container content (min-width: 1000px) {
+  .grid-stats:not(:has(> :nth-child(6):last-child)) {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+  .grid-stats:has(> :nth-child(4):last-child) {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 }
 @container content (min-width: 1400px) {
-  .grid-stats {
+  .grid-stats:has(> :nth-child(6):last-child) {
     grid-template-columns: repeat(6, minmax(0, 1fr));
   }
 }
@@ -89,22 +102,27 @@
 }
 .section-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  gap: var(--sp-5);
+  gap: var(--sp-4) var(--sp-5);
   flex-wrap: wrap;
+  min-height: var(--control-h-sm);
   padding: var(--sp-2) 0 0;
 }
+/* Sentence case, the card title's weight a step larger: it heads a group of
+   cards. Its note follows it; actions (a Tabs size="sm") sit on the right. */
 .section-title {
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
-  color: var(--fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  color: var(--fg);
 }
 .section-note {
+  margin-right: auto;
   font-size: var(--text-sm);
   color: var(--fg-muted);
+}
+.section-title:has(+ :not(.section-note)) {
+  margin-right: auto;
 }
 
 /* Links that are names: the text colour, accent on hover. */

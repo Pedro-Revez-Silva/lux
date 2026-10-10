@@ -10,7 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
-bun run test           # bun test: idle countdown and server states, money rounding, y scale, y axis width, chart stacking and bars, family colours, storage kind colours, CostFigure, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme (src/*.test.ts*)
+bun run test           # bun test: idle countdown and server states, money rounding, y scale, y axis width, chart stacking, bars, day ticks and faded colours, family colours, storage kind colours, CostFigure, PartBar shares, Meter clamping and text, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme (src/*.test.ts*)
 ```
 
 ## Using it
@@ -61,6 +61,11 @@ gallery/            the gallery app (index.html, Gallery.tsx, fake data)
   no shadow), quiet headers, whitespace instead of rules. Every page opens
   with a `PageHeader` (title, one line of context, primary actions on the
   right). Nothing animates except live state dots, spinners and toasts.
+- One control for "pick one of a few": the grey pill track (`Tabs` for
+  what a page or card shows, `SegmentedControl` for a value; both draw
+  alike). A page with more than one view puts its `Tabs` in the
+  `PageHeader` actions and keeps the choice in `?tab=` (none for the first
+  tab); a tab a principal cannot read is disabled, not hidden.
 - Names lead, ids support. Ids are plain mono in the muted colour with a
   copy affordance on hover or focus (`IdChip`), never boxed. Monospace is
   kept for ids, logs and numeric columns; host names, labels and adapters
@@ -118,6 +123,7 @@ them.
 | --- | --- | --- |
 | `--text-md` (body) | 14px | 13px |
 | `--text-{xs,sm,lg,xl,2xl,3xl}` | 12, 13, 15, 17, 22, 30px | 11, 12, 14, 16, 20, 28px |
+| `StatTile` value / label | 22 / 12px (`--text-2xl` / `--text-xs`) | 20 / 11px |
 | `--row-h` / `--row-h-dense` | 40 / 34px | 32 / 28px |
 | `--control-h` / `-sm` / `-lg` | 32 / 26 / 38px | 28 / 24 / 34px |
 | `--pad-card`, `--pad-cell` | 20, 14px | 16, 12px |
@@ -135,13 +141,15 @@ the right grid.
 | --- | --- | --- | --- |
 | < 768 | off-canvas drawer behind a menu button | brand, live dot, one scope menu (tenant, range, density, theme, session) | one column; state chips scroll sideways; tables scroll inside their card with the first column pinned; header actions drop below the title; the document scrolls |
 | 768–1279 | icon rail (`--sidebar-rail-w`, 56px) | full controls | stat tiles 3 across, charts 2 across |
-| 1280–1919 | full, collapsible to the rail (`localStorage["lux.sidebar"]`) | full controls | overview feed becomes a side column at 1100px of content; charts 2–3 across; stat tiles 6 across from 1400px |
+| 1280–1919 | full, collapsible to the rail (`localStorage["lux.sidebar"]`) | full controls | overview feed becomes a side column at 1100px of content; charts 2–3 across; stat tiles 5 across from 1000px of content |
 | ≥ 1920 / ≥ 2560 | full | full controls | charts grow and go 3–4 across; the feed widens (`--feed-w`); lists cap at `--page-list-w` (1760px), detail pages at `--page-detail-w` (1920px) and centre; the overview is unbounded |
 
 Page widths (`src/layout.css`): `.page` (detail), `.page-list` (tables), `.page-wide`
-(dashboards). Grids: `.grid-stats` (2 / 3 / 6), `.grid-charts` (1 / 2 / 3 /
-4 by container width), `.grid-2`, `.grid-3` (collapse to one column under
-900px of content).
+(dashboards). Grids: `.grid-stats` (2 / 3 / 5 by container width: under
+720px, from 720px, from 1000px; a row of exactly four goes 2 / 4, one of
+exactly six goes 3 / 6 from 1400px, so no row leaves a gap or an orphan),
+`.grid-charts` (1 / 2 / 3 / 4 by container width), `.grid-2`, `.grid-3`
+(collapse to one column under 900px of content).
 
 Tables (`Table`): every column that has a `sortValue` (client sort) or
 `sortable: true` (server sort) sorts. Its header is focusable (Enter or
@@ -207,6 +215,7 @@ All in `src/tokens.css`.
 | Spacing | `--sp-1` … `--sp-9` (2, 4, 6, 8, 12, 16, 24, 32, 48px); density-dependent `--gap` `--gap-lg` `--pad-page` `--pad-card` `--pad-cell` |
 | Radius | `--radius-{sm,md,lg,pill}` (3, 5, 8px, pill) |
 | Elevation | `--shadow-{sm,md,lg}` (popovers, dialogs, toasts; cards have none) |
+| Pill controls | `--seg-track` (the sunken track), `--seg-on` and `--seg-on-shadow` (the chosen pill: white with a hairline in light, a lighter step in dark) |
 | Motion | `--dur-{fast,normal,slow}` (100/180/300ms, 0 under reduced motion), `--ease` |
 | Layout | `--sidebar-w` `--sidebar-rail-w` `--topbar-h` `--row-h` `--row-h-dense` `--control-h` `--control-h-sm` `--control-h-lg` `--page-list-w` `--page-detail-w` `--feed-w` |
 
@@ -287,8 +296,15 @@ for a server's process, ServedStateMark for a server as the tenant's list
 shows it: ready, waking, asleep, stopped, unreachable, exited, no answer),
 IdleCountdown ("Idle in 7:42 · 10m after the last request"; `formatCountdown`),
 ConnectionBadge,
-StatTile, Sparkline, Card, Table, Pagination, Tabs, SegmentedControl (one
-of a few choices as joined buttons, a radio group), RelativeTime ("3h ago",
+StatTile (compact: a 12px muted label, the value at `--text-2xl`, its
+`unit` or note on its own line under it; `swatch` puts a `ColorKey` before
+the label for a figure that is one family or series; `lead` tints the one
+figure a page is about, at most one per row; `tone` warn / danger /
+success colours the value), Sparkline, Card, Table, Pagination, Tabs
+(`items`, `value`, `onChange`, `size`; role tablist; a count is a muted
+number in the pill; `size="sm"` inside a card or a `SectionHeader`),
+SegmentedControl (one of a few values, a radio group, drawn exactly as
+Tabs), RelativeTime ("3h ago",
 the exact date, time and zone in a Tooltip; every table's times),
 DurationCell (a duration with how it was measured in a Tooltip, a live one
 in the foreground, a slow one in the warn tone),
@@ -308,8 +324,10 @@ run's servers: state, URL, wake and lifetime tags, start/stop/restart/remove
 or, for a server kept after its run, detach; `hrefFor` links a name to its
 own page; an expandable log the caller renders),
 KeyValue, IdChip, Code, PageHeader (with optional breadcrumbs; CrumbSep),
-SectionHeader, ConfirmDialog, Dialog (a form modal), Toast (`useToast`),
-EmptyState, Spinner, Skeleton. Hooks: `useTheme`, `useDensity`, `useTerminalScheme`, `useNow` (the shared
+SectionHeader (a sentence-case `--text-lg` semibold title between groups
+of cards, its `note` beside it, `actions` such as a `Tabs size="sm"` on
+the right), ConfirmDialog, Dialog (a form modal), Toast (`useToast`),
+EmptyState, Spinner, Skeleton, PartBar, Meter, Callout (below). Hooks: `useTheme`, `useDensity`, `useTerminalScheme`, `useNow` (the shared
 clock relative times tick on), `useCopy`. All exported
 from `src/index.ts` with typed props; icons from `@lux/design-system/icons`.
 
@@ -362,6 +380,21 @@ Overview's Cost panel is composed of:
 | `FilterBar({add, note?})`, `FilterChip({name, op, value, onRemove})` | the active filters as removable chips, the add control, and what the filters reach |
 | `LabelFilterPopover({keys, values, notSet?, onApply, onKeyChange?})` | "＋ Label filter": a label key (with its Runs), then values as checkboxes with their cost, biggest first, a search (`matchValues`), and "(not set)"; Apply reports `{key, values, notSet}`; Cancel, Escape or a click outside leave things as they were |
 
+Parts of a whole, ratios and page notes (gallery section "parts"):
+
+| Export | What |
+| --- | --- |
+| `PartBar({parts, label, height?})` | one total split into parts: a single bar of segments `{label, value, color, text?}` with 1px gaps, each its share of the drawn parts' sum, each with a Tooltip (its `ColorKey` label, the caller's formatted `text`, its share). `value` is a number for geometry only; zero, negative or missing draws nothing; with nothing to draw the bar is an empty track. Pair it with a list of the parts |
+| `partShares(values)` | each value's share and whole percent: largest remainder, so drawn parts add up to exactly 100; a drawn part under 1% reads `<1%`, never `0%` |
+| `Meter({value, color?, decimals?})` | a ratio in a table cell: a 46px track with its fill (default `--chart-1`) and the percentage to its right in mono. The fill clamps to 0..1, the text keeps the true figure (`112%`); null or not finite is an en dash; a non-zero ratio that rounds to zero reads `<1%` (`meterFill`, `meterText`) |
+| `Callout({children, icon?})` | the page's one explanatory sentence ("Pool cost is the machines only…"): a soft info-tinted box, `--text-sm`, between cards. Not a toast, an error strip or an `InfoStrip` (which qualifies figures inside one card) |
+| `TimeSeriesChart` series `faded` | a lighter, opaque shade of the series' colour (`fadedColor`: mixed toward `--bg-surface`, keeping `FADE_KEEP`, 42%), the same in the plot, the legend and the tooltip: one family split into "charged to runs" and "not" (gallery: costs, "Host cost per day") |
+| `TimeSeriesChart` day bars | bars a day or wider put one x tick under each bar (`barTicks`), every k-th when they do not fit. They are UTC-day buckets (cost): the tick names the UTC date (`timeTickText`) and the tooltip the UTC day ("2026-10-09 UTC", `bucketText`), whatever the browser's zone |
+
+A cost family is always named with its `ColorKey` square: rows
+(`FamilyKey`, `BreakdownTable`), KPIs and StatTiles (`swatch`), bar and
+stacked chart legends and tooltips. Line charts keep a line key.
+
 Behaviour shared by every chart and tooltip:
 
 - **Y axis**: zero-based without a fixed `yMax`, the scale's top is the first
@@ -380,4 +413,5 @@ Behaviour shared by every chart and tooltip:
   measured before paint: it flips to the opposite side when its side leaves
   the viewport, and shifts along that side (`--tip-shift`) to stay 8px inside
   it. A "list price" note at a card's right edge stays readable (gallery:
-  Feedback, the right-aligned row).
+  Feedback, the right-aligned row). `className` and `style` go on its anchor
+  (a `PartBar` segment is one).

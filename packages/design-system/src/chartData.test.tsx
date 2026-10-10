@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { renderToStaticMarkup } from "react-dom/server";
-import { barRange, barSegments, barStep, bucketText, stackData, stackTotal } from "./chartData.ts";
+import { barRange, barSegments, barStep, barTicks, bucketText, chartColors, FADE_KEEP, fadedColor, stackData, stackTotal, timeTickText } from "./chartData.ts";
 import { TimeSeriesChart } from "./TimeSeriesChart.tsx";
 
 const none = new Set<number>();
@@ -59,11 +59,47 @@ test("barStep is the smallest positive step; barRange leaves half a bucket at ei
   expect(barRange([])).toBeNull();
 });
 
-test("bucketText names the bucket, not just its start", () => {
+test("bucketText names the bucket, not just its start; a day bucket by its UTC date", () => {
   const start = new Date(2026, 9, 9, 19, 0).getTime() / 1000;
   expect(bucketText(start, 3600)).toBe("2026-10-09 19:00–20:00");
-  const day = new Date(2026, 9, 9, 0, 0).getTime() / 1000;
-  expect(bucketText(day, 86400)).toBe("2026-10-09 00:00 – 2026-10-10 00:00");
+  const day = Date.UTC(2026, 9, 9) / 1000;
+  expect(bucketText(day, 86400)).toBe("2026-10-09 UTC");
+  expect(bucketText(day, 7 * 86400)).toBe("2026-10-09 – 2026-10-15 UTC");
+});
+
+/**
+ * Runs fn with the process in time zone tz, then back in the one it had.
+ * bun test runs in UTC when TZ is unset; deleting TZ again would leave the
+ * last zone in effect, so the restore sets UTC explicitly.
+ */
+function inZone<T>(tz: string, fn: () => T): T {
+  const was = process.env.TZ;
+  process.env.TZ = tz;
+  try {
+    return fn();
+  } finally {
+    process.env.TZ = was ?? "UTC";
+  }
+}
+
+test("day-bar ticks and tooltips name the UTC day, west and east of UTC", () => {
+  const day = Date.UTC(2026, 9, 9) / 1000;
+  const week = 7 * 86400;
+  for (const [tz, localDate, localTick] of [
+    ["America/Los_Angeles", 8, "10-08"],
+    ["Pacific/Auckland", 9, "10-09"],
+  ] as const) {
+    inZone(tz, () => {
+      // The zone took: local time is off UTC here (7h earlier, or 13h later).
+      expect(new Date(day * 1000).getDate()).toBe(localDate);
+      expect(new Date(day * 1000).getTimezoneOffset()).not.toBe(0);
+      expect(timeTickText(day, week, true)).toBe("10-09");
+      expect(timeTickText(day + 86400, week, true)).toBe("10-10");
+      expect(bucketText(day, 86400)).toBe("2026-10-09 UTC");
+      // Without day bars a tick over a week is the local month-day.
+      expect(timeTickText(day, week).trim()).toBe(localTick);
+    });
+  }
 });
 
 test("stackData and stackTotal: a gap is not a zero", () => {
@@ -83,7 +119,7 @@ test("TimeSeriesChart bars: legend entries carry their values and the note", asy
     const html = renderToStaticMarkup(
       <TimeSeriesChart x={[0, 3600]} ys={[[1, 2], [3, 4]]} series={[{ label: "Compute" }, { label: "AI models" }]} unit="money" currency="USD" stacked bars legendValues={["$3.00", "$7.00"]} legendNote="each bar is one hour" />,
     );
-    expect(html).toContain('class="tschart tschart-bars"');
+    expect(html).toContain('class="tschart tschart-bars tschart-stacked"');
     const legend = [...html.matchAll(/<button[^>]*tschart-legend-item[^>]*>(.*?)<\/button>/g)].map((m) => m[1]!.replace(/<[^>]+>/g, ""));
     expect(legend).toEqual(["Compute$3.00", "AI models$7.00"]);
     expect(html).toContain("each bar is one hour");
@@ -93,6 +129,52 @@ test("TimeSeriesChart bars: legend entries carry their values and the note", asy
     const items = [...el.querySelectorAll(".tschart-legend-item")];
     expect(items.map((b) => b.querySelector(".tschart-legend-label")?.textContent)).toEqual(["Compute", "AI models"]);
     expect(items.map((b) => b.querySelector(".tschart-legend-value")?.textContent)).toEqual(["$3.00", "$7.00"]);
+  } finally {
+    await GlobalRegistrator.unregister();
+  }
+});
+
+test("barTicks: one tick per bucket start while they fit, else every k-th from the first", () => {
+  const days = [0, 1, 2, 3, 4, 5, 6, 7].map((d) => d * 86400);
+  expect(barTicks(days, 800, 64)).toEqual(days);
+  // 200px fits three: every third bucket.
+  expect(barTicks(days, 200, 64)).toEqual([0, 3, 6].map((d) => d * 86400));
+  expect(barTicks(days, 10, 64)).toEqual([0]);
+  expect(barTicks([], 800, 64)).toEqual([]);
+});
+
+test("fadedColor mixes the colour toward the surface, keeping FADE_KEEP of it, as opaque hex", () => {
+  // #2a78d6 over white, 42% kept: R 42·.42 + 255·.58 = 165.5 → a6, G 198.3 → c6, B 237.8 → ee.
+  expect(FADE_KEEP).toBe(0.42);
+  expect(fadedColor("#2a78d6", "#ffffff")).toBe("#a6c6ee");
+  // Over the dark surface (#1b1c1f) it stays dark: a shade, not a pastel.
+  expect(fadedColor("#3987e5", "#1b1c1f")).toBe("#284972");
+  expect(fadedColor("#2a78d6", "#ffffff", 1)).toBe("#2a78d6");
+  expect(fadedColor("#2a78d6", "#ffffff", 0)).toBe("#ffffff");
+  // #rgb and rgb() read the same as #rrggbb.
+  expect(fadedColor("#000", "rgb(255, 255, 255)")).toBe(fadedColor("#000000", "#ffffff"));
+});
+
+test("fadedColor leaves a colour it cannot read unchanged, never a wrong shade", () => {
+  expect(fadedColor("var(--chart-1)", "#ffffff")).toBe("var(--chart-1)");
+  expect(fadedColor("#2a78d6", "")).toBe("#2a78d6");
+});
+
+test("chartColors fades only the faded series; the others keep their colour", () => {
+  expect(chartColors(["#2a78d6", "#2a78d6", "#1baf7a", "#1baf7a"], [false, true, undefined, true], "#ffffff")).toEqual(["#2a78d6", "#a6c6ee", "#1baf7a", fadedColor("#1baf7a", "#ffffff")]);
+});
+
+test("TimeSeriesChart: a faded series' legend key is the faded shade of its colour", async () => {
+  GlobalRegistrator.register();
+  try {
+    document.documentElement.style.setProperty("--chart-1", "#2a78d6");
+    document.documentElement.style.setProperty("--bg-surface", "#ffffff");
+    const html = renderToStaticMarkup(
+      <TimeSeriesChart x={[0, 86400]} ys={[[1, 2], [3, 4]]} series={[{ label: "Compute · runs", color: 1 }, { label: "Compute · unallocated", color: 1, faded: true }]} unit="money" currency="USD" stacked bars />,
+    );
+    const legend = html.slice(html.indexOf("tschart-legend"));
+    const keys = [...legend.matchAll(/class="tschart-key" style="background:([^;"]+)/g)].map((m) => m[1]);
+    expect(keys).toEqual(["#2a78d6", "#a6c6ee"]);
   } finally {
     await GlobalRegistrator.unregister();
   }

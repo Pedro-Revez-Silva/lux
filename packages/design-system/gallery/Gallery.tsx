@@ -3,6 +3,7 @@ import {
   Badge,
   BreakdownTable,
   Button,
+  Callout,
   Card,
   CENTS,
   FilterBar,
@@ -47,11 +48,14 @@ import {
   ListPriceNote,
   LiveDot,
   LogView,
+  Meter,
   Money,
   MoneyList,
   Logo,
   PageHeader,
   Pagination,
+  PartBar,
+  partShares,
   RelativeTime,
   RUN_STATE_LIST,
   SegmentedControl,
@@ -95,7 +99,7 @@ import {
   type TimeRange,
 } from "../src/index.ts";
 import { IconDots, IconInfo, IconMinus, IconMoon, IconPencil, IconPlus, IconRefresh, IconRows, IconRowsLoose, IconStar, IconSun, IconTerminal, IconWarning } from "../src/icons.tsx";
-import { fakeAnsiLogs, fakeCostLines, fakeCostSeries, fakeKeyBreakdown, fakeLabelValues, fakeRunLabels, fakeHosts, fakeLogs, fakeMultilineLogs, fakePlacementStages, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeServersWakeable, fakeShellScript, fakeStoredSeries, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
+import { fakeAnsiLogs, fakeCostLines, fakeCostSeries, fakeKeyBreakdown, fakeLabelValues, fakeRunLabels, fakeHosts, fakeLogs, fakeMultilineLogs, fakePlacementStages, fakePoolDaily, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeServersWakeable, fakeShellScript, fakeStoredSeries, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
 
 function Section({ id, title, children, note }: { id: string; title: string; note?: ReactNode; children: ReactNode }) {
   return (
@@ -109,7 +113,7 @@ function Section({ id, title, children, note }: { id: string; title: string; not
   );
 }
 
-const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "paging", "tabs", "selects", "charts", "costs", "costpanel", "timeline", "events", "logs", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
+const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "paging", "tabs", "selects", "charts", "costs", "costpanel", "parts", "timeline", "events", "logs", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
 
 /** The gallery: a slim bar (brand, theme and density) over the sections. */
 export function Gallery() {
@@ -168,6 +172,7 @@ function Sections() {
         <Charts />
         <Costs />
         <CostPanelDemo />
+        <PartsDemo />
         <TimelineDemo />
         <EventsDemo />
         <Logs />
@@ -415,7 +420,8 @@ function Layout() {
             </>
           }
         />
-        <SectionHeader title="Section header" note="a quiet label between groups of cards" />
+        <SectionHeader title="Trends" note="sentence case, a step above a card title; the note follows it" />
+        <SectionHeader title="Cost" note="hourly over the last 7d" actions={<Tabs size="sm" value="all" onChange={() => {}} items={[{ key: "all", label: "All" }, { key: "compute", label: "Compute" }]} />} />
       </Card>
     </Section>
   );
@@ -459,6 +465,7 @@ const RUN_COST_COLS: Column<RunCostRow>[] = [
 
 function Costs() {
   const c = useMemo(() => fakeCostSeries(), []);
+  const daily = useMemo(() => fakePoolDaily(), []);
   const refund = useMemo(() => [c.compute, refundHour(c.ai)], [c]);
   const byCurrency = useMemo(() => {
     const m = new Map<string, string[]>();
@@ -537,12 +544,94 @@ function Costs() {
           <TimeSeriesChart x={c.x} ys={refund} series={[{ label: "Compute", color: familyColor("compute") }, { label: "AI models", color: familyColor("ai", "violet") }]} unit="money" currency="USD" stacked bars />
         </Card>
       </div>
+      <Card title="Host cost per day" subtitle="faded series: compute and block storage, each split into what runs reserved and a lighter shade of the same family for what they did not; the same shade in legend and tooltip">
+        <TimeSeriesChart
+          x={daily.x}
+          ys={[daily.computeRuns, daily.computeIdle, daily.storageRuns, daily.storageIdle]}
+          series={[
+            { label: "Compute · runs", color: familyColor("compute") },
+            { label: "Compute · unallocated", color: familyColor("compute"), faded: true },
+            { label: "Block storage · runs", color: "var(--chart-3)" },
+            { label: "Block storage · unallocated", color: "var(--chart-3)", faded: true },
+          ]}
+          unit="money"
+          currency="USD"
+          stacked
+          bars
+          legendNote="each bar is one day"
+        />
+      </Card>
       <p className="sg-note">
         familySlot: {FAMILIES.map((f) => `${f.family}${f.color ? ` (${f.color})` : ""} → ${familySlot(f.family, f.color)}`).join(" · ")}. Named hints map to a slot (blue hints avoid slot 1, which is compute&apos;s), <Code>#rrggbb</Code> to the nearest hue, no hint to a slot from the family&apos;s name. A family's slot never depends on its companions: egress and video share slot 4 above, an accepted collision.
       </p>
     </Section>
   );
 }
+
+/* ---------- parts of a whole ---------- */
+
+const WHY_UNALLOCATED = [
+  { label: "Part-filled while busy", value: 5.15, text: "$5.15", color: "var(--chart-4)" },
+  { label: "Waiting to scale down", value: 1.3, text: "$1.30", color: "var(--chart-2)" },
+  { label: "Ready, no run yet", value: 0.42, text: "$0.42", color: "var(--chart-7)" },
+  { label: "Booting", value: 0.07, text: "$0.07", color: "var(--chart-5)" },
+];
+
+function PartsDemo() {
+  const shares = partShares(WHY_UNALLOCATED.map((p) => p.value));
+  return (
+    <Section id="parts" title="PartBar, Meter, Callout" note="PartBar: one total split into parts, a single bar of segments with 1px gaps, each its share of the parts' sum, each with a Tooltip (label, the caller's formatted value, share). Values are numbers for geometry only; the figures in text come from the caller. A zero or missing part draws nothing; a drawn part under 1% reads <1%. Percents use largest remainder, so they add up to 100 (partShares). Pair it with a list of the parts: the bar is the picture, not the record. Meter: one ratio in a table cell; the fill clamps to 0..1, the text keeps the true figure, no ratio is an en dash, a non-zero one under 1% reads <1%. Callout: the page's one explanatory sentence, a soft info-tinted box between cards (optional icon); not a toast, not an error strip, not an InfoStrip.">
+      <div className="grid grid-2">
+        <Card title="Why $6.94 was unallocated" subtitle="four parts, colours from the chart slots">
+          <div className="stack stack-tight">
+            <PartBar label="Why $6.94 was unallocated" parts={WHY_UNALLOCATED} />
+            <KeyValue items={WHY_UNALLOCATED.map((p, i) => ({ key: <ColorKey color={p.color}>{p.label}</ColorKey>, value: `${p.text} · ${shares[i]!.label}`, mono: true }))} />
+          </div>
+        </Card>
+        <Card title="States" subtitle="families; a zero part; one part; a tiny part; nothing">
+          <div className="stack stack-tight">
+            <PartBar label="By family" parts={[{ label: "Compute", value: 12.87, text: "$12.87", color: familyColor("compute") }, { label: "Block storage", value: 1.38, text: "$1.38", color: "var(--chart-3)" }]} />
+            <PartBar label="A zero part draws nothing" parts={[{ label: "Busy", value: 3, color: "var(--chart-4)" }, { label: "Idle", value: 0, color: "var(--chart-2)" }, { label: "Booting", value: null, color: "var(--chart-5)" }, { label: "Ready", value: 1, color: "var(--chart-7)" }]} />
+            <PartBar label="One part" parts={[{ label: "Compute", value: 4, color: familyColor("compute") }]} />
+            <PartBar label="A tiny part" height={8} parts={[{ label: "AI models", value: 625.76, text: "$625.76", color: familyColor("ai", "violet") }, { label: "Compute", value: 6.61, text: "$6.61", color: familyColor("compute") }, { label: "Block storage", value: 0.71, text: "$0.71", color: "var(--chart-3)" }]} />
+            <PartBar label="Nothing" parts={[{ label: "Compute", value: 0, color: familyColor("compute") }]} />
+          </div>
+        </Card>
+      </div>
+      <Card title="Meter" subtitle="a ratio in a table cell: 46px track, the percentage to its right in mono" flush>
+        <Table columns={METER_COLS} rows={METER_ROWS} rowKey={(r) => r.host} dense />
+      </Card>
+      <h3 className="sg-h3">Callout</h3>
+      <Callout>Pool cost is the machines only — instance and disk. AI and other external costs belong to runs and stay on the Overview and run pages.</Callout>
+      <Callout icon={<IconInfo size={14} />}>With an icon. One sentence that explains the page, between its cards; it wraps when the content is narrow and never carries an action. A status inside a card is an InfoStrip; a failure is an error strip; an outcome is a toast.</Callout>
+    </Section>
+  );
+}
+
+interface MeterRow {
+  host: string;
+  total: string;
+  util: number | null;
+  note: string;
+  color?: string;
+}
+
+const METER_ROWS: MeterRow[] = [
+  { host: "default-5ar45u7s", total: "$0.863", util: 0.91, note: "most of it reserved" },
+  { host: "default-hjogolfb", total: "$0.620", util: 0.5, note: "half" },
+  { host: "default-d222eff5", total: "$0.570", util: 0.004, note: "a sliver" },
+  { host: "default-zgf3i72f", total: "$0.544", util: 0, note: "zero: 0%, no fill" },
+  { host: "default-r76idik7", total: "$0.622", util: 1.12, note: "over 1: the fill clamps, the text does not" },
+  { host: "default-5pr3pyid", total: "–", util: null, note: "no figure: en dash" },
+  { host: "ai share", total: "$625.76", util: 0.987, note: "a series colour", color: "var(--chart-7)" },
+];
+
+const METER_COLS: Column<MeterRow>[] = [
+  { key: "host", header: "Host", cell: (r) => <span className="mono">{r.host}</span>, lead: true },
+  { key: "note", header: "State", cell: (r) => <span className="secondary">{r.note}</span> },
+  { key: "total", header: "Total", cell: (r) => r.total, align: "right", mono: true, width: 110 },
+  { key: "util", header: "Utilisation", cell: (r) => <Meter value={r.util} color={r.color} />, sortValue: (r) => r.util, align: "right", width: 140 },
+];
 
 /* ---------- components ---------- */
 
@@ -723,14 +812,24 @@ function States() {
 function Stats() {
   const series = useMemo(() => fakeSeries(48, 1800), []);
   return (
-    <Section id="stats" title="StatTile" note="Label, proportional-figure value, optional unit, signed delta vs a named period, 12–48 point sparkline in the de-emphasis hue with the current point in accent.">
+    <Section id="stats" title="StatTile" note="Compact: a 12px muted label (with a ColorKey swatch when the figure is one family or series), the value at --text-2xl, its unit or note on the line under it, an optional signed delta and sparkline. lead tints the one figure a page is about; tone=warn is money you would want back, danger a count that needs action. .grid-stats goes 2 → 3 → 5 across; a row of exactly four goes 2 + 2 then 4 across, one of exactly six 3 + 3 then 6 on the widest content.">
+      <h3 className="sg-h3">A cost row: lead, swatches, warn</h3>
+      <div className="grid grid-stats">
+        <StatTile lead label="Host cost (7d)" value="$14.26" unit="list price · 121 host-hours" />
+        <StatTile label="Compute" swatch={familyColor("compute")} value="$12.87" unit="$0.107/h avg · spot" />
+        <StatTile label="Block storage" swatch="var(--chart-3)" value="$1.38" unit="100 GB gp3 · $0.0115/h" />
+        <StatTile label="Unallocated" tone="warn" value="$6.94" unit="49% — no run reserved it" />
+        <StatTile label="Utilisation" value="51%" unit="charged to runs ÷ host cost" />
+      </div>
+      <h3 className="sg-h3">Deltas, sparklines, tones, loading</h3>
       <div className="grid grid-stats">
         <StatTile label="Running" value={formatCount(series.running.at(-1))} delta={12.5} deltaLabel="yesterday" trend={series.running} />
         <StatTile label="Queued" value={formatCount(series.queued.at(-1))} delta={-38} deltaUnit="" deltaLabel="1h ago" upIsGood={false} trend={series.queued} />
         <StatTile label="Hosts ready" value="14" unit="of 16" delta={0} deltaLabel="1h ago" />
-        <StatTile label="Hosts lost" value="2" tone="danger" delta={2} deltaUnit="" deltaLabel="1h ago" upIsGood={false} />
-        <StatTile label="Peak memory" value="1.4" unit="GiB" trend={series.mem} />
+        <StatTile label="Hosts lost" value="2" tone="danger" unit="stopped heartbeating" delta={2} deltaUnit="" deltaLabel="1h ago" upIsGood={false} />
+        <StatTile label="Peak memory" value="1.4 GiB" trend={series.mem} />
         <StatTile label="p50 queue time" value={formatDuration(83)} delta={-14.2} deltaLabel="7d" upIsGood={false} />
+        <StatTile label="Start latency (1h)" value="–" unit="no starts" />
         <StatTile label="Loading" value="" loading />
       </div>
     </Section>
@@ -926,8 +1025,11 @@ function Paging() {
 function TabsDemo() {
   const [v, setV] = useState("logs");
   const [w, setW] = useState("all");
+  const [s, setS] = useState("all");
+  const [m, setM] = useState("md");
   return (
-    <Section id="tabs" title="Tabs">
+    <Section id="tabs" title="Tabs, SegmentedControl" note="One look for “pick one of a few”: a sunken track, the chosen option a raised pill with semibold text. Tabs switch what a page or card shows (role tablist; counts are a muted number inside the pill; a disabled tab is greyed). SegmentedControl picks a value (role radiogroup) and draws with exactly the same rules. md heads a page (in PageHeader actions); sm sits in a card or a section header.">
+      <h3 className="sg-h3">Tabs, md and sm</h3>
       <Tabs
         value={v}
         onChange={setV}
@@ -949,6 +1051,13 @@ function TabsDemo() {
           { key: "failed", label: "Failed", count: 3 },
         ]}
       />
+      <h3 className="sg-h3">SegmentedControl, sm and md</h3>
+      <div className="sg-row">
+        <SegmentedControl label="Show" value={s} onChange={setS} options={[{ value: "all", label: "All" }, { value: "compute", label: "Compute" }, { value: "storage", label: "Block storage" }, { value: "external", label: "External" }]} />
+        <SegmentedControl label="Size" size="md" value={m} onChange={setM} options={[{ value: "sm", label: "Small" }, { value: "md", label: "Medium" }]} />
+      </div>
+      <h3 className="sg-h3">In a section header</h3>
+      <SectionHeader title="Cost" actions={<Tabs size="sm" value={w} onChange={setW} items={[{ key: "all", label: "All" }, { key: "live", label: "Live" }, { key: "failed", label: "Failed" }]} />} />
     </Section>
   );
 }

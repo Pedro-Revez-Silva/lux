@@ -163,12 +163,13 @@ outside `/v1/` and `/runner/`; old `/console/...` links redirect). It
 shows what its user can see: an operator the whole system, with a tenant
 filter at the top; a tenant key, that tenant.
 
-- **Overview**: status now, history charts over the chosen range, and a live
-  feed of every Run's events. An operator viewing all tenants also gets a
-  **Control host** row: luxd's machine (CPU, memory, one disk card per
+- **Overview**, in tabs: Activity (status now, history charts over the
+  chosen range, and a live feed of every Run's events), Cost (the cost
+  section) and Storage (bytes in S3 by kind). An operator viewing all
+  tenants also gets a **Control host** row on Activity: luxd's machine (CPU, memory, one disk card per
   tracked path), its Postgres (size, connections), and luxd itself (CPU,
   memory, goroutines), a line per luxd process. A host page charts its
-  runner the same way, a line per runner process.
+  runner the same way (its Metrics tab), a line per runner process.
 - **Runs**: filterable, with each Run's runtime (live while it runs) and
   placements (see [Concepts](concepts.md#placement-and-epoch)), and a Run
   page per Run: output (live), placement timeline, resource charts,
