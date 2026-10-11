@@ -57,7 +57,7 @@ was accepted as records of their own, each at most once per request id
 
 | Adapter | `lands` | `receipt` | accepted | consumed | failed |
 | --- | --- | --- | --- | --- | --- |
-| `claude-code` | `next_step` | yes | `command_lifecycle` `queued` | `command_lifecycle` `started` | `refused`; `cancelled`/`discarded` while the Run stops (or 3 times); a failed write |
+| `claude-code` | `next_step` | yes | `command_lifecycle` `queued` | `command_lifecycle` `started` | `refused` (`claude: the message was refused`); `cancelled`/`discarded` while the Run stops (`the Run stopped before the agent read it`); `cancelled`/`discarded` a 4th time on a live Run, after 3 resends (`claude: the message was cancelled 4 times by interrupts`); a failed write |
 | `codex` | `next_step` | from Codex 0.155 | `turn/start` or `turn/steer` result | `item/started` of the `userMessage` whose `clientId` is the request id | a `turn/steer` refusal other than a stale turn; the Run stopping before it was read |
 | `opencode` | `next_step` | yes, with OpenCode's server up | the steer stored (`prompt_async` 204), or a second `session/prompt` written | the first assistant `message.updated` whose `parentID` is the message id of this steer or of a later one lux sent | the Run stopping before it was read; a failed write; stored and not seen read when its loop ended normally (uncertain: never sent again); OpenCode idle for 2 minutes with it unread after sending it again past an interrupt, or never storing it |
 | `acp` | `next_turn` | no | its `session/prompt` written | — | a failed write |
@@ -72,7 +72,14 @@ that is stopping fails them. Per adapter: Codex, the unread steers start
 the next `turn/start`; OpenCode, they go again through `prompt_async`
 (under a new message id) once the cancelled loop ends; Claude Code, a line
 reported `cancelled` or `discarded` after an interrupt is written again
-with a new `uuid`. Each is sent again with its images.
+with a new `uuid`, up to 3 times. Each is sent again with its images.
+A Claude Code line that fails here fails with `the Run stopped before the
+agent read it` while the Run stops (the same reason Codex and OpenCode
+give), with `claude: the message was cancelled 4 times by interrupts` on a
+live Run once its 3 resends were cancelled too, or with the write error if
+its copy cannot be written. Only the first means the Run is stopping. A line
+Claude Code cancels before it reported it queued fails as `claude: the
+message was cancelled` (or `discarded`).
 
 ## Images
 

@@ -403,10 +403,10 @@ func (c *Claude) lifecycleFrame(uuid, state string) {
 	case "cancelled", "discarded":
 		// Claude Code cancels the lines still queued when a turn is
 		// interrupted (interrupt_cancel_queued_v1). One not yet read is
-		// written again, so it starts the next turn; only a stopping Run
-		// fails it.
-		if !c.resend(in) {
-			c.inputs.fail(c.sink, in, fmt.Errorf("claude: the message was %s", state))
+		// written again, so it starts the next turn; a stopping Run, or
+		// claudeMaxResends reached, fails it.
+		if err := c.resend(in, state); err != nil {
+			c.inputs.fail(c.sink, in, err)
 		}
 	case "refused":
 		c.inputs.fail(c.sink, in, fmt.Errorf("claude: the message was %s", state))
@@ -421,22 +421,35 @@ func (c *Claude) lifecycleFrame(uuid, state string) {
 	}
 }
 
+// claudeMaxResends: how many times one request id's line is written again
+// after interrupts cancel it; the cancel after the last resend fails it.
+const claudeMaxResends = 3
+
+var errClaudeCancelledTooOften = fmt.Errorf("claude: the message was cancelled %d times by interrupts", claudeMaxResends+1)
+
 // resend writes an accepted, unread line again, under a new uuid mapped to
-// the same request id; false if it must fail instead (the Run is stopping,
-// it was read already, or it was cancelled three times).
-func (c *Claude) resend(in proto.Input) bool {
+// the same request id. It returns nil once written, or why the line fails.
+func (c *Claude) resend(in proto.Input, state string) error {
 	c.mu.Lock()
 	if c.resent == nil {
 		c.resent = map[string]int{}
 	}
 	n := c.resent[in.RequestID] + 1
-	ok := !c.stopping && n <= 3
-	if ok {
+	stopping := c.stopping
+	if !stopping && n <= claudeMaxResends {
 		c.resent[in.RequestID] = n
 	}
 	c.mu.Unlock()
-	if !ok || !c.inputs.unreadOne(in.RequestID) {
-		return false
+	// Stopping is checked first: a line past its limit on a stopping Run
+	// still fails as unread by the stop.
+	switch {
+	case stopping:
+		return errStoppedUnread
+	case n > claudeMaxResends:
+		return errClaudeCancelledTooOften
+	}
+	if !c.inputs.unreadOne(in.RequestID) {
+		return fmt.Errorf("claude: the message was %s", state)
 	}
 	uuid := claudeUUID(fmt.Sprintf("%s#%d", in.RequestID, n))
 	c.mu.Lock()
@@ -445,10 +458,14 @@ func (c *Claude) resend(in proto.Input) bool {
 	if err := c.writeLine(uuid, in); err != nil {
 		c.mu.Lock()
 		c.dropSent(uuid)
+		stopping = c.stopping
 		c.mu.Unlock()
-		return false
+		if stopping {
+			return errStoppedUnread
+		}
+		return err
 	}
-	return true
+	return nil
 }
 
 // writeLine writes a user line: the input's images, then its text. Never
