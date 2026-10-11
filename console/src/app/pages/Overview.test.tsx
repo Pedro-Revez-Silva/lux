@@ -211,15 +211,15 @@ test("Every Auto sends no history res", async () => {
 
 for (const [cost, rank, showFilter] of [
   ["all", "all", {}],
-  ["compute", "compute", { family: "compute" }],
-  ["external", "external", { nofamily: "compute" }],
+  ["compute", "compute", { family: ["compute", "block-storage"] }],
+  ["external", "external", { nofamily: ["compute", "block-storage"] }],
 ] as const) {
   test(`?cost=${cost}: every summary that lists values is folded ranked by ${rank}; only the breakdown series filters by family`, async () => {
     const p = await render("operator", `http://localhost/?tab=cost&by=key&cost=${cost}`);
     try {
       const costs = costCalls(p.fake.calls);
       const of = (g: string[]) => costs.filter((q) => JSON.stringify(q.getAll("group")) === JSON.stringify(g));
-      const filterOf = (q: URLSearchParams) => ({ family: q.get("family") ?? undefined, nofamily: q.get("nofamily") ?? undefined });
+      const filterOf = (q: URLSearchParams): { family: readonly string[]; nofamily: readonly string[] } => ({ family: q.getAll("family"), nofamily: q.getAll("nofamily") });
       for (const [g, top] of [
         [["key"], "7"],
         [["key", "family"], "7"],
@@ -230,9 +230,9 @@ for (const [cost, rank, showFilter] of [
         expect(qs.length).toBe(1);
         expect([qs[0]!.get("top"), qs[0]!.get("rank")]).toEqual([top, rank]);
       }
-      expect(filterOf(of(["key"])[0]!)).toEqual({ family: undefined, nofamily: undefined, ...showFilter });
+      expect(filterOf(of(["key"])[0]!)).toEqual({ family: [], nofamily: [], ...showFilter });
       for (const g of [["key", "family"], ["run", "family"], ["tenant", "family"], ["family"]]) {
-        expect(filterOf(of(g)[0]!)).toEqual({ family: undefined, nofamily: undefined });
+        expect(filterOf(of(g)[0]!)).toEqual({ family: [], nofamily: [] });
       }
       // The family summary is not folded: it asks for runs, not top.
       expect([of(["family"])[0]!.get("runs"), of(["family"])[0]!.has("top")]).toEqual(["true", false]);
@@ -413,22 +413,63 @@ test("Overview Cost by family: Block storage is its own KPI and row, apart from 
   }
 });
 
-test("Show External: the total is every family but compute and says so; the External KPI is the plugins' alone", async () => {
+const muted = (el: Element) => [...el.querySelectorAll(".kpi")].map((k) => [k.querySelector(".kpi-label")?.textContent, k.classList.contains("is-muted"), k.querySelector(".kpi-sub")?.textContent ?? ""]);
+const showTitle = (el: Element, name: string) => [...el.querySelectorAll<HTMLElement>('[role="radiogroup"][aria-label="Show"] [role="radio"]')].find((b) => b.textContent === name)!.getAttribute("title");
+const totalSplit = (el: Element) => [...el.querySelector(".kpi [data-split-bar]")!.querySelectorAll<HTMLElement>(".split-bar-part")].map((p) => p.classList.contains("is-faint"));
+
+test("Show External: the total excludes compute and block storage; the External KPI is the plugins' alone", async () => {
   const p = await render("operator", "http://localhost/?tab=cost&cost=external", familyAnswer);
   try {
     await until(() => kpis(p.el).some(([l]) => l === "Block storage"), "the Block storage KPI");
     expect(kpis(p.el).slice(0, 4)).toEqual([
-      ["Non-compute total · last 24 hours", "$626.47"],
+      ["External total · last 24 hours", "$625.76"],
       ["Compute", "$6.61"],
       ["Block storage", "$0.71"],
       ["External", "$625.76"],
     ]);
-    const option = [...p.el.querySelectorAll<HTMLElement>('[role="radiogroup"][aria-label="Show"] [role="radio"]')].find((b) => b.textContent === "External")!;
-    expect(option.getAttribute("title")).toBe("Every family but compute: block storage and what cost plugins report");
+    expect(muted(p.el).slice(1, 4).map(([l, m, sub]) => [l, m, String(sub).startsWith("hidden")])).toEqual([
+      ["Compute", true, true],
+      ["Block storage", true, true],
+      ["External", false, false],
+    ]);
+    // Split bar parts in order compute, block storage, external.
+    expect(totalSplit(p.el)).toEqual([true, true, false]);
+    expect(showTitle(p.el, "External")).toBe("What cost plugins report: every family but compute and block storage");
+    expect(familyNamesIn(p.el)).toEqual(["AI models"]);
   } finally {
     await p.done();
   }
 });
+
+test("Show Compute: the total counts compute and block storage; External is muted, Block storage live", async () => {
+  const p = await render("operator", "http://localhost/?tab=cost&cost=compute", familyAnswer);
+  try {
+    await until(() => kpis(p.el).some(([l]) => l === "Block storage"), "the Block storage KPI");
+    expect(kpis(p.el).slice(0, 4)).toEqual([
+      ["Compute total · last 24 hours", "$7.32"],
+      ["Compute", "$6.61"],
+      ["Block storage", "$0.71"],
+      ["External", "$625.76"],
+    ]);
+    expect(muted(p.el).slice(1, 4).map(([l, m, sub]) => [l, m, String(sub).startsWith("hidden")])).toEqual([
+      ["Compute", false, false],
+      ["Block storage", false, false],
+      ["External", true, true],
+    ]);
+    expect(totalSplit(p.el)).toEqual([false, false, true]);
+    expect(showTitle(p.el, "Compute")).toBe("Host time and its disks: the compute and block storage families");
+    // By family keeps the two figures apart, each its share of the compute total.
+    const rows = [...cellsOf(p.el, "By family")].map((r) => [...r.querySelectorAll("td")].map((td) => td.textContent));
+    expect(rows).toEqual([
+      ["Compute", "341", "$6.61", "–", "–", "$6.61", "90%"],
+      ["Block storage", "341", "–", "$0.71", "–", "$0.71", "10%"],
+    ]);
+  } finally {
+    await p.done();
+  }
+});
+
+const familyNamesIn = (el: Element) => [...cellsOf(el, "By family")].map((r) => r.querySelector("td")!.textContent);
 
 test("Overview Cost: unallocated host time is split into Compute and Block storage; a tenant sees its own pools' when luxd sends them", async () => {
   for (const [role, url] of [

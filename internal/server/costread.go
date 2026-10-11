@@ -18,17 +18,18 @@ import (
 type costSummaryInput struct {
 	CostLabelQuery
 	Group    []string `query:"group,explode" doc:"Repeat up to twice: tenant (operators), pool, host, family, run, key, label:key."`
-	Family   string   `query:"family" doc:"Only this family. Not with nofamily."`
-	NoFamily string   `query:"nofamily" doc:"Every family but this one."`
+	Family   []string `query:"family,explode" doc:"Only these families: repeat up to 8 times, each value non-empty. Not with nofamily."`
+	NoFamily []string `query:"nofamily,explode" doc:"Every family but these: repeat up to 8 times, each value non-empty."`
 	Interval string   `query:"interval" doc:"hour or day; include a time series."`
 	Top      int      `query:"top" minimum:"1" maximum:"50" doc:"Keep the first group's N values costing the most per currency (ties by value) and fold the rest into one row per second-group value and currency, marked other: true (its value reads (other)), in totals and series; (none) is never folded nor counted, and the second group is kept. Needs a group. The row limit applies to the folded rows. Totals rows then carry runs, and otherCount says how many values were folded."`
-	Rank     string   `query:"rank" enum:"all,compute,external," doc:"With top: all (default), compute, or external (every family but compute): the cost that ranks the values and that runs counts. Refused when it counts none of the families family/nofamily keep."`
+	Rank     string   `query:"rank" enum:"all,compute,external," doc:"With top: all (default), compute (the host-tied families: compute and block-storage), or external (every other family): the cost that ranks the values and that runs counts. Refused when it counts none of the families family/nofamily keep."`
 	Runs     bool     `query:"runs" doc:"Without top: totals rows carry runs too (with top they always do)."`
 }
 
 func (in *costSummaryInput) Resolve(ctx huma.Context) []error {
 	u := ctx.URL()
 	in.Group = u.Query()["group"]
+	in.Family, in.NoFamily = u.Query()["family"], u.Query()["nofamily"]
 	in.CostLabelQuery.resolve(u.Query())
 	return nil
 }
@@ -73,16 +74,17 @@ func (q *CostLabelQuery) labelFilter() (map[string][]string, []string, error) {
 	return want, absent, nil
 }
 
-// costScopedSQL is the costed Run hours in [$1, $2) of family $3 (or all),
-// whose Run's labels match $4 ({key: [values]}: one of the values of every
-// key) and lack every key in $5. Filters are values, never SQL text.
+// costScopedSQL is the costed Run hours in [$1, $2) of the families in $3
+// (empty: all), whose Run's labels match $4 ({key: [values]}: one of the
+// values of every key) and lack every key in $5. Filters are values, never
+// SQL text.
 const costScopedSQL = `scoped AS (
 		SELECT c.hour, c.currency, c.amount, c.tenant_id, c.family, c.run_id,
 			coalesce(cp.name, '(none)') AS pool, coalesce(c.host_id, '(none)') AS host, r.labels,
 			coalesce(r.submitted_by_key, 'email:' || r.submitted_by_email, '(none)') AS submitter
 		FROM cost_hourly c JOIN runs r ON r.id = c.run_id LEFT JOIN pools cp ON cp.id = c.pool_id
 		WHERE c.run_id IS NOT NULL AND c.hour >= $1 AND c.hour < $2
-			AND ($3 = '' OR c.family = $3)
+			AND (cardinality($3::text[]) = 0 OR c.family = ANY($3::text[]))
 			AND ($4::jsonb = '{}' OR NOT EXISTS (SELECT 1 FROM jsonb_each($4::jsonb) f
 				WHERE (r.labels->>f.key) IN (SELECT jsonb_array_elements_text(f.value)) IS NOT TRUE))
 			AND (cardinality($5::text[]) = 0 OR NOT EXISTS (SELECT 1 FROM unnest($5::text[]) k WHERE r.labels ? k))
@@ -164,16 +166,49 @@ type costSummaryOutput struct {
 }
 
 const (
-	costMaxRange = 90 * 24 * time.Hour
-	costMaxRows  = 10000
+	costMaxRange         = 90 * 24 * time.Hour
+	costMaxRows          = 10000
+	costMaxFamilyFilters = 8
 )
+
+// familyFilter checks family and nofamily and returns them as the queries'
+// array parameters: never nil, since a NULL array matches no row.
+func (in *costSummaryInput) familyFilter() ([]string, []string, error) {
+	if len(in.Family) > 0 && len(in.NoFamily) > 0 {
+		return nil, nil, errf(http.StatusBadRequest, "bad_request", "family and nofamily exclude each other")
+	}
+	for name, values := range map[string][]string{"family": in.Family, "nofamily": in.NoFamily} {
+		if len(values) > costMaxFamilyFilters {
+			return nil, nil, errf(http.StatusBadRequest, "bad_request", "at most %d %s values", costMaxFamilyFilters, name)
+		}
+		if slices.Contains(values, "") {
+			return nil, nil, errf(http.StatusBadRequest, "bad_request", "%s must not be empty", name)
+		}
+	}
+	return append([]string{}, in.Family...), append([]string{}, in.NoFamily...), nil
+}
+
+// rankCountsNone reports whether rank counts none of the families that
+// family (only these) or nofamily (all but these) keep: rank=compute counts
+// the host families, rank=external every other one, of which nofamily
+// always leaves some.
+func rankCountsNone(rank string, family, nofamily []string) bool {
+	isHost := func(f string) bool { return slices.Contains(hostFamilies, f) }
+	switch rank {
+	case "compute":
+		if len(family) > 0 {
+			return !slices.ContainsFunc(family, isHost)
+		}
+		return !slices.ContainsFunc(hostFamilies, func(f string) bool { return !slices.Contains(nofamily, f) })
+	case "external":
+		return len(family) > 0 && !slices.ContainsFunc(family, func(f string) bool { return !isHost(f) })
+	}
+	return false
+}
 
 // fold is top (0: none) and what it ranks by. Range and enum are checked
 // by huma (422); these are the combinations the schema cannot express.
 func (in *costSummaryInput) fold() (int, string, error) {
-	if in.Family != "" && in.NoFamily != "" {
-		return 0, "", errf(http.StatusBadRequest, "bad_request", "family and nofamily exclude each other")
-	}
 	if in.Top == 0 {
 		if in.Rank != "" {
 			return 0, "", errf(http.StatusBadRequest, "bad_request", "rank needs top")
@@ -188,8 +223,7 @@ func (in *costSummaryInput) fold() (int, string, error) {
 		rank = "all"
 	}
 	// A rank that counts none of the families kept would rank by value alone.
-	if rank == "compute" && (in.Family != "" && in.Family != "compute" || in.NoFamily == "compute") ||
-		rank == "external" && in.Family == "compute" {
+	if rankCountsNone(rank, in.Family, in.NoFamily) {
 		return 0, "", errf(http.StatusBadRequest, "bad_request", "rank=%s counts none of the families kept", rank)
 	}
 	return in.Top, rank, nil
@@ -253,6 +287,10 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 	if err != nil {
 		return nil, err
 	}
+	family, nofamily, err := in.familyFilter()
+	if err != nil {
+		return nil, err
+	}
 	top, rank, err := in.fold()
 	if err != nil {
 		return nil, err
@@ -260,13 +298,14 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 	filtered := len(want) > 0 || len(absent) > 0
 	out := &costSummaryOutput{Body: CostSummaryBody{From: from, To: to, Basis: "list", Totals: []CostSummaryRow{}}}
 	// Group selectors and label keys are values, never SQL identifiers.
+	// ranks: rank=compute counts the host families ($13), external the rest.
 	const base = `WITH ` + costScopedSQL + `, dimensions AS (
-		SELECT hour, currency, amount, run_id, ($10 = 'all' OR (family = 'compute') = ($10 = 'compute')) AS ranks,
+		SELECT hour, currency, amount, run_id, ($10 = 'all' OR (family = ANY($13::text[])) = ($10 = 'compute')) AS ranks,
 			CASE $6::text WHEN 'tenant' THEN tenant_id WHEN 'pool' THEN pool WHEN 'host' THEN host WHEN 'key' THEN submitter
 				WHEN 'family' THEN family WHEN 'run' THEN run_id WHEN 'label' THEN coalesce(labels->>$8, '(none)') END AS g1,
 			CASE $7::text WHEN 'tenant' THEN tenant_id WHEN 'pool' THEN pool WHEN 'host' THEN host WHEN 'key' THEN submitter
 				WHEN 'family' THEN family WHEN 'run' THEN run_id WHEN 'label' THEN coalesce(labels->>$9, '(none)') END AS g2
-		FROM scoped WHERE $12 = '' OR family <> $12
+		FROM scoped WHERE family <> ALL($12::text[])
 	)`
 	// The fold ranks g1 per currency by the cost rank counts (a value with
 	// none ranks last), then marks every value past $11 other and names it
@@ -313,7 +352,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 	case in.Runs:
 		query = base + plainRuns
 	}
-	args := []any{from, to, in.Family, want, absent, group[0], group[1], label[0], label[1], rank, top, in.NoFamily}
+	args := []any{from, to, family, want, absent, group[0], group[1], label[0], label[1], rank, top, nofamily, hostFamilies}
 	rowCount := 0
 	read := func(tx pgx.Tx, interval string) ([]CostSummaryRow, error) {
 		bucket := "NULL::timestamptz"
@@ -405,13 +444,13 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 		// cost_hourly_host_pool_hour per owned pool instead of filtering every
 		// tenant's host rows.
 		if !filtered {
-			args, ownPools := []any{from, to, in.Family, in.NoFamily}, ""
+			args, ownPools := []any{from, to, family, nofamily}, ""
 			if p.TenantID != "" {
 				args, ownPools = append(args, p.TenantID), ` AND pool_id IN (SELECT id FROM pools WHERE tenant_id = $5)`
 			}
 			out.Body.Unallocated = []CostSummaryRow{}
 			rows, err := tx.Query(ctx, `SELECT family, currency, trim_scale(sum(unallocated))::text FROM cost_hourly
-				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3) AND ($4 = '' OR family <> $4)`+ownPools+`
+				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND (cardinality($3::text[]) = 0 OR family = ANY($3::text[])) AND family <> ALL($4::text[])`+ownPools+`
 				GROUP BY family, currency ORDER BY currency, family`, args...)
 			if err != nil {
 				return err
@@ -437,7 +476,7 @@ func (s *Server) costSummary(ctx context.Context, in *costSummaryInput) (*costSu
 			out.Body.Hosts = []HostAllocation{}
 			rows, err = tx.Query(ctx, `SELECT host_id, family, currency, trim_scale(sum(allocated))::text,
 				trim_scale(sum(unallocated))::text FROM cost_hourly
-				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND ($3 = '' OR family = $3) AND ($4 = '' OR family <> $4)`+ownPools+`
+				WHERE run_id IS NULL AND hour >= $1 AND hour < $2 AND (cardinality($3::text[]) = 0 OR family = ANY($3::text[])) AND family <> ALL($4::text[])`+ownPools+`
 				GROUP BY host_id, family, currency ORDER BY host_id, currency, family`, args...)
 			if err != nil {
 				return err
@@ -570,7 +609,7 @@ func (s *Server) costLabels(ctx context.Context, in *costLabelsInput) (*costLabe
 		// Each Run's labels once, not once per cost hour and family.
 		rows, err := tx.Query(ctx, `WITH `+costScopedSQL+`, labelled AS (SELECT DISTINCT run_id, labels FROM scoped)
 			SELECT k, count(*)::int FROM labelled, jsonb_object_keys(labels) k
-			GROUP BY k ORDER BY 2 DESC, 1`, from, to, "", want, absent)
+			GROUP BY k ORDER BY 2 DESC, 1`, from, to, []string{}, want, absent)
 		if err != nil {
 			return err
 		}

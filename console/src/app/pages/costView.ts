@@ -5,34 +5,34 @@
 // (hour or day) is the page's (every.ts).
 import { bandColor, compareMoney, familyDisplay, NONE_BAND_COLOR, OTHER_BAND_COLOR, sumMoney } from "@lux/design-system";
 import type { CostFamily, CostKey, CostSummary, CostSummaryRow, MoneyTotal } from "../../api/index.ts";
+import { BLOCK_STORAGE, COMPUTE, HOST_FAMILIES } from "../../costFamilies.ts";
 
-/** Which costs the panel counts: every family, compute (host time) only, or every other family. */
+export { BLOCK_STORAGE, COMPUTE, HOST_FAMILIES };
+
+/** Which costs the panel counts: every family, the host-tied ones (compute and block storage), or what cost plugins report. */
 export type CostShow = "all" | "compute" | "external";
 export type CostInterval = "hour" | "day";
-
-export const COMPUTE = "compute";
-/** lux's own disk family: shown apart from compute and from the plugins' families (the "external" side). */
-export const BLOCK_STORAGE = "block-storage";
 
 /** ?cost=: compute or external; anything else is All. */
 export function parseShow(v: string | null): CostShow {
   return v === "compute" || v === "external" ? v : "all";
 }
 
-/**
- * Whether a family counts under show. Show is luxd's family filter: compute
- * is family=compute, external nofamily=compute, so Show External is every
- * family but compute: block storage counts under it (its total reads
- * "Non-compute total"), while the External KPI is the plugins' families alone.
- */
+// Show groups the host families; the Compute and Block storage KPIs stay separate.
 export function shows(show: CostShow, family: string): boolean {
-  return show === "all" || (show === "compute") === (family === COMPUTE);
+  return show === "all" || (show === "compute") === HOST_FAMILIES.includes(family);
 }
 
 /** Which of a split's three sides a family is on: compute, block storage, or what plugins report. */
 export type Side = "compute" | "blockStorage" | "external";
 export function sideOf(family: string): Side {
-  return family === COMPUTE ? "compute" : family === BLOCK_STORAGE ? "blockStorage" : "external";
+  if (!HOST_FAMILIES.includes(family)) return "external";
+  return family === COMPUTE ? "compute" : "blockStorage";
+}
+
+/** Whether show leaves a side out: Compute and Block storage under External, External under Compute. */
+export function sideHidden(side: Side, show: CostShow): boolean {
+  return show !== "all" && (show === "compute") === (side === "external");
 }
 
 /** What the panel breaks cost down by. A label breakdown without a key takes the default key (defaultLabelKey). */
@@ -131,12 +131,12 @@ export function byCurrency<T extends { currency: string }>(rows: readonly T[]): 
 }
 
 /** The /v1/costs family filter that keeps what show counts. */
-export function showFamily(show: CostShow): { family?: string; nofamily?: string } {
+export function showFamily(show: CostShow): { family?: string[]; nofamily?: string[] } {
   switch (show) {
     case "compute":
-      return { family: COMPUTE };
+      return { family: [...HOST_FAMILIES] };
     case "external":
-      return { nofamily: COMPUTE };
+      return { nofamily: [...HOST_FAMILIES] };
     default:
       return {};
   }

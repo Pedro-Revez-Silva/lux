@@ -129,14 +129,15 @@ func TestCostSummaryTop(t *testing.T) {
 	for _, q := range []string{
 		"&top=3", "&group=run&rank=compute",
 		"&group=run&family=compute&nofamily=compute", "&group=run&family=ai&nofamily=compute",
-		"&group=run&top=3&family=ai&rank=compute", "&group=run&top=3&nofamily=compute&rank=compute",
+		"&group=run&top=3&family=ai&rank=compute", "&group=run&top=3&nofamily=compute&nofamily=block-storage&rank=compute",
 		"&group=run&top=3&family=compute&rank=external",
 	} {
 		if code := getJSON(t, s, keys["t1"], costPath(q), &got); code != http.StatusBadRequest {
 			t.Errorf("%s: status %d, want 400", q, code)
 		}
 	}
-	for _, q := range []string{"&group=run&top=50", "&group=run&top=3&family=compute&rank=compute", "&group=run&top=3&nofamily=compute&rank=external", "&group=run&top=3&family=ai&rank=external"} {
+	// nofamily=compute keeps block storage, a host family rank=compute counts.
+	for _, q := range []string{"&group=run&top=50", "&group=run&top=3&family=compute&rank=compute", "&group=run&top=3&nofamily=compute&rank=external", "&group=run&top=3&family=ai&rank=external", "&group=run&top=3&nofamily=compute&rank=compute"} {
 		if code := getJSON(t, s, keys["t1"], costPath(q), &got); code != http.StatusOK {
 			t.Errorf("%s: status %d", q, code)
 		}
@@ -228,6 +229,88 @@ func TestCostSummaryTop(t *testing.T) {
 	}
 	if m, want := runsByGroup(got.Totals, ""), map[string]int{" USD": 6, " EUR": 3}; !maps.Equal(m, want) || len(got.Totals) != len(want) {
 		t.Errorf("no group runs=true %v, want %v", m, want)
+	}
+}
+
+func TestCostRankCountsNone(t *testing.T) {
+	for _, tc := range []struct {
+		rank             string
+		family, nofamily []string
+		none             bool
+	}{
+		{"all", nil, nil, false},
+		{"all", []string{"ai"}, nil, false},
+		{"compute", nil, nil, false},
+		{"compute", []string{"compute"}, nil, false},
+		{"compute", []string{"block-storage"}, nil, false},
+		{"compute", []string{"ai", "block-storage"}, nil, false},
+		{"compute", []string{"ai"}, nil, true},
+		{"compute", []string{"ai", "storage"}, nil, true},
+		{"compute", nil, []string{"compute"}, false},
+		{"compute", nil, []string{"block-storage"}, false},
+		{"compute", nil, []string{"compute", "block-storage"}, true},
+		{"compute", nil, []string{"block-storage", "ai", "compute"}, true},
+		{"external", nil, nil, false},
+		{"external", []string{"compute"}, nil, true},
+		{"external", []string{"block-storage"}, nil, true},
+		{"external", []string{"compute", "block-storage"}, nil, true},
+		{"external", []string{"compute", "ai"}, nil, false},
+		{"external", nil, []string{"compute", "block-storage"}, false},
+		{"external", nil, []string{"ai"}, false},
+	} {
+		if got := rankCountsNone(tc.rank, tc.family, tc.nofamily); got != tc.none {
+			t.Errorf("rank=%s family=%v nofamily=%v: %v, want %v", tc.rank, tc.family, tc.nofamily, got, tc.none)
+		}
+	}
+}
+
+// rank=compute counts block storage with compute: a2's compute alone (80)
+// ranks below a1's (100), its compute and block storage (110) above.
+func TestCostSummaryRankComputeCountsBlockStorage(t *testing.T) {
+	s, keys := topFixture(t)
+	execSQL(t, s, context.Background(), `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, amount, allocated, unallocated)
+		VALUES ($1, 't1', 'a2', 'compute', 'block-storage', 'USD', 30, 0, 0)`, t0)
+	var got CostSummaryBody
+	for _, q := range []string{"&group=label:app&top=1&rank=compute", "&group=label:app&top=1&rank=compute&family=compute&family=block-storage"} {
+		got = CostSummaryBody{}
+		if code := getJSON(t, s, keys["t1"], costPath(q), &got); code != http.StatusOK {
+			t.Fatalf("%s: status %d", q, code)
+		}
+		m := byGroup(got.Totals, "label:app")
+		if m["a2 USD"] != "110" || m["a1 USD"] != "" {
+			t.Errorf("%s: totals %v, want a2 USD 110 kept and a1 folded", q, m)
+		}
+		if r := runsByGroup(got.Totals, "label:app"); r["a2 USD"] != 1 {
+			t.Errorf("%s: runs %v", q, r)
+		}
+	}
+	// rank=external no longer counts block storage: a2 counts no external cost.
+	got = CostSummaryBody{}
+	if code := getJSON(t, s, keys["t1"], costPath("&group=label:app&top=1&rank=external&nofamily=compute"), &got); code != http.StatusOK {
+		t.Fatalf("rank=external status %d", code)
+	}
+	if r := runsByGroup(got.Totals, "label:app"); r["a4 USD"] != 1 || r["(other) USD"] != 0 {
+		t.Errorf("rank=external runs %v", r)
+	}
+	for _, q := range []string{
+		"&group=run&top=3&nofamily=compute&nofamily=block-storage&rank=compute",
+		"&group=run&top=3&family=ai&family=storage&rank=compute",
+		"&group=run&top=3&family=compute&family=block-storage&rank=external",
+		"&group=run&top=3&family=block-storage&rank=external",
+	} {
+		if code := getJSON(t, s, keys["t1"], costPath(q), &got); code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400", q, code)
+		}
+	}
+	for _, q := range []string{
+		"&group=run&top=3&family=block-storage&rank=compute",
+		"&group=run&top=3&nofamily=compute&rank=compute",
+		"&group=run&top=3&nofamily=compute&nofamily=block-storage&rank=external",
+		"&group=run&top=3&family=compute&family=ai&rank=external",
+	} {
+		if code := getJSON(t, s, keys["t1"], costPath(q), &got); code != http.StatusOK {
+			t.Errorf("%s: status %d, want 200", q, code)
+		}
 	}
 }
 

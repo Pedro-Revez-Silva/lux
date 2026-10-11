@@ -69,6 +69,7 @@ import {
   runsPerFamily,
   shownTotals,
   showFamily,
+  sideHidden,
   sideOf,
   sideTotals,
   TOP_VALUES,
@@ -104,8 +105,9 @@ const BY_LABEL: Record<BreakdownKind, string> = { family: "Family", label: "Labe
  * page's step, hour or UTC day) stacked by the breakdown, one chart per
  * currency; the top Runs with their split and labels; cost by the
  * breakdown; and, for an operator viewing all tenants, unallocated host
- * time and the top tenants. Show (?cost=) counts all, compute or external
- * costs; Break down by (?by=) picks the stack; label filters (?label=,
+ * time and the top tenants. Show (?cost=) counts all costs, the host's
+ * (compute and block storage) or what cost plugins report; Break down by
+ * (?by=) picks the stack; label filters (?label=,
  * ?nolabel=) narrow every figure here, the previous window included.
  */
 export function OverviewCost() {
@@ -190,8 +192,8 @@ export function OverviewCost() {
 
   const showOptions = [
     { value: "all" as const, label: "All" },
-    { value: "compute" as const, label: <ColorKey color={COMPUTE_COLOR}>Compute</ColorKey>, title: "Host time Runs reserved (the compute family)" },
-    { value: "external" as const, label: <ColorKey color={EXTERNAL_COLOR}>External</ColorKey>, title: "Every family but compute: block storage and what cost plugins report" },
+    { value: "compute" as const, label: <ColorKey color={COMPUTE_COLOR}>Compute</ColorKey>, title: "Host time and its disks: the compute and block storage families" },
+    { value: "external" as const, label: <ColorKey color={EXTERNAL_COLOR}>External</ColorKey>, title: "What cost plugins report: every family but compute and block storage" },
   ];
   const kinds: BreakdownKind[] = scope.showTenant ? ["family", "label", "key", "pool", "tenant"] : ["family", "label", "key", "pool"];
   const byOptions = kinds.map((k) => ({ value: k, label: BY_LABEL[k] }));
@@ -394,8 +396,7 @@ function CostFilters({ filters, since, keys, fq, prefer }: { filters: LabelFilte
 const pct = (r: number | null) => (r == null ? null : meterText(r));
 
 function TotalKpi({ show, words, since, loading, shown, sides, change, filtered }: { show: CostShow; words: string; since: string; loading: boolean; shown: MoneyTotal[]; sides: SideTotals[]; change: ReturnType<typeof changes>; filtered: boolean }) {
-  // Show External is luxd's nofamily=compute: block storage is in this total, not in the External KPI beside it.
-  const label = show === "all" ? "Total" : show === "compute" ? "Compute total" : "Non-compute total";
+  const label = show === "all" ? "Total" : show === "compute" ? "Compute total" : "External total";
   const one = shown.length === 1;
   const lines = change.filter((c) => c.ratio != null);
   return (
@@ -423,12 +424,12 @@ function TotalKpi({ show, words, since, loading, shown, sides, change, filtered 
   );
 }
 
-/** Compute, Block storage and External as SplitBar parts; a side Show hides is drawn faint, never dropped. Block storage counts under External (luxd's nofamily=compute), so only Compute hides it. */
+// Hidden sides stay in the split bar, drawn faint.
 function splitParts(compute: string | null, blockStorage: string | null, external: string | null, show: CostShow) {
   return [
-    { amount: compute, color: COMPUTE_COLOR, label: "Compute", faint: show === "external" },
-    { amount: blockStorage, color: BLOCK_STORAGE_COLOR, label: "Block storage", faint: show === "compute" },
-    { amount: external, color: EXTERNAL_COLOR, label: "External", faint: show === "compute" },
+    { amount: compute, color: COMPUTE_COLOR, label: "Compute", faint: sideHidden("compute", show) },
+    { amount: blockStorage, color: BLOCK_STORAGE_COLOR, label: "Block storage", faint: sideHidden("blockStorage", show) },
+    { amount: external, color: EXTERNAL_COLOR, label: "External", faint: sideHidden("external", show) },
   ];
 }
 
@@ -437,7 +438,7 @@ const SIDE_COLOR: Record<Side, string> = { compute: COMPUTE_COLOR, blockStorage:
 
 function SideKpi({ side, show, loading, sides, unit }: { side: Side; show: CostShow; loading: boolean; sides: SideTotals[]; unit: string }) {
   const amounts = sides.flatMap((s) => (s[side] == null ? [] : [{ currency: s.currency, amount: s[side]! }]));
-  const hidden = side === "compute" ? show === "external" : show === "compute";
+  const hidden = sideHidden(side, show);
   const share = sides.length === 1 ? pct(ratio(sides[0]![side], sides[0]!.all)) : null;
   return (
     <Kpi

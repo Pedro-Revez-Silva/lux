@@ -645,14 +645,39 @@ def test_overview_cost_panel(page, env, lux, runners, hosts, cost_plugin):
     page.sign_in(lux.api_key, "/?tab=cost")
     _both_themes(page, env, "/?tab=cost", check)
 
-    # Show External: the Compute KPI is muted, the chart has no Compute series.
+    # Show External: what cost plugins report. Compute and Block storage are muted, the chart has neither.
+    # A static host has no disk: the Run's block storage is one hour written as luxd's
+    # block-storage lines are, under a source of its own so the compute refresh keeps it.
+    with psycopg.connect(env.owner_dsn) as conn:
+        conn.execute("""INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, amount)
+            VALUES (date_trunc('hour', now()), %s, %s, 'e2e-disk', 'block-storage', 'USD', 1.25)""", (lux.tenant_id, run_id))
     page.goto(env.luxd_url + "/?tab=cost")
     expect(card.locator(".tschart-plot canvas")).to_have_count(1, timeout=15_000)
+    expect(_legend_label(card.locator(".tschart-legend"), "Block storage")).to_have_count(1, timeout=15_000)
     panel.get_by_role("radio", name="External", exact=True).click()
     expect(page).to_have_url(re.compile(r"[?&]cost=external(&|$)"))
-    expect(card.locator(".kpi.is-muted")).to_contain_text("Compute")
+    expect(card.locator(".kpi.is-muted .kpi-label")).to_have_text(["Compute", "Block storage"], timeout=15_000)
+    expect(card.locator(".kpi-label").first).to_have_text(re.compile(r"^External total"), timeout=15_000)
     expect(_legend_label(card.locator(".tschart-legend"), "Compute")).to_have_count(0)
+    expect(_legend_label(card.locator(".tschart-legend"), "Block storage")).to_have_count(0)
     expect(_legend_label(card.locator(".tschart-legend"), "AI models")).to_have_count(1)
+
+    # Show Compute: the host and its disks. The total is the Compute and Block storage KPIs together; External is muted.
+    # The Run has ended (_costed_run waits for succeeded and its line), so its compute no longer grows:
+    # one API read gives the figures, and the page the click left is read without a reload.
+    totals = lux.api("/v1/costs?since=24h&group=family").json()["totals"]
+    usd = {r["group"]["family"]: Decimal(r["amount"]) for r in totals if r["currency"] == "USD"}
+    compute, block = usd["compute"], usd["block-storage"]
+    assert block == Decimal("1.25"), usd
+    panel.get_by_role("radio", name="Compute", exact=True).click()
+    expect(page).to_have_url(re.compile(r"[?&]cost=compute(&|$)"))
+    expect(card.locator(".kpi.is-muted .kpi-label")).to_have_text(["External"], timeout=15_000)
+    kpi = lambda label: card.locator(".kpi", has=page.locator(".kpi-label", has_text=re.compile(rf"^{label}"))).locator(".money-list-lg")
+    expect(kpi("Compute total")).to_have_text(_cents_shown(compute + block), timeout=15_000)
+    expect(kpi("Compute$")).to_have_text(_cents_shown(compute), timeout=15_000)
+    expect(kpi("Block storage")).to_have_text(_cents_shown(block), timeout=15_000)
+    expect(_legend_label(card.locator(".tschart-legend"), "Block storage")).to_have_count(1, timeout=15_000)
+    expect(_legend_label(card.locator(".tschart-legend"), "AI models")).to_have_count(0)
 
     # Every Day: the top bar's step, carried on links; the panel and the trends are daily.
     page.goto(env.luxd_url + "/?tab=cost&range=7d&cost=external")

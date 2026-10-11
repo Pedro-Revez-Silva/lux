@@ -4,10 +4,12 @@ the Run's cost lists what each placement paid for its host."""
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 
 import pytest
 import requests
+from playwright.sync_api import expect
 
 
 @pytest.fixture()
@@ -95,4 +97,27 @@ def test_run_cost_placements_join_compute_and_block_storage(page, mock_console):
     # The host links to its page.
     card.get_by_role("link", name="gp-eu-west-1-b2").click()
     page.wait_for_url("**/hosts/host_9p4tz6c1mh**")
+    assert not page.errors, page.errors
+
+
+def test_overview_show_compute_counts_block_storage_and_external_neither(page, mock_console):
+    get = lambda q: requests.get(f"{mock_console}/v1/costs?since=7d&{q}", headers={"Authorization": "Bearer x"}, timeout=10).json()
+    by_family = {r["group"]["family"]: Decimal(r["amount"]) for r in get("group=family")["totals"] if r["currency"] == "USD"}
+    host = by_family["compute"] + by_family["block-storage"]
+    # The mock honours repeated family and nofamily, as luxd does.
+    assert sum(Decimal(r["amount"]) for r in get("family=compute&family=block-storage")["totals"]) == host
+    assert {r["group"]["family"] for r in get("group=family&nofamily=compute&nofamily=block-storage")["totals"]} == {"ai"}
+
+    card = page.locator("section.card.cost-card")
+    total = card.locator(".kpi").first
+    muted = card.locator(".kpi.is-muted .kpi-label")
+    page.goto(f"{mock_console}/?tab=cost&range=7d&cost=compute")
+    expect(total.locator(".kpi-label")).to_have_text(re.compile(r"^Compute total"), timeout=20_000)
+    expect(total.locator(".money-list-lg")).to_have_text(_dollars(str(host)), timeout=20_000)
+    expect(muted).to_have_text(["External"], timeout=20_000)
+
+    page.goto(f"{mock_console}/?tab=cost&range=7d&cost=external")
+    expect(total.locator(".kpi-label")).to_have_text(re.compile(r"^External total"), timeout=20_000)
+    expect(total.locator(".money-list-lg")).to_have_text(_dollars(str(by_family["ai"])), timeout=20_000)
+    expect(muted).to_have_text(["Compute", "Block storage"], timeout=20_000)
     assert not page.errors, page.errors

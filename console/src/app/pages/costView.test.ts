@@ -31,7 +31,11 @@ import {
   runsPerFamily,
   showFamily,
   shownTotals,
+  shows,
+  sideHidden,
+  sideOf,
   sideTotals,
+  HOST_FAMILIES,
   topSplit,
   unallocatedSides,
 } from "./costView.ts";
@@ -39,10 +43,31 @@ import {
 const fam = (family: string, currency: string, amount: string, at?: string): CostSummaryRow => ({ group: { family }, currency, amount, ...(at ? { at } : {}) });
 const runFam = (run: string, family: string, currency: string, amount: string): CostSummaryRow => ({ group: { run, family }, currency, amount });
 
-test("Show as the summary's family filter: compute is family=compute, external nofamily=compute", () => {
+test("Show as the summary's repeated family filter: Compute keeps both host families, External excludes both", () => {
   expect(showFamily("all")).toEqual({});
-  expect(showFamily("compute")).toEqual({ family: "compute" });
-  expect(showFamily("external")).toEqual({ nofamily: "compute" });
+  expect(showFamily("compute")).toEqual({ family: ["compute", "block-storage"] });
+  expect(showFamily("external")).toEqual({ nofamily: ["compute", "block-storage"] });
+});
+
+test("shows: Compute counts compute and block storage, External every other family, All every family", () => {
+  for (const f of ["compute", "block-storage"]) {
+    expect(shows("compute", f)).toBe(true);
+    expect(shows("external", f)).toBe(false);
+    expect(shows("all", f)).toBe(true);
+  }
+  for (const f of ["ai", "video", "storage"]) {
+    expect(shows("compute", f)).toBe(false);
+    expect(shows("external", f)).toBe(true);
+    expect(shows("all", f)).toBe(true);
+  }
+  expect(HOST_FAMILIES).toEqual(["compute", "block-storage"]);
+  expect(["compute", "block-storage", "ai"].map(sideOf)).toEqual(["compute", "blockStorage", "external"]);
+});
+
+test("sideHidden: Block storage hides with Compute under External, and is live under Compute", () => {
+  expect((["compute", "blockStorage", "external"] as const).map((s) => sideHidden(s, "all"))).toEqual([false, false, false]);
+  expect((["compute", "blockStorage", "external"] as const).map((s) => sideHidden(s, "compute"))).toEqual([false, false, true]);
+  expect((["compute", "blockStorage", "external"] as const).map((s) => sideHidden(s, "external"))).toEqual([true, true, false]);
 });
 
 const ROWS = [fam("compute", "USD", "3.87"), fam("ai", "USD", "55.08"), fam("video", "USD", "1.05"), fam("compute", "EUR", "2"), fam("ai", "EUR", "0.5")];
@@ -66,12 +91,13 @@ test("split: Compute is the compute family, External every other, per currency a
   ]);
 });
 
-test("split: Block storage is a side of its own, neither compute nor what plugins report; it counts under External's filter", () => {
+test("split: Block storage is a side of its own and counts under Show Compute, not External", () => {
   const rows = [fam("compute", "USD", "6.61"), fam("block-storage", "USD", "0.71"), fam("ai", "USD", "625.76")];
   expect(sideTotals(rows)).toEqual([{ currency: "USD", all: "633.08", compute: "6.61", blockStorage: "0.71", external: "625.76" }]);
-  // Show is luxd's nofamily=compute: block storage is in External's total, never Compute's.
-  expect(shownTotals(rows, "compute")).toEqual([{ currency: "USD", amount: "6.61" }]);
-  expect(shownTotals(rows, "external")).toEqual([{ currency: "USD", amount: "626.47" }]);
+  expect(shownTotals(rows, "compute")).toEqual([{ currency: "USD", amount: "7.32" }]);
+  expect(shownTotals(rows, "external")).toEqual([{ currency: "USD", amount: "625.76" }]);
+  expect(familyRows(rows, "compute").map((r) => r.family)).toEqual(["compute", "block-storage"]);
+  expect(familyRows(rows, "external").map((r) => r.family)).toEqual(["ai"]);
   expect(familyRows(rows, "all").map((r) => r.family)).toEqual(["ai", "compute", "block-storage"]);
   // Charts stack compute, then block storage, then the rest; block storage keeps its fixed slot and name.
   const [c] = familyCharts({ from: T(0), to: T(1), basis: "list", totals: [], series: rows.map((r) => ({ ...r, at: T(0) })), families: [{ family: "block-storage", displayName: "Block storage" }] }, "hour", "all");
@@ -167,6 +193,33 @@ test("Top Runs: ranked by what Show counts, per currency, with every family's pa
   // A Run with nothing on the shown side is not listed (not a $0 row).
   expect(topSplit(rows, "run", "compute").map((r) => r.key)).toEqual(["r1", "r2"]);
   expect(topSplit(rows, "run", "all", 1).map((r) => r.key)).toEqual(["r3", "r1"]);
+});
+
+test("Top Runs and the breakdown under Show Compute count block storage, and External never does", () => {
+  // r2's compute alone (8) is below r1's (10); with its block storage (3) it ranks first.
+  const rows = [runFam("r1", "compute", "USD", "10"), runFam("r2", "compute", "USD", "8"), runFam("r2", "block-storage", "USD", "3"), runFam("r3", "block-storage", "USD", "1"), runFam("r3", "ai", "USD", "4")];
+  expect(topSplit(rows, "run", "compute").map((r) => [r.key, r.amount])).toEqual([
+    ["r2", "11"],
+    ["r1", "10"],
+    ["r3", "1"],
+  ]);
+  expect(topSplit(rows, "run", "external").map((r) => [r.key, r.amount])).toEqual([["r3", "4"]]);
+  const dims = [app("a", "compute", "USD", "10"), app("b", "compute", "USD", "8"), app("b", "block-storage", "USD", "3"), app("c", "ai", "USD", "5"), app("c", "block-storage", "USD", "1")];
+  const comp = breakdownBands(dims, "label:app", "compute");
+  expect(comp.get("USD")!.map((x) => x.id)).toEqual(["b", "a", "c"]);
+  // The Compute and Block storage columns stay apart; the shown amount counts both.
+  expect(breakdownRows(dims, "label:app", "compute", comp).map((x) => [x.band.id, x.compute, x.blockStorage, x.external, x.amount])).toEqual([
+    ["b", "8", "3", null, "11"],
+    ["a", "10", null, null, "10"],
+    ["c", null, "1", "5", "1"],
+  ]);
+  const ext = breakdownBands(dims, "label:app", "external");
+  expect(breakdownRows(dims, "label:app", "external", ext).map((x) => [x.band.id, x.amount, x.share])).toEqual([["c", "5", 1]]);
+  // Charts and peaks under Compute keep block storage's series.
+  const series = { from: T(0), to: T(2), basis: "list", totals: [], series: [fam("compute", "USD", "1", T(0)), fam("block-storage", "USD", "5", T(1)), fam("ai", "USD", "9", T(1))] } satisfies CostSummary;
+  expect(familyCharts(series, "hour", "compute")[0]!.series.map((s) => s.label)).toEqual(["Compute", "Block storage"]);
+  expect(familyCharts(series, "hour", "external")[0]!.series.map((s) => s.label)).toEqual(["ai"]);
+  expect(peaks(series, "compute").map((p) => [new Date(p.at * 1000).toISOString(), p.amount])).toEqual([[T(1), "5"]]);
 });
 
 test("previous window: the same length, just before", () => {

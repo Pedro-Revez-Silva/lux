@@ -3654,20 +3654,28 @@ paths:
             type:
               - array
               - "null"
-        - description: Only this family. Not with nofamily.
-          explode: false
+        - description: "Only these families: repeat up to 8 times, each value non-empty. Not with nofamily."
+          explode: true
           in: query
           name: family
           schema:
-            description: Only this family. Not with nofamily.
-            type: string
-        - description: Every family but this one.
-          explode: false
+            description: "Only these families: repeat up to 8 times, each value non-empty. Not with nofamily."
+            items:
+              type: string
+            type:
+              - array
+              - "null"
+        - description: "Every family but these: repeat up to 8 times, each value non-empty."
+          explode: true
           in: query
           name: nofamily
           schema:
-            description: Every family but this one.
-            type: string
+            description: "Every family but these: repeat up to 8 times, each value non-empty."
+            items:
+              type: string
+            type:
+              - array
+              - "null"
         - description: hour or day; include a time series.
           explode: false
           in: query
@@ -3685,12 +3693,12 @@ paths:
             maximum: 50
             minimum: 1
             type: integer
-        - description: "With top: all (default), compute, or external (every family but compute): the cost that ranks the values and that runs counts. Refused when it counts none of the families family/nofamily keep."
+        - description: "With top: all (default), compute (the host-tied families: compute and block-storage), or external (every other family): the cost that ranks the values and that runs counts. Refused when it counts none of the families family/nofamily keep."
           explode: false
           in: query
           name: rank
           schema:
-            description: "With top: all (default), compute, or external (every family but compute): the cost that ranks the values and that runs counts. Refused when it counts none of the families family/nofamily keep."
+            description: "With top: all (default), compute (the host-tied families: compute and block-storage), or external (every other family): the cost that ranks the values and that runs counts. Refused when it counts none of the families family/nofamily keep."
             enum:
               - all
               - compute

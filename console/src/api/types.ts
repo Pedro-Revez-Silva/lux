@@ -436,9 +436,10 @@ export interface CostFamily {
 export interface CostSummaryParams {
   /** Up to two: tenant (operators), pool, host, family, run, key, label:key. */
   group?: string[];
-  family?: string;
-  /** Every family but this one. */
-  nofamily?: string;
+  /** Only these families; an array is sent as repeated family= (luxd takes up to 8). */
+  family?: string | string[];
+  /** Every family but these; an array is sent as repeated nofamily=. */
+  nofamily?: string | string[];
   interval?: "hour" | "day";
   /** 1–50: fold the first group past its top N values per currency into rows marked `other: true`. */
   top?: number;
