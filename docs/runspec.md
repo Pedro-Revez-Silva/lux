@@ -675,7 +675,14 @@ POST /v1/runs/{id}/resume
 - **A failed clone does not fail the Run.** The agent keeps its
   conversation, so the Run starts without that repository. Its `git.clone`
   event says `failed`, and luxd removes it from the spec, so later resumes
-  don't retry it and `lux push` doesn't list it. A repository in the
+  don't retry it and `lux push` doesn't list it. Its credential goes with
+  it when nothing else in the spec uses it (another repository, registry
+  auth, an MCP server's or service's header): it leaves the Run's secrets,
+  later resumes don't need its value, and the event carries
+  `droppedSecret`. A value still sent under that name is ignored, never
+  declared as a secret the workload sees (`as: env` or `file`: 422
+  `invalid_spec`); a repository added again with it makes it a runner-only
+  credential again. A repository in the
   submitted spec that can't be cloned still fails the placement (stage
   `git`).
 - `push: false` works as for any repository. Pushes include the added

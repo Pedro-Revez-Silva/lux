@@ -93,7 +93,8 @@ func (s *Server) routes(api huma.API) {
 			"A Run whose spec has resumePolicy never ends terminated whenever it would rest resumable, and a requested resume of one is refused: 409 not_resumable, whatever its state " +
 			"(an assignment no runner started may still be placed again).\n\n" +
 			"git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event " +
-			"with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it. " +
+			"with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it; " +
+			"its credential leaves the Run's secrets with it when nothing else uses it (another repository, registry auth, a header), so later resumes no longer need its value. " +
 			"Adding needs a Run resume accepts (not one already resuming: 409). " +
 			"A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one, or unless its resumePolicy is restart and it has no session, which restores nothing.\n\n" +
 			"resources changes what the Run gets from now on, written into its spec: cpus and memory, larger or smaller; disk larger, or smaller " +
@@ -679,6 +680,10 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 	p := principal(ctx)
 	sp := in.Body
 	if sp.Git != nil {
+		if len(sp.Git.DroppedCredentials) > 0 {
+			return nil, invalidSpec(&spec.ValidationError{Problems: []string{
+				"git.droppedCredentials is set by luxd, never submitted"}})
+		}
 		for i, r := range sp.Git.Repositories {
 			if r.AddedBy != "" {
 				// Only luxd sets it: it marks a repository a resume added.
@@ -1522,9 +1527,9 @@ func (s *Server) stopOrTerminate(ctx context.Context, id, reason string) (*accep
 
 type resumeRequest struct {
 	RequestID     string        `json:"requestId,omitempty" doc:"Names this resume: in its resume.requested event, in the addedBy of the repositories it adds and in their git.clone events. Generated if absent."`
-	Secrets       []spec.Secret `json:"secrets,omitempty" doc:"A value for every one of the Run's secrets (a new value rotates it), and for the credentials of repositories it adds: luxd never keeps them. A name the Run does not have, and no added repository's credential, declares a new secret, checked as a submit's (as: env, file or none; env by default): the Run has it from this resume on, and every later resume must supply it. On a Run already resuming, the first resume's secrets stand."`
+	Secrets       []spec.Secret `json:"secrets,omitempty" doc:"A value for every one of the Run's secrets (a new value rotates it), and for the credentials of repositories it adds: luxd never keeps them. A name the Run does not have, and no added repository's credential, declares a new secret, checked as a submit's (as: env, file or none; env by default): the Run has it from this resume on, and every later resume must supply it. Except a name in the spec's git.droppedCredentials: ignored without as, 422 invalid_spec with as env or file. On a Run already resuming, the first resume's secrets stand."`
 	RemoveSecrets []string      `json:"removeSecrets,omitempty" doc:"Names of the Run's secrets to remove: from this resume on the workload no longer has them and resumes no longer need them. Refused (422 invalid_spec, nothing changed): a name the Run does not have, a git or registry credential, an MCP server's or service's header secret, or a name also in secrets or the credential of a repository this resume adds."`
-	Git           *resumeGit    `json:"git,omitempty" doc:"Repositories to add. The runner clones them before the Run starts again; one whose clone fails is dropped and the Run goes on without it (a git.clone event says so)."`
+	Git           *resumeGit    `json:"git,omitempty" doc:"Repositories to add. The runner clones them before the Run starts again; one whose clone fails is dropped and the Run goes on without it (a git.clone event says so). Its credential is dropped from the Run's secrets with it when nothing else uses it (the event's droppedSecret names it): later resumes need no value for it, and one still sent is ignored, never declared as a secret the workload sees (with as env or file: 422 invalid_spec)."`
 	Input         *resumeInput  `json:"input,omitempty" doc:"A message for the workload once it is back."`
 	// FromSnapshot resumes from an older snapshot (e.g. after lost).
 	FromSnapshot string           `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost). Older snapshots are deleted once the latest is uploaded: one deleted is 409 snapshot_unavailable."`
@@ -1726,15 +1731,17 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		}
 		if len(req.RemoveSecrets) > 0 {
 			refs = slices.DeleteFunc(refs, func(r spec.SecretRef) bool { return slices.Contains(req.RemoveSecrets, r.Name) })
-			// A removed secret's value goes nowhere, not even to redaction.
-			kept := make(map[string]string, len(refs))
-			for _, r := range refs {
-				if v, ok := values[r.Name]; ok {
-					kept[r.Name] = v
-				}
-			}
-			values = kept
 		}
+		// Only the Run's secrets' values are held: a removed one's goes
+		// nowhere, not even to redaction, nor does one under a dropped
+		// credential's name (ResumeSecrets declares none).
+		kept := make(map[string]string, len(refs))
+		for _, r := range refs {
+			if v, ok := values[r.Name]; ok {
+				kept[r.Name] = v
+			}
+		}
+		values = kept
 		if specChanged = specChanged || len(declared) > 0 || len(req.RemoveSecrets) > 0; specChanged {
 			stored, _, _ := sp.SplitSecrets()
 			if _, err := tx.Exec(ctx, `UPDATE runs SET spec = $2 WHERE id = $1`, id, stored); err != nil {

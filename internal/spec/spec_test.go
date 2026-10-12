@@ -446,14 +446,140 @@ func TestAddRepositories(t *testing.T) {
 	if _, err := s.AddRepositories([]Repository{{Name: "web", URL: "https://example.com/w.git", Credential: "WEB_TOKEN"}}, "r-1", BuiltinDefaults); err != nil {
 		t.Fatal(err)
 	}
-	if s.DropRepository("web", "r-9") || s.DropRepository("api", "") || s.DropRepository("api", "r-1") {
-		t.Fatal("dropped a repository another request (or the submit) added")
+	for _, c := range [][2]string{{"web", "r-9"}, {"api", ""}, {"api", "r-1"}} {
+		if dropped, _ := s.DropRepository(c[0], c[1]); dropped {
+			t.Fatalf("dropped %s for %q: a repository another request (or the submit) added", c[0], c[1])
+		}
 	}
-	if !s.DropRepository("web", "r-1") || len(s.Git.Repositories) != 1 {
-		t.Fatalf("not dropped: %+v", s.Git.Repositories)
+	if dropped, cred := s.DropRepository("web", "r-1"); !dropped || cred != "WEB_TOKEN" || len(s.Git.Repositories) != 1 {
+		t.Fatalf("not dropped (credential %q): %+v", cred, s.Git.Repositories)
 	}
-	if err := s.Normalize(BuiltinDefaults); err != nil || !s.runnerOnly("WEB_TOKEN") {
-		t.Fatalf("its credential stays runner-only: %v %+v", err, s.Secrets)
+	if err := s.Normalize(BuiltinDefaults); err != nil || slices.ContainsFunc(s.Secrets, func(sec Secret) bool { return sec.Name == "WEB_TOKEN" }) {
+		t.Fatalf("its unused credential stays declared: %v %+v", err, s.Secrets)
+	}
+}
+
+// A dropped repository's credential stays declared, runner-only, while
+// anything else uses it: another repository, registry auth, a header.
+func TestDropRepositoryKeepsACredentialStillUsed(t *testing.T) {
+	base := func() RunSpec {
+		s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"}},
+			Volumes: []Volume{{Name: "workspace", Path: "/workspace", Kind: "state"}},
+			Network: Network{Unrestricted: true}}
+		if err := s.Normalize(BuiltinDefaults); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	for name, c := range map[string]struct {
+		setup func(*RunSpec)
+		kept  bool
+	}{
+		"unused": {func(*RunSpec) {}, false},
+		"another repository": {func(s *RunSpec) {
+			s.Git = &Git{Repositories: []Repository{{Name: "a", URL: "https://x/a.git", Credential: "TOK"}}}
+			s.Secrets = []Secret{{Name: "TOK"}}
+		}, true},
+		"registry auth": {func(s *RunSpec) {
+			s.Image.RegistryAuth = []RegistryAuth{{Registry: "ghcr.io", Secret: "TOK"}}
+			s.Secrets = []Secret{{Name: "TOK"}}
+		}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := base()
+			c.setup(&s)
+			if err := s.Normalize(BuiltinDefaults); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AddRepositories([]Repository{{Name: "web", URL: "https://x/w.git", Credential: "TOK"}}, "r-1", BuiltinDefaults); err != nil {
+				t.Fatal(err)
+			}
+			dropped, cred := s.DropRepository("web", "r-1")
+			if !dropped {
+				t.Fatal("not dropped")
+			}
+			if err := s.Normalize(BuiltinDefaults); err != nil {
+				t.Fatal(err)
+			}
+			if c.kept != (cred == "") || c.kept != s.runnerOnly("TOK") {
+				t.Fatalf("dropped credential %q, secrets %+v; want kept %v", cred, s.Secrets, c.kept)
+			}
+		})
+	}
+	// A header secret is never a git credential (Normalize refuses both),
+	// so the header case is the same name used by a service once dropped.
+	s := base()
+	if _, err := s.AddRepositories([]Repository{{Name: "web", URL: "https://x/w.git", Credential: "TOK"}}, "r-1", BuiltinDefaults); err != nil {
+		t.Fatal(err)
+	}
+	s.Workload.Services = []Service{{Name: "api", URL: "https://api.example.com/", Headers: []MCPHeader{{Name: "Authorization", Secret: "TOK"}}}}
+	if _, cred := s.DropRepository("web", "r-1"); cred != "" || !slices.ContainsFunc(s.Secrets, func(sec Secret) bool { return sec.Name == "TOK" }) {
+		t.Fatalf("dropped %q though a service header uses it: %+v", cred, s.Secrets)
+	}
+}
+
+// A secret the container sees is never dropped with a repository, even one
+// that names it as its credential. AddRepositories refuses that spec, so it
+// is built by hand.
+func TestDropRepositoryKeepsAnEnvSecret(t *testing.T) {
+	s := RunSpec{
+		Git:     &Git{Repositories: []Repository{{Name: "web", URL: "https://x/w.git", Credential: "TOK", AddedBy: "r-1"}}},
+		Secrets: []Secret{{Name: "TOK", As: "env"}},
+	}
+	dropped, cred := s.DropRepository("web", "r-1")
+	if !dropped || cred != "" {
+		t.Fatalf("dropped %v, credential %q; want the repository only", dropped, cred)
+	}
+	if len(s.Secrets) != 1 || s.Secrets[0].Name != "TOK" || s.Secrets[0].As != "env" {
+		t.Errorf("secrets %+v, want TOK as env kept", s.Secrets)
+	}
+	if len(s.Git.DroppedCredentials) != 0 {
+		t.Errorf("droppedCredentials %v, want none", s.Git.DroppedCredentials)
+	}
+}
+
+// A value re-supplied under a dropped credential's name is never declared:
+// not as env by default, refused as env or file; a repository added again
+// with it makes it runner-only again.
+func TestDroppedCredentialNeverEntersTheContainer(t *testing.T) {
+	dropped := func() RunSpec {
+		s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"}},
+			Volumes: []Volume{{Name: "workspace", Path: "/workspace", Kind: "state"}}}
+		if err := s.Normalize(BuiltinDefaults); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.AddRepositories([]Repository{{Name: "web", URL: "https://x/w.git", Credential: "TOK"}}, "r-1", BuiltinDefaults); err != nil {
+			t.Fatal(err)
+		}
+		if _, cred := s.DropRepository("web", "r-1"); cred != "TOK" {
+			t.Fatalf("dropped %q", cred)
+		}
+		return s
+	}
+	for _, as := range []string{"", "none"} {
+		s := dropped()
+		declared, err := s.ResumeSecrets([]Secret{{Name: "TOK", Value: "v", As: as}}, nil, nil, BuiltinDefaults)
+		if err != nil || len(declared) != 0 || len(s.Secrets) != 0 {
+			t.Fatalf("as %q: declared %v %+v (%v)", as, declared, s.Secrets, err)
+		}
+	}
+	for _, sec := range []Secret{{Name: "TOK", Value: "v", As: "env"}, {Name: "TOK", Value: "v", As: "file", Path: "/t"}} {
+		s := dropped()
+		if _, err := s.ResumeSecrets([]Secret{sec}, nil, nil, BuiltinDefaults); err == nil || !strings.Contains(err.Error(), "was a git credential") {
+			t.Fatalf("as %s: %v", sec.As, err)
+		}
+	}
+	s := dropped()
+	repos := []Repository{{Name: "web", URL: "https://x/w.git", Credential: "TOK"}}
+	added, err := s.AddRepositories(repos, "r-2", BuiltinDefaults)
+	if err != nil || !reflect.DeepEqual(added, []string{"TOK"}) {
+		t.Fatalf("re-add: %v %v", added, err)
+	}
+	if _, err := s.ResumeSecrets([]Secret{{Name: "TOK", Value: "v"}}, nil, repos, BuiltinDefaults); err != nil {
+		t.Fatal(err)
+	}
+	if !s.runnerOnly("TOK") || s.Secrets[0].As != "none" {
+		t.Fatalf("re-added credential %+v, want runner-only", s.Secrets)
 	}
 }
 

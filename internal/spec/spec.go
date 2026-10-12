@@ -243,6 +243,9 @@ type Secret struct {
 type Git struct {
 	Repositories []Repository `json:"repositories" yaml:"repositories"`
 	Push         *Push        `json:"push,omitempty" yaml:"push,omitempty"`
+	// DroppedCredentials: credentials removed from secrets with the failed
+	// clone of the only repository using them.
+	DroppedCredentials []string `json:"droppedCredentials,omitempty" yaml:"-" doc:"Set by luxd: credentials removed from secrets with a failed clone's repository, the only one using them. A resume's value under one of these names is not declared as a secret the workload sees."`
 }
 
 type Repository struct {
@@ -747,16 +750,37 @@ func (s *RunSpec) runnerOnly(name string) bool {
 }
 
 // DropRepository removes a repository added by requestID (one whose clone
-// failed); reports whether it was there. Its credential stays declared and
-// runner-only: a value handed over as a git credential never enters the
-// container later.
-func (s *RunSpec) DropRepository(name, requestID string) bool {
+// failed); reports whether it was there. Its credential leaves the secrets
+// too when nothing else in the spec uses it (another repository, registry
+// auth, a header), and is returned so the caller drops its ref. The name is
+// kept in Git.DroppedCredentials: ResumeSecrets never declares a value
+// re-supplied under it as one the container sees.
+func (s *RunSpec) DropRepository(name, requestID string) (dropped bool, credential string) {
 	if s.Git == nil || requestID == "" {
-		return false
+		return false, ""
 	}
-	n := len(s.Git.Repositories)
-	s.Git.Repositories = slices.DeleteFunc(s.Git.Repositories, func(r Repository) bool { return r.Name == name && r.AddedBy == requestID })
-	return len(s.Git.Repositories) < n
+	i := slices.IndexFunc(s.Git.Repositories, func(r Repository) bool { return r.Name == name && r.AddedBy == requestID })
+	if i < 0 {
+		return false, ""
+	}
+	c := s.Git.Repositories[i].Credential
+	s.Git.Repositories = slices.Delete(s.Git.Repositories, i, i+1)
+	// Only a runner-only secret: one the container sees is never removed
+	// behind the workload's back.
+	if c == "" || s.onlyCredential(c) || !s.runnerOnly(c) {
+		return true, ""
+	}
+	s.Secrets = slices.DeleteFunc(s.Secrets, func(sec Secret) bool { return sec.Name == c })
+	if !slices.Contains(s.Git.DroppedCredentials, c) {
+		s.Git.DroppedCredentials = append(s.Git.DroppedCredentials, c)
+	}
+	return true, c
+}
+
+// droppedCredential reports whether name was a credential DropRepository
+// took out of the secrets.
+func (s *RunSpec) droppedCredential(name string) bool {
+	return s.Git != nil && slices.Contains(s.Git.DroppedCredentials, name)
 }
 
 // normalizeSecret checks one secret's name and placement (at names it in
@@ -795,11 +819,13 @@ func (s *RunSpec) normalizeSecret(at string, sec *Secret) []string {
 // ResumeSecrets applies a resume's secrets to a stored (normalized) spec,
 // after AddRepositories (whose new credentials are then the spec's, not
 // declared here). Each supplied secret whose name the spec lacks is
-// declared, checked as at submit and stored without its value; each name
-// in remove leaves the spec. Removing a name the spec lacks, a credential
-// (git, registry or header), a name also supplied, or the credential of a
-// repository in repos (those this resume adds) is refused. Returns the
-// names declared; on any problem, the spec is unchanged.
+// declared, checked as at submit and stored without its value, except a
+// name in Git.DroppedCredentials: never declared, and refused with as env
+// or file. Each name in remove leaves the spec. Removing a name the spec
+// lacks, a credential (git, registry or header), a name also supplied, or
+// the credential of a repository in repos (those this resume adds) is
+// refused. Returns the names declared; on any problem, the spec is
+// unchanged.
 func (s *RunSpec) ResumeSecrets(supplied []Secret, remove []string, repos []Repository, d Defaults) ([]string, error) {
 	has := map[string]bool{}
 	for _, sec := range s.Secrets {
@@ -810,6 +836,14 @@ func (s *RunSpec) ResumeSecrets(supplied []Secret, remove []string, repos []Repo
 	seen := map[string]bool{}
 	for i, sec := range supplied {
 		if has[sec.Name] {
+			continue
+		}
+		if s.droppedCredential(sec.Name) {
+			// A value handed over as a git credential never enters the
+			// container: a client still sending it declares nothing.
+			if sec.As != "" && sec.As != "none" {
+				errs = append(errs, fmt.Sprintf("secrets[%d]: %q was a git credential: use a secret of its own", i, sec.Name))
+			}
 			continue
 		}
 		if seen[sec.Name] {

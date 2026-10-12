@@ -461,8 +461,12 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 					return err
 				}
 			case proto.EvGitClone:
-				if err := dropFailedRepo(ctx, tx, f.RunID, ev.Data); err != nil {
+				cred, err := dropFailedRepo(ctx, tx, f.RunID, ev.Data)
+				if err != nil {
 					return err
+				}
+				if cred != "" {
+					ev.Data["droppedSecret"] = cred
 				}
 			case "image.built":
 				if err := recordImageResolved(ctx, tx, f.RunID, ev.Data); err != nil {
@@ -627,22 +631,29 @@ func recordPushes(ctx context.Context, tx pgx.Tx, runID string, data map[string]
 
 // dropFailedRepo removes from the Run's spec a repository added on resume
 // whose clone failed, so later resumes do not retry it and pushes do not
-// list it. Only the one that request added: a name reused since stays.
-func dropFailedRepo(ctx context.Context, tx pgx.Tx, runID string, data map[string]any) error {
+// list it. Only the one that request added: a name reused since stays. A
+// credential nothing else uses leaves the spec and runs.secrets with it, so
+// later resumes do not need its value; its name is returned.
+func dropFailedRepo(ctx context.Context, tx pgx.Tx, runID string, data map[string]any) (string, error) {
 	repo, _ := data["repo"].(string)
 	req, _ := data["requestId"].(string)
 	if data["status"] != "failed" || req == "" {
-		return nil
+		return "", nil
 	}
 	var sp spec.RunSpec
-	if err := tx.QueryRow(ctx, `SELECT spec FROM runs WHERE id = $1`, runID).Scan(&sp); err != nil {
-		return err
+	var refs []spec.SecretRef
+	if err := tx.QueryRow(ctx, `SELECT spec, secrets FROM runs WHERE id = $1`, runID).Scan(&sp, &refs); err != nil {
+		return "", err
 	}
-	if !sp.DropRepository(repo, req) {
-		return nil
+	dropped, cred := sp.DropRepository(repo, req)
+	if !dropped {
+		return "", nil
 	}
-	_, err := tx.Exec(ctx, `UPDATE runs SET spec = $2 WHERE id = $1`, runID, sp)
-	return err
+	if cred != "" {
+		refs = slices.DeleteFunc(refs, func(r spec.SecretRef) bool { return r.Name == cred })
+	}
+	_, err := tx.Exec(ctx, `UPDATE runs SET spec = $2, secrets = $3 WHERE id = $1`, runID, sp, refs)
+	return cred, err
 }
 
 // recordImageResolved keeps a Run's first image build (every FROM pinned,
