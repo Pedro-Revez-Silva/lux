@@ -107,3 +107,31 @@ def test_get_products_pages_the_real_gp3_answer(ec2):
             break
     assert sorted(units) == [("GB-Mo", "0.0836000000"), ("GiBps-mo", "42.8032000000"), ("IOPS-Mo", "0.0052000000")]
     assert get_products(ec2, {"regionCode": "eu-north-1", "volumeApiName": "io2"})["PriceList"] == []
+
+
+def call(ec2, **form) -> tuple[int, str]:
+    body = urllib.parse.urlencode(form).encode()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(ec2.url, data=body), timeout=5) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+
+def test_market_actions_answer_as_ec2(ec2):
+    status, xml = call(ec2, Action="DescribeSubnets", **{"SubnetId.1": "subnet-a", "SubnetId.2": "subnet-b"})
+    assert status == 200 and "<availabilityZone>eu-north-1a</availabilityZone>" in xml, xml
+    assert "<availabilityZoneId>eun1-az2</availabilityZoneId>" in xml, xml
+    status, xml = call(ec2, Action="GetSpotPlacementScores", TargetCapacity="1", **{"InstanceType.1": "m7i.large",
+                                                                                   "RegionName.1": "eu-north-1"})
+    assert status == 200 and xml.count("<score>7</score>") == 2, xml
+    ec2.placement_scores_error = "UnauthorizedOperation"
+    status, xml = call(ec2, Action="GetSpotPlacementScores", TargetCapacity="1")
+    assert status == 403 and "<Code>UnauthorizedOperation</Code>" in xml, xml
+    status, xml = call(ec2, Action="DescribeSpotPriceHistory", AvailabilityZone="eu-north-1a", **{"InstanceType.1": "m7i.large"})
+    assert status == 200 and "<spotPrice>0.0312</spotPrice>" in xml, xml
+
+
+def test_an_unknown_action_is_invalid_action(ec2):
+    status, xml = call(ec2, Action="DescribeNothing")
+    assert status == 400 and "<Code>InvalidAction</Code>" in xml, xml

@@ -7,7 +7,9 @@ from __future__ import annotations
 import json
 import re
 import time
+from pathlib import Path
 
+import psycopg
 import pytest
 
 from conftest import fake_only, generic
@@ -275,3 +277,45 @@ def test_a_renamed_pool_keeps_its_hosts_and_runs(lux, ec2):
         lux.run("terminate", first)
     finally:
         lux.run("pools", "rename", "burst2", "burst", check=False)
+
+
+def test_market_samples_for_a_pools_candidate_types(env, lux, ec2):
+    """The market sampler records, for each candidate type of an ec2 pool
+    (its instanceType and fallbacks, and LUX_MARKET_CANDIDATES) in each
+    zone of its subnets: the spot price, the on-demand list price and the
+    spot placement score, and caches the types' descriptions. A refused
+    GetSpotPlacementScores (no IAM permission) leaves the score NULL and
+    keeps the prices. Operator SQL is its only reader."""
+    fake_only(ec2)
+    env.stop_luxd()
+    log = Path(env.log_dir) / "luxd.log"
+    log_from = log.stat().st_size if log.exists() else 0
+    env.start_luxd(LUX_EC2_ENDPOINT=ec2.url, LUX_PRICING_ENDPOINT=ec2.url, AWS_ACCESS_KEY_ID="fake",
+                   AWS_SECRET_ACCESS_KEY="fake", AWS_REGION="us-east-1", LUX_MARKET_EVERY="5s",
+                   LUX_MARKET_CANDIDATES="c7g.large")
+    ec2.placement_scores_error = "UnauthorizedOperation"
+    pool(lux, ec2, max=1, template={**ec2.template, "fallbackInstanceTypes": ["m7g.large"]})
+
+    def rows():
+        with psycopg.connect(env.owner_dsn) as conn:
+            return conn.execute("""SELECT zone, zone_id, instance_type, spot_per_hour::text, on_demand_per_hour::text,
+                    currency, placement_score FROM market_samples ORDER BY instance_type, zone, sampled_at""").fetchall()
+    # Each zone's row is its own insert: wait for all 2 zones x 3 types.
+    got = wait_until(lambda: (r := rows()) and len(r) >= 6 and r, 90, 1, "no market samples")
+    first = {(z, t): (zid, spot, od, cur, score) for z, zid, t, spot, od, cur, score in got}
+    assert set(first) == {(z, t) for z in ("us-east-1a", "us-east-1b") for t in ("c7g.large", "m7g.large", "m7i.large")}, got
+    assert first[("us-east-1a", "m7i.large")] == ("use1-az1", "0.031200000", "0.100000000", "USD", None), got
+    # The fake quotes no on-demand price for the other types: NULL, the rest kept.
+    assert first[("us-east-1b", "c7g.large")] == ("use1-az2", "0.031200000", None, "USD", None), got
+    with psycopg.connect(env.owner_dsn) as conn:
+        catalog = conn.execute("SELECT instance_type, memory_bytes FROM instance_types ORDER BY 1").fetchall()
+    assert [t for t, _ in catalog] == ["c7g.large", "m7g.large", "m7i.large"], catalog
+    with open(log, "rb") as f:
+        f.seek(log_from)
+        assert b"GetSpotPlacementScores" in f.read()
+
+    # With the permission, the next samples carry the score.
+    # (A type is sampled again a minute after its last sample at the soonest.)
+    ec2.placement_scores_error = ""
+    wait_until(lambda: any(r[6] == 7 and r[2] == "m7i.large" and r[1] == "use1-az1" for r in rows()), 150, 1,
+               "no placement score once allowed")

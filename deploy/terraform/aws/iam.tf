@@ -227,8 +227,10 @@ resource "aws_iam_role_policy" "control_luxd" {
         Action = [
           "pricing:GetProducts",
           "ec2:DescribeSpotPriceHistory",
+          "ec2:GetSpotPlacementScores", # market samples: spot capacity outlook per candidate type and zone
+          "ec2:DescribeSubnets",        # market samples: the zones a pool's subnets are in
         ]
-        Resource = "*" # Neither pricing action supports resource-level permissions.
+        Resource = "*" # None of these supports resource-level permissions.
       },
       {
         Sid    = "Blobs"

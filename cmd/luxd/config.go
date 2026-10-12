@@ -102,6 +102,15 @@ type config struct {
 			PricingEndpoint string   `toml:"pricing_endpoint" env:"LUX_PRICING_ENDPOINT"`
 		} `toml:"compute"`
 	} `toml:"costs"`
+	// Market: candidate instance types' prices and spot placement scores,
+	// sampled for a future pool advisor (docs/telemetry.md#market-data).
+	Market struct {
+		// Every: how often each candidate type is sampled; 0 is off.
+		Every duration `toml:"every" env:"LUX_MARKET_EVERY"`
+		// Candidates: instance types sampled for every pool besides its
+		// template's; in the environment, comma-separated.
+		Candidates []string `toml:"candidates" env:"LUX_MARKET_CANDIDATES"`
+	} `toml:"market"`
 	EC2 struct {
 		Endpoint string `toml:"endpoint" env:"LUX_EC2_ENDPOINT"`
 		// NoCapacityRetryAfter: how long a candidate (region, instance
@@ -229,6 +238,7 @@ func defaultConfig() config {
 	c.ListingLag.Duration = server.DefaultListingLag
 	c.OutdatedDrainPercent = server.DefaultOutdatedDrainPercent
 	c.EC2.NoCapacityRetryAfter.Duration = ec2.DefaultNoCapacityRetryAfter
+	c.Market.Every.Duration = server.DefaultMarketEvery
 	d := spec.BuiltinDefaults
 	c.Defaults.CPUs, c.Defaults.Memory.Bytes, c.Defaults.Disk.Bytes, c.Defaults.Pids = d.CPUs, d.Memory, d.Disk, d.Pids
 	c.History.SampleEvery.Duration = 10 * time.Second
@@ -533,6 +543,14 @@ func (c config) check() error {
 	if c.Costs.Compute.PricingRegion == "" {
 		problems = append(problems, "costs.compute.pricing_region (LUX_COSTS_PRICING_REGION) is required")
 	}
+	if c.Market.Every.Duration < 0 {
+		problems = append(problems, "market.every (LUX_MARKET_EVERY) must not be negative")
+	}
+	for _, it := range c.Market.Candidates {
+		if !validInstanceType(it) {
+			problems = append(problems, fmt.Sprintf("market.candidates (LUX_MARKET_CANDIDATES) %q: want an instance type such as m7i.large", it))
+		}
+	}
 	if c.EC2.NoCapacityRetryAfter.Duration < 0 {
 		problems = append(problems, "ec2.no_capacity_retry_after (LUX_EC2_NO_CAPACITY_RETRY_AFTER) must not be negative")
 	}
@@ -656,4 +674,20 @@ func require(v, key, env string) (string, error) {
 		return "", fmt.Errorf("%s is required (%s in the config file, or %s)", key, key, env)
 	}
 	return v, nil
+}
+
+// validInstanceType: a provider instance type name (family.size), so a
+// typo in market.candidates is refused at startup rather than sampled as
+// failures forever.
+func validInstanceType(s string) bool {
+	family, size, ok := strings.Cut(s, ".")
+	if !ok || family == "" || size == "" || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '.' || r == '-') {
+			return false
+		}
+	}
+	return true
 }

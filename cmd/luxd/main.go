@@ -214,6 +214,7 @@ func serve(ctx context.Context, c config, plan servePlan) error {
 			},
 		},
 		Providers: providers(c, log),
+		Market:    server.MarketConfig{Every: c.Market.Every.Duration, Candidates: c.Market.Candidates},
 		ConsoleAuth: server.ConsoleAuth{
 			Mode:            c.Console.Auth,
 			CFTeam:          c.Console.CloudflareAccess.Team,

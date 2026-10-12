@@ -101,6 +101,10 @@ type Runner struct {
 	images     *imageUse
 	graph      string // Podman's graph root, once asked
 	graphOnce  sync.Once
+	// imagesDirPath: containers/storage's image metadata directory, once
+	// Podman has said (imagesDir).
+	imagesDirMu   sync.Mutex
+	imagesDirPath string
 	// recordMu serializes read-modify-write of snapshot records (uploader,
 	// discard, report).
 	recordMu sync.Mutex

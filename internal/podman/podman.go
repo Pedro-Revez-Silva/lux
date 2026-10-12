@@ -9,6 +9,7 @@ package podman
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,10 +17,13 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/marcioapm/lux/internal/hoststat"
 )
@@ -142,6 +146,11 @@ type ImageInfo struct {
 	Size  int64
 	User  string
 	Env   []string
+	// OS and Architecture: the platform of the image itself.
+	OS, Architecture string
+	// ImagesDir: the image metadata directory of the store this image is
+	// in, "" when its inspect does not tell (then see Podman.ImagesDir).
+	ImagesDir string
 }
 
 // ImageInspect returns what ref names.
@@ -158,12 +167,165 @@ func (p *Podman) ImageInspect(ctx context.Context, ref string) (ImageInfo, error
 			User string   `json:"User"`
 			Env  []string `json:"Env"`
 		} `json:"Config"`
+		OS           string `json:"Os"`
+		Architecture string `json:"Architecture"`
+		GraphDriver  struct {
+			Name string            `json:"Name"`
+			Data map[string]string `json:"Data"`
+		} `json:"GraphDriver"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil || len(raw) == 0 {
 		return ImageInfo{}, fmt.Errorf("image inspect %s: %v", ref, err)
 	}
 	r := raw[0]
-	return ImageInfo{ID: r.ID, Names: r.RepoTags, Size: r.Size, User: r.Config.User, Env: r.Config.Env}, nil
+	return ImageInfo{ID: r.ID, Names: r.RepoTags, Size: r.Size, User: r.Config.User, Env: r.Config.Env,
+		OS: r.OS, Architecture: r.Architecture, ImagesDir: storeImagesDir(r.GraphDriver.Name, r.GraphDriver.Data["UpperDir"])}, nil
+}
+
+// storeImagesDir is the image metadata directory of the store whose top
+// layer is upperDir (<store>/<driver>/<layer>/diff): <store>/<driver>-images.
+// That store is the graph root, or `imagestore` when storage.conf sets one,
+// which `podman info` does not show. "" when upperDir has another shape.
+func storeImagesDir(driver, upperDir string) string {
+	layer := filepath.Dir(upperDir)
+	drv := filepath.Dir(layer)
+	if driver == "" || !filepath.IsAbs(upperDir) || filepath.Base(upperDir) != "diff" || filepath.Base(drv) != driver {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(drv), driver+"-images")
+}
+
+// ImagesDir is where containers/storage keeps image metadata under the
+// graph root: <graph root>/<driver>-images, one directory per image id. An
+// image in a separate image store says where it is (ImageInfo.ImagesDir).
+func (p *Podman) ImagesDir(ctx context.Context) (string, error) {
+	out, err := p.Run(ctx, "info", "--format", "{{.Store.GraphRoot}} {{.Store.GraphDriverName}}")
+	if err != nil {
+		return "", err
+	}
+	root, driver, ok := strings.Cut(strings.TrimSpace(string(out)), " ")
+	if !ok || root == "" || driver == "" {
+		return "", fmt.Errorf("podman info: graph root and driver %q", out)
+	}
+	return filepath.Join(root, driver+"-images"), nil
+}
+
+// ImagePlatforms are the platforms (os/arch[/variant]) the reference an
+// image was pulled by offers, read from what containers/storage keeps
+// beside the image (files named "=" + base64 of the big data key); `podman
+// manifest inspect` would ask the registry. A pull through a manifest list
+// or OCI index stores it as "manifest-sha256:<digest>"; an image with no
+// list (single-arch, loaded, built here) has its own platform, from its
+// config blob ("sha256:<id>") or else from info.
+//
+// A ref pinned by digest reads only the manifest of that digest. Storage
+// records no tag → list association: an image reached by several tags
+// keeps every tag's list and every name, merged. So a tag offers a stored
+// list's platforms only when the image has that one name and one list;
+// with no list it offers the image's own platform; otherwise nil
+// (unknown), never a union of lists. Entries for unknown/unknown (build
+// attestations) are not platforms.
+func ImagePlatforms(imagesDir, ref string, info ImageInfo) ([]string, error) {
+	dir := filepath.Join(imagesDir, strings.TrimPrefix(info.ID, "sha256:"))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	_, pinned, _ := strings.Cut(ref, "@")
+	var own *ociPlatform
+	var lists [][]string
+	for _, e := range entries {
+		enc, ok := strings.CutPrefix(e.Name(), "=")
+		if !ok {
+			continue
+		}
+		key, err := base64.StdEncoding.DecodeString(enc)
+		if err != nil {
+			continue
+		}
+		switch k := string(key); {
+		case strings.HasPrefix(k, "manifest-sha256:"):
+			if pinned != "" && k != "manifest-"+pinned {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err != nil {
+				return nil, err
+			}
+			if ps := listPlatforms(b); len(ps) > 0 {
+				lists = append(lists, ps)
+			}
+		case k == "sha256:"+strings.TrimPrefix(info.ID, "sha256:"):
+			b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err == nil {
+				var c ociPlatform
+				if json.Unmarshal(b, &c) == nil {
+					own = &c
+				}
+			}
+		}
+	}
+	switch {
+	case len(lists) == 1 && (pinned != "" || len(info.Names) <= 1):
+		return lists[0], nil
+	case len(lists) > 0:
+		return nil, fmt.Errorf("image %s: %d stored lists, %d names: which one %s came by is not recorded", info.ID, len(lists), len(info.Names), ref)
+	}
+	if own == nil || own.String() == "" {
+		own = &ociPlatform{OS: info.OS, Architecture: info.Architecture}
+	}
+	if s := own.String(); s != "" {
+		return []string{s}, nil
+	}
+	return nil, fmt.Errorf("image %s: no platform", info.ID)
+}
+
+// listPlatforms are a manifest list's or OCI index's platforms, sorted,
+// each once (an index may list one platform several times, e.g. Windows
+// images per os.version); none for an image manifest.
+func listPlatforms(b []byte) []string {
+	var list struct {
+		Manifests []struct {
+			Platform *ociPlatform `json:"platform"`
+		} `json:"manifests"`
+	}
+	if json.Unmarshal(b, &list) != nil {
+		return nil
+	}
+	var out []string
+	for _, m := range list.Manifests {
+		if m.Platform == nil || m.Platform.OS == "unknown" || m.Platform.Architecture == "unknown" {
+			continue
+		}
+		if s := m.Platform.String(); s != "" && !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// ociPlatform is a manifest list entry's platform, or an image config's.
+type ociPlatform struct {
+	OS           string `json:"os"`
+	Architecture string `json:"architecture"`
+	Variant      string `json:"variant"`
+}
+
+// String is "" for an incomplete platform, or one with a NUL or invalid
+// UTF-8, which luxd could not store.
+func (o ociPlatform) String() string {
+	if o.OS == "" || o.Architecture == "" {
+		return ""
+	}
+	s := o.OS + "/" + o.Architecture
+	if o.Variant != "" {
+		s += "/" + o.Variant
+	}
+	if strings.ContainsRune(s, 0) || !utf8.ValidString(s) {
+		return ""
+	}
+	return s
 }
 
 // ContainerImages is the set of image ids any container (running or not)
@@ -445,14 +607,23 @@ type Usage struct {
 	CPUSeconds      float64
 	MemoryBytes     int64
 	Pids            int
+	// Pressure stall totals in seconds (PSI): nil when the kernel has no
+	// *.pressure file, which is not the same as no stall.
+	CPUStall, MemoryStall, MemoryFullStall, IOStall, IOFullStall *float64
 }
 
 func CgroupUsage(cgroupPath string) (Usage, error) {
-	var u Usage
 	if cgroupPath == "" {
-		return u, errors.New("no cgroup")
+		return Usage{}, errors.New("no cgroup")
 	}
-	base := "/sys/fs/cgroup" + cgroupPath
+	return cgroupUsageAt("/sys/fs/cgroup" + cgroupPath), nil
+}
+
+func cgroupUsageAt(base string) Usage {
+	var u Usage
+	u.CPUStall, _ = readPressure(base + "/cpu.pressure")
+	u.MemoryStall, u.MemoryFullStall = readPressure(base + "/memory.pressure")
+	u.IOStall, u.IOFullStall = readPressure(base + "/io.pressure")
 	if n, err := readInt(base + "/memory.peak"); err == nil {
 		u.PeakMemoryBytes = n
 	}
@@ -473,7 +644,42 @@ func CgroupUsage(cgroupPath string) (Usage, error) {
 			}
 		}
 	}
-	return u, nil
+	return u
+}
+
+// readPressure reads a cgroup v2 *.pressure file's "some" and "full"
+// totals (microseconds in the file) as seconds. Either is nil when the file
+// or its line is missing: a kernel without PSI, or cpu.pressure's "full"
+// before Linux 5.13.
+//
+//	some avg10=0.00 avg60=0.00 avg300=0.00 total=12345
+//	full avg10=0.00 avg60=0.00 avg300=0.00 total=6789
+func readPressure(path string) (some, full *float64) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		kind, rest, _ := strings.Cut(strings.TrimSpace(l), " ")
+		for _, f := range strings.Fields(rest) {
+			v, ok := strings.CutPrefix(f, "total=")
+			if !ok {
+				continue
+			}
+			us, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				break
+			}
+			s := float64(us) / 1e6
+			switch kind {
+			case "some":
+				some = &s
+			case "full":
+				full = &s
+			}
+		}
+	}
+	return some, full
 }
 
 // HostUsage is the whole machine's: CPU seconds used since boot (all

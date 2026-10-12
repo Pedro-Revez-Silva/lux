@@ -284,7 +284,9 @@ func (s *Server) rollupHistory(ctx context.Context) error {
 				}
 			}
 		}
-		return nil
+		// Market samples are hourly figures, kept as long as hours.
+		_, err := tx.Exec(ctx, `DELETE FROM market_samples WHERE sampled_at < now() - $1::interval`, interval(s.cfg.HistoryHours))
+		return err
 	})
 }
 
@@ -375,9 +377,13 @@ var (
 		aggs: append([]string{"max(cpu_seconds)", "avg(mem_bytes)::bigint", "avg(disk_bytes)::bigint",
 			"round(avg(placements))::int", "avg(alloc_cpus)", "avg(alloc_mem)::bigint"}, procAggs...),
 		match: "d.host_id = s.host_id"}
+	// peak_cpu_cores is a peak and the stall totals counters: each the
+	// bucket's maximum, so a burst inside a minute or hour is kept.
 	placementRollup = rollup{table: "placement_samples", keys: []string{"run_id", "epoch", "tenant_id"},
-		cols:  []string{"cpu_seconds", "mem_bytes", "disk_bytes", "pids", "net_rx", "net_tx"},
-		aggs:  []string{"max(cpu_seconds)", "avg(mem_bytes)::bigint", "max(disk_bytes)", "round(avg(pids))::int", "max(net_rx)", "max(net_tx)"},
+		cols: []string{"cpu_seconds", "mem_bytes", "disk_bytes", "pids", "net_rx", "net_tx",
+			"peak_cpu_cores", "cpu_stall", "mem_stall", "mem_full_stall", "io_stall", "io_full_stall"},
+		aggs: []string{"max(cpu_seconds)", "avg(mem_bytes)::bigint", "max(disk_bytes)", "round(avg(pids))::int", "max(net_rx)", "max(net_tx)",
+			"max(peak_cpu_cores)", "max(cpu_stall)", "max(mem_stall)", "max(mem_full_stall)", "max(io_stall)", "max(io_full_stall)"},
 		match: "d.run_id = s.run_id AND d.epoch = s.epoch"}
 	// Runs and hosts by state are the bucket's last sample; stored bytes
 	// are levels.
@@ -435,6 +441,13 @@ type Sample struct {
 	NetRxRate *float64 `json:"netRxRate,omitempty"`
 	NetTxRate *float64 `json:"netTxRate,omitempty"`
 	Epoch     *int     `json:"epoch,omitempty"`
+	// Placements: CPU bursts and pressure stalls.
+	PeakCPUCores        *float64 `json:"peakCpuCores,omitempty" doc:"The highest CPU rate in cores between two consecutive runner readings (about 10 s apart) in this point's interval: a rollup keeps the bucket's maximum."`
+	CPUStallRate        *float64 `json:"cpuStallRate,omitempty" doc:"Seconds per second some task waited for CPU (cpu.pressure some), over the interval since the previous point. Absent without PSI."`
+	MemoryStallRate     *float64 `json:"memoryStallRate,omitempty" doc:"As cpuStallRate, for memory (memory.pressure some)."`
+	MemoryFullStallRate *float64 `json:"memoryFullStallRate,omitempty" doc:"Seconds per second every task stalled on memory (memory.pressure full)."`
+	IOStallRate         *float64 `json:"ioStallRate,omitempty" doc:"As cpuStallRate, for I/O (io.pressure some)."`
+	IOFullStallRate     *float64 `json:"ioFullStallRate,omitempty" doc:"Seconds per second every task stalled on I/O (io.pressure full)."`
 	// The system.
 	Runs      map[string]int `json:"runs,omitempty"`
 	Busy      *int           `json:"busy,omitempty"`
@@ -756,25 +769,37 @@ func (s *Server) runHistory(ctx context.Context, in *runHistoryInput) (*historyO
 		if err := requireRun(ctx, tx, in.ID); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT epoch, at, cpu_seconds, mem_bytes, disk_bytes, pids, net_rx, net_tx
+		rows, err := tx.Query(ctx, `SELECT epoch, at, cpu_seconds, mem_bytes, disk_bytes, pids, net_rx, net_tx,
+				peak_cpu_cores, cpu_stall, mem_stall, mem_full_stall, io_stall, io_full_stall
 			FROM `+placementRollup.source(res, "$3", "$4")+` s WHERE run_id = $1 AND res = $2 AND at BETWEEN $3 AND $4 ORDER BY epoch, at`,
 			in.ID, res, from, to)
 		if err != nil {
 			return err
 		}
 		var cpu, rx, tx_ rate
+		var stall [5]rate
 		var epoch, lastEpoch int
 		var at time.Time
-		var cpuS *float64
+		var cpuS, peakCPU *float64
+		var stallS [5]*float64
 		var mem, disk, nrx, ntx *int64
 		var pids *int
-		_, err = pgx.ForEachRow(rows, []any{&epoch, &at, &cpuS, &mem, &disk, &pids, &nrx, &ntx}, func() error {
+		dest := []any{&epoch, &at, &cpuS, &mem, &disk, &pids, &nrx, &ntx, &peakCPU}
+		for i := range stallS {
+			dest = append(dest, &stallS[i])
+		}
+		_, err = pgx.ForEachRow(rows, dest, func() error {
 			if epoch != lastEpoch {
-				cpu, rx, tx_, lastEpoch = rate{}, rate{}, rate{}, epoch
+				cpu, rx, tx_, stall, lastEpoch = rate{}, rate{}, rate{}, [5]rate{}, epoch
 			}
 			ep := epoch
+			var sr [5]*float64
+			for i := range stall {
+				sr[i] = stall[i].next(at, stallS[i])
+			}
 			h.Samples = append(h.Samples, Sample{At: at, Epoch: &ep, CPUCores: cpu.next(at, cpuS), MemoryBytes: mem, DiskBytes: disk,
-				Pids: pids, NetRxRate: rx.next(at, Float(nrx)), NetTxRate: tx_.next(at, Float(ntx))})
+				Pids: pids, NetRxRate: rx.next(at, Float(nrx)), NetTxRate: tx_.next(at, Float(ntx)), PeakCPUCores: peakCPU,
+				CPUStallRate: sr[0], MemoryStallRate: sr[1], MemoryFullStallRate: sr[2], IOStallRate: sr[3], IOFullStallRate: sr[4]})
 			return nil
 		})
 		return err

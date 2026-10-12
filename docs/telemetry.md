@@ -13,7 +13,7 @@ every Run, placement and host. The API returns all of it, and
 | `firstStartedAt` | First reached `running`. |
 | `finishedAt` | Reached a terminal state. |
 | `stage`, `stageSince` | Where it is now and since when ([stages](concepts.md#stages)); `stageReason` while stopping. |
-| `usage` | Rolled up over placements: peak memory, disk and PIDs (maxima), CPU seconds and network bytes (sums), placement count, and `queueSeconds` (requested → first workload start). |
+| `usage` | Rolled up over placements: peak memory, disk and PIDs (maxima), CPU seconds and network bytes (sums), placement count, and `queueSeconds` (requested → first workload start). `peakCpuCores` is the placements' maximum and the `*StallSeconds` their sum, each absent when no placement reported it. |
 
 ## Placements
 
@@ -47,9 +47,33 @@ Resource figures are read from the container's cgroup (v2):
 | `peakMemoryBytes` | `memory.peak`, which the kernel keeps, so short spikes between samples are not missed. |
 | `peakPids` | `pids.peak`. |
 | `cpuSeconds` | `cpu.stat` `usage_usec`. |
+| `peakCpuCores` | The highest CPU rate, in cores, between two consecutive readings of `usage_usec` by the runner (about 10 s apart; readings under a second apart are not used). A burst shorter than the interval is averaged over it. |
+| `cpuStallSeconds` | `cpu.pressure` `some` `total`: time in which at least one of the container's tasks waited for a CPU (PSI). |
+| `memoryStallSeconds`, `memoryFullStallSeconds` | `memory.pressure` `some` and `full` `total`: time in which some, or all, of its tasks stalled on memory (reclaim, swap-in). |
+| `ioStallSeconds`, `ioFullStallSeconds` | `io.pressure` `some` and `full` `total`, for I/O. |
 | `peakDiskBytes` | The largest sampled size of the state volumes plus the writable layer. |
 | `netRxBytes`, `netTxBytes` | Network I/O of the container's network namespace. |
 | `snapshotBytes` | Compressed size of its final snapshot. |
+
+The stall figures are absent, never 0, where the kernel has no PSI (no
+`*.pressure` files: a kernel built without it, or booted with `psi=0`),
+and from runners that predate them; so is `peakCpuCores`. A CPU stall on a
+host means its Runs together asked for more CPU than it had; a memory
+stall, that the container worked against its memory limit.
+
+`imagePlatforms` lists the platforms (`os/arch[/variant]`, e.g.
+`linux/arm64/v8`) the placement's image reference offers, sent with the
+`imageReady` mark: every entry of the manifest list or OCI index the pull
+fetched (attestation entries, `unknown/unknown`, left out); a single-arch
+image's own platform; for an image built on the host (`image.build`), the
+host's. The runner reads what Podman stored when it pulled the image
+(containers/storage keeps the list beside the image) and makes no registry
+call; a reference pinned by the digest of one platform's manifest offers
+that platform only. Storage does not record which tag came by which list:
+when one image is reached through several lists, or through a list and
+other names, a tag's platforms are unknown (a digest-pinned reference
+still offers its own list's). When the runner cannot tell, the field is
+absent and the start goes on (a debug line in the runner's log).
 
 The runner sends these with **every heartbeat** (about every third of the
 lease period, 10 s by default) and once more at exit. So a placement whose
@@ -327,7 +351,7 @@ kept as samples, in these tables, at three resolutions (`res`: 0 raw, 60,
 | Table | Written | What |
 | --- | --- | --- |
 | `host_samples` | each heartbeat | the host's CPU seconds (counter), memory and disk in use; its live placements and the CPU and memory they asked for; the runner process's own use (below) |
-| `placement_samples` | each heartbeat, per live placement | CPU seconds (counter), memory and pids now, disk, network counters |
+| `placement_samples` | each heartbeat, per live placement | CPU seconds (counter), memory and pids now, disk, network counters; `peak_cpu_cores`, the CPU rate over the interval the reading ends (a peak); `cpu_stall`, `mem_stall`, `mem_full_stall`, `io_stall`, `io_full_stall`, the PSI totals in seconds (counters, NULL without PSI) |
 | `system_samples` | every `LUX_SAMPLE_EVERY` | for the system (tenant `''`) and each tenant with anything live or with bytes in S3: Runs by state, busy, idle, queued, started and finished since the last sample, time to start p50/p95, hosts by state, capacity, allocated, and stored bytes by kind (below) |
 | `control_samples`, `control_disk_samples` | with the whole system's sample, at its instant | the control host, the machine luxd runs on: CPU seconds (counter) and cores, memory used and total; its Postgres database's size and connections (read with SQL, so a remote database works too); for each of `LUX_HISTORY_DISK_PATHS` its filesystem's used, free (writable without root) and total bytes; and the luxd process's own use (below) |
 
@@ -385,7 +409,10 @@ Every minute, luxd rolls complete buckets up into the next resolution
 summed, states the bucket's last) and deletes what is older than that
 resolution's retention (`LUX_HISTORY_RAW`, `_MINUTES`, `_HOURS`). The API
 (`/v1/history`, `/v1/hosts/{id}/history`, `/v1/runs/{id}/history`) serves
-counters as rates. `/v1/history` carries the control host (`control`)
+counters as rates. A Run's history carries `peakCpuCores` as stored (a
+rollup bucket's highest rate) and the stall counters as `cpuStallRate`,
+`memoryStallRate`, `memoryFullStallRate`, `ioStallRate` and
+`ioFullStallRate`: seconds stalled per second. `/v1/history` carries the control host (`control`)
 only for an operator key reading the whole system: never for
 a tenant key, nor for an operator's `?tenant=`. See
 [Operators](operators.md#history).
@@ -401,3 +428,82 @@ hourly samples is a gap (no point), and today folds the hours rolled up
 so far. A pool's metrics (`/v1/pools/{name}/metrics`) take `res=86400`
 too. Without `res`, a read still gets the finest resolution kept for its
 range, never days.
+
+## Market data
+
+For each `ec2` pool, luxd records what its candidate instance types cost
+and how likely EC2 is to have spot capacity for them, per availability
+zone. Nothing in lux reads it yet: it accumulates for a pool advisor, and
+until then operators read it with SQL. Both tables are the system's only
+(row-level security `system_only`, as `price_cache` and `host_rates`).
+
+**Candidates** are, per region, every live `ec2` pool's template
+`instanceType` and `fallbackInstanceTypes`, plus `[market] candidates`
+(`LUX_MARKET_CANDIDATES`), which applies to every pool. **Zones** are those
+of the pools' subnets (`ec2:DescribeSubnets`; a template without subnets:
+the region's default subnets'). Without that permission, the zones the
+pool's hosts were launched in are sampled instead, by name only.
+
+`market_samples`, one row per (provider, region, zone, instance type)
+per sample:
+
+| Column | Source |
+| --- | --- |
+| `zone`, `zone_id` | The zone's name (`us-east-1a`, which differs between accounts) and id (`use1-az1`, which does not). |
+| `spot_per_hour` | The latest Linux/UNIX spot price within the last 24 hours (`ec2:DescribeSpotPriceHistory`). |
+| `on_demand_per_hour` | The Linux on-demand list price, through `price_cache` (`pricing:GetProducts`, refreshed per `LUX_COSTS_PRICES_REFRESH`). Per region: the same in every zone's row. |
+| `currency` | Of both prices (`USD`). |
+| `placement_score` | EC2's spot placement score, 1 to 10, for one instance of the type in that zone (`ec2:GetSpotPlacementScores` with that one type, `TargetCapacity` 1 in `units`, `SingleAvailabilityZone`, the pool's region). EC2 scores its top 10 zones; a zone it leaves out has none. |
+
+Each figure is fetched on its own and is NULL on its own: a refused or
+throttled call (a role without `ec2:GetSpotPlacementScores`, say) leaves
+its column NULL and the other figures are stored. A pass logs one warning
+naming what failed, whatever the count, and the types it tried are not
+tried again until their next turn.
+
+EC2 documents that a placement score asked for fewer than three instance
+types is always low. lux asks per type, so each type gets its own figure:
+its scores compare one type across zones and hours, not with what a fleet
+of several types would get.
+
+`instance_types`, one row per (provider, region, instance type): from
+`ec2:DescribeInstanceTypes`, its `vcpus`, `memory_bytes`, `architectures`,
+`nested_virtualization` (`nested-virtualization` among the processor's
+supported features), `burstable`, `network_baseline_gbps` (the sum of its
+network cards' baselines) and `network_performance` (EC2's wording), and
+`fetched_at`. A row is fetched when its type first becomes a candidate and
+again once it is a day old; a failed fetch keeps the old row.
+
+**Cadence.** Every type is sampled once per `[market] every`
+(`LUX_MARKET_EVERY`, default `1h`; `0s` turns the sampler off) by the luxd
+holding the provisioner lease; the others' loops find they do not hold it
+and do nothing. A pass checks the lease when it starts and again before it
+writes each type's rows and the catalog's, and stops once it no longer
+holds it. The lease can still move between that check and the write, so
+around a handover two luxds may both sample a type in the same hour. It
+costs per pass one `DescribeSubnets`
+per pool, and per candidate type one `GetSpotPlacementScores`, one
+`GetProducts` (cached for `LUX_COSTS_PRICES_REFRESH`) and one
+`DescribeSpotPriceHistory` per zone.
+
+**The placement score quota.** EC2 limits how many *new* request
+configurations an account may score in 24 hours; a configuration it has
+seen in the last 24 hours can be asked again. The limit is not published:
+the AWS guidance for a score tracker gives about 10 configurations, and
+past it EC2 answers `MaxConfigLimitExceeded` until the window passes. lux
+sends one configuration per (region, instance type) and asks the same ones
+every pass, so a pool with 5 candidate types in 3 zones uses 5
+configurations a day (the zones come in one answer), however often it
+samples: 120 requests a day at the hourly default, all of them repeats
+after the first hour. The cadence does not change the count; the number of
+distinct (region, type) pairs does. Keep them, over every pool and
+`candidates`, under 10; beyond that the extra types' scores are NULL and
+their prices are still stored.
+
+**Retention.** Rows older than the hourly history's retention
+(`LUX_HISTORY_HOURS`, 400 days by default) are deleted by the minute's
+rollup pass. `instance_types` is replaced, never deleted.
+
+Sizing: a row is about 240 B with its indexes, so a pool's market data
+takes `types × zones × 24 × hour_days × 240 B` at the hourly default: 5
+types in 3 zones for 400 days is 144,000 rows, about 35 MB.

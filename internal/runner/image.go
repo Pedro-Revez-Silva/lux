@@ -11,6 +11,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -559,6 +560,52 @@ func (r *Runner) relieveDisk(ctx context.Context) []string {
 		r.log.Info("disk over --image-disk-high: removed unused images", "usedPct", 100*used/max(total, 1), "images", removed)
 	}
 	return removed
+}
+
+// learnPlatforms records the platforms image's reference offers, from what
+// Podman stored when it pulled it (podman.ImagePlatforms); never a registry
+// call. An image built here offers the host's platform. Not knowing leaves
+// them nil, logged at debug: never a reason to fail the start.
+func (p *placement) learnPlatforms(ctx context.Context, image string, built bool, info podman.ImageInfo) {
+	platforms := []string{runtime.GOOS + "/" + runtime.GOARCH}
+	if !built {
+		dir := info.ImagesDir
+		var err error
+		if dir == "" {
+			dir, err = p.r.imagesDir(ctx)
+		}
+		if err == nil {
+			platforms, err = podman.ImagePlatforms(dir, image, info)
+		}
+		if err != nil {
+			p.r.log.Debug("image platforms unknown", "run", p.runID, "epoch", p.epoch, "image", image, "err", err)
+			return
+		}
+	}
+	p.mu.Lock()
+	p.imagePlatforms = platforms
+	p.mu.Unlock()
+}
+
+func (p *placement) platforms() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.imagePlatforms)
+}
+
+// imagesDir is containers/storage's image metadata directory, asked of
+// Podman until it answers.
+func (r *Runner) imagesDir(ctx context.Context) (string, error) {
+	r.imagesDirMu.Lock()
+	defer r.imagesDirMu.Unlock()
+	if r.imagesDirPath == "" {
+		d, err := r.pm.ImagesDir(ctx)
+		if err != nil {
+			return "", err
+		}
+		r.imagesDirPath = d
+	}
+	return r.imagesDirPath, nil
 }
 
 // graphRoot is where Podman keeps images: asked once, /var/lib/containers

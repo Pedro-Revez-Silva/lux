@@ -540,32 +540,39 @@ type Resumability struct {
 type ImageResolution = proto.ImageResolution
 
 type Placement struct {
-	Epoch              int        `json:"epoch"`
-	Host               string     `json:"host"`
-	HostName           string     `json:"hostName"`
-	State              string     `json:"state"`
-	ExitCode           *int       `json:"exitCode,omitempty"`
-	ExitReason         string     `json:"exitReason,omitempty"`
-	StopReason         string     `json:"stopReason,omitempty"`
-	AssignedAt         time.Time  `json:"assignedAt"`
-	AcceptedAt         *time.Time `json:"acceptedAt,omitempty"`
-	ImageReadyAt       *time.Time `json:"imageReadyAt,omitempty"`
-	VolumesRestoredAt  *time.Time `json:"volumesRestoredAt,omitempty"`
-	ReposReadyAt       *time.Time `json:"reposReadyAt,omitempty" doc:"Its repositories were cloned and a resume's sync fetched (at once without repositories)."`
-	ContainerStartedAt *time.Time `json:"containerStartedAt,omitempty"`
-	WorkloadStartedAt  *time.Time `json:"workloadStartedAt,omitempty"`
-	StopRequestedAt    *time.Time `json:"stopRequestedAt,omitempty"`
-	ExitedAt           *time.Time `json:"exitedAt,omitempty"`
-	SnapshotDoneAt     *time.Time `json:"snapshotDoneAt,omitempty"`
-	UploadedAt         *time.Time `json:"uploadedAt,omitempty"`
-	PeakMemoryBytes    *int64     `json:"peakMemoryBytes,omitempty"`
-	PeakDiskBytes      *int64     `json:"peakDiskBytes,omitempty"`
-	PeakPids           *int       `json:"peakPids,omitempty"`
-	CPUSeconds         *float64   `json:"cpuSeconds,omitempty"`
-	NetRxBytes         *int64     `json:"netRxBytes,omitempty"`
-	NetTxBytes         *int64     `json:"netTxBytes,omitempty"`
-	SnapshotBytes      *int64     `json:"snapshotBytes,omitempty"`
-	MemoryLimit        *int64     `json:"memoryLimit,omitempty" doc:"Bytes: the container's memory limit, the Run's resources.memory scaled to its host's share (MemTotal less the runner's headroom, over the memory the host offers). Absent until the container starts, and for placements from before luxd recorded it."`
+	Epoch                  int        `json:"epoch"`
+	Host                   string     `json:"host"`
+	HostName               string     `json:"hostName"`
+	State                  string     `json:"state"`
+	ExitCode               *int       `json:"exitCode,omitempty"`
+	ExitReason             string     `json:"exitReason,omitempty"`
+	StopReason             string     `json:"stopReason,omitempty"`
+	AssignedAt             time.Time  `json:"assignedAt"`
+	AcceptedAt             *time.Time `json:"acceptedAt,omitempty"`
+	ImageReadyAt           *time.Time `json:"imageReadyAt,omitempty"`
+	VolumesRestoredAt      *time.Time `json:"volumesRestoredAt,omitempty"`
+	ReposReadyAt           *time.Time `json:"reposReadyAt,omitempty" doc:"Its repositories were cloned and a resume's sync fetched (at once without repositories)."`
+	ContainerStartedAt     *time.Time `json:"containerStartedAt,omitempty"`
+	WorkloadStartedAt      *time.Time `json:"workloadStartedAt,omitempty"`
+	StopRequestedAt        *time.Time `json:"stopRequestedAt,omitempty"`
+	ExitedAt               *time.Time `json:"exitedAt,omitempty"`
+	SnapshotDoneAt         *time.Time `json:"snapshotDoneAt,omitempty"`
+	UploadedAt             *time.Time `json:"uploadedAt,omitempty"`
+	PeakMemoryBytes        *int64     `json:"peakMemoryBytes,omitempty"`
+	PeakDiskBytes          *int64     `json:"peakDiskBytes,omitempty"`
+	PeakPids               *int       `json:"peakPids,omitempty"`
+	CPUSeconds             *float64   `json:"cpuSeconds,omitempty"`
+	NetRxBytes             *int64     `json:"netRxBytes,omitempty"`
+	NetTxBytes             *int64     `json:"netTxBytes,omitempty"`
+	SnapshotBytes          *int64     `json:"snapshotBytes,omitempty"`
+	MemoryLimit            *int64     `json:"memoryLimit,omitempty" doc:"Bytes: the container's memory limit, the Run's resources.memory scaled to its host's share (MemTotal less the runner's headroom, over the memory the host offers). Absent until the container starts, and for placements from before luxd recorded it."`
+	PeakCPUCores           *float64   `json:"peakCpuCores,omitempty" doc:"The highest CPU rate, in cores, between two consecutive readings of the container's cgroup (about 10 s apart). Absent from runners that predate it."`
+	CPUStallSeconds        *float64   `json:"cpuStallSeconds,omitempty" doc:"cpu.pressure's some total: seconds in which some task waited for CPU. Absent without PSI (or from older runners), never 0 for it."`
+	MemoryStallSeconds     *float64   `json:"memoryStallSeconds,omitempty" doc:"memory.pressure's some total, in seconds."`
+	MemoryFullStallSeconds *float64   `json:"memoryFullStallSeconds,omitempty" doc:"memory.pressure's full total: seconds in which every task stalled on memory."`
+	IOStallSeconds         *float64   `json:"ioStallSeconds,omitempty" doc:"io.pressure's some total, in seconds."`
+	IOFullStallSeconds     *float64   `json:"ioFullStallSeconds,omitempty" doc:"io.pressure's full total, in seconds."`
+	ImagePlatforms         []string   `json:"imagePlatforms,omitempty" doc:"The platforms (os/arch[/variant]) the image's reference offers: every entry of a manifest list or OCI index, a single-arch image's own, an image built on the host the host's. Absent when the runner could not tell, or predates it."`
 }
 
 // RunUsage rolls placements up: peaks are maxima, totals are sums.
@@ -577,6 +584,13 @@ type RunUsage struct {
 	NetRxBytes      int64   `json:"netRxBytes"`
 	NetTxBytes      int64   `json:"netTxBytes"`
 	Placements      int     `json:"placements"`
+	// Absent when no placement reported them.
+	PeakCPUCores           *float64 `json:"peakCpuCores,omitempty"`
+	CPUStallSeconds        *float64 `json:"cpuStallSeconds,omitempty"`
+	MemoryStallSeconds     *float64 `json:"memoryStallSeconds,omitempty"`
+	MemoryFullStallSeconds *float64 `json:"memoryFullStallSeconds,omitempty"`
+	IOStallSeconds         *float64 `json:"ioStallSeconds,omitempty"`
+	IOFullStallSeconds     *float64 `json:"ioFullStallSeconds,omitempty"`
 	// Seconds between being requested and the first workload start.
 	QueueSeconds *float64 `json:"queueSeconds,omitempty"`
 }
@@ -1106,7 +1120,9 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 		rows, err := tx.Query(ctx, `SELECT p.epoch, p.host_id, h.name, p.state, p.exit_code, p.exit_reason, p.stop_reason,
 				p.created_at, p.accepted_at, p.image_ready_at, p.volumes_restored_at, p.repos_ready_at, p.container_started_at, p.workload_started_at,
 				p.stop_requested_at, p.exited_at, p.snapshot_done_at, p.uploaded_at,
-				p.peak_memory_bytes, p.peak_disk_bytes, p.peak_pids, p.cpu_seconds, p.net_rx_bytes, p.net_tx_bytes, p.snapshot_bytes, p.memory_limit
+				p.peak_memory_bytes, p.peak_disk_bytes, p.peak_pids, p.cpu_seconds, p.net_rx_bytes, p.net_tx_bytes, p.snapshot_bytes, p.memory_limit,
+				p.peak_cpu_cores, p.cpu_stall_seconds, p.memory_stall_seconds, p.memory_full_stall_seconds, p.io_stall_seconds, p.io_full_stall_seconds,
+				p.image_platforms
 			FROM placements p JOIN hosts h ON h.id = p.host_id WHERE p.run_id = $1 ORDER BY p.epoch`, id)
 		if err != nil {
 			return err
@@ -1118,11 +1134,19 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 			if err := rows.Scan(&pl.Epoch, &pl.Host, &pl.HostName, &pl.State, &pl.ExitCode, &pl.ExitReason, &pl.StopReason,
 				&pl.AssignedAt, &pl.AcceptedAt, &pl.ImageReadyAt, &pl.VolumesRestoredAt, &pl.ReposReadyAt, &pl.ContainerStartedAt, &pl.WorkloadStartedAt,
 				&pl.StopRequestedAt, &pl.ExitedAt, &pl.SnapshotDoneAt, &pl.UploadedAt,
-				&pl.PeakMemoryBytes, &pl.PeakDiskBytes, &pl.PeakPids, &pl.CPUSeconds, &pl.NetRxBytes, &pl.NetTxBytes, &pl.SnapshotBytes, &pl.MemoryLimit); err != nil {
+				&pl.PeakMemoryBytes, &pl.PeakDiskBytes, &pl.PeakPids, &pl.CPUSeconds, &pl.NetRxBytes, &pl.NetTxBytes, &pl.SnapshotBytes, &pl.MemoryLimit,
+				&pl.PeakCPUCores, &pl.CPUStallSeconds, &pl.MemoryStallSeconds, &pl.MemoryFullStallSeconds, &pl.IOStallSeconds, &pl.IOFullStallSeconds,
+				&pl.ImagePlatforms); err != nil {
 				return err
 			}
 			run.Placements = append(run.Placements, pl)
 			u.Placements++
+			u.PeakCPUCores = maxOf(u.PeakCPUCores, pl.PeakCPUCores)
+			u.CPUStallSeconds = sumOf(u.CPUStallSeconds, pl.CPUStallSeconds)
+			u.MemoryStallSeconds = sumOf(u.MemoryStallSeconds, pl.MemoryStallSeconds)
+			u.MemoryFullStallSeconds = sumOf(u.MemoryFullStallSeconds, pl.MemoryFullStallSeconds)
+			u.IOStallSeconds = sumOf(u.IOStallSeconds, pl.IOStallSeconds)
+			u.IOFullStallSeconds = sumOf(u.IOFullStallSeconds, pl.IOFullStallSeconds)
 			if pl.PeakMemoryBytes != nil {
 				u.PeakMemoryBytes = max(u.PeakMemoryBytes, *pl.PeakMemoryBytes)
 			}
@@ -1155,6 +1179,27 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 		return err
 	})
 	return run, err
+}
+
+// maxOf and sumOf fold a placement's optional figure into a Run's: nil
+// stays nil until some placement has one.
+func maxOf(acc, v *float64) *float64 {
+	if v == nil || (acc != nil && *acc >= *v) {
+		return acc
+	}
+	x := *v
+	return &x
+}
+
+func sumOf(acc, v *float64) *float64 {
+	if v == nil {
+		return acc
+	}
+	x := *v
+	if acc != nil {
+		x += *acc
+	}
+	return &x
 }
 
 // RunPath names a Run. Exported: huma only sees the path parameter of an

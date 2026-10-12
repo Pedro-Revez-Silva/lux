@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -508,11 +510,16 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 	pids := make([]int, n)
 	rx, tx_ := make([]int64, n), make([]int64, n)
 	curMem, curPids := make([]int64, n), make([]int, n)
+	// Absent from older runners and without PSI: NULL, never 0.
+	peakCPU, cpuNow := make([]*float64, n), make([]*float64, n)
+	cpuStall, memStall, memFull, ioStall, ioFull := make([]*float64, n), make([]*float64, n), make([]*float64, n), make([]*float64, n), make([]*float64, n)
 	for i, l := range hb.Leases {
 		runs[i], epochs[i] = l.RunID, l.Epoch
 		if u := l.Usage; u != nil {
 			mem[i], disk[i], pids[i], cpu[i], rx[i], tx_[i] = u.PeakMemoryBytes, u.PeakDiskBytes, u.PeakPids, u.CPUSeconds, u.NetRxBytes, u.NetTxBytes
 			curMem[i], curPids[i] = u.MemoryBytes, u.Pids
+			peakCPU[i], cpuNow[i] = u.PeakCPUCores, u.CPUCores
+			cpuStall[i], memStall[i], memFull[i], ioStall[i], ioFull[i] = u.CPUStallSeconds, u.MemoryStallSeconds, u.MemoryFullStallSeconds, u.IOStallSeconds, u.IOFullStallSeconds
 		}
 	}
 	var outdatedDrained []string
@@ -557,12 +564,20 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 					peak_pids         = greatest(p.peak_pids, nullif(u.pids, 0)),
 					cpu_seconds       = greatest(p.cpu_seconds, nullif(u.cpu, 0)),
 					net_rx_bytes      = greatest(p.net_rx_bytes, nullif(u.rx, 0)),
-					net_tx_bytes      = greatest(p.net_tx_bytes, nullif(u.tx, 0))
-				FROM unnest($3::text[], $4::int[], $5::bigint[], $6::bigint[], $7::int[], $8::float8[], $9::bigint[], $10::bigint[])
-					AS u(run_id, epoch, mem, disk, pids, cpu, rx, tx)
+					net_tx_bytes      = greatest(p.net_tx_bytes, nullif(u.tx, 0)),
+					peak_cpu_cores            = greatest(p.peak_cpu_cores, u.peak_cpu),
+					cpu_stall_seconds         = greatest(p.cpu_stall_seconds, u.cpu_stall),
+					memory_stall_seconds      = greatest(p.memory_stall_seconds, u.mem_stall),
+					memory_full_stall_seconds = greatest(p.memory_full_stall_seconds, u.mem_full),
+					io_stall_seconds          = greatest(p.io_stall_seconds, u.io_stall),
+					io_full_stall_seconds     = greatest(p.io_full_stall_seconds, u.io_full)
+				FROM unnest($3::text[], $4::int[], $5::bigint[], $6::bigint[], $7::int[], $8::float8[], $9::bigint[], $10::bigint[],
+						$11::float8[], $12::float8[], $13::float8[], $14::float8[], $15::float8[], $16::float8[])
+					AS u(run_id, epoch, mem, disk, pids, cpu, rx, tx, peak_cpu, cpu_stall, mem_stall, mem_full, io_stall, io_full)
 				WHERE p.run_id = u.run_id AND p.epoch = u.epoch AND p.host_id = $1
 				  AND p.state IN `+livePlacementStates,
-				hostID, interval(s.cfg.LeaseDuration), runs, epochs, mem, disk, pids, cpu, rx, tx_)
+				hostID, interval(s.cfg.LeaseDuration), runs, epochs, mem, disk, pids, cpu, rx, tx_,
+				peakCPU, cpuStall, memStall, memFull, ioStall, ioFull)
 			if err != nil {
 				return err
 			}
@@ -573,14 +588,16 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 			if err := sampleHost(ctx, tx, hostID, hb.Usage, hb.Runner); err != nil || n == 0 {
 				return err
 			}
-			_, err := tx.Exec(ctx, `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, cpu_seconds, mem_bytes, disk_bytes, pids, net_rx, net_tx)
+			_, err := tx.Exec(ctx, `INSERT INTO placement_samples (run_id, epoch, tenant_id, res, at, cpu_seconds, mem_bytes, disk_bytes, pids, net_rx, net_tx,
+					peak_cpu_cores, cpu_stall, mem_stall, mem_full_stall, io_stall, io_full_stall)
 				SELECT p.run_id, p.epoch, p.tenant_id, 0, now(), nullif(u.cpu, 0), nullif(u.mem, 0), nullif(u.disk, 0), nullif(u.pids, 0),
-					nullif(u.rx, 0), nullif(u.tx, 0)
-				FROM unnest($2::text[], $3::int[], $4::bigint[], $5::bigint[], $6::int[], $7::float8[], $8::bigint[], $9::bigint[])
-					AS u(run_id, epoch, mem, disk, pids, cpu, rx, tx)
+					nullif(u.rx, 0), nullif(u.tx, 0), u.cpu_now, u.cpu_stall, u.mem_stall, u.mem_full, u.io_stall, u.io_full
+				FROM unnest($2::text[], $3::int[], $4::bigint[], $5::bigint[], $6::int[], $7::float8[], $8::bigint[], $9::bigint[],
+						$10::float8[], $11::float8[], $12::float8[], $13::float8[], $14::float8[], $15::float8[])
+					AS u(run_id, epoch, mem, disk, pids, cpu, rx, tx, cpu_now, cpu_stall, mem_stall, mem_full, io_stall, io_full)
 				JOIN placements p ON p.run_id = u.run_id AND p.epoch = u.epoch AND p.host_id = $1 AND p.state IN `+livePlacementStates+`
 				ON CONFLICT DO NOTHING`,
-				hostID, runs, epochs, curMem, disk, curPids, cpu, rx, tx_)
+				hostID, runs, epochs, curMem, disk, curPids, cpu, rx, tx_, cpuNow, cpuStall, memStall, memFull, ioStall, ioFull)
 			return err
 		})
 		return later.write()
@@ -694,9 +711,16 @@ func recordUsage(ctx context.Context, tx pgx.Tx, runID string, epoch int, u *pro
 			peak_pids         = greatest(peak_pids, nullif($5::int, 0)),
 			cpu_seconds       = greatest(cpu_seconds, nullif($6::float8, 0)),
 			net_rx_bytes      = greatest(net_rx_bytes, nullif($7::bigint, 0)),
-			net_tx_bytes      = greatest(net_tx_bytes, nullif($8::bigint, 0))
+			net_tx_bytes      = greatest(net_tx_bytes, nullif($8::bigint, 0)),
+			peak_cpu_cores            = greatest(peak_cpu_cores, $9::float8),
+			cpu_stall_seconds         = greatest(cpu_stall_seconds, $10::float8),
+			memory_stall_seconds      = greatest(memory_stall_seconds, $11::float8),
+			memory_full_stall_seconds = greatest(memory_full_stall_seconds, $12::float8),
+			io_stall_seconds          = greatest(io_stall_seconds, $13::float8),
+			io_full_stall_seconds     = greatest(io_full_stall_seconds, $14::float8)
 		WHERE run_id = $1 AND epoch = $2`,
-		runID, epoch, u.PeakMemoryBytes, u.PeakDiskBytes, u.PeakPids, u.CPUSeconds, u.NetRxBytes, u.NetTxBytes)
+		runID, epoch, u.PeakMemoryBytes, u.PeakDiskBytes, u.PeakPids, u.CPUSeconds, u.NetRxBytes, u.NetTxBytes,
+		u.PeakCPUCores, u.CPUStallSeconds, u.MemoryStallSeconds, u.MemoryFullStallSeconds, u.IOStallSeconds, u.IOFullStallSeconds)
 	return err
 }
 
@@ -772,6 +796,29 @@ func msToTime(ms int64) *time.Time {
 	}
 	t := time.UnixMilli(ms)
 	return &t
+}
+
+// Bounds on a runner's image platforms: an OCI index lists a few dozen at
+// most, each a short os/arch/variant.
+const (
+	maxImagePlatforms   = 64
+	maxImagePlatformLen = 64
+)
+
+// platforms is a runner's image platform list as stored: NULL (keep what
+// is stored) when it sent none, one outside the bounds above, or one with
+// an entry Postgres text cannot hold (a NUL, invalid UTF-8), which would
+// otherwise fail the status it came with.
+func platforms(ps []string) []string {
+	if len(ps) == 0 || len(ps) > maxImagePlatforms {
+		return nil
+	}
+	for _, p := range ps {
+		if p == "" || len(p) > maxImagePlatformLen || strings.ContainsRune(p, 0) || !utf8.ValidString(p) {
+			return nil
+		}
+	}
+	return ps
 }
 
 // hostEvicting: the host's provider takes it away soon (a spot

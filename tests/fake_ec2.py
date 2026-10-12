@@ -126,6 +126,13 @@ class FakeEC2:
         self.volumes_error = ""
         # Each GetProducts' filters, {field: value}, in order.
         self.pricing_calls: list[dict] = []
+        # Market data (luxd's market sampler): the spot price every type
+        # has in every zone, and the placement score every zone gets; an
+        # error code in placement_scores_error refuses GetSpotPlacementScores
+        # as a role without ec2:GetSpotPlacementScores is refused.
+        self.spot_price = "0.0312"
+        self.placement_score = 7
+        self.placement_scores_error = ""
         self.server = ThreadingHTTPServer((env.gateway, 0), self._handler())
         self.url = f"http://{env.gateway}:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -218,7 +225,10 @@ class FakeEC2:
                 if q.get("DryRun") != "true":
                     fake.calls.append(action)
                 try:
-                    xml = getattr(fake, "_" + action)(q)
+                    handler = getattr(fake, "_" + action, None)
+                    if handler is None or not action[:1].isupper():
+                        raise FakeError("InvalidAction", f"The action {action} is not valid for this web service.")
+                    xml = handler(q)
                     code = 200
                 except KeyError:
                     code, xml = 400, _error("InvalidAction", action)
@@ -347,6 +357,33 @@ class FakeEC2:
                         f"</sizeInMiB></memoryInfo></item>" for t in _list(q, "InstanceType"))
         return f'<DescribeInstanceTypesResponse xmlns="{NS}"><instanceTypeSet>{items}</instanceTypeSet></DescribeInstanceTypesResponse>'
 
+    def _DescribeSubnets(self, q):
+        """Each subnet named (or, with none, a default subnet per zone a
+        and b) in the zone _zone gives it, with a zone id from its letter."""
+        subnets = _list(q, "SubnetId") or ["subnet-a", "subnet-b"]
+        region = self.template.get("region") or "us-east-1"
+        items = "".join(f"<item><subnetId>{escape(sn)}</subnetId><availabilityZone>{self._zone(sn)}</availabilityZone>"
+                        f"<availabilityZoneId>{_zone_id(region, sn)}</availabilityZoneId></item>" for sn in subnets)
+        return f'<DescribeSubnetsResponse xmlns="{NS}"><subnetSet>{items}</subnetSet></DescribeSubnetsResponse>'
+
+    def _DescribeSpotPriceHistory(self, q):
+        zone, types = q.get("AvailabilityZone", ""), _list(q, "InstanceType")
+        at = q.get("EndTime") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        items = "".join(f"<item><availabilityZone>{escape(zone)}</availabilityZone><instanceType>{escape(t)}</instanceType>"
+                        f"<productDescription>Linux/UNIX</productDescription><spotPrice>{self.spot_price}</spotPrice>"
+                        f"<timestamp>{escape(at)}</timestamp></item>" for t in types)
+        return (f'<DescribeSpotPriceHistoryResponse xmlns="{NS}"><spotPriceHistorySet>{items}</spotPriceHistorySet>'
+                f"</DescribeSpotPriceHistoryResponse>")
+
+    def _GetSpotPlacementScores(self, q):
+        if self.placement_scores_error:
+            raise FakeError(self.placement_scores_error, "You are not authorized to perform this operation. (fake)")
+        regions = _list(q, "RegionName") or [self.template.get("region") or "us-east-1"]
+        items = "".join(f"<item><region>{escape(r)}</region><availabilityZoneId>{_zone_id(r, sn)}</availabilityZoneId>"
+                        f"<score>{self.placement_score}</score></item>" for r in regions for sn in ("subnet-a", "subnet-b"))
+        return (f'<GetSpotPlacementScoresResponse xmlns="{NS}"><spotPlacementScoreSet>{items}</spotPlacementScoreSet>'
+                f"</GetSpotPlacementScoresResponse>")
+
     def _TerminateInstances(self, q):
         ids = _list(q, "InstanceId")
         items = ""
@@ -471,6 +508,14 @@ def _error(code: str, msg: str) -> str:
 
 def _tags(tags: dict) -> str:
     return "".join(f"<item><key>{escape(k)}</key><value>{escape(v)}</value></item>" for k, v in tags.items())
+
+
+def _zone_id(region: str, subnet: str) -> str:
+    """A zone id shaped as EC2's (use1-az1 for us-east-1, subnet-a)."""
+    parts = region.split("-")
+    short = parts[0] + "".join(p[0] for p in parts[1:-1]) + parts[-1]
+    letter = subnet.rsplit("-", 1)[-1][:1] or "a"
+    return f"{short}-az{ord(letter) - ord('a') + 1}"
 
 
 def _list(q: dict, prefix: str) -> list[str]:

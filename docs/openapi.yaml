@@ -2375,6 +2375,10 @@ components:
         cpuSeconds:
           format: double
           type: number
+        cpuStallSeconds:
+          description: "cpu.pressure's some total: seconds in which some task waited for CPU. Absent without PSI (or from older runners), never 0 for it."
+          format: double
+          type: number
         epoch:
           format: int64
           type: integer
@@ -2390,19 +2394,46 @@ components:
           type: string
         hostName:
           type: string
+        imagePlatforms:
+          description: "The platforms (os/arch[/variant]) the image's reference offers: every entry of a manifest list or OCI index, a single-arch image's own, an image built on the host the host's. Absent when the runner could not tell, or predates it."
+          items:
+            type: string
+          type:
+            - array
+            - "null"
         imageReadyAt:
           format: date-time
           type: string
+        ioFullStallSeconds:
+          description: io.pressure's full total, in seconds.
+          format: double
+          type: number
+        ioStallSeconds:
+          description: io.pressure's some total, in seconds.
+          format: double
+          type: number
+        memoryFullStallSeconds:
+          description: "memory.pressure's full total: seconds in which every task stalled on memory."
+          format: double
+          type: number
         memoryLimit:
           description: "Bytes: the container's memory limit, the Run's resources.memory scaled to its host's share (MemTotal less the runner's headroom, over the memory the host offers). Absent until the container starts, and for placements from before luxd recorded it."
           format: int64
           type: integer
+        memoryStallSeconds:
+          description: memory.pressure's some total, in seconds.
+          format: double
+          type: number
         netRxBytes:
           format: int64
           type: integer
         netTxBytes:
           format: int64
           type: integer
+        peakCpuCores:
+          description: The highest CPU rate, in cores, between two consecutive readings of the container's cgroup (about 10 s apart). Absent from runners that predate it.
+          format: double
+          type: number
         peakDiskBytes:
           format: int64
           type: integer
@@ -2618,12 +2649,30 @@ components:
         cpuSeconds:
           format: double
           type: number
+        cpuStallSeconds:
+          format: double
+          type: number
+        ioFullStallSeconds:
+          format: double
+          type: number
+        ioStallSeconds:
+          format: double
+          type: number
+        memoryFullStallSeconds:
+          format: double
+          type: number
+        memoryStallSeconds:
+          format: double
+          type: number
         netRxBytes:
           format: int64
           type: integer
         netTxBytes:
           format: int64
           type: integer
+        peakCpuCores:
+          format: double
+          type: number
         peakDiskBytes:
           format: int64
           type: integer
@@ -2670,6 +2719,10 @@ components:
         cpuCores:
           format: double
           type: number
+        cpuStallRate:
+          description: Seconds per second some task waited for CPU (cpu.pressure some), over the interval since the previous point. Absent without PSI.
+          format: double
+          type: number
         diskBytes:
           format: int64
           type: integer
@@ -2687,13 +2740,33 @@ components:
         idle:
           format: int64
           type: integer
+        ioFullStallRate:
+          description: Seconds per second every task stalled on I/O (io.pressure full).
+          format: double
+          type: number
+        ioStallRate:
+          description: As cpuStallRate, for I/O (io.pressure some).
+          format: double
+          type: number
         memoryBytes:
           format: int64
           type: integer
+        memoryFullStallRate:
+          description: Seconds per second every task stalled on memory (memory.pressure full).
+          format: double
+          type: number
+        memoryStallRate:
+          description: As cpuStallRate, for memory (memory.pressure some).
+          format: double
+          type: number
         netRxRate:
           format: double
           type: number
         netTxRate:
+          format: double
+          type: number
+        peakCpuCores:
+          description: "The highest CPU rate in cores between two consecutive runner readings (about 10 s apart) in this point's interval: a rollup keeps the bucket's maximum."
           format: double
           type: number
         pids:

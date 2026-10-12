@@ -81,6 +81,12 @@ arrive, a few seconds late.
    ON CONFLICT specification" until it is restarted on the new binary.
    No data is lost: the cost queue and the price refresh retry them. So
    migrate and then restart (or roll) every luxd promptly.
+   067–070 (peak CPU and pressure stalls, image platforms, market data)
+   add nullable columns to `placements` and `placement_samples` and two new
+   tables: no rewrite, and older luxds keep working. Grant the luxd role
+   `ec2:GetSpotPlacementScores` and `ec2:DescribeSubnets` for complete
+   [market data](telemetry.md#market-data); without them it is sampled
+   without placement scores, or in the zones of the pools' hosts.
 3. Restart (or roll) every `luxd serve` onto the new binary; for a release
    with 056 and several luxds, start every one of them, all stopped in
    step 2: do not roll.
@@ -190,6 +196,8 @@ under a timeout. `luxd check-config` is an alias of `validate`.
 | `LUX_COSTS_PRICES_REFRESH` | `24h` | Refresh interval for the on-demand price cache. |
 | `LUX_COSTS_PRICING_REGION` | `us-east-1` | AWS region for the Pricing API, independent of the host's region. |
 | `LUX_PRICING_ENDPOINT` | AWS | Overrides the Pricing API endpoint (tests). |
+| `LUX_MARKET_EVERY` | `1h` | How often each candidate instance type's spot and on-demand prices and spot placement score are sampled for every zone of each `ec2` pool ([Market data](telemetry.md#market-data)); `0s` turns it off. One luxd samples: the provisioner lease's holder. |
+| `LUX_MARKET_CANDIDATES` | — | Instance types sampled for every `ec2` pool besides its template's `instanceType` and `fallbackInstanceTypes`; comma-separated (`market.candidates`, a list, in the file). Each (region, type) pair is one of EC2's daily spot placement score configurations, of which an account gets about 10 ([the quota](telemetry.md#market-data)). A name that is not `family.size` is refused at startup. |
 | `LUX_DEBUG` | — | Debug logging. |
 | `LUX_CONSOLE_AUTH` | `key` | How the console signs people in: `key` or `cloudflare-access` ([Operators](operators.md#signing-in)). |
 | `LUX_CF_ACCESS_TEAM`, `LUX_CF_ACCESS_AUD` | — | For `cloudflare-access`: the Access team (`acme` or `acme.cloudflareaccess.com`) and the application's AUD tag. |
@@ -691,9 +699,14 @@ What an instance needs:
   `ec2:DescribeSpotPriceHistory` for spot prices and `ec2:DescribeVolumes`
   for each host's block-storage volumes (their size and type price its
   block storage; without it a host's block storage stays missing, never
-  zero), from its standard AWS
-  configuration (environment or instance role). These three actions are
-  read-only and require `Resource: "*"`; the runner needs none. The
+  zero), and, for [market data](telemetry.md#market-data),
+  `ec2:GetSpotPlacementScores` (without it the samples have no placement
+  score, logged once per pass) and `ec2:DescribeSubnets` (the zones of a
+  pool's subnets; without it, the zones its hosts were launched in), from
+  its standard AWS configuration (environment or instance role). These
+  actions are read-only and require `Resource: "*"`: none supports
+  resource-level permissions. The Terraform module's luxd role
+  (`deploy/terraform/aws/iam.tf`) grants them. The runner needs none. The
   Pricing API uses `LUX_COSTS_PRICING_REGION` regardless of the host's
   region. `LUX_EC2_ENDPOINT` and `LUX_PRICING_ENDPOINT` override their
   respective endpoints for tests.

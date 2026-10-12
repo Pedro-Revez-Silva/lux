@@ -98,9 +98,14 @@ type Provider struct {
 	clients   map[string]*awsec2.Client
 	// next subnet per pool: launches spread across the pool's subnets.
 	next map[string]int
-	// memory is each instance type's memory in bytes, per region, as
-	// DescribeInstanceTypes gave it: fixed for a type, so asked once.
-	memory map[[2]string]int64
+	// typesMu guards types and memoryFailed: launches (the provisioner)
+	// and the market sampler's catalog both read them.
+	typesMu sync.Mutex
+	// types is each instance type's description, per region, as
+	// DescribeInstanceTypes gave it, and when: a launch's memory reads it
+	// whatever its age (a type's memory is fixed), the catalog refetches
+	// it after catalogMaxAge.
+	types map[[2]string]typeEntry
 	// memoryFailed is when each type's lookup last failed: within
 	// memoryRetryAfter of it, launches go ahead without asking again.
 	memoryFailed map[[2]string]time.Time
@@ -146,7 +151,7 @@ const DefaultNoCapacityRetryAfter = 30 * time.Second
 // New builds the provider. endpoint overrides the EC2 endpoint (tests).
 func New(endpoint string, log *slog.Logger) *Provider {
 	return &Provider{endpoint: endpoint, clients: map[string]*awsec2.Client{}, next: map[string]int{},
-		memory: map[[2]string]int64{}, memoryFailed: map[[2]string]time.Time{}, memoryTimeout: memoryLookupTimeout,
+		types: map[[2]string]typeEntry{}, memoryFailed: map[[2]string]time.Time{}, memoryTimeout: memoryLookupTimeout,
 		noCapacity: map[capacityKey]noCapacityMark{}, noCapacityFor: DefaultNoCapacityRetryAfter, now: time.Now, log: log}
 }
 
@@ -641,28 +646,31 @@ func isNotFound(err error) bool {
 // within memoryTimeout, and not again for memoryRetryAfter after a failure.
 func (p *Provider) instanceMemory(ctx context.Context, c *awsec2.Client, region, instanceType string) (int64, error) {
 	key := [2]string{region, instanceType}
-	if mem, ok := p.memory[key]; ok {
-		return mem, nil
+	p.typesMu.Lock()
+	e, known := p.types[key]
+	at, failed := p.memoryFailed[key]
+	p.typesMu.Unlock()
+	if known && e.info.MemoryBytes > 0 {
+		return e.info.MemoryBytes, nil
 	}
-	if at, ok := p.memoryFailed[key]; ok && time.Since(at) < memoryRetryAfter {
+	if failed && time.Since(at) < memoryRetryAfter {
 		return 0, fmt.Errorf("ec2 DescribeInstanceTypes failed %s ago; not asked again before %s", time.Since(at).Round(time.Second), memoryRetryAfter)
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.memoryTimeout)
 	defer cancel()
-	out, err := c.DescribeInstanceTypes(ctx, &awsec2.DescribeInstanceTypesInput{
-		InstanceTypes: []types.InstanceType{types.InstanceType(instanceType)},
-	})
-	if err == nil && (len(out.InstanceTypes) != 1 || out.InstanceTypes[0].MemoryInfo == nil || aws.ToInt64(out.InstanceTypes[0].MemoryInfo.SizeInMiB) <= 0) {
-		err = errors.New("no memory in the reply")
+	infos, err := describeInstanceTypes(ctx, c, []string{instanceType})
+	if err == nil && (len(infos) != 1 || infos[0].MemoryBytes <= 0) {
+		err = errors.New("ec2 DescribeInstanceTypes: no memory in the reply")
 	}
+	p.typesMu.Lock()
+	defer p.typesMu.Unlock()
 	if err != nil {
 		p.memoryFailed[key] = time.Now()
-		return 0, fmt.Errorf("ec2 DescribeInstanceTypes: %w", err)
+		return 0, err
 	}
 	delete(p.memoryFailed, key)
-	mem := aws.ToInt64(out.InstanceTypes[0].MemoryInfo.SizeInMiB) << 20
-	p.memory[key] = mem
-	return mem, nil
+	p.types[key] = typeEntry{infos[0], time.Now()}
+	return infos[0].MemoryBytes, nil
 }
 
 // runnerEnv is env plus what the template decides about every instance's

@@ -98,6 +98,9 @@ type Config struct {
 	AllowedOrigins []string
 	// Preview: the preview listener (preview.go).
 	Preview PreviewConfig
+	// Market: candidate instance types' prices and spot placement scores
+	// (market.go).
+	Market MarketConfig
 }
 
 // PreviewConfig is the preview listener's ([preview]).
@@ -192,6 +195,10 @@ type Server struct {
 	wg          sync.WaitGroup
 	pluginsOnce sync.Once
 	plugins     []*costPlugin
+	// marketTried: when this process last sampled each (provider, region,
+	// instance type), whatever came of it (market.go).
+	marketMu    sync.Mutex
+	marketTried map[[3]string]time.Time
 }
 
 func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Server {
@@ -329,7 +336,7 @@ func (s *Server) Run(ctx context.Context) error {
 		go func() { errc <- psrv.ListenAndServe() }()
 		s.log.Info("previews listening", "addr", s.cfg.Preview.Listen, "domain", s.cfg.Preview.Domain)
 	}
-	s.wg.Add(11)
+	s.wg.Add(12)
 	go func() { defer s.wg.Done(); s.idleLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.aliveLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.ticketReaper(ctx) }()
@@ -341,6 +348,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() { defer s.wg.Done(); s.listenLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.costLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.priceLoop(ctx) }()
+	go func() { defer s.wg.Done(); s.marketLoop(ctx) }()
 	go func() { errc <- srv.ListenAndServe() }()
 	s.log.Info("luxd listening", "addr", s.cfg.Listen)
 	select {

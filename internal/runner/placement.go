@@ -83,7 +83,11 @@ type placement struct {
 	netRx        int64
 	netTx        int64
 	cgroup       string
-	ip           string // the container's address, once looked up
+	cpuPeak      cpuPeak
+	// imagePlatforms: what the image's reference offers (learnPlatforms);
+	// nil when unknown.
+	imagePlatforms []string
+	ip             string // the container's address, once looked up
 	// exited: per server, the gen the shim reported exited.
 	exited map[string]int64
 	// srvSet: the servers luxd last sent (servers.go).
@@ -131,7 +135,7 @@ func (p *placement) runningStatus() proto.Status {
 	p.mu.Lock()
 	limit := p.memoryLimit
 	p.mu.Unlock()
-	return proto.Status{State: "running", Times: p.times(), MemoryLimit: limit}
+	return proto.Status{State: "running", Times: p.times(), MemoryLimit: limit, ImagePlatforms: p.platforms()}
 }
 
 // liveState is the state reported in heartbeats; "" when not live. An
@@ -280,7 +284,7 @@ func (p *placement) reportStarting(ctx context.Context) {
 			return
 		case <-p.startingDue:
 		}
-		_ = p.report(ctx, proto.MsgStatus, proto.Status{State: "starting", Times: p.times()})
+		_ = p.report(ctx, proto.MsgStatus, proto.Status{State: "starting", Times: p.times(), ImagePlatforms: p.platforms()})
 	}
 }
 
@@ -433,7 +437,7 @@ func startEnd(state string) (int, string) {
 func (p *placement) reportStartEnd(ctx context.Context, state, msg string) {
 	p.setPhase("exited")
 	code, reason := startEnd(state)
-	for p.report(ctx, proto.MsgStatus, proto.Status{State: state, ExitCode: &code, Reason: reason, Message: msg, Times: p.times()}) != nil {
+	for p.report(ctx, proto.MsgStatus, proto.Status{State: state, ExitCode: &code, Reason: reason, Message: msg, Times: p.times(), ImagePlatforms: p.platforms()}) != nil {
 		if p.isStale() || ctx.Err() != nil {
 			return
 		}
@@ -522,9 +526,11 @@ func (p *placement) run(ctx context.Context) {
 		return
 	}
 	p.state.Image = image
-	p.progress("imageReady")
-
 	info, err := p.r.pm.ImageInspect(startCtx, image)
+	if err == nil {
+		p.learnPlatforms(startCtx, image, sp.Image.Build != nil, info)
+	}
+	p.progress("imageReady")
 	if err != nil {
 		fail("image", err)
 		return
@@ -727,7 +733,7 @@ func (p *placement) finish(ctx context.Context, exit *exitRecord) {
 	p.r.uploads.kick()
 
 	st := proto.Status{State: "exited", ExitCode: &exit.Code, Reason: exit.Reason, Message: exit.Message,
-		OutputSeq: exit.OutputSeq, Times: p.times(), Usage: usage}
+		OutputSeq: exit.OutputSeq, Times: p.times(), Usage: usage, ImagePlatforms: p.platforms()}
 	if exit.Failed {
 		st.State = "failed"
 	}
@@ -1411,9 +1417,48 @@ func (p *placement) usage() *proto.Usage {
 		if cu, err := podman.CgroupUsage(p.cgroup); err == nil {
 			u.PeakMemoryBytes, u.PeakPids, u.CPUSeconds = cu.PeakMemoryBytes, cu.PeakPids, cu.CPUSeconds
 			u.MemoryBytes, u.Pids = cu.MemoryBytes, cu.Pids
+			u.CPUCores, u.PeakCPUCores = p.cpuPeak.observe(cu.CPUSeconds, time.Now())
+			u.CPUStallSeconds, u.MemoryStallSeconds, u.MemoryFullStallSeconds = cu.CPUStall, cu.MemoryStall, cu.MemoryFullStall
+			u.IOStallSeconds, u.IOFullStallSeconds = cu.IOStall, cu.IOFullStall
 		}
 	}
 	return u
+}
+
+// minCPUInterval is the shortest wall time a CPU rate is taken over: two
+// readings closer than this (an exit report right after a heartbeat) would
+// turn scheduling jitter into a peak.
+const minCPUInterval = time.Second
+
+// cpuPeak is the highest CPU rate, in cores, seen between two consecutive
+// readings of one placement's cgroup counter. It only grows.
+type cpuPeak struct {
+	at      time.Time
+	seconds float64
+	peak    *float64
+}
+
+// observe takes a reading of the CPU counter. It returns the rate over the
+// interval this reading ends (nil when none was taken: the first reading,
+// or one under minCPUInterval after the last) and the peak so far.
+func (c *cpuPeak) observe(seconds float64, at time.Time) (last, peak *float64) {
+	switch {
+	case c.at.IsZero() || seconds < c.seconds:
+		// The first reading, or a counter that went back (a new cgroup).
+		c.at, c.seconds = at, seconds
+	case at.Sub(c.at) >= minCPUInterval:
+		r := (seconds - c.seconds) / at.Sub(c.at).Seconds()
+		last = &r
+		if c.peak == nil || r > *c.peak {
+			c.peak = &r
+		}
+		c.at, c.seconds = at, seconds
+	}
+	if c.peak != nil {
+		v := *c.peak
+		peak = &v
+	}
+	return last, peak
 }
 
 // sampleSlow measures what costs real work: disk use (walking every mounted

@@ -75,6 +75,14 @@ pricing_endpoint = ""              # LUX_PRICING_ENDPOINT (tests)
 # settle = ["15m", "2h"]            # optional; else describe's, else costs.settle
 # insecure = false                  # allow public plain HTTP only when true
 
+[market]
+# Candidate instance types' spot and on-demand prices and spot placement
+# scores, per zone of each ec2 pool, for a future pool advisor
+# (docs/telemetry.md#market-data). Mind GetSpotPlacementScores' daily limit
+# on distinct requests before adding candidates.
+every = "1h"                       # LUX_MARKET_EVERY: how often each candidate type is sampled; "0s" is off
+candidates = []                    # LUX_MARKET_CANDIDATES (comma-separated): sampled for every pool besides its template's types
+
 [ec2]
 endpoint = ""                      # LUX_EC2_ENDPOINT (tests)
 # Skip a candidate (region, type, launch template, subnet, market) EC2 had no

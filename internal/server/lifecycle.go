@@ -307,10 +307,11 @@ func (s *Server) applyStatusOnly(ctx context.Context, tx pgx.Tx, tenantID, runID
 			workload_started_at  = coalesce(workload_started_at, $6),
 			exited_at            = coalesce(exited_at, $7),
 			memory_limit         = coalesce(memory_limit, nullif($8::bigint, 0)),
-			repos_ready_at       = coalesce(repos_ready_at, $9)
+			repos_ready_at       = coalesce(repos_ready_at, $9),
+			image_platforms      = coalesce($10, image_platforms)
 		WHERE run_id = $1 AND epoch = $2`, runID, epoch,
 		msToTime(t["imageReady"]), msToTime(t["volumesRestored"]), msToTime(t["containerStarted"]),
-		msToTime(t["workloadStarted"]), msToTime(t["exited"]), st.MemoryLimit, msToTime(t["reposReady"]))
+		msToTime(t["workloadStarted"]), msToTime(t["exited"]), st.MemoryLimit, msToTime(t["reposReady"]), platforms(st.ImagePlatforms))
 	if err != nil {
 		return err
 	}

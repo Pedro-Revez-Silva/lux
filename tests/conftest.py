@@ -516,7 +516,10 @@ class RealEC2:
 # tests see a timer fire without waiting out a production default.
 FAKE_EC2_TIMERS = {"LUX_SCALE_DOWN_AFTER": "3s", "LUX_LAUNCH_TIMEOUT": "8s",
                    "LUX_PROVIDER_CHECK_EVERY": "2s", "LUX_LOST_GRACE": "4s", "LUX_LISTING_LAG": "4s",
-                   "LUX_EC2_NO_CAPACITY_RETRY_AFTER": "3s"}
+                   "LUX_EC2_NO_CAPACITY_RETRY_AFTER": "3s",
+                   # Off: a test of the market sampler turns it on; others
+                   # count the fake's calls.
+                   "LUX_MARKET_EVERY": "0s"}
 
 
 @pytest.fixture
