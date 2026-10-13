@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -97,23 +98,28 @@ func TestLuxFakeOpenCodeSubagent(t *testing.T) {
 
 // With `subagent ask`, the child's bash call asks a permission that only
 // lux answers: allowed over HTTP, the call completes, and the warning
-// says so.
+// says so. OpenCode goes on as it takes the answer, so the record and its
+// warning, together, come after the ask (bash running) and possibly after
+// what the child did next.
 func TestLuxFakeOpenCodeSubagentAsks(t *testing.T) {
 	sink := runFakeOpenCode(t, "subagent ask", fakeTaskDone)
 	recs := sink.records()
-	wantRecords(t, kinds(recs), []string{
+	got := kinds(recs)
+	at := slices.Index(got, "opencode.permission allow")
+	if at < 0 || at+1 >= len(got) || got[at+1] != "lux.warning" || at < slices.Index(got, "opencode.part bash running") {
+		t.Fatalf("records:\n%s", strings.Join(recs, "\n"))
+	}
+	if !strings.Contains(recs[at+1], "asked for bash on cat /etc/hostname; lux allowed it") {
+		t.Fatalf("warning: %s", recs[at+1])
+	}
+	wantRecords(t, slices.Delete(got, at, at+2), []string{
 		"opencode.session",
 		"opencode.task running",
 		"opencode.part read running",
 		"opencode.part read completed",
 		"opencode.part bash running",
-		"opencode.permission allow",
-		"lux.warning",
 		"opencode.part bash completed",
 		"opencode.message",
 		"opencode.task completed",
 	})
-	if !strings.Contains(recs[6], "asked for bash on cat /etc/hostname; lux allowed it") {
-		t.Fatalf("warning: %s", recs[6])
-	}
 }

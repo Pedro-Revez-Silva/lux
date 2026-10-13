@@ -302,7 +302,9 @@ func (a *ACP) childMessage(ev busEvent, run string) {
 // per id. The Run's own session's is answered over ACP (handleRequest):
 // recorded as allowed, nothing sent. A child's, which nobody else
 // answers, lux allows once over OpenCode's server, off the bus goroutine
-// and within a.permissionTimeout, then records it and warns.
+// and within a.permissionTimeout, then records it and warns: OpenCode goes
+// on with the child as it takes the answer, so records of what the child
+// did next can come before these.
 func (a *ACP) childPermission(ev busEvent, run string) {
 	k, p := a.kids, ev.Properties
 	k.mu.Lock()
@@ -328,6 +330,9 @@ func (a *ACP) childPermission(ev busEvent, run string) {
 			msg = fmt.Sprintf("opencode: a subagent session %s asked for %s on %s; lux could not answer it, and its task call may wait for it: %v",
 				rec.SessionID, rec.Permission, strings.Join(rec.Patterns, ", "), err)
 		}
+		// Under k.mu, so no record of the tree comes between the two.
+		k.mu.Lock()
+		defer k.mu.Unlock()
 		a.sink.Event(proto.EvOpenCodePermission, rec)
 		a.sink.Event(proto.EvWarning, map[string]any{"message": msg})
 	}

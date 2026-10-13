@@ -376,7 +376,9 @@ gets its own `opencode.task`.
   own session's over ACP ([Unattended permissions](#unattended-permissions)).
   It then writes `opencode.permission` with `answered: allow`, or `none`
   and the `error` if OpenCode refused the answer, and a `lux.warning`
-  naming the session, the permission and its patterns. The Run's own
+  naming the session, the permission and its patterns, right after it.
+  OpenCode carries on with the child as soon as it takes the answer, so
+  the pair can come after records of what the child did next. The Run's own
   session's requests are answered over ACP (`acp.permission`); lux also
   writes `opencode.permission` with `answered: allow` for them, and sends
   nothing over HTTP. A server lux did not start (an observed `--port`)
