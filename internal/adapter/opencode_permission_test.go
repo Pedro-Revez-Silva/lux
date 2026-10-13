@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -274,6 +275,92 @@ func TestOpenCodeChildPermissionSlowSinkHoldsNoBus(t *testing.T) {
 		`lux.warning {"message":"opencode: a subagent session ses_kid asked for external_directory on /etc/*; lux allowed it"}`,
 		`opencode.part {"sessionID":"ses_kid","messageID":"msg_ses_kid","callID":"c_after","tool":"bash","status":"running","time":{}}`,
 	})
+}
+
+// A child's permission answered while another writer is stalled (a held
+// pending written from its timer) and the child streams tool calls: the
+// permission and its warning are queued together, so no part comes
+// between them, and every part is written once, in the bus's order.
+// Where the pair is queued among the parts is up to the scheduler, and a
+// part can come between two separate queuings only if the bus goroutine
+// takes k.mu in that instant: no round is sure to hit it, so the
+// contested phase is repeated with fresh adapters. The rounds are short,
+// as only the events around the answer contest it. The test is therefore
+// probabilistic: a split enqueue fails it most runs, not every round.
+func TestOpenCodeChildPermissionPairContested(t *testing.T) {
+	const rounds, calls, startAt = 150, 300, 20
+	session := rec(proto.EvOpenCodeSession, proto.OpenCodeSession{ID: "ses_kid", ParentID: ocSession, Title: "t", CreatedAt: 1})
+	pair := []string{
+		`opencode.permission {"sessionID":"ses_kid","permissionID":"per_1","permission":"external_directory","patterns":["/etc/*"],"callID":"toolu_1","answered":"allow"}`,
+		`lux.warning {"message":"opencode: a subagent session ses_kid asked for external_directory on /etc/*; lux allowed it"}`,
+	}
+	part := func(call, status string) string {
+		return rec(proto.EvOpenCodePart, proto.OpenCodePart{SessionID: "ses_kid", MessageID: "msg_ses_kid", CallID: call, Tool: "bash", Status: status})
+	}
+	events := make([]string, calls)
+	wantParts := []string{session, part("c_held", "pending")}
+	for i := range events {
+		events[i] = ocTool("ses_kid", "c"+strconv.Itoa(i), "bash", "running", nil)
+		wantParts = append(wantParts, part("c"+strconv.Itoa(i), "running"))
+	}
+	contested := 0
+	for round := range rounds {
+		srv := newPermServer(t)
+		srv.hold = make(chan struct{})
+		clk := newTestClock()
+		a, sink := childRun(t, ocSession, srv.port(), clk)
+		pendingEntered, pendingRelease := make(chan struct{}), make(chan struct{})
+		var answerOnce, releaseOnce sync.Once
+		answer := func() { answerOnce.Do(func() { close(srv.hold) }) }
+		release := func() { releaseOnce.Do(func() { close(pendingRelease) }) }
+		t.Cleanup(answer)
+		t.Cleanup(release) // both before childRun's join
+		sink.gate = func(r string) chan struct{} {
+			if r == part("c_held", "pending") {
+				close(pendingEntered)
+				return pendingRelease
+			}
+			return nil
+		}
+		onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+		onBus(t, a, ocTool("ses_kid", "c_held", "bash", "pending", nil))
+		clk.fire(t)
+		within(t, pendingEntered, "the stalled pending write")
+		onBus(t, a, askedChild)
+		within(t, srv.received, "the permission's POST")
+
+		started, produced := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(produced)
+			for i, ev := range events {
+				if i == startAt {
+					close(started)
+				}
+				onBus(t, a, ev)
+			}
+		}()
+		within(t, started, "the child's tool calls")
+		answer()
+		within(t, produced, "the child's tool calls, all handled")
+		release()
+
+		got := joined(a, sink)
+		at := slices.Index(got, pair[0])
+		if at < 0 || at+1 >= len(got) || got[at+1] != pair[1] {
+			t.Fatalf("round %d: no permission with its warning right after it:\n%s", round, strings.Join(got, "\n"))
+		}
+		rest := slices.Delete(slices.Clone(got), at, at+2)
+		if slices.Contains(rest, pair[0]) || slices.Contains(rest, pair[1]) {
+			t.Fatalf("round %d: the permission or its warning twice:\n%s", round, strings.Join(got, "\n"))
+		}
+		if !slices.Equal(rest, wantParts) {
+			t.Fatalf("round %d: %d records besides the pair, want %d in the bus's order", round, len(rest), len(wantParts))
+		}
+		if at > 2 && at < len(rest) {
+			contested++
+		}
+	}
+	t.Logf("%d of %d rounds queued the pair among the child's parts", contested, rounds)
 }
 
 // The Run ending while OpenCode has not answered a child's permission
