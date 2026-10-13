@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -16,24 +17,27 @@ import (
 )
 
 // permServer is OpenCode's server as far as answering a permission goes:
-// POST /permission/{id}/reply answers code with body, after hold if set.
+// POST /permission/{id}/reply answers code with body, after hold if set
+// is closed. Each request is signalled on received once recorded.
 type permServer struct {
-	srv  *httptest.Server
-	mu   sync.Mutex
-	reqs []string
-	code int
-	body string
-	hold chan struct{}
+	srv      *httptest.Server
+	mu       sync.Mutex
+	reqs     []string
+	code     int
+	body     string
+	hold     chan struct{}
+	received chan struct{}
 }
 
 func newPermServer(t *testing.T) *permServer {
-	s := &permServer{code: http.StatusOK, body: "true"}
+	s := &permServer{code: http.StatusOK, body: "true", received: make(chan struct{}, 16)}
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		s.mu.Lock()
 		s.reqs = append(s.reqs, r.Method+" "+r.URL.Path+" "+r.Header.Get("Content-Type")+" "+r.Header.Get("x-opencode-directory")+" "+string(b))
 		code, body, hold := s.code, s.body, s.hold
 		s.mu.Unlock()
+		s.received <- struct{}{}
 		if hold != nil {
 			select {
 			case <-hold:
@@ -172,7 +176,7 @@ func TestOpenCodeChildPermissionFails(t *testing.T) {
 }
 
 // No server listening, and a server that does not answer within
-// permissionTimeout: none, with the error; the bus goroutine is not held.
+// permissionTimeout: none, with the error.
 func TestOpenCodeChildPermissionUnreachable(t *testing.T) {
 	l, _ := net.Listen("tcp", "127.0.0.1:0")
 	port := l.Addr().(*net.TCPAddr).Port
@@ -192,15 +196,85 @@ func TestOpenCodeChildPermissionUnreachable(t *testing.T) {
 	a, sink = childRun(t, ocSession, srv.port(), nil)
 	a.permissionTimeout = 50 * time.Millisecond
 	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
-	start := time.Now()
 	onBus(t, a, askedChild)
-	if d := time.Since(start); d > 40*time.Millisecond {
-		t.Fatalf("onBus waited %v for the answer", d)
-	}
 	_ = json.Unmarshal([]byte(strings.TrimPrefix(joined(a, sink)[1], "opencode.permission ")), &p)
 	if p.Answered != proto.PermissionNone || !strings.Contains(p.Error, "context deadline exceeded") {
 		t.Fatalf("held: %+v", p)
 	}
+}
+
+// While OpenCode has not answered a child's permission, the bus goes on:
+// a later event of the child is relayed before the answer comes, and the
+// permission and its warning after it.
+func TestOpenCodeChildPermissionHoldsNoBus(t *testing.T) {
+	srv := newPermServer(t)
+	srv.hold = make(chan struct{})
+	var once sync.Once
+	answer := func() { once.Do(func() { close(srv.hold) }) }
+	a, sink := childRun(t, ocSession, srv.port(), nil)
+	t.Cleanup(answer) // before childRun's join
+	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+	handled := make(chan struct{})
+	go func() {
+		defer close(handled)
+		onBus(t, a, askedChild)
+	}()
+	within(t, srv.received, "the permission's POST")
+	go func() {
+		<-handled
+		onBus(t, a, ocTool("ses_kid", "c_after", "bash", "running", nil))
+	}()
+	running := `opencode.part {"sessionID":"ses_kid","messageID":"msg_ses_kid","callID":"c_after","tool":"bash","status":"running","time":{}}`
+	for end := time.Now().Add(stallDeadline); !slices.Contains(sink.records(), running); time.Sleep(time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatalf("not relayed while the answer is held:\n%s", strings.Join(sink.records(), "\n"))
+		}
+	}
+	answer()
+	wantRecords(t, joined(a, sink), []string{
+		`opencode.session {"id":"ses_kid","parentID":"` + ocSession + `","title":"t","createdAt":1}`,
+		running,
+		`opencode.permission {"sessionID":"ses_kid","permissionID":"per_1","permission":"external_directory","patterns":["/etc/*"],"callID":"toolu_1","answered":"allow"}`,
+		`lux.warning {"message":"opencode: a subagent session ses_kid asked for external_directory on /etc/*; lux allowed it"}`,
+	})
+}
+
+// The Run ending while OpenCode has not answered a child's permission
+// ends the POST at once, well before permissionTimeout: the request is
+// recorded as none, with one warning.
+func TestOpenCodeChildPermissionCancelledByRunEnd(t *testing.T) {
+	srv := newPermServer(t)
+	srv.hold = make(chan struct{})
+	defer close(srv.hold)
+	a, sink := childRun(t, ocSession, srv.port(), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a.ctx = ctx
+	a.permissionTimeout = time.Hour
+	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+	onBus(t, a, askedChild)
+	within(t, srv.received, "the permission's POST")
+	cancel()
+	joinedRun := make(chan struct{})
+	go func() {
+		defer close(joinedRun)
+		a.bg.Wait()
+	}()
+	within(t, joinedRun, "the permission's worker after the Run ended")
+	got := sink.records()[1:]
+	var p proto.OpenCodePermission
+	if len(got) != 2 || json.Unmarshal([]byte(strings.TrimPrefix(got[0], proto.EvOpenCodePermission+" ")), &p) != nil {
+		t.Fatalf("records:\n%s", strings.Join(got, "\n"))
+	}
+	// The error is net/http's, with the server's URL: its cause is what is pinned.
+	if !strings.HasPrefix(p.Error, "POST /permission/per_1/reply: ") || !strings.HasSuffix(p.Error, "context canceled") {
+		t.Fatalf("error %q", p.Error)
+	}
+	wantRecords(t, got, []string{
+		rec(proto.EvOpenCodePermission, proto.OpenCodePermission{SessionID: "ses_kid", PermissionID: "per_1", Permission: "external_directory",
+			Patterns: []string{"/etc/*"}, CallID: "toolu_1", Answered: proto.PermissionNone, Error: p.Error}),
+		rec(proto.EvWarning, map[string]any{"message": "opencode: a subagent session ses_kid asked for external_directory on /etc/*; lux could not answer it, and its task call may wait for it: " + p.Error}),
+	})
 }
 
 // A server lux did not start (an observer) is sent nothing: a child's
