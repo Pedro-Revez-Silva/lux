@@ -151,31 +151,38 @@ func TestOpenCodeChildRelayHosts(t *testing.T) {
 func TestOpenCodeChildRelayLsOnceEach(t *testing.T) {
 	a, sink := childRun(t, lsParent, 0, nil)
 	replay(t, a, "opencode-1.18.21-children-ls.ndjson")
-	first := joined(a, sink)
-	var kinds []string
-	for _, r := range first {
-		typ, d, _ := strings.Cut(r, " ")
-		var m map[string]any
-		_ = json.Unmarshal([]byte(d), &m)
-		k := strings.TrimPrefix(typ, "opencode.")
-		for _, f := range []string{asString(m["status"]), asString(m["text"])} {
-			if f != "" {
-				k += " " + f
-			}
-		}
-		kinds = append(kinds, k)
+	model := json.RawMessage(`{"modelID":"claude-haiku-4.5","providerID":"llmproxy-anthropic"}`)
+	const msg1, msg2, read, task = "msg_1337c5b0d0013xHCi5STbDc5YD", "msg_1337c60c20015vu3j2NSOva9z4", "toolu_01Xxq7NjWNUK7NoJF1JHcevr", "toolu_01VUSdqgsMzkDvPaWDrrPTuQ"
+	in := `{"filePath":"/private/tmp/oc-probe/repo"}`
+	want := []string{
+		rec(proto.EvOpenCodeSession, proto.OpenCodeSession{ID: lsChild, ParentID: lsParent, Title: "List files in directory (@general subagent)", CreatedAt: 1791865150208}),
+		rec(proto.EvOpenCodeTask, proto.OpenCodeTask{SessionID: lsParent, CallID: task, ChildSessionID: lsChild, Model: model, Status: "running"}),
+		rec(proto.EvOpenCodePart, proto.OpenCodePart{SessionID: lsChild, MessageID: msg1, CallID: read, Tool: "read", Status: "running", Input: in,
+			Time: proto.OpenCodeTime{Start: 1791865151573}}),
+		rec(proto.EvOpenCodePart, proto.OpenCodePart{SessionID: lsChild, MessageID: msg1, CallID: read, Tool: "read", Status: "completed",
+			Title: "private/tmp/oc-probe/repo", Input: in, Output: "<path>/private/tmp/oc-probe/repo</path>\n<type>directory</type>\n<entries>\na.txt\nb.txt\n\n(2 entries)\n</entries>",
+			Time: proto.OpenCodeTime{Start: 1791865151573, End: 1791865151577}}),
+		rec(proto.EvOpenCodeMessage, proto.OpenCodeMessage{SessionID: lsChild, MessageID: msg1, Role: "assistant",
+			Text:   "I'll read the current working directory to list all the files.",
+			Tokens: proto.OpenCodeTokens{Input: 3, Output: 83, CacheWrite: 7268}, Completed: 1791865151680}),
+		rec(proto.EvOpenCodeMessage, proto.OpenCodeMessage{SessionID: lsChild, MessageID: msg2, Role: "assistant",
+			Text:   "Here are the files in the current working directory:\n\na.txt\nb.txt",
+			Tokens: proto.OpenCodeTokens{Input: 5, Output: 21, CacheRead: 7268, CacheWrite: 137}, Completed: 1791865152520}),
+		rec(proto.EvOpenCodeTask, proto.OpenCodeTask{SessionID: lsParent, CallID: task, ChildSessionID: lsChild, Model: model, Status: "completed"}),
 	}
-	wantRecords(t, kinds, []string{
-		"session", "task running", "part running", "part completed",
-		"message I'll read the current working directory to list all the files.",
-		"message Here are the files in the current working directory:\n\na.txt\nb.txt",
-		"task completed",
-	})
+	wantRecords(t, joined(a, sink), want)
 	replay(t, a, "opencode-1.18.21-children-ls.ndjson")
-	wantRecords(t, joined(a, sink), first)
+	wantRecords(t, joined(a, sink), want)
 }
 
-func asString(v any) string { s, _ := v.(string); return s }
+// rec is a record as childSink keeps it.
+func rec(typ string, v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return typ + " " + string(b)
+}
 
 // Sessions of another Run on the same server (or the server's own) are
 // not the Run's: replayed alone, or interleaved with the Run's own tree,

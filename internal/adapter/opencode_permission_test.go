@@ -82,19 +82,46 @@ func TestOpenCodeChildPermissionAllowed(t *testing.T) {
 }
 
 // The capture of a child asking (testdata/...-children-permission): the
-// one permission.asked is the child's, answered over HTTP.
+// one permission.asked is the child's, answered over HTTP. The relay's
+// records are the capture's, in the bus's order; the permission and its
+// warning come together, after the asking read call's running (OpenCode
+// goes on with the child as it takes the answer, so not at a fixed place).
 func TestOpenCodeChildPermissionCapture(t *testing.T) {
+	const parent, child = "ses_ecc2f11cfffeaAFEEcNfwHJCeC", "ses_ecc2f05bcffeO26eP2Q6hCnlL5"
+	const msg1, msg2, read, task = "msg_133d0fa54001KkMwUJt4VsKwE3", "msg_133d10032001UXTah2KzfgZXU3", "toolu_01FzAZzB2tNThBUBquzNwAiY", "toolu_01YJbqQURXRQd2HMrhBXLuXm"
 	srv := newPermServer(t)
-	a, sink := childRun(t, "ses_ecc2f11cfffeaAFEEcNfwHJCeC", srv.port(), nil)
+	a, sink := childRun(t, parent, srv.port(), nil)
 	replay(t, a, "opencode-1.18.21-children-permission.ndjson")
-	perms := slices.DeleteFunc(joined(a, sink), func(r string) bool {
-		return !strings.HasPrefix(r, "opencode.permission ") && !strings.HasPrefix(r, "lux.warning ")
-	})
-	wantRecords(t, perms, []string{
-		`opencode.permission {"sessionID":"ses_ecc2f05bcffeO26eP2Q6hCnlL5","permissionID":"per_133d0ff15001tnvIm3JG5dUtyj","permission":"external_directory","patterns":["/etc/*"],"callID":"toolu_01FzAZzB2tNThBUBquzNwAiY","answered":"allow"}`,
-		`lux.warning {"message":"opencode: a subagent session ses_ecc2f05bcffeO26eP2Q6hCnlL5 asked for external_directory on /etc/*; lux allowed it"}`,
-	})
-	if got := srv.requests(); len(got) != 1 || !strings.HasPrefix(got[0], "POST /permission/per_133d0ff15001tnvIm3JG5dUtyj/reply ") {
+	got := joined(a, sink)
+
+	model := json.RawMessage(`{"modelID":"claude-haiku-4.5","providerID":"llmproxy-anthropic"}`)
+	in := `{"filePath":"/etc/hosts","limit":1}`
+	running := rec(proto.EvOpenCodePart, proto.OpenCodePart{SessionID: child, MessageID: msg1, CallID: read, Tool: "read", Status: "running", Input: in,
+		Time: proto.OpenCodeTime{Start: 1791870697235}})
+	relay := []string{
+		rec(proto.EvOpenCodeSession, proto.OpenCodeSession{ID: child, ParentID: parent, Title: "Read first line of /etc/hosts (@general subagent)", CreatedAt: 1791870696003}),
+		rec(proto.EvOpenCodeTask, proto.OpenCodeTask{SessionID: parent, CallID: task, ChildSessionID: child, Model: model, Status: "running"}),
+		running,
+		rec(proto.EvOpenCodePart, proto.OpenCodePart{SessionID: child, MessageID: msg1, CallID: read, Tool: "read", Status: "completed", Title: "etc/hosts", Input: in,
+			Output: "<path>/etc/hosts</path>\n<type>file</type>\n<content>\n1: ##\n\n(Showing lines 1-1 of 15. Use offset=2 to continue.)\n</content>",
+			Time:   proto.OpenCodeTime{Start: 1791870697235, End: 1791870697513}}),
+		rec(proto.EvOpenCodeMessage, proto.OpenCodeMessage{SessionID: child, MessageID: msg1, Role: "assistant",
+			Tokens: proto.OpenCodeTokens{Input: 3, Output: 78, CacheWrite: 7247}, Completed: 1791870697521}),
+		rec(proto.EvOpenCodeMessage, proto.OpenCodeMessage{SessionID: child, MessageID: msg2, Role: "assistant", Text: "The first line of /etc/hosts is:\n\n```\n##\n```",
+			Tokens: proto.OpenCodeTokens{Input: 5, Output: 19, CacheRead: 7247, CacheWrite: 137}, Completed: 1791870701200}),
+		rec(proto.EvOpenCodeTask, proto.OpenCodeTask{SessionID: parent, CallID: task, ChildSessionID: child, Model: model, Status: "completed"}),
+	}
+	pair := []string{
+		rec(proto.EvOpenCodePermission, proto.OpenCodePermission{SessionID: child, PermissionID: "per_133d0ff15001tnvIm3JG5dUtyj", Permission: "external_directory",
+			Patterns: []string{"/etc/*"}, CallID: read, Answered: proto.PermissionAllowed}),
+		`lux.warning {"message":"opencode: a subagent session ` + child + ` asked for external_directory on /etc/*; lux allowed it"}`,
+	}
+	at := slices.Index(got, pair[0])
+	if at < 0 || at+1 >= len(got) || got[at+1] != pair[1] || at < slices.Index(got, running) {
+		t.Fatalf("no permission and warning together after the read's running:\n%s", strings.Join(got, "\n"))
+	}
+	wantRecords(t, slices.Delete(slices.Clone(got), at, at+2), relay)
+	if got := srv.requests(); len(got) != 1 || got[0] != `POST /permission/per_133d0ff15001tnvIm3JG5dUtyj/reply application/json /workspace {"reply":"once"}` {
 		t.Fatalf("requests %q", got)
 	}
 }
