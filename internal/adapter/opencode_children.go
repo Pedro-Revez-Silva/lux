@@ -211,6 +211,20 @@ func (a *ACP) pendingDue(key string, part *busPart) {
 	a.writePart(part)
 }
 
+// stopPending stops the timers of every held pending, as the Run ends: a
+// pending not yet written is not.
+func (k *ocChildren) stopPending() {
+	if k == nil {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for key, stop := range k.pending {
+		stop()
+		delete(k.pending, key)
+	}
+}
+
 // taskStatus is opencode.task's status for a task call's state, "" for
 // one it does not report (pending: no child yet).
 func taskStatus(s string) string {

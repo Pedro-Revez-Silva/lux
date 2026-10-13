@@ -355,6 +355,36 @@ func TestOpenCodeChildPendingCollapses(t *testing.T) {
 	wantRecords(t, got, []string{`c1 running {"command":"ls"} `, "c2 pending  ", "c2 running  "})
 }
 
+// The Run ending with pendings still held stops their timers: none is
+// left to fire after Run returns, and none is written.
+func TestOpenCodeChildPendingStoppedAtRunEnd(t *testing.T) {
+	clk := newTestClock()
+	a, sink := childRun(t, ocSession, 0, clk)
+	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+	for _, c := range []string{"c1", "c2", "c3"} {
+		onBus(t, a, ocTool("ses_kid", c, "bash", "pending", nil))
+	}
+	clk.mu.Lock()
+	due := len(clk.due)
+	clk.mu.Unlock()
+	if due != 3 {
+		t.Fatalf("%d timers held before the Run ended, want 3", due)
+	}
+	a.exited(func() {})
+	clk.mu.Lock()
+	due = len(clk.due)
+	clk.mu.Unlock()
+	a.kids.mu.Lock()
+	held := len(a.kids.pending)
+	a.kids.mu.Unlock()
+	if due != 0 || held != 0 {
+		t.Fatalf("after the Run ended: %d timers due, %d pendings held", due, held)
+	}
+	if got := sink.typed(proto.EvOpenCodePart); len(got) != 0 {
+		t.Fatalf("parts written: %q", got)
+	}
+}
+
 // Past maxChildParts opencode.part records, one lux.warning, then records
 // with the status alone (and the call's identity and times).
 func TestOpenCodeChildPartsCapped(t *testing.T) {

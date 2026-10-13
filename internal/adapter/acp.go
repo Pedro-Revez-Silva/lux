@@ -542,6 +542,9 @@ func (a *ACP) exited(cancel context.CancelFunc) {
 		a.bg.Done()
 	}
 	a.mu.Unlock()
+	// After a.closed and outside a.mu: the child relay takes k.mu, then
+	// a.mu (spawn).
+	a.kids.stopPending()
 	a.bg.Wait()
 	why := unreadWhy(stopped)
 	a.mu.Lock()
