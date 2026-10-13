@@ -15,8 +15,8 @@ import (
 // with info.parentID), which ACP never shows: lux follows it on the bus
 // and relays it as opencode.* records (proto.EvOpenCodeSession and the
 // rest), for every session whose chain of parents reaches the Run's. What
-// the bus says (opencode 1.18.21, .taskdocs/probes and
-// testdata/opencode-1.18.21-children*.ndjson):
+// the bus says (opencode 1.18.21, testdata/opencode-1.18.21-children-*
+// .ndjson):
 //
 //   - a session: session.created and session.updated, info a Session
 //     {id, parentID, title, time{created}}; the bus does not replay them,
