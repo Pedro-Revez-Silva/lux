@@ -52,10 +52,12 @@ type ocChildren struct {
 	// partsWritten: opencode.part records written; past maxChildParts they
 	// carry the status alone.
 	partsWritten int
-	// texts: the text of each text part of a child's message not yet
-	// written, by message id, then part id, in the order they came.
+	// texts: the text of each text part of a child's assistant message not
+	// yet written, by message id, then part id, in the order they came;
+	// at most about maxKeptText bytes of a message's (msgText.keep).
 	texts map[string]*msgText
-	// messages and permissions written, by id.
+	// messages: messages done with, by id: written, or not an
+	// assistant's (no text kept). permissions: written, by id.
 	messages    map[string]bool
 	permissions map[string]bool
 	// out: records decided under mu, in order, not yet written; emitting:
@@ -73,6 +75,30 @@ func plainRecord(typ string, data any) ocRecord { return func() (string, any) { 
 type msgText struct {
 	order []string
 	text  map[string]string
+	// cut: parts whose newest text was cut or dropped where it is kept.
+	cut map[string]bool
+}
+
+// keep drops the text of the parts after the first maxKeptText bytes, in
+// order: opencode.message carries no more than MaxOpenCodeText of them.
+func (m *msgText) keep() {
+	n := 0
+	for _, id := range m.order {
+		if n >= maxKeptText && m.text[id] != "" {
+			m.text[id], m.cut[id] = "", true
+		}
+		n += len(m.text[id])
+	}
+}
+
+// truncated reports whether a part's text was cut or dropped.
+func (m *msgText) truncated() bool {
+	for _, c := range m.cut {
+		if c {
+			return true
+		}
+	}
+	return false
 }
 
 func newOcChildren() *ocChildren {
@@ -94,6 +120,10 @@ const (
 	// maxChildParts: opencode.part records a Run writes in full; after
 	// them, one lux.warning, and the status alone.
 	maxChildParts = 2000
+	// maxKeptText: bytes of a child message's text kept until it
+	// completes, per part and (keep) per message; the margin over
+	// MaxOpenCodeText covers the join's separators.
+	maxKeptText = proto.MaxOpenCodeText + 256
 )
 
 // ofRun reports whether session is the Run's or descends from it. Under
@@ -307,30 +337,48 @@ func (a *ACP) emitKids() {
 }
 
 // childText keeps the newest text of a child message's text part, which
-// its message's completion writes.
+// its message's completion writes: at most maxKeptText bytes of it, cut
+// by sink.Clip (redacted first, so a secret is never half kept), outside
+// k.mu.
 func (a *ACP) childText(part *busPart, run string) {
 	k := a.kids
+	if part.SessionID == run {
+		return
+	}
+	k.mu.Lock()
+	ours := !k.messages[part.MessageID] && k.ofRun(part.SessionID, run)
+	k.mu.Unlock()
+	if !ours {
+		return
+	}
+	text, cut := part.Text, false
+	if len(text) > maxKeptText {
+		text, cut = a.sink.Clip(text, maxKeptText)
+		text = strings.Clone(text) // not a slice of the whole text
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if part.SessionID == run || !k.ofRun(part.SessionID, run) || k.messages[part.MessageID] {
+	if k.messages[part.MessageID] {
 		return
 	}
 	m := k.texts[part.MessageID]
 	if m == nil {
-		m = &msgText{text: map[string]string{}}
+		m = &msgText{text: map[string]string{}, cut: map[string]bool{}}
 		k.texts[part.MessageID] = m
 	}
 	if _, ok := m.text[part.ID]; !ok {
 		m.order = append(m.order, part.ID)
 	}
-	m.text[part.ID] = part.Text
+	m.text[part.ID], m.cut[part.ID] = text, cut
+	m.keep()
 }
 
 // childMessage writes opencode.message for a child's assistant message
-// once it is completed, once.
+// once it is completed, once. A message of another role is done with as
+// its role is known: its text is dropped, and no more kept.
 func (a *ACP) childMessage(ev busEvent, run string) {
 	k, info := a.kids, ev.Properties.Info
-	if info.Role != "assistant" || info.Time.Completed == 0 || info.SessionID == run {
+	if info.ID == "" || info.Role == "" || info.SessionID == run || (info.Role == "assistant" && info.Time.Completed == 0) {
 		return
 	}
 	k.mu.Lock()
@@ -339,20 +387,30 @@ func (a *ACP) childMessage(ev busEvent, run string) {
 		return
 	}
 	k.messages[info.ID] = true
+	m := k.texts[info.ID]
+	delete(k.texts, info.ID)
+	if info.Role != "assistant" {
+		k.mu.Unlock()
+		return
+	}
 	var text []string
-	if m := k.texts[info.ID]; m != nil {
+	cut := false
+	if m != nil {
+		cut = m.truncated()
 		for _, id := range m.order {
 			if t := m.text[id]; t != "" {
 				text = append(text, t)
 			}
 		}
 	}
-	delete(k.texts, info.ID)
 	rec := proto.OpenCodeMessage{SessionID: info.SessionID, MessageID: info.ID, Role: info.Role, Cost: info.Cost,
 		Completed: info.Time.Completed, Tokens: proto.OpenCodeTokens{Input: info.Tokens.Input, Output: info.Tokens.Output,
 			Reasoning: info.Tokens.Reasoning, CacheRead: info.Tokens.Cache.Read, CacheWrite: info.Tokens.Cache.Write}}
 	k.out = append(k.out, func() (string, any) {
 		rec.Text, rec.Truncated = a.sink.Clip(strings.Join(text, "\n"), proto.MaxOpenCodeText)
+		// Redaction can bring kept text under MaxOpenCodeText after
+		// more was cut where it was kept.
+		rec.Truncated = rec.Truncated || cut
 		return proto.EvOpenCodeMessage, rec
 	})
 	k.mu.Unlock()

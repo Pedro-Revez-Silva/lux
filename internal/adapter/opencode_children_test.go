@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -330,6 +331,135 @@ func TestOpenCodeChildMessageText(t *testing.T) {
 	_ = json.Unmarshal([]byte(sink.typed(proto.EvOpenCodeMessage)[2]), &m)
 	if len(m.Text) != proto.MaxOpenCodeText || !m.Truncated {
 		t.Fatalf("a long text: %d bytes, truncated %v", len(m.Text), m.Truncated)
+	}
+}
+
+func ocText(session, msg, part, text string) string {
+	b, _ := json.Marshal(map[string]any{"type": "message.part.updated", "properties": map[string]any{"sessionID": session,
+		"part": map[string]any{"id": part, "type": "text", "sessionID": session, "messageID": msg, "text": text}}})
+	return string(b)
+}
+
+// heapNow is the live heap after a full collection.
+func heapNow() uint64 {
+	var ms runtime.MemStats
+	runtime.GC()
+	runtime.GC()
+	runtime.ReadMemStats(&ms)
+	return ms.HeapAlloc
+}
+
+// A 16 MiB text update of a child message that never completes keeps a
+// few KiB, not the update: the tracker's heap grows by under 64 KiB, and
+// the text it keeps is under 8 KiB. When the message does complete, its
+// record has the text cut at MaxOpenCodeText, redacted, truncated.
+func TestOpenCodeChildUnfinishedTextBounded(t *testing.T) {
+	a, sink := childRun(t, ocSession, 0, nil)
+	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+	before := heapNow()
+	func() {
+		big := "head " + testSecret + " " + strings.Repeat("x", 16<<20)
+		onBus(t, a, ocText("ses_kid", "msg_big", "prt_1", big))
+	}()
+	grew := int64(heapNow()) - int64(before)
+	if kept := keptText(a); grew > 64<<10 || kept >= 8<<10 {
+		t.Fatalf("after a 16 MiB text update: heap grew %d bytes, %d bytes of text kept", grew, kept)
+	}
+	onBus(t, a, ocText("ses_kid", "msg_big", "prt_2", "later part"))
+	onBus(t, a, `{"type":"message.updated","properties":{"sessionID":"ses_kid","info":{"id":"msg_big","sessionID":"ses_kid","role":"assistant","cost":0,"tokens":{"cache":{}},"time":{"created":1,"completed":9}}}}`)
+	got := joinedTyped(a, sink, proto.EvOpenCodeMessage)
+	want := proto.OpenCodeMessage{SessionID: "ses_kid", MessageID: "msg_big", Role: "assistant", Completed: 9, Truncated: true,
+		Text: ("head [REDACTED:T] " + strings.Repeat("x", 16<<20))[:proto.MaxOpenCodeText]}
+	wb, _ := json.Marshal(want)
+	if len(got) != 1 || got[0] != string(wb) {
+		t.Fatalf("messages: %d, first %.200q", len(got), got)
+	}
+}
+
+// keptText is the text the tracker holds for messages not yet written.
+func keptText(a *ACP) int {
+	a.kids.mu.Lock()
+	defer a.kids.mu.Unlock()
+	n := 0
+	for _, m := range a.kids.texts {
+		for _, s := range m.text {
+			n += len(s)
+		}
+	}
+	return n
+}
+
+// Many text parts of one unfinished message keep no more in all than one
+// long part does.
+func TestOpenCodeChildManyTextPartsBounded(t *testing.T) {
+	a, _ := childRun(t, ocSession, 0, nil)
+	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+	for i := range 1000 {
+		onBus(t, a, ocText("ses_kid", "msg_many", "prt_"+strconv.Itoa(i), strings.Repeat("y", 4<<10)))
+	}
+	if n := keptText(a); n >= 8<<10 {
+		t.Fatalf("1000 parts of 4 KiB: %d bytes of text kept", n)
+	}
+}
+
+// Parts dropped where they are kept make the message truncated even when
+// redaction brings what was kept under MaxOpenCodeText.
+func TestOpenCodeChildDroppedPartsTruncated(t *testing.T) {
+	a, sink := childRun(t, ocSession, 0, nil)
+	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+	secrets := strings.Repeat(testSecret, maxKeptText/len(testSecret)+1) // redacted: 12 of every 18 bytes
+	onBus(t, a, ocText("ses_kid", "msg_d", "prt_1", secrets[:maxKeptText]))
+	onBus(t, a, ocText("ses_kid", "msg_d", "prt_2", "dropped"))
+	onBus(t, a, `{"type":"message.updated","properties":{"sessionID":"ses_kid","info":{"id":"msg_d","sessionID":"ses_kid","role":"assistant","cost":0,"tokens":{"cache":{}},"time":{"created":1,"completed":9}}}}`)
+	var m proto.OpenCodeMessage
+	got := joinedTyped(a, sink, proto.EvOpenCodeMessage)
+	if len(got) != 1 || json.Unmarshal([]byte(got[0]), &m) != nil {
+		t.Fatalf("messages: %q", got)
+	}
+	if len(m.Text) >= proto.MaxOpenCodeText || strings.Contains(m.Text, "dropped") || !m.Truncated {
+		t.Fatalf("%d bytes of text, truncated %v: %.80q", len(m.Text), m.Truncated, m.Text)
+	}
+}
+
+// A long text part is cut where it is kept after it is redacted, never
+// before: with earlier secrets redacted to shorter markers, a secret
+// straddling the keep limit in the raw text lands inside the record's
+// 2 KiB, and is redacted there, not half kept.
+func TestOpenCodeChildKeptTextCutAfterRedaction(t *testing.T) {
+	a, sink := childRun(t, ocSession, 0, nil)
+	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+	head := strings.Repeat(testSecret, 50)
+	filler := strings.Repeat("z", maxKeptText-9-len(head))
+	raw := head + filler + testSecret + strings.Repeat("w", 4<<10) // the third secret straddles byte maxKeptText
+	onBus(t, a, ocText("ses_kid", "msg_s", "prt_1", raw))
+	onBus(t, a, `{"type":"message.updated","properties":{"sessionID":"ses_kid","info":{"id":"msg_s","sessionID":"ses_kid","role":"assistant","cost":0,"tokens":{"cache":{}},"time":{"created":1,"completed":9}}}}`)
+	got := joinedTyped(a, sink, proto.EvOpenCodeMessage)
+	var m proto.OpenCodeMessage
+	if len(got) != 1 || json.Unmarshal([]byte(got[0]), &m) != nil {
+		t.Fatalf("messages: %q", got)
+	}
+	want := (strings.Repeat("[REDACTED:T]", 50) + filler + "[REDACTED:T]" + strings.Repeat("w", 4<<10))[:proto.MaxOpenCodeText]
+	if m.Text != want || !m.Truncated {
+		t.Fatalf("text %q\nwant %q", m.Text, want)
+	}
+}
+
+// A child's user message keeps no text: what came before its role was
+// known is dropped as it is, and what comes after is not kept.
+func TestOpenCodeChildUserTextDropped(t *testing.T) {
+	a, sink := childRun(t, ocSession, 0, nil)
+	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+	onBus(t, a, ocText("ses_kid", "msg_user", "prt_1", "the task's prompt"))
+	onBus(t, a, `{"type":"message.updated","properties":{"sessionID":"ses_kid","info":{"id":"msg_user","sessionID":"ses_kid","role":"user","time":{"created":1}}}}`)
+	onBus(t, a, ocText("ses_kid", "msg_user", "prt_2", "more of it"))
+	a.kids.mu.Lock()
+	held := len(a.kids.texts)
+	a.kids.mu.Unlock()
+	if held != 0 {
+		t.Fatalf("text kept for %d messages", held)
+	}
+	if got := joined(a, sink)[1:]; len(got) != 0 {
+		t.Fatalf("records: %q", got)
 	}
 }
 
