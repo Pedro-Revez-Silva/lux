@@ -45,6 +45,12 @@ type ocChildren struct {
 	// the bus repeats after a later one.
 	tasks map[string]bool
 	parts map[string]bool
+	// pending: the stop of the timer that writes a call's held pending
+	// ("session\x00callID"; pendingHold).
+	pending map[string]func() bool
+	// partsWritten: opencode.part records written; past maxChildParts they
+	// carry the status alone.
+	partsWritten int
 	// texts: the text of each text part of a child's message not yet
 	// written, by message id, then part id, in the order they came.
 	texts map[string]*msgText
@@ -60,7 +66,7 @@ type msgText struct {
 
 func newOcChildren() *ocChildren {
 	return &ocChildren{parent: map[string]string{}, announced: map[string]bool{}, tasks: map[string]bool{},
-		parts: map[string]bool{}, texts: map[string]*msgText{}, messages: map[string]bool{}, permissions: map[string]bool{}}
+		parts: map[string]bool{}, pending: map[string]func() bool{}, texts: map[string]*msgText{}, messages: map[string]bool{}, permissions: map[string]bool{}}
 }
 
 const (
@@ -68,6 +74,13 @@ const (
 	maxSessionDepth = 64
 	// childPermissionTimeout bounds answering a child's permission request.
 	childPermissionTimeout = 10 * time.Second
+	// pendingHold: a tool call's pending is written only if no other
+	// status of it comes within this long; a running before then is
+	// written alone.
+	pendingHold = time.Second
+	// maxChildParts: opencode.part records a Run writes in full; after
+	// them, one lux.warning, and the status alone.
+	maxChildParts = 2000
 )
 
 // ofRun reports whether session is the Run's or descends from it. Under
@@ -164,7 +177,34 @@ func (a *ACP) childTool(part *busPart, run string) {
 	if st == "" || k.parts[key+"\x00"+st] {
 		return
 	}
+	if st == "pending" {
+		if k.pending[key] == nil {
+			held := *part
+			k.pending[key] = a.clock.afterFunc(pendingHold, func() {
+				a.spawn(func() { a.pendingDue(key, &held) })
+			})
+		}
+		return
+	}
+	if stop := k.pending[key]; stop != nil {
+		stop()
+		delete(k.pending, key)
+	}
 	k.parts[key+"\x00"+st] = true
+	a.writePart(part)
+}
+
+// pendingDue writes a call's pending held for pendingHold, unless another
+// status of it came meanwhile.
+func (a *ACP) pendingDue(key string, part *busPart) {
+	k := a.kids
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.pending[key] == nil {
+		return
+	}
+	delete(k.pending, key)
+	k.parts[key+"\x00pending"] = true
 	a.writePart(part)
 }
 
@@ -179,11 +219,22 @@ func taskStatus(s string) string {
 }
 
 // writePart writes opencode.part: input on every status, output only
-// once completed and error only on error, each redacted and cut. Under
+// once completed and error only on error, each redacted and cut. Past
+// maxChildParts, the status and times alone, after one lux.warning. Under
 // k.mu.
 func (a *ACP) writePart(part *busPart) {
+	k := a.kids
 	rec := proto.OpenCodePart{SessionID: part.SessionID, MessageID: part.MessageID, CallID: part.CallID, Tool: part.Tool,
-		Status: part.State.Status, Title: part.State.Title, Time: proto.OpenCodeTime{Start: part.State.Time.Start, End: part.State.Time.End}}
+		Status: part.State.Status, Time: proto.OpenCodeTime{Start: part.State.Time.Start, End: part.State.Time.End}}
+	if k.partsWritten++; k.partsWritten > maxChildParts {
+		if k.partsWritten == maxChildParts+1 {
+			a.sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
+				"opencode: the Run's subagent sessions have made %d tool-call records; the next ones carry their status alone", maxChildParts)})
+		}
+		a.sink.Event(proto.EvOpenCodePart, rec)
+		return
+	}
+	rec.Title = part.State.Title
 	var cut [3]bool
 	if in := strings.TrimSpace(string(part.State.Input)); in != "" && in != "{}" && in != "null" {
 		rec.Input, cut[0] = a.sink.Clip(in, proto.MaxOpenCodeInput)

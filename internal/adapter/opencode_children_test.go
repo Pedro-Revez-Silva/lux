@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -113,7 +115,9 @@ func wantRecords(t *testing.T, got, want []string) {
 // change of its tool call's status, and each completed assistant message
 // with its text, once, in the order the bus said them. The parent's own
 // parts and messages, the deltas, and the repeated events (task running
-// twice, each message completed twice, session.updated) add nothing.
+// twice, each message completed twice, session.updated) add nothing. The
+// tool call's pending, replayed at once, is followed by its running within
+// pendingHold: only the running is written.
 func TestOpenCodeChildRelayHosts(t *testing.T) {
 	a, sink := childRun(t, hostsParent, 0, nil)
 	replay(t, a, "opencode-1.18.21-children-hosts.ndjson")
@@ -122,7 +126,6 @@ func TestOpenCodeChildRelayHosts(t *testing.T) {
 	wantRecords(t, joined(a, sink), []string{
 		`opencode.session {"id":"` + hostsChild + `","parentID":"` + hostsParent + `","title":"Read /etc/hosts first line (@general subagent)","createdAt":1791865588961}`,
 		`opencode.task {"sessionID":"` + hostsParent + `","callID":"toolu_01L91pCabVxisGJueHYPC6dV","childSessionID":"` + hostsChild + `",` + model + `,"status":"running"}`,
-		`opencode.part ` + part + `"status":"pending","time":{}}`,
 		`opencode.part ` + part + `"status":"running","input":"{\"filePath\":\"/etc/hosts\",\"limit\":1}","time":{"start":1791865590382}}`,
 		`opencode.part ` + part + `"status":"completed","title":"etc/hosts","input":"{\"filePath\":\"/etc/hosts\",\"limit\":1}","output":"\u003cpath\u003e/etc/hosts\u003c/path\u003e\n\u003ctype\u003efile\u003c/type\u003e\n\u003ccontent\u003e\n1: ##\n\n(Showing lines 1-1 of 15. Use offset=2 to continue.)\n\u003c/content\u003e","time":{"start":1791865590382,"end":1791865590387}}`,
 		`opencode.message {"sessionID":"` + hostsChild + `","messageID":"msg_133830cef001F84jOG3tnyJjdy","role":"assistant","text":"","cost":0,"tokens":{"input":3,"output":78,"reasoning":0,"cacheRead":0,"cacheWrite":7979},"completed":1791865590417}`,
@@ -133,7 +136,8 @@ func TestOpenCodeChildRelayHosts(t *testing.T) {
 
 // The other capture: the task call is pending (no child yet) before the
 // child exists, and the child's first message has text before its tool
-// call. Replaying the whole capture again adds nothing.
+// call. Replaying the whole capture again adds nothing: the bus repeats
+// the task's running after its completed, and that is not written again.
 func TestOpenCodeChildRelayLsOnceEach(t *testing.T) {
 	a, sink := childRun(t, lsParent, 0, nil)
 	replay(t, a, "opencode-1.18.21-children-ls.ndjson")
@@ -152,7 +156,7 @@ func TestOpenCodeChildRelayLsOnceEach(t *testing.T) {
 		kinds = append(kinds, k)
 	}
 	wantRecords(t, kinds, []string{
-		"session", "task running", "part pending", "part running", "part completed",
+		"session", "task running", "part running", "part completed",
 		"message I'll read the current working directory to list all the files.",
 		"message Here are the files in the current working directory:\n\na.txt\nb.txt",
 		"task completed",
@@ -187,8 +191,8 @@ func TestOpenCodeChildRelayIgnoresOtherRuns(t *testing.T) {
 		}
 	}
 	got := joined(a, sink)
-	if len(got) != 8 {
-		t.Fatalf("%d records, want the ls capture's 8:\n%s", len(got), strings.Join(got, "\n"))
+	if len(got) != 7 {
+		t.Fatalf("%d records, want the ls capture's 7:\n%s", len(got), strings.Join(got, "\n"))
 	}
 	for _, r := range got {
 		if strings.Contains(r, hostsChild) || strings.Contains(r, hostsParent) {
@@ -318,4 +322,57 @@ func TestOpenCodeChildMessageText(t *testing.T) {
 	if len(m.Text) != proto.MaxOpenCodeText || !m.Truncated {
 		t.Fatalf("a long text: %d bytes, truncated %v", len(m.Text), m.Truncated)
 	}
+}
+
+// A child's pending followed by another status within pendingHold is
+// written as that status alone; a pending still the newest after
+// pendingHold is written then, and the running after it too. A repeated
+// pending holds no second timer.
+func TestOpenCodeChildPendingCollapses(t *testing.T) {
+	clk := newTestClock()
+	a, sink := childRun(t, ocSession, 0, clk)
+	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+	onBus(t, a, ocTool("ses_kid", "c1", "bash", "pending", nil))
+	onBus(t, a, ocTool("ses_kid", "c1", "bash", "pending", nil))
+	onBus(t, a, ocTool("ses_kid", "c1", "bash", "running", map[string]any{"input": map[string]any{"command": "ls"}, "output": "partial"}))
+	clk.mu.Lock()
+	due, delays := len(clk.due), slices.Clone(clk.delays)
+	clk.mu.Unlock()
+	if due != 0 || !slices.Equal(delays, []time.Duration{pendingHold}) {
+		t.Fatalf("timers due %d, set %v", due, delays)
+	}
+	onBus(t, a, ocTool("ses_kid", "c2", "bash", "pending", nil))
+	clk.fire(t)
+	a.bg.Wait()
+	onBus(t, a, ocTool("ses_kid", "c2", "bash", "pending", nil))
+	onBus(t, a, ocTool("ses_kid", "c2", "bash", "running", nil))
+	var got []string
+	for _, d := range sink.typed(proto.EvOpenCodePart) {
+		var p proto.OpenCodePart
+		_ = json.Unmarshal([]byte(d), &p)
+		got = append(got, p.CallID+" "+p.Status+" "+p.Input+" "+p.Output)
+	}
+	wantRecords(t, got, []string{`c1 running {"command":"ls"} `, "c2 pending  ", "c2 running  "})
+}
+
+// Past maxChildParts opencode.part records, one lux.warning, then records
+// with the status alone (and the call's identity and times).
+func TestOpenCodeChildPartsCapped(t *testing.T) {
+	a, sink := childRun(t, ocSession, 0, nil)
+	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+	state := map[string]any{"title": "t", "input": map[string]any{"command": "ls"}, "output": "out", "time": map[string]any{"start": 5, "end": 6}}
+	for i := range maxChildParts + 2 {
+		onBus(t, a, ocTool("ses_kid", "c"+strconv.Itoa(i), "bash", "completed", state))
+	}
+	recs := sink.records()[1:]
+	if len(recs) != maxChildParts+3 {
+		t.Fatalf("%d records", len(recs))
+	}
+	full := `opencode.part {"sessionID":"ses_kid","messageID":"msg_ses_kid","callID":"c1999","tool":"bash","status":"completed","title":"t","input":"{\"command\":\"ls\"}","output":"out","time":{"start":5,"end":6}}`
+	wantRecords(t, recs[maxChildParts-1:], []string{
+		full,
+		`lux.warning {"message":"opencode: the Run's subagent sessions have made 2000 tool-call records; the next ones carry their status alone"}`,
+		`opencode.part {"sessionID":"ses_kid","messageID":"msg_ses_kid","callID":"c2000","tool":"bash","status":"completed","time":{"start":5,"end":6}}`,
+		`opencode.part {"sessionID":"ses_kid","messageID":"msg_ses_kid","callID":"c2001","tool":"bash","status":"completed","time":{"start":5,"end":6}}`,
+	})
 }
