@@ -99,8 +99,11 @@ func (s *Server) routes(api huma.API) {
 			"A Run whose only snapshot report was refused has nothing to restore: 409 no_snapshot, unless fromSnapshot names one, or unless its resumePolicy is restart and it has no session, which restores nothing.\n\n" +
 			"resources changes what the Run gets from now on, written into its spec: cpus and memory, larger or smaller; disk larger, or smaller " +
 			"only down to the snapshot's measured use plus headroom (otherwise kept, and resize.disk in the answer says why). " +
-			"A Run already resuming refuses other sizes (409).",
+			"A Run already resuming refuses other sizes (409).\n\n" +
+			"placement.poolId moves the Run to another pool, checked first (422 unknown_pool, platform_mismatch, pool_unfit; nothing changes). " +
+			"validateOnly runs every check and changes nothing: 200 with valid: true, or the error the resume would meet.",
 		DefaultStatus: http.StatusAccepted,
+		Responses:     map[string]*huma.Response{"200": {Description: "validateOnly: the resume would be accepted.", Content: jsonContent(schemaRef[ResumeAnswer](api))}},
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusTooManyRequests},
 	}, "run", s.resumeRun)
 	register(s, api, huma.Operation{
@@ -532,7 +535,6 @@ type Run struct {
 	Servers     []RunServer   `json:"servers,omitzero" doc:"On GET /v1/runs/{id}: the Run's servers."`
 	SubmittedBy *RunSubmitter `json:"submittedBy,omitempty" doc:"On GET /v1/runs/{id}: who submitted it, the API key or the person signed in. Absent for Runs submitted before luxd recorded it."`
 	Cost        *RunCostBrief `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
-	Resize      *Resize       `json:"resize,omitempty" doc:"In a resume's answer, when it asked to change resources: what it asked for and what the Run has from now on."`
 }
 
 // Resumability says whether a Run can be resumed now, and from what.
@@ -1593,6 +1595,8 @@ type resumeRequest struct {
 	FromSnapshot string           `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost). Older snapshots are deleted once the latest is uploaded: one deleted is 409 snapshot_unavailable."`
 	To           string           `json:"to,omitempty" doc:"Operators: place it on this host (id or name), and nowhere else."`
 	Resources    *resumeResources `json:"resources,omitempty" doc:"Change what the Run gets from now on (e.g. more disk after it went over). On a Run already resuming: the same as its resume asked for, 202 with that resume's resize; absent or empty, 202; other values, 409 not_resumable."`
+	Placement    *resumeTarget    `json:"placement,omitempty" doc:"Move the Run to another pool (poolId) from this resume on, with its saved state, as on any host change."`
+	ValidateOnly bool             `json:"validateOnly,omitempty" doc:"Run every check this resume would run and change nothing: 200 with valid: true (and the resize and placement it would apply), or the error it would meet. Secret values may be left out: only the names sent are checked. A live Run (scheduled, starting, running, stopping) is judged as if it were stopped, its state given in stateUnchecked."`
 	Sync         []proto.SyncRef  `json:"sync,omitempty" doc:"Move these repositories' checkouts (repo: the spec's repository name; ref: a branch, tag or sha; mode: move, fast-forward or fetch) before init, through the host's mirror. Mode move (default): tracked files become the ref's, untracked and ignored ones are kept. fast-forward: only a checkout that loses nothing moves; fetch: none does. Each is a git.sync event; the Run goes on after a failed one, its checkout as it was (or, if a reset failed half-way, where git stopped, with refs/lux/pre-sync holding what was there)."`
 }
 
@@ -1656,11 +1660,21 @@ type resumeRunInput struct {
 	Body *resumeRequest
 }
 
-// resumeOutput is the resumed Run and the id of the request.
+// resumeOutput is the resume's answer and the id of the request.
 type resumeOutput struct {
 	Status    int
 	RequestID string `header:"Lux-Request-Id" doc:"The resume's request id (requestId, or the one generated)."`
-	Body      *Run
+	Body      *ResumeAnswer
+}
+
+// ResumeAnswer is the resumed Run (202), or a validateOnly resume's
+// verdict (200: valid, without the Run), with what the resume changes.
+type ResumeAnswer struct {
+	Valid          bool             `json:"valid,omitempty" doc:"validateOnly: true, the resume would be accepted; the Run's fields are absent, and nothing changed."`
+	StateUnchecked string           `json:"stateUnchecked,omitempty" doc:"validateOnly on a live Run (scheduled, starting, running, stopping): its state, which was not checked; the rest was checked as for a resume once it is stopped, but for the tenant's Run quota, which its own placement counts against until then."`
+	Resize         *Resize          `json:"resize,omitempty" doc:"When it asked to change resources: what it asked for and what the Run has from now on."`
+	Placement      *ResumePlacement `json:"placement,omitempty" doc:"When it named a pool (placement.poolId): the pool the Run is bound to from now on, the one it left, and whether its platform went unchecked."`
+	*Run
 }
 
 // requireSecrets refuses a submit or resume that lacks a value (or has an
@@ -1709,25 +1723,56 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			values, cached = v, true
 		}
 	}
-	placeOn, err := s.chooseHost(ctx, p, req.To)
+	placeOn, placeOnPool, err := s.chooseHost(ctx, p, req.To)
 	if err != nil {
 		return nil, err
 	}
+	var target *poolFacts
+	if req.Placement != nil {
+		if req.Placement.PoolID == "" {
+			return nil, invalidSpec(&spec.ValidationError{Problems: []string{"placement.poolId is required with placement"}})
+		}
+		// Read as the system (the instance-type catalog is no tenant's);
+		// used only once the tenant's own transaction resolves the id.
+		f, err := s.loadPoolFacts(ctx, req.Placement.PoolID, p.TenantID)
+		if err != nil {
+			return nil, err
+		}
+		target = &f
+	}
 	resumed := false
 	var resize *Resize
-	err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+	var moved *ResumePlacement
+	// The live state a validateOnly resume did not check.
+	var stateUnchecked string
+	attempt := func(tx pgx.Tx) error {
 		var state string
 		var refs []spec.SecretRef
 		var sp spec.RunSpec
 		var noSnapshot bool
-		if err := tx.QueryRow(ctx, `SELECT r.state, r.secrets, r.spec, `+refusedWithoutSnapshot+` FROM runs r WHERE r.id = $1 FOR UPDATE OF r`, id).
-			Scan(&state, &refs, &sp, &noSnapshot); err != nil {
+		var curPool BoundPool
+		if err := tx.QueryRow(ctx, `SELECT r.state, r.secrets, r.spec, `+refusedWithoutSnapshot+`, coalesce(r.pool_id, ''), coalesce(rpool.name, '')
+			FROM runs r`+runPoolJoin+` WHERE r.id = $1 FOR UPDATE OF r`, id).
+			Scan(&state, &refs, &sp, &noSnapshot, &curPool.ID, &curPool.Name); err != nil {
 			return err
 		}
 		// Before anything else: whatever its state, such a Run is never
 		// placed again on request.
 		if spec.RefusesResume(sp.ResumePolicy) {
 			return errNeverResumable()
+		}
+		var to *resolvedPool
+		if req.Placement != nil {
+			rp, err := resolvePool(ctx, tx, p.TenantID, "", req.Placement.PoolID)
+			if err != nil {
+				return err
+			}
+			// A chosen host bypasses the pool scope (hostFit): it would run
+			// this placement outside the pool the Run is bound to.
+			if placeOn != nil && placeOnPool.ID != *rp.ID {
+				return errf(http.StatusUnprocessableEntity, "invalid_spec", "the chosen host is in pool %s, not %s", cmp.Or(placeOnPool.Name, "(none)"), rp.Name)
+			}
+			to = &rp
 		}
 		switch {
 		case resumable(state):
@@ -1738,6 +1783,16 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		case state == StateResuming:
 			if len(adding) > 0 {
 				return errf(http.StatusConflict, "not_resumable", "run is resuming already: repositories can only be added to a Run resume accepts")
+			}
+			if to != nil {
+				if *to.ID != curPool.ID {
+					return errf(http.StatusConflict, "not_resumable", "run is resuming already in pool %s: its pool can only change before it is resumed", curPool.Name)
+				}
+				first, err := pendingPool(ctx, tx, id)
+				if err != nil {
+					return err
+				}
+				moved = cmp.Or(first, &ResumePlacement{Pool: curPool.Name, PoolID: curPool.ID})
 			}
 			if req.Resources != nil {
 				asked, err := req.Resources.check()
@@ -1762,10 +1817,14 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			return nil // idempotent: the first resume's secrets stand
 		case terminal(state):
 			return errf(http.StatusConflict, "not_resumable", "run is %s", state)
+		case req.ValidateOnly && live(state):
+			// Asked before stopping it: would a resume be accepted once
+			// it is stopped. Everything else is checked as for that resume.
+			stateUnchecked = state
 		default:
 			return errf(http.StatusConflict, "not_resumable", "run is %s: stop it first", state)
 		}
-		if p.Operator && len(req.Secrets) == 0 && requireSecrets(refs, values) != nil {
+		if !req.ValidateOnly && p.Operator && len(req.Secrets) == 0 && requireSecrets(refs, values) != nil {
 			return errf(http.StatusUnprocessableEntity, "secrets_required",
 				"luxd no longer holds this Run's secrets: only the tenant can resume it, supplying them")
 		}
@@ -1806,8 +1865,11 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 				return err
 			}
 		}
-		if err := requireSecrets(refs, values); err != nil {
-			return err
+		// A dry run may leave values out: only the names it sends are checked.
+		if !req.ValidateOnly {
+			if err := requireSecrets(refs, values); err != nil {
+				return err
+			}
 		}
 		// Rotation is allowed: record the new fingerprints.
 		newRefs := make([]spec.SecretRef, 0, len(refs))
@@ -1847,13 +1909,28 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			if resize, err = resizeRun(ctx, tx, id, sp.Resources, *req.Resources); err != nil {
 				return err
 			}
+			sp.Resources = resize.Applied
+		}
+		if to != nil {
+			if moved, err = rebindPool(ctx, tx, id, sp, curPool, *to, *target); err != nil {
+				return err
+			}
 		}
 		var in *proto.Input
 		if req.Input != nil && req.Input.Text != "" {
 			in = &proto.Input{RequestID: ids.New("in"), Text: req.Input.Text}
 		}
-		if err := checkRunQuota(ctx, tx, p.TenantID); err != nil {
-			return err
+		// A live Run's own placement counts against the quota until it
+		// stops, so a dry run on it cannot judge the quota a resume meets.
+		if stateUnchecked == "" {
+			if err := checkRunQuota(ctx, tx, p.TenantID); err != nil {
+				return err
+			}
+		}
+		// A dry run stops before it caches secrets or writes events; its
+		// writes so far are rolled back below.
+		if req.ValidateOnly {
+			return nil
 		}
 		resumed = true
 		// Cached before commit, so the scheduler never sees the Run
@@ -1880,11 +1957,33 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		if resize != nil {
 			ev["resources"] = resize
 		}
+		if moved != nil && moved.From != nil {
+			pe := map[string]any{"from": moved.From, "to": BoundPool{Name: moved.Pool, ID: moved.PoolID}}
+			if moved.PlatformUnchecked {
+				pe["platformUnchecked"] = true
+			}
+			ev["pool"] = pe
+		}
 		if err := addEvent(ctx, tx, p.TenantID, id, 0, "resume.requested", ev); err != nil {
 			return err
 		}
 		return s.requestResume(ctx, tx, p.TenantID, id, in, why)
+	}
+	err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
+		err := attempt(tx)
+		// A dry run never commits: errValidated rolls back whatever its
+		// checks wrote.
+		if req.ValidateOnly && err == nil {
+			return errValidated
+		}
+		return err
 	})
+	if req.ValidateOnly {
+		if err != nil && !errors.Is(err, errValidated) {
+			return nil, err
+		}
+		return &resumeOutput{http.StatusOK, req.RequestID, &ResumeAnswer{Valid: true, StateUnchecked: stateUnchecked, Resize: resize, Placement: moved}}, nil
+	}
 	if err != nil {
 		if resumed && !cached {
 			s.secrets.drop(id)
@@ -1896,9 +1995,11 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 	if err != nil {
 		return nil, err
 	}
-	run.Resize = resize
-	return &resumeOutput{http.StatusAccepted, req.RequestID, run}, nil
+	return &resumeOutput{http.StatusAccepted, req.RequestID, &ResumeAnswer{Resize: resize, Placement: moved, Run: run}}, nil
 }
+
+// errValidated rolls back a validateOnly resume whose checks all passed.
+var errValidated = errors.New("validated: rolled back")
 
 // Disk headroom a shrink must leave above the measured use: a quarter of
 // it, and at least 1 GiB, so a Run is not stopped for its disk (checkDisk
@@ -1920,14 +2021,24 @@ func diskShrinkFloor(used int64) int64 {
 // resumed the Run itself (a move).
 func pendingResize(ctx context.Context, tx pgx.Tx, runID string) (*Resize, error) {
 	var rz *Resize
-	err := tx.QueryRow(ctx, `SELECT data->'resources' FROM run_events
+	if err := pendingResumeData(ctx, tx, runID, "resources", &rz); err != nil {
+		return nil, err
+	}
+	return rz, nil
+}
+
+// pendingResumeData scans field key of the latest resume.requested event
+// since the Run last entered a state other than resuming into dest; dest
+// is left as it was when there is none.
+func pendingResumeData(ctx context.Context, tx pgx.Tx, runID, key string, dest any) error {
+	err := tx.QueryRow(ctx, `SELECT data->$2::text FROM run_events
 		WHERE run_id = $1 AND type = 'resume.requested'
 		  AND id > coalesce((SELECT max(id) FROM run_events WHERE run_id = $1 AND type = 'state' AND data->>'state' <> 'resuming'), 0)
-		ORDER BY id DESC LIMIT 1`, runID).Scan(&rz)
+		ORDER BY id DESC LIMIT 1`, runID, key).Scan(dest)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
+		return nil
 	}
-	return rz, err
+	return err
 }
 
 // resizeRun writes a resume's resources into the Run's stored spec (cur
@@ -3041,6 +3152,15 @@ type Pool struct {
 	HostSize     *HostSize `json:"hostSize,omitempty" readOnly:"true" doc:"The capacity the pool's hosts register with, as the scheduler plans new hosts: the minimum of each resource over the latest 8 registrations (for an ec2 pool, of its current template), so a pool scaled to zero still has one. Runs ask in these terms: a Run's resources.memory is a share of hostSize.memory. Absent when no host ever registered in the pool."`
 	HostSizeFrom string    `json:"hostSizeFrom,omitempty" readOnly:"true" enum:"running,history" doc:"running: the pool has at least one ready or draining host now; history: hostSize comes only from hosts that have gone. Absent with hostSize."`
 	InstanceType string    `json:"instanceType,omitempty" readOnly:"true" doc:"The provider's instance type of the latest host hostSize is taken from; absent for static hosts and with hostSize." example:"c7a.8xlarge"`
+	// Platforms and Capabilities: what a resume's placement.poolId checks
+	// against (poolFacts), as the listing tenant would be checked.
+	Platforms    []string          `json:"platforms,omitempty" readOnly:"true" doc:"The platforms (os/arch) the pool's hosts run: those of its live and latest registered hosts, and for an ec2 pool its template's instance types as the instance-type catalog describes them. Absent when lux knows none; a resume into it is then not refused for its platform." example:"[\"linux/arm64\"]"`
+	Capabilities *PoolCapabilities `json:"capabilities,omitempty" readOnly:"true" doc:"What the pool's hosts offer a Run, as a resume's placement.poolId judges it."`
+}
+
+// PoolCapabilities: null is unknown.
+type PoolCapabilities struct {
+	NestedContainers *bool `json:"nestedContainers" doc:"Whether a Run with sandbox.nestedContainers can run in the pool: an ec2 pool's template nestedContainers, or a host that registered with lux-runner --nested. null for a static pool no host registered in." nullable:"true"`
 }
 
 // HostSize is a host's capacity as it registers: CPUs, and bytes of
@@ -3058,7 +3178,7 @@ const (
 )
 
 // poolReadOnly are the Pool fields luxd reports and a request cannot set.
-var poolReadOnly = []string{"platform", "hostSize", "hostSizeFrom", "instanceType"}
+var poolReadOnly = []string{"platform", "hostSize", "hostSizeFrom", "instanceType", "platforms", "capabilities"}
 
 // withHostSizes sets each of pools' host size, from one query.
 func withHostSizes(ctx context.Context, tx pgx.Tx, pools []Pool) error {
@@ -3157,7 +3277,10 @@ func (s *Server) listPools(ctx context.Context, _ *TenantQuery) (*listPoolsOutpu
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		return withHostSizes(ctx, tx, pools)
+		if err := withHostSizes(ctx, tx, pools); err != nil {
+			return err
+		}
+		return s.withPoolFacts(ctx, tx, pools, p.TenantID)
 	})
 	if err != nil {
 		return nil, err

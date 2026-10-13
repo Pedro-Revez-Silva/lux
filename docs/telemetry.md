@@ -124,15 +124,24 @@ Each system sample also writes one row per pool into `pool_samples`
 (migration 041), keyed by the pool's id, so a rename keeps a pool's history.
 A pool removed (`DELETE /v1/pools/{name}`) and then set again under the same
 name by the same owner is the same pool: `POST /v1/pools` revives the
-retired row, with its id, so its samples and cost history continue. The pool's own row
-(tenant `''`) holds its hosts by state, the capacity of its ready and
-draining hosts, what live placements on its hosts hold, its Runs running
-and queued, Runs first started and finished in the sample's window, and the
-launches it requested and the provider refused. A row per tenant holds
-that tenant's part (its Runs, allocation, starts and finishes) and nothing
-of the pool's hosts. They roll up and expire with the other samples. The
-first rows are written when this ships: an older range is a gap, never an
-invented zero (`historyFrom` says where a pool's history starts).
+retired row, with its id, so its samples and cost history continue. The
+pool's own row (tenant `''`) holds its hosts by state, the capacity of its
+ready and draining hosts, what live placements on its hosts hold, its Runs
+running and queued, Runs first started and finished in the sample's
+window, and the launches it requested and the provider refused. A row per
+tenant holds that tenant's part (its Runs, allocation, starts and
+finishes) and nothing of the pool's hosts.
+
+A Run counts under the pool it is bound to when it is counted: after a
+resume moves it ([moving to another pool](concepts.md#moving-to-another-pool)),
+its later starts and its finish count under the new pool; its cost stays
+with each placement's host's pool. `runsStarted` in `GET /v1/pools/stats`
+counts the same way, when it is read, so there a moved Run's first start
+counts under its new pool.
+
+The pool rows roll up and expire with the other samples. The first rows are
+written when this ships: an older range is a gap, never an invented zero
+(`historyFrom` says where a pool's history starts).
 
 Sizing: one row per key per sample, where the keys are the pools sampled
 (live ones, and retired ones with hosts or Runs) plus each (tenant, pool)

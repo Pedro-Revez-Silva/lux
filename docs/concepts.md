@@ -175,6 +175,9 @@ on every start, so it must be idempotent.
   before init ([the RunSpec](runspec.md#syncing-checkouts)). A running Run
   syncs with `POST /v1/runs/{id}/sync` (`lux sync`).
 - Attached servers start again ([Servers](#servers)).
+- A resume may **move the Run to another pool**
+  ([below](#moving-to-another-pool)). Its state follows, as on any host
+  change: nothing in a snapshot is tied to a pool.
 
 ### Resizing on resume
 
@@ -225,6 +228,74 @@ placement gets it.
     restart` it is restarted from scratch instead (no snapshot restored);
     with `manual` or `never` it is not placed again: it ends `failed`
     ([resume policy](runspec.md#resume-policy)).
+
+### Moving to another pool
+
+A resume can name another pool: `placement: {poolId}` in the request
+(`lux resume --pool <name|id>`), the same field and rule as a submit's
+`placement.poolId`. Together with `resources`, it gives a Run a size that
+lives in another pool without losing its checkout or its conversation:
+snapshots belong to the tenant, not to a pool, and a host in the new pool
+downloads them through a presigned URL as any other host would.
+
+The Run is rebound before it is placed: its `pool`/`poolId` (in `GET
+/v1/runs/{id}`) and its spec's `placement.pool` and `placement.poolId` are
+the new pool's, so its later resumes, retries and migrations stay there.
+It is placed only on that pool's hosts (with a `pool.placement` event
+there, as for any placement). Its costs follow its placements: each is
+priced at its host's rate and counted in its host's pool.
+
+lux checks, before anything changes, with the resources this resume sets.
+A refusal is 422 and changes nothing (pool, spec, state, secrets):
+
+- `unknown_pool`: no pool with that id is the tenant's or the platform's,
+  or it was removed.
+- `platform_mismatch`: the image's platforms, as the Run's last placement
+  reported them, share none with the pool's: its hosts' (each runner
+  reports its arch) and, for an ec2 pool, its template's instance types
+  as the instance-type catalog describes them. An `image.build` is rebuilt
+  on each host, so its platform is not known. When lux knows either side
+  not at all, it moves the Run and says so: `placement.platformUnchecked:
+  true` in the answer and in the event.
+- `pool_unfit`: no host the pool has, or launches, could ever take the
+  Run: one with `sandbox.nestedContainers` in a pool whose hosts lack
+  `lux-runner --nested` (an ec2 template without `nestedContainers`, or
+  one whose latest hosts registered without it), one whose
+  `placement.requires` labels none of its hosts has, or cpus, memory or
+  disk beyond every host it has and the hosts it would launch. For an ec2
+  pool those are the planned host or the probe host, never a fallback.
+  The planned host is the one the capacity planner expects: the smallest
+  of its current template's latest registrations. The probe host is the
+  one the planner launches when a Run outgrows that expectation: the
+  catalog's size of the template's `instanceType`, with the planned host's
+  labels. Before any registration there is only the catalog's size of
+  `instanceType`. Fallback types are launched only on a capacity shortage,
+  so they do not count; an `instanceType` the catalog lacks gives no probe
+  host, and before any registration is not refused on size. Hosts it no
+  longer has (terminated) do not count. A static pool no host has
+  registered in is not refused.
+
+The answer's `placement` is `{pool, poolId, from: {name, id},
+platformUnchecked}`, and the `resume.requested` event carries `pool:
+{from, to, platformUnchecked}` when the pool changed. Naming the pool the
+Run is in already moves nothing. On a Run already resuming, naming the
+pool its resume moved it to is a retry (202, with that resume's
+`placement`); any other pool is 409 `not_resumable`.
+
+`GET /v1/pools` gives each pool's `platforms` and
+`capabilities.nestedContainers` from the same facts, absent or null when
+lux does not know them.
+
+### Checking a resume first
+
+`validateOnly: true` (`lux resume --dry-run`) runs every check a resume
+would and changes nothing (no state, spec, pool, secrets or events): 200
+with `{valid: true, resize, placement}`, or the same error the resume
+would get. Secret values may be left out; the names sent are still
+checked. A live Run (scheduled, starting, running or stopping) is checked
+as if it were stopped, its state given in `stateUnchecked`, so an agent
+can ask before it is parked. The tenant's Run quota is not checked for a
+live Run, since its own placement counts against it until it stops.
 
 ## Secrets
 

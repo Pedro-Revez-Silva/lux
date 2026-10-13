@@ -14,14 +14,16 @@ import (
 )
 
 // chooseHost resolves an operator's choice of host (resume --to, migrate
-// --to) to its id; nil when there is none. Tenants cannot choose: where a
-// Run goes is the scheduler's (and its spec's) to say.
-func (s *Server) chooseHost(ctx context.Context, p Principal, ref string) (*string, error) {
+// --to) to its id and its pool (zero when it has none); nil when there is
+// no choice. Tenants cannot choose: where a Run goes is the scheduler's
+// (and its spec's) to say.
+func (s *Server) chooseHost(ctx context.Context, p Principal, ref string) (*string, BoundPool, error) {
+	var pool BoundPool
 	if ref == "" {
-		return nil, nil
+		return nil, pool, nil
 	}
 	if !p.Operator {
-		return nil, errf(http.StatusForbidden, "forbidden", "only operators choose hosts")
+		return nil, pool, errf(http.StatusForbidden, "forbidden", "only operators choose hosts")
 	}
 	var id string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
@@ -34,7 +36,8 @@ func (s *Server) chooseHost(ctx context.Context, p Principal, ref string) (*stri
 		}
 		var state string
 		var draining bool
-		if err := tx.QueryRow(ctx, `SELECT state, draining FROM hosts WHERE id = $1`, id).Scan(&state, &draining); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT h.state, h.draining, coalesce(h.pool_id, ''), coalesce(p.name, '')
+			FROM hosts h LEFT JOIN pools p ON p.id = h.pool_id WHERE h.id = $1`, id).Scan(&state, &draining, &pool.ID, &pool.Name); err != nil {
 			return err
 		}
 		if state != "ready" || draining {
@@ -43,9 +46,9 @@ func (s *Server) chooseHost(ctx context.Context, p Principal, ref string) (*stri
 		return nil
 	})
 	if errors.Is(err, errNotFound) {
-		return nil, errf(http.StatusNotFound, "not_found", "no host %s this Run could use", ref)
+		return nil, pool, errf(http.StatusNotFound, "not_found", "no host %s this Run could use", ref)
 	}
-	return &id, err
+	return &id, pool, err
 }
 
 type migrateRequest struct {
@@ -68,7 +71,7 @@ func (s *Server) migrateRun(ctx context.Context, in *migrateRunInput) (*accepted
 	if in.Body != nil {
 		req = *in.Body
 	}
-	placeOn, err := s.chooseHost(ctx, p, req.To)
+	placeOn, _, err := s.chooseHost(ctx, p, req.To)
 	if err != nil {
 		return nil, err
 	}

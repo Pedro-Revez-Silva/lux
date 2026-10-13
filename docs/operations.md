@@ -504,7 +504,9 @@ luxd picks the pool when the Run is submitted, in this order:
    working without marking anything.
 
 The pool is written into the Run's spec, so its resumes, retries and
-migrations stay there even when the default changes later. The Run's
+migrations stay there even when the default changes later, unless a resume
+names another pool (`placement.poolId`, `lux resume --pool`), which rebinds
+the Run there from then on. The Run's
 `submitted` event says which pool and why: `{"pool": "arm64", "poolFrom":
 "tenant-default", "poolOwner": "tenant"}` (`platform-default`, `fallback`,
 or `spec` when the spec named it). A Run that names a pool, `default`

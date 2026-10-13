@@ -92,6 +92,13 @@ func (f *fakeLuxd) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // runCLI runs lux with args against f, returning stdout and the error.
 func runCLI(t *testing.T, f http.Handler, args ...string) (string, error) {
 	t.Helper()
+	out, _, err := runCLIErr(t, f, args...)
+	return out, err
+}
+
+// runCLIErr is runCLI that also returns stderr.
+func runCLIErr(t *testing.T, f http.Handler, args ...string) (string, string, error) {
+	t.Helper()
 	srv := httptest.NewServer(f)
 	defer srv.Close()
 	var out, errOut bytes.Buffer
@@ -99,7 +106,7 @@ func runCLI(t *testing.T, f http.Handler, args ...string) (string, error) {
 	root := a.root()
 	root.SetArgs(append([]string{"--url", srv.URL, "--api-key", "k"}, args...))
 	err := root.Execute()
-	return out.String(), err
+	return out.String(), errOut.String(), err
 }
 
 var costT0 = time.Date(2026, 9, 26, 10, 0, 0, 0, time.UTC)

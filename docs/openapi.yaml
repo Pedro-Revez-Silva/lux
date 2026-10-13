@@ -97,6 +97,14 @@ components:
               type: string
             - type: number
       type: object
+    BoundPool:
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+      type: object
     Build:
       additionalProperties: false
       properties:
@@ -1435,6 +1443,10 @@ components:
     Pool:
       additionalProperties: false
       properties:
+        capabilities:
+          $ref: "#/components/schemas/PoolCapabilities"
+          description: What the pool's hosts offer a Run, as a resume's placement.poolId judges it.
+          readOnly: true
         currency:
           description: The currency of hourlyPrice (ISO 4217); both or neither.
           examples:
@@ -1481,6 +1493,16 @@ components:
           description: A platform pool (no tenant). In a request, true is refused unless the caller acts on the platform's pools (an operator key without a tenant).
           readOnly: true
           type: boolean
+        platforms:
+          description: "The platforms (os/arch) the pool's hosts run: those of its live and latest registered hosts, and for an ec2 pool its template's instance types as the instance-type catalog describes them. Absent when lux knows none; a resume into it is then not refused for its platform."
+          examples:
+            - - linux/arm64
+          items:
+            type: string
+          readOnly: true
+          type:
+            - array
+            - "null"
         provider:
           type: string
         scaleDownAfter:
@@ -1505,6 +1527,15 @@ components:
         warmWhileActive:
           description: Keep warmHosts only while the pool is in use (a Run placed or ended within scaleDownAfter, or one waiting); an idle pool scales down to minHosts.
           type: boolean
+      type: object
+    PoolCapabilities:
+      additionalProperties: false
+      properties:
+        nestedContainers:
+          description: "Whether a Run with sandbox.nestedContainers can run in the pool: an ec2 pool's template nestedContainers, or a host that registered with lux-runner --nested. null for a static pool no host registered in."
+          type:
+            - boolean
+            - "null"
       type: object
     PoolCost:
       additionalProperties: false
@@ -2061,6 +2092,158 @@ components:
             - array
             - "null"
       type: object
+    ResumeAnswer:
+      additionalProperties: false
+      properties:
+        activity:
+          type: string
+        cost:
+          $ref: "#/components/schemas/RunCostBrief"
+          description: "In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."
+        createdAt:
+          format: date-time
+          type: string
+        epoch:
+          format: int64
+          type: integer
+        exitCode:
+          format: int64
+          type: integer
+        finishedAt:
+          format: date-time
+          type: string
+        firstScheduledAt:
+          format: date-time
+          type: string
+        firstStartedAt:
+          format: date-time
+          type: string
+        host:
+          description: The name of the host of its current placement.
+          type: string
+        hostId:
+          description: That host's id.
+          type: string
+        id:
+          type: string
+        image:
+          $ref: "#/components/schemas/ImageResolution"
+        labels:
+          additionalProperties:
+            type: string
+          type: object
+        name:
+          type: string
+        placement:
+          $ref: "#/components/schemas/ResumePlacement"
+          description: "When it named a pool (placement.poolId): the pool the Run is bound to from now on, the one it left, and whether its platform went unchecked."
+        placementSeconds:
+          description: "Time spent placing the Run, summed over its placements: for each, from when the Run needed a host (created, or its previous placement ending) until that placement's workload started. A Run still being placed counts up to the time of the response (placing). waitSeconds + startSeconds."
+          format: double
+          type: number
+        placementStartSeconds:
+          description: The part spent starting on the host (assigned until the workload started, or the placement ended without starting).
+          format: double
+          type: number
+        placementWaitSeconds:
+          description: The part of placementSeconds spent waiting for a host (needing one until assigned).
+          format: double
+          type: number
+        placements:
+          items:
+            $ref: "#/components/schemas/RunPlacement"
+          type:
+            - array
+            - "null"
+        placing:
+          description: "The Run is being placed now: waiting for a host, or starting on one; placementSeconds grows from the response's time on."
+          type: boolean
+        pool:
+          description: The current name of the pool the Run is bound to (spec.placement.pool is the name it was submitted with).
+          type: string
+        poolId:
+          description: That pool's id.
+          type: string
+        resize:
+          $ref: "#/components/schemas/Resize"
+          description: "When it asked to change resources: what it asked for and what the Run has from now on."
+        resumable:
+          description: "Whether POST /v1/runs/{id}/resume without fromSnapshot would be accepted: its state is stopped, lost, failed or succeeded, its resumePolicy is not never, and it is not left with only a refused snapshot report. The same test as GET /v1/runs?resumable=true. As of this answer: a Run being stopped is not resumable until it is stopped."
+          type: boolean
+        resume:
+          $ref: "#/components/schemas/Resumability"
+        runtimeSeconds:
+          description: "Seconds its placements have spent running, summed: each from reaching running to exiting or being lost; one still running counts up to the time of the response."
+          format: double
+          type: number
+        runtimeSince:
+          description: "When the placement still running started, if one is: runtimeSeconds grows from the response's time on."
+          format: date-time
+          type: string
+        secrets:
+          items:
+            $ref: "#/components/schemas/SecretRef"
+          type:
+            - array
+            - "null"
+        servers:
+          description: "On GET /v1/runs/{id}: the Run's servers."
+          items:
+            $ref: "#/components/schemas/RunServer"
+          type:
+            - array
+            - "null"
+        sessionId:
+          type: string
+        snapshotId:
+          type: string
+        spec:
+          $ref: "#/components/schemas/RunSpec"
+        stage:
+          description: "Where the Run is now (docs/concepts.md#stages): waiting for a host; image, volumes, repositories, container while it starts on one; running; stopping (stageReason says why); or its resting state. A stage event announces each change."
+          enum:
+            - waiting
+            - image
+            - volumes
+            - repositories
+            - container
+            - running
+            - stopping
+            - stopped
+            - lost
+            - succeeded
+            - failed
+            - terminated
+          type: string
+        stageReason:
+          description: "For stopping: the stop's reason (stop, terminate, drain, preempt, migrate, timeout, disk)."
+          type: string
+        stageSince:
+          description: "When the stage began: one recorded time. volumes, repositories, container and running begin at the runner's marks, on its host's clock (running at luxd's started_at for a runner that reports no containerStarted); waiting, image (acceptedAt), stopping and a resting state at luxd's."
+          format: date-time
+          type: string
+        state:
+          type: string
+        stateReason:
+          type: string
+        stateUnchecked:
+          description: "validateOnly on a live Run (scheduled, starting, running, stopping): its state, which was not checked; the rest was checked as for a resume once it is stopped, but for the tenant's Run quota, which its own placement counts against until then."
+          type: string
+        steer:
+          $ref: "#/components/schemas/Steer"
+          description: What the Run's adapter does with input sent while the agent works (POST /v1/runs/{id}/input).
+        submittedBy:
+          $ref: "#/components/schemas/RunSubmitter"
+          description: "On GET /v1/runs/{id}: who submitted it, the API key or the person signed in. Absent for Runs submitted before luxd recorded it."
+        tenant:
+          description: The owning tenant's name.
+          type: string
+        usage:
+          $ref: "#/components/schemas/RunUsage"
+        valid:
+          description: "validateOnly: true, the resume would be accepted; the Run's fields are absent, and nothing changed."
+          type: boolean
+      type: object
     ResumeGit:
       additionalProperties: false
       properties:
@@ -2078,6 +2261,21 @@ components:
         text:
           type: string
       type: object
+    ResumePlacement:
+      additionalProperties: false
+      properties:
+        from:
+          $ref: "#/components/schemas/BoundPool"
+          description: The pool the Run left; absent when it was already there.
+        platformUnchecked:
+          description: "The Run moved without its platform being checked: lux does not know the platforms its image offers (no placement reported them, or it is an image.build, rebuilt on each host) or those of the pool's hosts (none registered, and the catalog lacks its template's instance types), or either."
+          type: boolean
+        pool:
+          description: The pool's current name.
+          type: string
+        poolId:
+          type: string
+      type: object
     ResumeRequest:
       additionalProperties: false
       properties:
@@ -2090,6 +2288,9 @@ components:
         input:
           $ref: "#/components/schemas/ResumeInput"
           description: A message for the workload once it is back.
+        placement:
+          $ref: "#/components/schemas/ResumeTarget"
+          description: Move the Run to another pool (poolId) from this resume on, with its saved state, as on any host change.
         removeSecrets:
           description: "Names of the Run's secrets to remove: from this resume on the workload no longer has them and resumes no longer need them. Refused (422 invalid_spec, nothing changed): a name the Run does not have, a git or registry credential, an MCP server's or service's header secret, or a name also in secrets or the credential of a repository this resume adds."
           items:
@@ -2120,6 +2321,9 @@ components:
         to:
           description: "Operators: place it on this host (id or name), and nowhere else."
           type: string
+        validateOnly:
+          description: "Run every check this resume would run and change nothing: 200 with valid: true (and the resize and placement it would apply), or the error it would meet. Secret values may be left out: only the names sent are checked. A live Run (scheduled, starting, running, stopping) is judged as if it were stopped, its state given in stateUnchecked."
+          type: boolean
       type: object
     ResumeResources:
       additionalProperties: false
@@ -2144,6 +2348,13 @@ components:
             - examples:
                 - 8Gi
               type: string
+      type: object
+    ResumeTarget:
+      additionalProperties: false
+      properties:
+        poolId:
+          description: "Move the Run to this pool from this resume on, by id: the same field and rule as a submit's placement.poolId (the tenant's active pool with that id, else the platform's; any other is 422 unknown_pool). The Run's pool (pool and poolId in GET) and its spec's placement.pool and placement.poolId become that pool's, so later resumes, retries and migrations stay there. Checked before anything changes, with resources as this resume sets them: 422 platform_mismatch when the platforms the image offered at its last placement and the pool's hosts' are both known and share none; 422 pool_unfit when no host the pool has or launches can ever take the Run (nested containers, placement.requires labels, cpus, memory or disk beyond a whole host). On a Run already resuming: its own pool, 202; another, 409 not_resumable. With an operator's to, that host must be in this pool (else 422 invalid_spec)."
+          type: string
       type: object
     Run:
       additionalProperties: false
@@ -2214,9 +2425,6 @@ components:
         poolId:
           description: That pool's id.
           type: string
-        resize:
-          $ref: "#/components/schemas/Resize"
-          description: "In a resume's answer, when it asked to change resources: what it asked for and what the Run has from now on."
         resumable:
           description: "Whether POST /v1/runs/{id}/resume without fromSnapshot would be accepted: its state is stopped, lost, failed or succeeded, its resumePolicy is not never, and it is not left with only a refused snapshot report. The same test as GET /v1/runs?resumable=true. As of this answer: a Run being stopped is not resumable until it is stopped."
           type: boolean
@@ -7124,6 +7332,8 @@ paths:
 
         resources changes what the Run gets from now on, written into its spec: cpus and memory, larger or smaller; disk larger, or smaller only down to the snapshot's measured use plus headroom (otherwise kept, and resize.disk in the answer says why). A Run already resuming refuses other sizes (409).
 
+        placement.poolId moves the Run to another pool, checked first (422 unknown_pool, platform_mismatch, pool_unfit; nothing changes). validateOnly runs every check and changes nothing: 200 with valid: true, or the error the resume would meet.
+
         Needs the `run` scope.
       operationId: resumeRun
       parameters:
@@ -7140,11 +7350,17 @@ paths:
             schema:
               $ref: "#/components/schemas/ResumeRequest"
       responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResumeAnswer"
+          description: "validateOnly: the resume would be accepted."
         "202":
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Run"
+                $ref: "#/components/schemas/ResumeAnswer"
           description: Accepted
           headers:
             Lux-Request-Id:

@@ -690,7 +690,9 @@ POST /v1/runs/{id}/resume
 - Every resume records a `resume.requested` event:
   `{requestId, by, addedRepositories}`, and `addedSecrets` and
   `removedSecrets` when it declared or removed secrets
-  ([Secrets](concepts.md#secrets)).
+  ([Secrets](concepts.md#secrets)), `resources {requested, applied, disk?}`
+  when it asked for resources, and `pool {from, to, platformUnchecked?}`
+  (each pool `{name, id}`) when it moved the Run to another pool.
 - Adding needs a Run that is stopped, lost, failed or succeeded. While it is
   resuming, the request gets 409.
 

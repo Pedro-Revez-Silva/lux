@@ -72,7 +72,7 @@ JPEG, WebP or GIF). See [images](adapters.md#images).
 
 ```bash
 lux stop <run> [--wait]         # graceful; snapshot; resumable
-lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--remove-secret NAME] [--from-snapshot ID] [--cpus N] [--memory SIZE] [--disk SIZE] [--to HOST]
+lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--remove-secret NAME] [--from-snapshot ID] [--cpus N] [--memory SIZE] [--disk SIZE] [--pool NAME|ID] [--dry-run] [--to HOST]
            [--add-repo name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]]... [--request-id ID]
            [--sync repo=ref]... [--sync-mode move|fast-forward|fetch]  # move restored checkouts to ref before init
 lux sync <run> repo=ref... [--mode move|fast-forward|fetch] [--wait] [--request-id ID] [--credential repo=VALUE]   # a running Run's checkouts
@@ -104,6 +104,29 @@ resumes anyway, and lux prints `disk kept: <why>` on stderr.
 ```bash
 lux resume run_x --cpus 4 --memory 2Gi    # more CPUs, less memory
 lux resume run_x --disk 10Gi              # smaller, if its state fits
+```
+
+`--pool` moves the Run to another pool from this resume on
+([moving to another pool](concepts.md#moving-to-another-pool)), by name or
+id; a name is your tenant's pool before the platform's. Its saved state
+follows, as on any host change, and later resumes stay in the new pool.
+lux refuses, changing nothing, a pool you cannot use (exit 4,
+`unknown_pool`), one whose hosts' platform the image does not offer
+(`platform_mismatch`), or one that can never take the Run (`pool_unfit`:
+nested containers, required labels, or a size beyond every host it has and
+the host it would launch). With `--to`, that host must be in the pool
+`--pool` names (exit 4, `invalid_spec`).
+When lux cannot tell the platform it moves the Run anyway and prints
+`platform unchecked: ...` on stderr.
+
+`--dry-run` runs every check the resume would and changes nothing: it
+prints `valid`, or fails as the resume would. Secret values may be left
+out. A running Run is checked as if it were stopped (`state unchecked:
+...` on stderr), so you can ask before stopping it.
+
+```bash
+lux resume run_x --pool big --cpus 16 --memory 64Gi   # a larger size that lives in pool big
+lux resume run_x --pool big --cpus 16 --dry-run       # would it be accepted?
 ```
 
 `--add-repo` (repeatable) adds a repository to a stopped, lost, failed or succeeded
@@ -202,6 +225,7 @@ lux hosts drain <host> [--force-evict]   # admin: no new Runs; without --force-e
 lux hosts price <host> --hourly-price 0.40 --currency USD   # admin: a static host's flat price, from now on
 lux hosts price <host> --clear           # admin: no price, so its Runs get no compute cost from now on
 lux pools ls                             # DEFAULT: * on the pool Runs naming no pool go to; operators without --tenant: every tenant's, OWNER platform or the tenant
+                                         # -o json: each pool's platforms (os/arch) and capabilities.nestedContainers, as lux resume --pool checks them; absent/null when unknown
 lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON] [--default] [--replace] [--dry-run]
 lux pools set <name> --default           # admin: make it the tenant's default pool (moves the mark); changes nothing else
 lux pools set <name> --default=false     # admin: clear it
@@ -220,7 +244,8 @@ rule keeps its name and can still be updated; a new one cannot take it.
 
 A pool's identity is its id; its name is what you call it. Hosts, host
 tokens, Runs, costs and EC2 instances (`lux:pool-id`) refer to the id, and
-a Run is bound to its pool's id when it is submitted. `lux pools rename`
+a Run is bound to its pool's id when it is submitted, and rebound only by a
+resume that names another pool (`lux resume --pool`). `lux pools rename`
 therefore changes the name and nothing else: running Runs keep running,
 hosts stay in the pool, a default pool stays the default, and a new Run
 naming the new name goes where the old name went. The old name is free at

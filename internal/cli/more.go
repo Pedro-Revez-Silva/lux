@@ -848,6 +848,39 @@ finds this pool. --platform renames the platform's pool of that name
 	return cmd
 }
 
+// poolIDOf is the id of the pool ref names, among those GET /v1/pools
+// lists to tenant (the Run's; an operator's key otherwise lists every
+// tenant's): a pool whose id it is, else the tenant's pool of that name,
+// else the platform's (resolvePool's preference at submit).
+func (a *app) poolIDOf(ctx context.Context, ref, tenant string) (string, error) {
+	var resp struct {
+		Pools []server.Pool `json:"pools"`
+	}
+	path := "/v1/pools"
+	// --tenant already narrows every request; a tenant key's is ignored.
+	if tenant != "" && a.c.Tenant == "" {
+		path += "?tenant=" + url.QueryEscape(tenant)
+	}
+	if err := a.c.Do(ctx, "GET", path, nil, &resp); err != nil {
+		return "", err
+	}
+	var platform string
+	for _, pl := range resp.Pools {
+		switch {
+		case pl.ID == ref:
+			return pl.ID, nil
+		case pl.Name == ref && !pl.Platform:
+			return pl.ID, nil
+		case pl.Name == ref:
+			platform = pl.ID
+		}
+	}
+	if platform == "" {
+		return "", fmt.Errorf("no pool %q", ref)
+	}
+	return platform, nil
+}
+
 // poolTarget is the live pool name that pools set would write, nil when
 // there is none; its owner as the operator knows it (the key's tenant,
 // --tenant's, or the platform); and whether that is the platform, which an

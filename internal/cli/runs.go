@@ -889,10 +889,10 @@ func parseAddRepo(v string) (spec.Repository, error) {
 }
 
 func (a *app) resumeCmd() *cobra.Command {
-	var input, secretsFrom, fromSnapshot, to, disk, memory, reqID, syncMode string
+	var input, secretsFrom, fromSnapshot, to, disk, memory, reqID, syncMode, pool string
 	var cpus float64
 	var secretArgs, removeSecrets, addRepos, syncs []string
-	var follow, wait bool
+	var follow, wait, dryRun bool
 	cmd := &cobra.Command{
 		Use:   "resume <run>",
 		Short: "Resume a stopped, lost, failed or succeeded Run on any host",
@@ -928,7 +928,18 @@ event; one that fails leaves its checkout as it was.
 --cpus, --memory and --disk change what the Run gets from now on. cpus and
 memory apply, larger or smaller. A smaller disk applies only if the Run's
 saved state fits it with headroom; otherwise the Run keeps its disk, still
-resumes, and lux says why on stderr ("disk kept: ...").`,
+resumes, and lux says why on stderr ("disk kept: ...").
+
+--pool moves the Run to another pool (its name, the tenant's pool before the
+platform's, or its id) from this resume on; its saved state follows, as on
+any host change. lux refuses a pool the image's platform does not run on
+(platform_mismatch) or that can never take the Run (pool_unfit: nested
+containers, required labels, a size beyond its hosts), changing nothing.
+"platform unchecked" on stderr: lux could not tell the platform.
+
+--dry-run runs every check the resume would and changes nothing: "valid", or
+the error the resume would meet. Secret values may be left out. A running
+Run is checked as if it were stopped ("state unchecked" on stderr).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := ctxOf(cmd)
@@ -1018,16 +1029,39 @@ resumes, and lux says why on stderr ("disk kept: ...").`,
 			} else if syncMode != "" {
 				return fmt.Errorf("--sync-mode needs --sync")
 			}
-			var out Run
+			if pool != "" {
+				id, err := a.poolIDOf(ctx, pool, run.Tenant)
+				if err != nil {
+					return err
+				}
+				req["placement"] = map[string]string{"poolId": id}
+			}
+			if dryRun {
+				req["validateOnly"] = true
+			}
+			var out server.ResumeAnswer
 			hdr, err := a.c.DoHeader(ctx, "POST", "/v1/runs/"+args[0]+"/resume", req, &out)
 			if err != nil {
 				return err
 			}
-			if id := hdr.Get("Lux-Request-Id"); id != "" {
+			if id := hdr.Get("Lux-Request-Id"); id != "" && !dryRun {
 				fmt.Fprintln(a.stderr, "request", id)
 			}
 			if out.Resize != nil && out.Resize.Disk != nil {
 				fmt.Fprintln(a.stderr, "disk kept:", out.Resize.Disk.Reason)
+			}
+			if pl := out.Placement; pl != nil && pl.PlatformUnchecked {
+				fmt.Fprintf(a.stderr, "platform unchecked: lux does not know whether pool %s runs this Run's image\n", pl.Pool)
+			}
+			if dryRun {
+				if a.output == "json" {
+					return a.json(out)
+				}
+				if out.StateUnchecked != "" {
+					fmt.Fprintf(a.stderr, "state unchecked: the Run is %s; checked as if it were stopped\n", out.StateUnchecked)
+				}
+				fmt.Fprintln(a.stdout, "valid")
+				return nil
 			}
 			if follow {
 				if _, err := a.followLogs(ctx, args[0], "", logOpts{stderr: true}); err != nil {
@@ -1040,9 +1074,8 @@ resumes, and lux says why on stderr ("disk kept: ...").`,
 				if err != nil {
 					return err
 				}
-				// GET has no resize: it is the resume's answer alone.
-				r.Resize = out.Resize
-				out = *r
+				// GET has no resize nor placement: they are the resume's answer alone.
+				out.Run = r
 			}
 			if a.output == "json" {
 				return a.json(out)
@@ -1066,6 +1099,8 @@ resumes, and lux says why on stderr ("disk kept: ...").`,
 	cmd.Flags().StringVar(&reqID, "request-id", "", "names this resume (in its events and added repositories); generated if absent")
 	cmd.Flags().StringArrayVar(&syncs, "sync", nil, "repo=ref: move the repository's checkout to ref before init (repeatable)")
 	cmd.Flags().StringVar(&syncMode, "sync-mode", "", "with --sync: "+syncModeHelp)
+	cmd.Flags().StringVar(&pool, "pool", "", "move the Run to this pool (name or id) from this resume on")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "check the resume and change nothing; a running Run is checked as if it were stopped")
 	return cmd
 }
 
