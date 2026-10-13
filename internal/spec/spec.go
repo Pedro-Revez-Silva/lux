@@ -29,7 +29,7 @@ type RunSpec struct {
 	Secrets   []Secret          `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 	Git       *Git              `json:"git,omitempty" yaml:"git,omitempty"`
 	Volumes   []Volume          `json:"volumes,omitempty" yaml:"volumes,omitempty"`
-	Resources Resources         `json:"resources" yaml:"resources" doc:"What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, disk 20Gi, pids 4096, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_DISK, LUX_DEFAULT_PIDS). disk bounds the writable layer plus state volumes: a Run over it is stopped and fails."`
+	Resources Resources         `json:"resources" yaml:"resources" doc:"What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, disk 20Gi, pids 4096, diskGrace 0, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_DISK, LUX_DEFAULT_PIDS, LUX_DEFAULT_DISK_GRACE). disk bounds the writable layer plus state volumes: a Run over it for longer than diskGrace, or at twice it, is stopped and fails."`
 	Timeout   Duration          `json:"timeout,omitempty" yaml:"timeout,omitempty" doc:"The most time the Run may spend running, summed over its placements (time stopped, lost, or waiting for a host does not count). Past it, the Run is stopped and fails. Unset: no limit."`
 	Placement Placement         `json:"placement" yaml:"placement"`
 	Network   Network           `json:"network" yaml:"network"`
@@ -281,13 +281,34 @@ type Resources struct {
 	Memory Bytes   `json:"memory,omitempty" yaml:"memory,omitempty"`
 	Disk   Bytes   `json:"disk,omitempty" yaml:"disk,omitempty"`
 	Pids   int64   `json:"pids,omitempty" yaml:"pids,omitempty"`
+	// Unset takes luxd's default; Normalize stores it set, so an explicit 0
+	// survives a later change of that default.
+	DiskGrace OptionalDuration `json:"diskGrace,omitzero" yaml:"diskGrace,omitempty" doc:"How long the Run may stay over disk before it is stopped, 0 to 1h (e.g. 5m). The runner stops it once disk use has been over the limit on every sample for this long; a sample at or under the limit restarts the count. At twice the disk it is stopped at once, whatever the grace. 0: stopped on the first sample over. Unset: luxd's default (LUX_DEFAULT_DISK_GRACE, 0 unless changed), stored in the Run's spec at submit."`
 }
+
+// MaxDiskGrace bounds resources.diskGrace: a grace much longer than this is
+// no longer a brief overshoot, and the host's disk is shared.
+const MaxDiskGrace = time.Hour
 
 // Problems is what Normalize refuses in resources once defaults are filled;
 // a resume that changes them is held to the same rules.
 func (r Resources) Problems() []string {
+	var out []string
 	if r.CPUs < 0 || r.Memory < 0 || r.Disk < 0 || r.Pids < 0 {
-		return []string{"resources must not be negative"}
+		out = append(out, "resources must not be negative")
+	}
+	out = append(out, DiskGraceProblems("resources.diskGrace", r.DiskGrace.Duration.Duration)...)
+	return out
+}
+
+// DiskGraceProblems refuses a disk grace outside [0, MaxDiskGrace]; name
+// is how the caller's input calls it.
+func DiskGraceProblems(name string, d time.Duration) []string {
+	switch {
+	case d < 0:
+		return []string{name + " must not be negative"}
+	case d > MaxDiskGrace:
+		return []string{fmt.Sprintf("%s must be at most %s, got %s", name, MaxDiskGrace, d)}
 	}
 	return nil
 }
@@ -397,6 +418,39 @@ func (d *Duration) parse(s string) error {
 	return nil
 }
 
+// OptionalDuration is a Duration that tells absent from 0: Set is false
+// when the field was absent (or null), true for any value given, "0s"
+// included. It marshals as Duration, and is omitted while unset.
+type OptionalDuration struct {
+	Duration
+	Set bool
+}
+
+// SetDuration is an OptionalDuration holding d.
+func SetDuration(d time.Duration) OptionalDuration {
+	return OptionalDuration{Duration: Duration{d}, Set: true}
+}
+
+func (d OptionalDuration) IsZero() bool { return !d.Set }
+func (d *OptionalDuration) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		*d = OptionalDuration{}
+		return nil
+	}
+	if err := d.Duration.UnmarshalJSON(b); err != nil {
+		return err
+	}
+	d.Set = true
+	return nil
+}
+func (d *OptionalDuration) UnmarshalYAML(unmarshal func(any) error) error {
+	if err := d.Duration.UnmarshalYAML(unmarshal); err != nil {
+		return err
+	}
+	d.Set = true
+	return nil
+}
+
 // Bytes accepts "8Gi", "512Mi", "1G", or a plain number of bytes.
 type Bytes int64
 
@@ -449,12 +503,15 @@ const DefaultGrace = 30 * time.Second
 // Defaults are the resources a Run gets when its spec leaves them unset.
 // An operator sets them per luxd.
 type Defaults struct {
-	CPUs   float64
-	Memory Bytes
-	Disk   Bytes
-	Pids   int
+	CPUs      float64
+	Memory    Bytes
+	Disk      Bytes
+	Pids      int
+	DiskGrace time.Duration
 }
 
+// BuiltinDefaults' DiskGrace is 0: a Run is stopped on its first sample
+// over its disk.
 var BuiltinDefaults = Defaults{CPUs: 2, Memory: 8 << 30, Disk: 20 << 30, Pids: 4096}
 
 // Normalize validates the spec and fills defaults. It returns every problem
@@ -645,6 +702,9 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	}
 	if r.Disk == 0 {
 		r.Disk = d.Disk
+	}
+	if !r.DiskGrace.Set {
+		r.DiskGrace = SetDuration(d.DiskGrace)
 	}
 	errs = append(errs, r.Problems()...)
 	if s.Timeout.Duration < 0 {

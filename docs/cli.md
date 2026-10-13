@@ -72,7 +72,7 @@ JPEG, WebP or GIF). See [images](adapters.md#images).
 
 ```bash
 lux stop <run> [--wait]         # graceful; snapshot; resumable
-lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--remove-secret NAME] [--from-snapshot ID] [--cpus N] [--memory SIZE] [--disk SIZE] [--pool NAME|ID] [--dry-run] [--to HOST]
+lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--remove-secret NAME] [--from-snapshot ID] [--cpus N] [--memory SIZE] [--disk SIZE] [--disk-grace DURATION] [--pool NAME|ID] [--dry-run] [--to HOST]
            [--add-repo name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]]... [--request-id ID]
            [--sync repo=ref]... [--sync-mode move|fast-forward|fetch]  # move restored checkouts to ref before init
 lux sync <run> repo=ref... [--mode move|fast-forward|fetch] [--wait] [--request-id ID] [--credential repo=VALUE]   # a running Run's checkouts
@@ -100,10 +100,13 @@ lux resume run_x --secret GIT_TOKEN=… --remove-secret LLM_PROXY_KEY
 apply, larger or smaller; a smaller disk applies only if the Run's saved
 state fits it with headroom. When it does not, the Run keeps its disk,
 resumes anyway, and lux prints `disk kept: <why>` on stderr.
+`--disk-grace` sets how long it may stay over its disk before it is
+stopped from now on (`0s` to `1h`; `0s` stops it on the first sample over).
 
 ```bash
 lux resume run_x --cpus 4 --memory 2Gi    # more CPUs, less memory
 lux resume run_x --disk 10Gi              # smaller, if its state fits
+lux resume run_x --disk-grace 5m          # tolerate 5 minutes over its disk
 ```
 
 `--pool` moves the Run to another pool from this resume on

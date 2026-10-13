@@ -889,7 +889,7 @@ func parseAddRepo(v string) (spec.Repository, error) {
 }
 
 func (a *app) resumeCmd() *cobra.Command {
-	var input, secretsFrom, fromSnapshot, to, disk, memory, reqID, syncMode, pool string
+	var input, secretsFrom, fromSnapshot, to, disk, diskGrace, memory, reqID, syncMode, pool string
 	var cpus float64
 	var secretArgs, removeSecrets, addRepos, syncs []string
 	var follow, wait, dryRun bool
@@ -929,6 +929,8 @@ event; one that fails leaves its checkout as it was.
 memory apply, larger or smaller. A smaller disk applies only if the Run's
 saved state fits it with headroom; otherwise the Run keeps its disk, still
 resumes, and lux says why on stderr ("disk kept: ...").
+--disk-grace sets how long it may stay over its disk before it is stopped
+from now on (0s to 1h; 0s stops it on the first sample over).
 
 --pool moves the Run to another pool (its name, the tenant's pool before the
 platform's, or its id) from this resume on; its saved state follows, as on
@@ -1004,6 +1006,9 @@ Run is checked as if it were stopped ("state unchecked" on stderr).`,
 			res := map[string]any{}
 			if disk != "" {
 				res["disk"] = disk
+			}
+			if cmd.Flags().Changed("disk-grace") {
+				res["diskGrace"] = diskGrace
 			}
 			if memory != "" {
 				res["memory"] = memory
@@ -1091,6 +1096,7 @@ Run is checked as if it were stopped ("state unchecked" on stderr).`,
 	cmd.Flags().StringVar(&fromSnapshot, "from-snapshot", "", "resume from an older snapshot, while it is available (lux snapshots)")
 	cmd.Flags().StringVar(&to, "to", "", "operators: resume on this host (id or name)")
 	cmd.Flags().StringVar(&disk, "disk", "", "a new disk limit from now on (e.g. 40Gi); a smaller one only if its saved state fits with headroom")
+	cmd.Flags().StringVar(&diskGrace, "disk-grace", "", "how long it may stay over its disk before it is stopped, from now on (e.g. 5m; 0s: at once)")
 	cmd.Flags().StringVar(&memory, "memory", "", "new memory from now on, larger or smaller (e.g. 4Gi)")
 	cmd.Flags().Float64Var(&cpus, "cpus", 0, "new CPUs from now on, larger or smaller (e.g. 0.5)")
 	cmd.Flags().BoolVar(&follow, "follow", false, "stream output until it ends")

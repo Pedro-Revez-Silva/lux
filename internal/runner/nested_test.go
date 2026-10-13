@@ -99,9 +99,40 @@ func TestDirSizeCountsHardlinksOnce(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(d, "c"), make([]byte, 10), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := dirSize(d); got != 1010 {
-		t.Errorf("dirSize = %d, want 1010", got)
+	if got, err := dirSize(d); got != 1010 || err != nil {
+		t.Errorf("dirSize = %d, %v, want 1010", got, err)
 	}
+}
+
+// dirSize's error is its root's: a missing root is an error, an unreadable
+// directory under it is skipped.
+func TestDirSizeErrorIsTheRoots(t *testing.T) {
+	if _, err := dirSize(filepath.Join(t.TempDir(), "gone")); err == nil {
+		t.Error("dirSize of a missing root: nil error")
+	}
+	t.Run("an unreadable subdirectory is skipped", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads a mode-0 directory anyway")
+		}
+		d := t.TempDir()
+		sub := filepath.Join(d, "sub")
+		if err := os.Mkdir(sub, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sub, "hidden"), make([]byte, 100), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "a"), make([]byte, 10), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(sub, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(sub, 0o700) }) // so TempDir can remove it
+		if got, err := dirSize(d); got != 10 || err != nil {
+			t.Errorf("dirSize = %d, %v, want 10, nil", got, err)
+		}
+	})
 }
 
 func TestAppArmorRestrictsUserns(t *testing.T) {

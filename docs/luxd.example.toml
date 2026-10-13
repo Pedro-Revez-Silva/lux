@@ -37,6 +37,7 @@ cpus = 2                           # LUX_DEFAULT_CPUS
 memory = "8Gi"                     # LUX_DEFAULT_MEMORY
 disk = "20Gi"                      # LUX_DEFAULT_DISK: writable layer plus state volumes
 pids = 4096                        # LUX_DEFAULT_PIDS
+disk_grace = "0s"                  # LUX_DEFAULT_DISK_GRACE: how long a Run may stay over its disk (0 to 1h)
 
 [history]
 sample_every = "10s"               # LUX_SAMPLE_EVERY

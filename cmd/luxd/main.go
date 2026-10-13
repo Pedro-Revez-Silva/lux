@@ -37,7 +37,6 @@ import (
 	"github.com/marcioapm/lux/internal/ec2"
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/server"
-	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 	"github.com/marcioapm/lux/internal/version"
 )
@@ -189,7 +188,7 @@ func serve(ctx context.Context, c config, plan servePlan) error {
 		LostGrace:            c.LostGrace.Duration,
 		ListingLag:           c.ListingLag.Duration,
 		OutdatedDrainPercent: c.OutdatedDrainPercent,
-		Defaults:             spec.Defaults{CPUs: c.Defaults.CPUs, Memory: c.Defaults.Memory.Bytes, Disk: c.Defaults.Disk.Bytes, Pids: c.Defaults.Pids},
+		Defaults:             c.specDefaults(),
 		SampleEvery:          c.History.SampleEvery.Duration,
 		HistoryRaw:           c.History.Raw.Duration,
 		HistoryMinutes:       c.History.Minutes.Duration,

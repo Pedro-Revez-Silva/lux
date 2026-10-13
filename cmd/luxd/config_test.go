@@ -101,6 +101,72 @@ default_tenant = "absmartly"
 	}
 }
 
+// defaults.disk_grace: 0 unless set, from the file or LUX_DEFAULT_DISK_GRACE
+// (which wins), handed to the server as spec.Defaults.DiskGrace; a negative
+// value or one over spec.MaxDiskGrace is refused, naming both spellings.
+func TestDefaultDiskGrace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "luxd.toml")
+	write := func(s string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("LUX_DEFAULT_DISK_GRACE", "")
+	os.Unsetenv("LUX_DEFAULT_DISK_GRACE")
+
+	write("")
+	c, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := c.specDefaults().DiskGrace; g != 0 {
+		t.Errorf("unset: %s, want 0", g)
+	}
+
+	write("[defaults]\ndisk_grace = \"5m\"\n")
+	if c, err = loadConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	if d := c.specDefaults(); d.DiskGrace != 5*time.Minute || d.Disk != spec.BuiltinDefaults.Disk {
+		t.Errorf("from the file: %+v, want diskGrace 5m and the builtin disk", d)
+	}
+	t.Setenv("LUX_DEFAULT_DISK_GRACE", "90s")
+	if c, err = loadConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	if g := c.specDefaults().DiskGrace; g != 90*time.Second {
+		t.Errorf("env over file: %s, want 1m30s", g)
+	}
+	os.Unsetenv("LUX_DEFAULT_DISK_GRACE")
+
+	for _, bad := range []struct {
+		file, env, want string
+		whole           bool // want is the whole error, not a part of it
+	}{
+		{"[defaults]\ndisk_grace = \"-1s\"", "", "defaults.disk_grace (LUX_DEFAULT_DISK_GRACE) must not be negative", false},
+		{"[defaults]\ndisk_grace = \"2h\"", "", "defaults.disk_grace (LUX_DEFAULT_DISK_GRACE) must be at most 1h0m0s, got 2h0m0s", false},
+		{"", "LUX_DEFAULT_DISK_GRACE=61m", "defaults.disk_grace (LUX_DEFAULT_DISK_GRACE) must be at most 1h0m0s", false},
+		{"", "LUX_DEFAULT_DISK_GRACE=soon", `LUX_DEFAULT_DISK_GRACE: "soon": time: invalid duration "soon"`, true},
+	} {
+		os.Unsetenv("LUX_DEFAULT_DISK_GRACE")
+		write(bad.file)
+		if bad.env != "" {
+			k, v, _ := strings.Cut(bad.env, "=")
+			t.Setenv(k, v)
+		}
+		_, err := loadConfig(path)
+		if err == nil || !strings.Contains(err.Error(), bad.want) || bad.whole && err.Error() != bad.want {
+			t.Errorf("%q %q: error %v, want %q", bad.file, bad.env, err, bad.want)
+		}
+	}
+	os.Unsetenv("LUX_DEFAULT_DISK_GRACE")
+	write("[defaults]\ndisk_grace = \"1h\"\n")
+	if _, err := loadConfig(path); err != nil {
+		t.Errorf("the maximum: %v", err)
+	}
+}
+
 // The host reconciler's rendered TOML must decode with luxd's strict parser
 // and pass the same validation as a config loaded at startup.
 func TestHostRenderedConfig(t *testing.T) {

@@ -19,6 +19,8 @@ export interface SpecResources {
   memory?: number;
   disk?: number;
   pids?: number;
+  /** A Go duration ("5m0s"): how long it may stay over disk. */
+  diskGrace?: string;
 }
 
 export interface RunSpec {

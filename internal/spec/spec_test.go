@@ -771,3 +771,81 @@ func TestBeforeStopTimeoutAgainstGrace(t *testing.T) {
 		t.Fatalf("a negative grace: %v", err)
 	}
 }
+
+// resources.diskGrace: absent takes the default and is stored set, so an
+// explicit 0 is told from absent and survives another default; negative or
+// over MaxDiskGrace is refused; JSON and YAML both say "unset" by leaving
+// it out.
+func TestDiskGrace(t *testing.T) {
+	d := BuiltinDefaults
+	d.DiskGrace = 5 * time.Minute
+	base := func(res string) RunSpec {
+		var s RunSpec
+		doc := `{"image":{"ref":"x"},"workload":{"command":["true"]},"resources":` + res + `}`
+		if err := json.Unmarshal([]byte(doc), &s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	for _, c := range []struct {
+		name, res string
+		defaults  Defaults
+		want      time.Duration
+		problem   string
+	}{
+		{"absent takes the default", `{}`, d, 5 * time.Minute, ""},
+		{"null takes the default", `{"diskGrace":null}`, d, 5 * time.Minute, ""},
+		{"absent with the builtin default", `{}`, BuiltinDefaults, 0, ""},
+		{"explicit 0 over a non-zero default", `{"diskGrace":"0s"}`, d, 0, ""},
+		{"explicit 0 as a number", `{"diskGrace":0}`, d, 0, ""},
+		{"explicit value", `{"diskGrace":"90s"}`, BuiltinDefaults, 90 * time.Second, ""},
+		{"seconds", `{"diskGrace":120}`, BuiltinDefaults, 2 * time.Minute, ""},
+		{"the maximum", `{"diskGrace":"1h"}`, BuiltinDefaults, time.Hour, ""},
+		{"negative", `{"diskGrace":"-1s"}`, d, 0, "resources.diskGrace must not be negative"},
+		{"too large", `{"diskGrace":"61m"}`, d, 0, "resources.diskGrace must be at most 1h0m0s, got 1h1m0s"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := base(c.res)
+			err := s.Normalize(c.defaults)
+			if c.problem != "" {
+				var ve *ValidationError
+				if !errors.As(err, &ve) || !slices.Equal(ve.Problems, []string{c.problem}) {
+					t.Fatalf("%v, want only %q", err, c.problem)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			g := s.Resources.DiskGrace
+			if !g.Set || g.Duration.Duration != c.want {
+				t.Fatalf("diskGrace %+v, want set to %s", g, c.want)
+			}
+			// Stored and normalized again under another default: kept.
+			b, _ := json.Marshal(s)
+			var again RunSpec
+			if err := json.Unmarshal(b, &again); err != nil {
+				t.Fatal(err)
+			}
+			if err := again.Normalize(Defaults{CPUs: 1, Memory: 1, Disk: 1, Pids: 1, DiskGrace: 7 * time.Minute}); err != nil {
+				t.Fatal(err)
+			}
+			if again.Resources.DiskGrace != g {
+				t.Errorf("after a round trip under another default: %+v, want %+v", again.Resources.DiskGrace, g)
+			}
+		})
+	}
+
+	var unset Resources
+	b, _ := json.Marshal(unset)
+	if strings.Contains(string(b), "diskGrace") {
+		t.Errorf("unset diskGrace marshalled: %s", b)
+	}
+	var y RunSpec
+	if err := yaml.Unmarshal([]byte("image: {ref: x}\nworkload: {command: [\"true\"]}\nresources: {diskGrace: 0s}\n"), &y); err != nil {
+		t.Fatal(err)
+	}
+	if err := y.Normalize(d); err != nil || !y.Resources.DiskGrace.Set || y.Resources.DiskGrace.Duration.Duration != 0 {
+		t.Errorf("YAML explicit 0 over a 5m default: %+v %v", y.Resources.DiskGrace, err)
+	}
+}

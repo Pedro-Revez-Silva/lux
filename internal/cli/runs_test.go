@@ -105,6 +105,43 @@ func TestResumeWaitKeepsResize(t *testing.T) {
 	}
 }
 
+// resume sends --disk-grace as resources.diskGrace, "0s" included; without
+// the flag it sends none.
+func TestResumeDiskGraceFlag(t *testing.T) {
+	sent := func(args ...string) map[string]any {
+		t.Helper()
+		var body map[string]any
+		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == "GET" && r.URL.Path == "/v1/runs/run_1":
+				_, _ = w.Write([]byte(`{"id":"run_1","state":"stopped"}`))
+			case r.Method == "POST" && r.URL.Path == "/v1/runs/run_1/resume":
+				b, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(b, &body)
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = w.Write([]byte(`{"id":"run_1","state":"resuming"}`))
+			default:
+				http.NotFound(w, r)
+			}
+		})
+		if _, err := runCLI(t, h, append([]string{"resume", "run_1"}, args...)...); err != nil {
+			t.Fatal(err)
+		}
+		res, _ := body["resources"].(map[string]any)
+		return res
+	}
+	if res := sent("--disk-grace", "5m"); !reflect.DeepEqual(res, map[string]any{"diskGrace": "5m"}) {
+		t.Errorf("--disk-grace 5m: resources %v", res)
+	}
+	if res := sent("--disk-grace", "0s"); !reflect.DeepEqual(res, map[string]any{"diskGrace": "0s"}) {
+		t.Errorf("--disk-grace 0s: resources %v", res)
+	}
+	if res := sent(); res != nil {
+		t.Errorf("no flag: resources %v, want none", res)
+	}
+}
+
 // resume sends --secret for a name the Run lacks (a declaration), drops a
 // --remove-secret name from the secrets it looks up, and sends it in
 // removeSecrets.

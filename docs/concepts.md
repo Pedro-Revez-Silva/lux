@@ -182,8 +182,8 @@ on every start, so it must be idempotent.
 ### Resizing on resume
 
 A resume can change what a stopped, lost, failed or succeeded Run gets from then on
-(`resources: {cpus, memory, disk}` in the request; `lux resume --cpus
---memory --disk`). A running Run's limits never change: stop it first.
+(`resources: {cpus, memory, disk, diskGrace}` in the request; `lux resume --cpus
+--memory --disk --disk-grace`). A running Run's limits never change: stop it first.
 What a resume applies is written into the Run's spec, so `GET
 /v1/runs/{id}` shows it, the scheduler reserves it, and every later
 placement gets it.
@@ -201,7 +201,12 @@ placement gets it.
   measurement. Less than that floor, or with no final measurement, the
   Run keeps its disk and resumes anyway, cpus and memory still applied: a
   smaller limit it is already over would only stop it again
-  ([disk is measured](runspec.md#rules)).
+  ([disk is measured](runspec.md#rules)), after its `diskGrace` or at once
+  at twice the limit.
+- **diskGrace** (how long the Run may stay over its disk) applies as asked,
+  `0` to `1h`; outside that is 422 `invalid_spec`. Absent leaves it as it
+  is. Whatever it is, the resumed placement starts its grace from zero: time
+  over the limit before the stop does not carry over.
 - The answer's `resize` and the `resume.requested` event's `resources`
   say what was asked (`requested`), what the Run has now (`applied`),
   and, when a disk was kept, `disk: {requested, kept, reason,
@@ -214,13 +219,13 @@ placement gets it.
 - A resume of a Run already resuming is a retry of the resume it waits
   on, and its `resources` are compared with what that resume asked for
   (its `requested`, not what was applied):
-  - the same `cpus`, `memory` and `disk` (each present or absent alike):
+  - the same `cpus`, `memory`, `disk` and `diskGrace` (each present or absent alike):
     202, with that first resume's `resize`, a disk it kept included;
   - no `resources`, or all of them absent or `disk` 0: 202 without
     `resize`, whatever the first resume asked;
   - anything else, including a request where the first had none: 409
     `not_resumable`. Invalid values (cpus or memory 0 or less, a
-    negative disk) are 422 `invalid_spec` first, as on any resume.
+    negative disk, a diskGrace outside 0 to 1h) are 422 `invalid_spec` first, as on any resume.
   - A Run lux resumed itself, after a `drain`, `preempt` or `migrate`
     move, counts as a resume that asked for no resources, even when an
     earlier resume of yours resized it. While it is resuming, a resume

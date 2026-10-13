@@ -463,8 +463,9 @@ type ArtifactPublished struct {
 	Artifact
 }
 
-// EvDiskExceeded: a placement wrote more than its resources.disk (its
-// writable layer and state volumes). luxd stops it.
+// EvDiskExceeded: a placement was over its resources.disk (its writable
+// layer and state volumes) on every sample for its resources.diskGrace, or
+// on one sample at disklimit.CeilingFactor times the disk. luxd stops it.
 const EvDiskExceeded = "disk.exceeded"
 
 // EvGitClone is a repository the runner cloned, or failed to:

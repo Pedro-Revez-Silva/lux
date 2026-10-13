@@ -2042,6 +2042,13 @@ components:
             - examples:
                 - 8Gi
               type: string
+        diskGrace:
+          description: "How long the Run may stay over disk before it is stopped, 0 to 1h (e.g. 5m). The runner stops it once disk use has been over the limit on every sample for this long; a sample at or under the limit restarts the count. At twice the disk it is stopped at once, whatever the grace. 0: stopped on the first sample over. Unset: luxd's default (LUX_DEFAULT_DISK_GRACE, 0 unless changed), stored in the Run's spec at submit."
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
         memory:
           description: "A number of bytes, or a size: \"8Gi\", \"512Mi\", \"1G\". Responses carry the number."
           oneOf:
@@ -2340,6 +2347,13 @@ components:
             - examples:
                 - 8Gi
               type: string
+        diskGrace:
+          description: "A new disk grace (resources.diskGrace): how long the Run may stay over its disk before it is stopped, 0 to 1h. Absent: unchanged; 0: stopped on the first sample over; negative or over 1h: 422 invalid_spec. Every placement starts its grace from zero."
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
         memory:
           description: "A new memory size, larger or smaller, in its host's terms as at submit. Absent: unchanged; 0 or less: 422 invalid_spec."
           oneOf:
@@ -2815,7 +2829,7 @@ components:
           $ref: "#/components/schemas/Placement"
         resources:
           $ref: "#/components/schemas/Resources"
-          description: "What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, disk 20Gi, pids 4096, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_DISK, LUX_DEFAULT_PIDS). disk bounds the writable layer plus state volumes: a Run over it is stopped and fails."
+          description: "What the Run gets, and the scheduler reserves on its host. Unset fields take luxd's defaults: cpus 2, memory 8Gi, disk 20Gi, pids 4096, diskGrace 0, unless its operator changed them (LUX_DEFAULT_CPUS, LUX_DEFAULT_MEMORY, LUX_DEFAULT_DISK, LUX_DEFAULT_PIDS, LUX_DEFAULT_DISK_GRACE). disk bounds the writable layer plus state volumes: a Run over it for longer than diskGrace, or at twice it, is stopped and fails."
         resumePolicy:
           description: "What lux does when it moves the Run (a drain, a spot preemption, a migration). auto (the default): resumed elsewhere, restored from its snapshot. restart: started again from scratch elsewhere (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host. manual: ends failed, and an operator's migrate is refused (409 not_movable); a person may resume it. never: it can never be resumed, so every end that would leave it resumable (a move, a requested stop, success, failure) ends it terminated, its outcome in stateReason (e.g. succeeded; resumePolicy never), its state volumes are not snapshotted on exit, and an operator's migrate is refused; a requested resume of one still resting from an older luxd is refused (409 not_resumable); an assignment no runner started may still be placed again. For one-shot work such as a CI job holding a single-use token."
           type: string

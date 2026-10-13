@@ -66,10 +66,11 @@ type config struct {
 	// pool, as a percentage of its live hosts (at least 1). Default 10.
 	OutdatedDrainPercent int `toml:"outdated_drain_percent" env:"LUX_OUTDATED_DRAIN_PERCENT"`
 	Defaults             struct {
-		CPUs   float64 `toml:"cpus" env:"LUX_DEFAULT_CPUS"`
-		Memory size    `toml:"memory" env:"LUX_DEFAULT_MEMORY"`
-		Disk   size    `toml:"disk" env:"LUX_DEFAULT_DISK"`
-		Pids   int     `toml:"pids" env:"LUX_DEFAULT_PIDS"`
+		CPUs      float64  `toml:"cpus" env:"LUX_DEFAULT_CPUS"`
+		Memory    size     `toml:"memory" env:"LUX_DEFAULT_MEMORY"`
+		Disk      size     `toml:"disk" env:"LUX_DEFAULT_DISK"`
+		Pids      int      `toml:"pids" env:"LUX_DEFAULT_PIDS"`
+		DiskGrace duration `toml:"disk_grace" env:"LUX_DEFAULT_DISK_GRACE"`
 	} `toml:"defaults"`
 	History struct {
 		SampleEvery duration `toml:"sample_every" env:"LUX_SAMPLE_EVERY"`
@@ -191,6 +192,12 @@ func (d *duration) UnmarshalJSON(b []byte) error {
 // size is a number of bytes written as a string: a size ("8Gi") or digits.
 type size struct{ spec.Bytes }
 
+// specDefaults is [defaults] as luxd fills them into a Run's spec.
+func (c config) specDefaults() spec.Defaults {
+	d := c.Defaults
+	return spec.Defaults{CPUs: d.CPUs, Memory: d.Memory.Bytes, Disk: d.Disk.Bytes, Pids: d.Pids, DiskGrace: d.DiskGrace.Duration}
+}
+
 func (s *size) UnmarshalText(b []byte) error {
 	return s.UnmarshalJSON(strconv.AppendQuote(nil, string(b)))
 }
@@ -241,6 +248,7 @@ func defaultConfig() config {
 	c.Market.Every.Duration = server.DefaultMarketEvery
 	d := spec.BuiltinDefaults
 	c.Defaults.CPUs, c.Defaults.Memory.Bytes, c.Defaults.Disk.Bytes, c.Defaults.Pids = d.CPUs, d.Memory, d.Disk, d.Pids
+	c.Defaults.DiskGrace.Duration = d.DiskGrace
 	c.History.SampleEvery.Duration = 10 * time.Second
 	c.History.Raw.Duration = server.DefaultHistoryRaw
 	c.History.Minutes.Duration = server.DefaultHistoryMinutes
@@ -460,6 +468,7 @@ func (c config) check() error {
 	if c.Defaults.Pids <= 0 {
 		problems = append(problems, "defaults.pids (LUX_DEFAULT_PIDS) must be a positive number")
 	}
+	problems = append(problems, spec.DiskGraceProblems("defaults.disk_grace (LUX_DEFAULT_DISK_GRACE)", c.Defaults.DiskGrace.Duration)...)
 	for _, p := range c.History.DiskPaths {
 		if !filepath.IsAbs(p) {
 			problems = append(problems, fmt.Sprintf("history.disk_paths (LUX_HISTORY_DISK_PATHS) %q: want an absolute path", p))

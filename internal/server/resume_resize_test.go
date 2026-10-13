@@ -21,9 +21,10 @@ import (
 // resizeBase is what the resize tests submit; submit adds the default pids.
 var resizeBase = spec.Resources{CPUs: 2, Memory: spec.Bytes(4 * gib), Disk: spec.Bytes(20 * gib)}
 
-// withPids is r as submit stores it: with the default pids.
+// withPids is r as submit stores it: with the default pids and diskGrace.
 func withPids(r spec.Resources) spec.Resources {
 	r.Pids = int64(spec.BuiltinDefaults.Pids)
+	r.DiskGrace = spec.SetDuration(spec.BuiltinDefaults.DiskGrace)
 	return r
 }
 
@@ -135,7 +136,7 @@ func TestResumeResizesCPUsAndMemory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := spec.Resources{CPUs: c.cpus, Memory: spec.Bytes(c.memory), Disk: spec.Bytes(20 * gib), Pids: int64(spec.BuiltinDefaults.Pids)}
+			want := spec.Resources{CPUs: c.cpus, Memory: spec.Bytes(c.memory), Disk: spec.Bytes(20 * gib), Pids: int64(spec.BuiltinDefaults.Pids), DiskGrace: spec.SetDuration(0)}
 			if got := storedResources(t, s, id); got != want {
 				t.Errorf("stored %+v, want %+v", got, want)
 			}
@@ -296,7 +297,7 @@ func TestResumeResizeOfANonResumableRun(t *testing.T) {
 			_, err := resumeWith(s, id, other)
 			refused(t, err, http.StatusConflict, "not_resumable", fmt.Sprintf("resume with %+v while resuming", other))
 		}
-		want := spec.Resources{CPUs: 1, Memory: spec.Bytes(gib), Disk: spec.Bytes(20 * gib), Pids: int64(spec.BuiltinDefaults.Pids)}
+		want := spec.Resources{CPUs: 1, Memory: spec.Bytes(gib), Disk: spec.Bytes(20 * gib), Pids: int64(spec.BuiltinDefaults.Pids), DiskGrace: spec.SetDuration(0)}
 		if got := storedResources(t, s, id); got != want {
 			t.Errorf("spec %+v, want %+v", got, want)
 		}
@@ -455,7 +456,7 @@ func TestResumeDiskShrinkNeedsTheFinalMeasurement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := spec.Resources{CPUs: 1, Memory: spec.Bytes(gib), Disk: spec.Bytes(c.applied), Pids: int64(spec.BuiltinDefaults.Pids)}
+			want := spec.Resources{CPUs: 1, Memory: spec.Bytes(gib), Disk: spec.Bytes(c.applied), Pids: int64(spec.BuiltinDefaults.Pids), DiskGrace: spec.SetDuration(0)}
 			if got := storedResources(t, s, id); got != want || out.Body.State != StateResuming {
 				t.Errorf("%s with %+v, want resuming with %+v", out.Body.State, got, want)
 			}
@@ -516,7 +517,7 @@ func TestResumeRetryWhileResuming(t *testing.T) {
 					t.Errorf("retry's resize %+v, want none", got)
 				}
 			}
-			want := spec.Resources{CPUs: 1, Memory: spec.Bytes(gib), Disk: spec.Bytes(20 * gib), Pids: int64(spec.BuiltinDefaults.Pids)}
+			want := spec.Resources{CPUs: 1, Memory: spec.Bytes(gib), Disk: spec.Bytes(20 * gib), Pids: int64(spec.BuiltinDefaults.Pids), DiskGrace: spec.SetDuration(0)}
 			var events int
 			systemScan(t, s, `SELECT count(*) FROM run_events WHERE run_id = $1 AND type = 'resume.requested'`, []any{id}, &events)
 			if got := storedResources(t, s, id); got != want || events != 1 {
@@ -580,7 +581,7 @@ func TestResumeRetryComparesTheCurrentResume(t *testing.T) {
 // Through the HTTP API: request decoding (bytes as numbers or strings,
 // absent fields), validation's 422 and the answer's JSON, then GET.
 func TestResumeResizeHTTP(t *testing.T) {
-	before := map[string]any{"cpus": 2.0, "memory": float64(4 * gib), "disk": float64(20 * gib), "pids": float64(spec.BuiltinDefaults.Pids)}
+	before := map[string]any{"cpus": 2.0, "memory": float64(4 * gib), "disk": float64(20 * gib), "pids": float64(spec.BuiltinDefaults.Pids), "diskGrace": "0s"}
 	with := func(kv ...any) map[string]any {
 		m := map[string]any{}
 		for k, v := range before {
