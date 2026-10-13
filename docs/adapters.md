@@ -370,8 +370,9 @@ gets its own `opencode.task`.
 - **Permissions.** OpenCode forwards a permission request over ACP only
   for a session ACP opened: a child's request would wait for an answer
   forever, and the `task` call that started it with it. lux answers it
-  itself, allowing it once (`POST /session/{id}/permissions/{permissionID}`
-  `{"response": "once"}` on OpenCode's server), as it allows the Run's
+  itself, allowing it once (`POST /permission/{permissionID}/reply`
+  `{"reply": "once"}` on OpenCode's server, as OpenCode's own TUI does),
+  within 10 s, as it allows the Run's
   own session's over ACP ([Unattended permissions](#unattended-permissions)).
   It then writes `opencode.permission` with `answered: allow`, or `none`
   and the `error` if OpenCode refused the answer, and a `lux.warning`
@@ -406,6 +407,9 @@ Nobody is watching a Run, so permission requests are answered by policy:
 
 - **ACP:** `session/request_permission` is answered with the first
   `allow_once` option (or else `allow_always`).
+- **OpenCode subagents:** a child session's request, which OpenCode does
+  not forward over ACP, is allowed once over OpenCode's server (see
+  [OpenCode subagents](#opencode-subagents)).
 - **Codex:** approval requests are approved.
 - **Claude Code:** pass the permission mode in `command`, for example
   `["claude", "--permission-mode", "bypassPermissions"]`.

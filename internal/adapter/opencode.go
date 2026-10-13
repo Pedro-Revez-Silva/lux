@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	mrand "math/rand/v2"
 	"net"
@@ -513,6 +514,37 @@ func (b *opencodeBus) promptAsync(ctx context.Context, session, msgID string, in
 	resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("%w: prompt_async: %s", errNotSent, resp.Status)
+	}
+	return nil
+}
+
+// allowPermission answers a pending permission request, of any session,
+// allowing it once: POST /permission/{id}/reply {"reply":"once"}, which
+// answers true (opencode 1.18.21, its OpenAPI's permission.reply, as its
+// own TUI and `opencode run` answer). Anything but a 2xx whose body is
+// true is an error: OpenCode serves its web app, 200 and HTML, on a path
+// it does not route.
+func (b *opencodeBus) allowPermission(ctx context.Context, id string) error {
+	if b.observer {
+		return errors.New("lux sends nothing but reads to a server it did not start")
+	}
+	path := "/permission/" + url.PathEscape(id) + "/reply"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.url(path), strings.NewReader(`{"reply":"once"}`))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-opencode-directory", b.dir)
+	b.authorize(req)
+	resp, err := b.hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	var ok bool
+	if resp.StatusCode/100 != 2 || json.Unmarshal(body, &ok) != nil || !ok {
+		return fmt.Errorf("POST %s: %s %s", path, resp.Status, bytes.TrimSpace(body[:min(len(body), 200)]))
 	}
 	return nil
 }

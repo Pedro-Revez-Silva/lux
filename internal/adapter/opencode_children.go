@@ -1,8 +1,12 @@
 package adapter
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -44,8 +48,9 @@ type ocChildren struct {
 	// texts: the text of each text part of a child's message not yet
 	// written, by message id, then part id, in the order they came.
 	texts map[string]*msgText
-	// messages written, by id.
-	messages map[string]bool
+	// messages and permissions written, by id.
+	messages    map[string]bool
+	permissions map[string]bool
 }
 
 type msgText struct {
@@ -55,11 +60,15 @@ type msgText struct {
 
 func newOcChildren() *ocChildren {
 	return &ocChildren{parent: map[string]string{}, announced: map[string]bool{}, tasks: map[string]bool{},
-		parts: map[string]bool{}, texts: map[string]*msgText{}, messages: map[string]bool{}}
+		parts: map[string]bool{}, texts: map[string]*msgText{}, messages: map[string]bool{}, permissions: map[string]bool{}}
 }
 
-// maxSessionDepth bounds the walk up a session's parents.
-const maxSessionDepth = 64
+const (
+	// maxSessionDepth bounds the walk up a session's parents.
+	maxSessionDepth = 64
+	// childPermissionTimeout bounds answering a child's permission request.
+	childPermissionTimeout = 10 * time.Second
+)
 
 // ofRun reports whether session is the Run's or descends from it. Under
 // k.mu.
@@ -99,6 +108,8 @@ func (a *ACP) childEvent(ev busEvent, run string) {
 		}
 	case "message.updated":
 		a.childMessage(ev, run)
+	case "permission.asked":
+		a.childPermission(ev, run)
 	}
 }
 
@@ -234,4 +245,46 @@ func (a *ACP) childMessage(ev busEvent, run string) {
 			Reasoning: info.Tokens.Reasoning, CacheRead: info.Tokens.Cache.Read, CacheWrite: info.Tokens.Cache.Write}}
 	rec.Text, rec.Truncated = a.sink.Clip(strings.Join(text, "\n"), proto.MaxOpenCodeText)
 	a.sink.Event(proto.EvOpenCodeMessage, rec)
+}
+
+// childPermission records a permission request of the Run's tree, once
+// per id. The Run's own session's is answered over ACP (handleRequest):
+// recorded as allowed, nothing sent. A child's, which nobody else
+// answers, lux allows once over OpenCode's server, off the bus goroutine
+// and within a.permissionTimeout, then records it and warns.
+func (a *ACP) childPermission(ev busEvent, run string) {
+	k, p := a.kids, ev.Properties
+	k.mu.Lock()
+	if p.ID == "" || k.permissions[p.ID] || !k.ofRun(p.SessionID, run) {
+		k.mu.Unlock()
+		return
+	}
+	k.permissions[p.ID] = true
+	k.mu.Unlock()
+	rec := proto.OpenCodePermission{SessionID: p.SessionID, PermissionID: p.ID, Permission: p.Permission,
+		Patterns: p.Patterns, CallID: p.Tool.CallID, Answered: proto.PermissionAllowed}
+	if rec.Patterns == nil {
+		rec.Patterns = []string{}
+	}
+	if p.SessionID == run {
+		a.sink.Event(proto.EvOpenCodePermission, rec)
+		return
+	}
+	answer := func(err error) {
+		msg := fmt.Sprintf("opencode: a subagent session %s asked for %s on %s; lux allowed it", rec.SessionID, rec.Permission, strings.Join(rec.Patterns, ", "))
+		if err != nil {
+			rec.Answered, rec.Error = proto.PermissionNone, err.Error()
+			msg = fmt.Sprintf("opencode: a subagent session %s asked for %s on %s; lux could not answer it, and its task call may wait for it: %v",
+				rec.SessionID, rec.Permission, strings.Join(rec.Patterns, ", "), err)
+		}
+		a.sink.Event(proto.EvOpenCodePermission, rec)
+		a.sink.Event(proto.EvWarning, map[string]any{"message": msg})
+	}
+	if !a.spawn(func() {
+		ctx, cancel := context.WithTimeout(a.runCtx(), a.permissionTimeout)
+		defer cancel()
+		answer(a.bus.allowPermission(ctx, rec.PermissionID))
+	}) {
+		answer(errors.New("the Run ended before lux could answer it"))
+	}
 }

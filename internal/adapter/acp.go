@@ -149,8 +149,10 @@ type ACP struct {
 	compactionMu sync.Mutex
 	lastSummary  string
 	// kids: the Run's OpenCode child sessions, relayed from the bus
-	// (opencode_children.go).
-	kids *ocChildren
+	// (opencode_children.go); permissionTimeout bounds answering one's
+	// permission request.
+	kids              *ocChildren
+	permissionTimeout time.Duration
 }
 
 func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
@@ -159,7 +161,7 @@ func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
 func NewOpenCode() *ACP {
 	return &ACP{ready: make(chan struct{}), opencode: true, steerKick: make(chan struct{}, 1),
 		suspect: map[string]time.Time{}, resent: map[string]bool{}, admittedLate: map[string]bool{}, settleEvery: time.Second, clock: wallClock{},
-		compactionTimeout: 10 * time.Second, kids: newOcChildren()}
+		compactionTimeout: 10 * time.Second, kids: newOcChildren(), permissionTimeout: childPermissionTimeout}
 }
 
 // settleClock is the time settle reads and schedules its next look by.
