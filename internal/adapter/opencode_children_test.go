@@ -351,19 +351,14 @@ func TestOpenCodeChildPartClippedAndRedacted(t *testing.T) {
 func TestOpenCodeChildMessageText(t *testing.T) {
 	a, sink := childRun(t, ocSession, 0, nil)
 	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
-	text := func(id, s string) string {
-		b, _ := json.Marshal(map[string]any{"type": "message.part.updated", "properties": map[string]any{"sessionID": "ses_kid",
-			"part": map[string]any{"id": id, "type": "text", "sessionID": "ses_kid", "messageID": "msg_1", "text": s}}})
-		return string(b)
-	}
 	done := `{"type":"message.updated","properties":{"sessionID":"ses_kid","info":{"id":"msg_1","sessionID":"ses_kid","role":"assistant","cost":0.25,"tokens":{"input":1,"output":2,"reasoning":3,"cache":{"read":4,"write":5}},"time":{"created":1,"completed":9}}}}`
-	onBus(t, a, text("prt_a", ""))
-	onBus(t, a, text("prt_b", "second"))
-	onBus(t, a, text("prt_a", "first "+testSecret))
+	onBus(t, a, ocText("ses_kid", "msg_1", "prt_a", ""))
+	onBus(t, a, ocText("ses_kid", "msg_1", "prt_b", "second"))
+	onBus(t, a, ocText("ses_kid", "msg_1", "prt_a", "first "+testSecret))
 	onBus(t, a, strings.Replace(done, `,"completed":9`, "", 1))
 	onBus(t, a, done)
 	onBus(t, a, done)
-	onBus(t, a, text("prt_c", strings.Repeat("x", 3000)))
+	onBus(t, a, ocText("ses_kid", "msg_1", "prt_c", strings.Repeat("x", 3000)))
 	onBus(t, a, strings.ReplaceAll(done, "msg_1", "msg_2"))
 	got := sink.typed(proto.EvOpenCodeMessage)
 	if len(got) != 2 {
@@ -377,7 +372,7 @@ func TestOpenCodeChildMessageText(t *testing.T) {
 	if m.MessageID != "msg_2" || m.Text != "" || m.Truncated {
 		t.Fatalf("a message with no text parts of its own: %+v", m)
 	}
-	onBus(t, a, strings.ReplaceAll(text("prt_c", strings.Repeat("x", 3000)), "msg_1", "msg_3"))
+	onBus(t, a, ocText("ses_kid", "msg_3", "prt_c", strings.Repeat("x", 3000)))
 	onBus(t, a, strings.ReplaceAll(done, "msg_1", "msg_3"))
 	_ = json.Unmarshal([]byte(sink.typed(proto.EvOpenCodeMessage)[2]), &m)
 	if len(m.Text) != proto.MaxOpenCodeText || !m.Truncated {
