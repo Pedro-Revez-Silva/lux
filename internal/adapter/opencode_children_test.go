@@ -560,6 +560,28 @@ func TestOpenCodeChildTextRedactedBeforeKept(t *testing.T) {
 	}
 }
 
+// The slack over MaxOpenCodeText is what lets the record's clip cut a
+// marker whole when the bound falls inside one at a join: the second part
+// is redacted on its own, so its marker is whole, and keep would cut it
+// at the limit; with the slack the stub kept is at least the marker's
+// prefix, which the record's clip recognises and ends before. Without it
+// the join is within the limit, nothing is clipped, and the stub is written.
+func TestOpenCodeChildTextSlackKeepsAMarkerPrefixForTheRecordsClip(t *testing.T) {
+	head := strings.Repeat("h", proto.MaxOpenCodeText-5)
+	secret := strings.Repeat("s", 100)
+	got := childRecord(t, map[string]string{secret: "T"}, []string{head, secret + strings.Repeat("t", 400)})
+	var m proto.OpenCodeMessage
+	if err := json.Unmarshal([]byte(got), &m); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(m.Text, "[") {
+		t.Fatalf("a marker stub reached the record: %.40q", m.Text[len(m.Text)-40:])
+	}
+	if m.Text != head+"\n" || !m.Truncated {
+		t.Fatalf("record text = …%.30q (%d bytes, truncated %v), want the head and the join's newline alone, truncated", m.Text[len(m.Text)-30:], len(m.Text), m.Truncated)
+	}
+}
+
 // Out of contract, pinned as it is: a secret spanning two parts. Parts are
 // OpenCode's own text blocks, redacted one at a time, so neither half is
 // matched. The join puts "\n" at the split, so the record's redaction
