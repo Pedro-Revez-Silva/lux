@@ -31,7 +31,8 @@ import (
 //   - `container inspect X` prints $0.inspect.X if it exists;
 //   - $0.ctr holds the id of the Run's container while one exists (the
 //     placement's, ctr-1); `rm -f` removes it by that id or the Run's
-//     container name, and `volume rm` its volume's file;
+//     container name, and `volume rm` its volume's file (failing while
+//     $0.failvolrm exists);
 //   - `rmi` records the image it removes in $0.rmi.
 //
 // The placement's image is img, which lux pulled for t1.
@@ -42,8 +43,10 @@ type finishFixture struct {
 	data    string
 	mu      sync.Mutex
 	reports []proto.Frame
-	// ctrAtStatus: whether the container existed when luxd got the status.
+	// ctrAtStatus: whether the container existed when luxd got the status;
+	// volAtStatus: whether the data volume did.
 	ctrAtStatus []bool
+	volAtStatus []bool
 	// holdEpoch: reports about this epoch are kept in held, unanswered,
 	// until ackHeld or nackHeld answers them.
 	holdEpoch int
@@ -78,7 +81,7 @@ case "$1 $2" in
     while [ -e "$0.holdnet" ]; do sleep 0.05; done
   fi
   exit 1 ;;
-"volume rm") rm -f "$0.vol.$4" ;;
+"volume rm") [ -e "$0.failvolrm" ] && { echo "volume is busy" >&2; exit 1; }; rm -f "$0.vol.$4" ;;
 "kill -s") echo "$4" >> "$0.killed" ;;
 "container inspect") [ -e "$0.inspect.$3" ] && cat "$0.inspect.$3" || exit 1 ;;
 "rmi "*) echo "$2" >> "$0.rmi" ;;
@@ -140,6 +143,8 @@ esac
 				if fr.Type == proto.MsgStatus {
 					_, err := os.Stat(bin + ".ctr")
 					f.ctrAtStatus = append(f.ctrAtStatus, err == nil)
+					_, err = os.Stat(bin + ".vol." + volumeName("run1", "data"))
+					f.volAtStatus = append(f.volAtStatus, err == nil)
 				}
 				f.mu.Unlock()
 				r.conn.dispatch(ctx, proto.Frame{Type: proto.MsgAck, ID: fr.ID})

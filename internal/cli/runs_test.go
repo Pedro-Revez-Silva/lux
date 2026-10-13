@@ -38,6 +38,77 @@ func submitted(t *testing.T, args ...string) map[string]any {
 	return body
 }
 
+func TestRunDryRunUsesValidateOnly(t *testing.T) {
+	var query string
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"valid":true,"wouldStartNow":false,"effectivePool":"p","effectiveResources":{"cpus":1,"memory":2,"disk":3},"blockers":[{"code":"space_not_settled","hosts":1,"remainingSeconds":5}]}`))
+	})
+	out, err := runCLI(t, h, "run", "--spot", "--dry-run", "--image", "alpine", "--", "true")
+	want := "Valid spec; effective pool p, CPUs 1, memory 2 bytes, disk 3 bytes\n" +
+		"Would not start now (advisory; no host launches or reclamation are promised):\n" +
+		"  space_not_settled (wait at least 5s if nothing changes)\n"
+	if err != nil || query != "validateOnly=true" || out != want {
+		t.Fatalf("query %q err %v output:\n%q\nwant:\n%q", query, err, out, want)
+	}
+}
+
+// --dry-run sends each secret by name with its reference as written: the
+// ${NAME} is not resolved from the environment, nor any .env file read
+// (with --secrets-from naming a missing file, and without it).
+func TestRunDryRunDoesNotResolveSecretValues(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "spot.yaml")
+	if err := os.WriteFile(file, []byte("spot: true\nimage: {ref: alpine}\nworkload: {command: [\"true\"]}\nsecrets: [{name: TOKEN, value: '${LUX_TEST_ABSENT_SECRET}'}]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LUX_TEST_ABSENT_SECRET", "resolved-value-must-not-be-sent")
+	for _, extra := range [][]string{nil, {"--secrets-from", filepath.Join(t.TempDir(), "absent.env")}} {
+		var body map[string]any
+		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			if err := json.Unmarshal(b, &body); err != nil {
+				t.Errorf("POST body %s: %v", b, err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"valid":true,"effectivePool":"p","effectiveResources":{"cpus":1,"memory":2,"disk":3}}`))
+		})
+		if _, err := runCLI(t, h, append([]string{"run", "-f", file, "--dry-run"}, extra...)...); err != nil {
+			t.Fatal(err)
+		}
+		secrets, _ := body["secrets"].([]any)
+		if len(secrets) != 1 {
+			t.Fatalf("secrets sent %v, want TOKEN", body["secrets"])
+		}
+		sec, _ := secrets[0].(map[string]any)
+		if sec["name"] != "TOKEN" || (sec["value"] != nil && sec["value"] != "${LUX_TEST_ABSENT_SECRET}") {
+			t.Fatalf("secret sent %v: want TOKEN by name, its value unresolved", sec)
+		}
+		if b, _ := json.Marshal(body); strings.Contains(string(b), "resolved-value-must-not-be-sent") {
+			t.Fatalf("the resolved value was sent: %s", b)
+		}
+	}
+}
+
+func TestRunSpotFlag(t *testing.T) {
+	body := submitted(t, "run", "--spot", "--image", "alpine", "--", "true")
+	if body["spot"] != true {
+		t.Fatalf("spot = %v", body["spot"])
+	}
+	file := filepath.Join(t.TempDir(), "spec.yaml")
+	if err := os.WriteFile(file, []byte("spot: true\nresumePolicy: auto\nimage: {ref: alpine}\nworkload: {command: [\"true\"]}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body = submitted(t, "run", "-f", file)
+	if body["spot"] != true || body["resumePolicy"] != "auto" {
+		t.Fatalf("spec must preserve explicit policy for server validation: %v", body)
+	}
+	body = submitted(t, "run", "-f", file, "--spot=false")
+	if _, exists := body["spot"]; exists || body["resumePolicy"] != "auto" {
+		t.Fatalf("flag override: %v", body)
+	}
+}
+
 func TestRunPoolFlag(t *testing.T) {
 	placement := func(body map[string]any) map[string]any {
 		p, _ := body["placement"].(map[string]any)

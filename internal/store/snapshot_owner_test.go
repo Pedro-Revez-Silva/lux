@@ -50,7 +50,7 @@ func TestSnapshotOwnerUpgrade(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := []string{"037_snapshot_records", "038_pool_id", "039_luxd_alive", "040_launch_outcome", "041_pool_samples", "042_dashboard_indexes", "043_run_input_events", "044_run_input_events_backfill", "045_event_cover", "046_event_type", "047_placement_memory_limit", "048_hosts_pool_registered", "049_wakeable_servers", "050_prompt_attachments", "051_stored_bytes", "052_stored_bytes_backfill", "053_run_expiry", "054_snapshot_cleanup", "055_host_capabilities", "056_run_terminated", "057_runs_resting_succeeded", "058_artifact_versions", "059_run_submitter", "060_run_stage", "061_host_volumes", "062_host_rates_family", "063_snapshot_family", "064_cost_hourly_family", "065_cost_hourly_tenant_hosts", "066_cost_hourly_host_pool_hour",
-				"067_placement_cpu_peak_pressure", "068_placement_image_platforms", "069_market_samples", "070_instance_types", "071_pool_sizes", "072_host_disk_samples"}
+				"067_placement_cpu_peak_pressure", "068_placement_image_platforms", "069_market_samples", "070_instance_types", "071_pool_sizes", "072_host_disk_samples", "073_spot_runs", "074_capacity_age_transitions"}
 			if from == "030_servers" {
 				want = append([]string{"031_pool_template_tags", "032_default_pool", "033_run_pool_owner", "034_pool_host_events", "035_snapshot_refused"}, want...)
 			}

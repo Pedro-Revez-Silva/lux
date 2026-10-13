@@ -571,6 +571,7 @@ func waitingRuns(ctx context.Context, tx pgx.Tx, pl poolRow) ([]pendingRun, map[
 	rows, err := tx.Query(ctx, `SELECT id, tenant_id, state, spec, snapshot_id, pending_sync,
 		jsonb_array_length(secrets) > 0, coalesce(place_on, ''), coalesce(avoid_host, ''), pool_id, updated_at
 		FROM runs WHERE pool_id = $1 AND state = 'provisioning' AND NOT terminate_requested
+		  AND coalesce(spec->>'spot', 'false') <> 'true'
 		ORDER BY updated_at, id`, pl.ID)
 	if err != nil {
 		return nil, nil, err
@@ -617,6 +618,12 @@ func (s *Server) readyHosts(ctx context.Context, tx pgx.Tx, runs []pendingRun) (
 	// (required by candidateHosts) is the cluster-wide liveness signal.
 	for _, h := range ready {
 		h.Connected = true
+		// Spot placements are reclaimable on demand: their space is the
+		// pool's for planning, so they never cause a launch.
+		for _, sp := range h.Spots {
+			h.remove(sp)
+		}
+		h.Spots = nil
 	}
 	slices.SortFunc(ready, func(a, b *candidateHost) int { return strings.Compare(a.ID, b.ID) })
 	return ready, nil

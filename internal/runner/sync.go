@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -32,23 +33,43 @@ const syncDir = "sync" // on the runtime volume: /.lux/run/sync/<syncSubdir>
 // mode: it syncs a checkout that does not exist in mode SyncModeProbe. One
 // that knows modes fails it naming that mode; an older one names none.
 // Nothing is touched either way. A shim that does not answer within the
-// deadline does not know them: it runs in its own process group, killed
-// whole at the deadline, and its output is waited for no longer than
-// WaitDelay after (a descendant that escaped the group cannot hold it open).
+// probe's deadline (probeShim) does not know them.
 func shimKnowsSyncModes(path string) bool {
+	args := proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "probe", Path: "/nonexistent/lux-sync-probe", Mode: proto.SyncModeProbe}}}
+	out, ok := probeShim(path, "sync", string(proto.Marshal(args)))
+	var res []proto.SyncResult
+	if !ok || json.Unmarshal(out, &res) != nil {
+		return false
+	}
+	return len(res) == 1 && res[0].Mode == proto.SyncModeProbe
+}
+
+// shimKnowsReclaim asks the lux-shim at path for its capabilities: one
+// listing proto.ShimCapReclaim signals a spot reclamation at once and skips
+// beforeStop. An older shim has no such subcommand (it fails, or starts as
+// PID 1 without its config and exits), so it never answers yes.
+func shimKnowsReclaim(path string) bool {
+	out, ok := probeShim(path, proto.ShimCapabilitiesCmd)
+	var caps []string
+	if !ok || json.Unmarshal(out, &caps) != nil {
+		return false
+	}
+	return slices.Contains(caps, proto.ShimCapReclaim)
+}
+
+// probeShim runs the lux-shim at path with args and returns its stdout,
+// ok when it exited 0. One that does not answer within the deadline is
+// killed with its process group; its output is waited for no longer than
+// WaitDelay after (a descendant that escaped the group cannot hold it open).
+func probeShim(path string, args ...string) ([]byte, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	args := proto.SyncArgs{Repos: []proto.SyncRepo{{Name: "probe", Path: "/nonexistent/lux-sync-probe", Mode: proto.SyncModeProbe}}}
-	cmd := exec.CommandContext(ctx, path, "sync", string(proto.Marshal(args)))
+	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.Output()
-	var res []proto.SyncResult
-	if err != nil || json.Unmarshal(out, &res) != nil {
-		return false
-	}
-	return len(res) == 1 && res[0].Mode == proto.SyncModeProbe
+	return out, err == nil
 }
 
 // oldShim is a safe-mode sync's result on a placement whose lux-shim

@@ -123,6 +123,7 @@ const (
 	evReady            = "host.ready"
 	evPlacementAssign  = "host.placement_assigned"
 	evPlacementEnded   = "host.placement_ended"
+	evSpotReclaimed    = "host.spot_reclaimed"
 	evDrainRequested   = "host.drain_requested"
 	evLost             = "host.lost"
 	evTerminateRequest = "host.terminate_requested"

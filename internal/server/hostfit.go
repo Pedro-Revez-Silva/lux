@@ -36,6 +36,7 @@ const (
 	// sharing, another chosen host).
 	kindScope
 	kindSyncModes
+	kindSpotReclaim
 	// kindShape: a shaped pool's Run, a host not advertising the shape
 	// with disk scaling.
 	kindShape
@@ -88,6 +89,9 @@ func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 	if proto.SafeSyncModes(r.PendingSync) && !slices.Contains(h.Caps, proto.CapSyncModes) {
 		constraint(kindSyncModes, "host's lux-runner predates sync modes")
 	}
+	if r.Spec.Spot && !slices.Contains(h.Caps, proto.CapSpotReclaim) {
+		constraint(kindSpotReclaim, "host's lux-runner lacks spot reclamation support")
+	}
 	// A shaped pool's sizes are fractions of its nominal host: only a
 	// runner advertising exactly that host, and scaling disk to it, takes
 	// one. A larger host advertises the shape, not its hardware.
@@ -119,10 +123,7 @@ func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 }
 
 func reserveHost(h *candidateHost, r pendingRun) {
-	h.UsedCPUs += r.Spec.Resources.CPUs
-	h.UsedMem += int64(r.Spec.Resources.Memory)
-	h.UsedDisk += int64(r.Spec.Resources.Disk)
-	h.UsedRuns++
+	h.reserve(usageOf(r.Spec.Resources))
 	h.Tenants = append(h.Tenants, r.TenantID)
 }
 

@@ -63,6 +63,8 @@ export function eventSummary(e: Event): string {
       return `from ${str(d.from) ?? "?"} to ${str(d.to) ?? "any other host"}`;
     case "disk.exceeded":
       return `disk ${typeof d.usedBytes === "number" ? formatBytes(d.usedBytes) : "?"} over its limit of ${typeof d.limitBytes === "number" ? formatBytes(d.limitBytes) : "?"}`;
+    case "disk.release_failed":
+      return `disk not released yet, retrying: ${str(d.error) ?? "?"}`;
     case "push.requested":
       return `push ${str(d.requestId) ?? ""}`;
     case "resume.requested": {

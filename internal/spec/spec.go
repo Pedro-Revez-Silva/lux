@@ -20,6 +20,7 @@ import (
 )
 
 type RunSpec struct {
+	Spot      bool              `json:"spot,omitempty" yaml:"spot,omitempty" doc:"Opt into opportunistic Run scheduling, independent of the host's EC2 market. Requires resumePolicy never; omitted resumePolicy normalizes to never. Spot demand never launches hosts. Admission requires spare capacity continuously free for more than 60s and a compatible runner."`
 	Name      string            `json:"name,omitempty" yaml:"name,omitempty"`
 	Labels    map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
 	Image     Image             `json:"image" yaml:"image"`
@@ -35,7 +36,7 @@ type RunSpec struct {
 	Network   Network           `json:"network" yaml:"network"`
 	Sandbox   Sandbox           `json:"sandbox" yaml:"sandbox"`
 	Artifacts Artifacts         `json:"artifacts" yaml:"artifacts"`
-	// Empty is stored as given and means ResumeAuto.
+	// Empty means ResumeAuto for normal Runs; spot normalizes it to never.
 	ResumePolicy string `json:"resumePolicy,omitempty" yaml:"resumePolicy,omitempty" doc:"What lux does when it moves the Run (a drain, a spot preemption, a migration). auto (the default): resumed elsewhere, restored from its snapshot. restart: started again from scratch elsewhere (empty state volumes, its first command, no session), for workloads safe to rerun whose saved state must not be trusted on another host. manual: ends failed, and an operator's migrate is refused (409 not_movable); a person may resume it. never: it can never be resumed, so every end that would leave it resumable (a move, a requested stop, success, failure) ends it terminated, its outcome in stateReason (e.g. succeeded; resumePolicy never), its state volumes are not snapshotted on exit, and an operator's migrate is refused; a requested resume of one still resting from an older luxd is refused (409 not_resumable); an assignment no runner started may still be placed again. For one-shot work such as a CI job holding a single-use token."`
 }
 
@@ -712,10 +713,18 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	if s.Timeout.Duration < 0 {
 		fail("timeout must not be negative")
 	}
-	switch s.ResumePolicy {
-	case "", ResumeAuto, ResumeRestart, ResumeManual, ResumeNever:
-	default:
-		fail("resumePolicy: must be auto, restart, manual or never, got %q", s.ResumePolicy)
+	if s.Spot {
+		if s.ResumePolicy == "" {
+			s.ResumePolicy = ResumeNever
+		} else if s.ResumePolicy != ResumeNever {
+			fail("resumePolicy: spot Runs require never (or omit resumePolicy), got %q", s.ResumePolicy)
+		}
+	} else {
+		switch s.ResumePolicy {
+		case "", ResumeAuto, ResumeRestart, ResumeManual, ResumeNever:
+		default:
+			fail("resumePolicy: must be auto, restart, manual or never, got %q", s.ResumePolicy)
+		}
 	}
 	for i, e := range s.Network.Egress {
 		if (e.Host == "") == (e.CIDR == "") {

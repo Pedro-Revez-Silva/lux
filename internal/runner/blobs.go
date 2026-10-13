@@ -468,6 +468,11 @@ func (r *Runner) readopt(ctx context.Context) {
 				if p.stopWhy != "" {
 					p.phase = "stopping"
 				}
+				if st.ReclaimKillAt > 0 {
+					// The deadline survives the restart; it is never reset.
+					p.reclaimAt, p.reclaimArmed = st.ReclaimKillAt, true
+					p.armReclaimKill(ctx, time.UnixMilli(st.ReclaimKillAt))
+				}
 				r.log.Info("re-adopting running placement", "run", st.RunID, "epoch", st.Epoch)
 				go func() {
 					defer close(p.done)

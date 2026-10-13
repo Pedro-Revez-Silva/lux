@@ -36,6 +36,13 @@ type runState struct {
 	Exit *exitRecord `json:"exit,omitempty"`
 	// StopReason from luxd, if any.
 	StopReason string `json:"stopReason,omitempty"`
+	// ReclaimKillAt: unix ms when a spot reclamation's SIGKILL is due, set
+	// at the first notice's receipt and never moved.
+	ReclaimKillAt int64 `json:"reclaimKillAt,omitempty"`
+	// ReleasePending: a spot placement's snapshot (output, artifacts) is
+	// reported, and its container and workload volumes must be removed
+	// before its end is: luxd frees its disk at that report.
+	ReleasePending bool `json:"releasePending,omitempty"`
 	// Stale: luxd fenced this placement off; do not report or upload.
 	Stale bool `json:"stale,omitempty"`
 	// Egress, as applied: re-applied when a restarted runner re-adopts a

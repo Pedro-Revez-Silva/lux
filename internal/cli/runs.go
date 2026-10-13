@@ -29,7 +29,7 @@ type Run = server.Run
 
 func (a *app) runCmd() *cobra.Command {
 	var file, idem, secretsFrom, pool, size string
-	var follow, wait bool
+	var follow, wait, spot, dryRun bool
 	var labels []string
 	cmd := &cobra.Command{
 		Use:   "run -f spec.yaml [-- command...]",
@@ -78,6 +78,9 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 			if pool != "" {
 				sp.Placement.Pool = pool
 			}
+			if cmd.Flags().Changed("spot") {
+				sp.Spot = spot
+			}
 			if size != "" {
 				sp.Resources.Size = size
 			}
@@ -87,6 +90,12 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 					sp.Labels = map[string]string{}
 				}
 				sp.Labels[k] = v
+			}
+			if dryRun {
+				if follow || wait {
+					return fmt.Errorf("--dry-run cannot be combined with --follow or --wait")
+				}
+				return a.validateRun(cmd, sp)
 			}
 			if err := fillSecrets(sp.Secrets, secretsFrom); err != nil {
 				return err
@@ -123,9 +132,39 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "label key=value (repeatable)")
 	cmd.Flags().StringVar(&idem, "idempotency-key", "", "make the submission safe to retry")
 	cmd.Flags().StringVar(&secretsFrom, "secrets-from", "", ".env file supplying secret values")
+	cmd.Flags().BoolVar(&spot, "spot", false, "opt into opportunistic scheduling (requires resumePolicy never)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate and check advisory live admission without creating a Run; not a reservation or workload-success guarantee")
 	cmd.Flags().BoolVar(&follow, "follow", false, "stream output until the Run ends; exit with its code")
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait until the Run ends; exit with its code")
 	return cmd
+}
+
+// validateRun is `lux run --dry-run`: submit's validateOnly answer, no Run.
+func (a *app) validateRun(cmd *cobra.Command, sp spec.RunSpec) error {
+	var answer server.SubmitAnswer
+	if err := a.c.Do(ctxOf(cmd), "POST", "/v1/runs?validateOnly=true", sp, &answer); err != nil {
+		return err
+	}
+	if a.output == "json" {
+		return a.json(answer)
+	}
+	fmt.Fprintf(a.stdout, "Valid spec; effective pool %s, CPUs %g, memory %d bytes, disk %d bytes\n", answer.EffectivePool, answer.EffectiveResources.CPUs, answer.EffectiveResources.Memory, answer.EffectiveResources.Disk)
+	if answer.WouldStartNow {
+		fmt.Fprintf(a.stdout, "Would start now on %s (advisory; not a reservation or workload-success guarantee).\n", answer.EligibleHost)
+		return nil
+	}
+	fmt.Fprintln(a.stdout, "Would not start now (advisory; no host launches or reclamation are promised):")
+	for _, b := range answer.Blockers {
+		fmt.Fprintf(a.stdout, "  %s", b.Code)
+		if b.RemainingSeconds != nil {
+			fmt.Fprintf(a.stdout, " (wait at least %ds if nothing changes)", *b.RemainingSeconds)
+		}
+		if b.Reason != "" {
+			fmt.Fprintf(a.stdout, ": %s", b.Reason)
+		}
+		fmt.Fprintln(a.stdout)
+	}
+	return nil
 }
 
 func readFileOrStdin(path string) ([]byte, error) {

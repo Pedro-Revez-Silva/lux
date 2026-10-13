@@ -155,3 +155,9 @@ test("server events say what happened to which server, and a sync from where to 
     "app kept aaaaaaa → bbbbbbb (0 ahead, 2 behind)",
   );
 });
+
+test("a spot Run's failed disk release says why", () => {
+  expect(eventSummary({ id: 1, type: "disk.release_failed", data: { error: "volume is busy" }, time: "" })).toBe(
+    "disk not released yet, retrying: volume is busy",
+  );
+});

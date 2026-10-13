@@ -69,6 +69,17 @@ func TestHostFitConstraints(t *testing.T) {
 			r.PendingSync = []proto.SyncRef{{Repo: "a", Ref: "main", Mode: proto.SyncFetch}}
 			h.Caps = []string{proto.CapDiff, proto.CapSyncModes}
 		}, nil},
+		{"spot old runner", func(r *pendingRun, h *candidateHost) {
+			r.Spec.Spot = true
+		}, []fitBlocker{{Kind: kindSpotReclaim, Reason: "host's lux-runner lacks spot reclamation support"}}},
+		{"chosen preserves spot capability", func(r *pendingRun, h *candidateHost) {
+			r.Spec.Spot = true
+			r.PlaceOn = h.ID
+		}, []fitBlocker{{Kind: kindSpotReclaim, Reason: "host's lux-runner lacks spot reclamation support"}}},
+		{"spot capable runner", func(r *pendingRun, h *candidateHost) {
+			r.Spec.Spot = true
+			h.Caps = []string{proto.CapSpotReclaim}
+		}, nil},
 		{"unlimited", func(r *pendingRun, h *candidateHost) {
 			h.Capacity = proto.Capacity{}
 			h.UsedCPUs = 100

@@ -691,17 +691,29 @@ func (s *Server) scaleDownAfter(pl poolRow) time.Duration {
 func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolState) error {
 	// Runs waiting for a host in this pool: those bound to it.
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM runs r
-		WHERE r.state = 'provisioning' AND NOT r.terminate_requested AND r.pool_id = $1`, pl.ID).Scan(&st.demand); err != nil {
+		WHERE r.state = 'provisioning' AND NOT r.terminate_requested AND r.pool_id = $1
+		  AND coalesce(r.spec->>'spot', 'false') <> 'true'`, pl.ID).Scan(&st.demand); err != nil {
 		return err
 	}
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM placements p JOIN hosts h ON h.id = p.host_id
-			WHERE h.pool_id = $1
-			  AND (p.state IN `+livePlacementStates+` OR coalesce(p.ended_at, p.created_at) > now() - $2::interval))`,
+	// Spot placements never make a pool active: a host running only spot
+	// work is as idle as an empty one (docs/design/spot-runs.md). Live and
+	// recently ended placements are separate checks, so each uses its own
+	// index (placements_host_live; placements_host_ended, whose ended_at
+	// IS NULL range holds a placement that never ended) and none walks a
+	// host's whole placement history.
+	if err := tx.QueryRow(ctx, `SELECT
+			EXISTS (SELECT 1 FROM hosts h JOIN placements p ON p.host_id = h.id JOIN runs r ON r.id = p.run_id
+				WHERE h.pool_id = $1 AND p.state IN `+livePlacementStates+` AND NOT `+spotRunSQL+`)
+			OR EXISTS (SELECT 1 FROM hosts h JOIN placements p ON p.host_id = h.id JOIN runs r ON r.id = p.run_id
+				WHERE h.pool_id = $1 AND p.ended_at > now() - $2::interval AND NOT `+spotRunSQL+`)
+			OR EXISTS (SELECT 1 FROM hosts h JOIN placements p ON p.host_id = h.id JOIN runs r ON r.id = p.run_id
+				WHERE h.pool_id = $1 AND p.ended_at IS NULL AND p.created_at > now() - $2::interval AND NOT `+spotRunSQL+`)`,
 		pl.ID, interval(s.scaleDownAfter(pl))).Scan(&st.active); err != nil {
 		return err
 	}
 	rows, err := tx.Query(ctx, `SELECT h.id, coalesce(h.provider_id, ''), coalesce(h.launch_template, $5), h.state, h.draining,
 			EXISTS (SELECT 1 FROM placements p WHERE p.host_id = h.id AND p.state IN `+livePlacementStates+`),
+			EXISTS (SELECT 1 FROM placements p JOIN runs r ON r.id = p.run_id WHERE p.host_id = h.id AND p.state IN `+livePlacementStates+` AND NOT `+spotRunSQL+`),
 			EXISTS (SELECT 1 FROM blobs b WHERE b.host_id = h.id AND b.location = 'host'),
 			coalesce(h.last_placement_ended_at, h.registered_at, h.created_at) < now() - $3::interval,
 			h.provision_requested_at < now() - $4::interval,
@@ -720,8 +732,8 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 	for rows.Next() {
 		var h hostRef
 		var state string
-		var draining, busy, pending, idleLong, launchLong, lostLong bool
-		if err := rows.Scan(&h.ID, &h.ProviderID, &h.Template, &state, &draining, &busy, &pending, &idleLong, &launchLong, &lostLong, &h.Settled); err != nil {
+		var draining, busy, busyNormal, pending, idleLong, launchLong, lostLong bool
+		if err := rows.Scan(&h.ID, &h.ProviderID, &h.Template, &state, &draining, &busy, &busyNormal, &pending, &idleLong, &launchLong, &lostLong, &h.Settled); err != nil {
 			return err
 		}
 		switch {
@@ -755,6 +767,8 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 			st.terminate = append(st.terminate, h)
 			continue
 		case draining || state == "draining":
+			// Terminated only once every placement is gone, spot included:
+			// a scale-down reclaims its spot placements first.
 			if !busy && !pending {
 				h.Reason = "drained: terminated"
 				st.terminate = append(st.terminate, h)
@@ -764,7 +778,7 @@ func (s *Server) poolState(ctx context.Context, tx pgx.Tx, pl poolRow, st *poolS
 			continue // not counted: on its way out
 		case state == "provisioning":
 			st.provisioning++
-		case state == "ready" && !busy:
+		case state == "ready" && !busyNormal:
 			st.idle++
 			if st.idleHosts == nil {
 				st.idleHosts = map[string]bool{}
@@ -984,16 +998,70 @@ func (s *Server) releaseProvisionLease() {
 // drainForScaleDown cordons an idle host; the next pass terminates it once
 // it has nothing left to upload.
 // Only if it is still idle: the scheduler may have placed a Run on it
-// since the pool was counted.
+// since the pool was counted. Spot placements do not make it busy: each is
+// reclaimed (stop reason spot-reclaim: SIGTERM, SIGKILL 15s later, the Run
+// terminated), never drained into a resume.
 func (s *Server) drainForScaleDown(ctx context.Context, hostID string) (bool, error) {
-	var hosts []string
+	var hosts, reclaimed []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-		var err error
-		hosts, err = s.drainHosts(ctx, tx, "idle: scaling down", causeScaleDown, "", `id = $1 AND state = 'ready'
-			AND NOT EXISTS (SELECT 1 FROM placements p WHERE p.host_id = hosts.id AND p.state IN `+livePlacementStates+`)`, hostID)
-		return err
+		// Its spot Runs first (Runs before hosts), then the drain, which
+		// locks the host and rechecks it has no normal placement.
+		rows, err := tx.Query(ctx, `SELECT p.run_id, p.tenant_id FROM placements p JOIN runs r ON r.id = p.run_id
+			WHERE p.host_id = $1 AND p.state IN `+livePlacementStates+` AND `+spotRunSQL+` ORDER BY p.run_id`, hostID)
+		if err != nil {
+			return err
+		}
+		type spotRun struct{ run, tenant string }
+		spots, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (spotRun, error) {
+			var v spotRun
+			return v, r.Scan(&v.run, &v.tenant)
+		})
+		if err != nil {
+			return err
+		}
+		runs := make([]string, len(spots))
+		for i, v := range spots {
+			runs[i] = v.run
+		}
+		if err := lockReaperRuns(ctx, tx, runs); err != nil {
+			return err
+		}
+		if err := lockCostHost(ctx, tx, hostID); err != nil {
+			return err
+		}
+		// A placement could arrive during discovery. Do not drain a host
+		// whose newly arrived spot Run was not locked above; retry next tick.
+		var changed bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM placements p JOIN runs r ON r.id=p.run_id
+			WHERE p.host_id=$1 AND p.state IN `+livePlacementStates+` AND `+spotRunSQL+` AND NOT (p.run_id=ANY($2::text[])))`, hostID, runs).Scan(&changed); err != nil {
+			return err
+		}
+		if changed {
+			return nil
+		}
+		var later laterEvents
+		hosts, err = s.drainHostsLater(ctx, tx, &later, "idle: scaling down", causeScaleDown, "", `id = $1 AND state = 'ready'
+			AND NOT EXISTS (SELECT 1 FROM placements p JOIN runs r ON r.id = p.run_id
+				WHERE p.host_id = hosts.id AND p.state IN `+livePlacementStates+` AND NOT `+spotRunSQL+`)`, hostID)
+		if err != nil || len(hosts) == 0 {
+			return err
+		}
+		for _, v := range spots {
+			h, err := s.requestStop(ctx, tx, v.tenant, v.run, stopSpotReclaim)
+			if err != nil {
+				return err
+			}
+			if h != "" {
+				reclaimed = append(reclaimed, v.run)
+			}
+		}
+		// Event streams last, after the stops' placement rows.
+		return later.write()
 	})
 	s.notifyAll(hosts)
+	if len(reclaimed) > 0 {
+		s.log.Info("scale-down reclaimed spot placements", "host", hostID, "runs", reclaimed)
+	}
 	return len(hosts) > 0, err
 }
 

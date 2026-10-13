@@ -311,6 +311,10 @@ type Sync struct {
 // and uses the credential it was assigned.
 const CapGitCredentials = "git-credentials"
 
+// CapSpotReclaim identifies a runner enforcing a durable first-notice 15s
+// reclamation deadline, independent of workload grace and stop hooks.
+const CapSpotReclaim = "spot-reclaim-v1"
+
 // CapDiskScale is the Hello capability of a runner that holds each Run to
 // its share of the filesystem (lux-runner --disk with --disk-headroom):
 // Capacity.Disk is then nominal. Shaped pools place Runs only on such
@@ -485,6 +489,11 @@ type ArtifactPublished struct {
 // layer and state volumes) on every sample for its resources.diskGrace, or
 // on one sample at disklimit.CeilingFactor times the disk. luxd stops it.
 const EvDiskExceeded = "disk.exceeded"
+
+// EvDiskReleaseFailed: a spot placement's container or volumes could not be
+// removed at its end (data: error). Sent once; the runner keeps retrying,
+// and the end stays unreported, its disk reserved, until removal succeeds.
+const EvDiskReleaseFailed = "disk.release_failed"
 
 // EvGitClone is a repository the runner cloned, or failed to:
 // {repo, status: cloned | failed, commit?, error?, requestId?} (requestId:

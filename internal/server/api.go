@@ -714,13 +714,29 @@ func scanRun(row pgx.Row) (*Run, error) {
 }
 
 type submitRunInput struct {
+	ValidateOnly   bool   `query:"validateOnly" doc:"Validate without creating a Run. Reports advisory current admission, not a reservation or workload-success guarantee. Facts can change immediately."`
 	IdempotencyKey string `header:"Idempotency-Key" doc:"Makes the submission safe to retry: another with the same key returns the first Run (200) instead of creating one."`
 	Body           spec.RunSpec
 }
 
 type submitRunOutput struct {
 	Status int
-	Body   *Run
+	Body   *SubmitAnswer
+}
+
+// SubmitAnswer is either a created/replayed Run, or validateOnly's read-only
+// advisory admission result. It never guarantees workload success. The
+// validateOnly fields carry names of their own: an embedded Run field of the
+// same name (pool, poolId) would be shadowed, in Go and in JSON.
+type SubmitAnswer struct {
+	*Run
+	Valid              bool               `json:"valid,omitempty" doc:"validateOnly: the spec would be accepted; no Run was created and nothing changed."`
+	WouldStartNow      bool               `json:"wouldStartNow,omitempty" doc:"validateOnly: a host could take the Run now (spot: settled spare capacity no normal Run is waiting for; normal: a host it fits on now). Advisory: not a reservation, and it may change at once."`
+	EffectiveResources *spec.Resources    `json:"effectiveResources,omitempty" doc:"validateOnly: the resources the Run would reserve, after defaults and a shaped pool's rounding."`
+	EffectivePool      string             `json:"effectivePool,omitempty" doc:"validateOnly: the pool the Run would be bound to."`
+	EffectivePoolID    string             `json:"effectivePoolId,omitempty" doc:"validateOnly: that pool's id."`
+	EligibleHost       string             `json:"eligibleHost,omitempty" doc:"validateOnly: the host it would start on now."`
+	Blockers           []AdmissionBlocker `json:"blockers,omitempty" doc:"validateOnly: why it would not start now, by kind."`
 }
 
 func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunOutput, error) {
@@ -764,6 +780,11 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		return nil, err
 	}
 	stored, refs, values := sp.SplitSecrets()
+	if in.ValidateOnly {
+		// Values are never required for a validation: only names and
+		// references (Normalize checked them), as for resume validateOnly.
+		return s.validateSubmit(ctx, p, stored, raw)
+	}
 	if err := requireSecrets(refs, values); err != nil {
 		return nil, err
 	}
@@ -854,13 +875,13 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		}); err != nil {
 			return nil, err
 		}
-		return &submitRunOutput{http.StatusOK, winner}, nil
+		return &submitRunOutput{http.StatusOK, &SubmitAnswer{Run: winner}}, nil
 	}
 	if created {
 		s.Kick()
-		return &submitRunOutput{http.StatusCreated, run}, nil
+		return &submitRunOutput{http.StatusCreated, &SubmitAnswer{Run: run}}, nil
 	}
-	return &submitRunOutput{http.StatusOK, run}, nil
+	return &submitRunOutput{http.StatusOK, &SubmitAnswer{Run: run}}, nil
 }
 
 // runByIdempotencyKey reads the Run submitted with key, in the tenant the
@@ -1797,7 +1818,7 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		}
 		// Before anything else: whatever its state, such a Run is never
 		// placed again on request.
-		if spec.RefusesResume(sp.ResumePolicy) {
+		if sp.Spot || spec.RefusesResume(sp.ResumePolicy) {
 			return errNeverResumable()
 		}
 		var to *resolvedPool

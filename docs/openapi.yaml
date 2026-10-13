@@ -1,5 +1,30 @@
 components:
   schemas:
+    AdmissionBlocker:
+      additionalProperties: false
+      properties:
+        code:
+          description: "no_hosts: no live connected host in its pool or chosen host; constraint: labels, nesting, tenancy, pool shape, or another chosen host; capability: the host's lux-runner lacks a feature the Run needs; not_enough_spare: not enough unreserved cpus, memory, disk or run slots; space_not_settled (spot): the spare space has not been continuously free for more than 60s; normal_demand_pending (spot): a queued normal Run could use that space."
+          enum:
+            - no_hosts
+            - constraint
+            - capability
+            - not_enough_spare
+            - space_not_settled
+            - normal_demand_pending
+          type: string
+        hosts:
+          description: How many hosts this blocks.
+          format: int64
+          type: integer
+        reason:
+          description: The first such host's reason, for constraint and capability.
+          type: string
+        remainingSeconds:
+          description: "space_not_settled: the shortest wait after which the space would qualify if nothing changes."
+          format: int64
+          type: integer
+      type: object
     Artifact:
       additionalProperties: false
       properties:
@@ -2966,6 +2991,9 @@ components:
           type:
             - array
             - "null"
+        spot:
+          description: Opt into opportunistic Run scheduling, independent of the host's EC2 market. Requires resumePolicy never; omitted resumePolicy normalizes to never. Spot demand never launches hosts. Admission requires spare capacity continuously free for more than 60s and a compatible runner.
+          type: boolean
         timeout:
           description: "The most time the Run may spend running, summed over its placements (time stopped, lost, or waiting for a host does not count). Past it, the Run is stopped and fails. Unset: no limit."
           oneOf:
@@ -3528,6 +3556,174 @@ components:
           description: luxd to runner only (tunnel flow control); ignored from clients.
           format: int64
           type: integer
+      type: object
+    SubmitAnswer:
+      additionalProperties: false
+      properties:
+        activity:
+          type: string
+        blockers:
+          description: "validateOnly: why it would not start now, by kind."
+          items:
+            $ref: "#/components/schemas/AdmissionBlocker"
+          type:
+            - array
+            - "null"
+        cost:
+          $ref: "#/components/schemas/RunCostBrief"
+          description: "In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."
+        createdAt:
+          format: date-time
+          type: string
+        effectivePool:
+          description: "validateOnly: the pool the Run would be bound to."
+          type: string
+        effectivePoolId:
+          description: "validateOnly: that pool's id."
+          type: string
+        effectiveResources:
+          $ref: "#/components/schemas/Resources"
+          description: "validateOnly: the resources the Run would reserve, after defaults and a shaped pool's rounding."
+        eligibleHost:
+          description: "validateOnly: the host it would start on now."
+          type: string
+        epoch:
+          format: int64
+          type: integer
+        exitCode:
+          format: int64
+          type: integer
+        finishedAt:
+          format: date-time
+          type: string
+        firstScheduledAt:
+          format: date-time
+          type: string
+        firstStartedAt:
+          format: date-time
+          type: string
+        host:
+          description: The name of the host of its current placement.
+          type: string
+        hostId:
+          description: That host's id.
+          type: string
+        id:
+          type: string
+        image:
+          $ref: "#/components/schemas/ImageResolution"
+        labels:
+          additionalProperties:
+            type: string
+          type: object
+        name:
+          type: string
+        placementSeconds:
+          description: "Time spent placing the Run, summed over its placements: for each, from when the Run needed a host (created, or its previous placement ending) until that placement's workload started. A Run still being placed counts up to the time of the response (placing). waitSeconds + startSeconds."
+          format: double
+          type: number
+        placementStartSeconds:
+          description: The part spent starting on the host (assigned until the workload started, or the placement ended without starting).
+          format: double
+          type: number
+        placementWaitSeconds:
+          description: The part of placementSeconds spent waiting for a host (needing one until assigned).
+          format: double
+          type: number
+        placements:
+          items:
+            $ref: "#/components/schemas/RunPlacement"
+          type:
+            - array
+            - "null"
+        placing:
+          description: "The Run is being placed now: waiting for a host, or starting on one; placementSeconds grows from the response's time on."
+          type: boolean
+        pool:
+          description: The current name of the pool the Run is bound to (spec.placement.pool is the name it was submitted with).
+          type: string
+        poolId:
+          description: That pool's id.
+          type: string
+        resumable:
+          description: "Whether POST /v1/runs/{id}/resume without fromSnapshot would be accepted: its state is stopped, lost, failed or succeeded, its resumePolicy is not never, and it is not left with only a refused snapshot report. The same test as GET /v1/runs?resumable=true. As of this answer: a Run being stopped is not resumable until it is stopped."
+          type: boolean
+        resume:
+          $ref: "#/components/schemas/Resumability"
+        runtimeSeconds:
+          description: "Seconds its placements have spent running, summed: each from reaching running to exiting or being lost; one still running counts up to the time of the response."
+          format: double
+          type: number
+        runtimeSince:
+          description: "When the placement still running started, if one is: runtimeSeconds grows from the response's time on."
+          format: date-time
+          type: string
+        secrets:
+          items:
+            $ref: "#/components/schemas/SecretRef"
+          type:
+            - array
+            - "null"
+        servers:
+          description: "On GET /v1/runs/{id}: the Run's servers."
+          items:
+            $ref: "#/components/schemas/RunServer"
+          type:
+            - array
+            - "null"
+        sessionId:
+          type: string
+        sizing:
+          $ref: "#/components/schemas/RunSizing"
+          description: "On a shaped pool: what its submit asked for in resources and the size it has. Absent for a Run submitted to and still in an unshaped pool."
+        snapshotId:
+          type: string
+        spec:
+          $ref: "#/components/schemas/RunSpec"
+        stage:
+          description: "Where the Run is now (docs/concepts.md#stages): waiting for a host; image, volumes, repositories, container while it starts on one; running; stopping (stageReason says why); or its resting state. A stage event announces each change."
+          enum:
+            - waiting
+            - image
+            - volumes
+            - repositories
+            - container
+            - running
+            - stopping
+            - stopped
+            - lost
+            - succeeded
+            - failed
+            - terminated
+          type: string
+        stageReason:
+          description: "For stopping: the stop's reason (stop, terminate, drain, preempt, migrate, timeout, disk)."
+          type: string
+        stageSince:
+          description: "When the stage began: one recorded time. volumes, repositories, container and running begin at the runner's marks, on its host's clock (running at luxd's started_at for a runner that reports no containerStarted); waiting, image (acceptedAt), stopping and a resting state at luxd's."
+          format: date-time
+          type: string
+        state:
+          type: string
+        stateReason:
+          type: string
+        steer:
+          $ref: "#/components/schemas/Steer"
+          description: What the Run's adapter does with input sent while the agent works (POST /v1/runs/{id}/input).
+        submittedBy:
+          $ref: "#/components/schemas/RunSubmitter"
+          description: "On GET /v1/runs/{id}: who submitted it, the API key or the person signed in. Absent for Runs submitted before luxd recorded it."
+        tenant:
+          description: The owning tenant's name.
+          type: string
+        usage:
+          $ref: "#/components/schemas/RunUsage"
+        valid:
+          description: "validateOnly: the spec would be accepted; no Run was created and nothing changed."
+          type: boolean
+        wouldStartNow:
+          description: "validateOnly: a host could take the Run now (spot: settled spare capacity no normal Run is waiting for; normal: a host it fits on now). Advisory: not a reservation, and it may change at once."
+          type: boolean
       type: object
     SyncRef:
       additionalProperties: false
@@ -6240,6 +6436,13 @@ paths:
         Needs the `run` scope.
       operationId: submitRun
       parameters:
+        - description: Validate without creating a Run. Reports advisory current admission, not a reservation or workload-success guarantee. Facts can change immediately.
+          explode: false
+          in: query
+          name: validateOnly
+          schema:
+            description: Validate without creating a Run. Reports advisory current admission, not a reservation or workload-success guarantee. Facts can change immediately.
+            type: boolean
         - description: "Makes the submission safe to retry: another with the same key returns the first Run (200) instead of creating one."
           in: header
           name: Idempotency-Key
@@ -6263,7 +6466,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Run"
+                $ref: "#/components/schemas/SubmitAnswer"
           description: Created
         "400":
           content:

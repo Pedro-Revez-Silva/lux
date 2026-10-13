@@ -36,6 +36,16 @@ const (
 func OutputFile(epoch int) string { return "output-" + strconv.Itoa(epoch) + ".jsonl" }
 func ExitFile(epoch int) string   { return "exit-" + strconv.Itoa(epoch) + ".json" }
 
+// `lux-shim capabilities` prints a JSON array of the shim features named
+// below; a shim that predates the subcommand prints none. The runner
+// advertises a feature that needs the shim only on an affirmative answer.
+const (
+	ShimCapabilitiesCmd = "capabilities"
+	// ShimCapReclaim: a ShimStop with KillAtUnixMs SIGTERMs at once, runs no
+	// beforeStop, ignores workload grace, and SIGKILLs at that instant.
+	ShimCapReclaim = "reclaim-v1"
+)
+
 type ShimConfig struct {
 	RunID   string   `json:"runId"`
 	Epoch   int      `json:"epoch"`
@@ -137,6 +147,9 @@ type ShimMsg struct {
 	// GraceSec, when set, shortens the stop's grace (the host is going
 	// away sooner than the workload's own grace allows).
 	GraceSec float64 `json:"graceSec,omitempty"`
+	// KillAtUnixMs, for a spot reclamation: SIGTERM now, skipping
+	// beforeStop, and SIGKILL to the process group at this instant.
+	KillAtUnixMs int64 `json:"killAtUnixMs,omitempty"`
 	// A stream's handshake: the connection then carries StreamData lines.
 	Stream *StreamOpen `json:"stream,omitempty"`
 	// servers: the ones to run now (with a command); any other the shim

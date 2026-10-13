@@ -28,7 +28,7 @@ was reached; `1` anything else.
 ## Runs
 
 ```bash
-lux run -f spec.yaml [--follow | --wait] [--name N] [-l k=v] [--pool P] [--size NAME] [--idempotency-key K] [--secrets-from .env]
+lux run -f spec.yaml [--spot] [--dry-run | --follow | --wait] [--name N] [-l k=v] [--pool P] [--size NAME] [--idempotency-key K] [--secrets-from .env]
 lux run --image alpine -- echo hello           # a quick generic Run
 lux run --image alpine --pool arm64 -- uname -m
 lux run --image alpine --pool m --size m-2-arm64 -- make test   # a size of a shaped pool
@@ -55,6 +55,33 @@ the pool.
 pool, those are rounded up to the smallest size covering them; on an
 unshaped pool `--size` is refused (exit 4, `size_unsupported`). See
 [`resources.size`](runspec.md#rules).
+
+`--spot` opts the Run into opportunistic scheduling, independently of the
+host's EC2 market. It only uses existing connected hosts' spare capacity that
+has been continuously free for **more than 60s**, and normal Runs go first.
+Omitted `resumePolicy` becomes `never`; an explicit policy other than `never`
+is refused (422 `invalid_spec`). A spot Run cannot resume. A normal Run or
+scale-down may reclaim it: SIGTERM immediately, SIGKILL after 15s, then
+terminated with an explicit cause. Its existing output and artifacts are kept;
+state volumes are not exported. `--spot=false` overrides `spot: true` in a file.
+
+`--dry-run` validates the submission and checks current admission without
+creating a Run, caching secrets, reserving space, launching hosts or stopping
+anything. Secret **names** are enough: values are neither required nor resolved
+from the environment or `--secrets-from`. It cannot be combined with `--wait`
+or `--follow`. A valid but unavailable Run exits successfully and lists blockers.
+`-o json` returns `valid`, `wouldStartNow`, `effectiveResources`, `effectivePool`,
+`effectivePoolId`, `eligibleHost` when it fits, otherwise `blockers` (including
+`space_not_settled` and `remainingSeconds`). Normal Runs' `wouldStartNow` means
+current free-host fit only: no reclamation or host launch is promised. This is
+**advisory**, not a reservation or a guarantee that the workload succeeds; facts
+can change as soon as the check returns. Real spot submissions simply wait when
+capacity is temporarily unavailable.
+
+```bash
+lux run --spot --dry-run --image alpine -- echo hello
+lux run -f spot.yaml --dry-run -o json
+```
 
 `lux logs -o json` prints one JSON record per line:
 `{"cursor","epoch","seq","t","ch","data"|"event"}`. Pass a record's

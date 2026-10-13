@@ -87,6 +87,33 @@ func TestAllProblemsAtOnce(t *testing.T) {
 	}
 }
 
+func TestSpotResumePolicy(t *testing.T) {
+	for _, policy := range []string{"", ResumeNever, ResumeAuto, ResumeRestart, ResumeManual, "Never", "always"} {
+		t.Run(policy, func(t *testing.T) {
+			s := RunSpec{Spot: true, Image: Image{Ref: "alpine"}, Workload: Workload{Command: []string{"true"}}, ResumePolicy: policy}
+			err := s.Normalize(BuiltinDefaults)
+			if policy != "" && policy != ResumeNever {
+				want := fmt.Sprintf("resumePolicy: spot Runs require never (or omit resumePolicy), got %q", policy)
+				var ve *ValidationError
+				if !errors.As(err, &ve) || !slices.Equal(ve.Problems, []string{want}) {
+					t.Fatalf("error = %v, want %q", err, want)
+				}
+				return
+			}
+			if err != nil || s.ResumePolicy != ResumeNever {
+				t.Fatalf("normalized policy = %q, error %v", s.ResumePolicy, err)
+			}
+			stored, _, _ := s.SplitSecrets()
+			if !stored.Spot || stored.ResumePolicy != ResumeNever {
+				t.Fatalf("stored spec = %+v", stored)
+			}
+			if err := stored.Normalize(BuiltinDefaults); err != nil {
+				t.Fatalf("renormalize: %v", err)
+			}
+		})
+	}
+}
+
 func TestResumePolicy(t *testing.T) {
 	for policy, ok := range map[string]bool{"": true, "auto": true, "restart": true, "manual": true, "never": true, "Never": false, "always": false} {
 		s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Command: []string{"true"}}, ResumePolicy: policy}

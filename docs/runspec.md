@@ -114,6 +114,48 @@ default when Runs carry it. luxd does not enforce it. Who submitted a Run
 (the API key, or the person signed in) is recorded apart from its labels,
 as `submittedBy` on `GET /v1/runs/{id}`.
 
+## Spot Runs
+
+`spot: true` opts the Run into opportunistic scheduling, independent of whether
+its host is EC2 spot, on-demand or static. Spot Runs only use existing live,
+connected, compatible hosts; their demand never launches a host or keeps one
+alive. Admission requires the requested CPU, memory, disk and run-slot vector to
+have been continuously free for **more than 60s**, with no eligible queued normal
+Run winning that space. Spot Runs may wait in the queue like normal submissions.
+
+Omitted `resumePolicy` is stored as `never`. Explicit `never` is accepted; any
+other policy (including `auto`, `restart` and `manual`) is rejected with 422
+`invalid_spec`: `resumePolicy: spot Runs require never (or omit resumePolicy), got
+"VALUE"`. A spot Run cannot be resumed or automatically restarted. When normal
+work needs its capacity, or an idle host scales down, the placement is reclaimed:
+SIGTERM immediately on the runner's first notice, then SIGKILL at 15s if it is
+still alive. Workload `grace` and `beforeStop` cannot postpone either signal;
+the reclamation does not run the beforeStop hook. The Run ends terminated with
+an explicit cause. No state-volume snapshot is exported, but existing output and
+artifacts retain the usual `never` behavior (they are not erased).
+
+A spot Run's end frees its disk for other work, so the runner removes its
+container and its state, ephemeral and engine volumes before reporting the end,
+also when the Run ends while still starting. While that removal fails the runner
+retries it and the Run stays `stopping` with its disk reserved; the first
+failure adds a `disk.release_failed` event to the Run (`data.error`: podman's
+error), once per runner process.
+
+```yaml
+spot: true
+image: { ref: alpine }
+workload: { command: [sh, -c, "make test"] }
+# resumePolicy: never             # optional; this is the stored default
+```
+
+`lux run --spot --dry-run` (API `POST /v1/runs?validateOnly=true`) checks the same
+normalization, validation, shaped sizing and spot admission as submission. It
+writes nothing and needs only secret names, not values. The structured result
+distinguishes a valid spec from one that would start now, with effective resources
+and pool, an eligible host, or blockers and remaining settling wait. It is advisory,
+not a reservation or a workload-success guarantee: concurrent work can change
+availability immediately. See [CLI](cli.md#runs).
+
 ## Rules
 
 - `image`: exactly one of `ref` or `build`.

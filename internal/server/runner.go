@@ -143,7 +143,7 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 				exit_requested_at = CASE WHEN $10 THEN exit_requested_at ELSE NULL END,
 				labels = $2, arch = $3, capacity = $4, versions = $5, caches = $6,
 				local_snapshots = $7, provider_id = coalesce(nullif($8, ''), provider_id),
-				capabilities = $11,
+				capabilities = $11, capacity_epoch = capacity_epoch + 1,
 				registered_at = coalesce(registered_at, now()),
 				provisioned_at = coalesce(provisioned_at, now()),
 				last_heartbeat = now(), lost_at = NULL
