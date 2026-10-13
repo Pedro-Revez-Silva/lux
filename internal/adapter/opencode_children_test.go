@@ -24,19 +24,28 @@ const (
 )
 
 // childSink keeps the opencode.* records and lux.warning messages, in
-// order, as JSON.
+// order, as JSON. With gate set, an Event gate returns a channel for is
+// held until that channel is closed, after its record is kept.
 type childSink struct {
 	*inputSink
 	mu   sync.Mutex
 	recs []string
+	gate func(rec string) chan struct{}
 }
 
 func (s *childSink) Event(typ string, v any) {
 	if strings.HasPrefix(typ, "opencode.") || typ == proto.EvWarning {
 		b, _ := json.Marshal(v)
+		rec := typ + " " + string(b)
 		s.mu.Lock()
-		s.recs = append(s.recs, typ+" "+string(b))
+		s.recs = append(s.recs, rec)
+		gate := s.gate
 		s.mu.Unlock()
+		if gate != nil {
+			if ch := gate(rec); ch != nil {
+				<-ch
+			}
+		}
 	}
 	s.inputSink.Event(typ, v)
 }
@@ -383,6 +392,67 @@ func TestOpenCodeChildPendingStoppedAtRunEnd(t *testing.T) {
 	if got := sink.typed(proto.EvOpenCodePart); len(got) != 0 {
 		t.Fatalf("parts written: %q", got)
 	}
+}
+
+// stallDeadline bounds a wait that a correct relay ends at once: generous,
+// as it only catches a deadlock.
+const stallDeadline = 10 * time.Second
+
+func within(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(stallDeadline):
+		t.Fatalf("%s: not within %v", what, stallDeadline)
+	}
+}
+
+// A sink write held up (a held pending written from its timer, its
+// output file stalled) does not hold the bus reader: an event of another
+// session, and an event of the Run's tree, are each handled while the
+// write waits, and the tree's record is written after the held one.
+func TestOpenCodeChildSlowSinkHoldsNoBus(t *testing.T) {
+	clk := newTestClock()
+	a, sink := childRun(t, ocSession, 0, clk)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	free := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(free) // registered after childRun's: runs first, so its join ends
+	sink.gate = func(rec string) chan struct{} {
+		if strings.Contains(rec, `"callID":"c1"`) && strings.Contains(rec, `"status":"pending"`) {
+			close(entered)
+			return release
+		}
+		return nil
+	}
+	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+	onBus(t, a, ocTool("ses_kid", "c1", "bash", "pending", nil))
+	clk.fire(t) // spawns pendingDue
+	within(t, entered, "the held pending's write")
+
+	handled := make(chan struct{})
+	go func() {
+		defer close(handled)
+		onBus(t, a, ocTool("ses_stranger", "x1", "bash", "running", nil))
+		onBus(t, a, ocTool("ses_kid", "c2", "bash", "running", nil))
+	}()
+	within(t, handled, "onBus while a sink write is held")
+	if got := sink.typed(proto.EvOpenCodePart); len(got) != 1 {
+		t.Fatalf("written while the pending's write is held: %q", got)
+	}
+	free()
+	var got []string
+	for _, d := range joinedTyped(a, sink, proto.EvOpenCodePart) {
+		var p proto.OpenCodePart
+		_ = json.Unmarshal([]byte(d), &p)
+		got = append(got, p.SessionID+" "+p.CallID+" "+p.Status)
+	}
+	wantRecords(t, got, []string{"ses_kid c1 pending", "ses_kid c2 running"})
+}
+
+func joinedTyped(a *ACP, sink *childSink, typ string) []string {
+	a.bg.Wait()
+	return sink.typed(typ)
 }
 
 // Past maxChildParts opencode.part records, one lux.warning, then records

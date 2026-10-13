@@ -58,7 +58,17 @@ type ocChildren struct {
 	// messages and permissions written, by id.
 	messages    map[string]bool
 	permissions map[string]bool
+	// out: records decided under mu, in order, not yet written; emitting:
+	// a goroutine is writing them (emitKids). Records are clipped and
+	// written outside mu, so a slow sink never holds the bus reader.
+	out      []ocRecord
+	emitting bool
 }
+
+// ocRecord makes a record to write: it clips (redacts) outside k.mu.
+type ocRecord func() (typ string, data any)
+
+func plainRecord(typ string, data any) ocRecord { return func() (string, any) { return typ, data } }
 
 type msgText struct {
 	order []string
@@ -137,16 +147,18 @@ func (a *ACP) childSession(ev busEvent, run string) {
 		return
 	}
 	k.mu.Lock()
-	defer k.mu.Unlock()
 	if _, known := k.parent[info.ID]; !known {
 		k.parent[info.ID] = info.ParentID
 	}
 	if k.announced[info.ID] || info.ID == run || !k.ofRun(info.ID, run) {
+		k.mu.Unlock()
 		return
 	}
 	k.announced[info.ID] = true
-	a.sink.Event(proto.EvOpenCodeSession, proto.OpenCodeSession{ID: info.ID, ParentID: k.parent[info.ID],
-		Title: info.Title, CreatedAt: info.Time.Created})
+	k.out = append(k.out, plainRecord(proto.EvOpenCodeSession, proto.OpenCodeSession{ID: info.ID, ParentID: k.parent[info.ID],
+		Title: info.Title, CreatedAt: info.Time.Created}))
+	k.mu.Unlock()
+	a.emitKids()
 }
 
 // childTool writes opencode.task for a task call of the Run's tree that
@@ -155,6 +167,7 @@ func (a *ACP) childSession(ev busEvent, run string) {
 func (a *ACP) childTool(part *busPart, run string) {
 	k := a.kids
 	k.mu.Lock()
+	defer a.emitKids()
 	defer k.mu.Unlock()
 	child := part.State.Metadata.SessionID
 	if part.Tool == "task" && child != "" && child != part.SessionID {
@@ -169,8 +182,8 @@ func (a *ACP) childTool(part *busPart, run string) {
 	if part.Tool == "task" && child != "" {
 		if st := taskStatus(part.State.Status); st != "" && !k.tasks[key+"\x00"+st] {
 			k.tasks[key+"\x00"+st] = true
-			a.sink.Event(proto.EvOpenCodeTask, proto.OpenCodeTask{SessionID: part.SessionID, CallID: part.CallID,
-				ChildSessionID: child, Model: part.State.Metadata.Model, Status: st})
+			k.out = append(k.out, plainRecord(proto.EvOpenCodeTask, proto.OpenCodeTask{SessionID: part.SessionID, CallID: part.CallID,
+				ChildSessionID: child, Model: part.State.Metadata.Model, Status: st}))
 		}
 	}
 	if part.SessionID == run {
@@ -194,7 +207,7 @@ func (a *ACP) childTool(part *busPart, run string) {
 		delete(k.pending, key)
 	}
 	k.parts[key+"\x00"+st] = true
-	a.writePart(part)
+	a.queuePart(*part)
 }
 
 // pendingDue writes a call's pending held for pendingHold, unless another
@@ -202,13 +215,14 @@ func (a *ACP) childTool(part *busPart, run string) {
 func (a *ACP) pendingDue(key string, part *busPart) {
 	k := a.kids
 	k.mu.Lock()
+	defer a.emitKids()
 	defer k.mu.Unlock()
 	if k.pending[key] == nil {
 		return
 	}
 	delete(k.pending, key)
 	k.parts[key+"\x00pending"] = true
-	a.writePart(part)
+	a.queuePart(*part)
 }
 
 // stopPending stops the timers of every held pending, as the Run ends: a
@@ -235,35 +249,61 @@ func taskStatus(s string) string {
 	return ""
 }
 
-// writePart writes opencode.part: input on every status, output only
-// once completed and error only on error, each redacted and cut. Past
-// maxChildParts, the status and times alone, after one lux.warning. Under
-// k.mu.
-func (a *ACP) writePart(part *busPart) {
+// queuePart queues opencode.part: input on every status, output only
+// once completed and error only on error, each redacted and cut as it is
+// written. Past maxChildParts, the status and times alone, after one
+// lux.warning. Under k.mu.
+func (a *ACP) queuePart(part busPart) {
 	k := a.kids
 	rec := proto.OpenCodePart{SessionID: part.SessionID, MessageID: part.MessageID, CallID: part.CallID, Tool: part.Tool,
 		Status: part.State.Status, Time: proto.OpenCodeTime{Start: part.State.Time.Start, End: part.State.Time.End}}
 	if k.partsWritten++; k.partsWritten > maxChildParts {
 		if k.partsWritten == maxChildParts+1 {
-			a.sink.Event(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
-				"opencode: the Run's subagent sessions have made %d tool-call records; the next ones carry their status alone", maxChildParts)})
+			k.out = append(k.out, plainRecord(proto.EvWarning, map[string]any{"message": fmt.Sprintf(
+				"opencode: the Run's subagent sessions have made %d tool-call records; the next ones carry their status alone", maxChildParts)}))
 		}
-		a.sink.Event(proto.EvOpenCodePart, rec)
+		k.out = append(k.out, plainRecord(proto.EvOpenCodePart, rec))
 		return
 	}
 	rec.Title = part.State.Title
-	var cut [3]bool
-	if in := strings.TrimSpace(string(part.State.Input)); in != "" && in != "{}" && in != "null" {
-		rec.Input, cut[0] = a.sink.Clip(in, proto.MaxOpenCodeInput)
+	k.out = append(k.out, func() (string, any) {
+		var cut [3]bool
+		if in := strings.TrimSpace(string(part.State.Input)); in != "" && in != "{}" && in != "null" {
+			rec.Input, cut[0] = a.sink.Clip(in, proto.MaxOpenCodeInput)
+		}
+		switch rec.Status {
+		case "completed":
+			rec.Output, cut[1] = a.sink.Clip(part.State.Output, proto.MaxOpenCodeOutput)
+		case "error":
+			rec.Error, cut[2] = a.sink.Clip(part.State.Error, proto.MaxOpenCodeOutput)
+		}
+		rec.Truncated = cut[0] || cut[1] || cut[2]
+		return proto.EvOpenCodePart, rec
+	})
+}
+
+// emitKids writes the queued records, in order, outside k.mu. One
+// goroutine writes at a time; one that queues while another writes
+// returns at once, and the writer takes its records too.
+func (a *ACP) emitKids() {
+	k := a.kids
+	k.mu.Lock()
+	if k.emitting {
+		k.mu.Unlock()
+		return
 	}
-	switch rec.Status {
-	case "completed":
-		rec.Output, cut[1] = a.sink.Clip(part.State.Output, proto.MaxOpenCodeOutput)
-	case "error":
-		rec.Error, cut[2] = a.sink.Clip(part.State.Error, proto.MaxOpenCodeOutput)
+	k.emitting = true
+	for len(k.out) > 0 {
+		batch := k.out
+		k.out = nil
+		k.mu.Unlock()
+		for _, r := range batch {
+			a.sink.Event(r())
+		}
+		k.mu.Lock()
 	}
-	rec.Truncated = cut[0] || cut[1] || cut[2]
-	a.sink.Event(proto.EvOpenCodePart, rec)
+	k.emitting = false
+	k.mu.Unlock()
 }
 
 // childText keeps the newest text of a child message's text part, which
@@ -294,8 +334,8 @@ func (a *ACP) childMessage(ev busEvent, run string) {
 		return
 	}
 	k.mu.Lock()
-	defer k.mu.Unlock()
 	if k.messages[info.ID] || !k.ofRun(info.SessionID, run) {
+		k.mu.Unlock()
 		return
 	}
 	k.messages[info.ID] = true
@@ -311,8 +351,12 @@ func (a *ACP) childMessage(ev busEvent, run string) {
 	rec := proto.OpenCodeMessage{SessionID: info.SessionID, MessageID: info.ID, Role: info.Role, Cost: info.Cost,
 		Completed: info.Time.Completed, Tokens: proto.OpenCodeTokens{Input: info.Tokens.Input, Output: info.Tokens.Output,
 			Reasoning: info.Tokens.Reasoning, CacheRead: info.Tokens.Cache.Read, CacheWrite: info.Tokens.Cache.Write}}
-	rec.Text, rec.Truncated = a.sink.Clip(strings.Join(text, "\n"), proto.MaxOpenCodeText)
-	a.sink.Event(proto.EvOpenCodeMessage, rec)
+	k.out = append(k.out, func() (string, any) {
+		rec.Text, rec.Truncated = a.sink.Clip(strings.Join(text, "\n"), proto.MaxOpenCodeText)
+		return proto.EvOpenCodeMessage, rec
+	})
+	k.mu.Unlock()
+	a.emitKids()
 }
 
 // childPermission records a permission request of the Run's tree, once
@@ -330,16 +374,18 @@ func (a *ACP) childPermission(ev busEvent, run string) {
 		return
 	}
 	k.permissions[p.ID] = true
-	k.mu.Unlock()
 	rec := proto.OpenCodePermission{SessionID: p.SessionID, PermissionID: p.ID, Permission: p.Permission,
 		Patterns: p.Patterns, CallID: p.Tool.CallID, Answered: proto.PermissionAllowed}
 	if rec.Patterns == nil {
 		rec.Patterns = []string{}
 	}
 	if p.SessionID == run {
-		a.sink.Event(proto.EvOpenCodePermission, rec)
+		k.out = append(k.out, plainRecord(proto.EvOpenCodePermission, rec))
+		k.mu.Unlock()
+		a.emitKids()
 		return
 	}
+	k.mu.Unlock()
 	answer := func(err error) {
 		msg := fmt.Sprintf("opencode: a subagent session %s asked for %s on %s; lux allowed it", rec.SessionID, rec.Permission, strings.Join(rec.Patterns, ", "))
 		if err != nil {
@@ -347,11 +393,12 @@ func (a *ACP) childPermission(ev busEvent, run string) {
 			msg = fmt.Sprintf("opencode: a subagent session %s asked for %s on %s; lux could not answer it, and its task call may wait for it: %v",
 				rec.SessionID, rec.Permission, strings.Join(rec.Patterns, ", "), err)
 		}
-		// Under k.mu, so no record of the tree comes between the two.
+		// Queued together, so no record of the tree is written between
+		// the two.
 		k.mu.Lock()
-		defer k.mu.Unlock()
-		a.sink.Event(proto.EvOpenCodePermission, rec)
-		a.sink.Event(proto.EvWarning, map[string]any{"message": msg})
+		k.out = append(k.out, plainRecord(proto.EvOpenCodePermission, rec), plainRecord(proto.EvWarning, map[string]any{"message": msg}))
+		k.mu.Unlock()
+		a.emitKids()
 	}
 	if !a.spawn(func() {
 		ctx, cancel := context.WithTimeout(a.runCtx(), a.permissionTimeout)
