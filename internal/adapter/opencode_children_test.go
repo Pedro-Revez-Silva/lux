@@ -254,6 +254,49 @@ func TestOpenCodeChildRelayNested(t *testing.T) {
 	})
 }
 
+// A session up to 63 levels below the Run's is of the Run (a walk of 64
+// sessions, the Run's included), one deeper is not; a cycle of parents
+// that never reaches the Run's ends the walk and relays nothing.
+func TestOpenCodeChildAncestryBound(t *testing.T) {
+	chain := func(depth int) []string {
+		var evs []string
+		parent := ocSession
+		for i := 1; i <= depth; i++ {
+			id := "ses_d" + strconv.Itoa(i)
+			evs = append(evs, ocSessionCreated(id, parent))
+			parent = id
+		}
+		return append(evs, ocTool(parent, "c_deep", "bash", "running", nil))
+	}
+	for _, c := range []struct {
+		name    string
+		events  []string
+		relayed bool
+	}{
+		{"62 levels", chain(62), true},
+		{"63 levels", chain(63), true},
+		{"64 levels", chain(64), false},
+		{"cycle", []string{ocSessionCreated("ses_a", "ses_b"), ocSessionCreated("ses_b", "ses_a"),
+			ocTool("ses_a", "c_deep", "bash", "running", nil)}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a, sink := childRun(t, ocSession, 0, nil)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for _, ev := range c.events {
+					onBus(t, a, ev)
+				}
+			}()
+			within(t, done, "the walk up the parents")
+			got := joinedTyped(a, sink, proto.EvOpenCodePart)
+			if relayed := slices.ContainsFunc(got, func(r string) bool { return strings.Contains(r, `"callID":"c_deep"`) }); relayed != c.relayed || len(got) > 1 {
+				t.Fatalf("parts %q, want relayed %v", got, c.relayed)
+			}
+		})
+	}
+}
+
 // A child's tool call's input, output and error are redacted, then cut
 // (input at 300 bytes, output and error at 2 KiB, on a rune boundary);
 // output only once completed, error only on error.
