@@ -465,3 +465,58 @@ func TestSyncWaitNamesTheOperation(t *testing.T) {
 		t.Fatalf("got\n%s\nwant\n%s", out.String(), want)
 	}
 }
+
+// lux push and lux sync send --credential repo=VALUE as the body's
+// credentials, ${VAR} read from the environment; a malformed, empty or
+// repeated one sends nothing, and its error never carries the value.
+func TestPushAndSyncSendCredentials(t *testing.T) {
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		bodies = append(bodies, b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"requestId":"rq"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("LUX_TEST_GIT_TOKEN", "ghs_from_env")
+	execute := func(args ...string) error {
+		a := &app{stdin: strings.NewReader(""), stdout: io.Discard, stderr: io.Discard}
+		root := a.root()
+		root.SetArgs(append([]string{"--url", srv.URL, "--api-key", "k"}, args...))
+		return root.Execute()
+	}
+	if err := execute("push", "run_x", "--credential", "app=ghs_literal", "--credential", "lib=${LUX_TEST_GIT_TOKEN}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := execute("sync", "run_x", "app=main", "--credential", "app=${LUX_TEST_GIT_TOKEN}"); err != nil {
+		t.Fatal(err)
+	}
+	if err := execute("push", "run_x"); err != nil {
+		t.Fatal(err)
+	}
+	want := []map[string]any{
+		{"credentials": map[string]any{"app": "ghs_literal", "lib": "ghs_from_env"}},
+		{"credentials": map[string]any{"app": "ghs_from_env"}, "requestId": "", "sync": []any{map[string]any{"repo": "app", "ref": "main"}}},
+		{},
+	}
+	if !reflect.DeepEqual(bodies, want) {
+		t.Fatalf("bodies %v, want %v", bodies, want)
+	}
+	for _, bad := range [][]string{
+		{"--credential", "ghs_no_repo"},
+		{"--credential", "app="},
+		{"--credential", "app=ghs_a", "--credential", "app=ghs_b"},
+		{"--credential", "app=${LUX_TEST_UNSET_VAR}"},
+	} {
+		for _, cmd := range [][]string{{"push", "run_x"}, {"sync", "run_x", "app=main"}} {
+			err := execute(append(cmd, bad...)...)
+			if err == nil || strings.Contains(err.Error(), "ghs_") {
+				t.Errorf("%v %v: error %v", cmd, bad, err)
+			}
+		}
+	}
+	if len(bodies) != len(want) {
+		t.Fatalf("a refused --credential sent %d request(s)", len(bodies)-len(want))
+	}
+}

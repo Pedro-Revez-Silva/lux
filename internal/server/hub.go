@@ -14,6 +14,7 @@ import (
 
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/spec"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -332,7 +333,7 @@ func writeFrame(ctx context.Context, ws *websocket.Conn, f proto.Frame) error {
 // sent (whatever order ids committed in). The poll fallback has no
 // connection and asks for every unacked message.
 func (s *Server) pendingMessages(ctx context.Context, hostID string, undelivered bool) ([]proto.Frame, error) {
-	if err := s.refuseUnsupportedSyncs(ctx, hostID); err != nil {
+	if err := s.refuseUndeliverable(ctx, hostID); err != nil {
 		return nil, err
 	}
 	var out []proto.Frame
@@ -363,8 +364,11 @@ func (s *Server) pendingMessages(ctx context.Context, hostID string, undelivered
 	// RETURNING does not preserve the subquery's order.
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	for i := range out {
-		if out[i].Type == proto.MsgAssign {
+		switch out[i].Type {
+		case proto.MsgAssign:
 			out[i].Data = s.attachSecrets(out[i].RunID, out[i].Data)
+		case proto.MsgPush, proto.MsgSync:
+			out[i].Data = s.attachCredentials(out[i].ID, out[i].Type, out[i].Data)
 		}
 	}
 	return out, nil
@@ -383,43 +387,72 @@ const unsupportedSync = `host_messages.type IN ('sync', 'assign')
 // syncModesGone is the outcome of a sync refused at delivery.
 const syncModesGone = "the host's lux-runner no longer supports sync modes"
 
-// refuseUnsupportedSyncs settles every unsupportedSync message of a host
-// in place of delivering it, and acks it. A running Run's sync ends failed:
-// a failed git.sync per repository, then sync.done. An assignment's
-// placement, not yet started, is lost and its Run queued again with its
-// sync, so that hostFit waits for a host with sync modes.
-func (s *Server) refuseUnsupportedSyncs(ctx context.Context, hostID string) error {
+// credentialedMsg is an unacked push or sync naming credentials, and
+// whether its host's latest registration has proto.CapGitCredentials.
+type credentialedMsg struct {
+	id      int64
+	runID   string
+	capable bool
+}
+
+// refuseUndeliverable settles, in place of delivering them, a host's
+// messages that must not reach its runner: unsupportedSync ones
+// (refuseSync) and credentialed ones it cannot deliver as asked
+// (refuseUncredentialed). Both are found in one transaction, since this
+// runs on every delivery pass; each is settled in its own.
+func (s *Server) refuseUndeliverable(ctx context.Context, hostID string) error {
 	type refused struct {
 		id    int64
 		runID string
 	}
-	var found []refused
+	var syncs []refused
+	var creds []credentialedMsg
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, coalesce(run_id, '') FROM host_messages
 			WHERE host_id = $1 AND acked_at IS NULL AND `+unsupportedSync+` ORDER BY id`, hostID)
 		if err != nil {
 			return err
 		}
-		found, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (refused, error) {
+		syncs, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (refused, error) {
 			var m refused
 			return m, r.Scan(&m.id, &m.runID)
+		})
+		if err != nil {
+			return err
+		}
+		rows, err = tx.Query(ctx, `SELECT m.id, coalesce(m.run_id, ''),
+				EXISTS (SELECT 1 FROM hosts h WHERE h.id = m.host_id AND $4 = ANY(h.capabilities))
+			FROM host_messages m
+			WHERE m.host_id = $1 AND m.acked_at IS NULL AND m.type IN ($2, $3) AND jsonb_array_length(coalesce(m.payload->'credentialRepos', '[]')) > 0
+			ORDER BY m.id`, hostID, proto.MsgPush, proto.MsgSync, proto.CapGitCredentials)
+		if err != nil {
+			return err
+		}
+		creds, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (credentialedMsg, error) {
+			var m credentialedMsg
+			return m, r.Scan(&m.id, &m.runID, &m.capable)
 		})
 		return err
 	})
 	if err != nil {
 		return err
 	}
-	for _, m := range found {
+	for _, m := range syncs {
 		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error { return s.refuseSync(ctx, tx, hostID, m.id, m.runID) }); err != nil {
 			return err
 		}
 	}
-	if len(found) > 0 {
+	if len(syncs) > 0 {
 		s.Kick()
 	}
-	return nil
+	return s.refuseUncredentialed(ctx, hostID, creds)
 }
 
+// refuseSync settles an unsupportedSync message in place of delivering it,
+// and acks it. A running Run's sync ends failed: a failed git.sync per
+// repository, then sync.done. An assignment's placement, not yet started,
+// is lost and its Run queued again with its sync, so that hostFit waits
+// for a host with sync modes.
 func (s *Server) refuseSync(ctx context.Context, tx pgx.Tx, hostID string, id int64, runID string) error {
 	// The Run first, then its message: as a report's transaction locks them.
 	var tenantID string
@@ -492,8 +525,125 @@ func (s *Server) attachSecrets(runID string, data json.RawMessage) json.RawMessa
 	return proto.Marshal(a)
 }
 
+// attachCredentials adds to a push or sync the git credentials luxd holds
+// for message id: at send time, never stored.
+func (s *Server) attachCredentials(id int64, typ string, data json.RawMessage) json.RawMessage {
+	creds, ok := s.secrets.getMsg(id)
+	if !ok {
+		return data
+	}
+	switch typ {
+	case proto.MsgPush:
+		var m proto.Push
+		if json.Unmarshal(data, &m) != nil {
+			return data
+		}
+		m.Credentials = creds
+		return proto.Marshal(m)
+	default:
+		var m proto.Sync
+		if json.Unmarshal(data, &m) != nil {
+			return data
+		}
+		m.Credentials = creds
+		return proto.Marshal(m)
+	}
+}
+
+// credentialsGone is the outcome of a push or sync refused at delivery
+// because this luxd does not hold its credentials.
+const credentialsGone = "luxd no longer holds this request's credentials (it restarted, or the runner moved to another luxd): send it again"
+
+// refuseUncredentialed settles, in place of delivering, every message of
+// found that names credentials (credentialRepos) this luxd does not hold,
+// or whose host re-registered without proto.CapGitCredentials: sent
+// without them, or to a runner that drops them, it would use the
+// credential they were to replace. A push ends with a git.push event,
+// every repository failed; a sync with a failed git.sync per repository,
+// then sync.done.
+func (s *Server) refuseUncredentialed(ctx context.Context, hostID string, found []credentialedMsg) error {
+	for _, m := range found {
+		why := credentialsGone
+		if _, held := s.secrets.getMsg(m.id); held {
+			if m.capable {
+				continue
+			}
+			why = credentialsUnsupported
+		}
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+			return s.refuseUncredentialedMsg(ctx, tx, hostID, m.id, m.runID, why)
+		}); err != nil {
+			return err
+		}
+		s.secrets.dropMsg(m.id)
+	}
+	return nil
+}
+
+// credentialsUnsupported is the outcome of a push or sync with credentials
+// refused at delivery because its host's runner no longer takes them.
+const credentialsUnsupported = "the host's lux-runner no longer takes credentials on a push or sync"
+
+func (s *Server) refuseUncredentialedMsg(ctx context.Context, tx pgx.Tx, hostID string, id int64, runID, why string) error {
+	// The Run first, then its message: as a report's transaction locks them.
+	var tenantID string
+	var sp spec.RunSpec
+	if err := tx.QueryRow(ctx, `SELECT tenant_id, spec FROM runs WHERE id = $1 FOR UPDATE`, runID).Scan(&tenantID, &sp); err != nil {
+		return err
+	}
+	var typ string
+	var epoch int
+	var payload json.RawMessage
+	err := tx.QueryRow(ctx, `SELECT type, coalesce(epoch, 0), payload FROM host_messages
+		WHERE id = $1 AND acked_at IS NULL FOR UPDATE`, id).Scan(&typ, &epoch, &payload)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	s.log.Warn("push or sync refused at delivery: credentials not held", "host", hostID, "run", runID, "epoch", epoch, "type", typ)
+	switch typ {
+	case proto.MsgPush:
+		var m proto.Push
+		if err := json.Unmarshal(payload, &m); err != nil {
+			return err
+		}
+		var results []proto.PushResult
+		if sp.Git != nil && sp.Git.Push != nil {
+			for _, r := range sp.Git.Repositories {
+				res := proto.PushResult{Repo: r.Name, Branch: sp.Git.Push.Branch, Status: "failed", Error: why}
+				if !r.Pushed() {
+					res = proto.PushResult{Repo: r.Name, Status: "skipped"}
+				}
+				results = append(results, res)
+			}
+		}
+		if err := addEvent(ctx, tx, tenantID, runID, epoch, "git.push", map[string]any{"requestId": m.RequestID, "results": results}); err != nil {
+			return err
+		}
+	case proto.MsgSync:
+		var m proto.Sync
+		if err := json.Unmarshal(payload, &m); err != nil {
+			return err
+		}
+		for _, r := range m.Repos {
+			if err := addEvent(ctx, tx, tenantID, runID, epoch, proto.EvGitSync, map[string]any{"repo": r.Repo, "ref": r.Ref,
+				"mode": proto.SyncModeOf(r.Mode), "status": "failed", "error": why, "requestId": m.RequestID}); err != nil {
+				return err
+			}
+		}
+		if err := addEvent(ctx, tx, tenantID, runID, epoch, proto.EvSyncDone, map[string]any{"requestId": m.RequestID, "changed": false}); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(ctx, `UPDATE host_messages SET acked_at = now() WHERE id = $1`, id)
+	return err
+}
+
 func (s *Server) ackMessage(ctx context.Context, hostID string, id int64) error {
-	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+	var acked string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var typ, runID string
 		var epoch int
 		// An assignment's Run first, then the message: the order refuseSync
@@ -516,6 +666,7 @@ func (s *Server) ackMessage(ctx context.Context, hostID string, id int64) error 
 		if err != nil {
 			return err
 		}
+		acked = typ
 		if typ == proto.MsgAssign {
 			if _, err = tx.Exec(ctx, `UPDATE placements SET accepted_at = coalesce(accepted_at, now())
 				WHERE run_id = $1 AND epoch = $2`, runID, epoch); err != nil {
@@ -526,14 +677,26 @@ func (s *Server) ackMessage(ctx context.Context, hostID string, id int64) error 
 		}
 		return err
 	})
+	// Delivered: the runner keeps a push's or sync's credentials now.
+	if err == nil && (acked == proto.MsgPush || acked == proto.MsgSync) {
+		s.secrets.dropMsg(id)
+	}
+	return err
 }
 
 // enqueue writes a durable control message for a host. Call inside a
 // transaction; notify after commit.
 func enqueue(ctx context.Context, tx pgx.Tx, hostID, runID string, epoch int, typ string, payload any) error {
-	_, err := tx.Exec(ctx, `INSERT INTO host_messages (host_id, run_id, epoch, type, payload)
-		VALUES ($1, nullif($2, ''), nullif($3, 0), $4, $5)`, hostID, runID, epoch, typ, proto.Marshal(payload))
+	_, err := enqueueID(ctx, tx, hostID, runID, epoch, typ, payload)
 	return err
+}
+
+// enqueueID is enqueue, returning the message's id.
+func enqueueID(ctx context.Context, tx pgx.Tx, hostID, runID string, epoch int, typ string, payload any) (int64, error) {
+	var id int64
+	err := tx.QueryRow(ctx, `INSERT INTO host_messages (host_id, run_id, epoch, type, payload)
+		VALUES ($1, nullif($2, ''), nullif($3, 0), $4, $5) RETURNING id`, hostID, runID, epoch, typ, proto.Marshal(payload)).Scan(&id)
+	return id, err
 }
 
 type hostToken struct {

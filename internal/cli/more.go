@@ -29,7 +29,7 @@ import (
 
 func (a *app) pushCmd() *cobra.Command {
 	var wait bool
-	var expect []string
+	var expect, credentials []string
 	cmd := &cobra.Command{
 		Use:   "push <run>",
 		Short: "Push the Run's repositories to its git.push branch",
@@ -37,6 +37,9 @@ func (a *app) pushCmd() *cobra.Command {
 with credentials only the runner holds. A branch that moved since this Run
 last pushed it is not overwritten. --expect repo=sha instead pushes only if
 the branch is at that commit (for pushing onto a branch someone else owns).
+--credential repo=VALUE pushes that repository with VALUE (e.g. a fresh
+installation token) instead of its credential secret; the runner keeps it
+for that repository's later fetches and pushes, and luxd never stores it.
 --wait prints each repository's outcome and fails unless every one was
 pushed or already up to date.`,
 		Args: cobra.ExactArgs(1),
@@ -57,6 +60,13 @@ pushed or already up to date.`,
 				}
 				body["expect"] = ex
 			}
+			creds, err := parseCredentials(credentials)
+			if err != nil {
+				return err
+			}
+			if creds != nil {
+				body["credentials"] = creds
+			}
 			var resp map[string]string
 			if err := a.c.Do(ctxOf(cmd), "POST", "/v1/runs/"+args[0]+"/push", body, &resp); err != nil {
 				return err
@@ -73,7 +83,44 @@ pushed or already up to date.`,
 	}
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait for the outcome")
 	cmd.Flags().StringArrayVar(&expect, "expect", nil, "repo=sha: push only if the branch is at that commit (repeatable)")
+	cmd.Flags().StringArrayVar(&credentials, "credential", nil, credentialHelp)
 	return cmd
+}
+
+// credentialHelp is lux push's and lux sync's --credential help.
+const credentialHelp = "repo=VALUE: a git credential for the repository in place of its credential secret, " +
+	"kept by the runner for later fetches and pushes; ${VAR} reads it from the environment, single-quoted so the shell leaves it: " +
+	"--credential 'app=${GIT_TOKEN}' (repeatable)"
+
+// parseCredentials reads --credential repo=VALUE arguments; a VALUE of
+// ${VAR} is that environment variable's. Nil for none. Errors never carry
+// a value.
+func parseCredentials(args []string) (map[string]string, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+	out := map[string]string{}
+	for _, kv := range args {
+		repo, v, ok := strings.Cut(kv, "=")
+		repo = strings.TrimSpace(repo)
+		if !ok || repo == "" {
+			return nil, errors.New("--credential: want repo=VALUE")
+		}
+		if strings.HasPrefix(v, "${") && strings.HasSuffix(v, "}") {
+			name := v[2 : len(v)-1]
+			if v, ok = os.LookupEnv(name); !ok {
+				return nil, fmt.Errorf("--credential %s: environment variable %s is not set", repo, name)
+			}
+		}
+		if v == "" {
+			return nil, fmt.Errorf("--credential %s: empty value", repo)
+		}
+		if _, dup := out[repo]; dup {
+			return nil, fmt.Errorf("--credential: %s given twice", repo)
+		}
+		out[repo] = v
+	}
+	return out, nil
 }
 
 // waitPush waits for the push's git.push event (one per request, with

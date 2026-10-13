@@ -75,7 +75,7 @@ lux stop <run> [--wait]         # graceful; snapshot; resumable
 lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--remove-secret NAME] [--from-snapshot ID] [--cpus N] [--memory SIZE] [--disk SIZE] [--to HOST]
            [--add-repo name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]]... [--request-id ID]
            [--sync repo=ref]... [--sync-mode move|fast-forward|fetch]  # move restored checkouts to ref before init
-lux sync <run> repo=ref... [--mode move|fast-forward|fetch] [--wait] [--request-id ID]   # a running Run's checkouts
+lux sync <run> repo=ref... [--mode move|fast-forward|fetch] [--wait] [--request-id ID] [--credential repo=VALUE]   # a running Run's checkouts
 lux terminate <run> [--wait]    # ends it for good: terminated, never resumable (a snapshot is still taken); a Run left stopped, lost, failed or succeeded is terminated after its tenant's expiry (default 90 days). `lux cancel` is a deprecated alias.
 lux snapshots <run>             # where each snapshot lives; only the current one is kept once uploaded (older ones: available false)
 ```
@@ -143,7 +143,7 @@ if one failed.
 ## Git
 
 ```bash
-lux push <run> [--wait]         # push each repository to git.push.branch (leased)
+lux push <run> [--wait] [--credential repo=VALUE]   # push each repository to git.push.branch (leased)
 lux diff <run> [--base clone|head] [--stat]   # what a running Run changed, per repository
 ```
 
@@ -173,6 +173,14 @@ prints git-style stat lines instead, and `-o json` the whole result
 - Exit 4 when the Run is not running (keep a patch with
   [beforeStop](runspec.md#before-stop)), 3 when it has no repositories, 1
   when a repository's diff failed.
+
+`lux push` and `lux sync` take `--credential repo=VALUE` (repeatable): a
+git credential for that repository in place of its credential secret, such
+as a fresh short-lived token. The runner keeps it for the repository's
+later fetches and pushes; luxd never stores it. `${VAR}` reads VALUE from
+the environment, keeping it off the command line when single-quoted so the
+shell does not expand it: `--credential 'app=${GIT_TOKEN}'`
+([git](runspec.md#git)).
 
 ## Files
 

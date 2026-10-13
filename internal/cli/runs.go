@@ -1089,6 +1089,7 @@ const syncModeHelp = "how each checkout may move: move (default: becomes the ref
 
 func (a *app) syncCmd() *cobra.Command {
 	var reqID, mode string
+	var credentials []string
 	var wait bool
 	cmd := &cobra.Command{
 		Use:   "sync <run> repo=ref...",
@@ -1098,7 +1099,9 @@ shas), fetched through its host's mirror, as lux resume --sync does before
 init. --mode fast-forward moves a checkout only when nothing in it can be
 lost, and --mode fetch never moves one: both leave a branch's commit as
 refs/remotes/lux/<branch> in the checkout. Servers with afterSync run it
-and restart once a checkout moved; the others keep running. With --wait,
+and restart once a checkout moved; the others keep running. --credential
+repo=VALUE fetches that repository with VALUE instead of its credential
+secret, and the runner keeps it for later fetches and pushes. With --wait,
 print each repository's git.sync outcome.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -1110,7 +1113,15 @@ print each repository's git.sync outcome.`,
 			var out struct {
 				RequestID string `json:"requestId"`
 			}
-			if err := a.c.Do(ctx, "POST", "/v1/runs/"+args[0]+"/sync", map[string]any{"sync": refs, "requestId": reqID}, &out); err != nil {
+			body := map[string]any{"sync": refs, "requestId": reqID}
+			creds, err := parseCredentials(credentials)
+			if err != nil {
+				return err
+			}
+			if creds != nil {
+				body["credentials"] = creds
+			}
+			if err := a.c.Do(ctx, "POST", "/v1/runs/"+args[0]+"/sync", body, &out); err != nil {
 				return err
 			}
 			if !wait {
@@ -1171,6 +1182,7 @@ print each repository's git.sync outcome.`,
 	cmd.Flags().StringVar(&reqID, "request-id", "", "names this sync (in its git.sync events); generated if absent")
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait for the outcome; exit 1 if a repository failed")
 	cmd.Flags().StringVar(&mode, "mode", "", syncModeHelp)
+	cmd.Flags().StringArrayVar(&credentials, "credential", nil, credentialHelp)
 	return cmd
 }
 

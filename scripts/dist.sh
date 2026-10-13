@@ -39,7 +39,8 @@ wanted() { [[ " $ARCHES " == *" $1 "* ]]; }
 # sync-modes: a sync entry's mode (move, fast-forward, fetch) on POST /v1/runs/{id}/sync and a resume's sync.
 # resume-policy: a RunSpec's resumePolicy (auto, restart, manual, never); an older luxd ignores it and treats the Run as auto.
 # egress-wildcards: a network.egress host rule *.<domain>; an older luxd refuses it, an older runner admits no name under it.
-FEATURES=(validate resume-secrets sync-modes resume-policy egress-wildcards artifact-publish)
+# git-credentials: credentials (per repository name, a git credential) on POST /v1/runs/{id}/push and /sync; an older luxd refuses the field (422).
+FEATURES=(validate resume-secrets sync-modes resume-policy egress-wildcards artifact-publish git-credentials)
 
 rm -rf "$DIST"
 mkdir -p "$DIST"

@@ -274,9 +274,9 @@ func (r *Runner) Run(ctx context.Context) error {
 // capabilities are Hello's: sync modes only with a shim that has them.
 func (r *Runner) capabilities() []string {
 	if r.shimSyncModes {
-		return []string{proto.CapDiff, proto.CapSyncModes}
+		return []string{proto.CapDiff, proto.CapGitCredentials, proto.CapSyncModes}
 	}
-	return []string{proto.CapDiff}
+	return []string{proto.CapDiff, proto.CapGitCredentials}
 }
 
 func (r *Runner) hello(ctx context.Context) proto.Hello {
@@ -424,6 +424,9 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) bool {
 		if p := r.placement(f.RunID, f.Epoch); p != nil {
 			var req proto.Sync
 			_ = json.Unmarshal(f.Data, &req)
+			// Rotated here, in the Run's control order, so the newest
+			// request's credentials are the ones kept.
+			p.rotateGitCreds(req.Credentials)
 			// Off the control queue, like a push: fetching can take a while.
 			go p.syncRunning(context.WithoutCancel(ctx), req)
 		}
@@ -431,6 +434,7 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) bool {
 		if p := r.placement(f.RunID, f.Epoch); p != nil {
 			var req proto.Push
 			_ = json.Unmarshal(f.Data, &req)
+			p.rotateGitCreds(req.Credentials)
 			// Not in the control queue: a push can take minutes, and a stop
 			// behind it must not wait.
 			go p.push(context.WithoutCancel(ctx), req)

@@ -391,9 +391,20 @@ func (s *Server) priceLoop(ctx context.Context) {
 type secretCache struct {
 	mu sync.Mutex
 	m  map[string]map[string]string
+	// msgs: by host message id, the git credentials a push or sync
+	// carries (proto.Push.Credentials), attached at delivery, dropped at
+	// its ack or refusal, or with its Run's secrets.
+	msgs map[int64]heldCredentials
 }
 
-func newSecretCache() *secretCache { return &secretCache{m: map[string]map[string]string{}} }
+type heldCredentials struct {
+	runID string
+	creds map[string]string
+}
+
+func newSecretCache() *secretCache {
+	return &secretCache{m: map[string]map[string]string{}, msgs: map[int64]heldCredentials{}}
+}
 
 func (c *secretCache) put(runID string, v map[string]string) {
 	c.mu.Lock()
@@ -412,4 +423,28 @@ func (c *secretCache) drop(runID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.m, runID)
+	for id, h := range c.msgs {
+		if h.runID == runID {
+			delete(c.msgs, id)
+		}
+	}
+}
+
+func (c *secretCache) putMsg(id int64, runID string, creds map[string]string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.msgs[id] = heldCredentials{runID: runID, creds: creds}
+}
+
+func (c *secretCache) getMsg(id int64) (map[string]string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	h, ok := c.msgs[id]
+	return h.creds, ok
+}
+
+func (c *secretCache) dropMsg(id int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.msgs, id)
 }

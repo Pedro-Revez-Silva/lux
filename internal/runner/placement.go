@@ -98,6 +98,9 @@ type placement struct {
 	// syncRetryFailed: those its whole-history retry could not bundle.
 	sync            *proto.SyncArgs
 	syncRetryFailed []proto.SyncResult
+	// gitCreds: per repository name, the latest credential a push or sync
+	// carried; it replaces assign.Secrets[credential] (gitRepo). Memory only.
+	gitCreds map[string]string
 	// memoryLimit: the container's memory limit, once this placement
 	// started it (0 when re-adopted).
 	memoryLimit int64
