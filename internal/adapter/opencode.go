@@ -203,21 +203,75 @@ func (b *opencodeBus) err() error {
 	return b.lastErr
 }
 
-// busEvent is what lux reads of a bus event.
+// busEvent is what lux reads of a bus event. info is a Message
+// (message.updated) or a Session (session.created, session.updated), whose
+// parentID is the parent message or the parent session; part is
+// message.part.updated's; id, permission, patterns and tool are
+// permission.asked's (opencode 1.18.21; see opencode_children.go).
 type busEvent struct {
 	Type       string `json:"type"`
 	Properties struct {
 		SessionID string `json:"sessionID"`
 		Info      struct {
-			ID        string `json:"id"`
-			Role      string `json:"role"`
-			ParentID  string `json:"parentID"`
-			SessionID string `json:"sessionID"`
+			ID        string  `json:"id"`
+			Role      string  `json:"role"`
+			ParentID  string  `json:"parentID"`
+			SessionID string  `json:"sessionID"`
+			Title     string  `json:"title"`
+			Cost      float64 `json:"cost"`
+			Tokens    struct {
+				Input     int64 `json:"input"`
+				Output    int64 `json:"output"`
+				Reasoning int64 `json:"reasoning"`
+				Cache     struct {
+					Read  int64 `json:"read"`
+					Write int64 `json:"write"`
+				} `json:"cache"`
+			} `json:"tokens"`
+			Time struct {
+				Created   int64 `json:"created"`
+				Completed int64 `json:"completed"`
+			} `json:"time"`
 		} `json:"info"`
 		Status struct {
 			Type string `json:"type"`
 		} `json:"status"`
+		Part       *busPart `json:"part"`
+		ID         string   `json:"id"`
+		Permission string   `json:"permission"`
+		Patterns   []string `json:"patterns"`
+		Tool       struct {
+			CallID string `json:"callID"`
+		} `json:"tool"`
 	} `json:"properties"`
+}
+
+// busPart is what lux reads of a message part: a tool call (type tool,
+// whose state.metadata.sessionId is the child session a task call runs)
+// or a message's text (type text).
+type busPart struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	SessionID string `json:"sessionID"`
+	MessageID string `json:"messageID"`
+	CallID    string `json:"callID"`
+	Tool      string `json:"tool"`
+	Text      string `json:"text"`
+	State     struct {
+		Status   string          `json:"status"`
+		Title    string          `json:"title"`
+		Input    json.RawMessage `json:"input"`
+		Output   string          `json:"output"`
+		Error    string          `json:"error"`
+		Metadata struct {
+			SessionID string          `json:"sessionId"`
+			Model     json.RawMessage `json:"model"`
+		} `json:"metadata"`
+		Time struct {
+			Start int64 `json:"start"`
+			End   int64 `json:"end"`
+		} `json:"time"`
+	} `json:"state"`
 }
 
 // follow reads GET /event until ctx ends, reconnecting while the server is

@@ -1130,6 +1130,8 @@ func (k *sink) Compacted(c proto.Compaction) {
 	k.s.out.Event(proto.EvCompacted, c)
 }
 
+func (k *sink) Clip(text string, max int) (string, bool) { return k.redactCut(text, max) }
+
 // maxAckedText caps the input text an ack repeats.
 const maxAckedText = 64 << 10
 

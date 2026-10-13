@@ -148,6 +148,9 @@ type ACP struct {
 	// sees lastSummary, the summary the one before it reported.
 	compactionMu sync.Mutex
 	lastSummary  string
+	// kids: the Run's OpenCode child sessions, relayed from the bus
+	// (opencode_children.go).
+	kids *ocChildren
 }
 
 func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
@@ -156,7 +159,7 @@ func NewACP() *ACP { return &ACP{ready: make(chan struct{})} }
 func NewOpenCode() *ACP {
 	return &ACP{ready: make(chan struct{}), opencode: true, steerKick: make(chan struct{}, 1),
 		suspect: map[string]time.Time{}, resent: map[string]bool{}, admittedLate: map[string]bool{}, settleEvery: time.Second, clock: wallClock{},
-		compactionTimeout: 10 * time.Second}
+		compactionTimeout: 10 * time.Second, kids: newOcChildren()}
 }
 
 // settleClock is the time settle reads and schedules its next look by.
@@ -1041,7 +1044,8 @@ func (a *ACP) queueInput(in proto.Input) {
 // sent has read it and the steers sent before it (bus.answered);
 // session.idle after the ACP turn has ended settles the Run's work;
 // session.status is the Run's activity (setOpenCodeBusy); session.compacted
-// of the Run's session is reported as lux.compacted (compacted).
+// of the Run's session is reported as lux.compacted (compacted); the Run's
+// child sessions are relayed (childEvent).
 func (a *ACP) onBus(ev busEvent) {
 	if a.busHandled != nil {
 		defer a.busHandled(ev)
@@ -1049,6 +1053,7 @@ func (a *ACP) onBus(ev busEvent) {
 	a.mu.Lock()
 	session, bt := a.session, a.busTurn
 	a.mu.Unlock()
+	a.childEvent(ev, session)
 	p := ev.Properties
 	switch ev.Type {
 	case "message.updated":
