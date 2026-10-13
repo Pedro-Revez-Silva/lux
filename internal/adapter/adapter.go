@@ -57,6 +57,11 @@ type Sink interface {
 	// Compacted: the agent compacted its conversation (proto.EvCompacted).
 	// The sink redacts and caps the summary.
 	Compacted(c proto.Compaction)
+	// Clip is text redacted as all output is, then cut to at most max
+	// bytes on a UTF-8 boundary (never inside a redaction), and whether it
+	// was cut: redacted first, so a secret the cut crosses is not half
+	// kept.
+	Clip(text string, max int) (string, bool)
 }
 
 // Delivery is when an accepted input reaches the agent's model.

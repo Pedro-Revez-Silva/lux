@@ -137,6 +137,9 @@ type agent struct {
 	// compact reports a compaction with its summary (compact.go); nil
 	// where the protocol has no way to say so.
 	compact func(summary string)
+	// subagent runs a task tool call in a child session, as OpenCode
+	// reports it on its bus (subagent.go); nil where there is no bus.
+	subagent func(ask bool, cancel chan struct{}) string
 }
 
 // prompt is a user message and the client's id for it; images describes
@@ -489,6 +492,12 @@ func (a *agent) runLine(line string, cancel chan struct{}) bool {
 		a.say(a.mcpCall(server, tool, text))
 	case "compact":
 		a.runCompact(rest == "remote")
+	case "subagent":
+		if a.subagent == nil {
+			a.say("subagent: this protocol reports no subagents")
+			return false
+		}
+		a.say("subagent: " + a.subagent(rest == "ask", cancel))
 	default:
 		a.say("you said: " + line)
 	}
@@ -650,8 +659,9 @@ func acp() {
 	}
 	oc.run = func(p prompt) { runLoop(p, nil) }
 	if oc.listen(os.Args) {
-		// OpenCode reports a compaction only on its bus.
+		// OpenCode reports a compaction and its subagents only on its bus.
 		a.compact = oc.compact
+		a.subagent = oc.subagent
 	}
 	for sc := scanner(); sc.Scan(); {
 		var m rpcMsg

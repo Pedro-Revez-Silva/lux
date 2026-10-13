@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	mrand "math/rand/v2"
 	"net"
@@ -203,21 +204,75 @@ func (b *opencodeBus) err() error {
 	return b.lastErr
 }
 
-// busEvent is what lux reads of a bus event.
+// busEvent is what lux reads of a bus event. info is a Message
+// (message.updated) or a Session (session.created, session.updated), whose
+// parentID is the parent message or the parent session; part is
+// message.part.updated's; id, permission, patterns and tool are
+// permission.asked's (opencode 1.18.21; see opencode_children.go).
 type busEvent struct {
 	Type       string `json:"type"`
 	Properties struct {
 		SessionID string `json:"sessionID"`
 		Info      struct {
-			ID        string `json:"id"`
-			Role      string `json:"role"`
-			ParentID  string `json:"parentID"`
-			SessionID string `json:"sessionID"`
+			ID        string  `json:"id"`
+			Role      string  `json:"role"`
+			ParentID  string  `json:"parentID"`
+			SessionID string  `json:"sessionID"`
+			Title     string  `json:"title"`
+			Cost      float64 `json:"cost"`
+			Tokens    struct {
+				Input     int64 `json:"input"`
+				Output    int64 `json:"output"`
+				Reasoning int64 `json:"reasoning"`
+				Cache     struct {
+					Read  int64 `json:"read"`
+					Write int64 `json:"write"`
+				} `json:"cache"`
+			} `json:"tokens"`
+			Time struct {
+				Created   int64 `json:"created"`
+				Completed int64 `json:"completed"`
+			} `json:"time"`
 		} `json:"info"`
 		Status struct {
 			Type string `json:"type"`
 		} `json:"status"`
+		Part       *busPart `json:"part"`
+		ID         string   `json:"id"`
+		Permission string   `json:"permission"`
+		Patterns   []string `json:"patterns"`
+		Tool       struct {
+			CallID string `json:"callID"`
+		} `json:"tool"`
 	} `json:"properties"`
+}
+
+// busPart is what lux reads of a message part: a tool call (type tool,
+// whose state.metadata.sessionId is the child session a task call runs)
+// or a message's text (type text).
+type busPart struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	SessionID string `json:"sessionID"`
+	MessageID string `json:"messageID"`
+	CallID    string `json:"callID"`
+	Tool      string `json:"tool"`
+	Text      string `json:"text"`
+	State     struct {
+		Status   string          `json:"status"`
+		Title    string          `json:"title"`
+		Input    json.RawMessage `json:"input"`
+		Output   string          `json:"output"`
+		Error    string          `json:"error"`
+		Metadata struct {
+			SessionID string          `json:"sessionId"`
+			Model     json.RawMessage `json:"model"`
+		} `json:"metadata"`
+		Time struct {
+			Start int64 `json:"start"`
+			End   int64 `json:"end"`
+		} `json:"time"`
+	} `json:"state"`
 }
 
 // follow reads GET /event until ctx ends, reconnecting while the server is
@@ -459,6 +514,37 @@ func (b *opencodeBus) promptAsync(ctx context.Context, session, msgID string, in
 	resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("%w: prompt_async: %s", errNotSent, resp.Status)
+	}
+	return nil
+}
+
+// allowPermission answers a pending permission request, of any session,
+// allowing it once: POST /permission/{id}/reply {"reply":"once"}, which
+// answers true (opencode 1.18.21, its OpenAPI's permission.reply, as its
+// own TUI and `opencode run` answer). Anything but a 2xx whose body is
+// true is an error: OpenCode serves its web app, 200 and HTML, on a path
+// it does not route.
+func (b *opencodeBus) allowPermission(ctx context.Context, id string) error {
+	if b.observer {
+		return errors.New("lux sends nothing but reads to a server it did not start")
+	}
+	path := "/permission/" + url.PathEscape(id) + "/reply"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.url(path), strings.NewReader(`{"reply":"once"}`))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-opencode-directory", b.dir)
+	b.authorize(req)
+	resp, err := b.hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	var ok bool
+	if resp.StatusCode/100 != 2 || json.Unmarshal(body, &ok) != nil || !ok {
+		return fmt.Errorf("POST %s: %s %s", path, resp.Status, bytes.TrimSpace(body[:min(len(body), 200)]))
 	}
 	return nil
 }

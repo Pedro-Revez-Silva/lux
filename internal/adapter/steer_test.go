@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -63,6 +64,22 @@ func (s *inputSink) InputFailed(in proto.Input, err error) {
 func (s *inputSink) Compacted(c proto.Compaction) {
 	b, _ := json.Marshal(c)
 	s.add("compacted " + string(b))
+}
+
+// testSecret is what the test sinks' Clip redacts, as the shim's redactor
+// redacts a secret's value.
+const testSecret = "s3cr3t-child-value"
+
+// Clip redacts testSecret, then cuts on a UTF-8 boundary.
+func (s *inputSink) Clip(text string, max int) (string, bool) {
+	text = strings.ReplaceAll(text, testSecret, "[REDACTED:T]")
+	if len(text) <= max {
+		return text, false
+	}
+	for max > 0 && !utf8.RuneStart(text[max]) {
+		max--
+	}
+	return text[:max], true
 }
 
 // compactions are the sink's compacted lines.

@@ -24,6 +24,8 @@ import (
 //	GET  /session/{id}/message          the stored messages, oldest first
 //	GET  /session/status                {sessionID: {"type":"busy"}} while a
 //	                                    loop runs, {} otherwise
+//	POST /permission/{id}/reply         {"reply":"once"|"always"|"reject"}:
+//	                                    answer a pending permission (true)
 //
 // The bus reports each stored user message (message.updated, role user),
 // each model step as an assistant message.updated whose parentID is the
@@ -38,6 +40,10 @@ type opencodeServer struct {
 	busy bool
 	// run starts a loop for a prompt when none is running.
 	run func(p prompt)
+	// asked: permission requests waiting for a reply, by id (subagent.go);
+	// kids counts the child sessions made.
+	asked map[string]chan string
+	kids  int
 }
 
 // storedMsg is a stored message as GET /session/{id}/message lists it.
@@ -67,6 +73,7 @@ func (o *opencodeServer) listen(args []string) bool {
 	mux.HandleFunc("POST /session/{id}/prompt_async", o.promptAsync)
 	mux.HandleFunc("GET /session/{id}/message", o.messages)
 	mux.HandleFunc("GET /session/status", o.sessionStatus)
+	mux.HandleFunc("POST /permission/{id}/reply", o.permissionReply)
 	go http.Serve(l, mux)
 	return true
 }

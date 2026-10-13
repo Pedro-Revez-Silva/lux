@@ -331,6 +331,68 @@ A client rebuilding a conversation from the summary should anchor on the
 turn boundary before the record (the turn the compaction happened in),
 not on the record itself.
 
+## OpenCode subagents
+
+OpenCode's `task` tool runs a subagent in a **child session** of the one
+it is called from. ACP shows only the Run's own session, so a child's
+tool calls, messages and permission requests never reach lux over ACP.
+With OpenCode's server up (the `opencode` adapter on a command lux
+built, or a command with a `--port` of its own), lux follows them on
+OpenCode's bus and writes these records for every session whose chain
+of parents (`parentID`) reaches the Run's session, up to 63 levels below
+it (a walk of at most 64 sessions, the Run's own included; a deeper or
+cyclic chain is not followed). Sessions of other Runs on the same server
+are ignored.
+
+| Record | When | Data |
+| --- | --- | --- |
+| `opencode.session` | a child session is created; once per id | `id`, `parentID`, `title`, `createdAt` (unix ms) |
+| `opencode.task` | a `task` call of a session of the Run's tree names its child (`running`), then ends | `sessionID` (the caller), `callID`, `childSessionID`, `model` (`{modelID, providerID}`), `status`: `running` \| `completed` \| `error` |
+| `opencode.part` | a child's tool call changes status | `sessionID` (the child), `messageID`, `callID`, `tool`, `status`: `pending` \| `running` \| `completed` \| `error`, `title`, `input`, `output`, `error`, `time` `{start, end}` (unix ms), `truncated` |
+| `opencode.message` | a child's assistant message completes; once | `sessionID`, `messageID`, `role` (`assistant`), `text`, `cost`, `tokens` `{input, output, reasoning, cacheRead, cacheWrite}`, `completed` (unix ms), `truncated` |
+| `opencode.permission` | OpenCode asks a permission for a session of the Run's tree; once per permission id | `sessionID`, `permissionID`, `permission`, `patterns`, `callID`, `answered`: `allow` \| `none`, `error` |
+
+`opencode.task`'s `callID` and `childSessionID` nest a child under the
+call that runs it; `opencode.part` and `opencode.message` carry the
+child's `sessionID`. A `task` call inside a child (a nested subagent)
+gets its own `opencode.task`.
+
+- **Text.** `opencode.part`'s `input` is the call's input as JSON, cut at
+  300 bytes; `output` (on `completed` only) and `error` (on `error` only)
+  at 2 KiB; `opencode.message`'s `text` (its text parts) at 2 KiB. Each is
+  redacted like all output, then cut on a UTF-8 boundary; `truncated` is
+  `true` when one was cut. Streamed text (`message.part.delta`) is never
+  relayed.
+- **Volume.** `opencode.part` is written only when a call's status
+  changes. A call that goes from `pending` to `running` within 1 s gives
+  one `running` record. A pending or running record has no `output`.
+  After 2000 `opencode.part` records in a Run, lux writes one
+  `lux.warning` and the rest carry no `input`, `output`, `error` or
+  `title`.
+- **Permissions.** OpenCode forwards a permission request over ACP only
+  for a session ACP opened: a child's request would wait for an answer
+  forever, and the `task` call that started it with it. lux answers it
+  itself, allowing it once (`POST /permission/{permissionID}/reply`
+  `{"reply": "once"}` on OpenCode's server, as OpenCode's own TUI does),
+  within 10 s, as it allows the Run's
+  own session's over ACP ([Unattended permissions](#unattended-permissions)).
+  It then writes `opencode.permission` with `answered: allow`, or `none`
+  and the `error` if OpenCode refused the answer, and a `lux.warning`
+  naming the session, the permission and its patterns, right after it.
+  OpenCode carries on with the child as soon as it takes the answer, so
+  the pair can come after records of what the child did next. The Run's own
+  session's requests are answered over ACP (`acp.permission`); lux also
+  writes `opencode.permission` with `answered: allow` for them, and sends
+  nothing over HTTP. A server lux did not start (an observed `--port`)
+  is never sent anything: a child's request there is recorded with
+  `answered: none`.
+- **Resume and reconnect.** OpenCode's bus does not replay past events.
+  A child session created before a resume (`session/load`), or before
+  lux's event stream (re)connected, is unknown to lux until a later
+  `session.updated` for it, or a later update of the `task` call that
+  runs it (its metadata names the child), teaches lux its parent; from
+  then on it is relayed. What the bus said of it before is not recorded.
+
 ## State paths
 
 An agent keeps its session in files, and those files must be on a
@@ -352,6 +414,9 @@ Nobody is watching a Run, so permission requests are answered by policy:
 
 - **ACP:** `session/request_permission` is answered with the first
   `allow_once` option (or else `allow_always`).
+- **OpenCode subagents:** a child session's request, which OpenCode does
+  not forward over ACP, is allowed once over OpenCode's server (see
+  [OpenCode subagents](#opencode-subagents)).
 - **Codex:** approval requests are approved.
 - **Claude Code:** pass the permission mode in `command`, for example
   `["claude", "--permission-mode", "bypassPermissions"]`.
