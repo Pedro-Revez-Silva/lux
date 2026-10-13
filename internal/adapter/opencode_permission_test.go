@@ -239,6 +239,43 @@ func TestOpenCodeChildPermissionHoldsNoBus(t *testing.T) {
 	})
 }
 
+// A permission's record held up in the sink (its output stalled) holds
+// neither the bus reader nor its warning's place: an event of another
+// session and one of the tree are handled meanwhile, and the warning is
+// still written right after the record.
+func TestOpenCodeChildPermissionSlowSinkHoldsNoBus(t *testing.T) {
+	srv := newPermServer(t)
+	a, sink := childRun(t, ocSession, srv.port(), nil)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	free := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(free)
+	sink.gate = func(r string) chan struct{} {
+		if strings.HasPrefix(r, proto.EvOpenCodePermission+" ") {
+			close(entered)
+			return release
+		}
+		return nil
+	}
+	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+	onBus(t, a, askedChild)
+	within(t, entered, "the permission's record")
+	handled := make(chan struct{})
+	go func() {
+		defer close(handled)
+		onBus(t, a, ocTool("ses_stranger", "x1", "bash", "running", nil))
+		onBus(t, a, ocTool("ses_kid", "c_after", "bash", "running", nil))
+	}()
+	within(t, handled, "onBus while the permission's record is held")
+	free()
+	wantRecords(t, joined(a, sink), []string{
+		`opencode.session {"id":"ses_kid","parentID":"` + ocSession + `","title":"t","createdAt":1}`,
+		`opencode.permission {"sessionID":"ses_kid","permissionID":"per_1","permission":"external_directory","patterns":["/etc/*"],"callID":"toolu_1","answered":"allow"}`,
+		`lux.warning {"message":"opencode: a subagent session ses_kid asked for external_directory on /etc/*; lux allowed it"}`,
+		`opencode.part {"sessionID":"ses_kid","messageID":"msg_ses_kid","callID":"c_after","tool":"bash","status":"running","time":{}}`,
+	})
+}
+
 // The Run ending while OpenCode has not answered a child's permission
 // ends the POST at once, well before permissionTimeout: the request is
 // recorded as none, with one warning.
