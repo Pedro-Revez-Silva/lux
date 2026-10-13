@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -452,10 +453,12 @@ func TestOpenCodeChildManyTextPartsBounded(t *testing.T) {
 	}
 }
 
-// A child message's record is the same however its text is split into
-// parts: every part is redacted before it counts against what is kept,
-// so secret-bearing parts keep no more room than their redacted text
-// takes, and the part crossing the bound keeps its head.
+// The record of a child message whose secrets each lie within one of its
+// parts (OpenCode's text blocks) is the record of the same text sent as
+// one part: every part is redacted before it counts against what is
+// kept, so secret-bearing parts keep no more room than their redacted
+// text takes, and the part crossing the bound keeps its head. A secret
+// spanning parts is outside this (TestOpenCodeChildCrossBlockSecretIsOutOfContract).
 func TestOpenCodeChildTextSplitAsJoined(t *testing.T) {
 	secrets := strings.Repeat(testSecret, maxKeptText/len(testSecret)) // redacted: 12 of every 18 bytes
 	many := slices.Repeat([]string{testSecret}, 150)
@@ -469,29 +472,135 @@ func TestOpenCodeChildTextSplitAsJoined(t *testing.T) {
 		{"redacted under the bound, then a short part", []string{secrets, "kept"},
 			proto.OpenCodeMessage{Text: strings.Repeat("[REDACTED:T]", maxKeptText/len(testSecret)) + "\nkept"}},
 	}
-	record := func(t *testing.T, texts []string) string {
-		a, sink := childRun(t, ocSession, 0, nil)
-		onBus(t, a, ocSessionCreated("ses_kid", ocSession))
-		for i, text := range texts {
-			onBus(t, a, ocText("ses_kid", "msg_1", "prt_"+strconv.Itoa(i), text))
-		}
-		onBus(t, a, `{"type":"message.updated","properties":{"sessionID":"ses_kid","info":{"id":"msg_1","sessionID":"ses_kid","role":"assistant","cost":0,"tokens":{"cache":{}},"time":{"created":1,"completed":9}}}}`)
-		got := joinedTyped(a, sink, proto.EvOpenCodeMessage)
-		if len(got) != 1 {
-			t.Fatalf("messages: %q", got)
-		}
-		return got[0]
-	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			c.want.SessionID, c.want.MessageID, c.want.Role, c.want.Completed = "ses_kid", "msg_1", "assistant", 9
 			wb, _ := json.Marshal(c.want)
-			whole, split := record(t, []string{strings.Join(c.parts, "\n")}), record(t, c.parts)
+			whole, split := childRecord(t, nil, []string{strings.Join(c.parts, "\n")}), childRecord(t, nil, c.parts)
 			if whole != string(wb) {
 				t.Fatalf("one part:\n%.300s\nwant\n%.300s", whole, wb)
 			}
 			if split != whole {
 				t.Fatalf("%d parts:\n%.300s\none part:\n%.300s", len(c.parts), split, whole)
+			}
+		})
+	}
+}
+
+// childRecord is the opencode.message record of a completed child message
+// whose text parts are texts, in order, written through red's Clip if red
+// is not nil.
+func childRecord(t *testing.T, red map[string]string, texts []string) string {
+	t.Helper()
+	a, sink := childRun(t, ocSession, 0, nil)
+	if red != nil {
+		a.sink = &valueSink{childSink: sink, values: red}
+	}
+	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+	for i, text := range texts {
+		onBus(t, a, ocText("ses_kid", "msg_1", "prt_"+strconv.Itoa(i), text))
+	}
+	onBus(t, a, `{"type":"message.updated","properties":{"sessionID":"ses_kid","info":{"id":"msg_1","sessionID":"ses_kid","role":"assistant","cost":0,"tokens":{"cache":{}},"time":{"created":1,"completed":9}}}}`)
+	got := joinedTyped(a, sink, proto.EvOpenCodeMessage)
+	if len(got) != 1 {
+		t.Fatalf("messages: %q", got)
+	}
+	return got[0]
+}
+
+// valueSink is a childSink whose Clip redacts each key of values to
+// "[REDACTED:<value>]", then cuts as the shim's sink does: on a UTF-8
+// boundary, and before a marker the cut would split.
+type valueSink struct {
+	*childSink
+	values map[string]string
+}
+
+func (s *valueSink) Clip(text string, max int) (string, bool) {
+	for v, name := range s.values {
+		text = strings.ReplaceAll(text, v, "[REDACTED:"+name+"]")
+	}
+	if len(text) <= max {
+		return text, false
+	}
+	for max > 0 && !utf8.RuneStart(text[max]) {
+		max--
+	}
+	if open := strings.LastIndex(text[:max], "["); open >= 0 && strings.HasPrefix(text[open:], "[REDACTED:") &&
+		!strings.Contains(text[open:max], "]") {
+		max = open
+	}
+	return text[:max], true
+}
+
+// A secret inside a part is redacted before the part is kept: what the
+// tracker holds for a message not yet completed has its marker, not its
+// value, both for a part under the bound and for one cut to it.
+func TestOpenCodeChildTextRedactedBeforeKept(t *testing.T) {
+	a, _ := childRun(t, ocSession, 0, nil)
+	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+	onBus(t, a, ocText("ses_kid", "msg_1", "prt_1", "short "+testSecret+" part"))
+	onBus(t, a, ocText("ses_kid", "msg_1", "prt_2", testSecret+strings.Repeat("y", 8<<10)))
+	a.kids.mu.Lock()
+	m := a.kids.texts["msg_1"]
+	var kept []string
+	if m != nil {
+		for _, id := range m.order {
+			kept = append(kept, m.text[id])
+		}
+	}
+	a.kids.mu.Unlock()
+	if len(kept) != 2 || kept[0] != "short [REDACTED:T] part" || !strings.HasPrefix(kept[1], "[REDACTED:T]yyy") ||
+		strings.Contains(strings.Join(kept, ""), testSecret) {
+		t.Fatalf("kept: %.200q", kept)
+	}
+}
+
+// Out of contract, pinned as it is: a secret spanning two parts. Parts are
+// OpenCode's own text blocks, redacted one at a time, so neither half is
+// matched. The join puts "\n" at the split, so the record's redaction
+// matches only a value with "\n" at exactly that point, and only if keep
+// left both halves whole; both cases use such a value, the only shape
+// the join can match, and show the two-part record differing from the
+// one-part one. A value without that "\n" is redacted in no two-part
+// record. Accepted, not redacted by a streaming redactor: a value split
+// across blocks is not an input the relay redacts.
+func TestOpenCodeChildCrossBlockSecretIsOutOfContract(t *testing.T) {
+	a6, b6 := strings.Repeat("a", 600), strings.Repeat("b", 600)
+	a3, b3 := strings.Repeat("a", 300), strings.Repeat("b", 300)
+	x := strings.Repeat("x", 1900)
+	long := strings.Repeat("N", 700)
+	cases := []struct {
+		name         string
+		red          map[string]string
+		parts        []string
+		whole, split proto.OpenCodeMessage
+	}{
+		// The second part is cut to fit before the join is redacted, so
+		// the join redacts the secret but loses the suffix the shorter
+		// marker would have made room for, and is truncated.
+		{"join shrinks", map[string]string{a6 + "\n" + b6: "T"}, []string{a6, b6 + x},
+			proto.OpenCodeMessage{Text: "[REDACTED:T]" + x},
+			proto.OpenCodeMessage{Text: "[REDACTED:T]" + x[:maxKeptText-len(a6)-1-len(b6)], Truncated: true}},
+		// The second half is cut before the join is redacted, so the join
+		// no longer holds the value and 148 bytes of its first half are
+		// written as they are.
+		{"half cut away", map[string]string{a3 + "\n" + b3: long}, []string{x + a3, b3},
+			proto.OpenCodeMessage{Text: x, Truncated: true},
+			proto.OpenCodeMessage{Text: x + a3[:proto.MaxOpenCodeText-len(x)], Truncated: true}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for _, r := range []struct {
+				name  string
+				parts []string
+				want  proto.OpenCodeMessage
+			}{{"one part", []string{strings.Join(c.parts, "\n")}, c.whole}, {"two parts", c.parts, c.split}} {
+				r.want.SessionID, r.want.MessageID, r.want.Role, r.want.Completed = "ses_kid", "msg_1", "assistant", 9
+				wb, _ := json.Marshal(r.want)
+				if got := childRecord(t, c.red, r.parts); got != string(wb) {
+					t.Errorf("%s:\n%.300s\nwant\n%.300s", r.name, got, wb)
+				}
 			}
 		})
 	}

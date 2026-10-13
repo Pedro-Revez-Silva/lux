@@ -80,9 +80,10 @@ type msgText struct {
 	cut map[string]bool
 }
 
-// keep bounds the parts' redacted text, joined as childMessage joins it,
-// to maxKeptText bytes: the part crossing the bound keeps its prefix (on
-// a rune boundary), the parts after it nothing.
+// keep holds the message's parts to maxKeptText bytes, counted as
+// childMessage joins them ("\n" between non-empty parts): the part
+// crossing the bound keeps its head, cut on a rune boundary only, the
+// parts after it nothing. Its parts are already redacted (childText).
 func (m *msgText) keep() {
 	n := 0
 	for _, id := range m.order {
@@ -133,11 +134,12 @@ const (
 	// maxChildParts: opencode.part records a Run writes in full; after
 	// them, one lux.warning, and the status alone.
 	maxChildParts = 2000
-	// maxKeptText: bytes of a child message's redacted text, its parts
-	// joined, kept until it completes (keep). The record redacts the join
-	// again and cuts it to MaxOpenCodeText; the 256 bytes over it are
-	// slack for that second redaction shrinking the join, where a pattern
-	// matches across a part boundary.
+	// maxKeptText: bytes of a child message's redacted, joined text held
+	// until it completes (keep). keep cuts on a rune boundary only, so it
+	// can cut a marker; the 256 bytes over MaxOpenCodeText leave any
+	// marker begun before MaxOpenCodeText at least its "[REDACTED:"
+	// prefix, which the record's sink.Clip recognises and cuts before,
+	// so no part of a marker is written.
 	maxKeptText = proto.MaxOpenCodeText + 256
 )
 
@@ -351,10 +353,20 @@ func (a *ACP) emitKids() {
 	k.mu.Unlock()
 }
 
-// childText keeps the newest text of a child message's text part, which
-// its message's completion writes: at most maxKeptText bytes of it, cut
-// by sink.Clip (redacted first, so a secret is never half kept), outside
-// k.mu.
+// childText keeps the newest text of a child message's text part for its
+// message's completion (childMessage) to write. The bound guarantees:
+//   - memory: a message that never completes holds at most maxKeptText
+//     bytes of text;
+//   - no raw secret held: each part is redacted by sink.Clip, outside
+//     k.mu, before keep counts or holds any of it;
+//   - the record is the kept parts' redacted join, clipped to
+//     MaxOpenCodeText.
+//
+// Redaction is per block: a part is OpenCode's own assistant text block.
+// A secret spanning blocks is redacted by neither path, the part's or the
+// join's: neither half is the value, and the join puts "\n" at the split.
+// Only a value with "\n" at that very point can match the join, and only
+// if keep left both halves whole.
 func (a *ACP) childText(part *busPart, run string) {
 	k := a.kids
 	if part.SessionID == run {
@@ -366,8 +378,6 @@ func (a *ACP) childText(part *busPart, run string) {
 	if !ours {
 		return
 	}
-	// Every part redacted before keep charges it, so where the parts
-	// split a text does not change what is kept of it.
 	text, cut := a.sink.Clip(part.Text, maxKeptText)
 	text = strings.Clone(text) // not a slice of the whole text
 	k.mu.Lock()
