@@ -1,6 +1,7 @@
 package proto
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -201,6 +202,29 @@ const (
 	// Its place relative to the agent's own announcement, per adapter:
 	// docs/adapters.md#where-the-record-lands.
 	EvCompacted = "lux.compacted"
+	// OpenCode subagents: the `task` tool runs one in a child session of
+	// the Run's (session.created with parentID), which ACP does not show.
+	// lux reads them off OpenCode's bus for every session whose chain of
+	// parents reaches the Run's, and writes these records; never streamed
+	// text. Details: docs/adapters.md#opencode-subagents.
+	//
+	// EvOpenCodeSession: a session of the Run's tree other than its own,
+	// once per id (OpenCodeSession).
+	EvOpenCodeSession = "opencode.session"
+	// EvOpenCodeTask: a `task` tool call of a session of the Run's tree
+	// and the child session it runs, on each change of status
+	// (OpenCodeTask).
+	EvOpenCodeTask = "opencode.task"
+	// EvOpenCodePart: a child session's tool call, on each change of
+	// status (OpenCodePart). input, output and error are redacted and cut.
+	EvOpenCodePart = "opencode.part"
+	// EvOpenCodeMessage: a child session's assistant message, once, when
+	// it completes (OpenCodeMessage).
+	EvOpenCodeMessage = "opencode.message"
+	// EvOpenCodePermission: OpenCode asked a permission for a session of
+	// the Run's tree, and what lux did (OpenCodePermission). A lux.warning
+	// follows for one lux answered over HTTP (a child's).
+	EvOpenCodePermission = "opencode.permission"
 	// EvArtifact: a published file is staged, whole, as file (on the
 	// runtime volume): {"id", "name", "description", "contentType",
 	// "size", "sha256", "file"}.
@@ -225,6 +249,99 @@ type Compaction struct {
 	// SummaryTruncated is set by the shim when it cuts Summary.
 	SummaryTruncated bool `json:"summaryTruncated,omitempty"`
 }
+
+// Bounds on the text an OpenCode child record carries, in bytes, after
+// redaction: a tool call's input (as JSON), its output and error, and a
+// message's text.
+const (
+	MaxOpenCodeInput  = 300
+	MaxOpenCodeOutput = 2 << 10
+	MaxOpenCodeText   = 2 << 10
+)
+
+// OpenCodeSession is EvOpenCodeSession's data. CreatedAt is unix ms.
+type OpenCodeSession struct {
+	ID        string `json:"id"`
+	ParentID  string `json:"parentID"`
+	Title     string `json:"title"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+// OpenCodeTask is EvOpenCodeTask's data: SessionID's call CallID runs
+// ChildSessionID. Status is running, completed or error; Model is the
+// task's metadata.model as OpenCode gave it ({modelID, providerID}).
+type OpenCodeTask struct {
+	SessionID      string          `json:"sessionID"`
+	CallID         string          `json:"callID"`
+	ChildSessionID string          `json:"childSessionID"`
+	Model          json.RawMessage `json:"model,omitempty"`
+	Status         string          `json:"status"`
+}
+
+// OpenCodeTime is a tool call's start and end, unix ms; 0 is not yet.
+type OpenCodeTime struct {
+	Start int64 `json:"start,omitempty"`
+	End   int64 `json:"end,omitempty"`
+}
+
+// OpenCodePart is EvOpenCodePart's data. Status is pending, running,
+// completed or error. Input is the call's input as JSON, at most
+// MaxOpenCodeInput bytes; Output (completed only) and Error (error only)
+// at most MaxOpenCodeOutput. Truncated: one of them was cut.
+type OpenCodePart struct {
+	SessionID string       `json:"sessionID"`
+	MessageID string       `json:"messageID"`
+	CallID    string       `json:"callID"`
+	Tool      string       `json:"tool"`
+	Status    string       `json:"status"`
+	Title     string       `json:"title,omitempty"`
+	Input     string       `json:"input,omitempty"`
+	Output    string       `json:"output,omitempty"`
+	Error     string       `json:"error,omitempty"`
+	Time      OpenCodeTime `json:"time"`
+	Truncated bool         `json:"truncated,omitempty"`
+}
+
+// OpenCodeTokens is a message's token usage.
+type OpenCodeTokens struct {
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	Reasoning  int64 `json:"reasoning"`
+	CacheRead  int64 `json:"cacheRead"`
+	CacheWrite int64 `json:"cacheWrite"`
+}
+
+// OpenCodeMessage is EvOpenCodeMessage's data: Text is the message's text
+// parts joined, at most MaxOpenCodeText bytes (Truncated if cut); Cost in
+// the provider's currency (USD); Completed unix ms.
+type OpenCodeMessage struct {
+	SessionID string         `json:"sessionID"`
+	MessageID string         `json:"messageID"`
+	Role      string         `json:"role"`
+	Text      string         `json:"text"`
+	Cost      float64        `json:"cost"`
+	Tokens    OpenCodeTokens `json:"tokens"`
+	Completed int64          `json:"completed"`
+	Truncated bool           `json:"truncated,omitempty"`
+}
+
+// OpenCodePermission is EvOpenCodePermission's data. Answered is
+// PermissionAllowed (lux, or ACP for the Run's own session, allowed it
+// once) or PermissionNone (nobody did: Error says why).
+type OpenCodePermission struct {
+	SessionID    string   `json:"sessionID"`
+	PermissionID string   `json:"permissionID"`
+	Permission   string   `json:"permission"`
+	Patterns     []string `json:"patterns"`
+	CallID       string   `json:"callID"`
+	Answered     string   `json:"answered"`
+	Error        string   `json:"error,omitempty"`
+}
+
+const (
+	PermissionAllowed = "allow"
+	PermissionNone    = "none"
+)
 
 // Input phases: lux.input's phase (accepted, failed), and
 // AdapterEvent.InputProgress's (consumed, failed).
