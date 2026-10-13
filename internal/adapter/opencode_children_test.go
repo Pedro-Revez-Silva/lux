@@ -452,22 +452,48 @@ func TestOpenCodeChildManyTextPartsBounded(t *testing.T) {
 	}
 }
 
-// Parts dropped where they are kept make the message truncated even when
-// redaction brings what was kept under MaxOpenCodeText.
-func TestOpenCodeChildDroppedPartsTruncated(t *testing.T) {
-	a, sink := childRun(t, ocSession, 0, nil)
-	onBus(t, a, ocSessionCreated("ses_kid", ocSession))
-	secrets := strings.Repeat(testSecret, maxKeptText/len(testSecret)+1) // redacted: 12 of every 18 bytes
-	onBus(t, a, ocText("ses_kid", "msg_d", "prt_1", secrets[:maxKeptText]))
-	onBus(t, a, ocText("ses_kid", "msg_d", "prt_2", "dropped"))
-	onBus(t, a, `{"type":"message.updated","properties":{"sessionID":"ses_kid","info":{"id":"msg_d","sessionID":"ses_kid","role":"assistant","cost":0,"tokens":{"cache":{}},"time":{"created":1,"completed":9}}}}`)
-	var m proto.OpenCodeMessage
-	got := joinedTyped(a, sink, proto.EvOpenCodeMessage)
-	if len(got) != 1 || json.Unmarshal([]byte(got[0]), &m) != nil {
-		t.Fatalf("messages: %q", got)
+// A child message's record is the same however its text is split into
+// parts: every part is redacted before it counts against what is kept,
+// so secret-bearing parts keep no more room than their redacted text
+// takes, and the part crossing the bound keeps its head.
+func TestOpenCodeChildTextSplitAsJoined(t *testing.T) {
+	secrets := strings.Repeat(testSecret, maxKeptText/len(testSecret)) // redacted: 12 of every 18 bytes
+	many := slices.Repeat([]string{testSecret}, 150)
+	cases := []struct {
+		name  string
+		parts []string
+		want  proto.OpenCodeMessage
+	}{
+		{"150 secrets, then a long part", append(many, strings.Repeat("x", 4000)),
+			proto.OpenCodeMessage{Truncated: true, Text: (strings.Repeat("[REDACTED:T]\n", 150) + strings.Repeat("x", 4000))[:proto.MaxOpenCodeText]}},
+		{"redacted under the bound, then a short part", []string{secrets, "kept"},
+			proto.OpenCodeMessage{Text: strings.Repeat("[REDACTED:T]", maxKeptText/len(testSecret)) + "\nkept"}},
 	}
-	if len(m.Text) >= proto.MaxOpenCodeText || strings.Contains(m.Text, "dropped") || !m.Truncated {
-		t.Fatalf("%d bytes of text, truncated %v: %.80q", len(m.Text), m.Truncated, m.Text)
+	record := func(t *testing.T, texts []string) string {
+		a, sink := childRun(t, ocSession, 0, nil)
+		onBus(t, a, ocSessionCreated("ses_kid", ocSession))
+		for i, text := range texts {
+			onBus(t, a, ocText("ses_kid", "msg_1", "prt_"+strconv.Itoa(i), text))
+		}
+		onBus(t, a, `{"type":"message.updated","properties":{"sessionID":"ses_kid","info":{"id":"msg_1","sessionID":"ses_kid","role":"assistant","cost":0,"tokens":{"cache":{}},"time":{"created":1,"completed":9}}}}`)
+		got := joinedTyped(a, sink, proto.EvOpenCodeMessage)
+		if len(got) != 1 {
+			t.Fatalf("messages: %q", got)
+		}
+		return got[0]
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.want.SessionID, c.want.MessageID, c.want.Role, c.want.Completed = "ses_kid", "msg_1", "assistant", 9
+			wb, _ := json.Marshal(c.want)
+			whole, split := record(t, []string{strings.Join(c.parts, "\n")}), record(t, c.parts)
+			if whole != string(wb) {
+				t.Fatalf("one part:\n%.300s\nwant\n%.300s", whole, wb)
+			}
+			if split != whole {
+				t.Fatalf("%d parts:\n%.300s\none part:\n%.300s", len(c.parts), split, whole)
+			}
+		})
 	}
 }
 

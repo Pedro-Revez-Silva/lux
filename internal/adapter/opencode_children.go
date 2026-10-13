@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -54,7 +55,7 @@ type ocChildren struct {
 	partsWritten int
 	// texts: the text of each text part of a child's assistant message not
 	// yet written, by message id, then part id, in the order they came;
-	// at most about maxKeptText bytes of a message's (msgText.keep).
+	// redacted, and at most maxKeptText bytes of a message's (msgText.keep).
 	texts map[string]*msgText
 	// messages: messages done with, by id: written, or not an
 	// assistant's (no text kept). permissions: written, by id.
@@ -79,15 +80,27 @@ type msgText struct {
 	cut map[string]bool
 }
 
-// keep drops the text of the parts after the first maxKeptText bytes, in
-// order: opencode.message carries no more than MaxOpenCodeText of them.
+// keep bounds the parts' redacted text, joined as childMessage joins it,
+// to maxKeptText bytes: the part crossing the bound keeps its prefix (on
+// a rune boundary), the parts after it nothing.
 func (m *msgText) keep() {
 	n := 0
 	for _, id := range m.order {
-		if n >= maxKeptText && m.text[id] != "" {
-			m.text[id], m.cut[id] = "", true
+		t := m.text[id]
+		if t == "" {
+			continue
 		}
-		n += len(m.text[id])
+		if n > 0 {
+			n++ // the "\n" before it
+		}
+		if room := max(maxKeptText-n, 0); len(t) > room {
+			for room > 0 && !utf8.RuneStart(t[room]) {
+				room--
+			}
+			t = t[:room]
+			m.text[id], m.cut[id] = t, true
+		}
+		n += len(t)
 	}
 }
 
@@ -120,9 +133,11 @@ const (
 	// maxChildParts: opencode.part records a Run writes in full; after
 	// them, one lux.warning, and the status alone.
 	maxChildParts = 2000
-	// maxKeptText: bytes of a child message's text kept until it
-	// completes, per part and (keep) per message; the margin over
-	// MaxOpenCodeText covers the join's separators.
+	// maxKeptText: bytes of a child message's redacted text, its parts
+	// joined, kept until it completes (keep). The record redacts the join
+	// again and cuts it to MaxOpenCodeText; the 256 bytes over it are
+	// slack for that second redaction shrinking the join, where a pattern
+	// matches across a part boundary.
 	maxKeptText = proto.MaxOpenCodeText + 256
 )
 
@@ -351,11 +366,10 @@ func (a *ACP) childText(part *busPart, run string) {
 	if !ours {
 		return
 	}
-	text, cut := part.Text, false
-	if len(text) > maxKeptText {
-		text, cut = a.sink.Clip(text, maxKeptText)
-		text = strings.Clone(text) // not a slice of the whole text
-	}
+	// Every part redacted before keep charges it, so where the parts
+	// split a text does not change what is kept of it.
+	text, cut := a.sink.Clip(part.Text, maxKeptText)
+	text = strings.Clone(text) // not a slice of the whole text
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if k.messages[part.MessageID] {
@@ -408,8 +422,8 @@ func (a *ACP) childMessage(ev busEvent, run string) {
 			Reasoning: info.Tokens.Reasoning, CacheRead: info.Tokens.Cache.Read, CacheWrite: info.Tokens.Cache.Write}}
 	k.out = append(k.out, func() (string, any) {
 		rec.Text, rec.Truncated = a.sink.Clip(strings.Join(text, "\n"), proto.MaxOpenCodeText)
-		// Redaction can bring kept text under MaxOpenCodeText after
-		// more was cut where it was kept.
+		// A part cut where it was kept is truncated whatever the
+		// join's length.
 		rec.Truncated = rec.Truncated || cut
 		return proto.EvOpenCodeMessage, rec
 	})
