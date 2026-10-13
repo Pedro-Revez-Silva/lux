@@ -62,7 +62,8 @@ func runFakeOpenCode(t *testing.T, prompt string, done func(recs []string) bool)
 // fakeRecords are lux-fake's subagent records with what varies between
 // Runs replaced: the parent session's id by $P, the child message's by $M
 // (each taken from where it first appears, so every other record must
-// carry the same), and every time, once checked set and in order, by 0.
+// carry the same), and every time, once checked set and in order, by 0;
+// a completed or error part must carry its end.
 func fakeRecords(t *testing.T, recs []string) []string {
 	t.Helper()
 	var parent, msg string
@@ -95,7 +96,8 @@ func fakeRecords(t *testing.T, recs []string) []string {
 				msg = x.MessageID
 			}
 			ordered(x.Time.Start)
-			if x.Time.End != 0 {
+			// A finished call has ended; a running one may not have.
+			if x.Status == "completed" || x.Status == "error" || x.Time.End != 0 {
 				ordered(x.Time.End)
 			}
 			x.Time = proto.OpenCodeTime{}
