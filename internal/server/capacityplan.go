@@ -408,6 +408,12 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 			h.Capacity = plan.Expected.Capacity
 			h.Labels = maps.Clone(plan.Expected.Labels)
 		}
+		// A shaped pool's new host is launched advertising the shape, with
+		// disk scaling ((*PoolShape).runnerEnv), whatever older hosts registered with.
+		if sh := pl.Shape; sh != nil {
+			h.Capacity.CPUs, h.Capacity.Memory, h.Capacity.Disk = sh.CPUs, int64(sh.Memory), int64(sh.Disk)
+			h.Caps = append(h.Caps, proto.CapDiskScale)
+		}
 		if h.Labels == nil {
 			h.Labels = map[string]string{}
 		}
@@ -578,6 +584,7 @@ func waitingRuns(ctx context.Context, tx pgx.Tx, pl poolRow) ([]pendingRun, map[
 		if err := rows.Scan(&r.ID, &r.TenantID, &r.State, &r.Spec, &r.SnapshotID, &r.PendingSync, &r.HasSecrets, &r.PlaceOn, &r.AvoidHost, &r.PoolID, &since); err != nil {
 			return nil, nil, err
 		}
+		r.Shape = pl.Shape
 		runs = append(runs, r)
 		waitingSince[r.ID] = since
 	}

@@ -359,7 +359,7 @@ kept as samples, in these tables, at three resolutions (`res`: 0 raw, 60,
 
 | Table | Written | What |
 | --- | --- | --- |
-| `host_samples` | each heartbeat | the host's CPU seconds (counter), memory and disk in use; its live placements and the CPU and memory they asked for; the runner process's own use (below) |
+| `host_samples` | each heartbeat | the host's CPU seconds (counter), memory and disk in use; `disk_free`, what unprivileged writers can still use on the filesystem of the runner's data directory (a level); for a runner scaling disk (`disk-scale`), `fs_capacity` and `disk_headroom`, that filesystem's capacity and the bytes kept from Runs, as read at its start (a rollup's maximum; NULL otherwise); its live placements and the CPU and memory they asked for; the runner process's own use (below) |
 | `placement_samples` | each heartbeat, per live placement | CPU seconds (counter), memory and pids now, disk, network counters; `peak_cpu_cores`, the CPU rate over the interval the reading ends (a peak); `cpu_stall`, `mem_stall`, `mem_full_stall`, `io_stall`, `io_full_stall`, the PSI totals in seconds (counters, NULL without PSI) |
 | `system_samples` | every `LUX_SAMPLE_EVERY` | for the system (tenant `''`) and each tenant with anything live or with bytes in S3: Runs by state, busy, idle, queued, started and finished since the last sample, time to start p50/p95, hosts by state, capacity, allocated, and stored bytes by kind (below) |
 | `control_samples`, `control_disk_samples` | with the whole system's sample, at its instant | the control host, the machine luxd runs on: CPU seconds (counter) and cores, memory used and total; its Postgres database's size and connections (read with SQL, so a remote database works too); for each of `LUX_HISTORY_DISK_PATHS` its filesystem's used, free (writable without root) and total bytes; and the luxd process's own use (below) |
@@ -379,7 +379,14 @@ two samples of the same start, and a minute or hour bucket keeps its last
 reading's counter and start (not the maximum, which may be the previous
 process's); RSS, heap and goroutines are averaged, the peak is the
 bucket's maximum. The API has the runner's as `runner` on a host's
-samples, with the CPU as cores.
+samples, with the CPU as cores, and the filesystem's as `diskFreeBytes`,
+`fsCapacityBytes` and `diskHeadroomBytes`.
+
+A Run's disk is three figures, kept apart: what it asked for
+(`sizing.requested`), the nominal reservation the scheduler and costs use
+(`spec.resources.disk`, a placement's `resources.disk`), and on a host
+scaling disk the effective limit it was held to (`disk.exceeded`'s
+`limitBytes`, with `nominalLimitBytes` and `limitFactor` beside it).
 
 Stored bytes are what lux keeps in S3 for the tenant (every tenant for
 `''`) at the sample's instant: the sum of `blobs.size` over blobs whose

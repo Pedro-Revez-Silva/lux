@@ -1525,16 +1525,13 @@ func (p *placement) sampleSlow(ctx context.Context) {
 	wg.Wait()
 	// A partial sum is a lower bound: over the limit it is conclusive, at or
 	// under it would wrongly restart the grace.
-	var limit int64
-	if p.assign != nil {
-		limit = int64(p.assign.Spec.Resources.Disk)
-	}
-	if probeErr == nil || (limit > 0 && disk > limit) {
+	l := p.diskLimit()
+	if probeErr == nil || (l.Nominal > 0 && disk > l.Effective) {
 		p.checkDisk(ctx, disk, time.Now())
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if probeErr != nil && limit > 0 && p.phase == "running" && !p.diskProbeFailed {
+	if probeErr != nil && l.Nominal > 0 && p.phase == "running" && !p.diskProbeFailed {
 		p.diskProbeFailed = true
 		p.logf("a disk use probe failed; a sample counts against the disk limit only if what was measured is over it (logged once per placement)",
 			"err", probeErr)
@@ -1545,6 +1542,19 @@ func (p *placement) sampleSlow(ctx context.Context) {
 	}
 }
 
+// diskLimit is what this placement's disk is held to: its resources.disk,
+// scaled to the host's share when the runner scales disk (diskScale).
+func (p *placement) diskLimit() disklimit.Limit {
+	if p.assign == nil {
+		return disklimit.Limit{}
+	}
+	l := disklimit.Unscaled(p.assign.Spec.Resources)
+	if d := p.r.disk; d.on {
+		l.Effective, l.Factor, l.Scaled = d.limit(l.Nominal), d.factor(), true
+	}
+	return l
+}
+
 // checkDisk reports a Run over its disk limit (its writable layer and state
 // volumes) once it has been over for its resources.diskGrace, or at once at
 // disklimit.CeilingFactor times the limit: luxd stops it, and it ends
@@ -1553,21 +1563,24 @@ func (p *placement) checkDisk(ctx context.Context, used int64, now time.Time) {
 	if p.assign == nil {
 		return
 	}
+	limit := p.diskLimit()
 	p.mu.Lock()
 	if p.phase != "running" {
 		p.mu.Unlock()
 		return
 	}
-	v := p.disk.Sample(p.assign.Spec.Resources, used, now)
+	v := p.disk.Sample(limit, used, now)
 	p.mu.Unlock()
 	switch v.Step {
 	case disklimit.WentOver:
 		p.logf("over its disk limit; stopping it unless it drops back under within its grace",
-			"used", used, "limit", v.Limit, "grace", v.Grace, "remaining", v.Remaining.Round(time.Second))
+			"used", used, "limit", v.Of.Effective, "nominalLimit", v.Of.Nominal, "factor", v.Of.Factor,
+			"grace", v.Of.Grace, "remaining", v.Remaining.Round(time.Second))
 	case disklimit.BackUnder:
-		p.logf("back under its disk limit", "used", used, "limit", v.Limit)
+		p.logf("back under its disk limit", "used", used, "limit", v.Of.Effective)
 	case disklimit.Exceeded:
-		p.logf("over its disk limit", "used", used, "limit", v.Limit, "grace", v.Grace, "ceiling", v.Ceiling)
+		p.logf("over its disk limit", "used", used, "limit", v.Of.Effective, "nominalLimit", v.Of.Nominal, "factor", v.Of.Factor,
+			"grace", v.Of.Grace, "ceiling", v.Ceiling)
 		go p.reportRetrying(context.WithoutCancel(ctx), proto.RunEvent{Type: proto.EvDiskExceeded, Data: v.EventData(used)})
 	}
 }

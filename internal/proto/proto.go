@@ -116,6 +116,11 @@ type Capacity struct {
 	Memory int64   `json:"memory"`
 	Disk   int64   `json:"disk"`
 	Runs   int     `json:"runs"`
+	// With CapDiskScale, Disk is nominal: each Run's disk limit is its
+	// share of FSCapacity - DiskHeadroom (bytes, as the runner read them
+	// at start). Absent otherwise.
+	DiskHeadroom int64 `json:"diskHeadroom,omitempty"`
+	FSCapacity   int64 `json:"fsCapacity,omitempty"`
 }
 
 type LocalSnapshot struct {
@@ -161,6 +166,13 @@ type HostUsage struct {
 	CPUSeconds  float64 `json:"cpuSeconds"`
 	MemoryBytes int64   `json:"memoryBytes"`
 	DiskBytes   int64   `json:"diskBytes"`
+	// The filesystem DiskBytes is on: FSFreeBytes what unprivileged
+	// writers can still use. FSCapacityBytes and DiskHeadroomBytes are the
+	// runner's disk scaling's, absent without CapDiskScale. Absent from
+	// older runners.
+	FSFreeBytes       *int64 `json:"fsFreeBytes,omitempty"`
+	FSCapacityBytes   *int64 `json:"fsCapacityBytes,omitempty"`
+	DiskHeadroomBytes *int64 `json:"diskHeadroomBytes,omitempty"`
 }
 
 // ProcessUsage is the runner process's own, on each heartbeat. CPUSeconds
@@ -298,6 +310,12 @@ type Sync struct {
 // Push.Credentials and Sync.Credentials. A runner without it drops them
 // and uses the credential it was assigned.
 const CapGitCredentials = "git-credentials"
+
+// CapDiskScale is the Hello capability of a runner that holds each Run to
+// its share of the filesystem (lux-runner --disk with --disk-headroom):
+// Capacity.Disk is then nominal. Shaped pools place Runs only on such
+// runners.
+const CapDiskScale = "disk-scale"
 
 // ImageResolution is a built image as its Run's first build made it: the
 // Containerfile with every FROM pinned to a digest, and the image id.

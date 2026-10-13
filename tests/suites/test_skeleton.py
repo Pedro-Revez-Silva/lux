@@ -8,7 +8,7 @@ import time
 import pytest
 
 from conftest import CLIError, generic
-from env import ALPINE_IMAGE
+from env import ALPINE_IMAGE, wait_until
 
 
 def test_echo_hello(lux, runners, hosts):
@@ -188,7 +188,9 @@ def test_a_run_over_its_disk_limit_is_stopped_and_fails(lux, runners, hosts):
     """resources.disk bounds what a Run writes (its writable layer and state
     volumes): past it, the Run is stopped and fails, its state kept."""
     runners.start(hosts[0], "--usage-every", "1s")
-    script = "echo start; dd if=/dev/zero of=/w/big bs=1M count=64 2>/dev/null; echo wrote; sleep 600"
+    # "kept": the state volume came back non-empty. "wrote": all 64 MiB are in it.
+    script = ("[ -s /w/big ] && echo kept; echo start; dd if=/dev/zero of=/w/big bs=1M count=64 2>/dev/null && "
+              '[ "$(stat -c %s /w/big)" -eq 67108864 ] && echo wrote; sleep 600')
     run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", script, resources={"disk": "32Mi"},
                                 volumes=[{"name": "w", "path": "/w", "kind": "state"}]))
     run = lux.wait_state(run_id, "failed", timeout=60)
@@ -197,9 +199,19 @@ def test_a_run_over_its_disk_limit_is_stopped_and_fails(lux, runners, hosts):
     exceeded = lux.events(run_id, "disk.exceeded")
     assert exceeded and exceeded[0]["data"]["limitBytes"] == 32 << 20, exceeded
     assert lux.json("snapshots", run_id), "its state was not kept"
-    # Resumed with room to spare: it runs on, its 64 MiB still there.
+    # Resumed with room to spare: it runs on, its /w/big still there. Epoch 1
+    # was stopped only once over 32 MiB, nearly all of it /w/big, so the
+    # restored volume always holds a non-empty /w/big. Only the resumed
+    # placement's own stdout counts: `lux logs` joins every placement's.
     lux.run("resume", run_id, "--disk", "256Mi")
-    lux.wait_output(run_id, "start\nwrote\nstart", timeout=60)
+    lux.wait_state(run_id, "running", timeout=60)
+    epoch = lux.get(run_id)["placements"][-1]["epoch"]
+    assert epoch >= 2, lux.get(run_id)["placements"]
+    stdout = lambda: "".join(r.get("data", "") for r in lux.records(run_id) if r.get("epoch") == epoch and r.get("ch") == "stdout")
+    try:
+        wait_until(lambda: stdout() == "kept\nstart\nwrote\n", 60, 0.5, f"epoch {epoch} did not find its state and write 64 MiB")
+    except AssertionError as e:
+        raise AssertionError(f"{e}; epoch {epoch} stdout {stdout()!r}") from None
     run = lux.get(run_id)
     assert run["state"] == "running" and run["spec"]["resources"]["disk"] == 256 << 20, run
     lux.run("terminate", run_id, "--wait")
@@ -208,6 +220,47 @@ def test_a_run_over_its_disk_limit_is_stopped_and_fails(lux, runners, hosts):
     ok = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "dd if=/dev/zero of=/tmp/f bs=1M count=8 2>/dev/null; sleep 3"))
     run = lux.wait_state(ok, "succeeded", timeout=60)
     assert run["spec"]["resources"]["disk"] == 20 << 30, run["spec"]["resources"]
+
+
+def test_a_run_over_its_effective_disk_limit_is_stopped(lux, runners, hosts):
+    """A runner given a nominal disk and a disk headroom (here through its
+    environment, as a provisioned host's) holds each Run to
+    its share of the real filesystem. With the nominal disk the filesystem's
+    whole capacity and half of it kept back, a Run asking 64 MiB is held to
+    about 32 MiB: one writing 48 MiB (over its share, under what it asked)
+    is stopped, its event carrying both limits and the factor; one writing
+    16 MiB is left alone. The host advertises what it scaled by, and the
+    CPUs LUX_RUNNER_CPUS gives."""
+    # Capacity as the runner reads it (Go's statfs: f_bsize units): used
+    # plus unprivileged-free blocks, which writes do not change.
+    hosts[0].exec("mkdir", "-p", "/var/lib/lux")
+    blocks, free, avail, bsize = map(int, hosts[0].exec("stat", "-f", "-c", "%b %f %a %s", "/var/lib/lux").split())
+    capacity = (blocks - free + avail) * bsize
+    headroom = capacity // 2
+    # Through the environment alone: no size flag.
+    runners.start(hosts[0], "--usage-every", "1s", environ={
+        "LUX_RUNNER_CPUS": "4", "LUX_RUNNER_DISK": str(capacity), "LUX_RUNNER_DISK_HEADROOM": str(headroom)})
+    nominal = 64 << 20
+    effective = nominal * (capacity - headroom) // capacity
+    assert 31 << 20 < effective <= 32 << 20, effective
+    host = lux.json("hosts", "get", hosts[0].name)
+    assert host["capacity"]["cpus"] == 4 and host["capacity"]["disk"] == capacity \
+        and host["capacity"]["diskHeadroom"] == headroom and host["capacity"]["fsCapacity"] == capacity, host["capacity"]
+
+    vols = [{"name": "w", "path": "/w", "kind": "state"}]
+    over = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "dd if=/dev/zero of=/w/big bs=1M count=48 2>/dev/null; echo wrote; sleep 600",
+                              resources={"disk": "64Mi"}, volumes=vols))
+    run = lux.wait_state(over, "failed", timeout=60)
+    assert run["stateReason"] == "disk limit exceeded", run
+    data = lux.events(over, "disk.exceeded")[0]["data"]
+    assert data["limitBytes"] == effective and data["nominalLimitBytes"] == nominal and data["usedBytes"] > effective \
+        and data["usedBytes"] < nominal and abs(data["limitFactor"] - (capacity - headroom) / capacity) < 1e-9, data
+    assert run["spec"]["resources"]["disk"] == nominal, run["spec"]["resources"]
+
+    under = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "dd if=/dev/zero of=/w/small bs=1M count=16 2>/dev/null; sleep 4",
+                               resources={"disk": "64Mi"}, volumes=vols))
+    lux.wait_state(under, "succeeded", timeout=60)
+    assert not lux.events(under, "disk.exceeded")
 
 
 def test_disk_is_reserved_on_the_host(lux, runners, hosts):

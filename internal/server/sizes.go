@@ -29,6 +29,37 @@ type PoolShape struct {
 	Disk        spec.Bytes `json:"disk" doc:"Nominal disk of a whole host (from its launch template, not its instance type)."`
 	MinCPUs     float64    `json:"minCpus" doc:"The smallest size's CPUs: a power of two, at least 0.5. The ladder halves the whole host down to it."`
 	DefaultCPUs float64    `json:"defaultCpus" doc:"The CPUs of the size a Run that asks for no resources gets: one of the ladder's."`
+	// DiskHeadroom: nil reads as DefaultDiskHeadroom (a shape stored
+	// before the field, or a request without it).
+	DiskHeadroom *spec.Bytes `json:"diskHeadroom,omitempty" doc:"Bytes of each host's disk kept from Runs, for the OS, tools and image storage (lux-runner --disk-headroom): a Run's disk limit is its size's disk × min(1, (filesystem capacity − diskHeadroom) / disk). At least 0 and less than disk. Absent: 10 GiB."`
+}
+
+// DefaultDiskHeadroom is a shape's diskHeadroom when it names none: an
+// initial floor for the OS, tools and image storage, not a measured one.
+const DefaultDiskHeadroom = spec.Bytes(10 << 30)
+
+// diskHeadroom is sh's disk headroom, its default when unset.
+func (sh PoolShape) diskHeadroom() spec.Bytes {
+	if sh.DiskHeadroom == nil {
+		return DefaultDiskHeadroom
+	}
+	return *sh.DiskHeadroom
+}
+
+// runnerEnv is what a host luxd launches for a shaped pool starts its
+// runner with: the shape's nominal host and the pool's disk headroom, so
+// it advertises the shape and scales disk to it (CapDiskScale). nil for
+// an unshaped pool, whose hosts' environment is unchanged.
+func (sh *PoolShape) runnerEnv() map[string]string {
+	if sh == nil {
+		return nil
+	}
+	return map[string]string{
+		"LUX_RUNNER_CPUS":          strconv.FormatFloat(sh.CPUs, 'f', -1, 64),
+		"LUX_RUNNER_MEMORY":        strconv.FormatInt(int64(sh.Memory), 10),
+		"LUX_RUNNER_DISK":          strconv.FormatInt(int64(sh.Disk), 10),
+		"LUX_RUNNER_DISK_HEADROOM": strconv.FormatInt(int64(sh.diskHeadroom()), 10),
+	}
 }
 
 // PoolSize is one entry of a shaped pool's ladder.
@@ -90,19 +121,21 @@ func sizeCurrent(m *sizing.Model, name string, cur spec.Resources) bool {
 	return err == nil && e.CPUs == cur.CPUs && e.Memory == cur.Memory && e.Disk == cur.Disk
 }
 
-// shapeKeys are ParseShape's keys, in the order its errors list them.
+// shapeKeys are ParseShape's required keys, in the order its errors list
+// them; disk-headroom is optional.
 var shapeKeys = []string{"family", "arch", "cpus", "memory", "disk", "min-cpus", "default-cpus"}
 
 // ParseShape reads `luxd admin create-pool --shape` and `lux pools set
 // --shape`: family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2,
-// every key required. Values are checked by ValidShape, not here.
+// every key required, and optionally disk-headroom=10Gi. Values are
+// checked by ValidShape, not here.
 func ParseShape(s string) (*PoolShape, error) {
 	var sh PoolShape
 	seen := map[string]bool{}
 	for _, part := range strings.Split(s, ",") {
 		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if !ok || !slices.Contains(shapeKeys, k) {
-			return nil, fmt.Errorf("shape %q: want %s=VALUE pairs", s, strings.Join(shapeKeys, "|"))
+		if !ok || !slices.Contains(shapeKeys, k) && k != "disk-headroom" {
+			return nil, fmt.Errorf("shape %q: want %s[,disk-headroom]=VALUE pairs", s, strings.Join(shapeKeys, "|"))
 		}
 		var err error
 		switch k {
@@ -120,6 +153,9 @@ func ParseShape(s string) (*PoolShape, error) {
 			err = json.Unmarshal([]byte(strconv.Quote(v)), &sh.Memory)
 		case "disk":
 			err = json.Unmarshal([]byte(strconv.Quote(v)), &sh.Disk)
+		case "disk-headroom":
+			sh.DiskHeadroom = new(spec.Bytes)
+			err = json.Unmarshal([]byte(strconv.Quote(v)), sh.DiskHeadroom)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("shape %q: %s: invalid value %q", s, k, v)
@@ -139,11 +175,14 @@ func ParseShape(s string) (*PoolShape, error) {
 }
 
 // ValidShape is sh's model, or a 422 invalid_pool for a shape sizing.New
-// refuses.
+// refuses or a disk headroom outside [0, disk).
 func ValidShape(sh PoolShape) (*sizing.Model, error) {
 	m, err := sh.model()
 	if err != nil {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "%s", err.Error())
+	}
+	if h := sh.diskHeadroom(); h < 0 || h >= sh.Disk {
+		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "invalid pool shape: diskHeadroom %d must be at least 0 and less than disk %d", h, sh.Disk)
 	}
 	return m, nil
 }

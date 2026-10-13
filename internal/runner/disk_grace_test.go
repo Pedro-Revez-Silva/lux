@@ -371,6 +371,62 @@ func TestDiskProbeFailureLoggedOnce(t *testing.T) {
 	})
 }
 
+// On a runner that scales disk, checkDisk and sampleSlow hold a placement
+// to its effective limit: a sample between the effective and the nominal
+// limit goes over and, past the grace, is reported with both limits and
+// the factor; a sample at the effective limit is not over; the ceiling is
+// twice the effective limit.
+func TestCheckDiskHoldsToTheEffectiveLimit(t *testing.T) {
+	// 160 GiB nominal, 160 GiB filesystem, 10 GiB headroom: 10 GiB asked
+	// holds to 9.375 GiB.
+	const effective = diskLimit / 16 * 15
+	scaled := func(t *testing.T) (*diskFixture, *placement) {
+		f := newDiskFixture(t)
+		f.r.disk = mustDiskScale(t, 160*gib, 10*gib, 160*gib)
+		return f, f.placement(1)
+	}
+	t.Run("between effective and nominal, past the grace", func(t *testing.T) {
+		f, p := scaled(t)
+		used := diskLimit - 1
+		t0 := time.Now()
+		p.checkDisk(f.ctx, used, t0)
+		p.checkDisk(f.ctx, used, t0.Add(diskGrace))
+		evs := f.wantEvents(t, "under nominal, over effective", 1)
+		want := map[string]any{"usedBytes": float64(used), "limitBytes": float64(effective), "graceSeconds": diskGrace.Seconds(),
+			"ceiling": false, "nominalLimitBytes": float64(diskLimit), "limitFactor": 0.9375}
+		if !reflect.DeepEqual(evs[0].Data, want) {
+			t.Errorf("event data %v, want %v", evs[0].Data, want)
+		}
+	})
+	t.Run("at the effective limit, through sampleSlow", func(t *testing.T) {
+		f, p := scaled(t)
+		f.size(t, effective)
+		t0 := time.Now()
+		p.checkDisk(f.ctx, effective+1, t0.Add(-diskGrace))
+		p.sampleSlow(f.ctx)
+		p.checkDisk(f.ctx, effective+1, t0)
+		f.wantEvents(t, "the sample at the effective limit restarts the grace", 0)
+	})
+	t.Run("the ceiling is twice the effective limit", func(t *testing.T) {
+		f, p := scaled(t)
+		p.checkDisk(f.ctx, 2*effective, time.Now())
+		evs := f.wantEvents(t, "at 2× effective", 1)
+		if evs[0].Data["ceiling"] != true {
+			t.Errorf("event data %v, want the ceiling", evs[0].Data)
+		}
+	})
+	t.Run("a partial sample between effective and nominal counts", func(t *testing.T) {
+		f, p := scaled(t)
+		withVolume(p)
+		f.flag(t, "failvolume")
+		f.size(t, effective+1)
+		p.sampleSlow(f.ctx)
+		if got := f.wentOver(); len(got) != 1 {
+			t.Errorf("went-over logs %v, want one: a partial sum over the effective limit is conclusive", got)
+		}
+	})
+}
+
 // A new placement of the Run (a resume) starts its grace from zero: its
 // first sample over has the whole grace left, even though the last
 // placement was reported.

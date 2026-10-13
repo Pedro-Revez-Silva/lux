@@ -1,6 +1,7 @@
 package disklimit
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -208,10 +209,11 @@ func TestOneReportPerPlacement(t *testing.T) {
 	}
 }
 
-// Sample reads the limit and grace from a Run's resources (a spec as luxd
-// assigns it) and the event carries them: graceSeconds and ceiling.
+// Unscaled reads the limit and grace from a Run's resources (a spec as luxd
+// assigns it) and the event carries them: graceSeconds and ceiling, and no
+// nominal limit or factor.
 func TestSampleUsesTheSpecAndFillsTheEvent(t *testing.T) {
-	res := spec.Resources{Disk: spec.Bytes(limit), DiskGrace: spec.SetDuration(5 * time.Minute)}
+	res := Unscaled(spec.Resources{Disk: spec.Bytes(limit), DiskGrace: spec.SetDuration(5 * time.Minute)})
 	c := newClock()
 	var w Watch
 	if v := w.Sample(res, over, c.next()); v.Step != WentOver || v.Remaining != 5*time.Minute {
@@ -223,8 +225,9 @@ func TestSampleUsesTheSpecAndFillsTheEvent(t *testing.T) {
 		t.Fatalf("%+v, want Exceeded once 5m over", v)
 	}
 	d := v.EventData(over)
-	if d["usedBytes"] != over || d["limitBytes"] != limit || d["graceSeconds"] != 300.0 || d["ceiling"] != false {
-		t.Errorf("event data %v", d)
+	want := map[string]any{"usedBytes": over, "limitBytes": limit, "graceSeconds": 300.0, "ceiling": false}
+	if !reflect.DeepEqual(d, want) {
+		t.Errorf("event data %v, want %v", d, want)
 	}
 
 	var cw Watch
@@ -235,7 +238,65 @@ func TestSampleUsesTheSpecAndFillsTheEvent(t *testing.T) {
 
 	// No disk limit is never over.
 	var nw Watch
-	if v := nw.Sample(spec.Resources{}, 1<<50, newClock().next()); v.Step != Quiet {
+	if v := nw.Sample(Unscaled(spec.Resources{}), 1<<50, newClock().next()); v.Step != Quiet {
 		t.Errorf("no limit: %+v, want Quiet", v)
 	}
+}
+
+// A scaled limit: the grace and the ceiling both count from the effective
+// limit, never the nominal one, and the event says both and the factor.
+func TestScaledLimitHoldsToTheEffective(t *testing.T) {
+	// 160 GiB nominal on a 160 GiB filesystem with 10 GiB headroom: 40 GiB
+	// asked holds to 37.5 GiB.
+	const nominal, effective = 40 * gib, 75 * gib / 2
+	l := Limit{Nominal: nominal, Effective: effective, Factor: 0.9375, Scaled: true, Grace: time.Minute}
+	t.Run("positive nominal scaled to zero", func(t *testing.T) {
+		var w Watch
+		zero := Limit{Nominal: 1, Effective: 0, Factor: 0.5, Scaled: true, Grace: time.Hour}
+		if v := w.Sample(zero, 0, newClock().next()); v.Step != Quiet {
+			t.Fatalf("empty: %+v, want Quiet", v)
+		}
+		if v := w.Sample(zero, 1, newClock().next()); v.Step != Exceeded || !v.Ceiling {
+			t.Fatalf("one byte: %+v, want Exceeded at the zero-byte ceiling", v)
+		}
+	})
+	t.Run("between effective and nominal goes over", func(t *testing.T) {
+		var w Watch
+		if v := w.Sample(l, effective+1, newClock().next()); v.Step != WentOver {
+			t.Fatalf("%+v, want WentOver one byte over the effective limit", v)
+		}
+	})
+	t.Run("at the effective limit is not over", func(t *testing.T) {
+		var w Watch
+		if v := w.Sample(l, effective, newClock().next()); v.Step != Quiet {
+			t.Fatalf("%+v, want Quiet at the effective limit", v)
+		}
+	})
+	t.Run("the grace runs from the effective limit", func(t *testing.T) {
+		var w Watch
+		c := newClock()
+		var vs []Verdict
+		for range 5 {
+			vs = append(vs, w.Sample(l, nominal-1, c.next()))
+		}
+		if n, at := exceeded(vs); n != 1 || at != 4 || vs[4].Ceiling {
+			t.Fatalf("reported %d times, first at %d: %+v; want once, at 4 (a minute), not the ceiling", n, at, vs)
+		}
+		want := map[string]any{"usedBytes": nominal - 1, "limitBytes": effective, "graceSeconds": 60.0, "ceiling": false,
+			"nominalLimitBytes": nominal, "limitFactor": 0.9375}
+		if d := vs[4].EventData(nominal - 1); !reflect.DeepEqual(d, want) {
+			t.Errorf("event data %v, want %v", d, want)
+		}
+	})
+	t.Run("the ceiling is twice the effective limit", func(t *testing.T) {
+		var w Watch
+		if v := w.Sample(l, CeilingFactor*effective-1, newClock().next()); v.Step != WentOver {
+			t.Fatalf("one byte under 2× effective: %+v, want WentOver", v)
+		}
+		var cw Watch
+		v := cw.Sample(l, CeilingFactor*effective, newClock().next())
+		if v.Step != Exceeded || !v.Ceiling {
+			t.Fatalf("at 2× effective (under 2× nominal): %+v, want Exceeded at the ceiling", v)
+		}
+	})
 }

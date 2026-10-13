@@ -609,9 +609,32 @@ resume settles it:
 - asking for resources: those are resolved, as on any resume.
 
 A pool without a shape is unchanged in every way: it takes no `size`, and
-cpus, memory and disk as given, with luxd's defaults. Shapes describe
-Runs' reservations only, for now: hosts still register and are scheduled
-on as before.
+cpus, memory and disk as given, with luxd's defaults.
+
+A shaped pool's Runs are placed only on hosts that advertise exactly its
+nominal host (`capacity` cpus, memory and disk equal to the shape's) and
+scale disk to it (the `disk-scale` capability: `lux-runner --disk` with
+`--disk-headroom`). A host luxd launches for the pool is started that way,
+with the shape's `cpus`, `memory`, `disk` and `diskHeadroom` (10 GiB
+unless set), whatever its instance type: a larger
+fallback type advertises the shape, not its hardware. Any other host in
+the pool (an older lux-runner, or one started by hand with its own
+capacity) is skipped, and a waiting Run's reason says how many hosts do
+not advertise the shape. A static shaped pool's hosts must be started with
+those flags by hand ([operations](operations.md#shaped-pools)).
+
+On such a host a Run's disk limit is its size's disk scaled to what the
+filesystem really has:
+
+```
+limit = disk × min(1, (filesystem capacity − diskHeadroom) / shape disk)
+```
+
+in whole bytes, rounded down. For a 160 GiB shape on a 160 GiB filesystem
+with 10 GiB of headroom, `m-2-arm64` (40 GiB) is held to 37.5 GiB. The
+grace and the ceiling count from that limit, and `disk.exceeded` says
+both it and the size's disk. Packing and admission on shaped pools are
+otherwise as on any pool, for now.
 
 ### Memory: the host's terms, scaled to what Linux sees
 

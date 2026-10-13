@@ -42,7 +42,8 @@ wanted() { [[ " $ARCHES " == *" $1 "* ]]; }
 # git-credentials: credentials (per repository name, a git credential) on POST /v1/runs/{id}/push and /sync; an older luxd refuses the field (422).
 # pool-sizes: a pool's shape and sizes, resources.size on submit and resume, and a Run's sizing; an older luxd refuses shape and resources.size as unknown fields.
 # disk-grace: resources.diskGrace and [defaults] disk_grace; an older luxd refuses both, an older runner stops on the first sample over.
-FEATURES=(validate resume-secrets sync-modes resume-policy egress-wildcards artifact-publish git-credentials pool-sizes disk-grace)
+# disk-shaping: lux-runner --disk-headroom (disk-scale), shape.diskHeadroom, and shaped pools placing only on runners advertising their shape; an older luxd refuses diskHeadroom and places shaped Runs anywhere.
+FEATURES=(validate resume-secrets sync-modes resume-policy egress-wildcards artifact-publish git-credentials pool-sizes disk-grace disk-shaping)
 
 rm -rf "$DIST"
 mkdir -p "$DIST"

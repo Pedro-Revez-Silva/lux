@@ -684,11 +684,14 @@ func readPressure(path string) (some, full *float64) {
 
 // HostUsage is the whole machine's: CPU seconds used since boot (all
 // cores, from /proc/stat), memory in use (MemTotal - MemAvailable), and
-// the disk used on the filesystem holding dir.
+// the disk used and still free to unprivileged writers on the filesystem
+// holding dir (DiskOK: both were read).
 type HostUsage struct {
 	CPUSeconds  float64
 	MemoryBytes int64
 	DiskBytes   int64
+	DiskFree    int64
+	DiskOK      bool
 }
 
 func ReadHostUsage(dir string) (HostUsage, error) {
@@ -702,7 +705,7 @@ func ReadHostUsage(dir string) (HostUsage, error) {
 		u.MemoryBytes = m.Used
 	}
 	if d, err := hoststat.ReadDisk(dir); err == nil {
-		u.DiskBytes = d.Used
+		u.DiskBytes, u.DiskFree, u.DiskOK = d.Used, d.Free, true
 	}
 	return u, nil
 }

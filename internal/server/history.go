@@ -43,11 +43,12 @@ func (s *Server) resolutions() []resolution {
 // its live placements hold.
 func sampleHost(ctx context.Context, tx pgx.Tx, hostID string, u *proto.HostUsage, r *proto.ProcessUsage) error {
 	var cpu *float64
-	var mem, disk *int64
+	var mem, disk, free, fsCap, headroom *int64
 	if u != nil {
 		cpu, mem, disk = &u.CPUSeconds, &u.MemoryBytes, &u.DiskBytes
+		free, fsCap, headroom = u.FSFreeBytes, u.FSCapacityBytes, u.DiskHeadroomBytes
 	}
-	_, err := tx.Exec(ctx, insertHostSample, append([]any{hostID, cpu, mem, disk}, procValues(r)...)...)
+	_, err := tx.Exec(ctx, insertHostSample, append([]any{hostID, cpu, mem, disk, free, fsCap, headroom}, procValues(r)...)...)
 	return err
 }
 
@@ -372,9 +373,13 @@ func procRollup() (cols, aggs []string) {
 
 var (
 	procNames, procAggs = procRollup()
-	hostRollup          = rollup{table: "host_samples", keys: []string{"host_id"},
-		cols: append([]string{"cpu_seconds", "mem_bytes", "disk_bytes", "placements", "alloc_cpus", "alloc_mem"}, procNames...),
+	// The filesystem's free bytes are a level (the bucket's mean); its
+	// capacity and headroom are fixed per runner start (the maximum).
+	hostRollup = rollup{table: "host_samples", keys: []string{"host_id"},
+		cols: append([]string{"cpu_seconds", "mem_bytes", "disk_bytes", "disk_free", "fs_capacity", "disk_headroom",
+			"placements", "alloc_cpus", "alloc_mem"}, procNames...),
 		aggs: append([]string{"max(cpu_seconds)", "avg(mem_bytes)::bigint", "avg(disk_bytes)::bigint",
+			"avg(disk_free)::bigint", "max(fs_capacity)", "max(disk_headroom)",
 			"round(avg(placements))::int", "avg(alloc_cpus)", "avg(alloc_mem)::bigint"}, procAggs...),
 		match: "d.host_id = s.host_id"}
 	// peak_cpu_cores is a peak and the stall totals counters: each the
@@ -430,6 +435,10 @@ type Sample struct {
 	CPUCores    *float64 `json:"cpuCores,omitempty"`
 	MemoryBytes *int64   `json:"memoryBytes,omitempty"`
 	DiskBytes   *int64   `json:"diskBytes,omitempty"`
+	// Hosts: the filesystem diskBytes is on.
+	DiskFreeBytes     *int64 `json:"diskFreeBytes,omitempty" doc:"Hosts: bytes unprivileged writers can still use on the filesystem of the runner's data directory. Absent from older runners."`
+	FSCapacityBytes   *int64 `json:"fsCapacityBytes,omitempty" doc:"Hosts scaling disk (disk-scale): that filesystem's capacity as the runner read it at start, used plus free. Absent otherwise."`
+	DiskHeadroomBytes *int64 `json:"diskHeadroomBytes,omitempty" doc:"Hosts scaling disk: bytes of that filesystem kept from Runs (lux-runner --disk-headroom). Absent otherwise."`
 	// Hosts: live placements and what they hold.
 	Placements *int     `json:"placements,omitempty"`
 	AllocCPUs  *float64 `json:"allocCpus,omitempty"`
@@ -536,9 +545,10 @@ func procColumnSQL(f func(i int, c procColumn) string) string {
 var (
 	procCols = procColumnSQL(func(_ int, c procColumn) string { return c.name })
 	// The raw sample inserts, with the process columns' placeholders.
-	insertHostSample = `INSERT INTO host_samples (host_id, res, at, cpu_seconds, mem_bytes, disk_bytes, placements, alloc_cpus, alloc_mem, ` + procCols + `)
-		SELECT $1, 0, now(), $2, $3, $4, count(*), coalesce(sum((pl.resources->>'cpus')::float8), 0), coalesce(sum((pl.resources->>'memory')::int8), 0),
-			` + procParams(5) + `
+	insertHostSample = `INSERT INTO host_samples (host_id, res, at, cpu_seconds, mem_bytes, disk_bytes, disk_free, fs_capacity, disk_headroom,
+			placements, alloc_cpus, alloc_mem, ` + procCols + `)
+		SELECT $1, 0, now(), $2, $3, $4, $5, $6, $7, count(*), coalesce(sum((pl.resources->>'cpus')::float8), 0), coalesce(sum((pl.resources->>'memory')::int8), 0),
+			` + procParams(8) + `
 		FROM placements pl WHERE pl.host_id = $1 AND pl.state IN ` + livePlacementStates + `
 		ON CONFLICT DO NOTHING`
 	insertControlSample = `INSERT INTO control_samples (instance, hostname, res, at, cpu_seconds, cpus, mem_bytes, mem_total, db_bytes, db_connections, ` + procCols + `)
@@ -725,7 +735,7 @@ func (s *Server) hostHistory(ctx context.Context, in *hostHistoryInput) (*histor
 				return errf(http.StatusForbidden, "forbidden", "a platform host's history is the operators'")
 			}
 		}
-		rows, err := tx.Query(ctx, `SELECT at, cpu_seconds, mem_bytes, disk_bytes, placements, alloc_cpus, alloc_mem, `+procCols+`
+		rows, err := tx.Query(ctx, `SELECT at, cpu_seconds, mem_bytes, disk_bytes, disk_free, fs_capacity, disk_headroom, placements, alloc_cpus, alloc_mem, `+procCols+`
 			FROM `+hostRollup.source(res, "$3", "$4")+` s WHERE host_id = $1 AND res = $2 AND at BETWEEN $3 AND $4 ORDER BY at`, id, res, from, to)
 		if err != nil {
 			return err
@@ -734,12 +744,13 @@ func (s *Server) hostHistory(ctx context.Context, in *hostHistoryInput) (*histor
 		var runnerCPU procRate
 		var at time.Time
 		var cpuS *float64
-		var mem, disk, allocM *int64
+		var mem, disk, free, fsCap, headroom, allocM *int64
 		var n *int
 		var allocC *float64
 		var proc procRow
-		_, err = pgx.ForEachRow(rows, append([]any{&at, &cpuS, &mem, &disk, &n, &allocC, &allocM}, proc.dest()...), func() error {
+		_, err = pgx.ForEachRow(rows, append([]any{&at, &cpuS, &mem, &disk, &free, &fsCap, &headroom, &n, &allocC, &allocM}, proc.dest()...), func() error {
 			h.Samples = append(h.Samples, Sample{At: at, CPUCores: cpu.next(at, cpuS), MemoryBytes: mem, DiskBytes: disk,
+				DiskFreeBytes: free, FSCapacityBytes: fsCap, DiskHeadroomBytes: headroom,
 				Placements: n, AllocCPUs: allocC, AllocMem: allocM, Runner: proc.sample(&runnerCPU, at)})
 			return nil
 		})

@@ -98,6 +98,64 @@ func TestHostFitConstraints(t *testing.T) {
 	}
 }
 
+// A shaped pool's Run goes only to a host advertising disk-scale and
+// exactly the shape's cpus, memory and disk; each lack is its own
+// blocker, counted as "shape" in the wait reason. An unshaped Run ignores
+// both.
+func TestHostFitShape(t *testing.T) {
+	sh := &PoolShape{Family: "m", Arch: "arm64", CPUs: 8, Memory: spec.Bytes(32 << 30), Disk: spec.Bytes(160 << 30), MinCPUs: 0.5, DefaultCPUs: 2}
+	nominal := proto.Capacity{CPUs: 8, Memory: 32 << 30, Disk: 160 << 30, Runs: 16}
+	scaling := []string{proto.CapDiff, proto.CapDiskScale}
+	const noScale = "host's lux-runner does not scale disk (no --disk-headroom)"
+	mismatch := func(c string) string {
+		return "host advertises " + c + ", not its pool's shape cpus 8, memory 32.0 GiB, disk 160.0 GiB"
+	}
+	for _, tc := range []struct {
+		name   string
+		shaped bool
+		caps   []string
+		change func(*proto.Capacity)
+		want   []fitBlocker
+	}{
+		{"nominal with disk-scale", true, scaling, nil, nil},
+		{"no disk-scale", true, []string{proto.CapDiff, proto.CapSyncModes}, nil, []fitBlocker{{Kind: kindShape, Reason: noScale}}},
+		{"hardware cpus", true, scaling, func(c *proto.Capacity) { c.CPUs = 16 },
+			[]fitBlocker{{Kind: kindShape, Reason: mismatch("cpus 16, memory 32.0 GiB, disk 160.0 GiB")}}},
+		{"hardware memory", true, scaling, func(c *proto.Capacity) { c.Memory = 64 << 30 },
+			[]fitBlocker{{Kind: kindShape, Reason: mismatch("cpus 8, memory 64.0 GiB, disk 160.0 GiB")}}},
+		{"smaller disk", true, scaling, func(c *proto.Capacity) { c.Disk = 100 << 30 },
+			[]fitBlocker{{Kind: kindShape, Reason: mismatch("cpus 8, memory 32.0 GiB, disk 100.0 GiB")}}},
+		{"no disk reserved", true, scaling, func(c *proto.Capacity) { c.Disk = 0 },
+			[]fitBlocker{{Kind: kindShape, Reason: mismatch("cpus 8, memory 32.0 GiB, disk 0 B")}}},
+		{"old agent, hardware shape", true, nil, func(c *proto.Capacity) { c.CPUs = 16 },
+			[]fitBlocker{{Kind: kindShape, Reason: noScale}, {Kind: kindShape, Reason: mismatch("cpus 16, memory 32.0 GiB, disk 160.0 GiB")}}},
+		{"unshaped, old agent, any capacity", false, nil, func(c *proto.Capacity) { c.CPUs = 16; c.Disk = 0 }, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, h := fitFixture()
+			if tc.shaped {
+				r.Shape = sh
+			}
+			h.Capacity, h.Caps = nominal, tc.caps
+			if tc.change != nil {
+				tc.change(&h.Capacity)
+			}
+			if got := hostFit(r, h); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("blockers = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+	r, _ := fitFixture()
+	r.Shape = sh
+	var w waitCapacity
+	w.add([]fitBlocker{{Kind: kindShape, Reason: noScale}})
+	w.add([]fitBlocker{{Kind: kindShape, Reason: noScale}, {Kind: kindShape, Reason: mismatch("x")}})
+	want := "waiting for capacity: 2 hosts in its pool do not advertise its pool's shape (cpus 8, memory 32.0 GiB, disk 160.0 GiB) with disk scaling"
+	if got := w.reason(r); got != want {
+		t.Fatalf("reason\n got %q\nwant %q", got, want)
+	}
+}
+
 func TestHostFitResourceIdentityAndReservation(t *testing.T) {
 	r, h := fitFixture()
 	h.UsedCPUs, h.UsedMem, h.UsedDisk, h.UsedRuns = 2, 10000, 5000, 2

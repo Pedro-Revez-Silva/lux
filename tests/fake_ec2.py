@@ -345,10 +345,10 @@ class FakeEC2:
             return
         e = inst["env"]
         # The instance's metadata endpoint is this fake's, per instance. The
-        # runner.env's memory, as the unit's environment would give it.
-        memory = ["--memory", e["LUX_RUNNER_MEMORY"]] if e.get("LUX_RUNNER_MEMORY") else []
+        # runner.env's sizes, as the unit's environment would give them.
+        sizes = {k: e[k] for k in ("LUX_RUNNER_CPUS", "LUX_RUNNER_MEMORY", "LUX_RUNNER_DISK", "LUX_RUNNER_DISK_HEADROOM") if e.get(k)}
         host.start_runner(self.env, e["LUX_HOST_TOKEN"], "--provider-id", iid, "--ec2-imds", f"{self.url}/imds/{iid}",
-                          *memory, name=name, url=e.get("LUX_URL"))
+                          name=name, url=e.get("LUX_URL"), environ=sizes)
 
     def _DescribeInstanceTypes(self, q):
         if not self.type_memory_mib:

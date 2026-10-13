@@ -129,6 +129,12 @@ components:
         disk:
           format: int64
           type: integer
+        diskHeadroom:
+          format: int64
+          type: integer
+        fsCapacity:
+          format: int64
+          type: integer
         memory:
           format: int64
           type: integer
@@ -1809,6 +1815,14 @@ components:
             - examples:
                 - 8Gi
               type: string
+        diskHeadroom:
+          description: "Bytes of each host's disk kept from Runs, for the OS, tools and image storage (lux-runner --disk-headroom): a Run's disk limit is its size's disk × min(1, (filesystem capacity − diskHeadroom) / disk). At least 0 and less than disk. Absent: 10 GiB."
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
         family:
           description: "The size family, a lowercase slug (e.g. m): the first part of every size name. Pool metadata, never inferred from the provider."
           type: string
@@ -3064,10 +3078,22 @@ components:
         diskBytes:
           format: int64
           type: integer
+        diskFreeBytes:
+          description: "Hosts: bytes unprivileged writers can still use on the filesystem of the runner's data directory. Absent from older runners."
+          format: int64
+          type: integer
+        diskHeadroomBytes:
+          description: "Hosts scaling disk: bytes of that filesystem kept from Runs (lux-runner --disk-headroom). Absent otherwise."
+          format: int64
+          type: integer
         epoch:
           format: int64
           type: integer
         finished:
+          format: int64
+          type: integer
+        fsCapacityBytes:
+          description: "Hosts scaling disk (disk-scale): that filesystem's capacity as the runner read it at start, used plus free. Absent otherwise."
           format: int64
           type: integer
         hosts:

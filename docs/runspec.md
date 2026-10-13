@@ -169,7 +169,11 @@ as `submittedBy` on `GET /v1/runs/{id}`.
   a failing probe once per placement, with the error. The event's
   data carries `usedBytes`, `limitBytes`, `graceSeconds` and `ceiling`
   (`true` when the sample that stopped it was at the ceiling, whether or
-  not its grace had also run out). Its state is kept: resume it with a
+  not its grace had also run out). On a host that scales disk (a shaped
+  pool's: [shaped pools](concepts.md#shaped-pools)), `limitBytes` is the
+  limit the Run was held to, its `disk` scaled to the host's filesystem,
+  and the data adds `nominalLimitBytes` (its `disk`) and `limitFactor`;
+  the grace and the ceiling count from `limitBytes`. Its state is kept: resume it with a
   larger limit (`lux resume <run> --disk 40Gi`, or `resources.disk` in the
   resume request) or a longer grace (`--disk-grace`,
   `resources.diskGrace`), or it is stopped again. tmpfs mounts (with

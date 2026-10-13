@@ -255,6 +255,7 @@ lux pools set <name> --default           # admin: make it the tenant's default p
 lux pools set <name> --default=false     # admin: clear it
 lux pools set <name> --provider static --hourly-price 0.40 --currency USD   # default price of hosts registering into it
 lux pools set m --provider ec2 --template "$TEMPLATE" --shape family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2   # a shaped pool
+                                          # --shape ...,disk-headroom=20Gi: disk each host keeps from Runs (default 10Gi)
 lux pools sizes <pool> [--platform]      # a shaped pool's sizes: SIZE, DEFAULT (*), CPUS, MEMORY, DISK, FRACTION; -o json the list
 lux pools rm <name> [--force-evict]      # admin: cordons its provisioned hosts, terminated once idle; --force-evict stops their live Runs too
 lux pools rename <name> <new-name> [--platform]   # admin: only the name changes; hosts, Runs and instances stay with the pool

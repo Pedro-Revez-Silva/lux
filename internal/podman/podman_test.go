@@ -40,7 +40,7 @@ func TestBuildUsesCgroupfs(t *testing.T) {
 }
 
 // The runner's heartbeat usage is hoststat's: CPU busy seconds, memory used
-// and the disk used on dir's filesystem. The machine keeps changing, so each
+// and the disk used and free on dir's filesystem. The machine keeps changing, so each
 // value must lie between hoststat's reads just before and just after (memory
 // and disk, which can also shrink, within slack; a wrong mapping such as
 // total or free for used is off by far more).
@@ -78,5 +78,8 @@ func TestReadHostUsage(t *testing.T) {
 	}
 	if !within(u.DiskBytes, d0.Used, d1.Used) {
 		t.Errorf("disk %d, hoststat used %d then %d", u.DiskBytes, d0.Used, d1.Used)
+	}
+	if !u.DiskOK || !within(u.DiskFree, d0.Free, d1.Free) {
+		t.Errorf("free %d (ok %v), hoststat free %d then %d", u.DiskFree, u.DiskOK, d0.Free, d1.Free)
 	}
 }

@@ -107,7 +107,8 @@ since older releases lack both the file and the commands it names:
 | `artifact-publish` | tell workloads to publish with `/.lux/bin/lux-shim publish` ([artifacts](runspec.md#artifacts)) once every luxd and then every runner runs such a release (luxd first: an older luxd refuses a runner's `artifact.published` report, and the runner retries it until luxd is upgraded). Such a runner no longer collects what a workload writes into the old `$LUX_ARTIFACTS` directory, nor sets the variable: a workload that still writes there loses those files. |
 | `egress-wildcards` | let tenants submit a RunSpec with a wildcard host rule in `network.egress`, `*.<domain>` ([network egress](runspec.md#network-egress)), once every luxd and runner runs such a release: an older luxd refuses the spec, and an older runner allows no name under it. |
 | `git-credentials` | send `credentials` on a push or a sync ([git](runspec.md#git)), once every luxd runs such a release: an older luxd refuses the field (422). A Run whose host runs an older lux-runner gets 409 `git_credentials_unsupported` until the host is upgraded. luxd holds the values in memory only until the runner has the request, so a credentialed push or sync must reach the luxd holding the runner's connection (a single luxd, or routing that sends it to the luxd the Run's host is connected to, as interactive streams need); any other luxd answers 503 `host_unreachable` and queues nothing. A queued request whose values are gone (luxd restarted, or the runner reconnected elsewhere first) ends failed, saying to send it again. |
-| `pool-sizes` | give pools a `shape` and submit or resume with `resources.size` ([shaped pools](concepts.md#shaped-pools)), once every luxd runs such a release: an older luxd refuses both fields as unknown (422/400), and one sharing the database would submit to a shaped pool without rounding. Runners need nothing new. |
+| `pool-sizes` | give pools a `shape` and submit or resume with `resources.size` ([shaped pools](concepts.md#shaped-pools)), once every luxd runs such a release: an older luxd refuses both fields as unknown (422/400), and one sharing the database would submit to a shaped pool without rounding. Runners need nothing new for that; placing on a shaped pool needs `disk-shaping` too. |
+| `disk-shaping` | shaped pools place Runs only on runners that advertise `disk-scale` and the shape's nominal capacity ([shaped pools](concepts.md#shaped-pools)), and a shape takes `diskHeadroom`: upgrade luxd and every runner of a shaped pool, and replace its hosts (luxd launches new ones with `LUX_RUNNER_CPUS`, `LUX_RUNNER_MEMORY`, `LUX_RUNNER_DISK` and `LUX_RUNNER_DISK_HEADROOM`), before shaping a pool that has Runs: an older runner's host is skipped for them, and an older luxd refuses `diskHeadroom` as unknown and places shaped Runs anywhere. Unshaped pools and runners started without `--disk-headroom` are unchanged. |
 | `disk-grace` | set `[defaults] disk_grace` (`LUX_DEFAULT_DISK_GRACE`) and let tenants submit `resources.diskGrace` ([disk is measured](runspec.md#rules)), once every luxd and then every runner runs such a release: an older luxd refuses the key and the field, and an older runner ignores the grace and stops a Run on its first sample over its disk. |
 
 A release with no `FEATURES` file, or no `validate` line, predates
@@ -400,10 +401,11 @@ curl -fsS https://luxd.example/runner/v1/bootstrap.sh | sudo env \
 | `--data-dir` | `/var/lib/lux` | Run state and local snapshot copies. |
 | `--shim` | `/usr/local/bin/lux-shim` | The shim binary to mount into containers. |
 | `--label k=v` | | Host labels, matched by `placement.requires` and `prefers`. Also `LUX_LABELS=k=v,…`. |
-| `--max-runs`, `--cpus` | 16, all | Capacity offered to the scheduler. |
+| `--max-runs`, `--cpus` | 16, all | Capacity offered to the scheduler. `--cpus` also `LUX_RUNNER_CPUS`. |
 | `--memory` | MemTotal | The machine's gross memory, offered to the scheduler: Runs ask in these terms and get their share after headroom ([how](concepts.md#memory-the-hosts-terms-scaled-to-what-linux-sees)). An EC2 host luxd launches gets its instance type's memory. Also `LUX_RUNNER_MEMORY`. |
 | `--memory-headroom` | 512 MiB | Bytes of MemTotal kept from Runs for the kernel and the host. Each Run's container gets `resources.memory × min(1, (MemTotal − headroom) / --memory)`. The runner refuses to start if it leaves nothing. Also `LUX_RUNNER_MEMORY_HEADROOM`. |
-| `--disk` | not reserved | Bytes of disk the scheduler reserves Runs' `resources.disk` from. Without it, disk is not reserved (Runs still stop at their own limit). Set it to the space under `/var/lib/containers`, more to overcommit. |
+| `--disk` | not reserved | Bytes of disk the scheduler reserves Runs' `resources.disk` from. Without it, disk is not reserved (Runs still stop at their own limit). Set it to the space under `/var/lib/containers`, more to overcommit. With `--disk-headroom`, the host's nominal disk instead (below). Also `LUX_RUNNER_DISK`. |
+| `--disk-headroom` | not given | Bytes of the `--data-dir` filesystem kept from Runs. Given with `--disk` (0 is allowed), `--disk` is nominal and each Run's disk limit is `resources.disk × min(1, (capacity − headroom) / --disk)`, in whole bytes rounded down; the grace and the ceiling count from that limit. Capacity is the filesystem's used plus unprivileged-free blocks (statfs; blocks reserved for root count in neither), read once at start, never the free space. A grown volume takes effect only after a runner restart; adopted Runs also use the factor computed at that restart. The runner refuses to start if the headroom leaves nothing, and logs the factor. Only such a runner advertises `disk-scale`, which shaped pools require. Not given: limits are `resources.disk` as before. Also `LUX_RUNNER_DISK_HEADROOM`. |
 | `--usage-every` | `15s` | How often each Run's disk use is sampled, and its disk limit and `diskGrace` checked. The grace is counted in these samples, so a Run over its disk is stopped between `diskGrace` and `diskGrace` plus this interval from the first sample over. |
 | `--host-ttl` | `24h` | How long uploaded local copies are kept, and images lux pulled or built after their last use ([images on hosts](runspec.md#images-on-hosts)). |
 | `--image-disk-high` | `80` | Percent use of the disk holding Podman's storage (its graph root, `/var/lib/containers`) over which lux's unused images are removed, least recently used first, until under it. `0` turns it off. Images the host had before lux are never removed. |
@@ -554,6 +556,20 @@ the shape's own: it comes from the launch template's volume, which no
 instance type describes. Rolling back to a luxd
 without shapes leaves the columns in place and ignores them; Runs keep
 the resources they were given.
+
+For a static shaped pool, start each host's runner by hand with the shape's
+nominal capacity. For the shape above:
+
+```bash
+lux-runner --cpus 8 --memory 34359738368 --disk 171798691840 --disk-headroom 10737418240
+```
+
+Memory, disk and disk headroom are plain byte values, not values with unit
+suffixes. The advertised CPUs, memory and disk must equal the shape exactly
+([concepts](concepts.md#shaped-pools)). Use the shape's
+`diskHeadroom` (10 GiB by default), although equality of headroom is not
+enforced on hand-started hosts: any explicit headroom that allows the runner
+to start enables `disk-scale`.
 
 ## EC2 pools
 
@@ -723,7 +739,8 @@ What an instance needs:
   and `CreateTags`), `TerminateInstances`, `DescribeInstances` and
   `DescribeInstanceTypes` (a template's `instanceType`'s memory, passed to
   the runner as `LUX_RUNNER_MEMORY`; without it the launch still goes
-  ahead, logged, and the host offers its MemTotal), plus
+  ahead, logged, and the host offers its MemTotal; a shaped pool's hosts
+  get the shape's memory instead and need no lookup), plus
   `pricing:GetProducts` for on-demand and EBS prices,
   `ec2:DescribeSpotPriceHistory` for spot prices and `ec2:DescribeVolumes`
   for each host's block-storage volumes (their size and type price its
@@ -747,7 +764,7 @@ with an unrecognized value is refused, not left to fail at boot:
 | --- | --- | --- |
 | `ignition` (default) | An Ignition v3.4.0 config for Fedora CoreOS. | The default: no packages to install, fastest boot. |
 | `script` | A `#!/bin/bash` script cloud-init runs. | A stock Fedora Cloud, Ubuntu, Debian or AL2023 AMI. |
-| `env` | Plain `KEY=value` lines (`LUX_URL`, `LUX_HOST_TOKEN`, `LUX_HOST_NAME`, `LUX_EC2_IMDS`, `LUX_RUNNER_MEMORY` when luxd knows the instance type's memory, and `LUX_NESTED` for a nested pool). | A custom AMI with its own boot script, from before self-update. |
+| `env` | Plain `KEY=value` lines (`LUX_URL`, `LUX_HOST_TOKEN`, `LUX_HOST_NAME`, `LUX_EC2_IMDS`, `LUX_RUNNER_MEMORY` when luxd knows the instance type's memory, `LUX_NESTED` for a nested pool, and for a shaped pool `LUX_RUNNER_CPUS`, `LUX_RUNNER_MEMORY`, `LUX_RUNNER_DISK` and `LUX_RUNNER_DISK_HEADROOM`, its shape's nominal host and disk headroom). | A custom AMI with its own boot script, from before self-update. |
 
 ### Block storage of hosts launched before luxd recorded volumes
 

@@ -1037,6 +1037,31 @@ func TestLaunchWithoutTheInstanceTypesMemory(t *testing.T) {
 	}
 }
 
+// A shaped pool's runner env (luxd's nominal cpus, memory, disk and disk
+// headroom) reaches the host in every format, the nominal memory over the
+// instance type's, even on a larger fallback type: the host advertises the
+// shape, not its hardware.
+func TestLaunchUserDataCarriesTheShape(t *testing.T) {
+	url, calls, userData := fakeEC2(t, 131072)
+	shape := map[string]string{"LUX_URL": "http://luxd", "LUX_RUNNER_CPUS": "8", "LUX_RUNNER_MEMORY": "34359738368",
+		"LUX_RUNNER_DISK": "171798691840", "LUX_RUNNER_DISK_HEADROOM": "0"}
+	for _, format := range []string{"env", "script", "ignition"} {
+		template := `{"region": "eu-west-1", "launchTemplate": "lt-1", "instanceType": "m8g.4xlarge", "userData": "` + format + `"}`
+		if _, err := New(url, discard).Launch(context.Background(), json.RawMessage(template), nil, shape); err != nil {
+			t.Fatal(err)
+		}
+		got := runnerEnvOf(t, format, (*userData)[len(*userData)-1])
+		for k, v := range shape {
+			if got[k] != v {
+				t.Errorf("%s: %s=%q, want %q (runner env %v)", format, k, got[k], v, got)
+			}
+		}
+	}
+	if n := calls.snapshot()["DescribeInstanceTypes"]; n != 0 {
+		t.Errorf("%d DescribeInstanceTypes: the shape's memory needs no lookup", n)
+	}
+}
+
 var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 // A lookup that never answers costs its own timeout, not the launch; the

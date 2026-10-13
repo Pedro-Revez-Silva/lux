@@ -712,7 +712,8 @@ changes and writes nothing.
 
 --shape makes the pool shaped (docs/concepts.md, Shaped pools):
 family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2,
-every key required. Its sizes halve the whole host down to min-cpus
+every key required, and optionally disk-headroom=10Gi (the default): the
+disk each host keeps from Runs. Its sizes halve the whole host down to min-cpus
 (lux pools sizes <name> lists them). luxd checks it, and an ec2 pool's
 instance types against it, before storing it. Omitted on a shaped pool, the
 shape would be removed: refused without --replace, like a template key.

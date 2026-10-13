@@ -11,6 +11,9 @@ export interface Resources {
   memory: number;
   disk: number;
   runs: number;
+  /** A host scaling disk (disk-scale): disk is nominal; bytes kept from Runs, and its filesystem's capacity. */
+  diskHeadroom?: number;
+  fsCapacity?: number;
 }
 
 /** spec.Resources: what a Run asked for. */
@@ -665,6 +668,8 @@ export interface PoolShape {
   disk: number;
   minCpus: number;
   defaultCpus: number;
+  /** Bytes of each host's disk kept from Runs; absent: 10 GiB. */
+  diskHeadroom?: number;
 }
 
 export interface PoolSize {

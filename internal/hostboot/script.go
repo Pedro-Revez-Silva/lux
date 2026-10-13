@@ -17,7 +17,10 @@ set -euo pipefail
 : "${LUX_HOST_TOKEN:?LUX_HOST_TOKEN is required}"
 LUX_HOST_NAME="${LUX_HOST_NAME:-$(hostname)}"
 LUX_EC2_IMDS="${LUX_EC2_IMDS:-}"
+LUX_RUNNER_CPUS="${LUX_RUNNER_CPUS:-}"
 LUX_RUNNER_MEMORY="${LUX_RUNNER_MEMORY:-}"
+LUX_RUNNER_DISK="${LUX_RUNNER_DISK:-}"
+LUX_RUNNER_DISK_HEADROOM="${LUX_RUNNER_DISK_HEADROOM:-}"
 LUX_NESTED="${LUX_NESTED:-}"
 
 echo "lux: bootstrapping $LUX_HOST_NAME against $LUX_URL"
@@ -55,7 +58,10 @@ umask 077
   printf 'LUX_HOST_TOKEN=%s\n' "$LUX_HOST_TOKEN"
   printf 'LUX_HOST_NAME=%s\n' "$LUX_HOST_NAME"
   [ -n "$LUX_EC2_IMDS" ] && printf 'LUX_EC2_IMDS=%s\n' "$LUX_EC2_IMDS"
+  [ -n "$LUX_RUNNER_CPUS" ] && printf 'LUX_RUNNER_CPUS=%s\n' "$LUX_RUNNER_CPUS"
   [ -n "$LUX_RUNNER_MEMORY" ] && printf 'LUX_RUNNER_MEMORY=%s\n' "$LUX_RUNNER_MEMORY"
+  [ -n "$LUX_RUNNER_DISK" ] && printf 'LUX_RUNNER_DISK=%s\n' "$LUX_RUNNER_DISK"
+  [ -n "$LUX_RUNNER_DISK_HEADROOM" ] && printf 'LUX_RUNNER_DISK_HEADROOM=%s\n' "$LUX_RUNNER_DISK_HEADROOM"
   [ "$LUX_NESTED" = true ] && printf 'LUX_NESTED=true\n'
 } > /etc/lux/runner.env
 chmod 0600 /etc/lux/runner.env

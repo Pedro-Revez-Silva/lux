@@ -1,6 +1,7 @@
 package hoststat
 
 import (
+	"math"
 	"os"
 	"runtime/debug"
 	"testing"
@@ -32,6 +33,23 @@ func TestReadDisk(t *testing.T) {
 	}
 	if _, err := ReadDisk("/nonexistent/" + t.Name()); !os.IsNotExist(err) {
 		t.Fatalf("missing dir: %v", err)
+	}
+}
+
+// Capacity is Used + Free, saturating rather than wrapping past MaxInt64.
+func TestDiskCapacity(t *testing.T) {
+	for _, c := range []struct {
+		d    Disk
+		want int64
+	}{
+		{Disk{Used: 100, Free: 60, Total: 168}, 160},
+		{Disk{Used: 0, Free: 0, Total: 8}, 0},
+		{Disk{Used: math.MaxInt64 - 5, Free: 5}, math.MaxInt64},
+		{Disk{Used: math.MaxInt64 - 1, Free: 5}, math.MaxInt64},
+	} {
+		if got := c.d.Capacity(); got != c.want {
+			t.Errorf("%+v: capacity %d, want %d", c.d, got, c.want)
+		}
 	}
 }
 

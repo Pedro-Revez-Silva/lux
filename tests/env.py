@@ -244,12 +244,20 @@ class Host:
             raise RuntimeError("lux-runner is not built")
         Path(self.log_dir).mkdir(parents=True, exist_ok=True)
         log = open(Path(self.log_dir) / "runner.log", "ab")
+        environ = environ or {}
+        # The same capacity on any machine: by default a runner offers the
+        # whole machine, and a 16 GB CI runner fits one Run at the 8 GiB
+        # default where a workstation fits several. A test's own --cpus or
+        # --memory, later, wins; so does its LUX_RUNNER_CPUS or
+        # LUX_RUNNER_MEMORY, as no flag is then given.
+        defaults = [*([] if "LUX_RUNNER_CPUS" in environ else ["--cpus", "16"]),
+                    *([] if "LUX_RUNNER_MEMORY" in environ else ["--memory", str(RUNNER_MEMORY)])]
         return subprocess.Popen(
             [
                 "docker", "exec", "-i",
                 "-e", f"LUX_URL={url or env.luxd_url}",
                 "-e", f"LUX_HOST_TOKEN={token}",
-                *[a for k, v in (environ or {}).items() for a in ("-e", f"{k}={v}")],
+                *[a for k, v in environ.items() for a in ("-e", f"{k}={v}")],
                 self.container,
                 # The host image has no pkill: record the pid to stop it by.
                 "sh", "-c", 'echo $$ > /run/lux-runner.pid; exec "$@"', "lux-runner",
@@ -257,11 +265,7 @@ class Host:
                 "--name", name or self.name,
                 "--data-dir", "/var/lib/lux",
                 "--shim", "/opt/lux/lux-shim",
-                # The same capacity on any machine: by default a runner
-                # offers the whole machine, and a 16 GB CI runner fits one
-                # Run at the 8 GiB default where a workstation fits several.
-                # A test's own --cpus or --memory, later, wins.
-                "--cpus", "16", "--memory", str(RUNNER_MEMORY),
+                *defaults,
                 *extra,
             ],
             stdout=log,

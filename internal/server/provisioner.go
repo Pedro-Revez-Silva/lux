@@ -134,6 +134,8 @@ type poolRow struct {
 	// ScaleDownAfterS: the pool's own idle seconds, or nil for luxd's.
 	ScaleDownAfterS *int
 	WarmWhileActive bool
+	// Shape: pools.shape; nil for an unshaped pool.
+	Shape *PoolShape
 }
 
 func (s *Server) provision(ctx context.Context) error {
@@ -146,7 +148,7 @@ func (s *Server) provision(ctx context.Context) error {
 	var pools []poolRow
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, name, provider, tenant_id, template, min_hosts, max_hosts, warm_hosts, retired, shared,
-				scale_down_after_s, warm_while_active
+				scale_down_after_s, warm_while_active, shape
 			FROM pools WHERE provider <> 'static'
 			  AND (NOT retired OR EXISTS (SELECT 1 FROM hosts h WHERE h.pool_id = pools.id AND h.state <> 'terminated'))`)
 		if err != nil {
@@ -825,6 +827,7 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 		return err
 	}
 	env := map[string]string{"LUX_URL": s.cfg.RunnerURL, "LUX_HOST_TOKEN": token, "LUX_HOST_NAME": name}
+	maps.Copy(env, pl.Shape.runnerEnv())
 	tags := LaunchTags(s.deployment, pl.ID, pl.Name, hostID)
 	l, launchErr := prov.Launch(ctx, pl.Template, tags, env)
 	if launchErr != nil {

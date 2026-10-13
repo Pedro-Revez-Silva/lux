@@ -392,7 +392,7 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		template := fs.String("template", "{}", "provider template (JSON)")
 		price := fs.String("hourly-price", "", "static pools: default hourly price of hosts registering into it (a decimal; with --currency); replaces the pool's, like every flag here")
 		currency := fs.String("currency", "", "the currency of --hourly-price (ISO 4217, e.g. USD)")
-		shapeArg := fs.String("shape", "", "make it a shaped pool: family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2 (every key); replaces the pool's, like every flag here")
+		shapeArg := fs.String("shape", "", "make it a shaped pool: family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2 (every key), optionally disk-headroom=10Gi; replaces the pool's, like every flag here")
 		var isDefault optBool
 		fs.Var(&isDefault, "default", "mark it its owner's default pool (the platform's, without --tenant); --default=false clears the mark; omitted leaves it")
 		fs.Parse(args[1:])

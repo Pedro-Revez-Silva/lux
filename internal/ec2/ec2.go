@@ -694,7 +694,8 @@ func runnerEnv(t Template, env map[string]string) map[string]string {
 func renderUserData(format string, env map[string]string) ([]byte, error) {
 	he := hostboot.Env{
 		URL: env["LUX_URL"], HostToken: env["LUX_HOST_TOKEN"], HostName: env["LUX_HOST_NAME"],
-		EC2IMDS: env["LUX_EC2_IMDS"], Memory: env["LUX_RUNNER_MEMORY"], Nested: env["LUX_NESTED"] == "true",
+		EC2IMDS: env["LUX_EC2_IMDS"], CPUs: env["LUX_RUNNER_CPUS"], Memory: env["LUX_RUNNER_MEMORY"],
+		Disk: env["LUX_RUNNER_DISK"], DiskHeadroom: env["LUX_RUNNER_DISK_HEADROOM"], Nested: env["LUX_NESTED"] == "true",
 	}
 	return hostboot.Render(format, he)
 }

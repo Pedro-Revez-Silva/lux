@@ -69,6 +69,8 @@ type pendingRun struct {
 	// PoolID: runs.pool_id, the pool it is bound to; nil until a pool of
 	// its spec's name exists (bindPool).
 	PoolID *string
+	// Shape: its pool's, nil for an unshaped pool (hostFit's shape gate).
+	Shape *PoolShape
 	// An operator's say: the host it must go to, or one it must not.
 	PlaceOn   string
 	AvoidHost string
@@ -152,6 +154,15 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 			pools = append(pools, r.PoolID)
 			tenants = append(tenants, r.TenantID)
 			chosen = append(chosen, r.PlaceOn)
+		}
+		shapes, err := poolShapes(ctx, tx, pools)
+		if err != nil {
+			return err
+		}
+		for i := range items {
+			if r := &items[i].r; r.PoolID != nil {
+				r.Shape = shapes[*r.PoolID]
+			}
 		}
 		// Discovery is not a reservation; candidateHosts rechecks the same
 		// IDs after the advisory locks are acquired.
@@ -239,6 +250,25 @@ func bindPool(ctx context.Context, tx pgx.Tx, r *pendingRun) error {
 			ORDER BY p.tenant_id NULLS LAST LIMIT 1)
 		WHERE id = $1 RETURNING pool_id`, r.ID, r.Spec.Placement.Pool, r.TenantID).Scan(&r.PoolID)
 	return err
+}
+
+// poolShapes is the shape of each shaped pool among ids, by id; one query.
+func poolShapes(ctx context.Context, tx pgx.Tx, ids []*string) (map[string]*PoolShape, error) {
+	rows, err := tx.Query(ctx, `SELECT id, shape FROM pools WHERE id = ANY($1) AND shape IS NOT NULL`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]*PoolShape{}
+	for rows.Next() {
+		var id string
+		var sh *PoolShape
+		if err := rows.Scan(&id, &sh); err != nil {
+			return nil, err
+		}
+		out[id] = sh
+	}
+	return out, rows.Err()
 }
 
 // eligibleHostIDs finds hosts in the requested pools (by id, not retired:

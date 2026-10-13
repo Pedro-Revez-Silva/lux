@@ -4,6 +4,7 @@
 package hoststat
 
 import (
+	"math"
 	"os"
 	"runtime"
 	"runtime/metrics"
@@ -96,6 +97,15 @@ func parseKB(s string, keys ...string) map[string]int64 {
 // so Used + Free can be less than Total.
 type Disk struct {
 	Used, Free, Total int64
+}
+
+// Capacity is what an unprivileged writer could ever fill: Used + Free,
+// Total less the blocks reserved for root. Saturates at MaxInt64.
+func (d Disk) Capacity() int64 {
+	if d.Free > math.MaxInt64-d.Used {
+		return math.MaxInt64
+	}
+	return d.Used + d.Free
 }
 
 // ReadDisk statfs's dir.

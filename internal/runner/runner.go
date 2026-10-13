@@ -53,6 +53,10 @@ type Config struct {
 	// scheduler from their resources.disk (0: not reserved; each Run's
 	// limit still applies).
 	Disk int64
+	// DiskHeadroom, when given (0 included) with a Disk, makes Disk a
+	// nominal size: each Run's disk limit is its share of the filesystem
+	// less this (diskScale). nil: limits are resources.disk as asked.
+	DiskHeadroom *int64
 	// ProviderID is the cloud instance id, for provisioned hosts.
 	ProviderID string
 	// ForcePoll uses the HTTP polling transport even if WebSocket works.
@@ -130,6 +134,8 @@ type Runner struct {
 	shimSyncModes bool
 	// mem scales a Run's resources.memory to its container's limit.
 	mem memoryScale
+	// disk scales a Run's resources.disk to the limit it is held to.
+	disk diskScale
 	// handover, when set, replaces handoverWait's bound. Tests only.
 	handover time.Duration
 }
@@ -184,6 +190,13 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 			return nil, err
 		}
 	}
+	disk, err := newDiskScale(cfg.Disk, cfg.DiskHeadroom, cfg.DataDir, hoststat.ReadDisk)
+	if err != nil {
+		return nil, err
+	}
+	if disk.on {
+		log.Info("disk", "fsCapacity", disk.fsCapacity, "headroom", disk.headroom, "capacity", cfg.Disk, "factor", disk.factor())
+	}
 	if _, err := os.Stat(cfg.Shim); err != nil {
 		return nil, fmt.Errorf("shim binary: %w", err)
 	}
@@ -197,6 +210,7 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 		streams:    streams{m: map[string]*stream{}},
 		git:        gitws.New(cfg.DataDir),
 		mem:        mem,
+		disk:       disk,
 	}
 	r.api = newAPI(cfg.URL, cfg.Token, cfg.Name)
 	r.conn = newConn(r)
@@ -271,12 +285,27 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
-// capabilities are Hello's: sync modes only with a shim that has them.
+// capabilities are Hello's: sync modes only with a shim that has them,
+// disk scaling only when it is on.
 func (r *Runner) capabilities() []string {
+	caps := []string{proto.CapDiff, proto.CapGitCredentials}
 	if r.shimSyncModes {
-		return []string{proto.CapDiff, proto.CapGitCredentials, proto.CapSyncModes}
+		caps = append(caps, proto.CapSyncModes)
 	}
-	return []string{proto.CapDiff, proto.CapGitCredentials}
+	if r.disk.on {
+		caps = append(caps, proto.CapDiskScale)
+	}
+	return caps
+}
+
+// capacity is Hello's: with disk scaling on, Disk is nominal and the
+// headroom and filesystem capacity it scales by come with it.
+func (r *Runner) capacity() proto.Capacity {
+	c := proto.Capacity{CPUs: r.cfg.CPUs, Memory: r.cfg.Memory, Disk: r.cfg.Disk, Runs: r.cfg.MaxRuns}
+	if r.disk.on {
+		c.DiskHeadroom, c.FSCapacity = r.disk.headroom, r.disk.fsCapacity
+	}
+	return c
 }
 
 func (r *Runner) hello(ctx context.Context) proto.Hello {
@@ -292,7 +321,7 @@ func (r *Runner) hello(ctx context.Context) proto.Hello {
 		Arch:            runtime.GOARCH,
 		Labels:          r.cfg.Labels,
 		Nested:          r.nestedSeccomp != "",
-		Capacity:        proto.Capacity{CPUs: r.cfg.CPUs, Memory: r.cfg.Memory, Disk: r.cfg.Disk, Runs: r.cfg.MaxRuns},
+		Capacity:        r.capacity(),
 		Images:          imgs,
 		GitMirrors:      r.git.Mirrors(),
 		LocalSnapshots:  r.localSnapshots(),
@@ -583,7 +612,7 @@ func (r *Runner) heartbeatLoop(ctx context.Context) {
 		hb := proto.Heartbeat{LocalSnapshots: r.localSnapshots(), GitMirrors: r.git.Mirrors(),
 			RunnerSHA256: r.runnerSHA256, ShimSHA256: r.shimSHA256}
 		if hu, err := podman.ReadHostUsage(r.cfg.DataDir); err == nil {
-			hb.Usage = &proto.HostUsage{CPUSeconds: hu.CPUSeconds, MemoryBytes: hu.MemoryBytes, DiskBytes: hu.DiskBytes}
+			hb.Usage = r.hostUsage(hu)
 		}
 		if p, err := r.proc.Read(); err == nil {
 			hb.Runner = p
@@ -600,6 +629,19 @@ func (r *Runner) heartbeatLoop(ctx context.Context) {
 		}
 		cancel()
 	}
+}
+
+// hostUsage is a heartbeat's usage from hu, with the disk scaling's
+// filesystem capacity and headroom when it is on.
+func (r *Runner) hostUsage(hu podman.HostUsage) *proto.HostUsage {
+	u := &proto.HostUsage{CPUSeconds: hu.CPUSeconds, MemoryBytes: hu.MemoryBytes, DiskBytes: hu.DiskBytes}
+	if hu.DiskOK {
+		u.FSFreeBytes = &hu.DiskFree
+	}
+	if r.disk.on {
+		u.FSCapacityBytes, u.DiskHeadroomBytes = &r.disk.fsCapacity, &r.disk.headroom
+	}
+	return u
 }
 
 func (r *Runner) livePlacements() []*placement {

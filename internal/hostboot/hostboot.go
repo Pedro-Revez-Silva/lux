@@ -18,14 +18,19 @@ import (
 // EC2IMDS is empty outside EC2. Memory is the machine's gross memory in
 // bytes (the runner's --memory), when the provider knows it. Nested starts
 // the runner with --nested (LUX_NESTED=true): set only for a pool whose
-// template opts in.
+// template opts in. CPUs, Disk and DiskHeadroom (and Memory) are a shaped
+// pool's nominal host and disk headroom (--cpus, --disk, --disk-headroom),
+// set only for such a pool.
 type Env struct {
-	URL       string
-	HostToken string
-	HostName  string
-	EC2IMDS   string
-	Memory    string
-	Nested    bool
+	URL          string
+	HostToken    string
+	HostName     string
+	EC2IMDS      string
+	CPUs         string
+	Memory       string
+	Disk         string
+	DiskHeadroom string
+	Nested       bool
 }
 
 // pairs are Env's fields as KEY, value, only the ones set: the order
@@ -41,7 +46,10 @@ func (e Env) pairs() [][2]string {
 	add("LUX_HOST_TOKEN", e.HostToken)
 	add("LUX_HOST_NAME", e.HostName)
 	add("LUX_EC2_IMDS", e.EC2IMDS)
+	add("LUX_RUNNER_CPUS", e.CPUs)
 	add("LUX_RUNNER_MEMORY", e.Memory)
+	add("LUX_RUNNER_DISK", e.Disk)
+	add("LUX_RUNNER_DISK_HEADROOM", e.DiskHeadroom)
 	if e.Nested {
 		add("LUX_NESTED", "true")
 	}

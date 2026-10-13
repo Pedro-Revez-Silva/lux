@@ -992,6 +992,71 @@ func TestPoolShapeAPI(t *testing.T) {
 	}
 }
 
+// A shape's diskHeadroom is optional: absent reads as 10 GiB and is stored
+// absent; 0 up to less than disk is stored as given; negative, equal to or
+// above disk is 422 invalid_pool and stores nothing.
+func TestPoolShapeDiskHeadroom(t *testing.T) {
+	s := testServer(t)
+	execSQL(t, s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	key := apiKey(t, s, new("t1"), "admin", "read")
+	post := func(headroom any) *httptest.ResponseRecorder {
+		sh := map[string]any{"family": "m", "arch": "arm64", "cpus": 8, "memory": "32Gi", "disk": "160Gi", "minCpus": 0.5, "defaultCpus": 2}
+		if headroom != nil {
+			sh["diskHeadroom"] = headroom
+		}
+		return apiCall(t, s, key, http.MethodPost, "/v1/pools", map[string]any{"name": "shaped", "provider": "static", "shape": sh})
+	}
+	for _, c := range []struct {
+		name     string
+		headroom any
+		want     string
+	}{
+		{"negative", -1, "diskHeadroom -1 must be at least 0 and less than disk 171798691840"},
+		{"the whole disk", "160Gi", "diskHeadroom 171798691840 must be at least 0 and less than disk 171798691840"},
+		{"above the disk", "200Gi", "diskHeadroom 214748364800 must be at least 0 and less than disk 171798691840"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := post(c.headroom)
+			if code, msg := apiError(t, w.Body.Bytes()); w.Code != http.StatusUnprocessableEntity || code != "invalid_pool" ||
+				msg != "invalid pool shape: "+c.want {
+				t.Errorf("POST: %d %s, want 422 invalid_pool %q", w.Code, w.Body, c.want)
+			}
+			if n := queryOne[int](t, s, `SELECT count(*) FROM pools`); n != 0 {
+				t.Fatalf("%d pools stored after a refusal", n)
+			}
+		})
+	}
+	const stored = `SELECT shape->'diskHeadroom' FROM pools WHERE name = 'shaped'`
+	for _, c := range []struct {
+		name     string
+		headroom any
+		want     *int64
+		runner   string
+	}{
+		{"absent: the default", nil, nil, "10737418240"},
+		{"zero", 0, i64(0), "0"},
+		{"one byte under the disk", 160*gib - 1, i64(160*gib - 1), "171798691839"},
+		{"20Gi", "20Gi", i64(20 * gib), "21474836480"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if w := post(c.headroom); w.Code != http.StatusOK {
+				t.Fatalf("POST: %d %s", w.Code, w.Body)
+			}
+			got := queryOne[*int64](t, s, stored)
+			if (got == nil) != (c.want == nil) || got != nil && *got != *c.want {
+				t.Errorf("stored diskHeadroom %v, want %v", got, c.want)
+			}
+			sh := queryOne[*PoolShape](t, s, `SELECT shape FROM pools WHERE name = 'shaped'`)
+			if env := sh.runnerEnv(); env["LUX_RUNNER_DISK_HEADROOM"] != c.runner {
+				t.Errorf("runner env %v, want LUX_RUNNER_DISK_HEADROOM=%s", env, c.runner)
+			}
+		})
+	}
+	if (*PoolShape)(nil).runnerEnv() != nil {
+		t.Error("an unshaped pool's runner env is not empty")
+	}
+}
+
 // An ec2 pool's instance types the catalog knows must have the shape's
 // arch and at least its CPUs and memory; a type it lacks is not checked.
 func TestPoolShapeChecksInstanceTypes(t *testing.T) {
@@ -1042,10 +1107,15 @@ func TestParseShape(t *testing.T) {
 	if err != nil || *got != testShape {
 		t.Fatalf("ParseShape: %+v %v, want %+v", got, err, testShape)
 	}
+	got, err = ParseShape("family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2,disk-headroom=20Gi")
+	if err != nil || got.DiskHeadroom == nil || *got.DiskHeadroom != spec.Bytes(20*gib) {
+		t.Fatalf("ParseShape with disk-headroom: %+v %v, want 20 GiB", got, err)
+	}
 	for _, c := range []struct{ in, want string }{
 		{"family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5", "missing default-cpus"},
 		{"family=m,arch=arm64,cpus=x,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2", `cpus: invalid value "x"`},
 		{"family=m,arch=arm64,cpus=8,memory=lots,disk=160Gi,min-cpus=0.5,default-cpus=2", `memory: invalid value "lots"`},
+		{"family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2,disk-headroom=x", `disk-headroom: invalid value "x"`},
 		{"family=m,size=8", "want family|arch|cpus"},
 	} {
 		if _, err := ParseShape(c.in); err == nil || !strings.Contains(err.Error(), c.want) {
