@@ -339,8 +339,10 @@ tool calls, messages and permission requests never reach lux over ACP.
 With OpenCode's server up (the `opencode` adapter on a command lux
 built, or a command with a `--port` of its own), lux follows them on
 OpenCode's bus and writes these records for every session whose chain
-of parents (`parentID`) reaches the Run's session, at any depth. Sessions
-of other Runs on the same server are ignored.
+of parents (`parentID`) reaches the Run's session, up to 63 levels below
+it (a walk of at most 64 sessions, the Run's own included; a deeper or
+cyclic chain is not followed). Sessions of other Runs on the same server
+are ignored.
 
 | Record | When | Data |
 | --- | --- | --- |
@@ -384,9 +386,12 @@ gets its own `opencode.task`.
   nothing over HTTP. A server lux did not start (an observed `--port`)
   is never sent anything: a child's request there is recorded with
   `answered: none`.
-- **Resume.** On a resume (`session/load`), OpenCode's bus does not
-  replay `session.created` for child sessions made before it: those are
-  not known to lux, and nothing of them is recorded.
+- **Resume and reconnect.** OpenCode's bus does not replay past events.
+  A child session created before a resume (`session/load`), or before
+  lux's event stream (re)connected, is unknown to lux until a later
+  `session.updated` for it, or a later update of the `task` call that
+  runs it (its metadata names the child), teaches lux its parent; from
+  then on it is relayed. What the bus said of it before is not recorded.
 
 ## State paths
 

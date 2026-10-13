@@ -19,9 +19,10 @@ import (
 // .ndjson):
 //
 //   - a session: session.created and session.updated, info a Session
-//     {id, parentID, title, time{created}}; the bus does not replay them,
-//     so a child made before the stream (re)connected, or before a resume,
-//     is never known;
+//     {id, parentID, title, time{created}}; the bus replays nothing, so a
+//     child made before the stream (re)connected, or before a resume, is
+//     unknown until a later session.updated or an update of the task call
+//     running it names its parent, and its earlier events are lost;
 //   - a call of the task tool, in its caller's session: a tool part whose
 //     state.metadata.sessionId (from running on) is the child it runs;
 //   - a child's tool call: message.part.updated, part type tool, on every
@@ -70,7 +71,9 @@ func newOcChildren() *ocChildren {
 }
 
 const (
-	// maxSessionDepth bounds the walk up a session's parents.
+	// maxSessionDepth: sessions ofRun visits, the Run's own included, so a
+	// session at most maxSessionDepth-1 levels below the Run's is of the
+	// Run; it also ends the walk on a cycle of parents.
 	maxSessionDepth = 64
 	// childPermissionTimeout bounds answering a child's permission request.
 	childPermissionTimeout = 10 * time.Second
