@@ -455,10 +455,12 @@ func TestOpenCodeChildManyTextPartsBounded(t *testing.T) {
 
 // The record of a child message whose secrets each lie within one of its
 // parts (OpenCode's text blocks) is the record of the same text sent as
-// one part: every part is redacted before it counts against what is
-// kept, so secret-bearing parts keep no more room than their redacted
-// text takes, and the part crossing the bound keeps its head. A secret
-// spanning parts is outside this (TestOpenCodeChildCrossBlockSecretIsOutOfContract).
+// one part, its non-empty parts joined by "\n": an empty part is
+// omitted from the join, not written as an empty line. Every part is
+// redacted before it counts against what is kept, so secret-bearing parts
+// keep no more room than their redacted text takes, and the part crossing
+// the bound keeps its head. A secret spanning parts is outside this
+// (TestOpenCodeChildCrossBlockSecretIsOutOfContract).
 func TestOpenCodeChildTextSplitAsJoined(t *testing.T) {
 	secrets := strings.Repeat(testSecret, maxKeptText/len(testSecret)) // redacted: 12 of every 18 bytes
 	many := slices.Repeat([]string{testSecret}, 150)
@@ -471,12 +473,14 @@ func TestOpenCodeChildTextSplitAsJoined(t *testing.T) {
 			proto.OpenCodeMessage{Truncated: true, Text: (strings.Repeat("[REDACTED:T]\n", 150) + strings.Repeat("x", 4000))[:proto.MaxOpenCodeText]}},
 		{"redacted under the bound, then a short part", []string{secrets, "kept"},
 			proto.OpenCodeMessage{Text: strings.Repeat("[REDACTED:T]", maxKeptText/len(testSecret)) + "\nkept"}},
+		{"an empty part", []string{"a", "", "b"}, proto.OpenCodeMessage{Text: "a\nb"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			c.want.SessionID, c.want.MessageID, c.want.Role, c.want.Completed = "ses_kid", "msg_1", "assistant", 9
 			wb, _ := json.Marshal(c.want)
-			whole, split := childRecord(t, nil, []string{strings.Join(c.parts, "\n")}), childRecord(t, nil, c.parts)
+			joined := strings.Join(slices.DeleteFunc(slices.Clone(c.parts), func(p string) bool { return p == "" }), "\n")
+			whole, split := childRecord(t, nil, []string{joined}), childRecord(t, nil, c.parts)
 			if whole != string(wb) {
 				t.Fatalf("one part:\n%.300s\nwant\n%.300s", whole, wb)
 			}
