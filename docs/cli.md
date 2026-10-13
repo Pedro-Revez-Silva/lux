@@ -28,11 +28,12 @@ was reached; `1` anything else.
 ## Runs
 
 ```bash
-lux run -f spec.yaml [--follow | --wait] [--name N] [-l k=v] [--pool P] [--idempotency-key K] [--secrets-from .env]
+lux run -f spec.yaml [--follow | --wait] [--name N] [-l k=v] [--pool P] [--size NAME] [--idempotency-key K] [--secrets-from .env]
 lux run --image alpine -- echo hello           # a quick generic Run
 lux run --image alpine --pool arm64 -- uname -m
+lux run --image alpine --pool m --size m-2-arm64 -- make test   # a size of a shaped pool
 lux ls [--state running,stopped] [-l team=x] [--resumable] [--host H] [--limit N]   # with RUNTIME and COST columns; --resumable omits Runs whose only snapshot report was refused, and resumePolicy never
-lux get <run>                                  # state, stage, placements, usage
+lux get <run>                                  # state, stage, placements, usage; size: on a shaped pool, its size and what it asked for
 lux logs <run> [-f] [--since <cursor>] [--events] [--stderr=false] [--server NAME | --servers]
 lux events <run>                               # lifecycle events
 lux wait <run> [--state s1,s2] [--timeout 5m]  # default: until it ends; exits with its code
@@ -44,8 +45,16 @@ the environment (`value: ${GITHUB_TOKEN}`), from a `.env` file
 variable of the same name.
 
 Flags win over the spec file: `--pool` replaces `placement.pool`, as
-`--image` and `--name` replace theirs. Without `--pool` or
-`placement.pool`, the server picks the pool.
+`--image` and `--name` replace theirs, and `--size` sets
+`resources.size`. Without `--pool` or `placement.pool`, the server picks
+the pool.
+
+`--size` names a size of a [shaped pool](concepts.md#shaped-pools)
+(`lux pools sizes <pool>`); it cannot be combined with `resources.cpus`,
+`memory` or `disk` in the spec (exit 4, `size_conflict`). On a shaped
+pool, those are rounded up to the smallest size covering them; on an
+unshaped pool `--size` is refused (exit 4, `size_unsupported`). See
+[`resources.size`](runspec.md#rules).
 
 `lux logs -o json` prints one JSON record per line:
 `{"cursor","epoch","seq","t","ch","data"|"event"}`. Pass a record's
@@ -72,7 +81,7 @@ JPEG, WebP or GIF). See [images](adapters.md#images).
 
 ```bash
 lux stop <run> [--wait]         # graceful; snapshot; resumable
-lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--remove-secret NAME] [--from-snapshot ID] [--cpus N] [--memory SIZE] [--disk SIZE] [--disk-grace DURATION] [--pool NAME|ID] [--dry-run] [--to HOST]
+lux resume <run> [--wait | --follow] [--input "..."] [--secret NAME=VALUE] [--secrets-from .env] [--remove-secret NAME] [--from-snapshot ID] [--cpus N] [--memory SIZE] [--disk SIZE] [--disk-grace DURATION] [--size NAME] [--pool NAME|ID] [--dry-run] [--to HOST]
            [--add-repo name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false]]... [--request-id ID]
            [--sync repo=ref]... [--sync-mode move|fast-forward|fetch]  # move restored checkouts to ref before init
 lux sync <run> repo=ref... [--mode move|fast-forward|fetch] [--wait] [--request-id ID] [--credential repo=VALUE]   # a running Run's checkouts
@@ -107,6 +116,18 @@ stopped from now on (`0s` to `1h`; `0s` stops it on the first sample over).
 lux resume run_x --cpus 4 --memory 2Gi    # more CPUs, less memory
 lux resume run_x --disk 10Gi              # smaller, if its state fits
 lux resume run_x --disk-grace 5m          # tolerate 5 minutes over its disk
+```
+
+`--size` resizes to a size of the Run's pool (with `--pool`, the new
+pool's) instead; on a shaped pool `--cpus`, `--memory` and `--disk` are
+rounded up to a size too, and moving into one rounds the Run's current
+resources up to one of its sizes. lux prints `size: <name>` on stderr. A
+size with less disk than the Run has is refused unless its saved state
+fits it with headroom (exit 4, `size_below_saved_state`).
+
+```bash
+lux resume run_x --size m-4-arm64          # in its shaped pool
+lux resume run_x --pool m --size m-2-arm64 # into shaped pool m
 ```
 
 `--pool` moves the Run to another pool from this resume on
@@ -229,10 +250,12 @@ lux hosts price <host> --hourly-price 0.40 --currency USD   # admin: a static ho
 lux hosts price <host> --clear           # admin: no price, so its Runs get no compute cost from now on
 lux pools ls                             # DEFAULT: * on the pool Runs naming no pool go to; operators without --tenant: every tenant's, OWNER platform or the tenant
                                          # -o json: each pool's platforms (os/arch) and capabilities.nestedContainers, as lux resume --pool checks them; absent/null when unknown
-lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON] [--default] [--replace] [--dry-run]
+lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON] [--shape SHAPE] [--default] [--replace] [--dry-run]
 lux pools set <name> --default           # admin: make it the tenant's default pool (moves the mark); changes nothing else
 lux pools set <name> --default=false     # admin: clear it
 lux pools set <name> --provider static --hourly-price 0.40 --currency USD   # default price of hosts registering into it
+lux pools set m --provider ec2 --template "$TEMPLATE" --shape family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2   # a shaped pool
+lux pools sizes <pool> [--platform]      # a shaped pool's sizes: SIZE, DEFAULT (*), CPUS, MEMORY, DISK, FRACTION; -o json the list
 lux pools rm <name> [--force-evict]      # admin: cordons its provisioned hosts, terminated once idle; --force-evict stops their live Runs too
 lux pools rename <name> <new-name> [--platform]   # admin: only the name changes; hosts, Runs and instances stay with the pool
 lux pools events <name> [--platform] [--limit N] [--before ID] [--all]   # what happened to it, newest first
@@ -334,6 +357,17 @@ sends a dry-run `RunInstances` for it first
 `InvalidLaunchTemplateName.NotFound` for a launch template that no longer
 exists, and the pool keeps what it had. A set that keeps the pool's
 template as it is (changing only `--max`, say) is not checked again.
+
+`--shape family=..,arch=..,cpus=..,memory=..,disk=..,min-cpus=..,default-cpus=..`
+(every key) makes the pool [shaped](concepts.md#shaped-pools). luxd
+checks it, and an `ec2` pool's instance types against it, before storing
+it (exit 4, `invalid_pool`). Like the template, a set that leaves out a
+shape the pool has would remove it, each field printed as `shape.cpus
+8→-`, and is refused without `--replace`. `lux pools sizes <pool>`
+lists the sizes; `luxd admin create-pool --shape` takes the same value.
+`lux pools sizes` on an unshaped pool exits non-zero (`pool <name> has no
+shape`), with `-o json` too; an operator naming a pool several tenants
+have must add `--tenant`.
 
 ## Status and history
 

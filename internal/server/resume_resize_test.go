@@ -205,14 +205,17 @@ func TestResumeDisk(t *testing.T) {
 		peak      *int64
 		requested int64
 		applied   int64
-		kept      bool
+		reason    string // the DiskKept reason; "": the disk is not kept
 	}{
-		{"grow", i64(gib), 40 * gib, 40 * gib, false},
-		{"shrink, 1 GiB headroom fits", i64(2 * gib), 3 * gib, 3 * gib, false},
-		{"shrink, 25% headroom fits", i64(8 * gib), 10 * gib, 10 * gib, false},
-		{"shrink below 1 GiB headroom", i64(2 * gib), 3*gib - 1, 20 * gib, true},
-		{"shrink below 25% headroom", i64(8 * gib), 10*gib - 1, 20 * gib, true},
-		{"shrink without a measurement", nil, 10 * gib, 20 * gib, true},
+		{"grow", i64(gib), 40 * gib, 40 * gib, ""},
+		{"shrink, 1 GiB headroom fits", i64(2 * gib), 3 * gib, 3 * gib, ""},
+		{"shrink, 25% headroom fits", i64(8 * gib), 10 * gib, 10 * gib, ""},
+		{"shrink below 1 GiB headroom", i64(2 * gib), 3*gib - 1, 20 * gib,
+			"its saved state used up to 2.0 GiB, which needs at least 3.0 GiB of disk (that plus max(25%, 1 GiB)): a smaller disk is not applied"},
+		{"shrink below 25% headroom", i64(8 * gib), 10*gib - 1, 20 * gib,
+			"its saved state used up to 8.0 GiB, which needs at least 10.0 GiB of disk (that plus max(25%, 1 GiB)): a smaller disk is not applied"},
+		{"shrink without a measurement", nil, 10 * gib, 20 * gib,
+			"no disk use is recorded for the snapshot it resumes from: a smaller disk is not applied"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := testServer(t)
@@ -228,18 +231,18 @@ func TestResumeDisk(t *testing.T) {
 				t.Errorf("answer's spec disk %d, want %d", got, c.applied)
 			}
 			rz := out.Body.Resize
-			if rz == nil || int64(rz.Applied.Disk) != c.applied || int64(rz.Requested.Disk) != c.requested || (rz.Disk != nil) != c.kept {
+			if rz == nil || int64(rz.Applied.Disk) != c.applied || int64(rz.Requested.Disk) != c.requested || (rz.Disk != nil) != (c.reason != "") {
 				t.Fatalf("answer's resize %+v", rz)
 			}
 			evDisk := eventRes(resumeEvent(t, s, id), "disk")
-			if !c.kept {
+			if c.reason == "" {
 				if evDisk != nil {
 					t.Errorf("event says disk kept: %v", evDisk)
 				}
 				return
 			}
-			if int64(rz.Disk.Kept) != 20*gib || int64(rz.Disk.Requested) != c.requested || rz.Disk.Reason == "" {
-				t.Errorf("answer's disk %+v", rz.Disk)
+			if int64(rz.Disk.Kept) != 20*gib || int64(rz.Disk.Requested) != c.requested || rz.Disk.Reason != c.reason {
+				t.Errorf("answer's disk %+v, want reason %q", rz.Disk, c.reason)
 			}
 			if c.peak != nil && (rz.Disk.Measured == nil || *rz.Disk.Measured != *c.peak || rz.Disk.Needed <= c.requested) {
 				t.Errorf("answer's disk measurement %+v", rz.Disk)
@@ -414,8 +417,8 @@ func TestResumeDiskShrinkNeedsTheFinalMeasurement(t *testing.T) {
 		applied int64
 		reason  string
 	}{
-		{"lost before its exit status", 8 * gib, "", 2 * gib, 20 * gib, "no final measurement"},
-		{"lost before its exit status, a shrink its peak admits", 8 * gib, "", 11 * gib, 20 * gib, "no final measurement"},
+		{"lost before its exit status", 8 * gib, "", 2 * gib, 20 * gib, "ended without reporting its final disk use: a smaller disk is not applied"},
+		{"lost before its exit status, a shrink its peak admits", 8 * gib, "", 11 * gib, 20 * gib, "ended without reporting its final disk use: a smaller disk is not applied"},
 		{"exited, its final usage refuses the shrink", 1800 * mib, "exited", 2 * gib, 20 * gib, "its saved state used up to"},
 		{"exited, its final usage admits the shrink", 1800 * mib, "exited", 3 * gib, 3 * gib, ""},
 		{"failed, its final usage admits the shrink", 1800 * mib, "failed", 3 * gib, 3 * gib, ""},

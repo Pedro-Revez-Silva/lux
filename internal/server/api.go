@@ -535,6 +535,7 @@ type Run struct {
 	Servers     []RunServer   `json:"servers,omitzero" doc:"On GET /v1/runs/{id}: the Run's servers."`
 	SubmittedBy *RunSubmitter `json:"submittedBy,omitempty" doc:"On GET /v1/runs/{id}: who submitted it, the API key or the person signed in. Absent for Runs submitted before luxd recorded it."`
 	Cost        *RunCostBrief `json:"cost,omitempty" doc:"In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."`
+	Sizing      *RunSizing    `json:"sizing,omitempty" doc:"On a shaped pool: what its submit asked for in resources and the size it has. Absent for a Run submitted to and still in an unshaped pool."`
 }
 
 // Resumability says whether a Run can be resumed now, and from what.
@@ -616,7 +617,7 @@ type RunUsage struct {
 const runColumns = `r.id, rt.name, r.name, r.labels, r.state, r.state_reason, r.activity, r.exit_code, r.current_epoch,
 	r.session_id, r.snapshot_id, r.spec, r.image_resolved, r.secrets, r.created_at, r.first_scheduled_at, r.first_started_at, r.finished_at,
 	coalesce(rh.name, ''), coalesce(rp.host_id, ''), coalesce(rpool.name, ''), coalesce(r.pool_id, ''), rr.seconds, rr.since,
-	rpt.wait, rpt.start, rpt.placing, ` + resumableSQL + `, ` + stageColumns
+	rpt.wait, rpt.start, rpt.placing, r.requested_resources, r.resolved_size, CASE WHEN r.resolved_size IS NOT NULL THEN rpool.shape END, ` + resumableSQL + `, ` + stageColumns
 
 // runsFrom: a Run with its tenant, its current placement's host, and its
 // runtime (rr). Runtime is the sum over its placements of started_at
@@ -680,10 +681,27 @@ func placementTimeSQL(now string) string {
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	var stage stageInputs
+	var requested *SizeRequest
+	var size *string
+	var shape *PoolShape
 	err := row.Scan(append([]any{&r.ID, &r.Tenant, &r.Name, &r.Labels, &r.State, &r.StateReason, &r.Activity, &r.ExitCode, &r.Epoch,
 		&r.SessionID, &r.SnapshotID, &r.Spec, &r.Image, &r.Secrets, &r.CreatedAt, &r.ScheduledAt, &r.StartedAt, &r.FinishedAt, &r.Host, &r.HostID,
-		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince, &r.PlacementWaitSeconds, &r.PlacementStartSeconds, &r.Placing, &r.Resumable},
+		&r.Pool, &r.PoolID, &r.RuntimeSeconds, &r.RuntimeSince, &r.PlacementWaitSeconds, &r.PlacementStartSeconds, &r.Placing,
+		&requested, &size, &shape, &r.Resumable},
 		stage.scanTargets()...)...)
+	// resolved_size is shown only while it names a size of the pool's
+	// current ladder with the Run's resources: a removed or changed shape
+	// leaves it stale until the next resume re-resolves or clears it.
+	if size != nil && (shape == nil || !shape.hasSize(*size, r.Spec.Resources)) {
+		size = nil
+	}
+	if requested != nil || size != nil {
+		r.Sizing = &RunSizing{Requested: requested}
+		if size != nil {
+			res := r.Spec.Resources
+			r.Sizing.Resolved = &SizeResolved{Size: *size, CPUs: res.CPUs, Memory: res.Memory, Disk: res.Disk}
+		}
+	}
 	r.PlacementSeconds = r.PlacementWaitSeconds + r.PlacementStartSeconds
 	stage.State, stage.CreatedAt = r.State, r.CreatedAt
 	st := deriveStage(stage)
@@ -736,6 +754,9 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 			return nil, errAttachmentsUnsupported(cmp.Or(sp.Workload.Adapter, "generic"))
 		}
 	}
+	// The resources as asked, before Normalize fills luxd's defaults: a
+	// shaped pool resolves these, never the defaults.
+	raw := sp.Resources
 	if err := sp.Normalize(s.cfg.Defaults); err != nil {
 		return nil, invalidSpec(err)
 	}
@@ -756,7 +777,7 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 			existing, err := runByIdempotencyKey(ctx, tx, idem)
 			if err == nil {
 				run = existing
-				return nil
+				return checkReplay(existing, raw)
 			}
 			if !errors.Is(err, pgx.ErrNoRows) {
 				return err
@@ -777,18 +798,25 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 			return err
 		}
 		stored.Placement.Pool = rp.Name
+		requested, size, err := resolveSubmitSize(ctx, tx, rp, raw, &stored.Resources)
+		if err != nil {
+			return err
+		}
 		var prompt []spec.Attachment
 		stored, prompt = splitPromptAttachments(stored)
 		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_id, needs_host_since, prompt_attachments,
-				submitted_by_key, submitted_by_email)
-			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now(), $9, nullif($10, ''), nullif($11, ''))`,
-			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID, prompt, p.KeyID, p.Email)
+				submitted_by_key, submitted_by_email, requested_resources, resolved_size)
+			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now(), $9, nullif($10, ''), nullif($11, ''), $12, $13)`,
+			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID, prompt, p.KeyID, p.Email, requested, size)
 		if err != nil {
 			return err
 		}
 		ev := map[string]any{"by": p.Actor(), "pool": rp.Name, "poolFrom": rp.From}
 		if o := rp.ownerLabel(); o != "" {
 			ev["poolOwner"] = o
+		}
+		if size != nil {
+			ev["size"] = *size
 		}
 		if err := addEvent(ctx, tx, p.TenantID, id, 0, "submitted", ev); err != nil {
 			return err
@@ -819,7 +847,10 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		if err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 			r, err := runByIdempotencyKey(ctx, tx, idem)
 			winner = r
-			return err
+			if err != nil {
+				return err
+			}
+			return checkReplay(r, raw)
 		}); err != nil {
 			return nil, err
 		}
@@ -1605,6 +1636,7 @@ type resumeGit struct {
 }
 
 type resumeResources struct {
+	Size      string         `json:"size,omitempty" doc:"A size of the Run's pool (after placement.poolId, the new pool's): its cpus, memory and disk. Not with cpus, memory or disk (422 size_conflict); 422 unknown_size, or size_unsupported on an unshaped pool. In a shaped pool, cpus, memory and disk are rounded up to a size as at submit; a size with less disk than the Run has must hold its saved state with headroom, else 422 size_below_saved_state."`
 	CPUs      *float64       `json:"cpus,omitempty" doc:"A new CPU quota, larger or smaller (0.5 is half a CPU). Absent: unchanged; 0 or less: 422 invalid_spec."`
 	Memory    *spec.Bytes    `json:"memory,omitempty" doc:"A new memory size, larger or smaller, in its host's terms as at submit. Absent: unchanged; 0 or less: 422 invalid_spec."`
 	Disk      spec.Bytes     `json:"disk,omitempty" doc:"A new disk limit: its writable layer plus state volumes. Absent or 0: unchanged; negative: 422 invalid_spec. Larger: applied. Smaller: applied only if the placement that took the snapshot it resumes from reported its final disk use (it exited, was not lost) and the disk is at least its peak disk use plus max(25%, 1 GiB); otherwise the Run keeps its disk and still resumes, and resize.disk in the answer (and in the resume.requested event) says why."`
@@ -1615,6 +1647,7 @@ type resumeResources struct {
 // resources asked for, the others zero.
 func (r resumeResources) check() (spec.Resources, error) {
 	var req spec.Resources
+	req.Size = r.Size
 	var problems []string
 	if r.CPUs != nil {
 		req.CPUs = *r.CPUs
@@ -1643,7 +1676,8 @@ func (r resumeResources) check() (spec.Resources, error) {
 type Resize struct {
 	Requested spec.Resources `json:"requested" doc:"The resources the resume asked for; the others are absent."`
 	Applied   spec.Resources `json:"applied" doc:"The Run's resources from this resume on: what the scheduler reserves and its container gets."`
-	Disk      *DiskKept      `json:"disk,omitempty" doc:"Present when a smaller disk was refused and the current one kept."`
+	Size      string         `json:"size,omitempty" doc:"In a shaped pool: the size applied resolves to (what was asked, rounded up; or, on a move that asked nothing, the Run's resources rounded up). Absent in an unshaped pool."`
+	Disk      *DiskKept      `json:"disk,omitempty" doc:"Present when a smaller disk was refused and the current one kept (unshaped pools only)."`
 }
 
 // DiskKept says why a resume kept a Run's disk limit instead of shrinking it.
@@ -1755,9 +1789,10 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		var sp spec.RunSpec
 		var noSnapshot bool
 		var curPool BoundPool
-		if err := tx.QueryRow(ctx, `SELECT r.state, r.secrets, r.spec, `+refusedWithoutSnapshot+`, coalesce(r.pool_id, ''), coalesce(rpool.name, '')
+		var resolvedSize string
+		if err := tx.QueryRow(ctx, `SELECT r.state, r.secrets, r.spec, `+refusedWithoutSnapshot+`, coalesce(r.pool_id, ''), coalesce(rpool.name, ''), coalesce(r.resolved_size, '')
 			FROM runs r`+runPoolJoin+` WHERE r.id = $1 FOR UPDATE OF r`, id).
-			Scan(&state, &refs, &sp, &noSnapshot, &curPool.ID, &curPool.Name); err != nil {
+			Scan(&state, &refs, &sp, &noSnapshot, &curPool.ID, &curPool.Name, &resolvedSize); err != nil {
 			return err
 		}
 		// Before anything else: whatever its state, such a Run is never
@@ -1908,12 +1943,22 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 				return err
 			}
 		}
-		if req.Resources != nil {
-			var err error
-			if resize, err = resizeRun(ctx, tx, id, sp.Resources, *req.Resources); err != nil {
-				return err
-			}
-			sp.Resources = resize.Applied
+		// Sized against the pool the Run is in from now on: a move into or
+		// out of a shaped pool re-resolves there.
+		dest := curPool
+		if to != nil {
+			dest = BoundPool{Name: to.Name, ID: *to.ID}
+		}
+		sh, err := poolShape(ctx, tx, &dest.ID)
+		if err != nil {
+			return err
+		}
+		z := resumeSizing{runID: id, from: curPool, dest: dest, shape: sh, resolved: resolvedSize, cur: sp.Resources}
+		if rz, err := resumeSize(ctx, tx, z, req.Resources); err != nil {
+			return err
+		} else if rz != nil {
+			resize = rz
+			sp.Resources = rz.Applied
 		}
 		if to != nil {
 			if moved, err = rebindPool(ctx, tx, id, sp, curPool, *to, *target); err != nil {
@@ -2051,51 +2096,32 @@ func pendingResumeData(ctx context.Context, tx pgx.Tx, runID, key string, dest a
 // disk use of the placement that took the snapshot the Run resumes from
 // (runs.snapshot_id, already moved to fromSnapshot). Without that
 // measurement, a smaller disk is not applied. A disk kept is no error:
-// Resize.Disk says why. Values are checked as submit checks them.
-func resizeRun(ctx context.Context, tx pgx.Tx, runID string, cur spec.Resources, req resumeResources) (*Resize, error) {
-	requested, err := req.check()
-	if err != nil {
-		return nil, err
+// Resize.Disk says why. req is resumeResources.check's, already checked as
+// submit checks resources.
+func resizeRun(ctx context.Context, tx pgx.Tx, runID string, cur spec.Resources, req spec.Resources) (*Resize, error) {
+	rz := &Resize{Requested: req, Applied: cur}
+	if req.CPUs != 0 {
+		rz.Applied.CPUs = req.CPUs
 	}
-	rz := &Resize{Requested: requested, Applied: cur}
-	if req.CPUs != nil {
-		rz.Applied.CPUs = *req.CPUs
-	}
-	if req.Memory != nil {
-		rz.Applied.Memory = *req.Memory
+	if req.Memory != 0 {
+		rz.Applied.Memory = req.Memory
 	}
 	if req.Disk != 0 {
 		rz.Applied.Disk = req.Disk
 	}
-	if requested.DiskGrace.Set {
-		rz.Applied.DiskGrace = requested.DiskGrace
+	if req.DiskGrace.Set {
+		rz.Applied.DiskGrace = req.DiskGrace
 	}
 	if req.Disk > 0 && req.Disk < cur.Disk {
-		// The runner reports the snapshot before the exit status carrying
-		// its final disk sample, and only that status makes a placement
-		// 'exited'. In any other state (lost between the two) the peak may
-		// predate data the snapshot holds.
-		var peak *int64
-		var final bool
-		err := tx.QueryRow(ctx, `SELECT p.peak_disk_bytes, p.state = 'exited' FROM runs r
-			JOIN snapshots sn ON sn.id = r.snapshot_id AND sn.run_id = r.id
-			JOIN placements p ON p.id = sn.placement_id
-			WHERE r.id = $1`, runID).Scan(&peak, &final)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		reason, peak, err := diskShrinkRefusal(ctx, tx, runID, req.Disk)
+		if err != nil {
 			return nil, err
 		}
-		kept := DiskKept{Requested: req.Disk, Kept: cur.Disk}
-		switch {
-		case err == nil && !final:
-			kept.Reason = "no final measurement: the placement that took the snapshot it resumes from ended without reporting its final disk use, so a smaller disk is not applied"
-		case peak == nil:
-			kept.Reason = "no disk use is recorded for the snapshot it resumes from: a smaller disk is not applied"
-		case int64(req.Disk) < diskShrinkFloor(*peak):
-			kept.Measured, kept.Needed = peak, diskShrinkFloor(*peak)
-			kept.Reason = fmt.Sprintf("its saved state used up to %s; a smaller disk must be at least %s (that plus max(25%%, 1 GiB))",
-				bytesText(*peak), bytesText(kept.Needed))
-		}
-		if kept.Reason != "" {
+		if reason != "" {
+			kept := DiskKept{Requested: req.Disk, Kept: cur.Disk, Reason: reason + ": a smaller disk is not applied"}
+			if peak != nil {
+				kept.Measured, kept.Needed = peak, diskShrinkFloor(*peak)
+			}
 			rz.Disk, rz.Applied.Disk = &kept, cur.Disk
 		}
 	}
@@ -3167,6 +3193,8 @@ type Pool struct {
 	// against (poolFacts), as the listing tenant would be checked.
 	Platforms    []string          `json:"platforms,omitempty" readOnly:"true" doc:"The platforms (os/arch) the pool's hosts run: those of its live and latest registered hosts, and for an ec2 pool its template's instance types as the instance-type catalog describes them. Absent when lux knows none; a resume into it is then not refused for its platform." example:"[\"linux/arm64\"]"`
 	Capabilities *PoolCapabilities `json:"capabilities,omitempty" readOnly:"true" doc:"What the pool's hosts offer a Run, as a resume's placement.poolId judges it."`
+	Shape        *PoolShape        `json:"shape,omitempty" doc:"Makes the pool shaped: the nominal whole host its sizes halve down from. Runs ask for a size (resources.size) or have cpus, memory and disk rounded up to one. Checked at create and update (422 invalid_pool): family a lowercase slug, arch arm64 or amd64, cpus and minCpus powers of two (minCpus at least 0.5), memory and disk dividing exactly down to the smallest size, defaultCpus one of the sizes; for an ec2 pool, the template's instanceType and fallbackInstanceTypes the catalog knows must have its arch and at least its cpus and memory. Absent: unshaped, as every pool before. Like every field, a set without it removes it; Runs already submitted keep their resources."`
+	Sizes        []PoolSize        `json:"sizes,omitempty" readOnly:"true" doc:"A shaped pool's sizes, smallest first: each one's name, cpus, memory, disk and fraction of the whole host. Absent for an unshaped pool."`
 }
 
 // PoolCapabilities: null is unknown.
@@ -3189,7 +3217,7 @@ const (
 )
 
 // poolReadOnly are the Pool fields luxd reports and a request cannot set.
-var poolReadOnly = []string{"platform", "hostSize", "hostSizeFrom", "instanceType", "platforms", "capabilities"}
+var poolReadOnly = []string{"platform", "hostSize", "hostSizeFrom", "instanceType", "platforms", "capabilities", "sizes"}
 
 // withHostSizes sets each of pools' host size, from one query.
 func withHostSizes(ctx context.Context, tx pgx.Tx, pools []Pool) error {
@@ -3254,16 +3282,19 @@ type listPoolsOutput struct {
 // poolColumns: Select poolColumns FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id.
 const poolColumns = `p.id, p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
 	coalesce(p.scale_down_after_s, 0), p.warm_while_active,
-	p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, ''), p.is_default`
+	p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, ''), p.is_default, p.shape`
 
 func scanPool(row pgx.Row) (Pool, error) {
 	var pl Pool
 	var sda int
 	var isDefault bool
 	err := row.Scan(&pl.ID, &pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts,
-		&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &isDefault)
+		&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &isDefault, &pl.Shape)
 	pl.ScaleDownAfter.Duration = time.Duration(sda) * time.Second
 	pl.IsDefault = &isDefault
+	if pl.Shape != nil {
+		pl.Sizes = pl.Shape.sizes()
+	}
 	return pl, err
 }
 
@@ -3555,6 +3586,9 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	if err := ValidPoolPrice(pl.Provider, pl.HourlyPrice, pl.Currency); err != nil {
 		return nil, err
 	}
+	if err := CheckPoolShape(ctx, s.db, pl.Provider, pl.Template, pl.Shape); err != nil {
+		return nil, err
+	}
 	if pl.Template == nil {
 		pl.Template = map[string]any{}
 	}
@@ -3574,15 +3608,15 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 		err := SavePool(ctx, tx, p.TenantID, pl.Name, pl.IsDefault, func() error {
 			var storedID string
 			err := tx.QueryRow(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
-					scale_down_after_s, warm_while_active, hourly_price, price_currency)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''))
+					scale_down_after_s, warm_while_active, hourly_price, price_currency, shape)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''), $13)
 				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
 					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
-					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
+					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency, shape = EXCLUDED.shape,
 					`+PoolRevive+` RETURNING id`,
 				newID, p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
-				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency).Scan(&storedID)
+				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency, pl.Shape).Scan(&storedID)
 			if err != nil {
 				return err
 			}

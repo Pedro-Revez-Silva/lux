@@ -228,6 +228,21 @@ func TestResolution(t *testing.T) {
 	}
 }
 
+func TestDefault(t *testing.T) {
+	for _, def := range []float64{0.5, 2, 4, 8} {
+		s := shape(8)
+		s.DefaultCPUs = def
+		m := mustNew(t, s)
+		got, err := m.Resolve(Request{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d := m.Default(); d != got.Resolved || d.CPUs != def {
+			t.Errorf("default cpus %g: Default() = %+v, Resolve({}) = %+v", def, d, got.Resolved)
+		}
+	}
+}
+
 func TestOmittedFieldsIgnored(t *testing.T) {
 	m := model(t, 8)
 	cases := []struct {

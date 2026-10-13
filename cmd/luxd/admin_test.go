@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -168,6 +169,51 @@ func TestAdminPoolDefault(t *testing.T) {
 		if got := defaults(); !slices.Equal(got, c.want) {
 			t.Errorf("after %v: defaults %v, want %v", c.args, got, c.want)
 		}
+	}
+}
+
+// create-pool --shape stores a valid shape; a malformed or invalid one is
+// refused and stores no pool.
+func TestAdminCreatePoolShape(t *testing.T) {
+	cfg, db := adminDB(t)
+	ctx := context.Background()
+	stdout := os.Stdout
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = devnull
+	t.Cleanup(func() { os.Stdout = stdout; devnull.Close() })
+
+	const valid = "family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2"
+	if err := admin(ctx, cfg, []string{"create-pool", "--name", "shaped", "--shape", valid}); err != nil {
+		t.Fatal(err)
+	}
+	var raw []byte
+	if err := db.QueryRow(ctx, `SELECT shape FROM pools WHERE name = 'shaped'`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var got server.PoolShape
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := server.PoolShape{Family: "m", Arch: "arm64", CPUs: 8, Memory: 32 << 30, Disk: 160 << 30, MinCPUs: 0.5, DefaultCPUs: 2}
+	if got != want {
+		t.Errorf("stored shape %+v, want %+v", got, want)
+	}
+
+	for _, c := range []struct{ shape, want string }{
+		{strings.Replace(valid, "cpus=8", "cpus=6", 1), "nominal CPUs 6 is not a power of two"},
+		{"family=m,arch=arm64", "--shape: shape \"family=m,arch=arm64\": missing cpus, memory, disk, min-cpus, default-cpus"},
+	} {
+		err := admin(ctx, cfg, []string{"create-pool", "--name", "bad", "--shape", c.shape})
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("--shape %s: %v, want %q", c.shape, err, c.want)
+		}
+	}
+	var n int
+	if err := db.QueryRow(ctx, `SELECT count(*) FROM pools WHERE name = 'bad'`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("refused shapes stored %d pools (%v)", n, err)
 	}
 }
 

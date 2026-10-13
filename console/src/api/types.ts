@@ -19,6 +19,8 @@ export interface SpecResources {
   memory?: number;
   disk?: number;
   pids?: number;
+  /** A shaped pool's size; resolved at submit, never stored in the spec. */
+  size?: string;
   /** A Go duration ("5m0s"): how long it may stay over disk. */
   diskGrace?: string;
 }
@@ -147,6 +149,15 @@ export interface Run {
   cost?: RunCostBrief;
   /** In GET /v1/runs/{id} only: the API key (its name when the caller may see it) or the person that submitted it; absent before luxd recorded it. */
   submittedBy?: RunSubmitter;
+  /** On a shaped pool: what its submit asked for in resources, and the size it has. Absent for a Run submitted to and still in an unshaped pool. */
+  sizing?: RunSizing;
+}
+
+export interface RunSizing {
+  /** Only the fields the submit gave; {} is the pool's default size. Absent for a Run submitted to an unshaped pool. */
+  requested?: { size?: string; cpus?: number; memory?: number; disk?: number };
+  /** The size it has now, and its resources (as spec.resources). Absent while in an unshaped pool. */
+  resolved?: { size: string; cpus: number; memory: number; disk: number };
 }
 
 export interface RunSubmitter {
@@ -638,6 +649,34 @@ export interface Pool {
   isDefault?: boolean;
   hourlyPrice?: string;
   currency?: string;
+  /** Makes the pool shaped: the nominal whole host its sizes halve down from. */
+  shape?: PoolShape;
+  /** A shaped pool's sizes, smallest first. */
+  sizes?: PoolSize[];
+}
+
+export interface PoolShape {
+  family: string;
+  arch: "arm64" | "amd64";
+  cpus: number;
+  /** Bytes. */
+  memory: number;
+  /** Bytes. */
+  disk: number;
+  minCpus: number;
+  defaultCpus: number;
+}
+
+export interface PoolSize {
+  /** e.g. m-2-arm64: resources.size. */
+  name: string;
+  cpus: number;
+  memory: number;
+  disk: number;
+  /** Of a whole host: 1, 0.5, 0.25, … */
+  fraction: number;
+  /** The size a Run that asks for no resources gets. */
+  default?: boolean;
 }
 
 /** GET /v1/whoami: who the key belongs to. */

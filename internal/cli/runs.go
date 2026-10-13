@@ -28,7 +28,7 @@ import (
 type Run = server.Run
 
 func (a *app) runCmd() *cobra.Command {
-	var file, idem, secretsFrom, pool string
+	var file, idem, secretsFrom, pool, size string
 	var follow, wait bool
 	var labels []string
 	cmd := &cobra.Command{
@@ -41,8 +41,13 @@ func (a *app) runCmd() *cobra.Command {
   lux run --image alpine --pool arm64 -- uname -m
 
 Flags win over the spec file: --pool replaces placement.pool, as --image
-and --name replace theirs. Without --pool or placement.pool, the server
-picks the pool.
+and --name replace theirs, and --size sets resources.size. Without --pool
+or placement.pool, the server picks the pool.
+
+--size names a size of a shaped pool (lux pools sizes <pool>), which sets
+the Run's cpus, memory and disk; it cannot be combined with resources.cpus,
+memory or disk in the spec. On a shaped pool, those are rounded up to the
+smallest size covering them; on an unshaped pool, --size is refused.
 
 Secret values in the spec can be read from the environment with
 value: ${NAME}, or from a .env file with --secrets-from.`,
@@ -72,6 +77,9 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 			}
 			if pool != "" {
 				sp.Placement.Pool = pool
+			}
+			if size != "" {
+				sp.Resources.Size = size
 			}
 			for _, l := range labels {
 				k, v, _ := strings.Cut(l, "=")
@@ -111,6 +119,7 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 	cmd.Flags().String("image", "", "image ref, for a quick generic Run")
 	cmd.Flags().String("name", "", "a name for humans")
 	cmd.Flags().StringVar(&pool, "pool", "", "pool to place the Run in (overrides the spec's placement.pool)")
+	cmd.Flags().StringVar(&size, "size", "", "a size of a shaped pool (lux pools sizes <pool>), e.g. m-2-arm64 (sets resources.size)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "label key=value (repeatable)")
 	cmd.Flags().StringVar(&idem, "idempotency-key", "", "make the submission safe to retry")
 	cmd.Flags().StringVar(&secretsFrom, "secrets-from", "", ".env file supplying secret values")
@@ -341,6 +350,9 @@ func (a *app) getCmd() *cobra.Command {
 				fmt.Fprintf(w, "session:   %s\n", run.SessionID)
 			}
 			fmt.Fprintf(w, "created:   %s\n", run.CreatedAt.Format(time.RFC3339))
+			if line := sizingLine(run.Sizing); line != "" {
+				fmt.Fprintf(w, "size:      %s\n", line)
+			}
 			if len(run.Placements) > 0 {
 				fmt.Fprintln(w, "placements:")
 				for _, p := range run.Placements {
@@ -387,6 +399,38 @@ func (a *app) getCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// sizingLine is lux get's size line: the size a Run has and what its
+// submit asked for; "" for a Run with no sizing (an unshaped pool).
+func sizingLine(sz *server.RunSizing) string {
+	if sz == nil {
+		return ""
+	}
+	out := "-"
+	if r := sz.Resolved; r != nil {
+		out = fmt.Sprintf("%s (%s cpus, %s memory, %s disk)", r.Size, plainNumber(r.CPUs), bytesHuman(int64(r.Memory)), bytesHuman(int64(r.Disk)))
+	}
+	if q := sz.Requested; q != nil {
+		var asked []string
+		if q.Size != "" {
+			asked = append(asked, q.Size)
+		}
+		if q.CPUs != nil {
+			asked = append(asked, plainNumber(*q.CPUs)+" cpus")
+		}
+		if q.Memory != nil {
+			asked = append(asked, bytesHuman(int64(*q.Memory))+" memory")
+		}
+		if q.Disk != nil {
+			asked = append(asked, bytesHuman(int64(*q.Disk))+" disk")
+		}
+		if len(asked) == 0 {
+			asked = []string{"the pool's default"}
+		}
+		out += "; asked " + strings.Join(asked, ", ")
+	}
+	return out
 }
 
 type logOpts struct {
@@ -889,7 +933,7 @@ func parseAddRepo(v string) (spec.Repository, error) {
 }
 
 func (a *app) resumeCmd() *cobra.Command {
-	var input, secretsFrom, fromSnapshot, to, disk, diskGrace, memory, reqID, syncMode, pool string
+	var input, secretsFrom, fromSnapshot, to, disk, diskGrace, memory, reqID, syncMode, pool, size string
 	var cpus float64
 	var secretArgs, removeSecrets, addRepos, syncs []string
 	var follow, wait, dryRun bool
@@ -931,6 +975,13 @@ saved state fits it with headroom; otherwise the Run keeps its disk, still
 resumes, and lux says why on stderr ("disk kept: ...").
 --disk-grace sets how long it may stay over its disk before it is stopped
 from now on (0s to 1h; 0s stops it on the first sample over).
+
+--size names a size of the Run's pool (with --pool, the new pool's) in
+place of --cpus, --memory and --disk. In a shaped pool those are rounded up
+to a size, as at submit, and moving into one rounds the Run's current
+resources up to one of its sizes; "size: <name>" on stderr says which. A
+size with less disk than the Run has is refused unless its saved state
+fits it with headroom (size_below_saved_state).
 
 --pool moves the Run to another pool (its name, the tenant's pool before the
 platform's, or its id) from this resume on; its saved state follows, as on
@@ -1016,6 +1067,9 @@ Run is checked as if it were stopped ("state unchecked" on stderr).`,
 			if cmd.Flags().Changed("cpus") {
 				res["cpus"] = cpus
 			}
+			if size != "" {
+				res["size"] = size
+			}
 			if len(res) > 0 {
 				req["resources"] = res
 			}
@@ -1054,6 +1108,9 @@ Run is checked as if it were stopped ("state unchecked" on stderr).`,
 			}
 			if out.Resize != nil && out.Resize.Disk != nil {
 				fmt.Fprintln(a.stderr, "disk kept:", out.Resize.Disk.Reason)
+			}
+			if out.Resize != nil && out.Resize.Size != "" {
+				fmt.Fprintln(a.stderr, "size:", out.Resize.Size)
 			}
 			if pl := out.Placement; pl != nil && pl.PlatformUnchecked {
 				fmt.Fprintf(a.stderr, "platform unchecked: lux does not know whether pool %s runs this Run's image\n", pl.Pool)
@@ -1099,6 +1156,7 @@ Run is checked as if it were stopped ("state unchecked" on stderr).`,
 	cmd.Flags().StringVar(&diskGrace, "disk-grace", "", "how long it may stay over its disk before it is stopped, from now on (e.g. 5m; 0s: at once)")
 	cmd.Flags().StringVar(&memory, "memory", "", "new memory from now on, larger or smaller (e.g. 4Gi)")
 	cmd.Flags().Float64Var(&cpus, "cpus", 0, "new CPUs from now on, larger or smaller (e.g. 0.5)")
+	cmd.Flags().StringVar(&size, "size", "", "a size of the Run's pool (with --pool, the new pool's), e.g. m-2-arm64; not with --cpus, --memory or --disk")
 	cmd.Flags().BoolVar(&follow, "follow", false, "stream output until it ends")
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait until it is running (or has ended)")
 	cmd.Flags().StringArrayVar(&addRepos, "add-repo", nil, "add a repository: name=url[@ref][,ref=REF][,credential=SECRET][,path=/abs][,push=false] (repeatable)")

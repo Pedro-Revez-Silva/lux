@@ -392,6 +392,7 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		template := fs.String("template", "{}", "provider template (JSON)")
 		price := fs.String("hourly-price", "", "static pools: default hourly price of hosts registering into it (a decimal; with --currency); replaces the pool's, like every flag here")
 		currency := fs.String("currency", "", "the currency of --hourly-price (ISO 4217, e.g. USD)")
+		shapeArg := fs.String("shape", "", "make it a shaped pool: family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2 (every key); replaces the pool's, like every flag here")
 		var isDefault optBool
 		fs.Var(&isDefault, "default", "mark it its owner's default pool (the platform's, without --tenant); --default=false clears the mark; omitted leaves it")
 		fs.Parse(args[1:])
@@ -403,6 +404,16 @@ func admin(ctx context.Context, cfg config, args []string) error {
 			return errors.New("only platform pools (no --tenant) can be shared")
 		}
 		if err := server.ValidPoolPrice(*provider, *price, *currency); err != nil {
+			return err
+		}
+		var shape *server.PoolShape
+		if *shapeArg != "" {
+			var err error
+			if shape, err = server.ParseShape(*shapeArg); err != nil {
+				return fmt.Errorf("--shape: %w", err)
+			}
+		}
+		if err := server.CheckPoolShape(ctx, db, *provider, tmpl, shape); err != nil {
 			return err
 		}
 		log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -419,14 +430,14 @@ func admin(ctx context.Context, cfg config, args []string) error {
 			return server.SavePool(ctx, tx, *tenant, *name, isDefault.v, func() error {
 				var storedID string
 				err := tx.QueryRow(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
-						scale_down_after_s, warm_while_active, hourly_price, price_currency)
-					VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11, nullif($12, '')::numeric, nullif($13, ''))
+						scale_down_after_s, warm_while_active, hourly_price, price_currency, shape)
+					VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11, nullif($12, '')::numeric, nullif($13, ''), $14)
 					ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 						min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts, shared = EXCLUDED.shared,
 						scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
-						hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency,
+						hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency, shape = EXCLUDED.shape,
 						`+server.PoolRevive+` RETURNING id`,
-					id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive, *price, *currency).Scan(&storedID)
+					id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive, *price, *currency, shape).Scan(&storedID)
 				if err != nil {
 					return err
 				}

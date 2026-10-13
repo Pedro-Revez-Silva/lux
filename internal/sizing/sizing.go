@@ -181,6 +181,9 @@ func New(s Shape) (*Model, error) {
 
 func (m *Model) List() []Entry { return slices.Clone(m.entries) }
 
+// Default is the entry a request with no size, cpus, memory or disk resolves to.
+func (m *Model) Default() Entry { return m.defaultEntry }
+
 // Parse accepts only canonical names belonging to this nominal pool ladder.
 func (m *Model) Parse(name string) (Entry, error) {
 	if len(m.entries) == 0 {

@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -628,7 +629,7 @@ func counts(m map[string]int) string {
 
 // poolFields are pools set's flags that replace a pool's settings: without
 // any of them, --default only moves the mark.
-var poolFields = []string{"provider", "min", "max", "warm", "scale-down-after", "warm-while-active", "template", "hourly-price", "currency"}
+var poolFields = []string{"provider", "min", "max", "warm", "scale-down-after", "warm-while-active", "template", "hourly-price", "currency", "shape"}
 
 func (a *app) poolsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "pools", Short: "Host pools"}
@@ -693,7 +694,7 @@ name): a tenant's pool and a platform pool may share a name.`,
 		},
 	}
 	var p server.Pool
-	var template string
+	var template, shape string
 	var isDefault, replace, dryRun bool
 	set := &cobra.Command{
 		Use:   "set <name>",
@@ -708,6 +709,13 @@ true→-). A set that would remove something (a template key, or a
 exit 4, naming what it would remove: --replace accepts the removals. A set
 naming no pool of yours prints "creating pool <name>". --dry-run prints the
 changes and writes nothing.
+
+--shape makes the pool shaped (docs/concepts.md, Shaped pools):
+family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2,
+every key required. Its sizes halve the whole host down to min-cpus
+(lux pools sizes <name> lists them). luxd checks it, and an ec2 pool's
+instance types against it, before storing it. Omitted on a shaped pool, the
+shape would be removed: refused without --replace, like a template key.
 
 luxd checks an ec2 pool's template can launch before storing it (a dry-run
 RunInstances; docs/operations.md, EC2 pools), unless it is unchanged.
@@ -728,6 +736,13 @@ alone, --default changes only the mark of an existing pool.`,
 				if err := json.Unmarshal([]byte(template), &p.Template); err != nil {
 					return fmt.Errorf("--template: %w", err)
 				}
+			}
+			if shape != "" {
+				sh, err := server.ParseShape(shape)
+				if err != nil {
+					return fmt.Errorf("--shape: %w", err)
+				}
+				p.Shape = sh
 			}
 			if marker && !dryRun {
 				// Exactly these two fields: server.Pool would send its
@@ -839,20 +854,77 @@ finds this pool. --platform renames the platform's pool of that name
 	set.Flags().DurationVar(&p.ScaleDownAfter.Duration, "scale-down-after", 0, "how long a host stays idle before it is released (default: luxd's scale_down_after, 10m)")
 	set.Flags().BoolVar(&p.WarmWhileActive, "warm-while-active", false, "keep --warm hosts only while the pool is in use; an idle pool scales down to --min")
 	set.Flags().StringVar(&template, "template", "", "provider template (JSON)")
+	set.Flags().StringVar(&shape, "shape", "", "make it a shaped pool: family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2 (every key)")
 	set.Flags().StringVar(&p.HourlyPrice, "hourly-price", "", "static pools: default hourly price of hosts registering into it, a decimal (with --currency); existing hosts keep theirs. Like every flag here, it replaces the pool's: omitted, the pool has no default price")
 	set.Flags().StringVar(&p.Currency, "currency", "", "ISO 4217 currency of --hourly-price (e.g. USD)")
 	set.Flags().BoolVar(&isDefault, "default", false, "mark it the tenant's default pool, for Runs that name none (--default=false clears it; omitted: unchanged)")
-	set.Flags().BoolVar(&replace, "replace", false, "write even when the set removes template keys, a scale-down time, warm-while-active or a price the pool has")
+	set.Flags().BoolVar(&replace, "replace", false, "write even when the set removes template keys, a shape, a scale-down time, warm-while-active or a price the pool has")
 	set.Flags().BoolVar(&dryRun, "dry-run", false, "print what would change and write nothing")
-	cmd.AddCommand(ls, set, a.poolEventsCmd())
+	var sizesPlatform bool
+	sizes := &cobra.Command{
+		Use:   "sizes <pool>",
+		Short: "List a shaped pool's sizes",
+		Long: `List the sizes of a shaped pool, smallest first: each one's name (for
+lux run --size and lux resume --size), CPUs, memory, disk and fraction of a
+whole host; * marks the size a Run that asks for no resources gets. The
+pool whose id it is, else the tenant's pool of that name, else the
+platform's; --platform: the platform's. An operator's key without --tenant
+sees every tenant's pools: a name more than one tenant uses is refused,
+asking for --tenant.
+
+An unshaped pool has no sizes: lux says so and exits non-zero, with -o json
+too, so a script can tell it from a shaped one.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			found, err := a.poolOf(ctxOf(cmd), args[0], "", sizesPlatform)
+			if err != nil {
+				return err
+			}
+			if found.Shape == nil {
+				return fmt.Errorf("pool %s has no shape, so no sizes: Runs there ask with --cpus, --memory and --disk", found.Name)
+			}
+			if a.output == "json" {
+				// [] rather than null for a shape whose stored ladder luxd
+				// no longer accepts (it lists no sizes).
+				if found.Sizes == nil {
+					found.Sizes = []server.PoolSize{}
+				}
+				return a.json(found.Sizes)
+			}
+			var rows [][]string
+			for _, sz := range found.Sizes {
+				def := ""
+				if sz.Default {
+					def = "*"
+				}
+				rows = append(rows, []string{sz.Name, def, strconv.FormatFloat(sz.CPUs, 'f', -1, 64), bytesHuman(int64(sz.Memory)),
+					bytesHuman(int64(sz.Disk)), strconv.FormatFloat(sz.Fraction, 'f', -1, 64)})
+			}
+			a.table("SIZE\tDEFAULT\tCPUS\tMEMORY\tDISK\tFRACTION", rows)
+			return nil
+		},
+	}
+	sizes.Flags().BoolVar(&sizesPlatform, "platform", false, "the platform's pool of that name")
+	cmd.AddCommand(ls, set, sizes, a.poolEventsCmd())
 	return cmd
 }
 
-// poolIDOf is the id of the pool ref names, among those GET /v1/pools
-// lists to tenant (the Run's; an operator's key otherwise lists every
-// tenant's): a pool whose id it is, else the tenant's pool of that name,
-// else the platform's (resolvePool's preference at submit).
+// poolIDOf is the id of poolOf's pool.
 func (a *app) poolIDOf(ctx context.Context, ref, tenant string) (string, error) {
+	pl, err := a.poolOf(ctx, ref, tenant, false)
+	if err != nil {
+		return "", err
+	}
+	return pl.ID, nil
+}
+
+// poolOf is the pool ref names, among those GET /v1/pools lists to tenant
+// (the Run's; "" for the key's or --tenant's; an operator's key otherwise
+// lists every tenant's): a pool whose id it is, else the tenant's pool of
+// that name, else the platform's (resolvePool's preference at submit).
+// platformOnly: only the platform's pool of that name or id. A name two
+// tenants' pools share in an operator's listing is refused, not guessed.
+func (a *app) poolOf(ctx context.Context, ref, tenant string, platformOnly bool) (*server.Pool, error) {
 	var resp struct {
 		Pools []server.Pool `json:"pools"`
 	}
@@ -862,21 +934,34 @@ func (a *app) poolIDOf(ctx context.Context, ref, tenant string) (string, error) 
 		path += "?tenant=" + url.QueryEscape(tenant)
 	}
 	if err := a.c.Do(ctx, "GET", path, nil, &resp); err != nil {
-		return "", err
+		return nil, err
 	}
-	var platform string
-	for _, pl := range resp.Pools {
+	var own []*server.Pool
+	var platform *server.Pool
+	for i := range resp.Pools {
+		pl := &resp.Pools[i]
 		switch {
-		case pl.ID == ref:
-			return pl.ID, nil
-		case pl.Name == ref && !pl.Platform:
-			return pl.ID, nil
-		case pl.Name == ref:
-			platform = pl.ID
+		case pl.ID == ref && (pl.Platform || !platformOnly):
+			return pl, nil
+		case pl.Name != ref:
+		case pl.Platform:
+			platform = pl
+		default:
+			own = append(own, pl)
 		}
 	}
-	if platform == "" {
-		return "", fmt.Errorf("no pool %q", ref)
+	if len(own) > 1 && !platformOnly {
+		var owners []string
+		for _, pl := range own {
+			owners = append(owners, pl.Tenant)
+		}
+		return nil, fmt.Errorf("pool %q: tenants %s each have one: name one with --tenant", ref, strings.Join(owners, ", "))
+	}
+	if len(own) == 1 && !platformOnly {
+		return own[0], nil
+	}
+	if platform == nil {
+		return nil, fmt.Errorf("no pool %q", ref)
 	}
 	return platform, nil
 }
@@ -925,7 +1010,7 @@ func trimDecimal(s string) string {
 func removals(before, after map[string]any) []string {
 	var out []string
 	for k := range before {
-		if _, kept := after[k]; strings.HasPrefix(k, "template.") && !kept {
+		if _, kept := after[k]; (strings.HasPrefix(k, "template.") || strings.HasPrefix(k, "shape.")) && !kept {
 			out = append(out, k)
 		}
 	}

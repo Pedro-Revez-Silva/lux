@@ -107,6 +107,7 @@ since older releases lack both the file and the commands it names:
 | `artifact-publish` | tell workloads to publish with `/.lux/bin/lux-shim publish` ([artifacts](runspec.md#artifacts)) once every luxd and then every runner runs such a release (luxd first: an older luxd refuses a runner's `artifact.published` report, and the runner retries it until luxd is upgraded). Such a runner no longer collects what a workload writes into the old `$LUX_ARTIFACTS` directory, nor sets the variable: a workload that still writes there loses those files. |
 | `egress-wildcards` | let tenants submit a RunSpec with a wildcard host rule in `network.egress`, `*.<domain>` ([network egress](runspec.md#network-egress)), once every luxd and runner runs such a release: an older luxd refuses the spec, and an older runner allows no name under it. |
 | `git-credentials` | send `credentials` on a push or a sync ([git](runspec.md#git)), once every luxd runs such a release: an older luxd refuses the field (422). A Run whose host runs an older lux-runner gets 409 `git_credentials_unsupported` until the host is upgraded. luxd holds the values in memory only until the runner has the request, so a credentialed push or sync must reach the luxd holding the runner's connection (a single luxd, or routing that sends it to the luxd the Run's host is connected to, as interactive streams need); any other luxd answers 503 `host_unreachable` and queues nothing. A queued request whose values are gone (luxd restarted, or the runner reconnected elsewhere first) ends failed, saying to send it again. |
+| `pool-sizes` | give pools a `shape` and submit or resume with `resources.size` ([shaped pools](concepts.md#shaped-pools)), once every luxd runs such a release: an older luxd refuses both fields as unknown (422/400), and one sharing the database would submit to a shaped pool without rounding. Runners need nothing new. |
 | `disk-grace` | set `[defaults] disk_grace` (`LUX_DEFAULT_DISK_GRACE`) and let tenants submit `resources.diskGrace` ([disk is measured](runspec.md#rules)), once every luxd and then every runner runs such a release: an older luxd refuses the key and the field, and an older runner ignores the grace and stops a Run on its first sample over its disk. |
 
 A release with no `FEATURES` file, or no `validate` line, predates
@@ -530,6 +531,29 @@ A tenant has at most one default pool, and the platform one (Postgres
 refuses a second). Marking another pool moves the mark in one statement.
 `lux pools rm` clears the mark of the pool it removes; re-creating that
 pool does not bring it back. Upgrading marks no pool.
+
+### Shaped pools
+
+A pool's optional `shape` ([concepts](concepts.md#shaped-pools)) is set
+wherever pools are: `POST /v1/pools`, `lux pools set --shape` and
+`luxd admin create-pool --shape`, all with the same validation:
+
+```bash
+luxd admin create-pool --name m --provider ec2 --template "$TEMPLATE" \
+  --shape family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2
+```
+
+The shape is stored with the pool (`pools.shape`, migration 071) and
+listed as `shape` and `sizes` in `GET /v1/pools`. For an ec2 pool, luxd
+compares the template's `instanceType` and `fallbackInstanceTypes` with
+the shape where the instance-type catalog (`instance_types`, filled by
+the market sampler) has them: the arch must match, CPUs and memory must be
+at least the shape's. A type the catalog lacks is not checked, so a pool
+set before the sampler has run is checked only on its next set. Disk is
+the shape's own: it comes from the launch template's volume, which no
+instance type describes. Rolling back to a luxd
+without shapes leaves the columns in place and ignores them; Runs keep
+the resources they were given.
 
 ## EC2 pools
 

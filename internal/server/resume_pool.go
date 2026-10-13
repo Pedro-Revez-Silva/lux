@@ -176,57 +176,41 @@ func (s *Server) futureHost(ctx context.Context, tx pgx.Tx, pl poolRow, f *poolF
 	if t.InstanceType == "" || t.Region == "" {
 		return []poolProfile{future}, nil
 	}
-	rows, err := tx.Query(ctx, `SELECT instance_type, vcpus, memory_bytes, coalesce(architectures, '{}') FROM instance_types
-		WHERE provider = $1 AND region = $2 AND instance_type = ANY($3)`,
-		pl.Provider, t.Region, append([]string{t.InstanceType}, t.FallbackInstanceTypes...))
+	known, err := catalogTypes(ctx, tx, pl.Provider, t.Region, append([]string{t.InstanceType}, t.FallbackInstanceTypes...))
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var probe *poolProfile
-	for rows.Next() {
-		var name string
-		var vcpus *int
-		var mem *int64
-		var archs []string
-		if err := rows.Scan(&name, &vcpus, &mem, &archs); err != nil {
-			return nil, err
-		}
-		for _, a := range archs {
-			if g := ec2Archs[a]; g != "" && !slices.Contains(f.Archs, g) {
+	for _, ct := range known {
+		for _, g := range ct.Archs {
+			if !slices.Contains(f.Archs, g) {
 				f.Archs = append(f.Archs, g)
 			}
 		}
-		if name != t.InstanceType || vcpus == nil || mem == nil {
-			continue
-		}
-		// Disk is never the instance type's.
-		if expected == nil {
-			future.Capacity.CPUs, future.Capacity.Memory = float64(*vcpus), *mem
-			continue
-		}
-		probe = &poolProfile{Labels: maps.Clone(future.Labels), Capacity: future.Capacity, LabelsKnown: true}
-		// A new host reports its own name and arch: never a previous host's.
-		delete(probe.Labels, "name")
-		delete(probe.Labels, "arch")
-		var runnable []string
-		for _, a := range archs {
-			if g := ec2Archs[a]; slices.Contains(runnerArches, g) && !slices.Contains(runnable, g) {
-				runnable = append(runnable, g)
-			}
-		}
-		if len(runnable) == 1 {
-			probe.Labels["arch"] = runnable[0]
-		}
-		probe.Capacity.CPUs, probe.Capacity.Memory = float64(*vcpus), *mem
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	ct, ok := known[t.InstanceType]
+	if !ok || ct.CPUs == nil || ct.Memory == nil {
+		return []poolProfile{future}, nil
 	}
-	if probe != nil {
-		return []poolProfile{future, *probe}, nil
+	// Disk is never the instance type's.
+	if expected == nil {
+		future.Capacity.CPUs, future.Capacity.Memory = float64(*ct.CPUs), *ct.Memory
+		return []poolProfile{future}, nil
 	}
-	return []poolProfile{future}, nil
+	probe := poolProfile{Labels: maps.Clone(future.Labels), Capacity: future.Capacity, LabelsKnown: true}
+	// A new host reports its own name and arch: never a previous host's.
+	delete(probe.Labels, "name")
+	delete(probe.Labels, "arch")
+	var runnable []string
+	for _, g := range ct.Archs {
+		if slices.Contains(runnerArches, g) {
+			runnable = append(runnable, g)
+		}
+	}
+	if len(runnable) == 1 {
+		probe.Labels["arch"] = runnable[0]
+	}
+	probe.Capacity.CPUs, probe.Capacity.Memory = float64(*ct.CPUs), *ct.Memory
+	return []poolProfile{future, probe}, nil
 }
 
 // platforms are f's archs as os/arch; runners are linux only.

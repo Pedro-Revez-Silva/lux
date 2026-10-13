@@ -281,6 +281,8 @@ type Resources struct {
 	Memory Bytes   `json:"memory,omitempty" yaml:"memory,omitempty"`
 	Disk   Bytes   `json:"disk,omitempty" yaml:"disk,omitempty"`
 	Pids   int64   `json:"pids,omitempty" yaml:"pids,omitempty"`
+	// Size is resolved at submit and never stored in the spec.
+	Size string `json:"size,omitempty" yaml:"size,omitempty" doc:"A size of a shaped pool's ladder (e.g. m-2-arm64; GET /v1/pools lists each pool's sizes): the Run gets that size's cpus, memory and disk. Not with cpus, memory or disk (422 size_conflict); a name the pool lacks is 422 unknown_size; on an unshaped pool, 422 size_unsupported. On a shaped pool, cpus, memory and disk without size are rounded up to the smallest size covering every one given, and none of them takes the pool's default size; luxd's resource defaults apply only on unshaped pools. Never stored in the spec: the Run's sizing says what was asked and what it got."`
 	// Unset takes luxd's default; Normalize stores it set, so an explicit 0
 	// survives a later change of that default.
 	DiskGrace OptionalDuration `json:"diskGrace,omitzero" yaml:"diskGrace,omitempty" doc:"How long the Run may stay over disk before it is stopped, 0 to 1h (e.g. 5m). The runner stops it once disk use has been over the limit on every sample for this long; a sample at or under the limit restarts the count. At twice the disk it is stopped at once, whatever the grace. 0: stopped on the first sample over. Unset: luxd's default (LUX_DEFAULT_DISK_GRACE, 0 unless changed), stored in the Run's spec at submit."`
@@ -1229,9 +1231,11 @@ func Fingerprint(name, value string) string {
 	return hex.EncodeToString(h[:8])
 }
 
-// SplitSecrets returns the spec without secret values, the stored refs, and
-// the values by name.
+// SplitSecrets returns the stored form of the spec (without secret values,
+// nor resources.size, a request luxd resolves at submit), the stored refs,
+// and the values by name.
 func (s RunSpec) SplitSecrets() (RunSpec, []SecretRef, map[string]string) {
+	s.Resources.Size = ""
 	refs := make([]SecretRef, 0, len(s.Secrets))
 	values := map[string]string{}
 	stripped := make([]Secret, len(s.Secrets))

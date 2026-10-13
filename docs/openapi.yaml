@@ -1512,8 +1512,19 @@ components:
                 - 4h
               type: string
             - type: number
+        shape:
+          $ref: "#/components/schemas/PoolShape"
+          description: "Makes the pool shaped: the nominal whole host its sizes halve down from. Runs ask for a size (resources.size) or have cpus, memory and disk rounded up to one. Checked at create and update (422 invalid_pool): family a lowercase slug, arch arm64 or amd64, cpus and minCpus powers of two (minCpus at least 0.5), memory and disk dividing exactly down to the smallest size, defaultCpus one of the sizes; for an ec2 pool, the template's instanceType and fallbackInstanceTypes the catalog knows must have its arch and at least its cpus and memory. Absent: unshaped, as every pool before. Like every field, a set without it removes it; Runs already submitted keep their resources."
         shared:
           type: boolean
+        sizes:
+          description: "A shaped pool's sizes, smallest first: each one's name, cpus, memory, disk and fraction of the whole host. Absent for an unshaped pool."
+          items:
+            $ref: "#/components/schemas/PoolSize"
+          readOnly: true
+          type:
+            - array
+            - "null"
         template:
           additionalProperties: {}
           type: object
@@ -1773,6 +1784,81 @@ components:
           format: int64
           type: integer
       type: object
+    PoolShape:
+      additionalProperties: false
+      properties:
+        arch:
+          description: The hosts' architecture, the last part of every size name.
+          enum:
+            - arm64
+            - amd64
+          type: string
+        cpus:
+          description: "Nominal CPUs of a whole host: a power of two."
+          format: double
+          type: number
+        defaultCpus:
+          description: "The CPUs of the size a Run that asks for no resources gets: one of the ladder's."
+          format: double
+          type: number
+        disk:
+          description: Nominal disk of a whole host (from its launch template, not its instance type).
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
+        family:
+          description: "The size family, a lowercase slug (e.g. m): the first part of every size name. Pool metadata, never inferred from the provider."
+          type: string
+        memory:
+          description: Nominal memory of a whole host, in the terms Runs ask in.
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
+        minCpus:
+          description: "The smallest size's CPUs: a power of two, at least 0.5. The ladder halves the whole host down to it."
+          format: double
+          type: number
+      type: object
+    PoolSize:
+      additionalProperties: false
+      properties:
+        cpus:
+          format: double
+          type: number
+        default:
+          description: The size a Run that asks for no resources gets.
+          type: boolean
+        disk:
+          description: Bytes.
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
+        fraction:
+          description: "Of a whole host: 1, 0.5, 0.25, ..."
+          format: double
+          type: number
+        memory:
+          description: Bytes.
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
+        name:
+          examples:
+            - m-2-arm64
+          type: string
+      type: object
     PoolStats:
       additionalProperties: false
       properties:
@@ -2023,10 +2109,13 @@ components:
           description: "The Run's resources from this resume on: what the scheduler reserves and its container gets."
         disk:
           $ref: "#/components/schemas/DiskKept"
-          description: Present when a smaller disk was refused and the current one kept.
+          description: Present when a smaller disk was refused and the current one kept (unshaped pools only).
         requested:
           $ref: "#/components/schemas/Resources"
           description: The resources the resume asked for; the others are absent.
+        size:
+          description: "In a shaped pool: the size applied resolves to (what was asked, rounded up; or, on a move that asked nothing, the Run's resources rounded up). Absent in an unshaped pool."
+          type: string
       type: object
     Resources:
       additionalProperties: false
@@ -2060,6 +2149,9 @@ components:
         pids:
           format: int64
           type: integer
+        size:
+          description: "A size of a shaped pool's ladder (e.g. m-2-arm64; GET /v1/pools lists each pool's sizes): the Run gets that size's cpus, memory and disk. Not with cpus, memory or disk (422 size_conflict); a name the pool lacks is 422 unknown_size; on an unshaped pool, 422 size_unsupported. On a shaped pool, cpus, memory and disk without size are rounded up to the smallest size covering every one given, and none of them takes the pool's default size; luxd's resource defaults apply only on unshaped pools. Never stored in the spec: the Run's sizing says what was asked and what it got."
+          type: string
       type: object
     Resumability:
       additionalProperties: false
@@ -2202,6 +2294,9 @@ components:
             - "null"
         sessionId:
           type: string
+        sizing:
+          $ref: "#/components/schemas/RunSizing"
+          description: "On a shaped pool: what its submit asked for in resources and the size it has. Absent for a Run submitted to and still in an unshaped pool."
         snapshotId:
           type: string
         spec:
@@ -2362,6 +2457,9 @@ components:
             - examples:
                 - 8Gi
               type: string
+        size:
+          description: "A size of the Run's pool (after placement.poolId, the new pool's): its cpus, memory and disk. Not with cpus, memory or disk (422 size_conflict); 422 unknown_size, or size_unsupported on an unshaped pool. In a shaped pool, cpus, memory and disk are rounded up to a size as at submit; a size with less disk than the Run has must hold its saved state with headroom, else 422 size_below_saved_state."
+          type: string
       type: object
     ResumeTarget:
       additionalProperties: false
@@ -2467,6 +2565,9 @@ components:
             - "null"
         sessionId:
           type: string
+        sizing:
+          $ref: "#/components/schemas/RunSizing"
+          description: "On a shaped pool: what its submit asked for in resources and the size it has. Absent for a Run submitted to and still in an unshaped pool."
         snapshotId:
           type: string
         spec:
@@ -2801,6 +2902,16 @@ components:
           type: string
         workdir:
           type: string
+      type: object
+    RunSizing:
+      additionalProperties: false
+      properties:
+        requested:
+          $ref: "#/components/schemas/SizeRequest"
+          description: "What its submit asked for in resources.size, cpus, memory and disk, only those given (empty: none, the pool's default size). Absent for a Run submitted to an unshaped pool. A resume's request is in its answer's resize and its resume.requested event."
+        resolved:
+          $ref: "#/components/schemas/SizeResolved"
+          description: "The size the Run has now, and its cpus, memory and disk (as spec.resources). Absent while it is in an unshaped pool, or while its pool's current sizes have no size of that name with the Run's cpus, memory and disk (the shape changed since, even if the name stayed): its next resume resolves it again."
       type: object
     RunSpec:
       additionalProperties: false
@@ -3202,6 +3313,56 @@ components:
           type: string
         url:
           description: "Where requests go: http or https, without credentials. A request's path is appended to this URL's."
+          type: string
+      type: object
+    SizeRequest:
+      additionalProperties: false
+      properties:
+        cpus:
+          format: double
+          type: number
+        disk:
+          description: Bytes.
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
+        memory:
+          description: Bytes.
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
+        size:
+          type: string
+      type: object
+    SizeResolved:
+      additionalProperties: false
+      properties:
+        cpus:
+          format: double
+          type: number
+        disk:
+          description: Bytes.
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
+        memory:
+          description: Bytes.
+          oneOf:
+            - format: int64
+              type: integer
+            - examples:
+                - 8Gi
+              type: string
+        size:
           type: string
       type: object
     Snapshot:

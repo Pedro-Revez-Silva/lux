@@ -73,6 +73,7 @@ volumes:
   - { name: cache, path: /cache, kind: ephemeral }         # empty on every start
 
 resources: { cpus: 4, memory: 8Gi, disk: 50Gi, pids: 2048, diskGrace: 5m }   # diskGrace: time allowed over disk
+# resources: { size: m-2-arm64 }  # on a shaped pool: one of its sizes instead (lux pools sizes <pool>)
 timeout: 4h                     # running time, over all placements; unset: no limit
 resumePolicy: auto              # auto | restart | manual | never: after a drain, preemption or migration (see below)
 
@@ -180,6 +181,39 @@ as `submittedBy` on `GET /v1/runs/{id}`.
 - **Disk is reserved only where the host says how much it has**
   (`lux-runner --disk`); otherwise each Run's limit still applies, but
   the scheduler does not add them up.
+- **`resources.size`** names a size of a [shaped pool](concepts.md#shaped-pools)
+  (`lux pools sizes <pool>` lists them; `lux run --size`): the Run gets
+  that size's cpus, memory and disk. `pids` stays its own field, with its
+  default. On a shaped pool:
+  - `size` with any of `cpus`, `memory` or `disk` is refused, 422
+    `size_conflict`; a name not in the pool's ladder (another family or
+    arch included), 422 `unknown_size`.
+  - without `size`, the `cpus`, `memory` and `disk` given are **rounded up**
+    to the smallest size that covers every one of them: on an 8-CPU, 32 GiB,
+    160 GiB `m` pool, `{cpus: 3, memory: 10Gi}` and `{cpus: 1, memory: 12Gi}`
+    both get `m-4-arm64` (4 CPUs, 16 GiB, 80 GiB). A field left out is not
+    filled from luxd's defaults first, so `{cpus: 1}` gets `m-1-arm64`
+    whatever `LUX_DEFAULT_MEMORY` or `LUX_DEFAULT_DISK` say.
+  - with none of `size`, `cpus`, `memory` and `disk`, the Run gets the
+    pool's default size (its shape's `defaultCpus`).
+  - more than the whole host in any of them is refused, 422
+    `size_too_large`, naming what was asked and the largest size; a zero or
+    negative value, 422 `invalid_spec`.
+  - the Run's `spec.resources` is the size's: the scheduler reserves it and
+    costs price it. `size` itself is not kept in the spec: the Run's
+    `sizing` (submit's answer, `GET /v1/runs/{id}`, `GET /v1/runs`) has
+    `requested` (what the submit gave, only those fields) and `resolved`
+    (`size`, `cpus`, `memory`, `disk`).
+  - an `Idempotency-Key` retry is compared by what it asks for: the same
+    `resources` returns the first Run; other ones, even ones rounding to
+    the same size, are 409 `idempotency_conflict`.
+
+  On an unshaped pool (every pool without a `shape`), `size` is refused
+  with 422 `size_unsupported`; `cpus`, `memory` and `disk` are taken as
+  given, luxd's defaults filling the rest, exactly as before, and the Run
+  has no `sizing`. A luxd that predates sizes refuses `size` as an unknown
+  field; a client should check that the release lists `pool-sizes` in
+  `FEATURES`.
 - `placement.pool` names the pool a Run runs in. Omitted: the tenant's
   default pool, else the platform's default pool, else the pool named
   `default` ([default pools](operations.md#pools-and-the-default-pool)).
