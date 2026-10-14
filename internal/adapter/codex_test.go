@@ -97,6 +97,114 @@ func (s cxEvents) Event(typ string, data any) {
 	s.warnSink.Event(typ, data)
 }
 
+// cxRelays is an inputSink also logging stdout as "stdout <text>" and each
+// relayed notification (event or stream) as "relay <type> <threadId>".
+type cxRelays struct{ *inputSink }
+
+func (s cxRelays) Stdout(p []byte) { s.add("stdout " + string(p)) }
+
+func (s cxRelays) Event(typ string, data any) {
+	if raw, ok := data.(json.RawMessage); ok {
+		s.relay(typ, raw)
+	}
+	s.inputSink.Event(typ, data)
+}
+
+func (s cxRelays) Stream(typ, _, text string, wrap func(string) any) {
+	b, _ := json.Marshal(wrap(text))
+	s.relay(typ, b)
+}
+
+func (s cxRelays) relay(typ string, params []byte) {
+	var p struct {
+		ThreadID string `json:"threadId"`
+	}
+	_ = json.Unmarshal(params, &p)
+	s.add("relay " + typ + " " + p.ThreadID)
+}
+
+const (
+	cxSubRoot      = "01a133af-f06c-7222-ab85-63b996a297a0"
+	cxSubRootTurn  = "01a133af-f0c6-7a02-bcb4-d07ec4989a11"
+	cxSubChild     = "01a133b0-0aa5-7b93-b598-a603ff0d58a5"
+	cxSubRootReply = "I’ll delegate the read and wait for the result.\n"
+	cxSubChildText = "##"
+)
+
+// A subagent is a child thread on the Run's connection (codex 0.144.1,
+// testdata/codex-0.144.1-subagent.ndjson: the root turn spawns a child,
+// whose whole turn runs while the root waits on it). The child's
+// notifications are relayed, but its turn/completed does not end the
+// Run's turn or make it idle, its agentMessage is not the Run's stdout,
+// and its turn/started does not take the Run's turn: a steer still names
+// the root's.
+func TestCodexSubagentThreadIsNotTheRuns(t *testing.T) {
+	lines := testdataLines(t, "codex-0.144.1-subagent.ndjson")
+	log := &inputSink{}
+	c := NewCodex()
+	w := startWireSink(t, c, proto.ShimConfig{Prompt: "spawn a sub-agent"}, cxRelays{log})
+	calls := []string{"initialize", "thread/start", "turn/start"}
+	var want []string
+	for _, l := range lines {
+		var m struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatal(err)
+		}
+		if m.ID != nil {
+			id, _ := w.next(calls[0])
+			calls = calls[1:]
+			w.send(`{"id":` + id + strings.TrimPrefix(l, `{"id":`+string(m.ID)))
+			continue
+		}
+		var p struct {
+			ThreadID string `json:"threadId"`
+		}
+		_ = json.Unmarshal(m.Params, &p)
+		want = append(want, "relay codex."+m.Method+" "+p.ThreadID)
+		w.send(l)
+	}
+	relays := func() []string {
+		return slices.DeleteFunc(log.lines(), func(l string) bool { return !strings.HasPrefix(l, "relay ") })
+	}
+	for end := time.Now().Add(5 * time.Second); len(relays()) < len(want) && time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+	}
+	if got := relays(); !slices.Equal(got, want) {
+		t.Fatalf("relays\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if !slices.Contains(want, "relay codex.turn/completed "+cxSubChild) {
+		t.Fatal("the capture has no child turn/completed")
+	}
+
+	l := log.lines()
+	// The capture ends before the root's turn completes: no turn end.
+	if slices.Contains(l, "turn_end") {
+		t.Errorf("a turn end: %q", l)
+	}
+	if busy := slices.Index(l, "busy"); busy < 0 || slices.Contains(l[busy:], "idle") {
+		t.Errorf("idle mid-turn: %q", l)
+	}
+	if !slices.Contains(l, "stdout "+cxSubRootReply) || slices.Contains(l, "stdout "+cxSubChildText) {
+		t.Errorf("stdout: %q", slices.DeleteFunc(l, func(s string) bool { return !strings.HasPrefix(s, "stdout ") }))
+	}
+
+	c.Deliver(proto.Input{RequestID: "steer-1", Text: "and then?"})
+	_, p := w.next("turn/steer")
+	if str(p, "expectedTurnId") != cxSubRootTurn || str(p, "threadId") != cxSubRoot {
+		t.Fatalf("turn/steer params %v", p)
+	}
+	// Synthetic, not in the capture: a child's compaction is not the Run's
+	// (TestCodexCompactionIsReported covers the root's). exit joins every read.
+	w.send(`{"method":"item/completed","params":{"threadId":"` + cxSubChild + `","turnId":"child-turn","item":{"type":"contextCompaction","id":"cc-child"}}}`)
+	w.exit()
+	if got := log.compactions(); len(got) != 0 {
+		t.Fatalf("a child compaction reported as the Run's: %q", got)
+	}
+}
+
 // lineAfter is the line right after the first one starting with prefix, or
 // "" if there is none.
 func lineAfter(lines []string, prefix string) string {

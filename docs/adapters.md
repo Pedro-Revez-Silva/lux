@@ -29,6 +29,12 @@ on another host with its conversation intact.
 
 ## Input: accepted and consumed
 
+Before delivery, `POST /v1/runs/{id}/input` writes an `input` event with
+`requestId`, `by` (the caller's email when authenticated as a person,
+otherwise the API key id), `interrupt`, `text`, `rawBytes`, and optional
+`attachments` metadata. Join delivery records to this event on `requestId`
+to identify the sender; `by` is not carried in shim records.
+
 An input sent while the agent works reaches it at its **next model step**
 where the adapter can: after the tool call running now (which is not
 cancelled), within the same turn. The shim reports each input's first
@@ -392,6 +398,17 @@ gets its own `opencode.task`.
   `session.updated` for it, or a later update of the `task` call that
   runs it (its metadata names the child), teaches lux its parent; from
   then on it is relayed. What the bus said of it before is not recorded.
+
+## Codex subagents
+
+Codex (0.144 on) runs a subagent as a **child thread** on the Run's
+app-server connection: its notifications carry the child's `threadId`.
+They are relayed as `codex.<method>` records like the Run's own thread's
+(the parent's `item/*` of type `subAgentActivity` and
+`collabAgentToolCall` name the child), but they do not start or end the
+Run's turn (no `codex.turn_end`, no idle), do not carry its usage, do not
+consume its inputs, and the child's `agentMessage` text does not reach
+stdout. Notifications with no `threadId` are the Run's.
 
 ## State paths
 

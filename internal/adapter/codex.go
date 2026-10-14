@@ -376,8 +376,19 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 			c.compactionCompleted(*compaction)
 		}
 	}()
-	switch m.Method {
-	case "turn/started":
+	// A subagent runs as a child thread on this connection: its
+	// notifications name its own threadId, and are relayed but touch none
+	// of the Run's turn, usage, stdout or inputs.
+	var scope struct {
+		ThreadID string `json:"threadId"`
+	}
+	_ = json.Unmarshal(m.Params, &scope)
+	c.mu.Lock()
+	child := scope.ThreadID != "" && scope.ThreadID != c.thread
+	c.mu.Unlock()
+	switch {
+	case child:
+	case m.Method == "turn/started":
 		var p struct {
 			Turn struct {
 				ID string `json:"id"`
@@ -392,7 +403,7 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 		}
 		c.turn = p.Turn.ID
 		c.mu.Unlock()
-	case "thread/tokenUsage/updated":
+	case m.Method == "thread/tokenUsage/updated":
 		var p struct {
 			TurnID     string          `json:"turnId"`
 			TokenUsage json.RawMessage `json:"tokenUsage"`
@@ -405,7 +416,7 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 			c.usage, c.usageTurn = p.TokenUsage, p.TurnID
 		}
 		c.mu.Unlock()
-	case "turn/completed":
+	case m.Method == "turn/completed":
 		var p struct {
 			Turn struct {
 				ID     string `json:"id"`
@@ -433,7 +444,7 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 			sink.Activity(true)
 		}
 		defer c.drain() // after the turn/completed event below
-	case "item/started":
+	case m.Method == "item/started":
 		// A userMessage item carrying a clientId is an input of ours
 		// entering the model's context (from Codex 0.155 on; see
 		// codexReceipt).
@@ -447,7 +458,7 @@ func (c *Codex) handleNotification(m rpcMsg, sink Sink) {
 		if p.Item.Type == "userMessage" && p.Item.ClientID != nil {
 			c.inputs.consume(sink, *p.Item.ClientID)
 		}
-	case "item/completed":
+	case m.Method == "item/completed":
 		var p struct {
 			Item struct {
 				ID   string `json:"id"`

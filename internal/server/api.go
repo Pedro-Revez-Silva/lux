@@ -1535,7 +1535,7 @@ func (s *Server) postInput(ctx context.Context, req *postInputInput) (*requestID
 		if err := s.systemEnqueue(ctx, hostID, id, epoch, typ, msg); err != nil {
 			return err
 		}
-		ev := map[string]any{"requestId": in.RequestID, "interrupt": in.Interrupt, "text": in.Text, "rawBytes": len(in.Raw)}
+		ev := map[string]any{"requestId": in.RequestID, "by": p.Actor(), "interrupt": in.Interrupt, "text": in.Text, "rawBytes": len(in.Raw)}
 		if meta != nil {
 			ev["attachments"] = meta
 		}

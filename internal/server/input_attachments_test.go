@@ -155,13 +155,23 @@ func TestInputAttachmentsAccepted(t *testing.T) {
 	}
 	ev := queryOne[string](t, s, `SELECT data::text FROM run_events WHERE run_id = 'r1' AND type = 'input'`)
 	var d struct {
+		By          string                `json:"by"`
 		Attachments []spec.AttachmentMeta `json:"attachments"`
 	}
 	_ = json.Unmarshal([]byte(ev), &d)
 	sum := sha256.Sum256(tinyPNG)
 	want := spec.AttachmentMeta{Name: "shot.png", ContentType: "image/png", Size: len(tinyPNG), SHA256: hex.EncodeToString(sum[:])}
-	if strings.Contains(ev, b64(tinyPNG)) || len(d.Attachments) != 1 || d.Attachments[0] != want {
+	if strings.Contains(ev, b64(tinyPNG)) || len(d.Attachments) != 1 || d.Attachments[0] != want || d.By != "k1" {
 		t.Fatalf("input event %s", ev)
+	}
+
+	person := context.WithValue(context.Background(), principalKey, Principal{TenantID: "t1", KeyID: "k1", Email: "ada@example.com", Scopes: []string{"run"}})
+	if _, err := s.postInput(person, &postInputInput{RunPath: RunPath{ID: "r1"}, Body: inputRequest{RequestID: "req-person", Text: "look again"}}); err != nil {
+		t.Fatal(err)
+	}
+	by := queryOne[string](t, s, `SELECT data->>'by' FROM run_events WHERE run_id = 'r1' AND type = 'input' AND data->>'requestId' = 'req-person'`)
+	if by != "ada@example.com" {
+		t.Fatalf("person input by %q", by)
 	}
 }
 
