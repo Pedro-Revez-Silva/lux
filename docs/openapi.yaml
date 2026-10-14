@@ -1520,6 +1520,12 @@ components:
           type: integer
         name:
           type: string
+        placement:
+          description: "How the scheduler chooses among the hosts a Run fits. spread: the host with the fewest Runs. pack: the most allocated host (the largest of its reserved cpus, memory and disk over its capacity), so whole hosts stay free for large sizes; among equally allocated hosts, the spread affinity (the snapshot's host, the image and git mirrors cached, preferred labels), then the lowest host id. Either way a Run whose snapshot only its host holds (not yet uploaded) waits for that host, and a host the Run must avoid comes last. Absent: the pool's default, pack for a shaped pool and spread otherwise. Like every field, a set without it returns it to the default. Other values: 422 invalid_pool."
+          enum:
+            - spread
+            - pack
+          type: string
         platform:
           description: A platform pool (no tenant). In a request, true is refused unless the caller acts on the platform's pools (an operator key without a tenant).
           readOnly: true
@@ -2149,11 +2155,27 @@ components:
         disk:
           $ref: "#/components/schemas/DiskKept"
           description: Present when a smaller disk was refused and the current one kept (unshaped pools only).
+        measuredBytes:
+          description: "With raisedFor: the peak disk use of the placement that took the snapshot the Run resumes from."
+          format: int64
+          type: integer
+        neededBytes:
+          description: "With raisedFor: the least disk that holds the saved state (measuredBytes plus headroom)."
+          format: int64
+          type: integer
+        raisedFor:
+          description: "Why size is larger than raisedFrom: saved state, the smallest size from raisedFrom up whose disk holds the Run's saved state (measuredBytes plus max(25%, 1 GiB): neededBytes). Absent when size is what the request resolves to."
+          enum:
+            - saved state
+          type: string
+        raisedFrom:
+          description: "In a shaped pool, when size is larger than the request resolves to: the size it resolves to, whose disk could not hold the Run's saved state."
+          type: string
         requested:
           $ref: "#/components/schemas/Resources"
           description: The resources the resume asked for; the others are absent.
         size:
-          description: "In a shaped pool: the size applied resolves to (what was asked, rounded up; or, on a move that asked nothing, the Run's resources rounded up). Absent in an unshaped pool."
+          description: "In a shaped pool: the size applied resolves to (what was asked, rounded up; or, on a move that asked nothing, the Run's resources rounded up; or larger, see raisedFor). Absent in an unshaped pool."
           type: string
       type: object
     Resources:
@@ -2497,7 +2519,7 @@ components:
                 - 8Gi
               type: string
         size:
-          description: "A size of the Run's pool (after placement.poolId, the new pool's): its cpus, memory and disk. Not with cpus, memory or disk (422 size_conflict); 422 unknown_size, or size_unsupported on an unshaped pool. In a shaped pool, cpus, memory and disk are rounded up to a size as at submit; a size with less disk than the Run has must hold its saved state with headroom, else 422 size_below_saved_state."
+          description: "A size of the Run's pool (after placement.poolId, the new pool's): its cpus, memory and disk. Not with cpus, memory or disk (422 size_conflict); 422 unknown_size, or size_unsupported on an unshaped pool. In a shaped pool, cpus, memory and disk are rounded up to a size as at submit; a size with less disk than the Run has must hold its saved state with headroom, else it is raised to the smallest larger size that does (resize.raisedFrom, raisedFor), or refused with 422 size_below_saved_state when none does or the saved state has no final measurement."
           type: string
       type: object
     ResumeTarget:
@@ -2945,6 +2967,14 @@ components:
     RunSizing:
       additionalProperties: false
       properties:
+        raisedFor:
+          description: "With resolved: why its size is larger than the resume that set it asked for. saved state: raisedFrom could not hold the Run's saved state, so it got the smallest larger size that could. Absent when it got what was asked."
+          enum:
+            - saved state
+          type: string
+        raisedFrom:
+          description: "With raisedFor: the size the resume that set its size asked for (its request resolved to)."
+          type: string
         requested:
           $ref: "#/components/schemas/SizeRequest"
           description: "What its submit asked for in resources.size, cpus, memory and disk, only those given (empty: none, the pool's default size). Absent for a Run submitted to an unshaped pool. A resume's request is in its answer's resize and its resume.requested event."

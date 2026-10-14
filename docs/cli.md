@@ -149,8 +149,12 @@ lux resume run_x --disk-grace 5m          # tolerate 5 minutes over its disk
 pool's) instead; on a shaped pool `--cpus`, `--memory` and `--disk` are
 rounded up to a size too, and moving into one rounds the Run's current
 resources up to one of its sizes. lux prints `size: <name>` on stderr. A
-size with less disk than the Run has is refused unless its saved state
-fits it with headroom (exit 4, `size_below_saved_state`).
+size whose disk cannot hold the Run's saved state with headroom is raised
+to the smallest that can, and lux says so: `size: m-4-arm64 (raised from
+m-1-arm64 for its saved state, which needs 62.5 GiB of disk)`; `lux get`
+shows it on the size line. With no size large enough, or no final
+measurement of the saved state, it is refused (exit 4,
+`size_below_saved_state`).
 
 ```bash
 lux resume run_x --size m-4-arm64          # in its shaped pool
@@ -396,6 +400,14 @@ lists the sizes; `luxd admin create-pool --shape` takes the same value.
 `lux pools sizes` on an unshaped pool exits non-zero (`pool <name> has no
 shape`), with `-o json` too; an operator naming a pool several tenants
 have must add `--tenant`.
+
+`--placement spread|pack` chooses how Runs are placed among the hosts
+they fit ([placement](concepts.md#placement-spread-or-pack)): `spread`
+(fewest Runs first) or `pack` (most allocated host first). Omitted, the
+pool has its default: `pack` when shaped, `spread` otherwise. A set that
+leaves out a placement the pool has would remove it (`placement
+pack→-`), refused without `--replace`. Another value is refused before
+anything is sent. `luxd admin create-pool --placement` takes the same.
 
 ## Status and history
 

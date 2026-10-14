@@ -217,6 +217,51 @@ func TestAdminCreatePoolShape(t *testing.T) {
 	}
 }
 
+// create-pool --placement stores spread or pack, and a run without it
+// stores none (the pool's default); another value is refused and stores
+// no pool.
+func TestAdminCreatePoolPlacement(t *testing.T) {
+	cfg, db := adminDB(t)
+	ctx := context.Background()
+	stdout := os.Stdout
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = devnull
+	t.Cleanup(func() { os.Stdout = stdout; devnull.Close() })
+
+	stored := func() *string {
+		var p *string
+		if err := db.QueryRow(ctx, `SELECT placement FROM pools WHERE name = 'p'`).Scan(&p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, v := range []string{"pack", "spread"} {
+		if err := admin(ctx, cfg, []string{"create-pool", "--name", "p", "--placement", v}); err != nil {
+			t.Fatal(err)
+		}
+		if got := stored(); got == nil || *got != v {
+			t.Errorf("--placement %s: stored %v", v, got)
+		}
+	}
+	if err := admin(ctx, cfg, []string{"create-pool", "--name", "p"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stored(); got != nil {
+		t.Errorf("without --placement: stored %q, want none", *got)
+	}
+	err = admin(ctx, cfg, []string{"create-pool", "--name", "bad", "--placement", "random"})
+	if err == nil || err.Error() != `placement "random": want spread or pack` {
+		t.Errorf("--placement random: %v", err)
+	}
+	var n int
+	if err := db.QueryRow(ctx, `SELECT count(*) FROM pools WHERE name = 'bad'`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("refused placement stored %d pools (%v)", n, err)
+	}
+}
+
 // create-tenant sets expire_after_days (default 90); set-quota changes it,
 // 0 meaning never, and leaves it when the flag is absent.
 func TestAdminExpireAfterDays(t *testing.T) {

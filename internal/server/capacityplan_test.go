@@ -1207,3 +1207,183 @@ func TestListPoolsHostSize(t *testing.T) {
 		t.Fatalf("a pool without hosts: %+v", got.HostSize)
 	}
 }
+
+// shapedPlanningFixture is planningFixture's pool shaped as testShape with
+// placement ("" for the default), and its provider registered so
+// provisionPass plans the pool as provision() reads it from the database.
+func shapedPlanningFixture(t *testing.T, placement string) (*Server, *planningProvider) {
+	t.Helper()
+	s, _, p := planningFixture(t, 0)
+	execSQL(t, s, context.Background(), `UPDATE pools SET shape = $1, placement = nullif($2, '') WHERE id = 'pool1'`, testShape, placement)
+	s.cfg.Providers = map[string]Provider{"ec2": p}
+	return s, p
+}
+
+// shapedReadyHost adds a ready host of testShape to pool1 holding used
+// sixteenths of it.
+func shapedReadyHost(t *testing.T, s *Server, id string, used float64) {
+	t.Helper()
+	observePlanningHost(t, s, id, "ready", shapeCapacity, map[string]string{})
+	execSQL(t, s, context.Background(), `UPDATE hosts SET capabilities = ARRAY['diff', 'sync-modes', 'disk-scale'] WHERE id = $1`, id)
+	if used > 0 {
+		occupy(t, s, id, sized(used/2))
+	}
+}
+
+// waitShaped adds Runs waiting in pool1 of sizes in sixteenths of
+// testShape, oldest first, with ids r0, r1, ...
+func waitShaped(t *testing.T, s *Server, sixteenths ...float64) {
+	t.Helper()
+	for i, n := range sixteenths {
+		execSQL(t, s, context.Background(), `INSERT INTO runs (id, tenant_id, pool_id, spec, state, updated_at)
+			VALUES ($1, 't1', 'pool1', $2, 'provisioning', now() + $3::int * interval '1 second')`,
+			fmt.Sprintf("r%d", i), map[string]any{"resources": sized(n / 2), "placement": map[string]any{"pool": "burst"}}, i)
+	}
+}
+
+// provisionPass runs one provision() pass without the provider check.
+func provisionPass(t *testing.T, s *Server) {
+	t.Helper()
+	s.lastAliveCheck = time.Now()
+	if err := s.provision(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The planner reserves a pack pool's waiting Runs on ready hosts as pack
+// places them, the most allocated fitting host first and the host a Run
+// avoids last, and a spread pool's on the first fitting host by id. Ready
+// h0 is empty but for h0Spot sixteenths of spot work, which the planner
+// counts free, and h1 holds h1Used sixteenths; arrivals are in sixteenths
+// of testShape, oldest first.
+func TestCapacityPlanPackPool(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		placement string
+		h0Spot    float64
+		h1Used    float64
+		arrivals  []float64
+		avoid     map[string]string // Run id to the host it avoids
+		ready     int               // Runs reserved on h0 and h1
+		launches  int
+	}{
+		// pack: the 1 joins h1, the 16 takes h0. First fit would put the 1
+		// on h0 and launch for the 16.
+		{"pack, 1 then 16", "", 0, 1, []float64{1, 16}, nil, 2, 0},
+		// pack: as above with spot work on h0: its space is free to the
+		// planner, so the 16 is reserved there and nothing launches.
+		{"pack, spot on h0, 1 then 16", "", 8, 1, []float64{1, 16}, nil, 2, 0},
+		// pack: 8 on h1, 16 on h0, the last two 8s share one new host.
+		// First fit would put 8, 8 on h0 and 8 on h1, and launch for the 16.
+		{"pack, 8 16 8 8", "", 0, 1, []float64{8, 16, 8, 8}, nil, 2, 1},
+		// pack: the 8 avoids h1, so pickHost puts it on h0 and the 16 fits
+		// neither host.
+		{"pack, 8 avoiding h1 then 16", "", 0, 8, []float64{8, 16}, map[string]string{"r0": "h1"}, 1, 1},
+		{"spread, 1 then 16", "spread", 0, 1, []float64{1, 16}, nil, 1, 1},
+		{"spread, 8 16 8 8", "spread", 0, 1, []float64{8, 16, 8, 8}, nil, 3, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, p := shapedPlanningFixture(t, c.placement)
+			shapedReadyHost(t, s, "h0", 0)
+			if c.h0Spot > 0 {
+				spotOnHost(t, s, "p-spot", "h0", sized(c.h0Spot/2))
+			}
+			shapedReadyHost(t, s, "h1", c.h1Used)
+			waitShaped(t, s, c.arrivals...)
+			for id, host := range c.avoid {
+				execSQL(t, s, context.Background(), `UPDATE runs SET avoid_host = $2 WHERE id = $1`, id, host)
+			}
+			provisionPass(t, s)
+			if p.calls != c.launches {
+				t.Errorf("launched %d, want %d", p.calls, c.launches)
+			}
+			if c.launches > 0 {
+				if evs := events(t, s, evScaleUp); len(evs) != 1 || evs[0].Data["ready"] != float64(c.ready) {
+					t.Errorf("scale-up %+v, want %d Runs on ready hosts", evs, c.ready)
+				}
+			}
+			if c.h0Spot > 0 {
+				for _, h := range []string{"h0", "h1"} {
+					if got := hostDecisions(t, s, h); len(got) != 1 || got[0]["decision"] != "reserved" {
+						t.Errorf("%s decisions %+v, want reserved", h, got)
+					}
+				}
+			}
+		})
+	}
+}
+
+// Blocker evidence is the hosts listed before the first host a Run fits,
+// whatever the placement: pack only changes which fitting host is
+// reserved. Hosts hold the given sixteenths of testShape; one Run of a
+// thirty-second waits.
+func TestCapacityPlanPackEvidenceBeforeFirstFit(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		placement string
+		used      [3]float64 // h0, h1, h2
+		reserved  string
+		notBlock  []string // hosts with no blocked or exhausted decision
+	}{
+		// h2 is listed after the reserved host.
+		{"pack, full host last", "", [3]float64{0, 1, 16}, "h1", []string{"h0", "h2"}},
+		{"spread, full host last", "spread", [3]float64{0, 1, 16}, "h0", []string{"h1", "h2"}},
+		// h1 does not fit and lies between the first fit (h0) and the
+		// packed host (h2).
+		{"pack, full host between", "", [3]float64{0, 16, 1}, "h2", []string{"h0", "h1"}},
+		{"spread, full host between", "spread", [3]float64{0, 16, 1}, "h0", []string{"h1", "h2"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, p := shapedPlanningFixture(t, c.placement)
+			for i, used := range c.used {
+				shapedReadyHost(t, s, fmt.Sprintf("h%d", i), used)
+			}
+			waitShaped(t, s, 0.5)
+			provisionPass(t, s)
+			if p.calls != 0 {
+				t.Fatalf("launched %d, want 0", p.calls)
+			}
+			if got := hostDecisions(t, s, c.reserved); len(got) != 1 || got[0]["decision"] != "reserved" {
+				t.Errorf("%s decisions %+v, want reserved", c.reserved, got)
+			}
+			for _, h := range c.notBlock {
+				for _, d := range hostDecisions(t, s, h) {
+					if d["decision"] == "blocked" || d["decision"] == "exhausted" {
+						t.Errorf("%s decision %+v, want no blocker evidence", h, d)
+					}
+				}
+			}
+		})
+	}
+}
+
+// The planner packs onto starting hosts too. No host is ready; s0 and s1
+// are starting with the current template. Arrivals 12, 8, 6, 2, 4
+// sixteenths: pack puts the 2 on s1 (14 to 16), so the 4 fits s0 (12 to
+// 16); first fit puts the 2 on s0 and launches for the 4.
+func TestCapacityPlanPackStartingHosts(t *testing.T) {
+	for _, c := range []struct {
+		placement string
+		launches  int
+	}{{"", 0}, {"spread", 1}} {
+		t.Run("placement "+c.placement, func(t *testing.T) {
+			s, p := shapedPlanningFixture(t, c.placement)
+			ctx := context.Background()
+			observePlanningHost(t, s, "history", "terminated", shapeCapacity, map[string]string{})
+			for _, id := range []string{"s0", "s1"} {
+				execSQL(t, s, ctx, `INSERT INTO hosts (id, name, tenant_id, pool_id, state, provider_id, provision_requested_at, launch_template, tagged, launch_outcome)
+					VALUES ($1, $1, 't1', 'pool1', 'provisioning', 'i-' || $1, now(), '{"version":1}', true, 'launched')`, id)
+			}
+			waitShaped(t, s, 12, 8, 6, 2, 4)
+			provisionPass(t, s)
+			if p.calls != c.launches {
+				t.Errorf("launched %d, want %d", p.calls, c.launches)
+			}
+			if c.launches > 0 {
+				if evs := events(t, s, evScaleUp); len(evs) != 1 || evs[0].Data["starting"] != 4.0 {
+					t.Errorf("scale-up %+v, want 4 Runs on starting hosts", evs)
+				}
+			}
+		})
+	}
+}

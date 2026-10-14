@@ -100,6 +100,22 @@ func TestResumeSizeFlag(t *testing.T) {
 	}
 }
 
+// A resize raised for the saved state says so on stderr: the size, the one
+// asked for, and the disk the state needs.
+func TestResumeSizeRaised(t *testing.T) {
+	var posted []map[string]any
+	h := poolsAndResume(t, http.StatusAccepted, `{"id":"run_1","state":"resuming","resize":{"requested":{"size":"m-1-arm64"},
+		"applied":{"cpus":4,"memory":17179869184,"disk":85899345920},"size":"m-4-arm64","raisedFrom":"m-1-arm64",
+		"raisedFor":"saved state","measuredBytes":53687091200,"neededBytes":67108864000}}`, &posted)
+	_, errOut, err := runCLIErr(t, h, "resume", "run_1", "--secret", "TOKEN=x", "--size", "m-1-arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "size: m-4-arm64 (raised from m-1-arm64 for its saved state, which needs 62.5 GiB of disk)\n"; !strings.Contains(errOut, want) {
+		t.Errorf("stderr %q, want %q", errOut, want)
+	}
+}
+
 // pools sizes lists a shaped pool's ladder, the default starred; -o json
 // the sizes; an unshaped pool is an error naming it.
 func TestPoolsSizes(t *testing.T) {
@@ -263,6 +279,51 @@ func TestPoolsSetShape(t *testing.T) {
 	}
 }
 
+// pools set --placement sends spread or pack, refuses anything else before
+// sending, prints a change, and treats leaving out a pool's placement as a
+// removal.
+func TestPoolsSetPlacement(t *testing.T) {
+	url, posted := poolsLuxd(t, false)
+	for _, v := range []string{"pack", "spread"} {
+		if code, _, stderr := lux(url, "pools", "set", "m", "--provider", "static", "--placement", v); code != 0 {
+			t.Fatalf("--placement %s: exit %d (%s)", v, code, stderr)
+		}
+		if got := (*posted)[len(*posted)-1]["placement"]; got != v {
+			t.Errorf("--placement %s: posted placement %v", v, got)
+		}
+	}
+	if code, _, _ := lux(url, "pools", "set", "m", "--provider", "static"); code != 0 {
+		t.Fatalf("without --placement: exit %d", code)
+	}
+	if _, sent := (*posted)[len(*posted)-1]["placement"]; sent {
+		t.Errorf("without --placement: posted %v, want no placement", (*posted)[len(*posted)-1])
+	}
+	n := len(*posted)
+	code, _, stderr := lux(url, "pools", "set", "m", "--provider", "static", "--placement", "random")
+	if code == 0 || stderr != "lux: --placement \"random\": want spread or pack\n" || len(*posted) != n {
+		t.Errorf("--placement random: exit %d, stderr %q, posted %d more", code, stderr, len(*posted)-n)
+	}
+
+	url, posted = poolsLuxd(t, false, `{"name":"m","tenant":"t1","provider":"static","placement":"pack"}`)
+	code, stdout, stderr := lux(url, "pools", "set", "m", "--provider", "static")
+	if code != 4 || len(*posted) != 0 || !strings.Contains(stderr, "would remove placement from pool m") || stdout != "placement pack→-\n" {
+		t.Errorf("removal: exit %d, posted %v, stdout %q, stderr %q", code, *posted, stdout, stderr)
+	}
+	code, stdout, _ = lux(url, "pools", "set", "m", "--provider", "static", "--placement", "spread")
+	if code != 0 || len(*posted) != 1 || stdout != "placement pack→spread\n" {
+		t.Errorf("change: exit %d, posted %v, stdout %q", code, *posted, stdout)
+	}
+
+	url, posted = poolsLuxd(t, false, `{"name":"m","tenant":"t1","provider":"static","placement":"pack"}`)
+	code, _, stderr = lux(url, "pools", "set", "m", "--provider", "static", "--replace")
+	if code != 0 || len(*posted) != 1 {
+		t.Fatalf("removal with --replace: exit %d (%s), posted %v", code, stderr, *posted)
+	}
+	if _, sent := (*posted)[0]["placement"]; sent {
+		t.Errorf("removal with --replace: posted %v, want no placement", (*posted)[0])
+	}
+}
+
 // get prints a shaped Run's size and what its submit asked for; none for
 // an unshaped Run.
 func TestGetPrintsSize(t *testing.T) {
@@ -272,6 +333,8 @@ func TestGetPrintsSize(t *testing.T) {
 			"size:      m-4-arm64 (4 cpus, 16.0 GiB memory, 80.0 GiB disk); asked 3 cpus, 10.0 GiB memory\n"},
 		{run + `,"sizing":{"requested":{},"resolved":{"size":"m-2-arm64","cpus":2,"memory":8589934592,"disk":42949672960}}}`,
 			"size:      m-2-arm64 (2 cpus, 8.0 GiB memory, 40.0 GiB disk); asked the pool's default\n"},
+		{run + `,"sizing":{"requested":{"size":"m-8-arm64"},"resolved":{"size":"m-4-arm64","cpus":4,"memory":17179869184,"disk":85899345920},"raisedFrom":"m-1-arm64","raisedFor":"saved state"}}`,
+			"size:      m-4-arm64 (4 cpus, 16.0 GiB memory, 80.0 GiB disk), raised from m-1-arm64 for its saved state; asked m-8-arm64\n"},
 		{run + `}`, ""},
 	} {
 		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

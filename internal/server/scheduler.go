@@ -84,6 +84,8 @@ type pendingRun struct {
 	PoolID *string
 	// Shape: its pool's, nil for an unshaped pool (hostFit's shape gate).
 	Shape *PoolShape
+	// Pack: its pool places by pack, not spread (packs).
+	Pack bool
 	// An operator's say: the host it must go to, or one it must not.
 	PlaceOn   string
 	AvoidHost string
@@ -176,13 +178,14 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 			tenants = append(tenants, r.TenantID)
 			chosen = append(chosen, r.PlaceOn)
 		}
-		shapes, err := poolShapes(ctx, tx, pools)
+		policies, err := poolPolicies(ctx, tx, pools)
 		if err != nil {
 			return err
 		}
 		for i := range items {
 			if r := &items[i].r; r.PoolID != nil {
-				r.Shape = shapes[*r.PoolID]
+				pp := policies[*r.PoolID]
+				r.Shape, r.Pack = pp.shape, packs(pp.placement, pp.shape != nil)
 			}
 		}
 		// Discovery is not a reservation; candidateHosts rechecks the same
@@ -312,21 +315,28 @@ func bindPool(ctx context.Context, tx pgx.Tx, r *pendingRun) error {
 	return err
 }
 
-// poolShapes is the shape of each shaped pool among ids, by id; one query.
-func poolShapes(ctx context.Context, tx pgx.Tx, ids []*string) (map[string]*PoolShape, error) {
-	rows, err := tx.Query(ctx, `SELECT id, shape FROM pools WHERE id = ANY($1) AND shape IS NOT NULL`, ids)
+// poolPolicy is what the scheduler reads of a Run's pool: its shape (nil:
+// unshaped) and its stored placement ("": the default).
+type poolPolicy struct {
+	shape     *PoolShape
+	placement string
+}
+
+// poolPolicies is the policy of each pool among ids, by id; one query.
+func poolPolicies(ctx context.Context, tx pgx.Tx, ids []*string) (map[string]poolPolicy, error) {
+	rows, err := tx.Query(ctx, `SELECT id, shape, coalesce(placement, '') FROM pools WHERE id = ANY($1)`, ids)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]*PoolShape{}
+	out := map[string]poolPolicy{}
 	for rows.Next() {
 		var id string
-		var sh *PoolShape
-		if err := rows.Scan(&id, &sh); err != nil {
+		var pp poolPolicy
+		if err := rows.Scan(&id, &pp.shape, &pp.placement); err != nil {
 			return nil, err
 		}
-		out[id] = sh
+		out[id] = pp
 	}
 	return out, rows.Err()
 }
@@ -416,7 +426,9 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 // pickHost chooses where a Run goes. Hard constraints first (tenancy, pool,
 // labels, capacity), then affinity: the host holding the Run's snapshot
 // wins outright (a resume there moves nothing), then hosts with the image
-// cached, then soft label preferences.
+// cached, then soft label preferences. A pack pool (r.Pack) puts the most
+// allocated host first instead, affinity breaking ties (packOrder); a
+// snapshot only one host may restore, or a host to avoid, still decides.
 //
 // wait is a human-readable reason when no host is chosen.
 func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []*candidateHost) (*candidateHost, string, error) {
@@ -442,6 +454,7 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 		score int
 	}
 	var ok []scored
+	var packed []packCandidate
 	reason := "no host matches"
 	if r.PlaceOn != "" {
 		// A chosen host that can no longer take Runs (drained, lost, gone:
@@ -507,12 +520,19 @@ func (s *Server) pickHost(ctx context.Context, tx pgx.Tx, r pendingRun, hosts []
 				sc += 10
 			}
 		}
+		if r.Pack {
+			packed = append(packed, packCandidateOf(h, r.AvoidHost, sc))
+			continue
+		}
 		// Spread: fewer running Runs first.
 		sc -= h.UsedRuns
 		if h.ID == r.AvoidHost {
 			sc -= 100000
 		}
 		ok = append(ok, scored{h, sc})
+	}
+	if len(packed) > 0 {
+		return slices.MinFunc(packed, packOrder).h, "", nil
 	}
 	if len(ok) == 0 {
 		if w := waiting.reason(r); reason != "waiting for snapshot upload" && w != "" {

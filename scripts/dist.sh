@@ -43,7 +43,8 @@ wanted() { [[ " $ARCHES " == *" $1 "* ]]; }
 # pool-sizes: a pool's shape and sizes, resources.size on submit and resume, and a Run's sizing; an older luxd refuses shape and resources.size as unknown fields.
 # disk-grace: resources.diskGrace and [defaults] disk_grace; an older luxd refuses both, an older runner stops on the first sample over.
 # disk-shaping: lux-runner --disk-headroom (disk-scale), shape.diskHeadroom, and shaped pools placing only on runners advertising their shape; an older luxd refuses diskHeadroom and places shaped Runs anywhere.
-FEATURES=(validate resume-secrets sync-modes resume-policy egress-wildcards artifact-publish git-credentials pool-sizes disk-grace disk-shaping)
+# pool-placement: a pool's placement (spread or pack; shaped pools pack by default); an older luxd refuses the field and spreads every pool.
+FEATURES=(validate resume-secrets sync-modes resume-policy egress-wildcards artifact-publish git-credentials pool-sizes disk-grace disk-shaping pool-placement)
 
 rm -rf "$DIST"
 mkdir -p "$DIST"

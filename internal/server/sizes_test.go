@@ -734,9 +734,11 @@ func TestResumeOutOfShapedPool(t *testing.T) {
 	}
 }
 
-// A resume's size in its own shaped pool: larger applies; smaller only
-// when the saved state still fits its disk with headroom, refused
-// otherwise (never kept at the old disk); refusals change nothing.
+// A resume's size in its own shaped pool: larger applies; smaller when the
+// saved state still fits its disk with headroom, raised to the smallest
+// size that holds it otherwise (TestResumeShapedRaise), and refused
+// without a final measurement (never kept at the old disk); refusals
+// change nothing.
 func TestResumeShapedSize(t *testing.T) {
 	const below = "size m-1-arm64 has 20.0 GiB of disk, less than the Run has now: "
 	const tail = "; a shaped pool never keeps a larger disk than its size, so choose a size with more disk"
@@ -753,8 +755,7 @@ func TestResumeShapedSize(t *testing.T) {
 		{"larger size", i64(gib), "", resumeResources{Size: "m-8-arm64"}, "", "m-8-arm64", sized(8), ""},
 		{"raw cpus round up", i64(gib), "", resumeResources{CPUs: f64(3)}, "", "m-4-arm64", sized(4), ""},
 		{"smaller, saved state fits", i64(30 * gib), "", resumeResources{Size: "m-2-arm64"}, "", "m-2-arm64", sized(2), ""},
-		{"smaller, saved state too large", i64(30 * gib), "", resumeResources{Size: "m-1-arm64"}, "size_below_saved_state", "", spec.Resources{},
-			below + "its saved state used up to 30.0 GiB, which needs at least 37.5 GiB of disk (that plus max(25%, 1 GiB))" + tail},
+		{"smaller, saved state too large: raised", i64(30 * gib), "", resumeResources{Size: "m-1-arm64"}, "", "m-2-arm64", sized(2), ""},
 		{"smaller, no measurement", nil, "", resumeResources{CPUs: f64(1)}, "size_below_saved_state", "", spec.Resources{},
 			below + "no disk use is recorded for the snapshot it resumes from" + tail},
 		{"smaller, measurement not final", i64(gib), "lost", resumeResources{Size: "m-1-arm64"}, "size_below_saved_state", "", spec.Resources{},

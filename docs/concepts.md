@@ -214,11 +214,18 @@ placement gets it.
 - In a [shaped pool](#shaped-pools) a resume resizes to a whole size:
   `resources.size` (`lux resume --size`), or cpus, memory and disk
   rounded up to a size as at submit; `resize.size` names it. Its disk is
-  never kept apart from its cpus and memory: a size with less disk than
-  the Run has is applied only when the saved state fits it with the
-  headroom above (and a final measurement), and otherwise refused with 422
-  `size_below_saved_state`, nothing changed. `size` on an unshaped pool is
-  422 `size_unsupported`.
+  never kept apart from its cpus and memory. A size with less disk than
+  the Run has must hold the saved state with the headroom above; when it
+  does not, the Run gets the smallest larger size that does, never less
+  than asked in any dimension: `resize.raisedFrom` is the size asked for,
+  `resize.raisedFor` is `saved state`, with `measuredBytes` and
+  `neededBytes`, and the Run's `sizing` keeps `raisedFrom` and
+  `raisedFor` until a later resume sizes it. When no size holds the saved
+  state, or the placement that took it reported no final measurement (as
+  for the unshaped disk rule, nothing then says how large it is), the
+  resume is refused with 422 `size_below_saved_state`, naming the largest
+  size, nothing changed. `validateOnly` answers the same. `size` on an
+  unshaped pool is 422 `size_unsupported`.
 - A new size is placed like a submit of that size. The snapshot's host is
   only preferred: if the new size does not fit there, the Run goes to
   another host of its pool that has room, or, in a provisioned pool, a new
@@ -298,7 +305,8 @@ pool its resume moved it to is a retry (202, with that resume's
 A move into a [shaped pool](#shaped-pools) sizes the Run there, before
 the checks above: what the resume asked for in `resources`, or, when it
 asked nothing, the Run's current cpus, memory and disk rounded up to the
-destination's sizes (more than its whole host: 422 `size_too_large`). The
+destination's sizes (more than its whole host: 422 `size_too_large`); a
+size it asked for is raised there for its saved state as above. The
 answer's `resize` says which size. A move out of a shaped pool keeps the
 Run's resources as they are, and it no longer has a size.
 
@@ -633,8 +641,50 @@ limit = disk × min(1, (filesystem capacity − diskHeadroom) / shape disk)
 in whole bytes, rounded down. For a 160 GiB shape on a 160 GiB filesystem
 with 10 GiB of headroom, `m-2-arm64` (40 GiB) is held to 37.5 GiB. The
 grace and the ceiling count from that limit, and `disk.exceeded` says
-both it and the size's disk. Packing and admission on shaped pools are
-otherwise as on any pool, for now.
+both it and the size's disk. A shaped host reserves each Run's size's
+disk alongside its cpus and memory: a Run fits only where all three are
+free. Admission under physical disk pressure is otherwise as on any pool,
+for now.
+
+### Placement: spread or pack
+
+A pool's `placement` says how the scheduler chooses among the hosts a Run
+fits (all of them: pool, tenancy, labels, nested containers, capacity,
+sync modes and, on a shaped pool, the shape):
+
+- `spread`: the host with the fewest Runs, after affinity (the host
+  holding the Run's snapshot, then the image and git mirrors cached, then
+  `placement.prefers` labels). Every unshaped pool's default.
+- `pack`: the most allocated host, measured as the largest share of its
+  cpus, memory or disk already reserved (not its Run count), so whole
+  hosts stay free for the large sizes and idle hosts can scale down. Among
+  hosts allocated alike, affinity as above decides, then the lowest host
+  id. Every shaped pool's default. A resource a host does not advertise
+  counts as empty, so pack on hosts that advertise none fills the lowest
+  host id first. Spot Runs' reservations count as free here, as they do
+  for scale-down: a host running only spot work ranks empty, so normal
+  Runs fill hosts that already have normal work and spot-only hosts can
+  still scale down. Among hosts allocated alike, the one already holding
+  spot work comes first (before affinity), so a fully empty host stays
+  free for a whole-host Run without reclaiming spot work. When a normal
+  Run fits nowhere without reclaiming, pack reclaims on the most allocated
+  host whose spot work suffices, ties by id (not by spot work, which would
+  kill more of it); spread tries hosts by id. Spot Runs
+  themselves are placed by spot admission, not by `placement`.
+
+A pool without a placement packs while shaped and spreads otherwise, so
+adding or removing a shape changes how it places.
+
+Either way a Run whose snapshot only its host holds (not uploaded yet)
+waits for that host, which may be less packed, and a host the Run is
+moving away from comes last. Under pack, an uploaded snapshot's host is
+only a tie-break, so a resume may restore from the blob store instead of
+a host copy. Live Runs are never moved to pack hosts
+tighter. Packing fills hosts first; it does not make every sequence fit:
+two hosts with a quarter free each still cannot take a half-host size, which
+waits for a host or launches one. Set it with `placement` on `POST
+/v1/pools`, `lux pools set --placement` or `luxd admin create-pool
+--placement`.
 
 ### Memory: the host's terms, scaled to what Linux sees
 

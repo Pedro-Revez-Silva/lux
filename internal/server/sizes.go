@@ -302,8 +302,10 @@ type SizeResolved struct {
 
 // RunSizing is a Run's request and resolution on a shaped pool.
 type RunSizing struct {
-	Requested *SizeRequest  `json:"requested,omitempty" doc:"What its submit asked for in resources.size, cpus, memory and disk, only those given (empty: none, the pool's default size). Absent for a Run submitted to an unshaped pool. A resume's request is in its answer's resize and its resume.requested event."`
-	Resolved  *SizeResolved `json:"resolved,omitempty" doc:"The size the Run has now, and its cpus, memory and disk (as spec.resources). Absent while it is in an unshaped pool, or while its pool's current sizes have no size of that name with the Run's cpus, memory and disk (the shape changed since, even if the name stayed): its next resume resolves it again."`
+	Requested  *SizeRequest  `json:"requested,omitempty" doc:"What its submit asked for in resources.size, cpus, memory and disk, only those given (empty: none, the pool's default size). Absent for a Run submitted to an unshaped pool. A resume's request is in its answer's resize and its resume.requested event."`
+	Resolved   *SizeResolved `json:"resolved,omitempty" doc:"The size the Run has now, and its cpus, memory and disk (as spec.resources). Absent while it is in an unshaped pool, or while its pool's current sizes have no size of that name with the Run's cpus, memory and disk (the shape changed since, even if the name stayed): its next resume resolves it again."`
+	RaisedFrom string        `json:"raisedFrom,omitempty" doc:"With raisedFor: the size the resume that set its size asked for (its request resolved to)."`
+	RaisedFor  string        `json:"raisedFor,omitempty" enum:"saved state" doc:"With resolved: why its size is larger than the resume that set it asked for. saved state: raisedFrom could not hold the Run's saved state, so it got the smallest larger size that could. Absent when it got what was asked."`
 }
 
 // sizeRequestOf is r's size request: its size, cpus, memory and disk
@@ -444,7 +446,9 @@ func savedDisk(ctx context.Context, tx pgx.Tx, runID string) (peak *int64, final
 
 // diskShrinkRefusal says why the Run may not shrink to disk: "" when its
 // saved state fits disk with diskShrinkFloor's headroom. peak is set only
-// when a final measurement refused it (the peak disk use it read).
+// when a final measurement refused it (the peak disk use it read); a
+// refusal without peak means no final measurement: the placement that took
+// the snapshot never reported its exit, or recorded no disk use.
 func diskShrinkRefusal(ctx context.Context, tx pgx.Tx, runID string, disk spec.Bytes) (reason string, peak *int64, err error) {
 	measured, final, found, err := savedDisk(ctx, tx, runID)
 	switch {
@@ -461,40 +465,75 @@ func diskShrinkRefusal(ctx context.Context, tx pgx.Tx, runID string, disk spec.B
 	return "", nil, nil
 }
 
+// raisedForSavedState is Resize.RaisedFor and RunSizing.RaisedFor when a
+// resize was raised to a size holding the Run's saved state.
+const raisedForSavedState = "saved state"
+
+// holdSavedState is the size a shaped resize to e gives a Run whose disk
+// it shrinks: e when the Run's saved state fits e's disk with
+// diskShrinkFloor's headroom, else the smallest size whose disk does. That
+// size has more disk than e, so it is larger than e in every dimension
+// (the ladder halves all three together): what the resume asked for is
+// never undercut. Without a final measurement nothing says which size
+// holds the state: refused, as diskShrinkRefusal's unmeasured path
+// refuses. peak is the measurement a raise was made for (nil: none).
+func holdSavedState(ctx context.Context, tx pgx.Tx, runID, pool string, m *sizing.Model, e sizing.Entry) (sizing.Entry, *int64, error) {
+	reason, peak, err := diskShrinkRefusal(ctx, tx, runID, e.Disk)
+	if err != nil || reason == "" {
+		return e, nil, err
+	}
+	if peak == nil {
+		return e, nil, errSizeBelowState(e, reason)
+	}
+	ladder := m.List()
+	for _, c := range ladder {
+		if int64(c.Disk) >= diskShrinkFloor(*peak) {
+			return c, peak, nil
+		}
+	}
+	top := ladder[len(ladder)-1]
+	return e, nil, errf(http.StatusUnprocessableEntity, "size_below_saved_state",
+		"pool %s: no size from %s up holds the Run's saved state: %s; the largest, %s, has %s of disk",
+		pool, e.Name, reason, top.Name, bytesText(int64(top.Disk)))
+}
+
 // resizeShaped resolves a resume's request r in the shaped pool (its
 // model m) and writes the size into the Run: its spec's cpus, memory and
-// disk and its resolved_size. cur is what the Run has; asked is what the
-// resume asked for (zero for a pool move that asked for nothing). A size
-// with less disk than the Run has must still hold its saved state with
-// the shrink headroom unshaped pools use; otherwise it is refused, never
-// kept at the old disk, which would break the size's coupling.
+// disk, its resolved_size and why it was raised. cur is what the Run has;
+// asked is what the resume asked for (zero for a pool move that asked for
+// nothing). A size with less disk than the Run has must still hold its
+// saved state with the shrink headroom unshaped pools use: otherwise it is
+// raised to the smallest size that does (holdSavedState), never kept at
+// the old disk, which would break the size's coupling.
 func resizeShaped(ctx context.Context, tx pgx.Tx, runID, pool string, cur spec.Resources, m *sizing.Model, asked spec.Resources, r sizing.Request) (*Resize, error) {
 	got, err := m.Resolve(r)
 	if err != nil {
 		return nil, sizingError(pool, err)
 	}
 	e := got.Resolved
+	var peak *int64
+	if e.Disk < cur.Disk {
+		if e, peak, err = holdSavedState(ctx, tx, runID, pool, m, e); err != nil {
+			return nil, err
+		}
+	}
 	rz := &Resize{Requested: asked, Applied: cur, Size: e.Name}
+	raisedTo := ""
+	if peak != nil {
+		rz.RaisedFrom, rz.RaisedFor = got.Resolved.Name, raisedForSavedState
+		rz.MeasuredBytes, rz.NeededBytes = peak, diskShrinkFloor(*peak)
+		raisedTo = e.Name
+	}
 	rz.Applied.CPUs, rz.Applied.Memory, rz.Applied.Disk = e.CPUs, e.Memory, e.Disk
 	set := map[string]any{"cpus": e.CPUs, "memory": e.Memory, "disk": e.Disk}
 	if asked.DiskGrace.Set {
 		rz.Applied.DiskGrace = asked.DiskGrace
 		set["diskGrace"] = asked.DiskGrace
 	}
-	if e.Disk < cur.Disk {
-		// TODO(sizes phase 4): round up to the smallest size whose disk
-		// fits the saved state, instead of refusing.
-		reason, _, err := diskShrinkRefusal(ctx, tx, runID, e.Disk)
-		if err != nil {
-			return nil, err
-		}
-		if reason != "" {
-			return nil, errSizeBelowState(e, reason)
-		}
-	}
 	if _, err := tx.Exec(ctx, `UPDATE runs SET resolved_size = $3,
+			size_raised_from = nullif($4, ''), size_raised_for = nullif($5, ''), size_raised_to = nullif($6, ''),
 			spec = jsonb_set(spec, '{resources}', coalesce(spec->'resources', '{}') || $2::jsonb) WHERE id = $1`,
-		runID, set, e.Name); err != nil {
+		runID, set, e.Name, rz.RaisedFrom, rz.RaisedFor, raisedTo); err != nil {
 		return nil, err
 	}
 	return rz, nil
@@ -540,7 +579,7 @@ func resumeSize(ctx context.Context, tx pgx.Tx, z resumeSizing, req *resumeResou
 		// The Run kept a size from a shaped pool: the one it leaves, or its
 		// own before its shape was removed. An unshaped pool has no sizes.
 		if z.resolved != "" {
-			if _, err := tx.Exec(ctx, `UPDATE runs SET resolved_size = NULL WHERE id = $1`, z.runID); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE runs SET resolved_size = NULL, size_raised_from = NULL, size_raised_for = NULL, size_raised_to = NULL WHERE id = $1`, z.runID); err != nil {
 				return nil, err
 			}
 		}

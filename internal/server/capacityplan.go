@@ -431,39 +431,53 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 	}
 	probe := false
 	bootstrap := false
-	// reserve fits r on the first of hosts it fits; hosts are at stage, or
-	// "planned" for a new host (no id).
+	pack := packs(pl.Placement, pl.Shape != nil)
+	// reserve fits r on one of hosts it fits: the first, or in a pack pool
+	// the one pickHost's pack order ranks first (avoided host last, then by
+	// allocation). hosts are at stage, or "planned" for a new host (no id).
 	reserve := func(hosts []*candidateHost, r pendingRun, stage string) bool {
+		var chosen *candidateHost
 		for _, h := range hosts {
-			hostStage := stage
-			if h.ID == "" {
-				hostStage = "planned"
-			}
 			if blockers := hostFit(r, h); len(blockers) != 0 {
+				// Evidence is each host listed before the first one r fits
+				// (every host when none fits), whatever the placement.
 				// Another host's chosen-host wait is not evidence about this
 				// host, nor is a host outside the pool (a candidate only
 				// because another Run chose it) evidence for a Run that did not.
-				if h.ID != "" && (r.PlaceOn == "" && h.PoolID == pl.ID || r.PlaceOn == h.ID) {
-					hostBlocked(r, h.ID, hostStage, blockers)
+				if chosen == nil && h.ID != "" && (r.PlaceOn == "" && h.PoolID == pl.ID || r.PlaceOn == h.ID) {
+					hostBlocked(r, h.ID, stage, blockers)
 				}
 				continue
 			}
-			reserveHost(h, r)
-			switch hostStage {
-			case "ready":
-				plan.Ready++
-				plan.reserved[h.ID] = true
-			case "starting":
-				plan.Starting++
-			case "planned":
-				plan.Planned++
+			if chosen == nil || packOrder(packCandidateOf(h, r.AvoidHost, 0), packCandidateOf(chosen, r.AvoidHost, 0)) < 0 {
+				chosen = h
 			}
-			if h.ID != "" {
-				reservedStage[h.ID] = hostStage
+			if !pack {
+				break
 			}
-			return true
 		}
-		return false
+		if chosen == nil {
+			return false
+		}
+		h := chosen
+		hostStage := stage
+		if h.ID == "" {
+			hostStage = "planned"
+		}
+		reserveHost(h, r)
+		switch hostStage {
+		case "ready":
+			plan.Ready++
+			plan.reserved[h.ID] = true
+		case "starting":
+			plan.Starting++
+		case "planned":
+			plan.Planned++
+		}
+		if h.ID != "" {
+			reservedStage[h.ID] = hostStage
+		}
+		return true
 	}
 	for _, r := range runs {
 		if reason, err := s.unmetPrerequisite(ctx, tx, r); err != nil {

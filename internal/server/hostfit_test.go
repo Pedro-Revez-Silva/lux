@@ -136,8 +136,11 @@ func TestHostFitShape(t *testing.T) {
 			[]fitBlocker{{Kind: kindShape, Reason: mismatch("cpus 8, memory 64.0 GiB, disk 160.0 GiB")}}},
 		{"smaller disk", true, scaling, func(c *proto.Capacity) { c.Disk = 100 << 30 },
 			[]fitBlocker{{Kind: kindShape, Reason: mismatch("cpus 8, memory 32.0 GiB, disk 100.0 GiB")}}},
+		// Disk 0 skips the disk fit for unshaped Runs only: a shaped Run's
+		// disk is reserved, so it is short as well as off-shape.
 		{"no disk reserved", true, scaling, func(c *proto.Capacity) { c.Disk = 0 },
-			[]fitBlocker{{Kind: kindShape, Reason: mismatch("cpus 8, memory 32.0 GiB, disk 0 B")}}},
+			[]fitBlocker{{Kind: kindShape, Reason: mismatch("cpus 8, memory 32.0 GiB, disk 0 B")},
+				{Kind: kindResource, Resource: "disk", Requested: 4096}}},
 		{"old agent, hardware shape", true, nil, func(c *proto.Capacity) { c.CPUs = 16 },
 			[]fitBlocker{{Kind: kindShape, Reason: noScale}, {Kind: kindShape, Reason: mismatch("cpus 16, memory 32.0 GiB, disk 160.0 GiB")}}},
 		{"unshaped, old agent, any capacity", false, nil, func(c *proto.Capacity) { c.CPUs = 16; c.Disk = 0 }, nil},
@@ -164,6 +167,32 @@ func TestHostFitShape(t *testing.T) {
 	want := "waiting for capacity: 2 hosts in its pool do not advertise its pool's shape (cpus 8, memory 32.0 GiB, disk 160.0 GiB) with disk scaling"
 	if got := w.reason(r); got != want {
 		t.Fatalf("reason\n got %q\nwant %q", got, want)
+	}
+}
+
+// A shaped host reserves nominal disk with cpus and memory: a host whose
+// disk is taken refuses a shaped Run though its cpus and memory are free,
+// to the byte. An unshaped Run on a disk-0 host is never short of disk.
+func TestHostFitShapedDiskReservation(t *testing.T) {
+	r, h := fitFixture()
+	r.Shape = &testShape
+	r.Spec.Resources = sized(2)
+	h.Capacity, h.Caps = shapeCapacity, []string{proto.CapDiskScale}
+	disk := int64(sized(2).Disk)
+	h.UsedDisk = shapeCapacity.Disk - disk
+	if got := hostFit(r, h); len(got) != 0 {
+		t.Fatalf("exactly the size's disk free: %+v", got)
+	}
+	h.UsedDisk++
+	want := []fitBlocker{{Kind: kindResource, Resource: "disk", Requested: float64(disk), Used: float64(h.UsedDisk),
+		Capacity: float64(shapeCapacity.Disk), Available: float64(disk - 1)}}
+	if got := hostFit(r, h); !reflect.DeepEqual(got, want) {
+		t.Fatalf("one byte short: %+v, want %+v", got, want)
+	}
+	plain, bare := fitFixture()
+	bare.Capacity.Disk, bare.UsedDisk = 0, 1<<40
+	if got := hostFit(plain, bare); len(got) != 0 {
+		t.Fatalf("unshaped Run on a disk-0 host: %+v", got)
 	}
 }
 

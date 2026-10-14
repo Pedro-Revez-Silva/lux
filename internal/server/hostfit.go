@@ -115,8 +115,11 @@ func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 	// Compare byte counts as integers before converting diagnostic values.
 	resource("memory", float64(res.Memory), float64(h.UsedMem), float64(h.Capacity.Memory),
 		h.Capacity.Memory > 0 && h.UsedMem+int64(res.Memory) > h.Capacity.Memory)
+	// A host advertising no disk reserves none. The shape gate above
+	// already refuses a disk-0 host to a shaped Run; r.Shape keeps that
+	// Run's disk reserved should the gate change.
 	resource("disk", float64(res.Disk), float64(h.UsedDisk), float64(h.Capacity.Disk),
-		h.Capacity.Disk > 0 && h.UsedDisk+int64(res.Disk) > h.Capacity.Disk)
+		(h.Capacity.Disk > 0 || r.Shape != nil) && h.UsedDisk+int64(res.Disk) > h.Capacity.Disk)
 	resource("runs", 1, float64(h.UsedRuns), float64(h.Capacity.Runs),
 		h.Capacity.Runs > 0 && h.UsedRuns >= h.Capacity.Runs)
 	return blockers

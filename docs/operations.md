@@ -109,6 +109,7 @@ since older releases lack both the file and the commands it names:
 | `git-credentials` | send `credentials` on a push or a sync ([git](runspec.md#git)), once every luxd runs such a release: an older luxd refuses the field (422). A Run whose host runs an older lux-runner gets 409 `git_credentials_unsupported` until the host is upgraded. luxd holds the values in memory only until the runner has the request, so a credentialed push or sync must reach the luxd holding the runner's connection (a single luxd, or routing that sends it to the luxd the Run's host is connected to, as interactive streams need); any other luxd answers 503 `host_unreachable` and queues nothing. A queued request whose values are gone (luxd restarted, or the runner reconnected elsewhere first) ends failed, saying to send it again. |
 | `pool-sizes` | give pools a `shape` and submit or resume with `resources.size` ([shaped pools](concepts.md#shaped-pools)), once every luxd runs such a release: an older luxd refuses both fields as unknown (422/400), and one sharing the database would submit to a shaped pool without rounding. Runners need nothing new for that; placing on a shaped pool needs `disk-shaping` too. |
 | `disk-shaping` | shaped pools place Runs only on runners that advertise `disk-scale` and the shape's nominal capacity ([shaped pools](concepts.md#shaped-pools)), and a shape takes `diskHeadroom`: upgrade luxd and every runner of a shaped pool, and replace its hosts (luxd launches new ones with `LUX_RUNNER_CPUS`, `LUX_RUNNER_MEMORY`, `LUX_RUNNER_DISK` and `LUX_RUNNER_DISK_HEADROOM`), before shaping a pool that has Runs: an older runner's host is skipped for them, and an older luxd refuses `diskHeadroom` as unknown and places shaped Runs anywhere. Unshaped pools and runners started without `--disk-headroom` are unchanged. |
+| `pool-placement` | set a pool's `placement` (`spread` or `pack`, [placement](concepts.md#placement-spread-or-pack)), once every luxd runs such a release: an older luxd refuses the field as unknown, and one sharing the database spreads every pool, shaped ones included. Upgrading also turns shaped pools that set none to `pack`. |
 | `disk-grace` | set `[defaults] disk_grace` (`LUX_DEFAULT_DISK_GRACE`) and let tenants submit `resources.diskGrace` ([disk is measured](runspec.md#rules)), once every luxd and then every runner runs such a release: an older luxd refuses the key and the field, and an older runner ignores the grace and stops a Run on its first sample over its disk. |
 
 A release with no `FEATURES` file, or no `validate` line, predates
@@ -556,6 +557,15 @@ the shape's own: it comes from the launch template's volume, which no
 instance type describes. Rolling back to a luxd
 without shapes leaves the columns in place and ignores them; Runs keep
 the resources they were given.
+
+A pool's `placement` (`spread` or `pack`;
+[concepts](concepts.md#placement-spread-or-pack)) is set the same three
+ways (`--placement`) and stored as `pools.placement` (migration 075),
+NULL for the default: `pack` for a shaped pool, `spread` otherwise. A
+luxd without it ignores the column and spreads every pool.
+A resume's raise for saved state (migration 076) is shown only while the
+Run keeps the size it was raised to: after a rollback resizes a raised
+Run, its raise label stays hidden until the next shaped resize.
 
 For a static shaped pool, start each host's runner by hand with the shape's
 nominal capacity. For the shape above:

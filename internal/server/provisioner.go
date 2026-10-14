@@ -136,6 +136,8 @@ type poolRow struct {
 	WarmWhileActive bool
 	// Shape: pools.shape; nil for an unshaped pool.
 	Shape *PoolShape
+	// Placement: pools.placement; "" for the pool's default.
+	Placement string
 }
 
 func (s *Server) provision(ctx context.Context) error {
@@ -148,7 +150,7 @@ func (s *Server) provision(ctx context.Context) error {
 	var pools []poolRow
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, name, provider, tenant_id, template, min_hosts, max_hosts, warm_hosts, retired, shared,
-				scale_down_after_s, warm_while_active, shape
+				scale_down_after_s, warm_while_active, shape, coalesce(placement, '')
 			FROM pools WHERE provider <> 'static'
 			  AND (NOT retired OR EXISTS (SELECT 1 FROM hosts h WHERE h.pool_id = pools.id AND h.state <> 'terminated'))`)
 		if err != nil {

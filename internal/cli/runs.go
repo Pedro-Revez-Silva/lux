@@ -449,6 +449,9 @@ func sizingLine(sz *server.RunSizing) string {
 	out := "-"
 	if r := sz.Resolved; r != nil {
 		out = fmt.Sprintf("%s (%s cpus, %s memory, %s disk)", r.Size, plainNumber(r.CPUs), bytesHuman(int64(r.Memory)), bytesHuman(int64(r.Disk)))
+		if sz.RaisedFor != "" {
+			out += fmt.Sprintf(", raised from %s for its %s", sz.RaisedFrom, sz.RaisedFor)
+		}
 	}
 	if q := sz.Requested; q != nil {
 		var asked []string
@@ -1019,8 +1022,10 @@ from now on (0s to 1h; 0s stops it on the first sample over).
 place of --cpus, --memory and --disk. In a shaped pool those are rounded up
 to a size, as at submit, and moving into one rounds the Run's current
 resources up to one of its sizes; "size: <name>" on stderr says which. A
-size with less disk than the Run has is refused unless its saved state
-fits it with headroom (size_below_saved_state).
+size whose disk cannot hold the Run's saved state (its measured peak plus
+headroom) is raised to the smallest that can, saying so ("size: <name>
+(raised from <asked> ...)"); with no such size, or no final measurement of
+the saved state, it is refused (size_below_saved_state).
 
 --pool moves the Run to another pool (its name, the tenant's pool before the
 platform's, or its id) from this resume on; its saved state follows, as on
@@ -1148,8 +1153,13 @@ Run is checked as if it were stopped ("state unchecked" on stderr).`,
 			if out.Resize != nil && out.Resize.Disk != nil {
 				fmt.Fprintln(a.stderr, "disk kept:", out.Resize.Disk.Reason)
 			}
-			if out.Resize != nil && out.Resize.Size != "" {
-				fmt.Fprintln(a.stderr, "size:", out.Resize.Size)
+			if rz := out.Resize; rz != nil && rz.Size != "" {
+				if rz.RaisedFor != "" {
+					fmt.Fprintf(a.stderr, "size: %s (raised from %s for its %s, which needs %s of disk)\n",
+						rz.Size, rz.RaisedFrom, rz.RaisedFor, bytesHuman(rz.NeededBytes))
+				} else {
+					fmt.Fprintln(a.stderr, "size:", rz.Size)
+				}
 			}
 			if pl := out.Placement; pl != nil && pl.PlatformUnchecked {
 				fmt.Fprintf(a.stderr, "platform unchecked: lux does not know whether pool %s runs this Run's image\n", pl.Pool)

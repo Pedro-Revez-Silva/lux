@@ -161,6 +161,10 @@ export interface RunSizing {
   requested?: { size?: string; cpus?: number; memory?: number; disk?: number };
   /** The size it has now, and its resources (as spec.resources). Absent while in an unshaped pool. */
   resolved?: { size: string; cpus: number; memory: number; disk: number };
+  /** With raisedFor: the size the resume that set it asked for. */
+  raisedFrom?: string;
+  /** Why its size is larger than that resume asked: its saved state needed more disk. */
+  raisedFor?: "saved state";
 }
 
 export interface RunSubmitter {
@@ -656,6 +660,8 @@ export interface Pool {
   shape?: PoolShape;
   /** A shaped pool's sizes, smallest first. */
   sizes?: PoolSize[];
+  /** spread: fewest Runs first; pack: most allocated host first. Absent: pack for a shaped pool, spread otherwise. */
+  placement?: "spread" | "pack";
 }
 
 export interface PoolShape {

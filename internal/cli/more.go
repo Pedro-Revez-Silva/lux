@@ -629,7 +629,7 @@ func counts(m map[string]int) string {
 
 // poolFields are pools set's flags that replace a pool's settings: without
 // any of them, --default only moves the mark.
-var poolFields = []string{"provider", "min", "max", "warm", "scale-down-after", "warm-while-active", "template", "hourly-price", "currency", "shape"}
+var poolFields = []string{"provider", "min", "max", "warm", "scale-down-after", "warm-while-active", "template", "hourly-price", "currency", "shape", "placement"}
 
 func (a *app) poolsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "pools", Short: "Host pools"}
@@ -716,7 +716,15 @@ every key required, and optionally disk-headroom=10Gi (the default): the
 disk each host keeps from Runs. Its sizes halve the whole host down to min-cpus
 (lux pools sizes <name> lists them). luxd checks it, and an ec2 pool's
 instance types against it, before storing it. Omitted on a shaped pool, the
-shape would be removed: refused without --replace, like a template key.
+shape would be removed: refused without --replace, like a template key. A
+pool without a placement packs while shaped and spreads otherwise, so
+adding or removing a shape changes how it places.
+
+--placement chooses how Runs are placed among the hosts they fit: spread
+(the host with the fewest Runs) or pack (the most allocated host, so whole
+hosts stay free for large sizes). Omitted: pack for a shaped pool, spread
+otherwise; omitted on a pool that has one, it would be removed: refused
+without --replace.
 
 luxd checks an ec2 pool's template can launch before storing it (a dry-run
 RunInstances; docs/operations.md, EC2 pools), unless it is unchanged.
@@ -744,6 +752,9 @@ alone, --default changes only the mark of an existing pool.`,
 					return fmt.Errorf("--shape: %w", err)
 				}
 				p.Shape = sh
+			}
+			if err := server.ValidPlacement(p.Placement); err != nil {
+				return fmt.Errorf("--placement %q: want spread or pack", p.Placement)
 			}
 			if marker && !dryRun {
 				// Exactly these two fields: server.Pool would send its
@@ -856,10 +867,11 @@ finds this pool. --platform renames the platform's pool of that name
 	set.Flags().BoolVar(&p.WarmWhileActive, "warm-while-active", false, "keep --warm hosts only while the pool is in use; an idle pool scales down to --min")
 	set.Flags().StringVar(&template, "template", "", "provider template (JSON)")
 	set.Flags().StringVar(&shape, "shape", "", "make it a shaped pool: family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2 (every key)")
+	set.Flags().StringVar(&p.Placement, "placement", "", "spread or pack (default: pack for a shaped pool, spread otherwise)")
 	set.Flags().StringVar(&p.HourlyPrice, "hourly-price", "", "static pools: default hourly price of hosts registering into it, a decimal (with --currency); existing hosts keep theirs. Like every flag here, it replaces the pool's: omitted, the pool has no default price")
 	set.Flags().StringVar(&p.Currency, "currency", "", "ISO 4217 currency of --hourly-price (e.g. USD)")
 	set.Flags().BoolVar(&isDefault, "default", false, "mark it the tenant's default pool, for Runs that name none (--default=false clears it; omitted: unchanged)")
-	set.Flags().BoolVar(&replace, "replace", false, "write even when the set removes template keys, a shape, a scale-down time, warm-while-active or a price the pool has")
+	set.Flags().BoolVar(&replace, "replace", false, "write even when the set removes template keys, a shape, a placement, a scale-down time, warm-while-active or a price the pool has")
 	set.Flags().BoolVar(&dryRun, "dry-run", false, "print what would change and write nothing")
 	var sizesPlatform bool
 	sizes := &cobra.Command{
@@ -1005,13 +1017,14 @@ func trimDecimal(s string) string {
 	return strings.TrimSuffix(strings.TrimRight(s, "0"), ".")
 }
 
-// removals are the settings before has that after drops: template keys,
-// and a scale-down time, warm-while-active or price set before and unset
-// after. A pools set replaces the pool, so these go silently otherwise.
+// removals are the settings before has that after drops: template and
+// shape keys and a placement (absent when unset), and a scale-down time,
+// warm-while-active or price set before and unset after. A pools set
+// replaces the pool, so these go silently otherwise.
 func removals(before, after map[string]any) []string {
 	var out []string
 	for k := range before {
-		if _, kept := after[k]; (strings.HasPrefix(k, "template.") || strings.HasPrefix(k, "shape.")) && !kept {
+		if _, kept := after[k]; (strings.HasPrefix(k, "template.") || strings.HasPrefix(k, "shape.") || k == "placement") && !kept {
 			out = append(out, k)
 		}
 	}
