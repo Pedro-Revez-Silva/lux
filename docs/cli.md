@@ -333,7 +333,11 @@ is launched, with the capacity plan saying why). A host's are `host.registered`,
 `host.placement_assigned`, `host.placement_ended` (with the Run's
 outcome), `host.capacity_decision` (the capacity planner's verdict on the
 host, when it changes), `host.drain_requested` (its cause), `host.lost`,
-`host.terminate_requested`, `host.terminated` and `host.provider_error`.
+`host.terminate_requested`, `host.terminated`, `host.provider_error`, and
+`host.disk_pressure` / `host.disk_pressure_ended` (its runner's
+[disk pressure](operations.md#disk-pressure) started, changed whether it
+finds relief, or ended). `lux hosts ls` shows a host under disk pressure as
+`ready (disk pressure)`.
 A failure that repeats on every provisioner pass is one event, shown with
 `(×N, last <time>)`. A tenant sees its own pools' and hosts' events; a
 platform pool's or host's are the operators' (not shown with `--tenant`,

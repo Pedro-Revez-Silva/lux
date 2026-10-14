@@ -640,11 +640,36 @@ limit = disk × min(1, (filesystem capacity − diskHeadroom) / shape disk)
 
 in whole bytes, rounded down. For a 160 GiB shape on a 160 GiB filesystem
 with 10 GiB of headroom, `m-2-arm64` (40 GiB) is held to 37.5 GiB. The
-grace and the ceiling count from that limit, and `disk.exceeded` says
-both it and the size's disk. A shaped host reserves each Run's size's
-disk alongside its cpus and memory: a Run fits only where all three are
-free. Admission under physical disk pressure is otherwise as on any pool,
-for now.
+grace counts from that limit, and `disk.exceeded` says both it and the
+size's disk. A shaped host reserves each Run's size's disk alongside its
+cpus and memory: a Run fits only where all three are free.
+
+#### Disk pressure on shaped hosts
+
+Reservations are nominal, and a Run may be over its limit for its
+`diskGrace`, so the physical filesystem can still run low (image caches,
+stopped Runs' local copies, snapshots waiting for upload, Runs in their
+grace). The two kinds of host guard against that differently:
+
+- **A host that scales disk** (every shaped pool's) has no fixed
+  ceiling. Its runner's low-free-space guard watches the filesystem's
+  free space: below the low mark (5% of the capacity by default) the host
+  takes no new Run, normal, spot or resumed; unused images are removed,
+  and the local copies of ended Runs that S3 already holds; then Runs
+  over their limit, largest excess first, are stopped with a
+  `disk.pressure_stop` event and end `failed`. A stopped Run's copy goes
+  once its snapshot is uploaded. A Run at or under its limit is never
+  stopped for it. The host takes Runs again once free
+  space is back at the recovery mark (10% by default). Stopped Runs and
+  retained snapshots count only through the free space they take, never
+  as cpu or memory reservations.
+- **A host that does not scale disk** (an unshaped pool's, unless its
+  runner was started with `--disk-headroom`) keeps the fixed ceiling: a
+  Run at twice its disk limit is stopped at once, whatever its grace. It
+  has no low-free-space guard.
+
+[Operations](operations.md#disk-pressure) has the marks, what an operator
+sees and how to tune them.
 
 ### Placement: spread or pack
 

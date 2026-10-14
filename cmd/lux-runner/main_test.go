@@ -5,6 +5,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/marcioapm/lux/internal/runner"
 )
 
 // parse runs config over args with env as the environment, keeping the
@@ -98,6 +100,48 @@ func TestReportErrPrefixesEveryLine(t *testing.T) {
 		"lux-runner: LUX_RUNNER_DISK=\"20Gi\": want a number of bytes\n"
 	if out.String() != want {
 		t.Errorf("%q, want %q", out.String(), want)
+	}
+}
+
+// The low-free-space guard's watermarks come from their flags or
+// variables, as a percentage or a size; unset, they are the defaults.
+func TestConfigDiskFreeMarks(t *testing.T) {
+	marks := func(env map[string]string, args ...string) (runner.FreeMark, runner.FreeMark, error) {
+		fs := flag.NewFlagSet("lux-runner", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		cfg, _, err := config(fs, args, func(k string) string { return env[k] })
+		return cfg.DiskLowFree, cfg.DiskRecoverFree, err
+	}
+	low, rec, err := marks(nil)
+	if err != nil || !low.IsZero() || !rec.IsZero() {
+		t.Fatalf("unset: %+v %+v %v, want zero (the defaults)", low, rec, err)
+	}
+	if runner.DefaultDiskLowFree != (runner.FreeMark{Percent: 5}) || runner.DefaultDiskRecoverFree != (runner.FreeMark{Percent: 10}) {
+		t.Fatalf("defaults %+v %+v, want 5%% and 10%%", runner.DefaultDiskLowFree, runner.DefaultDiskRecoverFree)
+	}
+	low, rec, err = marks(map[string]string{"LUX_RUNNER_DISK_LOW_FREE": "8GiB", "LUX_RUNNER_DISK_RECOVER_FREE": "12%"})
+	if err != nil || low != (runner.FreeMark{Bytes: 8 << 30}) || rec != (runner.FreeMark{Percent: 12}) {
+		t.Fatalf("env: %+v %+v %v", low, rec, err)
+	}
+	low, rec, err = marks(map[string]string{"LUX_RUNNER_DISK_LOW_FREE": "8GiB"}, "--disk-low-free", "2%", "--disk-recover-free", "4%")
+	if err != nil || low != (runner.FreeMark{Percent: 2}) || rec != (runner.FreeMark{Percent: 4}) {
+		t.Fatalf("flags win: %+v %+v %v", low, rec, err)
+	}
+	for _, c := range []struct {
+		name string
+		env  map[string]string
+		args []string
+		want string
+	}{
+		{"low above recover", nil, []string{"--disk-low-free", "20%"}, "--disk-low-free 20% must be below --disk-recover-free 10%"},
+		{"low equals recover", nil, []string{"--disk-low-free", "8GiB", "--disk-recover-free", "8GiB"}, "--disk-low-free 8.0 GiB must be below --disk-recover-free 8.0 GiB"},
+		{"recover at 100%", nil, []string{"--disk-recover-free", "100%"}, `invalid value "100%" for flag -disk-recover-free: want a percentage above 0% and below 100%`},
+		{"zero low", nil, []string{"--disk-low-free", "0"}, `invalid value "0" for flag -disk-low-free: want a percentage (5%) or a size above 0 (8GiB)`},
+		{"bad env", map[string]string{"LUX_RUNNER_DISK_LOW_FREE": "lots"}, nil, `LUX_RUNNER_DISK_LOW_FREE="lots": want a percentage (5%) or a size above 0 (8GiB)`},
+	} {
+		if _, _, err := marks(c.env, c.args...); err == nil || err.Error() != c.want {
+			t.Errorf("%s: %v, want %q", c.name, err, c.want)
+		}
 	}
 }
 

@@ -7,6 +7,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -87,6 +88,31 @@ func config(fs *flag.FlagSet, args []string, getenv func(string) string) (cfg ru
 	}
 	cpus, err := envCPUs(getenv)
 	envErr = errors.Join(envErr, err)
+	// The low-free-space guard's watermarks: a percentage of the data
+	// directory's filesystem, or a size.
+	markOf := func(name string, into *runner.FreeMark) {
+		if v := getenv(name); v != "" {
+			m, err := runner.ParseFreeMark(v)
+			if err != nil {
+				err = fmt.Errorf("%s=%q: %w", name, v, err)
+			}
+			envErr = errors.Join(envErr, err)
+			*into = m
+		}
+	}
+	markOf("LUX_RUNNER_DISK_LOW_FREE", &cfg.DiskLowFree)
+	markOf("LUX_RUNNER_DISK_RECOVER_FREE", &cfg.DiskRecoverFree)
+	// flag names the flag and the value itself.
+	markFlag := func(into *runner.FreeMark) func(string) error {
+		return func(s string) error {
+			m, err := runner.ParseFreeMark(s)
+			if err != nil {
+				return err
+			}
+			*into = m
+			return nil
+		}
+	}
 	nestedDefault, err := hostboot.NestedFromEnv(getenv("LUX_NESTED"))
 	envErr = errors.Join(envErr, err)
 	fs.StringVar(&cfg.Name, "name", "", "host name (default: hostname)")
@@ -107,6 +133,8 @@ func config(fs *flag.FlagSet, args []string, getenv func(string) string) (cfg ru
 		cfg.DiskHeadroom = &n
 		return nil
 	})
+	fs.Func("disk-low-free", fmt.Sprintf("with disk scaling (--disk-headroom): free space of the data directory's filesystem under which the host is under disk pressure: it takes no new Run, removes unused images, and stops Runs over their disk limit. A percentage of the filesystem's capacity (5%%) or a size (8GiB) (default %s). Also LUX_RUNNER_DISK_LOW_FREE", runner.DefaultDiskLowFree), markFlag(&cfg.DiskLowFree))
+	fs.Func("disk-recover-free", fmt.Sprintf("with disk scaling: free space at which disk pressure ends; above --disk-low-free (default %s). Also LUX_RUNNER_DISK_RECOVER_FREE", runner.DefaultDiskRecoverFree), markFlag(&cfg.DiskRecoverFree))
 	fs.StringVar(&cfg.ProviderID, "provider-id", getenv("LUX_PROVIDER_ID"), "cloud instance id, for provisioned hosts")
 	fs.BoolVar(&cfg.ForcePoll, "poll", false, "use HTTP polling instead of a WebSocket")
 	fs.StringVar(&cfg.EC2IMDS, "ec2-imds", getenv("LUX_EC2_IMDS"), "EC2 instance metadata URL to watch for spot interruptions (http://169.254.169.254 on EC2; empty: off)")
@@ -126,6 +154,11 @@ func config(fs *flag.FlagSet, args []string, getenv func(string) string) (cfg ru
 	if cfg.UsageEvery < 0 || cfg.Disk < 0 || cfg.Memory < 0 || cfg.MemoryHeadroom < 0 || cfg.CPUs < 0 ||
 		cfg.DiskHeadroom != nil && *cfg.DiskHeadroom < 0 {
 		return cfg, false, errors.New("--usage-every, --disk, --disk-headroom, --memory, --memory-headroom and --cpus must not be negative")
+	}
+	low := cmp.Or(cfg.DiskLowFree, runner.DefaultDiskLowFree)
+	rec := cmp.Or(cfg.DiskRecoverFree, runner.DefaultDiskRecoverFree)
+	if err := runner.CheckFreeMarks(low, rec); err != nil {
+		return cfg, false, err
 	}
 	return cfg, false, nil
 }
@@ -150,6 +183,9 @@ func main() {
 	}
 	if cfg.DiskHeadroom != nil && cfg.Disk == 0 {
 		fmt.Fprintln(os.Stderr, "lux-runner: --disk-headroom without --disk: the disk is not scaled")
+	}
+	if (!cfg.DiskLowFree.IsZero() || !cfg.DiskRecoverFree.IsZero()) && (cfg.DiskHeadroom == nil || cfg.Disk == 0) {
+		fmt.Fprintln(os.Stderr, "lux-runner: --disk-low-free and --disk-recover-free need disk scaling (--disk with --disk-headroom): no low-free-space guard")
 	}
 	// A provisioned host gets its name from luxd (user data).
 	if cfg.Name == "" {

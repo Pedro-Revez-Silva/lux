@@ -388,6 +388,16 @@ A Run's disk is three figures, kept apart: what it asked for
 scaling disk the effective limit it was held to (`disk.exceeded`'s
 `limitBytes`, with `nominalLimitBytes` and `limitFactor` beside it).
 
+A host's disk pressure ([operations](operations.md#disk-pressure)) is
+recorded as host events, not samples: `host.disk_pressure` when its runner
+reports it (with `freeBytes`, `lowFreeBytes`, `recoverFreeBytes` and
+`noRelief`, and again when `noRelief` changes) and
+`host.disk_pressure_ended` when a heartbeat with usage no longer carries
+it (one without usage changes nothing). The free
+bytes over time are the host samples' `disk_free`. A Run the guard stopped
+has a `disk.pressure_stop` event and its placement's stop reason
+`disk-pressure`.
+
 Stored bytes are what lux keeps in S3 for the tenant (every tenant for
 `''`) at the sample's instant: the sum of `blobs.size` over blobs whose
 `location` is `s3`, by `kind`. A blob still only on its host is not

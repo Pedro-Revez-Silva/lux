@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -389,6 +390,8 @@ type imageUse struct {
 	path2 string
 	// pinned: images a starting placement is about to use, never GC'd.
 	pinned map[string]int
+	// gen counts changes to last and by: the disk guard's diskGen.
+	gen atomic.Uint64
 }
 
 func newImageUse(dataDir string) *imageUse {
@@ -481,6 +484,7 @@ func (u *imageUse) snapshot() map[string]int64 {
 }
 
 func (u *imageUse) saveLocked() {
+	u.gen.Add(1)
 	b, _ := json.Marshal(u.last)
 	_ = writeFileAtomic(u.path, b, 0o600)
 	b, _ = json.Marshal(u.by)
@@ -535,6 +539,20 @@ func (r *Runner) relieveDisk(ctx context.Context) []string {
 	if need <= 0 {
 		return nil
 	}
+	removed := r.reclaimImages(ctx, need)
+	if len(removed) > 0 {
+		r.log.Info("disk over --image-disk-high: removed unused images", "usedPct", 100*used/max(total, 1), "images", removed)
+	}
+	return removed
+}
+
+// reclaimImages removes lux's unused images, least recently used first,
+// toward freeing need bytes (pickEvictions: never one a container uses, a
+// held local copy needs, or one used within recentUse).
+func (r *Runner) reclaimImages(ctx context.Context, need int64) []string {
+	if need <= 0 {
+		return nil
+	}
 	inUse, err := r.pm.ContainerImages(ctx)
 	if err != nil {
 		return nil
@@ -555,9 +573,6 @@ func (r *Runner) relieveDisk(ctx context.Context) []string {
 		if r.rmi(ctx, ref) {
 			removed = append(removed, ref)
 		}
-	}
-	if len(removed) > 0 {
-		r.log.Info("disk over --image-disk-high: removed unused images", "usedPct", 100*used/max(total, 1), "images", removed)
 	}
 	return removed
 }

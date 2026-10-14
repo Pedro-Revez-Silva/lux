@@ -173,6 +173,10 @@ func diagnosticBlockers(blockers []fitBlocker) []planBlocker {
 			out = append(out, planBlocker{Resource: b.Resource, Requested: &b.Requested, Used: &b.Used, Capacity: &b.Capacity, Available: &b.Available})
 		case kindLabel:
 			out = append(out, planBlocker{Reason: "required labels do not match"})
+		case kindDiskPressure:
+			// Without the free bytes, which change on every heartbeat: a
+			// decision is recorded again only when it changes.
+			out = append(out, planBlocker{Reason: "disk pressure"})
 		default:
 			out = append(out, planBlocker{Reason: b.Reason})
 		}

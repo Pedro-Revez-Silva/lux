@@ -4,7 +4,7 @@ components:
       additionalProperties: false
       properties:
         code:
-          description: "no_hosts: no live connected host in its pool or chosen host; constraint: labels, nesting, tenancy, pool shape, or another chosen host; capability: the host's lux-runner lacks a feature the Run needs; not_enough_spare: not enough unreserved cpus, memory, disk or run slots; space_not_settled (spot): the spare space has not been continuously free for more than 60s; normal_demand_pending (spot): a queued normal Run could use that space."
+          description: "no_hosts: no live connected host in its pool or chosen host; constraint: labels, nesting, tenancy, pool shape, or another chosen host; capability: the host's lux-runner lacks a feature the Run needs; not_enough_spare: not enough unreserved cpus, memory, disk or run slots; space_not_settled (spot): the spare space has not been continuously free for more than 60s; normal_demand_pending (spot): a queued normal Run could use that space; disk_pressure: the host's runner reports low free disk, and the host takes no new Run until it recovers."
           enum:
             - no_hosts
             - constraint
@@ -12,6 +12,7 @@ components:
             - not_enough_spare
             - space_not_settled
             - normal_demand_pending
+            - disk_pressure
           type: string
         hosts:
           description: How many hosts this blocks.
@@ -550,6 +551,25 @@ components:
                 - 8Gi
               type: string
       type: object
+    DiskPressure:
+      additionalProperties: false
+      properties:
+        freeBytes:
+          format: int64
+          type: integer
+        lowFree:
+          type: string
+        lowFreeBytes:
+          format: int64
+          type: integer
+        noRelief:
+          type: boolean
+        recoverFree:
+          type: string
+        recoverFreeBytes:
+          format: int64
+          type: integer
+      type: object
     DiskSample:
       additionalProperties: false
       properties:
@@ -710,6 +730,9 @@ components:
           $ref: "#/components/schemas/Resources"
         capacity:
           $ref: "#/components/schemas/Capacity"
+        diskPressure:
+          $ref: "#/components/schemas/DiskPressure"
+          description: "Present while its runner's low-free-space guard reports disk pressure (lux-runner --disk-low-free): the host takes no new Run until free disk is back at the recovery mark. Absent otherwise, and from runners without the guard."
         draining:
           type: boolean
         id:

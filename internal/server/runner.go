@@ -489,6 +489,15 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 					return err
 				}
 				notifyHost = hostID
+			case proto.EvDiskPressureStop:
+				if _, err := s.requestStop(ctx, tx, tenantID, f.RunID, stopDiskPressure); err != nil {
+					return err
+				}
+				if ev.Data == nil {
+					ev.Data = map[string]any{}
+				}
+				ev.Data["reason"] = diskPressureStopReason(ev.Data)
+				notifyHost = hostID
 			}
 			return addEvent(ctx, tx, tenantID, f.RunID, f.Epoch, ev.Type, ev.Data)
 		}
@@ -523,21 +532,35 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 		}
 	}
 	var outdatedDrained []string
+	// A heartbeat without usage (the runner could not read its host's) says
+	// nothing about pressure: the stored state stands until one with usage.
+	var pressure *proto.DiskPressure
+	pressureKnown := hb.Usage != nil
+	pressureEnded := false
+	if pressureKnown {
+		pressure = hb.Usage.DiskPressure
+	}
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		// The events after every row lock: event streams come last.
 		var later laterEvents
 		var back bool
-		if err := tx.QueryRow(ctx, `WITH old AS (SELECT id, state FROM hosts WHERE id = $1 FOR NO KEY UPDATE)
+		var was *proto.DiskPressure
+		if err := tx.QueryRow(ctx, `WITH old AS (SELECT id, state, disk_pressure FROM hosts WHERE id = $1 FOR NO KEY UPDATE)
 			UPDATE hosts SET last_heartbeat = now(),
 			state = CASE WHEN hosts.state = 'lost' THEN (CASE WHEN draining THEN 'draining' ELSE 'ready' END) ELSE hosts.state END,
-			caches = jsonb_set(caches, '{gitMirrors}', $2)
+			caches = jsonb_set(caches, '{gitMirrors}', $2),
+			disk_pressure = CASE WHEN $4 THEN $3 ELSE hosts.disk_pressure END
 			FROM old WHERE hosts.id = old.id
-			RETURNING old.state = 'lost' AND hosts.state = 'ready'`, hostID, nonNil(hb.GitMirrors)).Scan(&back); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			RETURNING old.state = 'lost' AND hosts.state = 'ready', old.disk_pressure`, hostID, nonNil(hb.GitMirrors), pressure, pressureKnown).Scan(&back, &was); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
 		// Back from lost (a network blip longer than the lease).
 		if back {
 			later.host(ctx, tx, hostID, evReady, map[string]any{"from": "lost"})
+		}
+		if pressureKnown {
+			diskPressureEvents(ctx, tx, &later, hostID, was, pressure)
+			pressureEnded = was != nil && pressure == nil
 		}
 		if err := forgetMissingCopies(ctx, tx, hostID, hb.LocalSnapshots); err != nil {
 			return err
@@ -604,8 +627,38 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 	})
 	if err == nil {
 		s.notifyAll(outdatedDrained)
+		// Pressure ended: Runs waiting on this host may fit now.
+		if pressureEnded {
+			s.Kick()
+		}
 	}
 	return err
+}
+
+// diskPressureEvents records the start and end of a host's disk pressure
+// (host.disk_pressure, host.disk_pressure_ended), and a change of whether
+// the runner finds relief, from the previous heartbeat's state was to now's.
+func diskPressureEvents(ctx context.Context, tx pgx.Tx, later *laterEvents, hostID string, was, now *proto.DiskPressure) {
+	switch {
+	case was == nil && now != nil, was != nil && now != nil && was.NoRelief != now.NoRelief:
+		later.host(ctx, tx, hostID, evDiskPressure, diskPressureData(now))
+	case was != nil && now == nil:
+		later.host(ctx, tx, hostID, evDiskPressureEnded, map[string]any{"reason": "free disk back at its recovery mark"})
+	}
+}
+
+func diskPressureData(p *proto.DiskPressure) map[string]any {
+	return map[string]any{"reason": diskPressureReason(p), "freeBytes": p.FreeBytes, "lowFreeBytes": p.LowFreeBytes,
+		"recoverFreeBytes": p.RecoverFreeBytes, "noRelief": p.NoRelief}
+}
+
+// diskPressureReason is e.g. "disk pressure: 4.1 GiB free, below 5%".
+func diskPressureReason(p *proto.DiskPressure) string {
+	r := fmt.Sprintf("disk pressure: %s free, below %s", spec.BytesText(p.FreeBytes), p.LowFree)
+	if p.NoRelief {
+		r += "; nothing to reclaim and no Run over its disk limit"
+	}
+	return r
 }
 
 // sample writes history in a savepoint of a heartbeat's transaction: a

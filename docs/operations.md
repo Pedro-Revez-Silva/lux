@@ -111,6 +111,7 @@ since older releases lack both the file and the commands it names:
 | `disk-shaping` | shaped pools place Runs only on runners that advertise `disk-scale` and the shape's nominal capacity ([shaped pools](concepts.md#shaped-pools)), and a shape takes `diskHeadroom`: upgrade luxd and every runner of a shaped pool, and replace its hosts (luxd launches new ones with `LUX_RUNNER_CPUS`, `LUX_RUNNER_MEMORY`, `LUX_RUNNER_DISK` and `LUX_RUNNER_DISK_HEADROOM`), before shaping a pool that has Runs: an older runner's host is skipped for them, and an older luxd refuses `diskHeadroom` as unknown and places shaped Runs anywhere. Unshaped pools and runners started without `--disk-headroom` are unchanged. |
 | `pool-placement` | set a pool's `placement` (`spread` or `pack`, [placement](concepts.md#placement-spread-or-pack)), once every luxd runs such a release: an older luxd refuses the field as unknown, and one sharing the database spreads every pool, shaped ones included. Upgrading also turns shaped pools that set none to `pack`. |
 | `disk-grace` | set `[defaults] disk_grace` (`LUX_DEFAULT_DISK_GRACE`) and let tenants submit `resources.diskGrace` ([disk is measured](runspec.md#rules)), once every luxd and then every runner runs such a release: an older luxd refuses the key and the field, and an older runner ignores the grace and stops a Run on its first sample over its disk. |
+| `disk-pressure` | rely on runners that scale disk (`--disk-headroom`) guarding their hosts' free space ([disk pressure](#disk-pressure)) instead of the 2× ceiling, once every luxd and then every such runner runs such a release. **luxd first**: an older luxd neither blocks admissions on a host's `diskPressure` nor stops a Run on `disk.pressure_stop`, and such a runner no longer has the ceiling, so a Run over its limit would run on until its grace ends. An older runner on a newer luxd is unchanged (it keeps the ceiling and sends no pressure, read as none). Runners without `--disk-headroom` keep the 2× ceiling in every release. |
 
 A release with no `FEATURES` file, or no `validate` line, predates
 `luxd validate`.
@@ -175,7 +176,7 @@ under a timeout. `luxd check-config` is an alias of `validate`.
 | `LUX_LEASE` | `30s` | A host that misses heartbeats this long is lost, along with its live placements. At least 3s. Runners heartbeat every third of it, and drop a connection that is silent for two of those. Time no luxd could hear them (every luxd stopped, frozen whole, or cut off from Postgres) is not held against them: nothing is lost for missed heartbeats during it, nor for a lease (plus 10s) after a luxd is back, so a running Run survives a deploy or an outage of any length, and a host that died meanwhile is lost soon after. Other timers (`LUX_LAUNCH_TIMEOUT`, `LUX_LOST_GRACE`) still count it. It is also how long a Run with secrets waits for a luxd that holds their values (after a restart, say) before it stops, to be resumed with them. |
 | `LUX_TICK` | `1s` | Scheduler and reaper interval. |
 | `LUX_DEFAULT_CPUS`, `LUX_DEFAULT_MEMORY`, `LUX_DEFAULT_DISK`, `LUX_DEFAULT_PIDS` | `2`, `8Gi`, `20Gi`, `4096` | Resources a Run gets when its spec sets none. |
-| `LUX_DEFAULT_DISK_GRACE` | `0s` | `resources.diskGrace` of a Run whose spec sets none (`defaults.disk_grace`): how long it may stay over its disk before it is stopped, `0s` to `1h`. `0s` stops it on the first sample over. Twice its disk stops it at once whatever the grace ([disk is measured](runspec.md#rules)). Written into the Run's spec at submit, so changing it leaves existing Runs as they are. |
+| `LUX_DEFAULT_DISK_GRACE` | `0s` | `resources.diskGrace` of a Run whose spec sets none (`defaults.disk_grace`): how long it may stay over its disk before it is stopped, `0s` to `1h`. `0s` stops it on the first sample over. Twice its disk stops it at once whatever the grace, on a host without disk scaling; on one with it, the host's [disk pressure](#disk-pressure) guard stops it instead ([disk is measured](runspec.md#rules)). Written into the Run's spec at submit, so changing it leaves existing Runs as they are. |
 | `LUX_PROVIDER_CHECK_EVERY` | `1m` | How often each EC2 pool's instances are listed (orphans terminated, vanished hosts written off). Mind the provider's API limits. |
 | `LUX_LOST_GRACE` | `5m` | How long a lost provisioned host's instance is kept (a runner restart or a network blip is not a loss) before it is terminated. |
 | `LUX_LISTING_LAG` | `1m` | How long after a launch EC2's listings may still miss an instance: until then a host missing from them is not written off. |
@@ -406,8 +407,10 @@ curl -fsS https://luxd.example/runner/v1/bootstrap.sh | sudo env \
 | `--memory` | MemTotal | The machine's gross memory, offered to the scheduler: Runs ask in these terms and get their share after headroom ([how](concepts.md#memory-the-hosts-terms-scaled-to-what-linux-sees)). An EC2 host luxd launches gets its instance type's memory. Also `LUX_RUNNER_MEMORY`. |
 | `--memory-headroom` | 512 MiB | Bytes of MemTotal kept from Runs for the kernel and the host. Each Run's container gets `resources.memory × min(1, (MemTotal − headroom) / --memory)`. The runner refuses to start if it leaves nothing. Also `LUX_RUNNER_MEMORY_HEADROOM`. |
 | `--disk` | not reserved | Bytes of disk the scheduler reserves Runs' `resources.disk` from. Without it, disk is not reserved (Runs still stop at their own limit). Set it to the space under `/var/lib/containers`, more to overcommit. With `--disk-headroom`, the host's nominal disk instead (below). Also `LUX_RUNNER_DISK`. |
-| `--disk-headroom` | not given | Bytes of the `--data-dir` filesystem kept from Runs. Given with `--disk` (0 is allowed), `--disk` is nominal and each Run's disk limit is `resources.disk × min(1, (capacity − headroom) / --disk)`, in whole bytes rounded down; the grace and the ceiling count from that limit. Capacity is the filesystem's used plus unprivileged-free blocks (statfs; blocks reserved for root count in neither), read once at start, never the free space. A grown volume takes effect only after a runner restart; adopted Runs also use the factor computed at that restart. The runner refuses to start if the headroom leaves nothing, and logs the factor. Only such a runner advertises `disk-scale`, which shaped pools require. Not given: limits are `resources.disk` as before. Also `LUX_RUNNER_DISK_HEADROOM`. |
-| `--usage-every` | `15s` | How often each Run's disk use is sampled, and its disk limit and `diskGrace` checked. The grace is counted in these samples, so a Run over its disk is stopped between `diskGrace` and `diskGrace` plus this interval from the first sample over. |
+| `--disk-headroom` | not given | Bytes of the `--data-dir` filesystem kept from Runs. Given with `--disk` (0 is allowed), `--disk` is nominal and each Run's disk limit is `resources.disk × min(1, (capacity − headroom) / --disk)`, in whole bytes rounded down; the grace counts from that limit, and there is no 2× ceiling: the [low-free-space guard](#disk-pressure) bounds the host instead. Capacity is the filesystem's used plus unprivileged-free blocks (statfs; blocks reserved for root count in neither), read once at start, never the free space. A grown volume takes effect only after a runner restart; adopted Runs also use the factor computed at that restart. The runner refuses to start if the headroom leaves nothing, and logs the factor. Only such a runner advertises `disk-scale`, which shaped pools require. Not given: limits are `resources.disk` as before, with the 2× ceiling. Also `LUX_RUNNER_DISK_HEADROOM`. |
+| `--disk-low-free` | `5%` | With `--disk-headroom`: free space of the `--data-dir` filesystem under which the host is under [disk pressure](#disk-pressure). A percentage of the filesystem's capacity (`5%`) or a size (`8GiB`, `8Gi`, bytes). Also `LUX_RUNNER_DISK_LOW_FREE`. |
+| `--disk-recover-free` | `10%` | With `--disk-headroom`: free space at which disk pressure ends. Must be above `--disk-low-free` and below the capacity. Also `LUX_RUNNER_DISK_RECOVER_FREE`. |
+| `--usage-every` | `15s` | How often each Run's disk use is sampled, and its disk limit and `diskGrace` checked. The grace is counted in these samples, so a Run over its disk is stopped between `diskGrace` and `diskGrace` plus this interval from the first sample over. A sample of a large tree may take longer than this; such a round's next sample starts when it ends. |
 | `--host-ttl` | `24h` | How long uploaded local copies are kept, and images lux pulled or built after their last use ([images on hosts](runspec.md#images-on-hosts)). |
 | `--image-disk-high` | `80` | Percent use of the disk holding Podman's storage (its graph root, `/var/lib/containers`) over which lux's unused images are removed, least recently used first, until under it. `0` turns it off. Images the host had before lux are never removed. |
 | `--provider-id` | | The cloud instance id, for provisioned hosts. Also `LUX_PROVIDER_ID`. |
@@ -429,6 +432,128 @@ EOF
 Host tokens come from `luxd admin create-host-token --tenant T [--pool P]
 [--label k=v]`. Restarting `lux-runner` does not touch running containers
 (Podman is daemonless). The new runner re-adopts them.
+
+### Disk pressure
+
+Disk limits are measured, not filesystem quotas, and a Run may stay over
+its limit for its `resources.diskGrace`; image caches, stopped Runs' local
+copies and snapshots waiting for upload also live on the host's disk
+outside any Run's reservation. How the runner keeps that from filling the
+filesystem depends on whether it scales disk:
+
+- **A runner without `--disk-headroom`** (every unshaped pool's host,
+  unless started otherwise) keeps the fixed ceiling: a Run at twice its
+  disk limit is stopped at once, whatever its grace. It has no
+  low-free-space guard, and `--disk-low-free` and `--disk-recover-free`
+  are ignored (the runner says so at start).
+- **A runner with `--disk` and `--disk-headroom`** (`disk-scale`: every
+  shaped pool's host) has no ceiling. Its low-free-space guard watches the
+  filesystem holding `--data-dir` instead.
+
+The guard measures the free space of that filesystem with statfs (what an
+unprivileged writer can still use: blocks reserved for root are not free)
+every 2 seconds (`--usage-every` when shorter), apart from the disk
+samples, and once at start, before the first heartbeat: a slow disk walk
+never delays blocking admissions, and a runner restarted under pressure
+never reports none. Reclaiming and stopping happen after each round of
+disk samples (`--usage-every`, 15s by default). Each placement's sample is
+cut off only after 4 times that interval or 2 minutes, whichever is
+longer, so a slow walk of a large tree still concludes and only a hung
+Podman is given up on. Keep
+`--data-dir` and Podman's storage (`/var/lib/containers`) on the same
+filesystem, as a stock host has them: the guard sees only the one holding
+`--data-dir`.
+
+Pressure starts when free space falls below `--disk-low-free` (default
+5% of the capacity), and ends only once it is at or above
+`--disk-recover-free` (default 10%). Between the two marks nothing
+changes. Both defaults are conservative: no shaped host has measured them
+yet. When pressure starts, and after every round of samples while it
+lasts, the runner:
+
+1. **Blocks admissions.** Its next heartbeat (sent at once) carries
+   `diskPressure`. luxd places no new Run on the host, normal, spot or
+   resumed: a waiting Run's reason says `1 host in its pool is under disk
+   pressure (low free disk)` (a spot Run's: `1 host is under disk
+   pressure`), and the capacity planner counts no room on the host, so a
+   pool that may launch hosts launches one as it would for a full host.
+   Runs already on the host keep running. A heartbeat without usage (the
+   runner could not read its host's) leaves the state luxd has as it is.
+2. **Reclaims caches.** It removes lux's unused images, least recently
+   used first, toward the recovery mark, with the protections of
+   `--image-disk-high`: never an image a container uses, one a local copy
+   waiting for a resume needs, or one used in the last 10 minutes. Then
+   it discards the local copies of Runs no longer live on the host that
+   S3 holds, oldest exit first, until the recovery mark: a copy goes only
+   once every snapshot of its Run is reported and uploaded and no upload
+   is pending (what `--host-ttl` waits for, without the wait; the rule
+   luxd uses to discard a copy when a Run resumes elsewhere). Its state
+   volumes and snapshot files go, and the next heartbeat tells luxd. A
+   copy still uploading, snapshots not yet uploaded and git mirrors are
+   never touched.
+3. **Stops Runs over their disk limit.** Only placements whose latest
+   sample is over their effective disk limit (within their grace)
+   qualify, the largest excess first; a placement whose latest sample
+   was inconclusive (a probe failed) does not. Before each, the runner
+   counts what is already on its way back against what is missing to the
+   recovery mark, and measures the filesystem again after each, so it
+   stops no more than it needs. A stopped Run gets a `disk.pressure_stop`
+   event and ends `failed`, its reason e.g. `stopped: host disk pressure,
+   12.3 GiB over its 37.5 GiB disk limit`. **A Run at or under its limit
+   is never stopped.**
+
+What a stop gives back, and when: the Run's container goes as soon as its
+end is reported, which frees its writable layer. Its state volumes stay,
+as for any stop, as the Run's local copy, and the stop first exports them
+(zstd) for upload, which briefly uses more of the filesystem. So the
+runner counts a stopping Run's writable layer as on its way back, then,
+once it has ended, its snapshot's blob sizes (a lower bound of its
+volumes, read from disk, so it holds across a runner restart) until their
+upload finishes. The same goes for any ended Run's copy that is still
+uploading. At the next round after that, step 2 discards the copy.
+Recovery after a stop
+therefore waits for that Run's upload, then the discard. The export is
+kept under pressure, since skipping it would lose the Run's state. If it
+fails for want of space (ENOSPC), the snapshot is reported failed
+(`snapshot.failed`, its error) as for any failed export, the volumes stay
+as the Run's only copy and are never discarded by the guard, and the Run
+still ends `failed` with the disk-pressure reason.
+
+If a pass finds nothing to reclaim, nothing on its way back and no Run
+over its limit, the host stays under pressure, admissions blocked, and
+says so (`noRelief`). It clears when space comes back: Runs ending, an
+operator freeing space by hand, or a copy's upload finishing. Until an
+image, a placement, a snapshot record or a sample crossing its limit
+changes, or a minute passes, the runner does not look again: no podman
+calls for images and no scan of local copies on every round.
+
+An operator sees it:
+
+- `lux hosts ls` and `lux hosts get <host>` show the state as `ready (disk
+  pressure)`; `GET /v1/hosts/{id}` has `diskPressure` (`freeBytes`,
+  `lowFreeBytes`, `recoverFreeBytes`, `lowFree`, `recoverFree`,
+  `noRelief`) while it lasts (stored as `hosts.disk_pressure`, migration
+  077).
+- `lux hosts events <host>` records `host.disk_pressure` when it starts
+  (`disk pressure: 4.1 GiB free, below 5%`), again when `noRelief`
+  changes, and `host.disk_pressure_ended` when it ends.
+- The capacity planner's `host.capacity_decision` names `disk pressure`.
+- The runner logs `disk pressure: admissions blocked`, each image it
+  removes, each local copy it discards (`disk pressure: discarded a local
+  copy S3 holds`) and each Run it stops, and `disk pressure ended`.
+  History keeps the filesystem's free bytes on every host sample.
+
+Tuning: the marks are a percentage of the filesystem's capacity or a
+size; use a size on a small filesystem where 5% is too little for an image
+pull. The low mark should leave room for what can be written before the
+watch sees it (every Run writing for 2 seconds) plus a stopped Run's
+export, and the gap to the
+recovery mark keeps a host from flapping in and out of pressure. The
+runner refuses to start unless 0 < low < recover < the filesystem's
+capacity, as resolved at start, and refuses a same-unit pair with low not
+below recover before reading the filesystem. Set `--image-disk-high`
+below `100% − --disk-recover-free` so ordinary image GC keeps the
+filesystem out of pressure in the first place.
 
 ### Binary distribution and self-update
 

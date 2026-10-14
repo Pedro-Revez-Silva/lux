@@ -10,6 +10,7 @@ package runner
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -57,6 +58,10 @@ type Config struct {
 	// nominal size: each Run's disk limit is its share of the filesystem
 	// less this (diskScale). nil: limits are resources.disk as asked.
 	DiskHeadroom *int64
+	// DiskLowFree and DiskRecoverFree are the low-free-space guard's
+	// watermarks (diskGuard), on only with disk scaling. Zero: the
+	// defaults, DefaultDiskLowFree and DefaultDiskRecoverFree.
+	DiskLowFree, DiskRecoverFree FreeMark
 	// ProviderID is the cloud instance id, for provisioned hosts.
 	ProviderID string
 	// ForcePoll uses the HTTP polling transport even if WebSocket works.
@@ -138,8 +143,17 @@ type Runner struct {
 	mem memoryScale
 	// disk scales a Run's resources.disk to the limit it is held to.
 	disk diskScale
+	// guard is the low-free-space guard; nil without disk scaling.
+	guard *diskGuard
+	// diskChanges counts changes the guard acts on (placements, snapshot
+	// records, a sample crossing its limit): diskGen.
+	diskChanges atomic.Uint64
+	// hbNow asks heartbeatLoop for a heartbeat now (kickHeartbeat).
+	hbNow chan struct{}
 	// handover, when set, replaces handoverWait's bound. Tests only.
 	handover time.Duration
+	// guardTick, when set, replaces guardEvery. Tests only.
+	guardTick time.Duration
 }
 
 // mountpoint is where a volume's data is on this host. It never changes for
@@ -199,6 +213,13 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 	if disk.on {
 		log.Info("disk", "fsCapacity", disk.fsCapacity, "headroom", disk.headroom, "capacity", cfg.Disk, "factor", disk.factor())
 	}
+	var guard *diskGuard
+	if disk.on {
+		if guard, err = newDiskGuard(log, cmp.Or(cfg.DiskLowFree, DefaultDiskLowFree), cmp.Or(cfg.DiskRecoverFree, DefaultDiskRecoverFree), disk.fsCapacity); err != nil {
+			return nil, err
+		}
+		log.Info("disk guard", "lowFree", guard.lowFree, "recoverFree", guard.recovFree)
+	}
 	if _, err := os.Stat(cfg.Shim); err != nil {
 		return nil, fmt.Errorf("shim binary: %w", err)
 	}
@@ -213,6 +234,13 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 		git:        gitws.New(cfg.DataDir),
 		mem:        mem,
 		disk:       disk,
+		hbNow:      make(chan struct{}, 1),
+	}
+	if guard != nil {
+		r.attachGuard(guard, func() (int64, error) {
+			d, err := hoststat.ReadDisk(cfg.DataDir)
+			return d.Free, err
+		})
 	}
 	r.api = newAPI(cfg.URL, cfg.Token, cfg.Name)
 	r.conn = newConn(r)
@@ -276,6 +304,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.nestedAppArmor = appArmorRestrictsUserns(appArmorSysctl)
 	}
 	r.readopt(ctx)
+	// Before the first heartbeat: a restart under pressure must not report
+	// none until the next sample round.
+	r.startGuard(ctx)
 	go r.uploads.loop(ctx)
 	go r.heartbeatLoop(ctx)
 	go r.usageLoop(ctx)
@@ -530,6 +561,7 @@ func (r *Runner) assign(ctx context.Context, a proto.Assign) {
 	p := newPlacement(r, a, old)
 	r.placements[a.RunID] = p
 	r.mu.Unlock()
+	r.diskChanged()
 	if old != nil {
 		// p touches nothing of the Run's until old is done (waitPrevious).
 		// An old one whose workload may still run is one luxd gave up on:
@@ -605,6 +637,8 @@ func (r *Runner) heartbeatLoop(ctx context.Context) {
 	for {
 		// The interval is re-read every second: the first wait starts before
 		// luxd's Welcome says the lease, and must not outlast a shorter one.
+		// A kick (kickHeartbeat) ends the wait at once.
+	wait:
 		for start := time.Now(); ; {
 			left := time.Until(start.Add(r.heartbeatEvery()))
 			if left <= 0 {
@@ -613,33 +647,17 @@ func (r *Runner) heartbeatLoop(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
+			case <-r.hbNow:
+				break wait
 			case <-time.After(min(left, time.Second)):
 			}
 		}
-		hb := proto.Heartbeat{LocalSnapshots: r.localSnapshots(), GitMirrors: r.git.Mirrors(),
-			RunnerSHA256: r.runnerSHA256, ShimSHA256: r.shimSHA256}
-		if hu, err := podman.ReadHostUsage(r.cfg.DataDir); err == nil {
-			hb.Usage = r.hostUsage(hu)
-		}
-		if p, err := r.proc.Read(); err == nil {
-			hb.Runner = p
-		}
-		for _, p := range r.livePlacements() {
-			if st := p.liveState(); st != "" {
-				hb.Leases = append(hb.Leases, proto.LivePlacement{RunID: p.runID, Epoch: p.epoch, State: st, Usage: p.usage()})
-			}
-		}
-		hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		// Acked: its peak RSS reached luxd. Else it carries to the next.
-		if r.conn.Report(hctx, proto.Frame{Type: proto.MsgHeartbeat, Data: proto.Marshal(hb)}) == nil {
-			r.proc.Stored()
-		}
-		cancel()
+		r.sendHeartbeat(ctx)
 	}
 }
 
 // hostUsage is a heartbeat's usage from hu, with the disk scaling's
-// filesystem capacity and headroom when it is on.
+// filesystem capacity and headroom, and the guard's pressure, when it is on.
 func (r *Runner) hostUsage(hu podman.HostUsage) *proto.HostUsage {
 	u := &proto.HostUsage{CPUSeconds: hu.CPUSeconds, MemoryBytes: hu.MemoryBytes, DiskBytes: hu.DiskBytes}
 	if hu.DiskOK {
@@ -648,6 +666,7 @@ func (r *Runner) hostUsage(hu podman.HostUsage) *proto.HostUsage {
 	if r.disk.on {
 		u.FSCapacityBytes, u.DiskHeadroomBytes = &r.disk.fsCapacity, &r.disk.headroom
 	}
+	u.DiskPressure = r.guard.state()
 	return u
 }
 
@@ -697,7 +716,9 @@ func (r *Runner) shouldExit(ctx context.Context, e proto.ExitHost) bool {
 // It is also how the disk limit is enforced: the grace is counted in
 // samples, so a Run is stopped between its diskGrace and diskGrace plus one
 // interval from the first sample over, having written up to that long's
-// worth past its limit.
+// worth past its limit. After each round the low-free-space guard, if on,
+// reclaims and stops against those samples (its watch of the filesystem
+// runs on its own ticker, startGuard).
 func (r *Runner) usageLoop(ctx context.Context) {
 	t := time.NewTicker(r.cfg.UsageEvery)
 	defer t.Stop()
@@ -714,10 +735,23 @@ func (r *Runner) usageLoop(ctx context.Context) {
 			if p.finishing() {
 				continue
 			}
-			wg.Go(func() { p.sampleSlow(ctx) })
+			// Bounded only against a hung podman (sampleBound): a long walk
+			// must conclude, or a large tree is never measured.
+			wg.Go(func() {
+				sctx, cancel := context.WithTimeout(ctx, sampleBound(r.cfg.UsageEvery))
+				defer cancel()
+				p.sampleSlow(sctx)
+			})
 		}
 		wg.Wait()
+		r.guardPass(ctx)
 	}
+}
+
+// sampleBound cuts off one placement's disk sample. Admissions are blocked
+// on the guard's own ticker, so a round may take longer than every.
+func sampleBound(every time.Duration) time.Duration {
+	return max(4*every, 2*time.Minute)
 }
 
 // localSnapshots lists Runs whose state volumes are on this host.

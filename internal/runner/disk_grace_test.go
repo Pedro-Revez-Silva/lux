@@ -102,13 +102,16 @@ func withVolume(p *placement) {
 }
 
 // events is every disk.exceeded event luxd got so far.
-func (f *diskFixture) events() []proto.RunEvent {
+func (f *diskFixture) events() []proto.RunEvent { return f.runEvents(proto.EvDiskExceeded) }
+
+// runEvents is every run event of type typ luxd got so far.
+func (f *diskFixture) runEvents(typ string) []proto.RunEvent {
 	f.luxd.mu.Lock()
 	defer f.luxd.mu.Unlock()
 	var out []proto.RunEvent
 	for _, fr := range f.luxd.frames {
 		var ev proto.RunEvent
-		if fr.Type == proto.MsgRunEvent && json.Unmarshal(fr.Data, &ev) == nil && ev.Type == proto.EvDiskExceeded {
+		if fr.Type == proto.MsgRunEvent && json.Unmarshal(fr.Data, &ev) == nil && ev.Type == typ {
 			out = append(out, ev)
 		}
 	}
@@ -374,8 +377,8 @@ func TestDiskProbeFailureLoggedOnce(t *testing.T) {
 // On a runner that scales disk, checkDisk and sampleSlow hold a placement
 // to its effective limit: a sample between the effective and the nominal
 // limit goes over and, past the grace, is reported with both limits and
-// the factor; a sample at the effective limit is not over; the ceiling is
-// twice the effective limit.
+// the factor; a sample at the effective limit is not over; there is no
+// ceiling (the low-free-space guard bounds the host instead).
 func TestCheckDiskHoldsToTheEffectiveLimit(t *testing.T) {
 	// 160 GiB nominal, 160 GiB filesystem, 10 GiB headroom: 10 GiB asked
 	// holds to 9.375 GiB.
@@ -407,13 +410,11 @@ func TestCheckDiskHoldsToTheEffectiveLimit(t *testing.T) {
 		p.checkDisk(f.ctx, effective+1, t0)
 		f.wantEvents(t, "the sample at the effective limit restarts the grace", 0)
 	})
-	t.Run("the ceiling is twice the effective limit", func(t *testing.T) {
+	t.Run("no ceiling on a scaled limit", func(t *testing.T) {
 		f, p := scaled(t)
 		p.checkDisk(f.ctx, 2*effective, time.Now())
-		evs := f.wantEvents(t, "at 2× effective", 1)
-		if evs[0].Data["ceiling"] != true {
-			t.Errorf("event data %v, want the ceiling", evs[0].Data)
-		}
+		p.checkDisk(f.ctx, 10*effective, time.Now().Add(diskGrace-time.Second))
+		f.wantEvents(t, "at 2× and 10× effective within the grace", 0)
 	})
 	t.Run("a partial sample between effective and nominal counts", func(t *testing.T) {
 		f, p := scaled(t)

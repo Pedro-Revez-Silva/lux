@@ -9,7 +9,6 @@ import (
 	"errors"
 	"io"
 	"maps"
-	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -87,6 +86,7 @@ func (c *countWriter) Write(p []byte) (int, error) {
 }
 
 func (r *Runner) saveSnapshotRecord(snapID string, rec *snapshotRecord) error {
+	r.diskChanged()
 	b, err := json.Marshal(rec)
 	if err != nil {
 		return err
@@ -330,17 +330,32 @@ func (r *Runner) staleEpoch(runID string) int {
 }
 
 // discard deletes the local copy of a Run's state: luxd says it resumed
-// elsewhere from an uploaded snapshot.
+// elsewhere from an uploaded snapshot, its host TTL passed, or the disk
+// guard needs the space and S3 holds the copy.
 func (r *Runner) discard(ctx context.Context, runID string, beforeEpoch int) {
+	r.discardUnless(ctx, runID, func(p *placement) bool { return p.epoch >= beforeEpoch })
+}
+
+// discardIdle is discard for a Run with no live placement here, checked
+// under r.mu: an assignment of the Run arriving meanwhile keeps its copy.
+// The disk guard and gcLoop discard through it alone.
+func (r *Runner) discardIdle(ctx context.Context, runID string) bool {
+	return r.discardUnless(ctx, runID, func(p *placement) bool { return p.liveState() != "" })
+}
+
+// discardUnless deletes runID's local copy unless keep, called under r.mu,
+// holds for its placement here; whether it did.
+func (r *Runner) discardUnless(ctx context.Context, runID string, keep func(*placement) bool) bool {
 	r.mu.Lock()
-	p := r.placements[runID]
-	if p != nil && p.epoch >= beforeEpoch {
+	if p := r.placements[runID]; p != nil && keep(p) {
 		r.mu.Unlock()
-		return
+		return false
 	}
 	delete(r.placements, runID)
 	r.mu.Unlock()
+	r.diskChanged()
 	r.removeRunLocal(ctx, runID)
+	return true
 }
 
 func (r *Runner) removeRunLocal(ctx context.Context, runID string) {
@@ -374,6 +389,7 @@ func (r *Runner) removeRunLocal(ctx context.Context, runID string) {
 }
 
 func removeSnapshotFiles(r *Runner, snapID string, rec *snapshotRecord) {
+	r.diskChanged()
 	for _, up := range rec.Uploads {
 		os.Remove(up.Path)
 	}
@@ -405,13 +421,7 @@ func (r *Runner) gcLoop(ctx context.Context) {
 			if time.Since(time.UnixMilli(st.LastExitAt)) < r.cfg.HostTTL {
 				continue
 			}
-			r.mu.Lock()
-			p := r.placements[e.Name()]
-			busy := p != nil && p.liveState() != ""
-			r.mu.Unlock()
-			if !busy {
-				r.discard(ctx, e.Name(), math.MaxInt)
-			}
+			r.discardIdle(ctx, e.Name())
 		}
 	}
 }

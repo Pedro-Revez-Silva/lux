@@ -173,6 +173,24 @@ type HostUsage struct {
 	FSFreeBytes       *int64 `json:"fsFreeBytes,omitempty"`
 	FSCapacityBytes   *int64 `json:"fsCapacityBytes,omitempty"`
 	DiskHeadroomBytes *int64 `json:"diskHeadroomBytes,omitempty"`
+	// DiskPressure: set while the runner's low-free-space guard holds the
+	// host under pressure (disk-scale runners only). Absent otherwise, and
+	// from older runners: luxd reads absent as no pressure.
+	DiskPressure *DiskPressure `json:"diskPressure,omitempty"`
+}
+
+// DiskPressure is a host under disk pressure: free bytes of the data
+// directory's filesystem fell below LowFreeBytes, and pressure lasts until
+// they are at least RecoverFreeBytes. LowFree and RecoverFree are the marks
+// as the operator gave them ("5%", "8.0 GiB"). NoRelief: the latest pass
+// found no unused image to remove and no over-limit placement to stop.
+type DiskPressure struct {
+	FreeBytes        int64  `json:"freeBytes"`
+	LowFreeBytes     int64  `json:"lowFreeBytes"`
+	RecoverFreeBytes int64  `json:"recoverFreeBytes"`
+	LowFree          string `json:"lowFree"`
+	RecoverFree      string `json:"recoverFree"`
+	NoRelief         bool   `json:"noRelief,omitempty"`
 }
 
 // ProcessUsage is the runner process's own, on each heartbeat. CPUSeconds
@@ -486,14 +504,21 @@ type ArtifactPublished struct {
 }
 
 // EvDiskExceeded: a placement was over its resources.disk (its writable
-// layer and state volumes) on every sample for its resources.diskGrace, or
-// on one sample at disklimit.CeilingFactor times the disk. luxd stops it.
+// layer and state volumes) on every sample for its resources.diskGrace, or,
+// on a host that does not scale disk, on one sample at
+// disklimit.CeilingFactor times the disk. luxd stops it.
 const EvDiskExceeded = "disk.exceeded"
 
 // EvDiskReleaseFailed: a spot placement's container or volumes could not be
 // removed at its end (data: error). Sent once; the runner keeps retrying,
 // and the end stays unreported, its disk reserved, until removal succeeds.
 const EvDiskReleaseFailed = "disk.release_failed"
+
+// EvDiskPressureStop: the runner's low-free-space guard asks luxd to stop a
+// placement over its effective disk limit while the host is under disk
+// pressure (data: usedBytes, limitBytes, excessBytes, freeBytes,
+// lowFreeBytes, recoverFreeBytes). luxd stops it; it ends failed.
+const EvDiskPressureStop = "disk.pressure_stop"
 
 // EvGitClone is a repository the runner cloned, or failed to:
 // {repo, status: cloned | failed, commit?, error?, requestId?} (requestId:

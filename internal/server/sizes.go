@@ -460,7 +460,7 @@ func diskShrinkRefusal(ctx context.Context, tx pgx.Tx, runID string, disk spec.B
 		return "no disk use is recorded for the snapshot it resumes from", nil, nil
 	case int64(disk) < diskShrinkFloor(*measured):
 		return fmt.Sprintf("its saved state used up to %s, which needs at least %s of disk (that plus max(25%%, 1 GiB))",
-			bytesText(*measured), bytesText(diskShrinkFloor(*measured))), measured, nil
+			spec.BytesText(*measured), spec.BytesText(diskShrinkFloor(*measured))), measured, nil
 	}
 	return "", nil, nil
 }
@@ -494,7 +494,7 @@ func holdSavedState(ctx context.Context, tx pgx.Tx, runID, pool string, m *sizin
 	top := ladder[len(ladder)-1]
 	return e, nil, errf(http.StatusUnprocessableEntity, "size_below_saved_state",
 		"pool %s: no size from %s up holds the Run's saved state: %s; the largest, %s, has %s of disk",
-		pool, e.Name, reason, top.Name, bytesText(int64(top.Disk)))
+		pool, e.Name, reason, top.Name, spec.BytesText(int64(top.Disk)))
 }
 
 // resizeShaped resolves a resume's request r in the shaped pool (its
@@ -542,7 +542,7 @@ func resizeShaped(ctx context.Context, tx pgx.Tx, runID, pool string, cur spec.R
 func errSizeBelowState(e sizing.Entry, why string) error {
 	return errf(http.StatusUnprocessableEntity, "size_below_saved_state",
 		"size %s has %s of disk, less than the Run has now: %s; a shaped pool never keeps a larger disk than its size, so choose a size with more disk",
-		e.Name, bytesText(int64(e.Disk)), why)
+		e.Name, spec.BytesText(int64(e.Disk)), why)
 }
 
 // resumeSizing is what resumeSize sizes a Run against.

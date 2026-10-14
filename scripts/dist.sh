@@ -44,7 +44,8 @@ wanted() { [[ " $ARCHES " == *" $1 "* ]]; }
 # disk-grace: resources.diskGrace and [defaults] disk_grace; an older luxd refuses both, an older runner stops on the first sample over.
 # disk-shaping: lux-runner --disk-headroom (disk-scale), shape.diskHeadroom, and shaped pools placing only on runners advertising their shape; an older luxd refuses diskHeadroom and places shaped Runs anywhere.
 # pool-placement: a pool's placement (spread or pack; shaped pools pack by default); an older luxd refuses the field and spreads every pool.
-FEATURES=(validate resume-secrets sync-modes resume-policy egress-wildcards artifact-publish git-credentials pool-sizes disk-grace disk-shaping pool-placement)
+# disk-pressure: disk-scale runners guard the host's free space (--disk-low-free, --disk-recover-free) instead of the 2x ceiling; luxd blocks admissions on a host's diskPressure and stops on disk.pressure_stop. Upgrade luxd first.
+FEATURES=(validate resume-secrets sync-modes resume-policy egress-wildcards artifact-publish git-credentials pool-sizes disk-grace disk-shaping pool-placement disk-pressure)
 
 rm -rf "$DIST"
 mkdir -p "$DIST"

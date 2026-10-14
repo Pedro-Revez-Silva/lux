@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"maps"
 	"os"
 	"path/filepath"
@@ -99,15 +100,20 @@ func TestDirSizeCountsHardlinksOnce(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(d, "c"), make([]byte, 10), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := dirSize(d); got != 1010 || err != nil {
+	if got, err := dirSize(context.Background(), d); got != 1010 || err != nil {
 		t.Errorf("dirSize = %d, %v, want 1010", got, err)
+	}
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := dirSize(ended, d); err == nil {
+		t.Error("dirSize with its context ended: nil error, want the walk cut short")
 	}
 }
 
 // dirSize's error is its root's: a missing root is an error, an unreadable
 // directory under it is skipped.
 func TestDirSizeErrorIsTheRoots(t *testing.T) {
-	if _, err := dirSize(filepath.Join(t.TempDir(), "gone")); err == nil {
+	if _, err := dirSize(context.Background(), filepath.Join(t.TempDir(), "gone")); err == nil {
 		t.Error("dirSize of a missing root: nil error")
 	}
 	t.Run("an unreadable subdirectory is skipped", func(t *testing.T) {
@@ -129,7 +135,7 @@ func TestDirSizeErrorIsTheRoots(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(sub, 0o700) }) // so TempDir can remove it
-		if got, err := dirSize(d); got != 10 || err != nil {
+		if got, err := dirSize(context.Background(), d); got != 10 || err != nil {
 			t.Errorf("dirSize = %d, %v, want 10, nil", got, err)
 		}
 	})

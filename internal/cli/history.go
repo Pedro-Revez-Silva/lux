@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/marcioapm/lux/internal/server"
+	"github.com/marcioapm/lux/internal/spec"
 )
 
 func (a *app) historyCmd() *cobra.Command {
@@ -231,7 +232,7 @@ func cores(v float64) string {
 	}
 }
 
-func bytesF(v float64) string { return bytesHuman(int64(v)) }
-func rateF(v float64) string  { return bytesHuman(int64(v)) + "/s" }
+func bytesF(v float64) string { return spec.BytesText(int64(v)) }
+func rateF(v float64) string  { return spec.BytesText(int64(v)) + "/s" }
 func plain(v float64) string  { return fmt.Sprintf("%g", v) }
 func secs(v float64) string   { return fmt.Sprintf("%.1fs", v) }

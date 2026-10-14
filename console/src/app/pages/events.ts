@@ -65,6 +65,8 @@ export function eventSummary(e: Event): string {
       return `disk ${typeof d.usedBytes === "number" ? formatBytes(d.usedBytes) : "?"} over its limit of ${typeof d.limitBytes === "number" ? formatBytes(d.limitBytes) : "?"}`;
     case "disk.release_failed":
       return `disk not released yet, retrying: ${str(d.error) ?? "?"}`;
+    case "disk.pressure_stop":
+      return str(d.reason) ?? "stopped: host disk pressure";
     case "push.requested":
       return `push ${str(d.requestId) ?? ""}`;
     case "resume.requested": {
@@ -260,6 +262,10 @@ export function infraEventSummary(e: LifecycleEvent): string {
       return `${s("run")} epoch ${s("epoch")}: ${s("outcome")}${s("reason") ? ` (${s("reason")})` : ""}`;
     case "host.drain_requested":
       return `${s("cause")}: ${s("reason")}${d.evict === true ? ", evicting its runs" : ""}`;
+    case "host.disk_pressure":
+      return `${s("reason")}; admissions blocked`;
+    case "host.disk_pressure_ended":
+      return `disk pressure ended: ${s("reason")}`;
     default:
       return s("reason");
   }

@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/marcioapm/lux/internal/server"
+	"github.com/marcioapm/lux/internal/spec"
 )
 
 // infraEventsCmd is `lux pools events` and `lux hosts events`: newest
@@ -163,6 +164,10 @@ func eventLine(e server.LifecycleEvent) string {
 		if d["evict"] == true {
 			line += ", evicting its Runs"
 		}
+	case "host.disk_pressure":
+		line = s("reason") + "; admissions blocked"
+	case "host.disk_pressure_ended":
+		line = "disk pressure ended: " + s("reason")
 	default:
 		line = s("reason")
 	}
@@ -304,9 +309,9 @@ func resourceAmount(resource string, v float64) string {
 		return plainNumber(v)
 	}
 	if v < 0 {
-		return "-" + bytesHuman(int64(-v))
+		return "-" + spec.BytesText(int64(-v))
 	}
-	return bytesHuman(int64(v))
+	return spec.BytesText(int64(v))
 }
 
 // plainNumber prints a JSON number without exponent notation.

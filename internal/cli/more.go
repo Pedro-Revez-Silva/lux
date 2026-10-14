@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/marcioapm/lux/internal/server"
+	"github.com/marcioapm/lux/internal/spec"
 )
 
 func (a *app) pushCmd() *cobra.Command {
@@ -200,7 +201,7 @@ func (a *app) snapshotsCmd() *cobra.Command {
 				if !s.Available {
 					where = []string{"unavailable"}
 				}
-				rows = append(rows, []string{s.ID, fmt.Sprint(s.Epoch), bytesHuman(size), strings.Join(where, ", "), ago(&s.CreatedAt)})
+				rows = append(rows, []string{s.ID, fmt.Sprint(s.Epoch), spec.BytesText(size), strings.Join(where, ", "), ago(&s.CreatedAt)})
 			}
 			a.table("ID\tEPOCH\tSIZE\tWHERE\tCREATED", rows)
 			return nil
@@ -283,7 +284,7 @@ func (a *app) artifactsCmd() *cobra.Command {
 			if dir == "" {
 				var rows [][]string
 				for _, art := range resp.Artifacts {
-					rows = append(rows, []string{art.ID, fmt.Sprint(art.Epoch), art.Path, fmt.Sprint(art.Version), bytesHuman(art.Size), art.ContentType,
+					rows = append(rows, []string{art.ID, fmt.Sprint(art.Epoch), art.Path, fmt.Sprint(art.Version), spec.BytesText(art.Size), art.ContentType,
 						oneLine(art.Description)})
 				}
 				a.table("ID\tEPOCH\tPATH\tVERSION\tSIZE\tTYPE\tDESCRIPTION", rows)
@@ -405,7 +406,7 @@ every host, with a TENANT column (--tenant: what that tenant sees).`,
 			var rows [][]string
 			for _, h := range resp.Hosts {
 				row := []string{h.Name, h.Pool, hostState(h), fmt.Sprint(h.LiveRuns), fmt.Sprintf("%g/%g", h.Allocated.CPUs, h.Capacity.CPUs),
-					bytesHuman(int64(h.Allocated.Memory)) + "/" + bytesHuman(h.Capacity.Memory), ago(h.LastHeartbeat)}
+					spec.BytesText(int64(h.Allocated.Memory)) + "/" + spec.BytesText(h.Capacity.Memory), ago(h.LastHeartbeat)}
 				if tenants {
 					row = append([]string{h.Name, cmp.Or(h.Tenant, "(platform)")}, row[1:]...)
 				}
@@ -448,8 +449,8 @@ every host, with a TENANT column (--tenant: what that tenant sees).`,
 			if h.ProviderID != nil {
 				fmt.Fprintf(w, "provider:  %s\n", *h.ProviderID)
 			}
-			fmt.Fprintf(w, "capacity:  %g cpus, %s memory, %s disk, %d runs\n", h.Capacity.CPUs, bytesHuman(h.Capacity.Memory), bytesHuman(h.Capacity.Disk), h.Capacity.Runs)
-			fmt.Fprintf(w, "allocated: %g cpus, %s memory\n", h.Allocated.CPUs, bytesHuman(int64(h.Allocated.Memory)))
+			fmt.Fprintf(w, "capacity:  %g cpus, %s memory, %s disk, %d runs\n", h.Capacity.CPUs, spec.BytesText(h.Capacity.Memory), spec.BytesText(h.Capacity.Disk), h.Capacity.Runs)
+			fmt.Fprintf(w, "allocated: %g cpus, %s memory\n", h.Allocated.CPUs, spec.BytesText(int64(h.Allocated.Memory)))
 			fmt.Fprintf(w, "heartbeat: %s\n", ago(h.LastHeartbeat))
 			fmt.Fprintln(w, "lifecycle:")
 			for _, k := range []string{"provisionRequested", "provisioned", "registered", "firstPlacement", "lastPlacementEnded",
@@ -462,7 +463,7 @@ every host, with a TENANT column (--tenant: what that tenant sees).`,
 				fmt.Fprintln(w, "runs:")
 				for _, p := range h.Placements {
 					fmt.Fprintf(w, "  %s  %-10s %-9s %s  %g cpus, %s  since %s\n", p.RunID, orDash(p.RunName), p.State, p.Tenant,
-						p.Resources.CPUs, bytesHuman(int64(p.Resources.Memory)), ago(&p.Since))
+						p.Resources.CPUs, spec.BytesText(int64(p.Resources.Memory)), ago(&p.Since))
 				}
 			}
 			return nil
@@ -520,6 +521,9 @@ func hostState(h server.Host) string {
 	if h.Draining && h.State != "draining" {
 		return h.State + " (draining)"
 	}
+	if h.DiskPressure != nil {
+		return h.State + " (disk pressure)"
+	}
 	return h.State
 }
 
@@ -546,9 +550,9 @@ func (a *app) tenantsCmd() *cobra.Command {
 			}
 			var rows [][]string
 			for _, t := range resp.Tenants {
-				stored := bytesHuman(t.StoredBytes)
+				stored := spec.BytesText(t.StoredBytes)
 				if t.MaxStorageBytes != nil {
-					stored += "/" + bytesHuman(*t.MaxStorageBytes)
+					stored += "/" + spec.BytesText(*t.MaxStorageBytes)
 				}
 				rows = append(rows, []string{t.Name, t.ID, fmt.Sprintf("%d/%s", t.ActiveRuns, limit(t.MaxConcurrentRuns)), fmt.Sprint(t.Runs),
 					fmt.Sprintf("%d/%s", t.Hosts, limit(t.MaxHosts)), stored, fmt.Sprintf("%dd", t.RetentionDays), expiry(t.ExpireAfterDays)})
@@ -599,7 +603,7 @@ placements hold. With an operator key, the whole system (--tenant narrows it).`,
 			fmt.Fprintf(w, "hosts:     %s\n", counts(st.Hosts))
 			c, u := st.Capacity, st.Allocated
 			fmt.Fprintf(w, "allocated: %g/%g cpus, %s/%s memory, %d/%d runs\n", u.CPUs, c.CPUs,
-				bytesHuman(u.Memory), bytesHuman(c.Memory), u.Runs, c.Runs)
+				spec.BytesText(u.Memory), spec.BytesText(c.Memory), u.Runs, c.Runs)
 			return nil
 		},
 	}
@@ -910,8 +914,8 @@ too, so a script can tell it from a shaped one.`,
 				if sz.Default {
 					def = "*"
 				}
-				rows = append(rows, []string{sz.Name, def, strconv.FormatFloat(sz.CPUs, 'f', -1, 64), bytesHuman(int64(sz.Memory)),
-					bytesHuman(int64(sz.Disk)), strconv.FormatFloat(sz.Fraction, 'f', -1, 64)})
+				rows = append(rows, []string{sz.Name, def, strconv.FormatFloat(sz.CPUs, 'f', -1, 64), spec.BytesText(int64(sz.Memory)),
+					spec.BytesText(int64(sz.Disk)), strconv.FormatFloat(sz.Fraction, 'f', -1, 64)})
 			}
 			a.table("SIZE\tDEFAULT\tCPUS\tMEMORY\tDISK\tFRACTION", rows)
 			return nil

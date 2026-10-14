@@ -29,7 +29,7 @@ func feed(w *Watch, grace time.Duration, samples ...int64) []Verdict {
 	c := newClock()
 	var out []Verdict
 	for _, u := range samples {
-		out = append(out, w.observe(u, limit, grace, c.next()))
+		out = append(out, w.observe(u, limit, grace, true, c.next()))
 	}
 	return out
 }
@@ -159,7 +159,7 @@ func TestCeilingReportsAtOnceDespiteTheGrace(t *testing.T) {
 	t.Run("no overflow near MaxInt64", func(t *testing.T) {
 		var w Watch
 		const big = int64(1) << 62
-		if v := w.observe(big+1, big, grace, newClock().next()); v.Step != WentOver {
+		if v := w.observe(big+1, big, grace, true, newClock().next()); v.Step != WentOver {
 			t.Fatalf("%+v, want WentOver: 2×limit overflows int64 and must not trip the ceiling", v)
 		}
 	})
@@ -243,8 +243,10 @@ func TestSampleUsesTheSpecAndFillsTheEvent(t *testing.T) {
 	}
 }
 
-// A scaled limit: the grace and the ceiling both count from the effective
-// limit, never the nominal one, and the event says both and the factor.
+// A scaled limit: the grace counts from the effective limit, never the
+// nominal one, and the event says both and the factor. A scaled limit has
+// no ceiling: however far over, only the grace reports it (the runner's
+// low-free-space guard bounds what it can write instead).
 func TestScaledLimitHoldsToTheEffective(t *testing.T) {
 	// 160 GiB nominal on a 160 GiB filesystem with 10 GiB headroom: 40 GiB
 	// asked holds to 37.5 GiB.
@@ -256,8 +258,13 @@ func TestScaledLimitHoldsToTheEffective(t *testing.T) {
 		if v := w.Sample(zero, 0, newClock().next()); v.Step != Quiet {
 			t.Fatalf("empty: %+v, want Quiet", v)
 		}
-		if v := w.Sample(zero, 1, newClock().next()); v.Step != Exceeded || !v.Ceiling {
-			t.Fatalf("one byte: %+v, want Exceeded at the zero-byte ceiling", v)
+		if v := w.Sample(zero, 1, newClock().next()); v.Step != WentOver {
+			t.Fatalf("one byte: %+v, want WentOver: a scaled limit has no ceiling", v)
+		}
+		zero.Grace = 0
+		var nw Watch
+		if v := nw.Sample(zero, 1, newClock().next()); v.Step != Exceeded || v.Ceiling {
+			t.Fatalf("one byte, grace 0: %+v, want Exceeded by the grace", v)
 		}
 	})
 	t.Run("between effective and nominal goes over", func(t *testing.T) {
@@ -288,15 +295,37 @@ func TestScaledLimitHoldsToTheEffective(t *testing.T) {
 			t.Errorf("event data %v, want %v", d, want)
 		}
 	})
-	t.Run("the ceiling is twice the effective limit", func(t *testing.T) {
+	t.Run("no ceiling: far over stays within the grace", func(t *testing.T) {
 		var w Watch
-		if v := w.Sample(l, CeilingFactor*effective-1, newClock().next()); v.Step != WentOver {
-			t.Fatalf("one byte under 2× effective: %+v, want WentOver", v)
+		c := newClock()
+		if v := w.Sample(l, CeilingFactor*effective, c.next()); v.Step != WentOver || v.Ceiling {
+			t.Fatalf("at 2× effective: %+v, want WentOver", v)
 		}
-		var cw Watch
-		v := cw.Sample(l, CeilingFactor*effective, newClock().next())
-		if v.Step != Exceeded || !v.Ceiling {
-			t.Fatalf("at 2× effective (under 2× nominal): %+v, want Exceeded at the ceiling", v)
+		if v := w.Sample(l, 100*effective, c.next()); v.Step != StillOver || v.Ceiling {
+			t.Fatalf("at 100× effective: %+v, want StillOver", v)
+		}
+		if w.Reported() {
+			t.Error("Reported() while within the grace")
 		}
 	})
+}
+
+// The unscaled limit keeps the ceiling exactly: one byte under twice the
+// limit goes over within the grace, twice the limit is reported at once.
+// Only Scaled lifts it.
+func TestUnscaledLimitKeepsTheCeiling(t *testing.T) {
+	l := Limit{Nominal: limit, Effective: limit, Factor: 1, Grace: time.Hour}
+	var w Watch
+	if v := w.Sample(l, CeilingFactor*limit-1, newClock().next()); v.Step != WentOver {
+		t.Fatalf("one byte under 2×: %+v, want WentOver", v)
+	}
+	var cw Watch
+	if v := cw.Sample(l, CeilingFactor*limit, newClock().next()); v.Step != Exceeded || !v.Ceiling {
+		t.Fatalf("at 2×: %+v, want Exceeded at the ceiling", v)
+	}
+	l.Scaled = true
+	var sw Watch
+	if v := sw.Sample(l, CeilingFactor*limit, newClock().next()); v.Step != WentOver {
+		t.Fatalf("scaled at 2×: %+v, want WentOver", v)
+	}
 }

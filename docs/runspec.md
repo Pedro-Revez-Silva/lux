@@ -199,12 +199,20 @@ availability immediately. See [CLI](cli.md#runs).
   luxd writes into the Run's stored spec at submit; an explicit `0s`
   stands over a non-zero default. Each placement (a resume, a move)
   starts its grace from zero.
-  **At its ceiling, currently twice its `disk`, a Run
-  is stopped at once, whatever its grace**: the host's disk is shared, and
-  a write left unbounded for the whole grace could fill it for every other
-  Run. Between two samples a Run can write about one interval's worth past
-  its ceiling. The ceiling stands in for a guard on the host's free space,
-  and will be replaced by one.
+  **On a host that does not scale disk, at its ceiling, twice its
+  `disk`, a Run is stopped at once, whatever its grace**: the host's disk
+  is shared, and a write left unbounded for the whole grace could fill it
+  for every other Run. Between two samples a Run can write about one
+  interval's worth past its ceiling. **On a host that scales disk** (a
+  shaped pool's: [shaped pools](concepts.md#shaped-pools)) there is no
+  ceiling: its runner guards the host's free space instead ([disk
+  pressure](operations.md#disk-pressure)). When the host runs low on
+  disk, a Run over its limit, even within its grace, may be stopped: it
+  gets a `disk.pressure_stop` event (`usedBytes`, `limitBytes`,
+  `excessBytes`, `freeBytes`, `lowFreeBytes`, `recoverFreeBytes`, and
+  `reason`) and ends `failed`, snapshotted as usual, with a reason such as
+  `stopped: host disk pressure, 12.3 GiB over its 37.5 GiB disk limit`. A
+  Run at or under its limit is never stopped for the host's disk.
   A sample whose measurement failed never restarts the count; it still
   counts if what was measured is already over the limit, so a Run whose
   disk cannot be measured at all is not stopped for it; the runner logs
@@ -215,7 +223,7 @@ availability immediately. See [CLI](cli.md#runs).
   pool's: [shaped pools](concepts.md#shaped-pools)), `limitBytes` is the
   limit the Run was held to, its `disk` scaled to the host's filesystem,
   and the data adds `nominalLimitBytes` (its `disk`) and `limitFactor`;
-  the grace and the ceiling count from `limitBytes`. Its state is kept: resume it with a
+  the grace counts from `limitBytes`, and `ceiling` is always `false`. Its state is kept: resume it with a
   larger limit (`lux resume <run> --disk 40Gi`, or `resources.disk` in the
   resume request) or a longer grace (`--disk-grace`,
   `resources.diskGrace`), or it is stopped again. tmpfs mounts (with

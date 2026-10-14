@@ -56,6 +56,8 @@ func spotWaitReason(blockers []AdmissionBlocker) string {
 			parts = append(parts, fmt.Sprintf("%d %s spare capacity free for under 60s", b.Hosts, plural(b.Hosts, "host has", "hosts have")))
 		case blockNormalPending:
 			parts = append(parts, "normal Runs are waiting for that capacity")
+		case blockDiskPressure:
+			parts = append(parts, fmt.Sprintf("%d %s under disk pressure (low free disk)", b.Hosts, plural(b.Hosts, "host is", "hosts are")))
 		}
 	}
 	return truncate("waiting for spot capacity: "+strings.Join(parts, ", "), maxWaitReason)
@@ -77,11 +79,12 @@ const (
 	blockNotEnough     = "not_enough_spare"
 	blockNotSettled    = "space_not_settled"
 	blockNormalPending = "normal_demand_pending"
+	blockDiskPressure  = "disk_pressure"
 )
 
 // AdmissionBlocker is why a Run would not start on some hosts now.
 type AdmissionBlocker struct {
-	Code             string `json:"code" enum:"no_hosts,constraint,capability,not_enough_spare,space_not_settled,normal_demand_pending" doc:"no_hosts: no live connected host in its pool or chosen host; constraint: labels, nesting, tenancy, pool shape, or another chosen host; capability: the host's lux-runner lacks a feature the Run needs; not_enough_spare: not enough unreserved cpus, memory, disk or run slots; space_not_settled (spot): the spare space has not been continuously free for more than 60s; normal_demand_pending (spot): a queued normal Run could use that space."`
+	Code             string `json:"code" enum:"no_hosts,constraint,capability,not_enough_spare,space_not_settled,normal_demand_pending,disk_pressure" doc:"no_hosts: no live connected host in its pool or chosen host; constraint: labels, nesting, tenancy, pool shape, or another chosen host; capability: the host's lux-runner lacks a feature the Run needs; not_enough_spare: not enough unreserved cpus, memory, disk or run slots; space_not_settled (spot): the spare space has not been continuously free for more than 60s; normal_demand_pending (spot): a queued normal Run could use that space; disk_pressure: the host's runner reports low free disk, and the host takes no new Run until it recovers."`
 	Hosts            int    `json:"hosts" doc:"How many hosts this blocks."`
 	Reason           string `json:"reason,omitempty" doc:"The first such host's reason, for constraint and capability."`
 	RemainingSeconds *int   `json:"remainingSeconds,omitempty" doc:"space_not_settled: the shortest wait after which the space would qualify if nothing changes."`
@@ -113,7 +116,7 @@ func (b blockerSet) add(code, reason string, remaining *time.Duration) {
 
 func (b blockerSet) list() []AdmissionBlocker {
 	var out []AdmissionBlocker
-	for _, code := range []string{blockNoHosts, blockConstraint, blockCapability, blockNotEnough, blockNotSettled, blockNormalPending} {
+	for _, code := range []string{blockNoHosts, blockConstraint, blockCapability, blockDiskPressure, blockNotEnough, blockNotSettled, blockNormalPending} {
 		if e := b[code]; e != nil {
 			out = append(out, *e)
 		}
@@ -130,6 +133,9 @@ func (b blockerSet) classify(blockers []fitBlocker) bool {
 		switch f.Kind {
 		case kindSpotReclaim, kindSyncModes:
 			b.add(blockCapability, f.Reason, nil)
+			return false
+		case kindDiskPressure:
+			b.add(blockDiskPressure, "", nil)
 			return false
 		case kindResource:
 		default:

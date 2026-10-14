@@ -344,7 +344,7 @@ func checkPoolFit(f poolFacts, name, poolID string, sp spec.RunSpec) error {
 			if b.Resource == "cpus" {
 				why = append(why, fmt.Sprintf("it needs %g cpus; its largest host has %g", b.Requested, largest))
 			} else {
-				why = append(why, fmt.Sprintf("it needs %s of %s; its largest host has %s", bytesText(int64(b.Requested)), b.Resource, bytesText(int64(largest))))
+				why = append(why, fmt.Sprintf("it needs %s of %s; its largest host has %s", spec.BytesText(int64(b.Requested)), b.Resource, spec.BytesText(int64(largest))))
 			}
 		}
 	}

@@ -1,6 +1,7 @@
 // Package disklimit decides when a placement over its disk limit is
-// reported: once it has been over for its resources.diskGrace, or at once
-// at CeilingFactor times the limit. The runner feeds it its disk samples.
+// reported: once it has been over for its resources.diskGrace, or, on a
+// host that does not scale disk, at once at CeilingFactor times the limit.
+// The runner feeds it its disk samples.
 package disklimit
 
 import (
@@ -9,11 +10,12 @@ import (
 	"github.com/marcioapm/lux/internal/spec"
 )
 
-// CeilingFactor: a Run using this many times its disk limit is reported at
-// once, its diskGrace notwithstanding. The host's disk is shared, and a
-// write left unbounded for the whole grace could fill it for every other
-// Run on it. An interim stand-in, until the runner guards the host's free
-// space.
+// CeilingFactor: on a host that does not scale disk, a Run using this many
+// times its disk limit is reported at once, its diskGrace notwithstanding.
+// The host's disk is shared, and a write left unbounded for the whole grace
+// could fill it for every other Run on it. A host that scales disk
+// (Limit.Scaled) has no ceiling: its runner's low-free-space guard stops
+// over-limit Runs when the filesystem runs low instead.
 const CeilingFactor = 2
 
 // Limit is what a placement's disk is held to. Effective is the limit
@@ -55,7 +57,8 @@ type Verdict struct {
 	// Remaining: the grace left, for WentOver and StillOver.
 	Remaining time.Duration
 	// Ceiling: Exceeded on a sample at CeilingFactor times the effective
-	// limit or more, whether or not the grace had also run out.
+	// limit or more, whether or not the grace had also run out. Never set
+	// for a scaled limit.
 	Ceiling bool
 }
 
@@ -65,10 +68,14 @@ func (w *Watch) Sample(l Limit, used int64, now time.Time) Verdict {
 	if l.Nominal <= 0 {
 		return Verdict{}
 	}
-	v := w.observe(used, l.Effective, l.Grace, now)
+	v := w.observe(used, l.Effective, l.Grace, !l.Scaled, now)
 	v.Of = l
 	return v
 }
+
+// Reported: this Watch has returned Exceeded (luxd is stopping the
+// placement).
+func (w *Watch) Reported() bool { return w.reported }
 
 // EventData is the disk.exceeded event's data for v. limitBytes is the
 // limit the Run was held to; on a host that scales disk, nominalLimitBytes
@@ -81,9 +88,9 @@ func (v Verdict) EventData(used int64) map[string]any {
 	return d
 }
 
-// observe takes one sample of used bytes against limit at now; Sample
-// fills the verdict's limit.
-func (w *Watch) observe(used, limit int64, grace time.Duration, now time.Time) Verdict {
+// observe takes one sample of used bytes against limit at now, with or
+// without the ceiling; Sample fills the verdict's limit.
+func (w *Watch) observe(used, limit int64, grace time.Duration, ceiling bool, now time.Time) Verdict {
 	if w.reported {
 		return Verdict{}
 	}
@@ -102,7 +109,7 @@ func (w *Watch) observe(used, limit int64, grace time.Duration, now time.Time) V
 	// reported as such even when the grace has run out too.
 	// used/CeilingFactor >= limit is used >= CeilingFactor×limit without
 	// overflowing int64.
-	if used/CeilingFactor >= limit {
+	if ceiling && used/CeilingFactor >= limit {
 		w.reported = true
 		return Verdict{Step: Exceeded, Ceiling: true}
 	}

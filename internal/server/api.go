@@ -2523,6 +2523,7 @@ type Host struct {
 	LastHeartbeat *time.Time            `json:"lastHeartbeat,omitempty"`
 	Times         map[string]*time.Time `json:"times" doc:"Its lifecycle. A host whose launch failed has no terminateRequested or terminated: no instance ever ran."`
 	Launch        *HostLaunch           `json:"launch,omitempty" doc:"How luxd's launch of it went; absent for a host that registered itself, or one from before launches were recorded."`
+	DiskPressure  *proto.DiskPressure   `json:"diskPressure,omitempty" doc:"Present while its runner's low-free-space guard reports disk pressure (lux-runner --disk-low-free): the host takes no new Run until free disk is back at the recovery mark. Absent otherwise, and from runners without the guard."`
 	// Placements: on GET /v1/hosts/{id} only, its live placements (the
 	// caller's; every tenant's for an operator).
 	Placements []HostPlacement `json:"placements,omitempty"`
@@ -2571,7 +2572,7 @@ const hostColumns = `h.id, h.name, coalesce(ht.name, ''), coalesce(hp.name, ''),
 	h.provider_id, h.instance_type, h.zone, h.market, h.last_heartbeat,
 	h.provision_requested_at, h.provisioned_at, h.registered_at, h.first_placement_at, h.last_placement_ended_at,
 	h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at,
-	h.launch_outcome, h.launch_finished_at, ` + hostLaunchError + `, h.volumes`
+	h.launch_outcome, h.launch_finished_at, ` + hostLaunchError + `, h.volumes, h.disk_pressure`
 
 // hostSeesProviderError, for SQL on hosts h with $1 as visibleHosts: a
 // platform host's provider error (account ids, role ARNs) is only for a
@@ -2627,7 +2628,7 @@ func hostScanDest(h *Host) hostDest {
 	var launchErr string
 	fields := []any{&h.ID, &h.Name, &h.Tenant, &h.Pool, &h.PoolID, &h.State, &h.StateReason, &h.Draining, &h.Labels, &h.Capacity, &h.Versions,
 		&h.Platform, &h.LiveRuns, &h.Allocated, &h.ProviderID, &h.InstanceType, &h.Zone, &h.Market, &h.LastHeartbeat,
-		&t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7], &t[8], &t[9], &outcome, &launched, &launchErr, &h.Volumes}
+		&t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7], &t[8], &t[9], &outcome, &launched, &launchErr, &h.Volumes, &h.DiskPressure}
 	return hostDest{fields, func() {
 		h.Times = map[string]*time.Time{
 			"provisionRequested": t[0], "provisioned": t[1], "registered": t[2], "firstPlacement": t[3],

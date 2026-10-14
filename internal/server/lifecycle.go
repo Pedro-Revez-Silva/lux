@@ -86,6 +86,34 @@ const (
 	spotScaleDownReason = "spot capacity reclaimed: host scaling down"
 )
 
+// stopDiskPressure is the stop reason of a placement its runner's
+// low-free-space guard stopped for being over its disk limit while the
+// host was low on disk (proto.EvDiskPressureStop). The Run ends failed,
+// its state_reason diskPressureStopReason's.
+const stopDiskPressure = "disk-pressure"
+
+// diskPressureStopReason is a disk.pressure_stop event's reason, e.g.
+// "stopped: host disk pressure, 12.3 GiB over its 37.5 GiB disk limit".
+func diskPressureStopReason(d map[string]any) string {
+	num := func(k string) int64 {
+		f, _ := d[k].(float64)
+		return int64(f)
+	}
+	return fmt.Sprintf("stopped: host disk pressure, %s over its %s disk limit", spec.BytesText(num("excessBytes")), spec.BytesText(num("limitBytes")))
+}
+
+// diskPressureStopped is the state_reason of a Run whose placement epoch
+// the disk guard stopped: its disk.pressure_stop event's reason.
+func diskPressureStopped(ctx context.Context, tx pgx.Tx, runID string, epoch int) (string, error) {
+	var reason string
+	err := tx.QueryRow(ctx, `SELECT data->>'reason' FROM run_events WHERE run_id = $1 AND epoch = $2 AND type = $3
+		ORDER BY id DESC LIMIT 1`, runID, epoch, proto.EvDiskPressureStop).Scan(&reason)
+	if errors.Is(err, pgx.ErrNoRows) || reason == "" {
+		return "stopped: host disk pressure", nil
+	}
+	return reason, err
+}
+
 // notResumedReason is the state_reason of a Run a move (stop) ended
 // because of its resumePolicy: failed (manual) or terminated (never).
 func notResumedReason(stop, policy string) string {
@@ -449,6 +477,11 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, runID
 		next, reason = StateFailed, "timeout"
 	case stopReason == "disk":
 		next, reason = StateFailed, "disk limit exceeded"
+	case stopReason == stopDiskPressure:
+		next = StateFailed
+		if reason, err = diskPressureStopped(ctx, tx, runID, epoch); err != nil {
+			return err
+		}
 	case failsOnMove:
 		// One-shot: what it was doing cannot continue on another host. The
 		// reason names the policy already, so never terminates it here.

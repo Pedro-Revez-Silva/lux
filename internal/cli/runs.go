@@ -410,7 +410,7 @@ func (a *app) getCmd() *cobra.Command {
 			}
 			if u := run.Usage; u != nil && u.Placements > 0 {
 				fmt.Fprintf(w, "usage:     peak memory %s, peak disk %s, cpu %.1fs\n",
-					bytesHuman(u.PeakMemoryBytes), bytesHuman(u.PeakDiskBytes), u.CPUSeconds)
+					spec.BytesText(u.PeakMemoryBytes), spec.BytesText(u.PeakDiskBytes), u.CPUSeconds)
 			}
 			if rs := run.Resume; rs != nil {
 				from := "from scratch"
@@ -448,7 +448,7 @@ func sizingLine(sz *server.RunSizing) string {
 	}
 	out := "-"
 	if r := sz.Resolved; r != nil {
-		out = fmt.Sprintf("%s (%s cpus, %s memory, %s disk)", r.Size, plainNumber(r.CPUs), bytesHuman(int64(r.Memory)), bytesHuman(int64(r.Disk)))
+		out = fmt.Sprintf("%s (%s cpus, %s memory, %s disk)", r.Size, plainNumber(r.CPUs), spec.BytesText(int64(r.Memory)), spec.BytesText(int64(r.Disk)))
 		if sz.RaisedFor != "" {
 			out += fmt.Sprintf(", raised from %s for its %s", sz.RaisedFrom, sz.RaisedFor)
 		}
@@ -462,10 +462,10 @@ func sizingLine(sz *server.RunSizing) string {
 			asked = append(asked, plainNumber(*q.CPUs)+" cpus")
 		}
 		if q.Memory != nil {
-			asked = append(asked, bytesHuman(int64(*q.Memory))+" memory")
+			asked = append(asked, spec.BytesText(int64(*q.Memory))+" memory")
 		}
 		if q.Disk != nil {
-			asked = append(asked, bytesHuman(int64(*q.Disk))+" disk")
+			asked = append(asked, spec.BytesText(int64(*q.Disk))+" disk")
 		}
 		if len(asked) == 0 {
 			asked = []string{"the pool's default"}
@@ -1156,7 +1156,7 @@ Run is checked as if it were stopped ("state unchecked" on stderr).`,
 			if rz := out.Resize; rz != nil && rz.Size != "" {
 				if rz.RaisedFor != "" {
 					fmt.Fprintf(a.stderr, "size: %s (raised from %s for its %s, which needs %s of disk)\n",
-						rz.Size, rz.RaisedFrom, rz.RaisedFor, bytesHuman(rz.NeededBytes))
+						rz.Size, rz.RaisedFrom, rz.RaisedFor, spec.BytesText(rz.NeededBytes))
 				} else {
 					fmt.Fprintln(a.stderr, "size:", rz.Size)
 				}

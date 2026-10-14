@@ -129,6 +129,11 @@ const (
 	evTerminateRequest = "host.terminate_requested"
 	evTerminated       = "host.terminated"
 	evHostProviderErr  = "host.provider_error"
+	// evDiskPressure: the host's runner reports disk pressure (data: reason,
+	// freeBytes, lowFreeBytes, recoverFreeBytes, noRelief), or a change of
+	// noRelief while under it; evDiskPressureEnded: it ended.
+	evDiskPressure      = "host.disk_pressure"
+	evDiskPressureEnded = "host.disk_pressure_ended"
 )
 
 // poolRetry: the events a pool writes on every provisioner tick while a

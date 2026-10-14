@@ -480,6 +480,29 @@ func (b *Bytes) UnmarshalYAML(unmarshal func(any) error) error {
 
 var bytesRe = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)\s*([KMGT]i?)?B?$`)
 
+// ParseBytes reads a size as Bytes does: "8Gi", "8GiB", "512Mi", "1G", or
+// a plain number of bytes.
+func ParseBytes(s string) (Bytes, error) {
+	var b Bytes
+	err := b.parse(s)
+	return b, err
+}
+
+// BytesText is n in binary units with one decimal ("4.1 GiB", "512 B"):
+// how luxd, the runner and the CLI print a byte count.
+func BytesText(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
 func (b *Bytes) parse(s string) error {
 	m := bytesRe.FindStringSubmatch(strings.TrimSpace(s))
 	if m == nil {

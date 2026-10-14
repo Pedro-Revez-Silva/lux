@@ -56,6 +56,9 @@ type candidateHost struct {
 	CapEpoch int64
 	// Shape: its pool's shape as stored (JSON text, "" for none).
 	Shape string
+	// DiskPressure: its runner's latest heartbeat reported disk pressure
+	// (hosts.disk_pressure); nil otherwise.
+	DiskPressure *proto.DiskPressure
 	// Spots: its live spot placements, oldest first (spot.go).
 	Spots []spotPlacement
 	// Pledges: per normal Run, the extra reservation its spot pledge here
@@ -366,7 +369,8 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 	rows, err := tx.Query(ctx, `
 		SELECT h.id, h.tenant_id, coalesce(p.name, ''), coalesce(h.pool_id, ''), h.labels, h.capacity, coalesce(h.caches->'images', '[]'),
 			coalesce(h.caches->'gitMirrors', '[]'),
-			coalesce(p.shared AND p.tenant_id IS NULL, false), coalesce(p.retired, false), h.capabilities, h.capacity_epoch, coalesce(p.shape::text, '')
+			coalesce(p.shared AND p.tenant_id IS NULL, false), coalesce(p.retired, false), h.capabilities, h.capacity_epoch, coalesce(p.shape::text, ''),
+			h.disk_pressure
 		FROM hosts h LEFT JOIN pools p ON p.id = h.pool_id
 		WHERE h.id = ANY($2) AND h.state = 'ready' AND NOT h.draining
 		  AND h.last_heartbeat > now() - $1::interval`,
@@ -379,7 +383,8 @@ func (s *Server) candidateHosts(ctx context.Context, tx pgx.Tx, lockedIDs []stri
 	for rows.Next() {
 		h := &candidateHost{}
 		var images []string
-		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.PoolID, &h.Labels, &h.Capacity, &images, &h.Mirrors, &h.Shared, &h.Retired, &h.Caps, &h.CapEpoch, &h.Shape); err != nil {
+		if err := rows.Scan(&h.ID, &h.TenantID, &h.Pool, &h.PoolID, &h.Labels, &h.Capacity, &images, &h.Mirrors, &h.Shared, &h.Retired, &h.Caps, &h.CapEpoch, &h.Shape,
+			&h.DiskPressure); err != nil {
 			rows.Close()
 			return nil, err
 		}
