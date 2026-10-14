@@ -96,6 +96,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Postgres and S3 are published on fixed host ports (the PG_PORT and
+      # S3_PORT defaults in tests/env.py) inside Linux's ephemeral range, so an
+      # earlier outgoing connection can hold one and Docker's bind then fails.
+      - name: Keep the shared services' ports out of the ephemeral range
+        run: sudo sysctl -w net.ipv4.ip_local_reserved_ports=55432,59000
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
