@@ -10,20 +10,25 @@ import { RunResources } from "./RunResources.tsx";
 import { RunServers } from "./RunServers.tsx";
 import { RunEvents, RunSnapshots, RunSpecView } from "./RunTabs.tsx";
 import { RunTimeline } from "./RunTimeline.tsx";
+import { RunSession } from "./session/RunSession.tsx";
+import { hasSession } from "./session/view.ts";
 
-const TABS = ["output", "servers", "timeline", "resources", "events", "snapshots", "spec"] as const;
+const TABS = ["session", "output", "servers", "timeline", "resources", "events", "snapshots", "spec"] as const;
 type Tab = (typeof TABS)[number];
 
 export function RunPage({ id }: { id: string }) {
   const { operator } = useScope();
   const now = useNow(5000);
-  // The tab lives in the URL (?tab=), so links can open one.
+  // The tab lives in the URL (?tab=), so links can open one; the first tab has none.
   const params = useSearchParams();
   const t = params.get("tab");
-  const tab: Tab = TABS.includes(t as Tab) ? (t as Tab) : "output";
-  const setTab = (next: Tab) => setSearchParams({ tab: next === "output" ? null : next });
   const q = useRun(id, { active: 3000, settled: 15_000, liveActive: 15_000, liveSettled: 60_000 });
   const run = q.data;
+  // Session exists only for an agent adapter: then it is first, else Output is.
+  const session = hasSession(run?.spec.workload.adapter);
+  const first: Tab = session ? "session" : "output";
+  const tab: Tab = TABS.includes(t as Tab) && (t !== "session" || session) ? (t as Tab) : first;
+  const setTab = (next: Tab) => setSearchParams({ tab: next === first ? null : next });
 
   if (q.error && !run) {
     return (
@@ -91,6 +96,7 @@ export function RunPage({ id }: { id: string }) {
         value={tab}
         onChange={setTab}
         items={[
+          ...(session ? [{ key: "session" as const, label: "Session" }] : []),
           { key: "output", label: "Output" },
           { key: "servers", label: "Servers", count: run.servers?.length || undefined },
           { key: "timeline", label: "Timeline", count: run.placements?.length },
@@ -100,6 +106,7 @@ export function RunPage({ id }: { id: string }) {
           { key: "spec", label: "Spec" },
         ]}
       />
+      {tab === "session" && <RunSession run={run} />}
       {tab === "output" && <RunOutput run={run} />}
       {tab === "servers" && <RunServers run={run} refetch={q.refetch} fetching={q.fetching} error={q.error} />}
       {tab === "timeline" && <RunTimeline run={run} now={now} />}

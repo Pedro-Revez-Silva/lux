@@ -13,10 +13,13 @@ import index from "./index.html";
 import { COST_TENANTS, costLabels, costSummary, submittedBy } from "./mockCosts.ts";
 import { history, hostHistory, poolMetrics, POOLS } from "./mockHistory.ts";
 import { costHost, hostCost, poolCost, runCost } from "./mockHostCost.ts";
+import { sessionOutput, sessionRun, sessionRunJson, SESSION_RUNS } from "./mockSessions.ts";
 
 const RUN_ID = "run_k3jq7x2mfa9vbn4z";
 const HOST_ID = "host_7f2cq9m1x0";
 const HOST = "gp-eu-west-1-c4";
+// The agent Runs of the Session tab (mockSessions.ts) run on the second ready host.
+const SESSION_HOST = { id: "host_3k8wq2n5vz", name: "gp-eu-west-1-a7" };
 const runState = process.env.MOCK_STATE ?? "running";
 const consoleAuth = process.env.MOCK_AUTH ?? "key";
 const tenantRole = process.env.MOCK_ROLE === "tenant";
@@ -269,8 +272,16 @@ async function api(req: Request, srv: Srv): Promise<Response> {
       const r = costLabels(u, callerTenant);
       return json(r.body, r.status);
     }
-    if (p === "/v1/runs") return json({ runs: [run()] });
+    if (p === "/v1/runs") return json({ runs: [run(), ...SESSION_RUNS.map((r) => sessionRunJson(r, SESSION_HOST))] });
     if (p === `/v1/runs/${RUN_ID}`) return json(run());
+    const sr = p.match(/^\/v1\/runs\/(run_[a-z0-9]+)(\/.*)?$/);
+    const sess = sr && sessionRun(sr[1]!);
+    if (sess) {
+      if (!sr![2]) return json(sessionRunJson(sess, SESSION_HOST));
+      if (sr![2] === "/output") return sessionOutput(sess, SESSION_HOST, u.searchParams.get("since"), req.signal);
+      if (sr![2] === "/cost") return json(runCost(sess.id, sessionRunJson(sess, SESSION_HOST).placements.map((x) => ({ ...x, hostId: x.host }))));
+      return json(sr![2].endsWith("history") ? { from: ago(3600), to: now(), resolution: 60, samples: [] } : { snapshots: [], artifacts: [], events: [], servers: [] });
+    }
     if (p === "/v1/servers") {
       const host = u.searchParams.get("hostname");
       const list = allServed().filter((x) => !host || x.hostname === host);

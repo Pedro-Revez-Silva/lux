@@ -262,3 +262,51 @@ export const IconGlobe = (p: IconProps) => (
     <path d="M1.75 8h12.5M8 1.75c1.8 1.7 2.7 3.8 2.7 6.25S9.8 12.55 8 14.25C6.2 12.55 5.3 10.45 5.3 8S6.2 3.45 8 1.75Z" />
   </Icon>
 );
+
+/* Session (agent transcript) icons. */
+export const IconAgent = (p: IconProps) => (
+  <Icon {...p}>
+    <circle cx="8" cy="5" r="2.5" />
+    <path d="M3 13.5c.6-2.6 2.6-4 5-4s4.4 1.4 5 4" />
+    <path d="M12.5 2.5l1 1M13.5 2.5l-1 1" />
+  </Icon>
+);
+export const IconFile = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M9 1.5H4.5a1 1 0 0 0-1 1v11a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1V5z" />
+    <path d="M9 1.5V5h3.5" />
+  </Icon>
+);
+export const IconThought = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M3 7a5 4 0 1 1 3.5 3.8L4 13l.6-2.8A4 4 0 0 1 3 7z" />
+  </Icon>
+);
+export const IconCompress = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M8 1.5v4M6 3.5l2 2 2-2M8 14.5v-4M6 12.5l2-2 2 2M2.5 8h11" />
+  </Icon>
+);
+export const IconShield = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M8 1.5l5 2v4c0 3.2-2.2 5.6-5 7-2.8-1.4-5-3.8-5-7v-4z" />
+    <path d="M5.8 8l1.6 1.6 2.8-3" />
+  </Icon>
+);
+export const IconListCheck = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M2.5 4l1 1 2-2M2.5 10l1 1 2-2M8 4.5h5.5M8 10.5h5.5" />
+  </Icon>
+);
+export const IconMove = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M2.5 8h11M10.5 5l3 3-3 3" />
+    <path d="M2.5 4.5v7" />
+  </Icon>
+);
+export const IconLock = (p: IconProps) => (
+  <Icon {...p}>
+    <rect x="3.5" y="7" width="9" height="6.5" rx="1.5" />
+    <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" />
+  </Icon>
+);

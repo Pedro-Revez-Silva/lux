@@ -60,7 +60,13 @@ assumed, the ended one's not known), and its events. Host-tied cost
 (compute and block storage), unallocated to an operator and to a tenant on
 its own pool only (with `MOCK_ROLE=tenant`, `default` hides it and `ci`
 shows it), rate periods with block storage's details, and the Run's cost
-with its placements. For layout, states
+with its placements. Four more Runs (`mockSessions.ts`) show the Run
+page's Session tab, their output streamed record by record: a live
+`opencode` Run with nested subagents, a compaction, a steer and a
+subagent's permission (scripted in lux's record shapes), and finished
+`claude-code` (a Task subagent), `codex` (a spawned subagent) and `acp`
+Runs that replay the recorded fixtures in
+`src/app/pages/session/testdata/`. For layout, states
 and screenshots only: nothing it answers is real. `tests/console_mock/`
 drives it in a headless browser (`cd tests && uv run pytest console_mock`;
 `LUX_TEST_CHROME` names a Chrome when Playwright's own is not installed).
@@ -103,7 +109,7 @@ Run-scoped calls (`/runs/{id}/…`, `/hosts/{id}/…`, `/artifacts/…`) do not 
 | --- | --- | --- |
 | `/` | Overview, tabs (`?tab=`): Activity (stat tiles, trend charts over the selected range at the page's step, the control host for operators, live activity feed), Cost (Show, Break down by family / label / API key / pool / tenant, label filters; KPIs, stacked bars, By &lt;breakdown&gt;, Top Runs with labels, Top tenants: `docs/costs.md` §9), Storage (the Stored chart) | `/status` (5s), `/history?since=&res=` (30s), `/costs?group=&label=&nolabel=&interval=` and `/costs/labels` (60s, while Cost is shown), `/events` SSE |
 | `/runs` | Runs over time and started/finished charts (the tenant scope's history over the global range; table filters do not narrow them), then the Runs table with state presets and chips, resumable/host/label filters; every column (Placement time and Cost included) sorts on the server across every match; cursor pages (First / Previous / Next, page size) | `/runs?sort=&dir=&limit=` with `next`/`prev`/`at` cursors (5s), `/history?since=` (30s) |
-| `/runs/:id` | Header + actions (Terminal, Stop, Terminate, Resume, Migrate), tabs (`?tab=`): Output (SSE), Servers (the run's `servers`; Add server with a lifetime, Attach server… (one of the tenant's unattached servers), start/stop/restart, remove, or detach a kept one, wake and lifetime tags, a log per server), Timeline (per-epoch waterfall), Resources (charts, epoch marks), Events, Snapshots & artifacts, Spec | `/runs/{id}` (3s while active), `/runs/{id}/output`, `/runs/{id}/servers/{name}/log`, `/history`, `/events`, `/snapshots`, `/artifacts` |
+| `/runs/:id` | Header + actions (Terminal, Stop, Terminate, Resume, Migrate), tabs (`?tab=`): Session (an agent Run's only, and then first: the output read as a conversation with its subagents, read-only; below), Output (SSE), Servers (the run's `servers`; Add server with a lifetime, Attach server… (one of the tenant's unattached servers), start/stop/restart, remove, or detach a kept one, wake and lifetime tags, a log per server), Timeline (per-epoch waterfall), Resources (charts, epoch marks), Events, Snapshots & artifacts, Spec | `/runs/{id}` (3s while active), `/runs/{id}/output`, `/runs/{id}/servers/{name}/log`, `/history`, `/events`, `/snapshots`, `/artifacts` |
 | `/runs/:id/terminal` | A shell in the run's container: xterm.js over the exec WebSocket, font size (persisted), terminal colours (Match console / Solarized light / Solarized dark: this terminal only, `lux.terminal.theme`, changed in place without reconnecting; the console theme stays in the top bar), Reconnect, Open in new tab; exited / lost overlays; an empty state while the run is not running | `/runs/{id}` (5s), `GET /runs/{id}/exec` (WebSocket; `POST /runs/{id}/tickets` first with a key) |
 | `/servers` | The tenant's servers: tiles (up, waking with the longest wait, asleep, stopped), a state filter (All / Up / Waking / Asleep), one row per server (state, wake, its run, owner, last request, idle countdown, wakes, created) | `/servers` (5s; refetched on `server.*` events) |
 | `/servers/:id` | One server: URL (copy, open), state and wake mode, actions (Restart, Stop, Detach, Delete); Served by (its run, placement, an open wake) and the idle countdown; tabs (`?tab=`): Overview (configuration), Events, Log. Not built yet: the 7-day uptime chart, cost tiles, and the table of runs that served it | `/servers/{id}` (3s), `/servers/{id}/events` (5s), `/servers/{id}/log` (5s) |
@@ -122,6 +128,20 @@ starts at page 1 and aborts the request in flight, and a refresh re-reads
 the page on screen from its own cursor, so polling never moves the reader.
 `pages/PagedEvents.tsx` is a pool's or a host's events on it: the design
 system's `EventTable` with a cursor `Pagination`, newest first.
+
+`pages/session/` is the Run page's Session tab (design:
+`docs/design/session-stream.md`). It opens the same output stream the
+Output tab reads (`useRunSession`: SSE, `<epoch>.<seq>` cursor, records
+folded in 50 ms batches) and builds the conversation in the browser:
+`projection.ts` folds records incrementally into threads of items (inputs
+with their phase, replies, thoughts, plans, tool calls with their updates,
+lux's markers and notes), one mapping per adapter (`acp.ts`, `opencode.ts`
+for OpenCode's `opencode.*` subagent records, `claude.ts` building the
+subagent tree from `parent_tool_use_id`, `codex.ts` from the app-server's
+`subAgentActivity` item and the child thread's notifications, `lux.ts`).
+`view.ts` turns it into what is drawn. The tests run on records lux wrote
+for real CLI runs (`testdata/`). A tool call's record link opens the
+Output tab; Output does not scroll to a record yet.
 
 ## Layout
 

@@ -10,7 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
-bun run test           # bun test: idle countdown and server states, money rounding, y scale, y axis width, chart stacking, bars, day ticks and faded colours, family colours, storage kind colours, CostFigure, PartBar shares, Meter clamping and text, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme (src/*.test.ts*)
+bun run test           # bun test: idle countdown and server states, money rounding, y scale, y axis width, chart stacking, bars, day ticks and faded colours, family colours, storage kind colours, CostFigure, PartBar shares, Meter clamping and text, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme, agent colour slots, ToolUsage, Markdown escaping, ToolCall (src/*.test.ts*)
 ```
 
 ## Using it
@@ -60,7 +60,8 @@ gallery/            the gallery app (index.html, Gallery.tsx, fake data)
 - Clean, calm, comfortable. One elevated surface (the card, a soft hairline,
   no shadow), quiet headers, whitespace instead of rules. Every page opens
   with a `PageHeader` (title, one line of context, primary actions on the
-  right). Nothing animates except live state dots, spinners and toasts.
+  right). Nothing animates except live state dots (a pill's, a running
+  subagent's `AgentMark`), spinners and toasts.
 - One control for "pick one of a few": the grey pill track (`Tabs` for
   what a page or card shows, `SegmentedControl` for a value; both draw
   alike). A page with more than one view puts its `Tabs` in the
@@ -96,6 +97,10 @@ gallery/            the gallery app (index.html, Gallery.tsx, fake data)
   the label. In a table cell there is not, so a figure that may still change
   gets a `~` prefix, never a colour, with the status spelled out in its
   Tooltip (`CostFigure`); `~` is what `lux ls` prints too.
+- An agent Run reads as a conversation first and a log second; both are
+  the same records, and each view links to the other (the Session
+  transcript's tool calls name their record in Output; the Output tab is
+  where input and interrupt are sent).
 
 ## Terminal scheme
 
@@ -130,6 +135,9 @@ them.
 | `--gap`, `--gap-lg`, `--pad-page` | 20, 28, 32px | 16, 20, 24px |
 | `--sidebar-w`, `--topbar-h` | 232, 52px | 208, 44px |
 | `--chart-h` | 200px (240 at 1920, 280 at 2560) | 180px (210, 240) |
+| `--session-rail-w` | 360px (420 at 1920, 480 at 2560) | 320px (380, 440) |
+| `--measure` | 760px (880 at 1920) | 720px (840 at 1920) |
+| `--turn-gap`, `--tool-row-h` | 12, 30px | 8, 26px |
 
 ## Breakpoints
 
@@ -212,6 +220,7 @@ All in `src/tokens.css`.
 | Semantic | `--{success,warn,danger,info}-{fg,bg,dot}` |
 | State hues | `--st-{neutral,blue,teal,green,amber,red,violet}-{fg,bg,dot}` |
 | Chart | `--chart-1` … `--chart-8` (fixed order; cost families and stored blob kinds map onto them, compute is `--chart-1`, breakdown bands never are: `bandColor`), `--chart-grid` `--chart-axis` `--chart-label` `--chart-cursor`, `--chart-h`; unallocated cost uses `--st-neutral-dot` |
+| Agents | `--agent-1` … `--agent-5`: aliases of `--chart-3, 7, 2, 5, 4` (no new colour, the validated palette, never compute's blue); a subagent type takes the next slot in first-seen order for the whole Run (`agentSlot`, `agentColor`), always beside its name |
 | Logs | `--log-stderr-bg` `--log-stderr-fg` `--log-line-hover` |
 | Terminal | `--term-bg` `--term-scrollbar` (the frame around the screen, following the console theme; a Terminal with a `scheme` sets its own on `.term[data-term-scheme]`; the screen's palette is `terminalThemes.ts`) |
 | Type | `--font-sans` `--font-mono`, `--text-{xs,sm,md,lg,xl,2xl,3xl}` (density-dependent), `--leading-{tight,normal}`, `--weight-{normal,medium,semibold}` |
@@ -221,6 +230,7 @@ All in `src/tokens.css`.
 | Pill controls | `--seg-track` (the sunken track), `--seg-on` and `--seg-on-shadow` (the chosen pill: white with a hairline in light, a lighter step in dark) |
 | Motion | `--dur-{fast,normal,slow}` (100/180/300ms, 0 under reduced motion), `--ease` |
 | Layout | `--sidebar-w` `--sidebar-rail-w` `--topbar-h` `--row-h` `--row-h-dense` `--control-h` `--control-h-sm` `--control-h-lg` `--page-list-w` `--page-detail-w` `--feed-w` |
+| Session | `--session-rail-w` (the rail beside a transcript), `--measure` (longest line of agent prose), `--turn-gap`, `--tool-row-h` (a folded tool call), `--subagent-indent` (18px, a level of the subagent tree) |
 
 State mapping (`src/states.ts`):
 
@@ -331,7 +341,11 @@ KeyValue, IdChip, Code, PageHeader (with optional breadcrumbs; CrumbSep),
 SectionHeader (a sentence-case `--text-lg` semibold title between groups
 of cards, its `note` beside it, `actions` such as a `Tabs size="sm"` on
 the right), ConfirmDialog, Dialog (a form modal), Toast (`useToast`),
-EmptyState, Spinner, Skeleton, PartBar, Meter, Callout (below). Hooks: `useTheme`, `useDensity`, `useTerminalScheme`, `useNow` (the shared
+EmptyState, Spinner, Skeleton, PartBar, Meter, Callout (below), and the
+Session components (SessionTranscript, InputTurn, MessageTurn, ThoughtTurn,
+PlanTurn, ToolCall, SessionMarker, Note, SubagentStub, SubagentTree,
+SubagentPanel, AgentMark, SessionRail, RailCard, RailFacts, ToolUsage;
+below). Hooks: `useTheme`, `useDensity`, `useTerminalScheme`, `useNow` (the shared
 clock relative times tick on), `useCopy`. All exported
 from `src/index.ts` with typed props; icons from `@lux/design-system/icons`.
 
@@ -395,6 +409,30 @@ Parts of a whole, ratios and page notes (gallery section "parts"):
 | `TimeSeriesChart` series `faded` | a lighter, opaque shade of the series' colour (`fadedColor`: mixed toward `--bg-surface`, keeping `FADE_KEEP`, 42%), the same in the plot, the legend and the tooltip: one family split into "charged to runs" and "not" (gallery: costs, "Host cost per day") |
 | `fadedCss(color)` | the same faded shade for the DOM: `color-mix()` of a token toward `--bg-surface`, keeping `FADE_KEEP`, so a `PartBar` segment or swatch under a chart matches its faded series (gallery: parts, "Charged to runs vs unallocated") |
 | `TimeSeriesChart` day bars | bars a day or wider put one x tick under each bar (`barTicks`), every k-th when they do not fit. They are UTC-day buckets (cost): the tick names the UTC date (`timeTickText`) and the tooltip the UTC day ("2026-10-09 UTC", `bucketText`), whatever the browser's zone |
+
+Session: an agent Run as a conversation (gallery section "session"; the
+console's Run page Session tab). Layout: `.session-layout` puts the
+transcript beside a `SessionRail` of `--session-rail-w`; under 1000px of
+content the rail is not drawn and a subagent opens in a modal `<dialog>`
+with the `Dialog` frame (`.dialog`), its `SubagentPanel` `bare`.
+`.session-pane-h` gives transcript and panel the page's height.
+
+| Export | What |
+| --- | --- |
+| `SessionTranscript({title?, subtitle?, actions?, itemCount, contentKey?, note?, status?, empty?})` | a card: head (title, adapter · model, an Everything / Messages `SegmentedControl` in `actions`), a scroller whose turns keep to `--measure`, a bar (read-only note, figures, Follow) and the "N new · Jump to latest" pill. Follow as `LogView`: scrolling up turns it off, back to the bottom turns it on; `itemCount` growth while off is what the pill counts; `contentKey` keeps a streaming reply's tail in view. `empty` replaces the turns (an `EmptyState` before the first record) |
+| `InputTurn({text, sender?, steer?, phase, error?, truncated?, attachments?})` | what lux delivered: Prompt or Steer, from whom, its phase as a Badge in words (`sent`, `accepted`, `consumed`, `failed`, each explained in its title) |
+| `MessageTurn({text, streaming?, cutNote?})` | the agent's prose through `Markdown` (paragraphs, fenced code, lists, `code`, **bold**; text only, never HTML); a drawn caret while `streaming` (not blinking: only live dots animate) |
+| `ThoughtTurn({text, seconds?})`, `PlanTurn({steps})` | a thought folded to "Thought for 6s"; a plan as a checklist, "n of m done", the step in progress in the foreground weight, done ones struck through and checked (never colour alone) |
+| `ToolCall({name, summary?, summaryMono?, status, start?, end?, now?, input?, diff?, output?, error?, cutNote?, record?, children?})` | one folded row (tool icon by name: `toolIcon`, the name in mono, the summary, a live duration, a status icon with its word for screen readers) that opens to Input, Change (`DiffLines`: `+`, `-`, `@@` keep their sign beside their colour), Output and the record link (`record {label, href?, onClick?}`). An error's first line shows folded. `children`: its `SubagentStub` |
+| `SessionMarker({type, children, summary?, summaryNote?})`, `Note({tone, children, detail?})` | a hairline with text for lux's own events (epoch, move, resume, turn end, compaction with an expandable summary, Run ended); one iconed line for a permission lux answered by policy (`Shield`) or a warning |
+| `SubagentStub`, `SubagentTree`, `SubagentPanel` (`SubagentSummary`: `{id, title, agent?, model?, color, status, startedAt?, endedAt?, tools, subagents?}`) | the row under a task call (colour rail, agent name, `SubagentStatusBadge`, last activity, counts, Open; Enter or Space open it); the rail's tree (a guide per depth, `--subagent-indent`); one subagent in the rail's place: header ruled in its colour, back link up its parent chain, facts, id, "Briefed with" (its cut named), its turns, the adapter's footnote. `bare` drops the card frame for a `Dialog` |
+| `AgentMark({color, live?})`, `agentSlot(slots, agent)`, `agentColor(slot)` | the agent colour dot, pulsing only while the subagent runs (none under reduced motion); a type's slot in first-seen order, and its `--agent-N` |
+| `SessionRail`, `RailCard({title, count?, aside?, flush?})`, `RailFacts({items})` | the column beside a transcript, its cards and label/value lines |
+| `ToolUsage({counts})` | calls per tool, most used first, one `--chart-1` bar each with the count beside it |
+
+Icons for it (`@lux/design-system/icons`): `IconAgent`, `IconFile`,
+`IconThought`, `IconCompress`, `IconShield`, `IconListCheck`, `IconMove`,
+`IconLock`.
 
 A cost family is always named with its `ColorKey` square: rows
 (`FamilyKey`, `BreakdownTable`), KPIs and StatTiles (`swatch`), bar and

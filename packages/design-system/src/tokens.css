@@ -82,6 +82,14 @@
   --chart-label: #6b7079;
   --chart-cursor: #8a9099;
 
+  /* Subagents: an agent type keeps one colour for a whole Run, slots taken
+     in first-seen order. Aliases of the validated chart palette (no new
+     colour), skipping compute's blue; always beside the agent's name. */
+  --agent-1: var(--chart-3);
+  --agent-2: var(--chart-7);
+  --agent-3: var(--chart-2);
+  --agent-4: var(--chart-5);
+  --agent-5: var(--chart-4);
   /* Log streams */
   --log-stderr-bg: rgba(208, 59, 59, 0.07);
   --log-stderr-fg: #8f2b2b;
@@ -208,6 +216,13 @@
   --gap-lg: 28px;
   --pad-page: 32px;
   --chart-h: 200px;
+  /* Session: the rail beside a transcript, the longest line of agent prose,
+     the space between turns, a folded tool call, a level of the subagent tree. */
+  --session-rail-w: 360px;
+  --measure: 760px;
+  --turn-gap: var(--sp-5);
+  --tool-row-h: 30px;
+  --subagent-indent: 18px;
 }
 :root[data-density="compact"] {
   --text-xs: 11px;
@@ -230,6 +245,10 @@
   --gap-lg: 20px;
   --pad-page: 24px;
   --chart-h: 180px;
+  --session-rail-w: 320px;
+  --measure: 720px;
+  --turn-gap: var(--sp-4);
+  --tool-row-h: 26px;
 }
 
 /* Breakpoints (viewport): 640 phone, 768 drawer/rail, 1280 full sidebar,
@@ -238,18 +257,24 @@
   :root {
     --chart-h: 240px;
     --feed-w: 400px;
+    --session-rail-w: 420px;
+    --measure: 880px;
   }
   :root[data-density="compact"] {
     --chart-h: 210px;
+    --session-rail-w: 380px;
+    --measure: 840px;
   }
 }
 @media (min-width: 2560px) {
   :root {
     --chart-h: 280px;
     --feed-w: 440px;
+    --session-rail-w: 480px;
   }
   :root[data-density="compact"] {
     --chart-h: 240px;
+    --session-rail-w: 440px;
   }
 }
 /* Below large (1280px): written as the exact complement of

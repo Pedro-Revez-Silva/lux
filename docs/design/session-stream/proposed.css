@@ -1,0 +1,317 @@
+/* ================================================================
+   PROPOSED design-system additions: Session (agent transcript).
+   Only existing tokens are used, plus the few new ones declared here.
+   Would land as a "Session" section in components.css + tokens.css.
+   ================================================================ */
+:root {
+  /* New tokens (tokens.css). Comfortable values; compact below. */
+  --session-rail-w: 360px;      /* the rail beside a transcript */
+  --measure: 760px;             /* longest line of agent prose */
+  --turn-gap: var(--sp-5);      /* between turns */
+  --tool-row-h: 30px;           /* a folded tool call */
+  --subagent-indent: 18px;      /* per nesting level in the rail tree */
+  /* Subagent colours: an agent (type) keeps its colour for the whole Run,
+     slots taken in first-seen order from the validated chart palette. */
+  --agent-1: var(--chart-3);
+  --agent-2: var(--chart-7);
+  --agent-3: var(--chart-2);
+  --agent-4: var(--chart-5);
+  --agent-5: var(--chart-4);
+}
+html[data-density="compact"] {
+  --session-rail-w: 320px;
+  --measure: 720px;
+  --turn-gap: var(--sp-4);
+  --tool-row-h: 26px;
+}
+@media (min-width: 1920px) { :root { --session-rail-w: 420px; --measure: 880px; } }
+@media (min-width: 2560px) { :root { --session-rail-w: 480px; } }
+
+/* ---------- Layout: transcript + rail (the Session tab) ---------- */
+.session-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--session-rail-w);
+  gap: var(--gap);
+  align-items: start;
+}
+@container content (max-width: 1000px) {
+  .session-layout { grid-template-columns: minmax(0, 1fr); }
+  .session-layout > .session-rail { display: none; }
+}
+.session-pane-h { height: clamp(420px, calc(100vh - 360px), 1100px); }
+
+/* ---------- SessionTranscript: a card with a scroller and a bar ---------- */
+.transcript {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  min-height: 0;
+  position: relative;
+}
+.transcript-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  padding: var(--sp-5) var(--pad-card);
+  border-bottom: 1px solid var(--border-soft);
+}
+.transcript-head .card-titles { flex: 1; min-width: 0; }
+.transcript-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-6) var(--pad-card) var(--sp-7);
+  scroll-behavior: auto;
+}
+.transcript-scroll:focus-visible { outline: none; box-shadow: inset var(--focus-ring); }
+.transcript-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  padding: 0 var(--sp-5) 0 var(--pad-card);
+  height: 34px;
+  border-top: 1px solid var(--border-soft);
+  font-size: var(--text-xs);
+  color: var(--fg-muted);
+}
+.transcript-bar .grow { flex: 1; }
+.transcript-readonly { display: inline-flex; align-items: center; gap: var(--sp-2); }
+.transcript-jump {
+  position: absolute;
+  left: 50%;
+  bottom: 48px;
+  transform: translateX(-50%);
+  display: inline-flex; align-items: center; gap: var(--sp-3);
+  height: var(--control-h-sm);
+  padding: 0 var(--sp-5);
+  border-radius: var(--radius-pill);
+  background: var(--fg);
+  color: var(--bg-surface);
+  font-size: var(--text-sm);
+  border: 0;
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+}
+.transcript-jump[hidden] { display: none; }
+.transcript-empty { padding: var(--sp-9) var(--sp-7); text-align: center; color: var(--fg-muted); }
+.transcript-empty .spinner { margin-bottom: var(--sp-5); }
+
+.turns { display: flex; flex-direction: column; gap: var(--turn-gap); max-width: var(--measure); margin: 0 auto; }
+.turns.is-wide { max-width: none; }
+
+/* ---------- Turn: a row with an optional time on the right ---------- */
+.turn { position: relative; }
+.turn-time {
+  position: absolute; right: calc(-1 * var(--sp-7) - 52px); top: 2px;
+  font: var(--text-xs) var(--font-mono); color: var(--fg-faint);
+  opacity: 0; transition: opacity var(--dur-fast) var(--ease);
+}
+.turn:hover > .turn-time { opacity: 1; }
+
+/* Input: what lux delivered to the agent (lux.input), with its phase. */
+.turn-input {
+  background: var(--bg-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--sp-4) var(--sp-5);
+}
+.turn-input-head {
+  display: flex; align-items: center; gap: var(--sp-3);
+  font-size: var(--text-xs); color: var(--fg-muted); margin-bottom: var(--sp-2);
+}
+.turn-input-head b { color: var(--fg-secondary); font-weight: var(--weight-medium); }
+.turn-input-text { white-space: pre-wrap; color: var(--fg); }
+.turn-input-head .badge { margin-left: auto; }
+
+/* Agent prose. */
+.turn-msg { color: var(--fg); line-height: 1.55; }
+.turn-msg p { margin: 0 0 var(--sp-4); }
+.turn-msg p:last-child { margin-bottom: 0; }
+.turn-msg ul, .turn-msg ol { margin: 0 0 var(--sp-4); padding-left: 20px; }
+.turn-msg code { font-family: var(--font-mono); font-size: 0.92em; background: var(--bg-subtle); padding: 1px 4px; border-radius: var(--radius-sm); }
+.turn-msg pre { font: var(--text-sm)/1.5 var(--font-mono); background: var(--bg-inset); border: 1px solid var(--border-soft); border-radius: var(--radius-md); padding: var(--sp-4) var(--sp-5); overflow-x: auto; margin: 0 0 var(--sp-4); }
+.turn-msg.is-streaming::after {
+  content: ""; display: inline-block; width: 7px; height: 1.05em; vertical-align: text-bottom;
+  margin-left: 2px; background: var(--accent); border-radius: 1px; animation: caret 1s steps(1) infinite;
+}
+@keyframes caret { 50% { opacity: 0; } }
+
+/* Thought (agent_thought_chunk / thinking): folded to one quiet line. */
+.thought { font-size: var(--text-sm); color: var(--fg-muted); }
+.thought-toggle { display: inline-flex; align-items: center; gap: var(--sp-2); background: none; border: 0; padding: 0; color: inherit; cursor: pointer; font: inherit; }
+.thought-toggle:hover { color: var(--fg-secondary); }
+.thought-toggle svg { transition: transform var(--dur-fast) var(--ease); }
+.thought.is-open .thought-toggle svg { transform: rotate(90deg); }
+.thought-body { margin: var(--sp-2) 0 0 18px; padding-left: var(--sp-5); border-left: 2px solid var(--border); font-style: italic; white-space: pre-wrap; }
+
+/* ---------- ToolCall: one folded row, opens in place ---------- */
+.tools { display: flex; flex-direction: column; gap: 2px; }
+.toolcall { border-radius: var(--radius-md); }
+.toolcall.is-open { background: var(--bg-inset); box-shadow: inset 0 0 0 1px var(--border-soft); }
+.toolcall-row {
+  display: grid;
+  grid-template-columns: 16px auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--sp-4);
+  min-height: var(--tool-row-h);
+  padding: 0 var(--sp-4);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  width: 100%; border: 0; background: none; text-align: left; color: inherit; font-family: inherit;
+}
+.toolcall-row:hover { background: var(--log-line-hover); }
+.toolcall-row:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.toolcall-icon { color: var(--fg-muted); display: inline-grid; }
+.toolcall-name { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-secondary); }
+.toolcall-summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
+.toolcall-summary.mono { font-size: var(--text-xs); }
+.toolcall-dur { font: var(--text-xs) var(--font-mono); color: var(--fg-muted); min-width: 44px; text-align: right; }
+.toolcall-status { display: inline-flex; align-items: center; justify-content: center; width: 16px; }
+.toolcall-status.is-done { color: var(--success-dot); }
+.toolcall-status.is-error { color: var(--danger-fg); }
+.toolcall-status.is-pending { color: var(--fg-faint); }
+.toolcall-error { padding: 0 var(--sp-4) var(--sp-3) calc(var(--sp-4) + 16px + var(--sp-4)); font-size: var(--text-xs); color: var(--danger-fg); }
+.toolcall-detail { padding: 0 var(--sp-4) var(--sp-4) calc(var(--sp-4) + 16px + var(--sp-4)); display: flex; flex-direction: column; gap: var(--sp-4); }
+.toolcall-section-label { font-size: var(--text-xs); color: var(--fg-muted); margin-bottom: var(--sp-2); display: flex; gap: var(--sp-3); align-items: center; }
+.toolcall-pre {
+  font: var(--text-xs)/1.55 var(--font-mono);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-3) var(--sp-4);
+  max-height: 260px; overflow: auto; white-space: pre; margin: 0;
+}
+.toolcall-pre .d-add { color: var(--ansi-green); }
+.toolcall-pre .d-del { color: var(--ansi-red); }
+.toolcall-pre .d-hunk { color: var(--ansi-cyan); }
+.toolcall-foot { display: flex; gap: var(--sp-5); font-size: var(--text-xs); color: var(--fg-muted); align-items: center; }
+.toolcall-foot a { color: var(--accent-text); text-decoration: none; }
+.toolcall-foot a:hover { text-decoration: underline; }
+.cut-note { font-size: var(--text-xs); color: var(--warn-fg); }
+
+/* A task call that runs a subagent: the row, then a stub in the agent's colour. */
+.subthread {
+  --agent: var(--fg-faint);
+  margin: 2px 0 var(--sp-2) calc(var(--sp-4) + 7px);
+  border-left: 2px solid var(--agent);
+  padding: var(--sp-3) var(--sp-4) var(--sp-3) var(--sp-5);
+  display: flex; align-items: center; gap: var(--sp-4);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+.subthread:hover { background: var(--log-line-hover); }
+.subthread.is-selected { background: var(--accent-subtle); }
+.subthread-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.subthread-title { display: flex; align-items: center; gap: var(--sp-3); }
+.subthread-title b { font-weight: var(--weight-medium); }
+.subthread-last { font-size: var(--text-xs); color: var(--fg-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.subthread-meta { font: var(--text-xs) var(--font-mono); color: var(--fg-muted); white-space: nowrap; }
+.subthread-open { font-size: var(--text-xs); color: var(--accent-text); display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; }
+
+/* AgentMark: a dot in the agent's colour, never alone (always beside its name). */
+.agent-mark { width: 8px; height: 8px; border-radius: 50%; background: var(--agent); flex: none; }
+.agent-mark.is-live { box-shadow: 0 0 0 0 var(--agent); animation: agent-pulse 1.6s ease-out infinite; }
+@keyframes agent-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--agent) 55%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }
+.agent-name { font-weight: var(--weight-medium); }
+
+/* ---------- SessionMarker: what lux itself did, between turns ---------- */
+.marker {
+  display: flex; align-items: center; gap: var(--sp-4);
+  font-size: var(--text-xs); color: var(--fg-muted);
+}
+.marker::before, .marker::after { content: ""; flex: 1; height: 1px; background: var(--border-soft); }
+.marker-body { display: inline-flex; align-items: center; gap: var(--sp-3); white-space: nowrap; max-width: 80%; overflow: hidden; text-overflow: ellipsis; }
+.marker-body b { color: var(--fg-secondary); font-weight: var(--weight-medium); }
+.marker-body button { background: none; border: 0; padding: 0; color: var(--accent-text); font: inherit; cursor: pointer; }
+.marker.is-turn::before, .marker.is-turn::after { background: transparent; }
+.marker.is-turn .marker-body { color: var(--fg-faint); }
+.marker-summary { margin: var(--sp-3) auto 0; max-width: 92%; font-size: var(--text-sm); color: var(--fg-secondary); background: var(--bg-inset); border-radius: var(--radius-md); padding: var(--sp-4) var(--sp-5); white-space: pre-wrap; }
+
+/* Note: a permission lux answered by policy, a warning. One line, iconed. */
+.note { display: flex; align-items: flex-start; gap: var(--sp-3); font-size: var(--text-xs); color: var(--fg-muted); padding: 0 var(--sp-4); }
+.note svg { flex: none; margin-top: 1px; }
+.note.is-warn { color: var(--warn-fg); }
+.note code { font-family: var(--font-mono); }
+
+/* Plan (acp plan / todowrite): a compact checklist. */
+.plan { border: 1px solid var(--border-soft); border-radius: var(--radius-md); padding: var(--sp-4) var(--sp-5); font-size: var(--text-sm); }
+.plan-head { display: flex; justify-content: space-between; font-size: var(--text-xs); color: var(--fg-muted); margin-bottom: var(--sp-3); }
+.plan ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.plan li { display: flex; gap: var(--sp-3); align-items: center; }
+.plan li.is-done { color: var(--fg-muted); text-decoration: line-through; text-decoration-color: var(--fg-faint); }
+.plan li.is-now { font-weight: var(--weight-medium); }
+.plan-box { width: 14px; height: 14px; border-radius: 4px; border: 1.5px solid var(--border-strong); display: inline-grid; place-items: center; flex: none; }
+.plan li.is-done .plan-box { background: var(--success-dot); border-color: var(--success-dot); color: #fff; }
+.plan li.is-now .plan-box { border-color: var(--accent); }
+
+/* Live activity at the tail. */
+.activity-tail { display: flex; align-items: center; gap: var(--sp-3); font-size: var(--text-sm); color: var(--fg-muted); }
+
+/* ---------- SessionRail: facts, subagents, tools (right column) ---------- */
+.session-rail { display: flex; flex-direction: column; gap: var(--gap); min-height: 0; }
+.rail-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+.rail-card-head { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-5) var(--pad-card) var(--sp-3); font-size: var(--text-sm); font-weight: var(--weight-semibold); }
+.rail-card-head .muted { font-weight: var(--weight-normal); }
+.rail-card-body { padding: 0 var(--pad-card) var(--sp-5); }
+.rail-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--sp-3) var(--sp-5); font-size: var(--text-sm); margin: 0; }
+.rail-facts dt { color: var(--fg-muted); }
+.rail-facts dd { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* SubagentTree: the Run's subagents, nested by parent. */
+.subtree { display: flex; flex-direction: column; padding: 0 var(--sp-3) var(--sp-4); }
+.subtree-row {
+  --depth: 0;
+  display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: var(--sp-4);
+  min-height: 44px; padding: var(--sp-2) var(--sp-4) var(--sp-2) calc(var(--sp-4) + var(--depth) * var(--subagent-indent));
+  border-radius: var(--radius-md); cursor: pointer; position: relative;
+  width: 100%; border: 0; background: none; text-align: left; color: inherit; font: inherit;
+}
+.subtree-row:hover { background: var(--log-line-hover); }
+.subtree-row.is-selected { background: var(--accent-subtle); }
+.subtree-row:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.subtree-guide { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--border); }
+.subtree-main { min-width: 0; display: flex; flex-direction: column; }
+.subtree-title { font-size: var(--text-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.subtree-sub { font-size: var(--text-xs); color: var(--fg-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.subtree-side { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font: var(--text-xs) var(--font-mono); color: var(--fg-muted); }
+.subtree-empty { padding: 0 var(--pad-card) var(--sp-5); font-size: var(--text-sm); color: var(--fg-muted); }
+
+/* ToolUsage: counts by tool, a bar each. */
+.toolusage { display: flex; flex-direction: column; gap: var(--sp-3); }
+.toolusage-row { display: grid; grid-template-columns: 64px minmax(0, 1fr) 28px; gap: var(--sp-4); align-items: center; font-size: var(--text-xs); }
+.toolusage-name { font-family: var(--font-mono); color: var(--fg-secondary); }
+.toolusage-track { display: block; height: 6px; border-radius: 3px; background: var(--bg-subtle); overflow: hidden; }
+.toolusage-fill { display: block; height: 100%; background: var(--chart-1); border-radius: 3px; }
+.toolusage-n { text-align: right; font-family: var(--font-mono); color: var(--fg-muted); }
+
+/* ---------- SubagentPanel: one subagent, in place of the rail ---------- */
+.subpanel { display: flex; flex-direction: column; background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; min-height: 0; }
+.subpanel-head { padding: var(--sp-4) var(--sp-5) var(--sp-5) var(--pad-card); border-bottom: 1px solid var(--border-soft); border-top: 3px solid var(--agent); display: flex; flex-direction: column; gap: var(--sp-3); }
+.subpanel-top { display: flex; align-items: center; justify-content: space-between; }
+.subpanel-kicker { font-size: var(--text-xs); color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; font-weight: var(--weight-medium); }
+.subpanel-back { display: inline-flex; align-items: center; gap: 2px; background: none; border: 0; padding: 0; color: var(--accent-text); font: inherit; font-size: var(--text-xs); cursor: pointer; align-self: flex-start; }
+.subpanel-title { font-size: var(--text-lg); font-weight: var(--weight-semibold); line-height: var(--leading-tight); margin: 0; }
+.subpanel-facts { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4); align-items: center; font-size: var(--text-xs); color: var(--fg-muted); }
+.subpanel-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: var(--sp-5) var(--sp-5) var(--sp-6) var(--pad-card); display: flex; flex-direction: column; gap: var(--turn-gap); }
+.subpanel-brief { font-size: var(--text-sm); background: var(--bg-subtle); border-radius: var(--radius-md); padding: var(--sp-4) var(--sp-5); white-space: pre-wrap; }
+.subpanel-foot { padding: var(--sp-4) var(--pad-card); border-top: 1px solid var(--border-soft); font-size: var(--text-xs); color: var(--fg-muted); display: flex; gap: var(--sp-3); }
+.subpanel .turn-time { display: none; }
+
+/* ---------- Mockup chrome only (not part of the proposal) ---------- */
+.mock-ctl {
+  position: fixed; right: 16px; bottom: 16px; z-index: 50;
+  background: var(--bg-raised); border: 1px solid var(--border-strong); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg); padding: 10px 12px; font-size: 12px; width: 300px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.mock-ctl h4 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--fg-muted); display: flex; justify-content: space-between; }
+.mock-ctl .row { gap: 6px; flex-wrap: wrap; }
+.mock-ctl select { font: inherit; padding: 3px 6px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--bg-surface); color: var(--fg); flex: 1; }
+.mock-ctl.is-min > :not(h4) { display: none; }
+.mock-placeholder { padding: var(--sp-9); text-align: center; color: var(--fg-muted); border: 1px dashed var(--border-strong); border-radius: var(--radius-lg); }
+.transcript .spinner, .subpanel .spinner, .rail-card .spinner { border-width: 1.5px; width: 12px; height: 12px; }
+.transcript-empty .spinner { width: 20px; height: 20px; border-width: 2px; }

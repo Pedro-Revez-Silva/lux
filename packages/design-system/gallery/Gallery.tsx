@@ -98,9 +98,28 @@ import {
   type SortState,
   type TerminalHandle,
   type TimeRange,
+  AgentMark,
+  agentColor,
+  agentSlot,
+  InputTurn,
+  MessageTurn,
+  Note,
+  PlanTurn,
+  RailCard,
+  RailFacts,
+  SessionMarker,
+  SessionRail,
+  SessionTranscript,
+  SubagentPanel,
+  SubagentStub,
+  SubagentTree,
+  ThoughtTurn,
+  ToolCall,
+  ToolUsage,
 } from "../src/index.ts";
 import { IconDots, IconInfo, IconMinus, IconMoon, IconPencil, IconPlus, IconRefresh, IconRows, IconRowsLoose, IconStar, IconSun, IconTerminal, IconWarning } from "../src/icons.tsx";
 import { fakeAnsiLogs, fakeCostLines, fakeCostSeries, fakeKeyBreakdown, fakeLabelValues, fakeRunLabels, fakeHosts, fakeLogs, fakeMultilineLogs, fakePlacementStages, fakePoolDaily, fakeRuns, fakeSeries, fakeServerLogs, fakeServerManual, fakeServers, fakeServersExited, fakeServersMigrated, fakeServersWakeable, fakeShellScript, fakeStoredSeries, fakeTenants, NOW, type FakeCostLine, type FakeHost, type FakeRun } from "./fake.ts";
+import { at, fakeDiff, fakeReply, fakeSubagents, fakeToolCounts } from "./fakeSession.ts";
 
 function Section({ id, title, children, note }: { id: string; title: string; note?: ReactNode; children: ReactNode }) {
   return (
@@ -114,7 +133,7 @@ function Section({ id, title, children, note }: { id: string; title: string; not
   );
 }
 
-const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "paging", "tabs", "selects", "charts", "costs", "costpanel", "parts", "timeline", "events", "logs", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
+const SECTIONS = ["logo", "colors", "type", "spacing", "layout", "buttons", "badges", "states", "stats", "cards", "tables", "paging", "tabs", "selects", "charts", "costs", "costpanel", "parts", "timeline", "events", "logs", "session", "terminal", "servers", "keyvalue", "dialogs", "feedback", "format"];
 
 /** The gallery: a slim bar (brand, theme and density) over the sections. */
 export function Gallery() {
@@ -177,6 +196,7 @@ function Sections() {
         <TimelineDemo />
         <EventsDemo />
         <Logs />
+        <SessionDemo />
         <TerminalDemo />
         <Servers />
         <KeyValueDemo />
@@ -1246,6 +1266,159 @@ function EventsDemo() {
       <Card flush title="Events" subtitle="pool burst · click a row to expand">
         <EventTable events={fakeEvents} summary={(e) => e.data} detail={(e) => <Code>{JSON.stringify(e, null, 2)}</Code>} />
       </Card>
+    </Section>
+  );
+}
+
+/* ---------- Session ---------- */
+
+function SessionDemo() {
+  const [filter, setFilter] = useState<"all" | "messages">("all");
+  const [open, setOpen] = useState<string | undefined>("ses_ch2m4pt");
+  const slots = useMemo(() => new Map<string, number>(), []);
+  const color = (agent: string) => agentColor(agentSlot(slots, agent));
+  const rows = fakeSubagents.map((s) => ({ ...s, color: color(s.agent) }));
+  const sub = rows.find((r) => r.id === open);
+  const msgs = filter === "messages";
+  const now = at(33.5);
+  return (
+    <Section
+      id="session"
+      title="Session: transcript, turns, tool calls, subagents"
+      note="An agent Run read as a conversation, beside the raw Output: the same records, each view linking to the other. Inputs carry their sender and phase in words; replies are a safe subset of markdown, with a caret while they stream; thoughts fold to one line; tool calls fold to one row with their status as an icon and a word for screen readers, and an error line shows even folded. lux's own events are hairline markers. A subagent's colour is its agent type's, first-seen order from the chart palette (--agent-1…5), always beside its name; its mark pulses only while it runs. The rail drops under 1000px of content."
+    >
+      <div className="session-layout">
+        <SessionTranscript
+          className="session-pane-h"
+          subtitle={
+            <>
+              opencode · <span className="mono">llmproxy-anthropic/claude-opus-5-5</span>
+            </>
+          }
+          actions={<SegmentedControl label="Show" value={filter} onChange={setFilter} options={[{ value: "all", label: "Everything" }, { value: "messages", label: "Messages" }]} />}
+          itemCount={12}
+          note={
+            <>
+              Read-only · input and interrupt are on <a href="#logs">Output</a>
+            </>
+          }
+          status={<span className="num">14 turns · 23 tool calls · cursor 3.1502</span>}
+        >
+          <SessionMarker type="epoch" t={at(0.3)}>
+            <b>Epoch 1</b> · started on <b>gp-eu-west-1-a2</b>
+          </SessionMarker>
+          <InputTurn t={at(0.35)} sender="ci-review-bot" phase="consumed" text="Fix #418: retries in internal/billing hammer the payment provider when it is down. Use exponential backoff, keep the public API, and add tests." />
+          {!msgs && <ThoughtTurn t={at(0.4)} seconds={6} text="The retry loop is probably a fixed sleep. Find all callers first so the webhook path, which backs off on its own, keeps its behaviour." />}
+          {!msgs && (
+            <PlanTurn
+              t={at(0.55)}
+              steps={[
+                { text: "Read the current retry loop", status: "done" },
+                { text: "Find every caller of billing.Retry", status: "done" },
+                { text: "Table tests for the delays", status: "now" },
+                { text: "Make max delay configurable", status: "todo" },
+              ]}
+            />
+          )}
+          {!msgs && (
+            <ToolCall name="task" summary="Find every caller of billing.Retry" summaryMono={false} status="completed" start={at(0.7)} end={at(1.9)} record={{ label: "record 1.233 in Output", href: "#logs" }}>
+              <SubagentStub {...rows[0]!} last="Four callers: charge.go:48 and refund.go:31 …" selected={open === rows[0]!.id} onOpen={() => setOpen(rows[0]!.id)} />
+            </ToolCall>
+          )}
+          <MessageTurn t={at(2)} text={fakeReply} />
+          {!msgs && <ToolCall name="edit" summary="internal/billing/retry.go" status="completed" start={at(2.1)} end={at(2.12)} diff={fakeDiff} input={'{\n  "filePath": "internal/billing/retry.go"\n}'} record={{ label: "record 1.260 in Output", href: "#logs" }} defaultOpen />}
+          {!msgs && <ToolCall name="bash" summary="go test ./internal/billing/..." status="error" start={at(2.3)} end={at(2.5)} output={"--- FAIL: TestChargeRetries (0.00s)\n    charge_test.go:40: undefined: base\nFAIL"} error="exit status 1" />}
+          <SessionMarker type="turn">turn ended · 3m 09s · 8 tool calls · idle</SessionMarker>
+          <SessionMarker type="compacted" t={at(11.2)} summary={"## Objective\n- Fix #418: exponential backoff in internal/billing Retry.\n## Done\n- base 250ms, ×2, cap 30s, ctx-aware. Tests pass."}>
+            <b>Context compacted</b> · 136.6k → 9.7k tokens · auto
+          </SessionMarker>
+          <SessionMarker type="epoch" t={at(30)}>
+            <b>Epoch 3</b> · moved to <b>gp-eu-west-1-c4</b>
+          </SessionMarker>
+          <InputTurn t={at(31)} sender="ada@example.com" steer phase="accepted" text="Also add jitter, and make the max delay configurable through BillingConfig." />
+          {!msgs && <Note t={at(31.3)}>lux allowed once: external_directory /tmp/* · subagent permissions are answered by policy</Note>}
+          {!msgs && (
+            <ToolCall name="task" summary="Write table tests for backoff with jitter" summaryMono={false} status="running" start={at(31.2)} now={now}>
+              <SubagentStub {...rows[1]!} subagents={1} now={now} last="bash go test ./internal/billing/... -run TestRetry -v" selected={open === rows[1]!.id} onOpen={() => setOpen(rows[1]!.id)} />
+            </ToolCall>
+          )}
+          <MessageTurn t={at(33.4)} streaming text="The tests are in and pass, and the reviewer had one real point. Switching the loop to a stopped" />
+          <Note tone="warning" t={at(33.4)}>
+            opencode: a subagent session asked for external_directory on /etc/*; lux could not answer it
+          </Note>
+        </SessionTranscript>
+        <SessionRail>
+          {sub ? (
+            <SubagentPanel
+              {...sub}
+              now={now}
+              back={sub.depth > 0 ? { label: rows[1]!.title, onClick: () => setOpen(rows[1]!.id) } : undefined}
+              onClose={() => setOpen(undefined)}
+              brief={{ text: "Write table-driven tests in internal/billing/retry_test.go for Retry: the delay sequence (250ms doubling to the cap), full jitter staying in [0, delay), early return on ctx cancel", cutNote: "the task's input, cut at 300 bytes by lux" }}
+              usage="$0.31 · 61.4k tokens"
+              footnote="A subagent's text arrives when each message completes, not as it streams; tool calls arrive as their status changes."
+            >
+              <ToolCall name="read" summary="internal/billing/retry.go" status="completed" start={at(31.3)} end={at(31.31)} cutNote="output cut at 2 KiB by lux" output="package billing …" />
+              <ToolCall name="task" summary="Check how other services seed rand" summaryMono={false} status="completed" start={at(31.4)} end={at(32)}>
+                <SubagentStub {...rows[2]!} last="Use math/rand/v2 with an injected func" onOpen={() => setOpen(rows[2]!.id)} />
+              </ToolCall>
+              <ToolCall name="bash" summary="go test ./internal/billing/... -run TestRetry -v" status="running" start={at(33)} now={now} />
+            </SubagentPanel>
+          ) : (
+            <>
+              <RailCard title="Session">
+                <RailFacts
+                  items={[
+                    { key: "Adapter", value: "opencode" },
+                    { key: "Model", value: "llmproxy-anthropic/claude-opus-5-5", mono: true },
+                    { key: "Session", value: <IdChip value="ses_9v2qd4h7" /> },
+                    { key: "Activity", value: <StatePill kind="run" state="running" activity="busy" /> },
+                    { key: "Turns", value: <span className="num">14</span> },
+                    { key: "Compactions", value: <span className="num">1</span> },
+                  ]}
+                />
+              </RailCard>
+              <RailCard title="Subagents" count={rows.length} aside={<Badge tone="info">1 running</Badge>} flush>
+                <SubagentTree rows={rows} now={now} onOpen={setOpen} />
+              </RailCard>
+              <RailCard title="Tools used" count={26}>
+                <ToolUsage counts={fakeToolCounts} />
+              </RailCard>
+            </>
+          )}
+        </SessionRail>
+      </div>
+      <h3 className="sg-h3">The rail when an adapter reports no subagents, and an empty transcript</h3>
+      <div className="grid-2">
+        <RailCard title="Subagents">
+          <span className="muted">
+            The <b>acp</b> adapter doesn't report subagents: ACP shows only the Run's own session.
+          </span>
+        </RailCard>
+        <SessionTranscript itemCount={0} subtitle="waiting for the agent" empty={<EmptyState compact icon={<Spinner size={18} />} title="No session yet" description="The agent's conversation appears here once lux has its first record." />}>
+          {null}
+        </SessionTranscript>
+      </div>
+      <h3 className="sg-h3">Turns on their own</h3>
+      <div className="turns" style={{ margin: 0 }}>
+        <InputTurn sender="ci" phase="failed" steer text="Add a screenshot of the dashboard" attachments={1} error="the agent does not take images" />
+        <InputTurn phase="sent" text="Fix the flaky test in queue_test.go" />
+        <ToolCall name="read" summary="cmd/reconcile/main.go" status="pending" start={now} now={now} />
+        <ToolCall name="spawn_agent" summary="/root/read_hosts" summaryMono status="completed" start={at(1)} end={at(1.2)}>
+          <SubagentStub {...rows[3]!} last="Findings: time.After allocates a timer per attempt" onOpen={() => undefined} />
+        </ToolCall>
+        <SessionMarker type="ended">
+          <b>Run succeeded</b> · exit 0
+        </SessionMarker>
+        <div className="row">
+          {rows.map((r) => (
+            <span key={r.id} className="row" style={{ gap: 6 }}>
+              <AgentMark color={r.color} live={r.status === "running"} />
+              <span className="agent-name">{r.agent}</span>
+            </span>
+          ))}
+        </div>
+      </div>
     </Section>
   );
 }
