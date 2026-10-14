@@ -218,7 +218,9 @@ def test_every_exit_collects(lux, runners, hosts):
     epoch: a changed file is the path's next version, an unchanged one is
     not recorded again. Publishing the same name again is a new version."""
     runners.start(hosts[0])
-    script = ("mkdir -p /workspace/out; date +%s%N > /workspace/out/stamp; echo same > /workspace/out/same; "
+    # stamp differs per epoch by construction: busybox date has no %N, and
+    # two epochs started in the same second would write the same bytes.
+    script = ("mkdir -p /workspace/out; echo \"epoch $LUX_EPOCH\" > /workspace/out/stamp; echo same > /workspace/out/same; "
               f"echo x > /tmp/once.txt; {PUBLISH} /tmp/once.txt; sleep 300")
     run_id = artifacts_run(lux, script, ["/workspace/out/*"])
     wait_until(lambda: lux.run("exec", run_id, "-T", "--", "test", "-f", "/workspace/out/stamp", input="", check=False).returncode == 0,
