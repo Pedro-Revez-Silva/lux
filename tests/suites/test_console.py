@@ -177,6 +177,41 @@ def test_run_page_streams_output_and_stops_the_run(page, operator, lux, runners,
     lux.run("terminate", run_id)
 
 
+def test_generic_run_takes_stdin_from_its_session_tab_and_output_is_read_only(page, operator, lux, runners, hosts):
+    runners.start(hosts[0])
+    # The workload reads one stdin line, then answers SIGINT with a marker (short sleeps, so the trap runs promptly).
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", "trap 'echo got-console-int' INT; echo stdin-ready; read l; echo \"stdin-$l\"; while :; do sleep 0.2; done"))
+    lux.wait_output(run_id, "stdin-ready")
+    page.sign_in(operator.api_key, f"/runs/{run_id}")
+    run_tabs = page.get_by_role("tablist").first
+    expect(run_tabs.get_by_role("tab", name="Output", exact=True)).to_have_attribute("aria-selected", "true", timeout=15_000)
+    page.locator(".logview").get_by_text("stdin-ready", exact=True).wait_for(timeout=20_000)
+    # Output is the log only: no field to type into, no Send or Interrupt, no link back to Session.
+    expect(page.get_by_role("textbox")).to_have_count(0)
+    expect(page.get_by_role("button", name="Send", exact=True)).to_have_count(0)
+    expect(page.get_by_role("button", name="Interrupt", exact=True)).to_have_count(0)
+    expect(page.get_by_role("link", name="Session", exact=True)).to_have_count(0)
+
+    run_tabs.get_by_role("tab", name="Session", exact=True).click()
+    session = page.get_by_role("region", name="Agent session")
+    expect(session.get_by_text("No agent conversation", exact=True)).to_be_visible()
+    composer = session.get_by_role("form", name="Send to stdin")
+    field = composer.get_by_role("textbox", name="Send to stdin")
+    send = composer.get_by_role("button", name="Send", exact=True)
+    expect(send).to_be_disabled()
+    field.fill("from-console")
+    field.press("Control+Enter")
+    expect(field).to_have_value("", timeout=10_000)
+    lux.wait_output(run_id, "stdin-from-console")
+    expect(composer.get_by_role("alert")).to_have_count(0)
+    # Interrupt from the composer is SIGINT to the workload.
+    composer.get_by_role("button", name="Interrupt", exact=True).click()
+    expect(page.get_by_role("status").get_by_text("Interrupt sent", exact=True)).to_be_visible(timeout=3_000)
+    lux.wait_output(run_id, "got-console-int")
+    assert not page.errors, page.errors
+    lux.run("terminate", run_id)
+
+
 def test_run_output_tabs_separate_the_workloads_lines_from_luxs(page, env, operator, lux, runners, hosts):
     runners.start(hosts[0])
     # A generic workload's steer arrives on stdin: the later line comes once the Output tab is up.

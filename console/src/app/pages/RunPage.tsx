@@ -1,8 +1,8 @@
-import { Badge, formatBytes, formatDuration, formatRelative, formatTimestamp, IdChip, KeyValue, PageHeader, StatePill, Tabs } from "@lux/design-system";
+import { Badge, FactRow, formatBytes, formatDuration, formatRelative, formatTimestamp, IdChip, ImageRef, KeyValue, LabelsFact, PageHeader, StatePill, Tabs } from "@lux/design-system";
 import { isRunActive, useNow, type Run, type RunSubmitter } from "../../api/index.ts";
 import { setSearchParams, useSearchParams } from "../router.tsx";
 import { useScope } from "../scope.tsx";
-import { DASH, ErrorBlock, ErrorStrip, HostLink, labelsText, PageSkeleton, useRun } from "./common.tsx";
+import { DASH, ErrorBlock, ErrorStrip, HostLink, PageSkeleton, useRun } from "./common.tsx";
 import { RunActions } from "./RunActions.tsx";
 import { RunOutput } from "./RunOutput.tsx";
 import { RunCost } from "./RunCost.tsx";
@@ -10,7 +10,7 @@ import { RunResources } from "./RunResources.tsx";
 import { RunServers } from "./RunServers.tsx";
 import { RunEvents, RunSnapshots, RunSpecView } from "./RunTabs.tsx";
 import { RunTimeline } from "./RunTimeline.tsx";
-import { RunSession } from "./session/RunSession.tsx";
+import { RunSession, RunStdinSession } from "./session/RunSession.tsx";
 import { hasSession } from "./session/view.ts";
 
 const TABS = ["session", "output", "servers", "timeline", "resources", "events", "snapshots", "spec"] as const;
@@ -24,10 +24,10 @@ export function RunPage({ id }: { id: string }) {
   const t = params.get("tab");
   const q = useRun(id, { active: 3000, settled: 15_000, liveActive: 15_000, liveSettled: 60_000 });
   const run = q.data;
-  // Session exists only for an agent adapter: then it is first, else Output is.
+  // An agent adapter's Session tab is first (the conversation); a generic Run's comes after Output.
   const session = hasSession(run?.spec.workload.adapter);
   const first: Tab = session ? "session" : "output";
-  const tab: Tab = TABS.includes(t as Tab) && (t !== "session" || session) ? (t as Tab) : first;
+  const tab: Tab = TABS.includes(t as Tab) ? (t as Tab) : first;
   const setTab = (next: Tab) => setSearchParams({ tab: next === first ? null : next });
 
   if (q.error && !run) {
@@ -77,20 +77,22 @@ export function RunPage({ id }: { id: string }) {
 
       <KeyValue
         columns={3}
-        className="run-facts"
         items={[
           { key: "Created", value: `${formatTimestamp(run.createdAt)} · ${formatRelative(run.createdAt, now)}` },
           { key: "First started", value: run.firstStartedAt ? `${formatTimestamp(run.firstStartedAt)} · queued ${formatDuration(run.usage?.queueSeconds)}` : DASH },
           { key: "Finished", value: run.finishedAt ? `${formatTimestamp(run.finishedAt)} · ${formatRelative(run.finishedAt, now)}` : DASH },
-          { key: "Image", value: run.spec.image.ref ?? (run.spec.image.build ? `built from ${run.spec.image.build.containerfile}` : DASH), mono: true },
           { key: "Resources", value: `${run.spec.resources.cpus ?? "–"} cpus · ${formatBytes(run.spec.resources.memory)} · ${formatBytes(run.spec.resources.disk)} disk` },
           { key: "Usage", value: run.usage ? `CPU ${formatDuration(run.usage.cpuSeconds)} · peak mem ${formatBytes(run.usage.peakMemoryBytes)} · ${run.usage.placements} placement${run.usage.placements === 1 ? "" : "s"}` : DASH },
+          { key: "Submitted by", value: <SubmittedBy by={run.submittedBy} /> },
           { key: "Session", value: run.sessionId ? <IdChip value={run.sessionId} truncate={24} /> : DASH },
           { key: "Snapshot", value: run.snapshotId ? <IdChip value={run.snapshotId} truncate={24} /> : DASH },
-          { key: "Labels", value: Object.keys(run.labels ?? {}).length ? <span className="mono">{labelsText(run.labels)}</span> : DASH },
-          { key: "Submitted by", value: <SubmittedBy by={run.submittedBy} /> },
         ]}
-      />
+      >
+        <FactRow label="Image">
+          {run.spec.image.ref ? <ImageRef value={run.spec.image.ref} /> : <span className="mono">{run.spec.image.build ? `built from ${run.spec.image.build.containerfile}` : DASH}</span>}
+        </FactRow>
+        <LabelsFact labels={run.labels} first={["app"]} />
+      </KeyValue>
 
       <Tabs<Tab>
         value={tab}
@@ -98,6 +100,7 @@ export function RunPage({ id }: { id: string }) {
         items={[
           ...(session ? [{ key: "session" as const, label: "Session" }] : []),
           { key: "output", label: "Output" },
+          ...(session ? [] : [{ key: "session" as const, label: "Session" }]),
           { key: "servers", label: "Servers", count: run.servers?.length || undefined },
           { key: "timeline", label: "Timeline", count: run.placements?.length },
           { key: "resources", label: "Resources & cost" },
@@ -106,7 +109,7 @@ export function RunPage({ id }: { id: string }) {
           { key: "spec", label: "Spec" },
         ]}
       />
-      {tab === "session" && <RunSession run={run} />}
+      {tab === "session" && (session ? <RunSession run={run} /> : <RunStdinSession run={run} />)}
       {tab === "output" && <RunOutput run={run} />}
       {tab === "servers" && <RunServers run={run} refetch={q.refetch} fetching={q.fetching} error={q.error} />}
       {tab === "timeline" && <RunTimeline run={run} now={now} />}

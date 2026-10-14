@@ -866,25 +866,11 @@
 .who-paid-split {
   padding: var(--pad-card);
 }
-.run-facts {
-  padding: var(--sp-2) var(--pad-card);
-  background: var(--bg-surface);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-lg);
-}
 .output-status {
   font-size: var(--text-sm);
 }
 .output-status .badge .spinner {
   margin-right: 4px;
-}
-.output-form {
-  display: flex;
-  gap: var(--sp-4);
-  flex-wrap: wrap;
-}
-.output-form .input {
-  flex: 1 1 240px;
 }
 .resume-report {
   display: flex;

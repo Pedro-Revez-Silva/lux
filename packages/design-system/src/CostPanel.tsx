@@ -160,13 +160,22 @@ export function BreakdownTable({ rows, lead, loading, onRowClick, empty = "No co
 
 /* ---------- Label chips ---------- */
 
-/** A Run's labels as key=value chips, the first `max` and a count of the rest; each in full in its title. */
-export function LabelChips({ labels, max = 3, first }: { labels: Record<string, string> | undefined; max?: number; first?: string[] }) {
-  const entries = Object.entries(labels ?? {}).sort(([a], [b]) => {
+/** A Run's labels as [key, value] pairs: the `first` keys in that order, then the rest A→Z. */
+export function sortLabels(labels: Record<string, string> | undefined, first?: string[]): [string, string][] {
+  return Object.entries(labels ?? {}).sort(([a], [b]) => {
     const ia = first?.indexOf(a) ?? -1;
     const ib = first?.indexOf(b) ?? -1;
     return (ia < 0 ? Infinity : ia) - (ib < 0 ? Infinity : ib) || a.localeCompare(b);
   });
+}
+
+/** `labels` sorted by `first`, or `entries` already in `sortLabels` order; never both. */
+export type LabelChipsProps = ({ labels: Record<string, string> | undefined; first?: string[]; entries?: never } | { entries: [string, string][]; labels?: never; first?: never }) & { max?: number };
+
+/** A Run's labels as key=value chips, the first `max` and a count of the rest; each in full in its title. */
+export function LabelChips(props: LabelChipsProps) {
+  const max = props.max ?? 3;
+  const entries = props.entries ?? sortLabels(props.labels, props.first);
   if (entries.length === 0) return <span className="muted">–</span>;
   const shown = entries.slice(0, max);
   const rest = entries.length - shown.length;

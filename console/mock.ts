@@ -4,7 +4,8 @@
 // is real: it is for layout, states and screenshots.
 //
 //   bun run mock                 # http://localhost:5175/, any key signs in
-//   MOCK_STATE=stopped bun run mock   # the run in another state
+//   MOCK_STATE=stopped bun run mock   # the run (and the live Session Runs) in another state
+//   MOCK_INPUT=fail bun run mock   # every input to a Session Run is refused (409)
 //   MOCK_AUTH=cloudflare-access bun run mock   # signed in as a person, no key
 //   MOCK_COST_CURRENCIES=USD,EUR bun run mock   # cost in two currencies (mockCosts.ts)
 //   MOCK_ROLE=tenant bun run mock   # a tenant key (acme): no tenant picker, its own costs and key names;
@@ -272,14 +273,21 @@ async function api(req: Request, srv: Srv): Promise<Response> {
       const r = costLabels(u, callerTenant);
       return json(r.body, r.status);
     }
-    if (p === "/v1/runs") return json({ runs: [run(), ...SESSION_RUNS.map((r) => sessionRunJson(r, SESSION_HOST))] });
+    if (p === "/v1/runs") return json({ runs: [run(), ...SESSION_RUNS.map((r) => sessionRunJson(r, SESSION_HOST, runState))] });
     if (p === `/v1/runs/${RUN_ID}`) return json(run());
     const sr = p.match(/^\/v1\/runs\/(run_[a-z0-9]+)(\/.*)?$/);
     const sess = sr && sessionRun(sr[1]!);
     if (sess) {
-      if (!sr![2]) return json(sessionRunJson(sess, SESSION_HOST));
+      const sj = sessionRunJson(sess, SESSION_HOST, runState);
+      if (!sr![2]) return json(sj);
       if (sr![2] === "/output") return sessionOutput(sess, SESSION_HOST, u.searchParams.get("since"), req.signal);
-      if (sr![2] === "/cost") return json(runCost(sess.id, sessionRunJson(sess, SESSION_HOST).placements.map((x) => ({ ...x, hostId: x.host }))));
+      if (sr![2] === "/cost") return json(runCost(sess.id, sj.placements.map((x) => ({ ...x, hostId: x.host }))));
+      // MOCK_INPUT=fail refuses every input, to show the composer keeping its draft.
+      if (sr![2] === "/input" && req.method === "POST") {
+        if (sj.state !== "running" && sj.state !== "starting") return json({ error: { code: "not_running", message: `run is ${sj.state}: use resume, which accepts an input` } }, 409);
+        if (process.env.MOCK_INPUT === "fail") return json({ error: { code: "not_running", message: "run is stopping: not started yet" } }, 409);
+        return json({ requestId: "in_mock" }, 202);
+      }
       return json(sr![2].endsWith("history") ? { from: ago(3600), to: now(), resolution: 60, samples: [] } : { snapshots: [], artifacts: [], events: [], servers: [] });
     }
     if (p === "/v1/servers") {

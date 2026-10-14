@@ -10,7 +10,7 @@ cd packages/design-system
 bun run gallery        # http://localhost:5198/ (Bun HTML-import server, HMR)
 bun run gallery:build  # static gallery in dist/, opens from any directory
 bun run typecheck
-bun run test           # bun test: idle countdown and server states, money rounding, y scale, y axis width, chart stacking, bars, day ticks and faded colours, family colours, storage kind colours, CostFigure, PartBar shares, Meter clamping and text, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme, agent colour slots, ToolUsage, Markdown escaping, ToolCall (src/*.test.ts*)
+bun run test           # bun test: idle countdown and server states, money rounding, y scale, y axis width, chart stacking, bars, day ticks and faded colours, family colours, storage kind colours, CostFigure, PartBar shares, Meter clamping and text, Table sort, columns and sort in words, EventTable, Pagination, Timeline point stages, durations, SegmentedControl, RelativeTime, terminal scheme, agent colour slots, ToolUsage, Markdown escaping, ToolCall, SessionComposer (send, draft kept on failure, keys, IME, disabled, interrupt) and the transcript's composer slot and resize follow, ImageRef digest shortening, LabelsFact disclosure, KeyValue full-width rows and surface (src/*.test.ts*)
 ```
 
 ## Using it
@@ -68,7 +68,9 @@ gallery/            the gallery app (index.html, Gallery.tsx, fake data)
   `PageHeader` actions and keeps the choice in `?tab=` (none for the first
   tab); a tab a principal cannot read is disabled, not hidden.
 - Names lead, ids support. Ids are plain mono in the muted colour with a
-  copy affordance on hover or focus (`IdChip`), never boxed. Monospace is
+  copy affordance on hover or focus (`IdChip`), never boxed. On touch screens
+  (no hover) the copy affordance is always shown, with a target of at least
+  24px. Monospace is
   kept for ids, logs and numeric columns; host names, labels and adapters
   are set in the sans.
 - Comfortable by default, compact on request (see Density).
@@ -99,8 +101,17 @@ gallery/            the gallery app (index.html, Gallery.tsx, fake data)
   Tooltip (`CostFigure`); `~` is what `lux ls` prints too.
 - An agent Run reads as a conversation first and a log second; both are
   the same records, and each view links to the other (the Session
-  transcript's tool calls name their record in Output; the Output tab is
-  where input and interrupt are sent).
+  transcript's tool calls name their record in Output). Input and interrupt
+  are sent from the Session tab's composer, to the Run's root session; the
+  Output tab is read-only logs.
+- A value that can be long (an image reference, labels, hashes) never sits
+  in a multi-column `KeyValue` grid cell, where it stretches its whole row:
+  it gets a full-width row under the grid (`FactRow`), on one line, with the
+  full value on hover and copy (`ImageRef`) or behind a disclosure
+  (`LabelsFact`). Host (Labels, Versions), Pool (Template) and Server
+  (Labels) still use grid cells; they move to `LabelsFact`. A full-width
+  row's value follows its key, not the grid's value column (accepted: the
+  Image and Labels values start where their key ends).
 
 ## Terminal scheme
 
@@ -230,7 +241,7 @@ All in `src/tokens.css`.
 | Pill controls | `--seg-track` (the sunken track), `--seg-on` and `--seg-on-shadow` (the chosen pill: white with a hairline in light, a lighter step in dark) |
 | Motion | `--dur-{fast,normal,slow}` (100/180/300ms, 0 under reduced motion), `--ease` |
 | Layout | `--sidebar-w` `--sidebar-rail-w` `--topbar-h` `--row-h` `--row-h-dense` `--control-h` `--control-h-sm` `--control-h-lg` `--page-list-w` `--page-detail-w` `--feed-w` |
-| Session | `--session-rail-w` (the rail beside a transcript), `--measure` (longest line of agent prose), `--turn-gap`, `--tool-row-h` (a folded tool call), `--subagent-indent` (18px, a level of the subagent tree) |
+| Session | `--session-rail-w` (the rail beside a transcript), `--measure` (longest line of agent prose), `--turn-gap`, `--tool-row-h` (a folded tool call), `--subagent-indent` (18px, a level of the subagent tree), `--session-pane-offset` (600px in both densities: the viewport height `.session-pane-h` leaves for the page above a session pane) |
 
 State mapping (`src/states.ts`):
 
@@ -337,12 +348,29 @@ TerminalOverlay (the card over a dimmed screen), ServerList / ServerRow (a
 run's servers: state, URL, wake and lifetime tags, start/stop/restart/remove
 or, for a server kept after its run, detach; `hrefFor` links a name to its
 own page; an expandable log the caller renders),
-KeyValue, IdChip, Code, PageHeader (with optional breadcrumbs; CrumbSep),
+KeyValue (`columns` 1–3; `className` is on the `<dl>`, or with `children` on
+the wrapper around grid and rows; `children` are full-width rows under the
+grid, the whole one card surface unless `surface={false}`, for a KeyValue
+already inside a `Card`: then the rows draw on the Card's padding with no
+second frame: `FactRow({label, count?, aside?, detail?})`, a
+labelled one-line fact with an optional control at its right and content
+under it; `ImageRef({value})`, an image reference on one line, the registry
+path muted, the name in the foreground, a digest shortened to the algorithm +
+first 12 + `…` + last 8 hex (`shortDigest`, `splitImageRef`; tags whole),
+the full reference in its title and copied by its copy affordance, wrapping
+instead of truncating on a phone; `LabelsFact({labels, label?, first?, max?, defaultOpen?})`,
+"Labels n" (or `label`, for Versions or a Template), a `LabelChips` preview
+and a Show all / Hide toggle (the same text whatever the `label`), a ghost `Button` in the link colour
+(`--accent-text`, also on hover; ServerList's Logs toggle stays neutral
+because it sits among action buttons) (`aria-expanded`; its
+accessible name is its visible text, so tests find it by `aria-expanded` and that text) that opens every pair, key over a
+complete, selectable mono value with a copy affordance; collapsed by
+default (`defaultOpen` for the gallery), "Labels –" and no toggle when there are none), IdChip, Code, PageHeader (with optional breadcrumbs; CrumbSep),
 SectionHeader (a sentence-case `--text-lg` semibold title between groups
 of cards, its `note` beside it, `actions` such as a `Tabs size="sm"` on
 the right), ConfirmDialog, Dialog (a form modal), Toast (`useToast`),
 EmptyState, Spinner, Skeleton, PartBar, Meter, Callout (below), and the
-Session components (SessionTranscript, InputTurn, MessageTurn, ThoughtTurn,
+Session components (SessionTranscript, SessionComposer, InputTurn, MessageTurn, ThoughtTurn,
 PlanTurn, ToolCall, SessionMarker, Note, SubagentStub, SubagentTree,
 SubagentPanel, AgentMark, SessionRail, RailCard, RailFacts, ToolUsage;
 below). Hooks: `useTheme`, `useDensity`, `useTerminalScheme`, `useNow` (the shared
@@ -393,7 +421,7 @@ Overview's Cost panel is composed of:
 | `KpiStrip`, `Kpi({label, value, sub?, loading?, muted?})`, `KpiSub` | figures across the top of a card, the first wider; two across in a narrow container, four from 760px, and a strip of five (Total, Compute, Block storage, External, peak) 3 + 2 from 760px and five across from 960px; a muted Kpi is a figure the view hides but still states |
 | `SplitBar({parts, whole, currency, label?, scale?})` | parts of one amount as one thin bar, each part its share of `whole`; a `faint` part is hidden by the view, drawn, never dropped; amounts in the title; `scale` sets its length against the largest row |
 | `BreakdownTable({rows, lead, onRowClick?, blockStorage?})` | cost by one dimension: swatch and name (mono for ids and label values, `quiet` for the value-less row, a `pill` such as "revoked"), Runs, Compute, External, Total, Share per currency; `blockStorage` adds a Block storage column between Compute and External (lux's disk family, apart from both); a missing part is `–`, not $0; a non-zero share under 0.5% reads `<1%` |
-| `LabelChips({labels, max?, first?})` | a Run's labels as `key=value` chips, the `first` keys first, `max` shown and the rest counted (`+2`, their text in the title) |
+| `LabelChips({labels, first?, max?} \| {entries, max?})` | a Run's labels as `key=value` chips, the `first` keys first, `max` shown and the rest counted (`+2`, their text in the title); `sortLabels(labels, first)` is that order as pairs, and `entries` takes such pairs already sorted (one of `labels` or `entries`, not both). Chips cap at 20ch; in a `LabelsFact` preview they may run to 40ch |
 | `InfoStrip({tone, children})` | a one-line notice inside a card (why some figures read as they do) |
 | `FilterBar({add, note?})`, `FilterChip({name, op, value, onRemove})` | the active filters as removable chips, the add control, and what the filters reach |
 | `LabelFilterPopover({keys, values, notSet?, onApply, onKeyChange?})` | "＋ Label filter": a label key (with its Runs), then values as checkboxes with their cost, biggest first, a search (`matchValues`), and "(not set)"; Apply reports `{key, values, notSet}`; Cancel, Escape or a click outside leave things as they were |
@@ -415,11 +443,15 @@ console's Run page Session tab). Layout: `.session-layout` puts the
 transcript beside a `SessionRail` of `--session-rail-w`; under 1000px of
 content the rail is not drawn and a subagent opens in a modal `<dialog>`
 with the `Dialog` frame (`.dialog`), its `SubagentPanel` `bare`.
-`.session-pane-h` gives transcript and panel the page's height.
+`.session-pane-h` gives transcript and panel
+`clamp(420px, 100vh − var(--session-pane-offset), 860px)`: room above for a
+Run page's facts and tabs, and inside for the composer. The offset is a
+token (600px), so a page with less above it can set its own.
 
 | Export | What |
 | --- | --- |
-| `SessionTranscript({title?, subtitle?, actions?, itemCount, contentKey?, note?, status?, empty?})` | a card: head (title, adapter · model, an Everything / Messages `SegmentedControl` in `actions`), a scroller whose turns keep to `--measure`, a bar (read-only note, figures, Follow) and the "N new · Jump to latest" pill. Follow as `LogView`: scrolling up turns it off, back to the bottom turns it on; `itemCount` growth while off is what the pill counts; `contentKey` keeps a streaming reply's tail in view. `empty` replaces the turns (an `EmptyState` before the first record) |
+| `SessionTranscript({title?, subtitle?, actions?, itemCount, contentKey?, note?, status?, empty?, composer?})` | a card: head (title, adapter · model, an Everything / Messages `SegmentedControl` in `actions`), a scroller whose turns keep to `--measure`, a bar (read-only note, figures, Follow), the "N new · Jump to latest" pill, and `composer` under the bar. Follow as `LogView`: scrolling up turns it off, back to the bottom turns it on; `itemCount` growth while off is what the pill counts; `contentKey` keeps a streaming reply's tail in view. `empty` replaces the turns (an `EmptyState` before the first record). With a `composer` the bar drops its lock and read-only `note` |
+| `SessionComposer({label, onSend, onInterrupt?, interruptTitle?, disabled?, placeholder?, defaultValue?, hint?, errorText?})` | the input under a transcript: a form named by `label` ("Message the agent", "Send to stdin"), a labelled 2-row textarea that grows to 160px, a `hint` line (where input lands, or why it cannot be sent), Interrupt (only with `onInterrupt`) and Send (primary). Send is off while the trimmed draft is empty; while `onSend` is pending Send is loading and the draft read-only; resolving clears the draft, rejecting keeps it and shows `errorText(err)` in a `role="alert"` line in the danger colour until the next edit. Ctrl/⌘+Enter in the textarea sends (`aria-keyshortcuts`; not while an IME is composing), Enter is a newline. The textarea is described by the hint and, while there is one, the error (`aria-invalid`). A rejecting `onInterrupt` is caught: its feedback is the caller's (the console toasts). `disabled` turns off the textarea and both buttons. Only as a `SessionTranscript`'s `composer` (it draws the card's hairline and padding) |
 | `InputTurn({text, sender?, steer?, phase, error?, truncated?, attachments?})` | what lux delivered: Prompt or Steer, from whom, its phase as a Badge in words (`sent`, `accepted`, `consumed`, `failed`, each explained in its title) |
 | `MessageTurn({text, streaming?, cutNote?})` | the agent's prose through `Markdown` (paragraphs, fenced code, lists, `code`, **bold**; text only, never HTML); a drawn caret while `streaming` (not blinking: only live dots animate) |
 | `ThoughtTurn({text, seconds?})`, `PlanTurn({steps})` | a thought folded to "Thought for 6s"; a plan as a checklist, "n of m done", the step in progress in the foreground weight, done ones struck through and checked (never colour alone) |

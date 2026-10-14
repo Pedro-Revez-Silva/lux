@@ -26,6 +26,7 @@ import {
 import { isRunActive, type Run } from "../../../api/index.ts";
 import { setSearchParams } from "../../router.tsx";
 import { agentOf, subagentTree } from "./projection.ts";
+import { RunComposer } from "./RunComposer.tsx";
 import type { Session, SessionItem, SessionThread, ToolItem } from "./types.ts";
 import { useRunSession } from "./useRunSession.ts";
 import { agentColors, briefFor, lastActivity, noSubagentsText, subagentCounts, subagentFootnote, summaryIsProse, toolCounts, toolCutNote, toolInputText, toolSummary, usageText, visible } from "./view.ts";
@@ -238,7 +239,7 @@ function Rail({ ctx, run }: { ctx: Ctx; run: Run }) {
   );
 }
 
-/** The Run page's Session tab: the Run's output read as a conversation, with its subagents. Read-only. */
+/** The Run page's Session tab: the Run's output read as a conversation, with its subagents, and the input to the Run. */
 export function RunSession({ run }: { run: Run }) {
   const adapter = run.spec.workload.adapter;
   const hosts = useMemo(() => Object.fromEntries((run.placements ?? []).map((p) => [p.host, p.hostName])), [run.placements]);
@@ -306,20 +307,7 @@ export function RunSession({ run }: { run: Run }) {
         actions={<SegmentedControl<Filter> label="Show" value={filter} onChange={setFilter} options={[{ value: "all", label: "Everything" }, { value: "messages", label: "Messages" }]} />}
         itemCount={shown.length}
         contentKey={lastItem}
-        note={
-          <>
-            Read-only · input and interrupt are on{" "}
-            <a
-              href="?tab=output"
-              onClick={(e) => {
-                e.preventDefault();
-                setSearchParams({ tab: "output" }, { replace: false });
-              }}
-            >
-              Output
-            </a>
-          </>
-        }
+        composer={<RunComposer key={run.id} run={run} />}
         status={
           <span className="num">
             {s.turns} {s.turns === 1 ? "turn" : "turns"} · {tools} tool {tools === 1 ? "call" : "calls"}
@@ -355,5 +343,21 @@ export function RunSession({ run }: { run: Run }) {
         {narrow && selected && <Panel ctx={ctx} id={selected} bare onClose={close} />}
       </dialog>
     </div>
+  );
+}
+
+/** A generic workload's Session tab: no conversation to read, only input to its stdin. */
+export function RunStdinSession({ run }: { run: Run }) {
+  return (
+    <SessionTranscript
+      subtitle={run.spec.workload.adapter}
+      itemCount={0}
+      empty={
+        <div className="transcript-empty">
+          <EmptyState compact title="No agent conversation" description="This workload is not an agent: its output is on the Output tab and input goes to its stdin." />
+        </div>
+      }
+      composer={<RunComposer key={run.id} run={run} stdin />}
+    />
   );
 }

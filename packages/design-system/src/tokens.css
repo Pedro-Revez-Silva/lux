@@ -217,12 +217,15 @@
   --pad-page: 32px;
   --chart-h: 200px;
   /* Session: the rail beside a transcript, the longest line of agent prose,
-     the space between turns, a folded tool call, a level of the subagent tree. */
+     the space between turns, a folded tool call, a level of the subagent tree,
+     and the viewport height a session pane leaves for the page above it (a Run
+     page's header, facts and tabs); compact keeps the same offset. */
   --session-rail-w: 360px;
   --measure: 760px;
   --turn-gap: var(--sp-5);
   --tool-row-h: 30px;
   --subagent-indent: 18px;
+  --session-pane-offset: 600px;
 }
 :root[data-density="compact"] {
   --text-xs: 11px;

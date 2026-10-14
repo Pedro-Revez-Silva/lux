@@ -147,35 +147,50 @@ export interface MockSessionRun {
   script: () => Step[];
   sessionId: string;
   createdAgo: number;
+  labels?: Record<string, string>;
+  image?: string;
 }
+
+// Long label values and a digest-pinned image: what the Run facts' full-width rows are for.
+const JERVASION_LABELS = {
+  app: "jervasion",
+  "jervasion.creation-key": "jervasion-5ddba459581876385ba3aef0a67a678d7bc0bcdb36a390d8",
+  "jervasion.deployment": "acme/aiverse@jervasion-acme",
+  "jervasion.intent-sha256": "c90e477bbaff488659e553c23aea3e860c7e5422c5515df7ac6657bec23e5cde",
+  "jervasion.pr": "45",
+  "jervasion.repository": "acme/aiverse",
+  "jervasion.sizingrepository": "large",
+  "jervasion.target": "pr:PR_kwDOQUrH8Es8AAAABIcOqGg",
+};
 
 export const SESSION_RUNS: MockSessionRun[] = [
   { id: "run_oc7nested0subagnt", name: "billing-backoff-418", adapter: "opencode", live: true, script: opencodeScript, sessionId: "ses_9v2qd4h7mock", createdAgo: 46 * 60 },
   { id: "run_cc4task0subagent0", name: "hosts-probe-claude", adapter: "claude-code", live: false, script: () => replay("claude-2.1.207-agent-subagent.jsonl"), sessionId: "0e212c6c-b0a9-4e2d-b591-6e6608b3e932", createdAgo: 3 * 3600 },
   { id: "run_cx9spawn0subagent", name: "hosts-probe-codex", adapter: "codex", live: false, script: () => replay("codex-0.144.1-subagent.jsonl"), sessionId: "01a133af-f06c-7222-ab85-63b996a297a0", createdAgo: 5 * 3600 },
   { id: "run_acp2todo0task0000", name: "notes-count-acp", adapter: "acp", live: false, script: () => replay("acp-opencode-1.18.21-todo-task.jsonl"), sessionId: "ses_ec59d54c8ffeodNJkSlnW18KML", createdAgo: 26 * 3600 },
+  { id: "run_jv8labels0digest0", name: "jervasion-pr-45", adapter: "opencode", live: true, script: opencodeScript, sessionId: "ses_jv8l4b3lsmock", createdAgo: 46 * 60, labels: JERVASION_LABELS, image: "ghcr.io/acme/jervasion-agent@sha256:2c567002fb22e0d9c1b7a4f35e6d2c8b90a1f4e7d3c2b1a09f8e7d6cd76856cf" },
 ];
 
 export function sessionRun(id: string): MockSessionRun | undefined {
   return SESSION_RUNS.find((r) => r.id === id);
 }
 
-/** The Run object GET /v1/runs/{id} returns for a session Run. */
-export function sessionRunJson(r: MockSessionRun, host: { id: string; name: string }) {
-  const state = r.live ? "running" : "succeeded";
+/** The Run object GET /v1/runs/{id} returns for a session Run; `liveState` replaces "running" for a live one (MOCK_STATE). */
+export function sessionRunJson(r: MockSessionRun, host: { id: string; name: string }, liveState = "running") {
+  const state = r.live ? liveState : "succeeded";
   return {
     id: r.id,
     tenant: "acme",
     name: r.name,
-    labels: { demo: "session" },
+    labels: r.labels ?? { demo: "session" },
     state,
-    resumable: false,
-    activity: r.live ? "busy" : undefined,
+    resumable: state === "stopped",
+    activity: state === "running" ? "busy" : undefined,
     epoch: 1,
     sessionId: r.sessionId,
     host: host.name,
     hostId: host.id,
-    spec: { name: r.name, image: { ref: "ghcr.io/acme/agent:2026.09.3" }, workload: { adapter: r.adapter, command: [r.adapter === "claude-code" ? "claude" : r.adapter === "acp" ? "agent" : r.adapter], workdir: "/workspace" }, resources: { cpus: 2, memory: 4 * 1024 ** 3, disk: 20 * 1024 ** 3 }, placement: { pool: "default" } },
+    spec: { name: r.name, image: { ref: r.image ?? "ghcr.io/acme/agent:2026.09.3" }, workload: { adapter: r.adapter, command: [r.adapter === "claude-code" ? "claude" : r.adapter === "acp" ? "agent" : r.adapter], workdir: "/workspace" }, resources: { cpus: 2, memory: 4 * 1024 ** 3, disk: 20 * 1024 ** 3 }, placement: { pool: "default" } },
     secrets: [],
     createdAt: ago(r.createdAgo),
     firstStartedAt: ago(r.createdAgo - 12),

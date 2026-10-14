@@ -412,15 +412,15 @@ export const fakeLabelValues: Record<string, { value: string; amounts: { currenc
     { value: "dude", amounts: [{ currency: "USD", amount: "7.39" }] },
   ],
   "jervasion.repository": [
-    { value: "absmartly/abs", amounts: [{ currency: "USD", amount: "31.40" }] },
-    { value: "absmartly/sdk-plugins", amounts: [{ currency: "USD", amount: "9.10" }] },
+    { value: "acme/abs", amounts: [{ currency: "USD", amount: "31.40" }] },
+    { value: "acme/sdk-plugins", amounts: [{ currency: "USD", amount: "9.10" }] },
     { value: "marcioapm/jervasion", amounts: [{ currency: "USD", amount: "7.90" }] },
-    { value: "absmartly/docs", amounts: [{ currency: "USD", amount: "1.20" }] },
+    { value: "acme/docs", amounts: [{ currency: "USD", amount: "1.20" }] },
   ],
 };
 
 export const fakeRunLabels: Record<string, string>[] = [
-  { app: "jervasion", "jervasion.repository": "absmartly/abs", "jervasion.pr": "5336" },
+  { app: "jervasion", "jervasion.repository": "acme/abs", "jervasion.pr": "5336" },
   { app: "dude", "dude.phase": "implement", "dude.ticket": "DASH-41" },
   {},
 ];

@@ -27,5 +27,6 @@ test("mock: every session Run's records fold with its adapter's subagent support
     ["claude-code", 1],
     ["codex", 1],
     ["acp", 0],
+    ["opencode", 4],
   ]);
 });

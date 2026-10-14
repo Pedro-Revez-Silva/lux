@@ -16,8 +16,10 @@ export interface SessionTranscriptProps {
   status?: ReactNode;
   /** Shown instead of the turns while there are none. */
   empty?: ReactNode;
+  /** A SessionComposer under the bar; with one, the bar drops its read-only note. */
+  composer?: ReactNode;
   className?: string;
-  children: ReactNode;
+  children?: ReactNode;
 }
 
 /**
@@ -25,7 +27,7 @@ export interface SessionTranscriptProps {
  * Follow-the-tail as LogView: scrolling up turns Follow off and a pill counts
  * what arrived; scrolling back to the bottom turns it on again.
  */
-export function SessionTranscript({ title = "Session", subtitle, actions, itemCount, contentKey, note, status, empty, className, children }: SessionTranscriptProps) {
+export function SessionTranscript({ title = "Session", subtitle, actions, itemCount, contentKey, note, status, empty, composer, className, children }: SessionTranscriptProps) {
   const el = useRef<HTMLDivElement>(null);
   const [follow, setFollow] = useState(true);
   const [seen, setSeen] = useState(itemCount);
@@ -34,6 +36,17 @@ export function SessionTranscript({ title = "Session", subtitle, actions, itemCo
     const n = el.current;
     if (n && follow) n.scrollTop = n.scrollHeight;
   }, [follow, itemCount, contentKey]);
+
+  // A growing composer shrinks the scroller without new content; keep the tail pinned while following.
+  useLayoutEffect(() => {
+    const n = el.current;
+    if (!n || !follow) return;
+    const ro = new ResizeObserver(() => {
+      n.scrollTop = n.scrollHeight;
+    });
+    ro.observe(n);
+    return () => ro.disconnect();
+  }, [follow]);
 
   const onScroll = () => {
     const n = el.current;
@@ -55,13 +68,22 @@ export function SessionTranscript({ title = "Session", subtitle, actions, itemCo
         </div>
         {actions}
       </div>
-      <div ref={el} className="transcript-scroll" tabIndex={0} onScroll={onScroll}>
-        {empty ?? <div className="turns">{children}</div>}
+      <div className="transcript-body">
+        <div ref={el} className="transcript-scroll" tabIndex={0} onScroll={onScroll}>
+          {empty ?? <div className="turns">{children}</div>}
+        </div>
+        {unseen > 0 && (
+          <button type="button" className="transcript-jump" onClick={() => setFollow(true)}>
+            <IconArrowDown size={12} /> {unseen} new · Jump to latest
+          </button>
+        )}
       </div>
       <div className="transcript-bar">
-        <span className="transcript-readonly">
-          <IconLock size={12} /> {note ?? "Read-only"}
-        </span>
+        {!composer && (
+          <span className="transcript-readonly">
+            <IconLock size={12} /> {note ?? "Read-only"}
+          </span>
+        )}
         <span className="grow" />
         {status}
         <button type="button" className={follow ? "logview-follow is-on" : "logview-follow"} aria-pressed={follow} onClick={() => setFollow(!follow)}>
@@ -69,11 +91,7 @@ export function SessionTranscript({ title = "Session", subtitle, actions, itemCo
           Follow
         </button>
       </div>
-      {unseen > 0 && (
-        <button type="button" className="transcript-jump" onClick={() => setFollow(true)}>
-          <IconArrowDown size={12} /> {unseen} new · Jump to latest
-        </button>
-      )}
+      {composer}
     </section>
   );
 }

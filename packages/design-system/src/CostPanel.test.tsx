@@ -31,9 +31,9 @@ describe("cost panel components", () => {
   });
 
   test("LabelChips: the keys asked for first, at most max, the rest counted with their text in the title", async () => {
-    const el = await render(<LabelChips labels={{ team: "x", app: "jervasion", "jervasion.repository": "absmartly/abs", z: "1" }} first={["app"]} max={2} />);
+    const el = await render(<LabelChips labels={{ team: "x", app: "jervasion", "jervasion.repository": "acme/abs", z: "1" }} first={["app"]} max={2} />);
     const chips = [...el.querySelectorAll(".label-chip")].map((c) => c.textContent);
-    expect(chips).toEqual(["app=jervasion", "jervasion.repository=absmartly/abs", "+2"]);
+    expect(chips).toEqual(["app=jervasion", "jervasion.repository=acme/abs", "+2"]);
     expect(el.querySelector(".label-chip.is-more")?.getAttribute("title")).toBe("team=x\nz=1");
     const none = await render(<LabelChips labels={{}} />);
     expect(none.textContent).toBe("–");
@@ -238,7 +238,7 @@ describe("cost panel components", () => {
     });
 
     test("matchValues: case-insensitive anywhere, biggest cost first", () => {
-      expect(matchValues([{ value: "absmartly/abs", amounts: [] }, { value: "Jervasion", amounts: [{ currency: "USD", amount: "1" }] }, { value: "dude", amounts: [{ currency: "USD", amount: "2" }] }], " JER ").map((v) => v.value)).toEqual(["Jervasion"]);
+      expect(matchValues([{ value: "acme/abs", amounts: [] }, { value: "Jervasion", amounts: [{ currency: "USD", amount: "1" }] }, { value: "dude", amounts: [{ currency: "USD", amount: "2" }] }], " JER ").map((v) => v.value)).toEqual(["Jervasion"]);
       expect(matchValues([{ value: "a", amounts: [{ currency: "USD", amount: "1" }] }, { value: "b", amounts: [{ currency: "USD", amount: "2" }] }, { value: "c", amounts: [] }], "").map((v) => v.value)).toEqual(["b", "a", "c"]);
     });
   });

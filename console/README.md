@@ -109,7 +109,7 @@ Run-scoped calls (`/runs/{id}/…`, `/hosts/{id}/…`, `/artifacts/…`) do not 
 | --- | --- | --- |
 | `/` | Overview, tabs (`?tab=`): Activity (stat tiles, trend charts over the selected range at the page's step, the control host for operators, live activity feed), Cost (Show, Break down by family / label / API key / pool / tenant, label filters; KPIs, stacked bars, By &lt;breakdown&gt;, Top Runs with labels, Top tenants: `docs/costs.md` §9), Storage (the Stored chart) | `/status` (5s), `/history?since=&res=` (30s), `/costs?group=&label=&nolabel=&interval=` and `/costs/labels` (60s, while Cost is shown), `/events` SSE |
 | `/runs` | Runs over time and started/finished charts (the tenant scope's history over the global range; table filters do not narrow them), then the Runs table with state presets and chips, resumable/host/label filters; every column (Placement time and Cost included) sorts on the server across every match; cursor pages (First / Previous / Next, page size) | `/runs?sort=&dir=&limit=` with `next`/`prev`/`at` cursors (5s), `/history?since=` (30s) |
-| `/runs/:id` | Header + actions (Terminal, Stop, Terminate, Resume, Migrate), tabs (`?tab=`): Session (an agent Run's only, and then first: the output read as a conversation with its subagents, read-only; below), Output (SSE), Servers (the run's `servers`; Add server with a lifetime, Attach server… (one of the tenant's unattached servers), start/stop/restart, remove, or detach a kept one, wake and lifetime tags, a log per server), Timeline (per-epoch waterfall), Resources (charts, epoch marks), Events, Snapshots & artifacts, Spec | `/runs/{id}` (3s while active), `/runs/{id}/output`, `/runs/{id}/servers/{name}/log`, `/history`, `/events`, `/snapshots`, `/artifacts` |
+| `/runs/:id` | Header + actions (Terminal, Stop, Terminate, Resume, Migrate), tabs (`?tab=`): Session (an agent Run's first tab: the output read as a conversation with its subagents, and the input to the Run under it; a generic Run's comes after Output: no conversation, a composer that writes to its stdin; below), Output (SSE, read-only), Servers (the run's `servers`; Add server with a lifetime, Attach server… (one of the tenant's unattached servers), start/stop/restart, remove, or detach a kept one, wake and lifetime tags, a log per server), Timeline (per-epoch waterfall), Resources (charts, epoch marks), Events, Snapshots & artifacts, Spec | `/runs/{id}` (3s while active), `/runs/{id}/output`, `/runs/{id}/servers/{name}/log`, `/history`, `/events`, `/snapshots`, `/artifacts` |
 | `/runs/:id/terminal` | A shell in the run's container: xterm.js over the exec WebSocket, font size (persisted), terminal colours (Match console / Solarized light / Solarized dark: this terminal only, `lux.terminal.theme`, changed in place without reconnecting; the console theme stays in the top bar), Reconnect, Open in new tab; exited / lost overlays; an empty state while the run is not running | `/runs/{id}` (5s), `GET /runs/{id}/exec` (WebSocket; `POST /runs/{id}/tickets` first with a key) |
 | `/servers` | The tenant's servers: tiles (up, waking with the longest wait, asleep, stopped), a state filter (All / Up / Waking / Asleep), one row per server (state, wake, its run, owner, last request, idle countdown, wakes, created) | `/servers` (5s; refetched on `server.*` events) |
 | `/servers/:id` | One server: URL (copy, open), state and wake mode, actions (Restart, Stop, Detach, Delete); Served by (its run, placement, an open wake) and the idle countdown; tabs (`?tab=`): Overview (configuration), Events, Log. Not built yet: the 7-day uptime chart, cost tiles, and the table of runs that served it | `/servers/{id}` (3s), `/servers/{id}/events` (5s), `/servers/{id}/log` (5s) |
@@ -141,7 +141,12 @@ subagent tree from `parent_tool_use_id`, `codex.ts` from the app-server's
 `subAgentActivity` item and the child thread's notifications, `lux.ts`).
 `view.ts` turns it into what is drawn. The tests run on records lux wrote
 for real CLI runs (`testdata/`). A tool call's record link opens the
-Output tab; Output does not scroll to a record yet.
+Output tab; Output does not scroll to a record yet. `RunComposer.tsx` is
+the input under the transcript (the design system's `SessionComposer`):
+text and interrupt go to the Run's root session through
+`POST /v1/runs/{id}/input` whichever subagent is open, enabled while the
+Run is starting or running; a generic Run's Session tab uses it as "Send
+to stdin" (Interrupt sends the workload SIGINT).
 
 ## Layout
 

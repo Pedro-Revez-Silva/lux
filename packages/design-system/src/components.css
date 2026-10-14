@@ -572,6 +572,101 @@
   overflow-wrap: anywhere;
 }
 
+/* ---------- KeyValue with full-width facts: FactRow, ImageRef, LabelsFact ----------
+   A value that can be long sits under the grid on a full-width row, one
+   line, never in a grid cell. With `surface` (the default) the whole is one
+   card; without it (inside a Card) the rows draw on the parent's padding. */
+.kv-facts {
+  min-width: 0;
+  container-type: inline-size;
+}
+.kv-facts-surface {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+}
+.kv-facts-surface > .kv { padding: var(--sp-2) var(--pad-card) 0; }
+/* The row's hairline lies over the last grid row's own. */
+.fact-row {
+  margin-top: -1px;
+  padding: var(--sp-3) 0;
+  border-top: 1px solid var(--border-soft);
+  min-width: 0;
+}
+.kv-facts-surface > .fact-row { padding-inline: var(--pad-card); }
+.kv-facts-surface > .fact-row:last-child { padding-bottom: var(--sp-4); }
+.fact-line {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  min-height: var(--control-h);
+  min-width: 0;
+}
+.fact-key {
+  flex: none;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+.fact-value {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+/* Hidden until hover or focus as .idchip-copy, which every .fact-copy also is. */
+.imageref:hover .fact-copy,
+.imageref:focus-within .fact-copy,
+.label-pair:hover .fact-copy,
+.label-pair:focus-within .fact-copy,
+.fact-copy.is-copied { opacity: 1; }
+.fact-copy.is-copied { color: var(--success-fg); }
+.imageref {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  max-width: 100%;
+}
+.imageref-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+}
+.imageref-path { color: var(--fg-muted); }
+.imageref-name { color: var(--fg); font-weight: var(--weight-medium); }
+/* The disclosure is a ghost Button in the link colour. */
+.btn-ghost.fact-toggle { flex: none; color: var(--accent-text); }
+.labels-fact .label-chip { max-width: 40ch; }
+.label-list { margin: var(--sp-3) 0 0; }
+.label-pair {
+  display: grid;
+  grid-template-columns: minmax(120px, 220px) minmax(0, 1fr);
+  gap: var(--sp-5);
+  padding: var(--sp-3) 0;
+  border-top: 1px solid var(--border-soft);
+  font-size: var(--text-sm);
+}
+.label-pair dt { color: var(--fg-secondary); overflow-wrap: anywhere; }
+.label-pair dd {
+  margin: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.label-pair dd .mono { min-width: 0; overflow-wrap: anywhere; user-select: text; }
+@media (max-width: 767px) {
+  .fact-line { flex-wrap: wrap; row-gap: var(--sp-2); }
+  .imageref-text { white-space: normal; overflow-wrap: anywhere; }
+  .labels-fact .fact-value { order: 3; flex-basis: 100%; }
+  .labels-fact .label-chips { flex-wrap: wrap; }
+  .labels-fact .fact-toggle { margin-left: auto; }
+  .label-pair { grid-template-columns: minmax(0, 1fr); gap: var(--sp-1); }
+}
+
 /* ---------- IdChip / Code ----------
    Ids are quiet: plain mono in the muted colour, the copy affordance
    appears on hover or focus. Names lead; ids support. */
@@ -626,6 +721,15 @@ a.idchip-text:hover {
 }
 .idchip.is-copied .idchip-copy {
   color: var(--success-fg);
+}
+/* No hover on touch screens: the copy affordance is always shown, at a 24px target. */
+@media (hover: none) {
+  .idchip-copy {
+    opacity: 1;
+    min-width: 24px;
+    min-height: 24px;
+    justify-content: center;
+  }
 }
 .code {
   padding: 1px var(--sp-2);
@@ -2557,7 +2661,8 @@ a.idchip-text:hover {
   .session-layout { grid-template-columns: minmax(0, 1fr); }
   .session-layout > .session-rail { display: none; }
 }
-.session-pane-h { height: clamp(420px, calc(100vh - 360px), 1100px); }
+/* The transcript card holds its composer too: sized so the composer stays in view under a Run page's facts and tabs. */
+.session-pane-h { height: clamp(420px, calc(100vh - var(--session-pane-offset)), 860px); }
 
 .transcript {
   display: flex;
@@ -2578,6 +2683,8 @@ a.idchip-text:hover {
   border-bottom: 1px solid var(--border-soft);
 }
 .transcript-head .card-titles { flex: 1; }
+/* The scroller and its "N new" pill: the pill sits over the scroller's foot, above the bar and composer. */
+.transcript-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .transcript-scroll {
   flex: 1;
   min-height: 0;
@@ -2597,13 +2704,14 @@ a.idchip-text:hover {
   color: var(--fg-muted);
   white-space: nowrap;
 }
-.transcript-bar .grow { flex: 1; }
+.transcript-bar .grow,
+.composer-actions .grow { flex: 1; }
 .transcript-bar a { color: var(--accent-text); }
 .transcript-readonly { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .transcript-jump {
   position: absolute;
   left: 50%;
-  bottom: 48px;
+  bottom: var(--sp-6);
   transform: translateX(-50%);
   display: inline-flex;
   align-items: center;
@@ -2619,6 +2727,37 @@ a.idchip-text:hover {
   cursor: pointer;
 }
 .transcript-empty { padding: var(--sp-9) var(--sp-7); text-align: center; color: var(--fg-muted); }
+
+/* SessionComposer: under the transcript bar, the input to the Run's root session. */
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  flex: none;
+  padding: var(--sp-5) var(--pad-card);
+  border-top: 1px solid var(--border-soft);
+}
+.composer-input {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: calc(2lh + 2 * var(--sp-4));
+  max-height: 160px;
+  padding: var(--sp-4);
+  font-family: var(--font-sans);
+  line-height: var(--leading-normal);
+  resize: vertical;
+  field-sizing: content;
+}
+.composer-input:disabled { background: var(--bg-subtle); color: var(--fg-muted); cursor: not-allowed; }
+.composer-input:read-only:not(:disabled) { color: var(--fg-secondary); }
+.composer-actions { display: flex; align-items: center; gap: var(--sp-4); }
+.composer-hint { min-width: 0; font-size: var(--text-xs); color: var(--fg-muted); }
+.composer-error { margin: 0; font-size: var(--text-sm); color: var(--danger-fg); overflow-wrap: anywhere; }
+@media (max-width: 767px) {
+  .composer-actions { flex-wrap: wrap; }
+  .composer-hint { flex-basis: 100%; }
+}
 
 .turns { display: flex; flex-direction: column; gap: var(--turn-gap); max-width: var(--measure); margin: 0 auto; }
 .turn { position: relative; min-width: 0; }
