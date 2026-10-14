@@ -271,7 +271,7 @@ func (s *Server) poolMetrics(ctx context.Context, in *poolMetricsInput) (*poolMe
 		return nil, err
 	}
 	out := &poolMetricsOutput{}
-	out.Body.From, out.Body.To, out.Body.Resolution = from, to, res
+	out.Body.From, out.Body.To = from, to
 	out.Body.Samples = []PoolSample{}
 	now := &out.Body.Now
 	now.Hosts = map[string]int{}
@@ -281,6 +281,12 @@ func (s *Server) poolMetrics(ctx context.Context, in *poolMetricsInput) (*poolMe
 			return err
 		}
 		out.Body.PoolID = pool.ID
+		var created time.Time
+		if err := tx.QueryRow(ctx, `SELECT created_at FROM pools WHERE id = $1`, pool.ID).Scan(&created); err != nil {
+			return err
+		}
+		res = s.resFor(in.HistoryQuery, from, to, created, res)
+		out.Body.Resolution = res
 		rows, err := tx.Query(ctx, `SELECT h.state, count(*),
 				coalesce(sum((h.capacity->>'cpus')::float8) FILTER (WHERE h.state IN ('ready', 'draining')), 0),
 				coalesce(sum((h.capacity->>'memory')::int8) FILTER (WHERE h.state IN ('ready', 'draining')), 0)::bigint

@@ -4364,12 +4364,12 @@ paths:
           schema:
             description: The end (RFC 3339); default now.
             type: string
-        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
           explode: false
           in: query
           name: res
           schema:
-            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
             type: string
         - description: "Only Runs with this label (key=value, split at the first =). Repeat: the same key repeated matches any of its values; different keys must all match."
           explode: true
@@ -4542,12 +4542,12 @@ paths:
           schema:
             description: The end (RFC 3339); default now.
             type: string
-        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
           explode: false
           in: query
           name: res
           schema:
-            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
             type: string
         - description: "Only Runs with this label (key=value, split at the first =). Repeat: the same key repeated matches any of its values; different keys must all match."
           explode: true
@@ -4757,12 +4757,12 @@ paths:
           schema:
             description: The end (RFC 3339); default now.
             type: string
-        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
           explode: false
           in: query
           name: res
           schema:
-            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
             type: string
       responses:
         "200":
@@ -5108,12 +5108,12 @@ paths:
           schema:
             description: The end (RFC 3339); default now.
             type: string
-        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
           explode: false
           in: query
           name: res
           schema:
-            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
             type: string
       responses:
         "200":
@@ -5414,12 +5414,12 @@ paths:
           schema:
             description: The end (RFC 3339); default now.
             type: string
-        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
           explode: false
           in: query
           name: res
           schema:
-            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
             type: string
       responses:
         "200":
@@ -5917,12 +5917,12 @@ paths:
           schema:
             description: The end (RFC 3339); default now.
             type: string
-        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
           explode: false
           in: query
           name: res
           schema:
-            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
             type: string
         - description: "Buckets of series: hour (default) or day."
           explode: false
@@ -6192,12 +6192,12 @@ paths:
           schema:
             description: The end (RFC 3339); default now.
             type: string
-        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
           explode: false
           in: query
           name: res
           schema:
-            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
             type: string
       responses:
         "200":
@@ -7242,12 +7242,12 @@ paths:
           schema:
             description: The end (RFC 3339); default now.
             type: string
-        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+        - description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
           explode: false
           in: query
           name: res
           schema:
-            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."
+            description: "Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."
             type: string
       responses:
         "200":

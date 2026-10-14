@@ -655,11 +655,12 @@ type HistoryQuery struct {
 	Since string `query:"since" doc:"How far back from now: a Go duration or a number of days (7d). Default 1h." example:"24h"`
 	From  string `query:"from" doc:"The start (RFC 3339), instead of since."`
 	To    string `query:"to" doc:"The end (RFC 3339); default now."`
-	Res   string `query:"res" doc:"Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range."`
+	Res   string `query:"res" doc:"Resolution in seconds: 0 (raw), 60, 3600 or 86400 (UTC days, folded from the hours when read). Default: the finest kept for the range; host, Run and pool metric histories start this calculation at creation when later."`
 }
 
 // historyRange resolves a HistoryQuery: since (default 1h) or from/to, and
-// the resolution asked for or the finest kept for the range.
+// the resolution asked for or the finest kept for the range (resFor narrows
+// it to a subject's lifetime).
 func (s *Server) historyRange(q HistoryQuery) (from, to time.Time, res int, err error) {
 	to = time.Now()
 	if v := q.To; v != "" {
@@ -688,6 +689,20 @@ func (s *Server) historyRange(q HistoryQuery) (from, to time.Time, res int, err 
 		return from, to, 0, errf(http.StatusBadRequest, "bad_request", "res must be 0, 60, 3600 or 86400")
 	}
 	return from, to, res, nil
+}
+
+// resFor is the resolution of a read of a subject created at created: res
+// when q asks for one, else the finest kept for the part of [from, to] the
+// subject has existed in. Retention is checked from that part's start too,
+// as nothing before it has samples.
+func (s *Server) resFor(q HistoryQuery, from, to, created time.Time, res int) int {
+	if q.Res != "" {
+		return res
+	}
+	if created.After(from) {
+		from = created
+	}
+	return s.pickResolution(from, to)
 }
 
 // parseSince is a Go duration, or a number of days ("7d").
@@ -748,21 +763,22 @@ func (s *Server) hostHistory(ctx context.Context, in *hostHistoryInput) (*histor
 	if err != nil {
 		return nil, err
 	}
-	h := History{From: from, To: to, Resolution: res, Samples: []Sample{}}
+	h := History{From: from, To: to, Samples: []Sample{}}
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		id, err := s.resolveHost(ctx, tx, p, in.ID, true)
 		if err != nil {
 			return err
 		}
-		if !p.Operator {
-			var own bool
-			if err := tx.QueryRow(ctx, `SELECT tenant_id IS NOT DISTINCT FROM $2 FROM hosts WHERE id = $1`, id, p.TenantID).Scan(&own); err != nil {
-				return err
-			}
-			if !own {
-				return errf(http.StatusForbidden, "forbidden", "a platform host's history is the operators'")
-			}
+		var own bool
+		var created time.Time
+		if err := tx.QueryRow(ctx, `SELECT tenant_id IS NOT DISTINCT FROM $2, created_at FROM hosts WHERE id = $1`, id, p.TenantID).Scan(&own, &created); err != nil {
+			return err
 		}
+		if !p.Operator && !own {
+			return errf(http.StatusForbidden, "forbidden", "a platform host's history is the operators'")
+		}
+		res = s.resFor(in.HistoryQuery, from, to, created, res)
+		h.Resolution = res
 		rows, err := tx.Query(ctx, `SELECT at, cpu_seconds, mem_bytes, disk_bytes, disk_free, fs_capacity, disk_headroom, placements, alloc_cpus, alloc_mem, `+procCols+`
 			FROM `+hostRollup.source(res, "$3", "$4")+` s WHERE host_id = $1 AND res = $2 AND at BETWEEN $3 AND $4 ORDER BY at`, id, res, from, to)
 		if err != nil {
@@ -803,11 +819,17 @@ func (s *Server) runHistory(ctx context.Context, in *runHistoryInput) (*historyO
 	if err != nil {
 		return nil, err
 	}
-	h := History{From: from, To: to, Resolution: res, Samples: []Sample{}}
+	h := History{From: from, To: to, Samples: []Sample{}}
 	err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		if err := requireRun(ctx, tx, in.ID); err != nil {
 			return err
 		}
+		var created time.Time
+		if err := tx.QueryRow(ctx, `SELECT created_at FROM runs WHERE id = $1`, in.ID).Scan(&created); err != nil {
+			return err
+		}
+		res = s.resFor(in.HistoryQuery, from, to, created, res)
+		h.Resolution = res
 		rows, err := tx.Query(ctx, `SELECT epoch, at, cpu_seconds, mem_bytes, disk_bytes, pids, net_rx, net_tx,
 				peak_cpu_cores, cpu_stall, mem_stall, mem_full_stall, io_stall, io_full_stall
 			FROM `+placementRollup.source(res, "$3", "$4")+` s WHERE run_id = $1 AND res = $2 AND at BETWEEN $3 AND $4 ORDER BY epoch, at`,

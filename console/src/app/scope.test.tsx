@@ -7,10 +7,12 @@ import { createRoot } from "react-dom/client";
 let ScopeProvider: typeof import("./scope.tsx").ScopeProvider;
 let useScope: typeof import("./scope.tsx").useScope;
 let scoped: typeof import("./router.tsx").scoped;
+let ScopeStep: typeof import("./ScopeStep.tsx").ScopeStep;
 beforeAll(async () => {
   GlobalRegistrator.register();
   ({ ScopeProvider, useScope } = await import("./scope.tsx"));
   ({ scoped } = await import("./router.tsx"));
+  ({ ScopeStep } = await import("./ScopeStep.tsx"));
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
 afterAll(async () => {
@@ -80,6 +82,26 @@ test("setting Every, Show, Break down by and filters writes the URL; the default
   await act(async () => p.scope().setCostFilters([]));
   expect(window.location.search).toBe("?range=7d");
   await p.done();
+});
+
+test("Auto leaves trend resolution to the server and fixed steps keep their labels", async () => {
+  (window as unknown as { happyDOM: { setURL: (u: string) => void } }).happyDOM.setURL("http://localhost/?range=7d");
+  const el = document.createElement("div");
+  const root = createRoot(el);
+  await act(async () => root.render(<ScopeProvider><ScopeStep /></ScopeProvider>));
+  try {
+    const trigger = el.querySelector<HTMLButtonElement>("button")!;
+    expect(trigger.textContent).toContain("Auto · server picks trends / cost day");
+    await act(async () => trigger.click());
+    expect(el.textContent).toContain("the server picks trends from the subject's available lifetime");
+    expect(el.textContent).toContain("cost for 7d is per day");
+    expect(el.textContent).not.toContain("trends per hour");
+    const hour = Array.from(el.querySelectorAll<HTMLElement>('[role="option"]')).find((option) => option.textContent?.startsWith("Hour"))!;
+    await act(async () => hour.click());
+    expect(trigger.textContent).toBe("EveryHour");
+  } finally {
+    await act(async () => root.unmount());
+  }
 });
 
 test("links carry every and cost with the tenant and range; per, by and filters stay on the page", () => {

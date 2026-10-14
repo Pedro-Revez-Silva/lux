@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { autoStep, autoSummary, costInterval, effectiveEvery, everyChoices, everyOptions, historyRes, parseEvery, resolveStep, stepNote, stepSentence } from "./every.ts";
+import { autoStep, autoSummary, costInterval, effectiveEvery, everyChoices, everyOptions, historyRes, parseEvery, resolveStep, stepNote, stepOfRes, stepSentence } from "./every.ts";
 
 test("?every=: minute, hour or day; anything else is Auto", () => {
   expect(["minute", "hour", "day", "week", "", null].map((v) => parseEvery(v))).toEqual(["minute", "hour", "day", "auto", "auto", "auto"]);
@@ -52,5 +52,6 @@ test("a kind that cannot use the choice keeps its own step and says why", () => 
   expect(resolveStep("7d", "hour", "trend")).toEqual({ step: "hour", auto: false });
   // Auto asks luxd for no resolution: it picks the finest kept.
   expect(historyRes(resolveStep("7d", "auto", "trend"))).toBeUndefined();
+  expect(stepNote(resolveStep("7d", "auto", "trend"), stepOfRes(0))).toBe("per 10s sample");
   expect(historyRes(resolveStep("24h", "minute", "trend"))).toBe(60);
 });
