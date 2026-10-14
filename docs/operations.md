@@ -43,7 +43,7 @@ arrive, a few seconds late.
 2. Run `luxd migrate` with the owner's DSN. It applies what is new and is
    safe to run again; running luxds keep working meanwhile, except while a
    migration builds an index, and except in a release whose note below
-   says otherwise (056; 062–064). 045 and 046 index the pool and host events
+   says otherwise (056; 062–064; 079). 045 and 046 index the pool and host events
    tables in their migration's transaction: until each commits, anything
    luxd does that records an event (heartbeats, registration, placements,
    drains) waits — about 3–4 s per million events for the two together.
@@ -87,9 +87,40 @@ arrive, a few seconds late.
    `ec2:GetSpotPlacementScores` and `ec2:DescribeSubnets` for complete
    [market data](telemetry.md#market-data); without them it is sampled
    without placement scores, or in the zones of the pools' hosts.
+   078 (`runs.first_pool_id`) adds a column without a default: an ACCESS
+   EXCLUSIVE lock on `runs` (and writes to `pools` held back) for a catalog
+   change only, committed at once, after waiting up to `lock_timeout`
+   (5 s) for transactions open on `runs`, during which new reads and
+   writes of `runs` queue behind it; on timeout 078 fails and `luxd
+   migrate` is run again. 079 then fills it in for Runs that had
+   already ended (succeeded, failed, terminated), in a transaction of its
+   own, about 41–51 s per million ended Runs on the test machine and more
+   under load. It holds the row locks of those ended Runs until it
+   commits. Reads, submits and a write to a single live Run go on; a write
+   to an ended Run (a resume, a late report) waits. So does a **live**
+   Run's runner report, for the rest of 079, behind the cost drainer of
+   any luxd, old or new: the drainer locks a chunk of claimed Runs (up to
+   100, live and ended mixed) in id order and waits at the first ended
+   one 079 holds, keeping the live Runs before it locked
+   (`writeComputeChunk` in `internal/server/costqueue.go`). Meanwhile luxd
+   handles none of that host's heartbeats, which queue behind the report,
+   and the host is lost once the wait exceeds the lease (`LUX_LEASE`,
+   30 s by default). Count the ended Runs first:
+   `SELECT count(*) FROM runs WHERE first_started_at IS NOT NULL AND state IN ('succeeded', 'failed', 'terminated')`.
+   Above 300,000 (about 15 s at the measured rate, half the default lease;
+   proportionally fewer with a shorter `LUX_LEASE`), steps 2–3 change:
+   either stop every `luxd serve` before 079 runs and start them on the
+   new binary once it has committed (time no luxd hears a host is not
+   held against it), or restart every luxd with `[costs] enabled = false`
+   (`LUX_COSTS=false`) before step 2 and with costs on again in step 3,
+   once 079 has committed (Runs queued meanwhile are drained then). Live
+   and resting Runs are left NULL and counted by the same rule when read.
+   079 then builds `runs_first_pool_started`, holding back writes to
+   `runs` (not reads) for the build, about 0.3 s per 200,000 Runs.
+   Otherwise older luxds keep working.
 3. Restart (or roll) every `luxd serve` onto the new binary; for a release
-   with 056 and several luxds, start every one of them, all stopped in
-   step 2: do not roll.
+   with 056 and several luxds, or with 079 run with every luxd stopped
+   (above), start every one of them, all stopped in step 2: do not roll.
 
 Migrate first: a luxd newer than its schema does not check it, and fails
 requests that touch what is missing (luxds older than the schema keep

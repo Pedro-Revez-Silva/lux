@@ -132,12 +132,27 @@ window, and the launches it requested and the provider refused. A row per
 tenant holds that tenant's part (its Runs, allocation, starts and
 finishes) and nothing of the pool's hosts.
 
-A Run counts under the pool it is bound to when it is counted: after a
-resume moves it ([moving to another pool](concepts.md#moving-to-another-pool)),
-its later starts and its finish count under the new pool; its cost stays
-with each placement's host's pool. `runsStarted` in `GET /v1/pools/stats`
-counts the same way, when it is read, so there a moved Run's first start
-counts under its new pool.
+A Run's first start counts under the pool of the host it first ran on (the
+placement whose `started_at` is the Run's `first_started_at`, else its
+earliest started placement), and its finish under the pool of the host of
+its last placement (its highest epoch). So a Run that a resume moved
+([moving to another pool](concepts.md#moving-to-another-pool)) from A to B
+and that finished in B counts its start in A and its finish in B, once
+each, in the pool's row and in its tenant's. A Run with no placement, or
+whose placement's host has no pool or is gone, counts under the pool it is
+bound to (`runs.pool_id`). Running and queued are where the Run is now: the
+pool it is bound to. `runsStarted` in `GET /v1/pools/stats` counts starts
+the same way. Its cost stays with each placement's host's pool. A retired
+pool's starts stay in its history (its samples), but `GET /v1/pools/stats`
+lists live pools only, so they are in no pool's current stats. The
+start's pool is recorded once, with `first_started_at`, as
+`runs.first_pool_id` (migration 078; 079 filled it in for the Runs that had
+ended before it; for a Run still live or resting then, and where it could
+not be told, it is NULL and the rule above is applied when counting).
+
+Samples written before this rule (lux releases before it) are not
+rewritten: in them, a moved Run's start and finish both count under the
+pool it was bound to when the sample was taken.
 
 The pool rows roll up and expire with the other samples. The first rows are
 written when this ships: an older range is a gap, never an invented zero

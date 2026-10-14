@@ -1820,6 +1820,7 @@ components:
           format: int64
           type: integer
         finished:
+          description: Runs finished in the sample's window, under the pool of the host of each one's last placement, or the pool it is bound to without one.
           format: int64
           type: integer
         hosts:
@@ -1841,6 +1842,7 @@ components:
           format: int64
           type: integer
         started:
+          description: Runs first started in the sample's window, under the pool of the host each first ran on, or the pool it is bound to without one.
           format: int64
           type: integer
       type: object
@@ -1966,7 +1968,7 @@ components:
             - array
             - "null"
         runsStarted:
-          description: "Runs first started in the range (a tenant: its own)."
+          description: "Runs first started in the range (a tenant: its own), under the pool of the host each first ran on, or the pool it is bound to without one."
           format: int64
           type: integer
       type: object

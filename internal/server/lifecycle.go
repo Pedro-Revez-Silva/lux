@@ -395,7 +395,12 @@ func (s *Server) applyStatusOnly(ctx context.Context, tx pgx.Tx, tenantID, runID
 			return err
 		}
 		if hostID != "" {
-			if _, err := tx.Exec(ctx, `UPDATE runs SET first_started_at = coalesce(first_started_at, now()) WHERE id = $1`, runID); err != nil {
+			// The CASE reads first_started_at before this SET: first_pool_id
+			// is written on the first start only, never by a later one.
+			if _, err := tx.Exec(ctx, `UPDATE runs SET first_started_at = coalesce(first_started_at, now()),
+					first_pool_id = CASE WHEN first_started_at IS NULL
+						THEN coalesce((SELECT h.pool_id FROM hosts h WHERE h.id = $2), pool_id) ELSE first_pool_id END
+				WHERE id = $1`, runID, hostID); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE hosts SET first_placement_at = coalesce(first_placement_at, now()) WHERE id = $1`, hostID); err != nil {

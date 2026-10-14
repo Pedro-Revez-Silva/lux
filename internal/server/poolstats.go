@@ -65,7 +65,7 @@ type PoolStats struct {
 	Hosts          map[string]int `json:"hosts" doc:"Hosts not terminated, by state."`
 	CapacityCPUs   float64        `json:"capacityCpus" doc:"Cores of its ready and draining hosts."`
 	AllocatedCPUs  float64        `json:"allocatedCpus" doc:"Cores its live placements hold (a tenant: its own)."`
-	RunsStarted    int            `json:"runsStarted" doc:"Runs first started in the range (a tenant: its own)."`
+	RunsStarted    int            `json:"runsStarted" doc:"Runs first started in the range (a tenant: its own), under the pool of the host each first ran on, or the pool it is bound to without one."`
 	RunsHourly     []int          `json:"runsHourly" doc:"The same per hour of the range, oldest first."`
 	LaunchFailures int            `json:"launchFailures" doc:"Launches the provider refused in the range."`
 	Cost           []MoneyAmount  `json:"cost" doc:"The cost of the Runs on its machines (compute and block storage) in the range, per currency; empty: none reported."`
@@ -170,8 +170,17 @@ func (s *Server) poolStats(ctx context.Context, in *poolStatsInput) (*poolStatsO
 		}); err != nil {
 			return err
 		}
-		rows, err = tx.Query(ctx, `SELECT pool_id, floor(extract(epoch FROM first_started_at - $2) / 3600)::int, count(*)
-			FROM runs WHERE pool_id = ANY($1) AND first_started_at > $2 AND first_started_at <= $3
+		// Counted under each Run's start pool (runStartPool), not runs.pool_id:
+		// the recorded first_pool_id arm, and the few NULL ones resolved at
+		// read time. OFFSET 0 keeps the pool filter out of the NULL arm, so
+		// its lookup runs once per Run, not again for the filter.
+		rows, err = tx.Query(ctx, `SELECT x.pool, floor(extract(epoch FROM x.at - $2) / 3600)::int, count(*)
+			FROM (SELECT r.first_pool_id AS pool, r.first_started_at AS at FROM runs r
+					WHERE r.first_pool_id = ANY($1) AND r.first_started_at > $2 AND r.first_started_at <= $3
+				UNION ALL
+				(SELECT `+runStartPool+`, r.first_started_at FROM runs r
+					WHERE r.first_pool_id IS NULL AND r.first_started_at > $2 AND r.first_started_at <= $3 OFFSET 0)) x
+			WHERE x.pool = ANY($1)
 			GROUP BY 1, 2`, ids, out.Body.From, out.Body.To)
 		if err != nil {
 			return err
@@ -218,8 +227,8 @@ type PoolSample struct {
 	AllocatedMem   int64          `json:"allocatedMemory"`
 	Running        int            `json:"running"`
 	Queued         int            `json:"queued"`
-	Started        int            `json:"started"`
-	Finished       int            `json:"finished"`
+	Started        int            `json:"started" doc:"Runs first started in the sample's window, under the pool of the host each first ran on, or the pool it is bound to without one."`
+	Finished       int            `json:"finished" doc:"Runs finished in the sample's window, under the pool of the host of each one's last placement, or the pool it is bound to without one."`
 	Launches       int            `json:"launches"`
 	LaunchFailures int            `json:"launchFailures"`
 }
