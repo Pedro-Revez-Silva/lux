@@ -447,7 +447,9 @@ families are final for every placement.
   shows list-price costs and says so in the UI and the API
   (`"basis": "list"`). A host's own volumes are priced (block storage,
   below); S3, snapshots and data transfer are not. A cost plugin could
-  report them.
+  report them. The [network measurements](telemetry.md#network-transfer)
+  classify accepted L3 traffic and count public IPv4 attachments, not
+  invoice-accurate transfer or allocated/unallocated public-IP costs.
 - **EBS** (block storage): the Pricing API, `GetProducts` on `AmazonEC2`,
   filtered by `regionCode` and `volumeApiName` (the volume type). Three
   products answer: productFamily `Storage` (unit `GB-Mo`), `System

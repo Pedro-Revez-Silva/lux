@@ -33,6 +33,42 @@ type Provider interface {
 	// them. A host absent from the answer has no attachment yet; an empty
 	// slice: attachments, none deleted with it.
 	Volumes(ctx context.Context, template json.RawMessage, providerIDs []string) (map[string][]HostVolume, error)
+	// Network is, per provider id (all in template's region), the host's
+	// network placement. A host absent from the answer is not known yet.
+	Network(ctx context.Context, template json.RawMessage, providerIDs []string) (map[string]HostNetwork, error)
+	// Prefixes is the provider's published address catalog, classified for
+	// template's region. It may answer from a cached copy; with none, an
+	// error.
+	Prefixes(ctx context.Context, template json.RawMessage) (ProviderPrefixes, error)
+}
+
+// HostNetwork is a host's network placement: its own subnets and zone,
+// every subnet of its network with its zone, and its billable public IPv4
+// addresses (every distinct one on any of its interfaces).
+type HostNetwork struct {
+	SubnetsUnavailable bool            `json:"partial,omitempty" doc:"Subnet discovery is incomplete; unlisted traffic is classified as unknown."`
+	SubnetCIDRs        []string        `json:"subnetCidrs"`
+	Zone               string          `json:"zone"`
+	VPCSubnets         []NetworkSubnet `json:"vpcSubnets"`
+	PublicIPv4         int             `json:"publicIPv4"`
+}
+
+type NetworkSubnet struct {
+	CIDR string `json:"cidr"`
+	Zone string `json:"zone"`
+}
+
+// ProviderPrefixes is a provider's address catalog for one region. Provider
+// is keyed by the other region: inter-region rates differ per destination.
+// ProviderGlobal is what the catalog publishes with no region (AWS GLOBAL:
+// CloudFront, Route 53): neither in-region nor inter-region.
+type ProviderPrefixes struct {
+	Source         string
+	FetchedAt      time.Time
+	RegionService  []string
+	RegionPublic   []string
+	ProviderGlobal []string
+	Provider       map[string][]string
 }
 
 // HostVolume is one block-storage volume of a host: its type, provisioned size,
@@ -185,6 +221,7 @@ func (s *Server) provision(ctx context.Context) error {
 			return err
 		}
 		s.recordVolumes(ctx)
+		s.recordNetwork(ctx)
 	}
 	return nil
 }

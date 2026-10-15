@@ -764,6 +764,14 @@ components:
           type: string
         name:
           type: string
+        netClasses:
+          additionalProperties:
+            $ref: "#/components/schemas/NetBytes"
+          description: "The host's own network transfer (outside any Run), cumulative bytes per billing class and direction: local, zone, region-service, region-public, provider:<region>, provider-global, internet, unknown. unknown is traffic off the host's subnets with no provider catalog to classify it: not priced. Absent from runners that predate it."
+          type: object
+        network:
+          $ref: "#/components/schemas/HostNetwork"
+          description: "Its network placement as the provider reports it: its own subnets and zone, every subnet of its network with its zone, and its billable public IPv4 addresses. Refreshed on each provider check; absent while not known, and for a host that registered itself."
         placements:
           items:
             $ref: "#/components/schemas/HostPlacement"
@@ -945,6 +953,30 @@ components:
           description: "Paged lists: how many hosts match."
           format: int64
           type: integer
+      type: object
+    HostNetwork:
+      additionalProperties: false
+      properties:
+        partial:
+          description: Subnet discovery is incomplete; unlisted traffic is classified as unknown.
+          type: boolean
+        publicIPv4:
+          format: int64
+          type: integer
+        subnetCidrs:
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        vpcSubnets:
+          items:
+            $ref: "#/components/schemas/NetworkSubnet"
+          type:
+            - array
+            - "null"
+        zone:
+          type: string
       type: object
     HostPlacement:
       additionalProperties: false
@@ -1330,6 +1362,16 @@ components:
         currency:
           type: string
       type: object
+    NetBytes:
+      additionalProperties: false
+      properties:
+        rx:
+          format: int64
+          type: integer
+        tx:
+          format: int64
+          type: integer
+      type: object
     Network:
       additionalProperties: false
       properties:
@@ -1347,6 +1389,14 @@ components:
             - "null"
         unrestricted:
           type: boolean
+      type: object
+    NetworkSubnet:
+      additionalProperties: false
+      properties:
+        cidr:
+          type: string
+        zone:
+          type: string
       type: object
     OutputEnd:
       additionalProperties: false
@@ -2844,6 +2894,11 @@ components:
           description: memory.pressure's some total, in seconds.
           format: double
           type: number
+        netClasses:
+          additionalProperties:
+            $ref: "#/components/schemas/NetBytes"
+          description: "Bytes the placement's network forwarded, per billing class and direction (rx from, tx to): local, zone, region-service, region-public, provider:<region>, provider-global, internet, unknown. Only what every firewall rule let through counts. unknown: off the host's subnets with no provider catalog to classify it; never priced. Absent from runners that predate it."
+          type: object
         netRxBytes:
           format: int64
           type: integer
@@ -3108,6 +3163,11 @@ components:
         memoryStallSeconds:
           format: double
           type: number
+        netClasses:
+          additionalProperties:
+            $ref: "#/components/schemas/NetBytes"
+          description: Every placement's netClasses summed per class and direction.
+          type: object
         netRxBytes:
           format: int64
           type: integer

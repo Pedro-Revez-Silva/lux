@@ -91,7 +91,16 @@ type Template struct {
 }
 
 type Provider struct {
-	endpoint string
+	networkMu     sync.Mutex
+	subnetCache   map[[2]string]subnetEntry
+	subnetMaxAge  time.Duration
+	prefixMu      sync.Mutex
+	prefixCatalog ipRanges
+	prefixETag    string
+	prefixChecked time.Time
+	prefixFetched time.Time
+	prefixGood    bool
+	endpoint      string
 	// clientsMu guards clients: Check runs from request handlers while the
 	// provisioner launches, lists and terminates.
 	clientsMu sync.Mutex
@@ -150,7 +159,7 @@ const DefaultNoCapacityRetryAfter = 30 * time.Second
 
 // New builds the provider. endpoint overrides the EC2 endpoint (tests).
 func New(endpoint string, log *slog.Logger) *Provider {
-	return &Provider{endpoint: endpoint, clients: map[string]*awsec2.Client{}, next: map[string]int{},
+	return &Provider{subnetMaxAge: server.DefaultProviderCheckEvery, endpoint: endpoint, clients: map[string]*awsec2.Client{}, next: map[string]int{},
 		types: map[[2]string]typeEntry{}, memoryFailed: map[[2]string]time.Time{}, memoryTimeout: memoryLookupTimeout,
 		noCapacity: map[capacityKey]noCapacityMark{}, noCapacityFor: DefaultNoCapacityRetryAfter, now: time.Now, log: log}
 }

@@ -16,7 +16,8 @@ type runState struct {
 	TenantID string `json:"tenantId"`
 	Epoch    int    `json:"epoch"`
 	// Phase of the current placement: assigned | started | exited | reported
-	Phase string `json:"phase"`
+	Phase string      `json:"phase"`
+	Net   netBaseline `json:"net,omitempty"`
 	// The snapshot the local state volumes currently hold (after an exit),
 	// and its epoch. A resume from that snapshot here moves nothing.
 	VolumesSnapshot string `json:"volumesSnapshot,omitempty"`

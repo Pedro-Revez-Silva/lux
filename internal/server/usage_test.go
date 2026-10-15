@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"net/http"
+	"reflect"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -44,7 +45,7 @@ func TestExitStatusRecordsLargeUsage(t *testing.T) {
 			}
 			wantUsageStates(t, s, ctx, "after the exit", "exited", StateStopped)
 			got, outputSeq := storedUsage(t, s, ctx)
-			if got != usage {
+			if !reflect.DeepEqual(got, usage) {
 				t.Fatalf("stored usage %+v, want %+v", got, usage)
 			}
 			if outputSeq != 3*gib {
@@ -91,7 +92,7 @@ func TestExitStatusKeepsHeartbeatPeaks(t *testing.T) {
 		t.Fatalf("exit status: %v", err)
 	}
 	wantUsageStates(t, s, ctx, "after the exit", "exited", StateStopped)
-	if got, _ := storedUsage(t, s, ctx); got != peaks {
+	if got, _ := storedUsage(t, s, ctx); !reflect.DeepEqual(got, peaks) {
 		t.Fatalf("stored usage %+v, want the heartbeat's %+v", got, peaks)
 	}
 }

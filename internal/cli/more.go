@@ -452,6 +452,13 @@ every host, with a TENANT column (--tenant: what that tenant sees).`,
 			fmt.Fprintf(w, "capacity:  %g cpus, %s memory, %s disk, %d runs\n", h.Capacity.CPUs, spec.BytesText(h.Capacity.Memory), spec.BytesText(h.Capacity.Disk), h.Capacity.Runs)
 			fmt.Fprintf(w, "allocated: %g cpus, %s memory\n", h.Allocated.CPUs, spec.BytesText(int64(h.Allocated.Memory)))
 			fmt.Fprintf(w, "heartbeat: %s\n", ago(h.LastHeartbeat))
+			if n := h.Network; n != nil {
+				fmt.Fprintf(w, "network:   zone %s, subnets %s, %d public IPv4\n", orDash(n.Zone), orDash(strings.Join(n.SubnetCIDRs, " ")), n.PublicIPv4)
+			}
+			if len(h.NetClasses) > 0 {
+				fmt.Fprintln(w, "host traffic:")
+				writeNetClasses(w, h.NetClasses)
+			}
 			fmt.Fprintln(w, "lifecycle:")
 			for _, k := range []string{"provisionRequested", "provisioned", "registered", "firstPlacement", "lastPlacementEnded",
 				"drainRequested", "terminateRequested", "terminated", "lost"} {

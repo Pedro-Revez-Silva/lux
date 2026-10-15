@@ -124,6 +124,17 @@ class FakeEC2:
         # DescribeVolumes as a missing ec2:DescribeVolumes would.
         self.volumes = [dict(FAKE_ROOT_VOLUME)]
         self.volumes_error = ""
+        region = template.get("region") or "us-east-1"
+        self.subnets = {f"subnet-{letter}": {"vpc": "vpc-fake", "cidr": f"10.0.{n}.0/24",
+                        "ipv6": f"2001:db8:{n}::/64", "zone": region + letter}
+                        for n, letter in enumerate(("a", "b"))}
+        self.subnets_error = ""
+        self.ipranges_etag = '"fake-ipranges-1"'
+        self.ipranges = {"syncToken": "1", "createDate": "2026-10-01-00-00-00",
+                         "prefixes": [{"ip_prefix": "192.0.2.0/24", "region": region, "service": "AMAZON"},
+                                      {"ip_prefix": "198.51.100.0/24", "region": region, "service": "S3"},
+                                      {"ip_prefix": "203.0.113.0/24", "region": "other-region", "service": "AMAZON"}],
+                         "ipv6_prefixes": [{"ipv6_prefix": "2001:db8:ffff::/48", "region": region, "service": "DYNAMODB"}]}
         # Each GetProducts' filters, {field: value}, in order.
         self.pricing_calls: list[dict] = []
         # Market data (luxd's market sampler): the spot price every type
@@ -193,7 +204,18 @@ class FakeEC2:
             def do_PUT(self):  # IMDSv2 session token
                 self._imds(lambda iid: (200, "fake-imds-token"))
 
-            def do_GET(self):  # the instance metadata a spot runner watches
+            def do_GET(self):  # the published catalog, or instance metadata
+                if self.path == "/ip-ranges.json":
+                    data = json.dumps(fake.ipranges).encode()
+                    unchanged = self.headers.get("If-None-Match") == fake.ipranges_etag
+                    self.send_response(304 if unchanged else 200)
+                    self.send_header("ETag", fake.ipranges_etag)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(0 if unchanged else len(data)))
+                    self.end_headers()
+                    if not unchanged:
+                        self.wfile.write(data)
+                    return
                 def action(iid):
                     with fake.lock:
                         notice = fake.notices.get(iid)
@@ -360,10 +382,27 @@ class FakeEC2:
     def _DescribeSubnets(self, q):
         """Each subnet named (or, with none, a default subnet per zone a
         and b) in the zone _zone gives it, with a zone id from its letter."""
-        subnets = _list(q, "SubnetId") or ["subnet-a", "subnet-b"]
+        if self.subnets_error:
+            raise FakeError(self.subnets_error, "not authorized to perform ec2:DescribeSubnets (fake)")
+        subnets = _list(q, "SubnetId") or list(self.subnets)
+        i = 1
+        while f"Filter.{i}.Name" in q:
+            if q[f"Filter.{i}.Name"] == "vpc-id":
+                wanted = _list(q, f"Filter.{i}.Value")
+                subnets = [sn for sn in subnets if self.subnets.get(sn, {}).get("vpc") in wanted]
+            i += 1
         region = self.template.get("region") or "us-east-1"
-        items = "".join(f"<item><subnetId>{escape(sn)}</subnetId><availabilityZone>{self._zone(sn)}</availabilityZone>"
-                        f"<availabilityZoneId>{_zone_id(region, sn)}</availabilityZoneId></item>" for sn in subnets)
+        items = ""
+        for sn in subnets:
+            info = self.subnets.get(sn, {})
+            ipv6 = info.get("ipv6", "")
+            association = (f"<ipv6CidrBlockAssociationSet><item><ipv6CidrBlock>{escape(ipv6)}</ipv6CidrBlock>"
+                           f"<ipv6CidrBlockState><state>associated</state></ipv6CidrBlockState>"
+                           f"</item></ipv6CidrBlockAssociationSet>") if ipv6 else ""
+            items += (f"<item><subnetId>{escape(sn)}</subnetId><availabilityZone>{escape(info.get('zone', self._zone(sn)))}</availabilityZone>"
+                      f"<availabilityZoneId>{_zone_id(region, sn)}</availabilityZoneId>"
+                      f"<vpcId>{escape(info.get('vpc', 'vpc-fake'))}</vpcId><cidrBlock>{escape(info.get('cidr', ''))}</cidrBlock>"
+                      f"{association}</item>")
         return f'<DescribeSubnetsResponse xmlns="{NS}"><subnetSet>{items}</subnetSet></DescribeSubnetsResponse>'
 
     def _DescribeSpotPriceHistory(self, q):
@@ -425,9 +464,17 @@ class FakeEC2:
                     chosen = [c for c in chosen if self.instances[c]["tags"].get(name[4:]) in values]
             items = "".join(
                 f"<item><instanceId>{i}</instanceId><instanceState><code>16</code><name>{self.instances[i]['state']}</name>"
-                f"</instanceState><tagSet>{_tags(self.instances[i]['tags'])}</tagSet></item>" for i in chosen)
+                f"</instanceState>{self._network_xml(self.instances[i])}<tagSet>{_tags(self.instances[i]['tags'])}</tagSet></item>" for i in chosen)
         return (f'<DescribeInstancesResponse xmlns="{NS}"><reservationSet><item><reservationId>r-0</reservationId>'
                 f"<instancesSet>{items}</instancesSet></item></reservationSet></DescribeInstancesResponse>")
+
+    def _network_xml(self, inst):
+        subnet = inst.get("subnet") or next(iter(self.subnets))
+        info = self.subnets.get(subnet, {})
+        public = inst.get("publicIpAddress", "192.0.2.10")
+        address = f"<ipAddress>{escape(public)}</ipAddress>" if public else ""
+        return (f"<subnetId>{escape(subnet)}</subnetId><vpcId>{escape(info.get('vpc', 'vpc-fake'))}</vpcId>"
+                f"<placement><availabilityZone>{escape(info.get('zone', self._zone(subnet)))}</availabilityZone></placement>{address}")
 
     def _DescribeVolumes(self, q):
         """The volumes attached to the instances an attachment.instance-id

@@ -10,6 +10,8 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+import ipaddress
+import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
 import pytest
@@ -130,6 +132,47 @@ def test_market_actions_answer_as_ec2(ec2):
     assert status == 403 and "<Code>UnauthorizedOperation</Code>" in xml, xml
     status, xml = call(ec2, Action="DescribeSpotPriceHistory", AvailabilityZone="eu-north-1a", **{"InstanceType.1": "m7i.large"})
     assert status == 200 and "<spotPrice>0.0312</spotPrice>" in xml, xml
+
+
+def test_network_discovery_filters_instances_and_vpc_subnets(ec2):
+    with ec2.lock:
+        ec2.instances["i-a"] = {"state": "running", "tags": {}, "subnet": "subnet-a", "publicIpAddress": "192.0.2.42"}
+        ec2.instances["i-b"] = {"state": "running", "tags": {}, "subnet": "subnet-b", "publicIpAddress": ""}
+    status, xml = call(ec2, Action="DescribeInstances", **{"Filter.1.Name": "instance-id",
+                                                        "Filter.1.Value.1": "i-a", "Filter.1.Value.2": "i-gone"})
+    assert status == 200
+    ns = {"e": "http://ec2.amazonaws.com/doc/2016-11-15/"}
+    instances = ET.fromstring(xml).findall(".//e:instancesSet/e:item", ns)
+    assert [(i.findtext("e:instanceId", namespaces=ns), i.findtext("e:ipAddress", namespaces=ns),
+             i.findtext("e:subnetId", namespaces=ns), i.findtext("e:vpcId", namespaces=ns)) for i in instances] == [
+                 ("i-a", "192.0.2.42", "subnet-a", "vpc-fake")]
+    for vpc, count in (("vpc-fake", 2), ("vpc-absent", 0)):
+        status, xml = call(ec2, Action="DescribeSubnets", **{"Filter.1.Name": "vpc-id", "Filter.1.Value.1": vpc})
+        assert status == 200
+        subnets = ET.fromstring(xml).findall("e:subnetSet/e:item", ns)
+        assert len(subnets) == count
+        for subnet in subnets:
+            assert ipaddress.ip_network(subnet.findtext("e:cidrBlock", namespaces=ns)).version == 4
+            association = subnet.find("e:ipv6CidrBlockAssociationSet/e:item", ns)
+            assert ipaddress.ip_network(association.findtext("e:ipv6CidrBlock", namespaces=ns)).version == 6
+            assert association.findtext("e:ipv6CidrBlockState/e:state", namespaces=ns) == "associated"
+    ec2.subnets_error = "UnauthorizedOperation"
+    assert call(ec2, Action="DescribeSubnets")[0] == 403
+
+
+def test_published_ip_ranges_and_conditional_fetch(ec2):
+    with urllib.request.urlopen(ec2.url + "/ip-ranges.json", timeout=5) as response:
+        catalog = json.loads(response.read())
+        etag = response.headers["ETag"]
+    assert {p["service"] for p in catalog["prefixes"]} == {"AMAZON", "S3"}
+    assert {p["service"] for p in catalog["ipv6_prefixes"]} == {"DYNAMODB"}
+    for p in catalog["prefixes"] + catalog["ipv6_prefixes"]:
+        ipaddress.ip_network(p.get("ip_prefix") or p["ipv6_prefix"])
+    request = urllib.request.Request(ec2.url + "/ip-ranges.json", headers={"If-None-Match": etag})
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        urllib.request.urlopen(request, timeout=5)
+    assert caught.value.code == 304
+    assert caught.value.read() == b""
 
 
 def test_an_unknown_action_is_invalid_action(ec2):

@@ -30,6 +30,9 @@ type fakeNet struct {
 
 var addElement = regexp.MustCompile(`^add element inet lux (\S+) \{ (.*) \}$`)
 
+// list: these tests read no counters (netclass_test.go's kernel does).
+func (n *fakeNet) list() ([]byte, error) { return []byte(`{"nftables":[]}`), nil }
+
 func (n *fakeNet) nft(script string) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -74,7 +77,7 @@ func (n *fakeNet) inSet(iface string, a netip.Addr) bool {
 // prefixes, as New's control plane.
 func fixture(t *testing.T, blocked ...netip.Prefix) (*Firewall, *fakeNet, func(iface string, unrestricted bool, rules ...spec.EgressRule) *[]Lookup) {
 	n := &fakeNet{sets: map[string]map[string]bool{}, addr: map[string]netip.Addr{}, nx: map[string]bool{}}
-	f := newFirewall(blocked, n.lookup, n.nft)
+	f := newFirewall(blocked, n.lookup, n.nft, n.list)
 	add := func(iface string, unrestricted bool, rules ...spec.EgressRule) *[]Lookup {
 		var mu sync.Mutex
 		var got []Lookup
@@ -303,7 +306,7 @@ func TestRemoveDuringRefreshStoresNothing(t *testing.T) {
 		}
 		return []netip.Addr{netip.MustParseAddr("93.184.216.34")}, nil
 	}
-	f := newFirewall(nil, lookup, func(string) error { return nil })
+	f := newFirewall(nil, lookup, func(string) error { return nil }, func() ([]byte, error) { return nil, fmt.Errorf("no table") })
 	for iface, host := range map[string]string{"lux1": "gone.example.com", "lux2": "kept.example.com"} {
 		r, err := newRun(false, []spec.EgressRule{{Host: host}}, nil)
 		if err != nil {
@@ -348,7 +351,7 @@ func TestRefreshStopsDispatchingOnCancel(t *testing.T) {
 // manyNames is a Firewall resolving with lookup, with one Run that lists
 // 3 × refreshWorkers names.
 func manyNames(lookup func(context.Context, string) ([]netip.Addr, error)) *Firewall {
-	f := newFirewall(nil, lookup, func(string) error { return nil })
+	f := newFirewall(nil, lookup, func(string) error { return nil }, func() ([]byte, error) { return nil, fmt.Errorf("no table") })
 	r := &run{hosts: map[string]bool{}}
 	for i := range 3 * refreshWorkers {
 		r.hosts[fmt.Sprintf("h%d.example.com", i)] = true

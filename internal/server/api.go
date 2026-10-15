@@ -1055,7 +1055,7 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 				p.stop_requested_at, p.exited_at, p.snapshot_done_at, p.uploaded_at,
 				p.peak_memory_bytes, p.peak_disk_bytes, p.peak_pids, p.cpu_seconds, p.net_rx_bytes, p.net_tx_bytes, p.snapshot_bytes, p.memory_limit,
 				p.peak_cpu_cores, p.cpu_stall_seconds, p.memory_stall_seconds, p.memory_full_stall_seconds, p.io_stall_seconds, p.io_full_stall_seconds,
-				p.image_platforms
+				p.image_platforms, p.net_classes
 			FROM placements p JOIN hosts h ON h.id = p.host_id WHERE p.run_id = $1 ORDER BY p.epoch`, id)
 		if err != nil {
 			return err
@@ -1069,7 +1069,7 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 				&pl.StopRequestedAt, &pl.ExitedAt, &pl.SnapshotDoneAt, &pl.UploadedAt,
 				&pl.PeakMemoryBytes, &pl.PeakDiskBytes, &pl.PeakPids, &pl.CPUSeconds, &pl.NetRxBytes, &pl.NetTxBytes, &pl.SnapshotBytes, &pl.MemoryLimit,
 				&pl.PeakCPUCores, &pl.CPUStallSeconds, &pl.MemoryStallSeconds, &pl.MemoryFullStallSeconds, &pl.IOStallSeconds, &pl.IOFullStallSeconds,
-				&pl.ImagePlatforms); err != nil {
+				&pl.ImagePlatforms, &pl.NetClasses); err != nil {
 				return err
 			}
 			run.Placements = append(run.Placements, pl)
@@ -1098,6 +1098,7 @@ func (s *Server) loadRun(ctx context.Context, tenantID, id string, detail bool) 
 			if pl.NetTxBytes != nil {
 				u.NetTxBytes += *pl.NetTxBytes
 			}
+			u.NetClasses = addNet(u.NetClasses, pl.NetClasses)
 		}
 		if len(run.Placements) > 0 && run.Placements[0].WorkloadStartedAt != nil {
 			q := run.Placements[0].WorkloadStartedAt.Sub(run.CreatedAt).Seconds()
@@ -1133,6 +1134,22 @@ func sumOf(acc, v *float64) *float64 {
 		x += *acc
 	}
 	return &x
+}
+
+// addNet sums per-class bytes; nil when both are empty, so the field is
+// omitted for Runs whose runners predate it.
+func addNet(acc, v map[string]proto.NetBytes) map[string]proto.NetBytes {
+	if len(v) == 0 {
+		return acc
+	}
+	if acc == nil {
+		acc = map[string]proto.NetBytes{}
+	}
+	for k, b := range v {
+		a := acc[k]
+		acc[k] = proto.NetBytes{Rx: a.Rx + b.Rx, Tx: a.Tx + b.Tx}
+	}
+	return acc
 }
 
 // RunPath names a Run. Exported: huma only sees the path parameter of an
@@ -2350,19 +2367,21 @@ type Host struct {
 	Capacity    proto.Capacity    `json:"capacity"`
 	// Allocated and LiveRuns: what its live placements asked for. A tenant
 	// sees only its own placements' share of a platform host.
-	Allocated     spec.Resources        `json:"allocated"`
-	Versions      map[string]any        `json:"versions"`
-	Platform      bool                  `json:"platform"`
-	LiveRuns      int                   `json:"liveRuns"`
-	ProviderID    *string               `json:"providerId,omitempty"`
-	InstanceType  *string               `json:"instanceType,omitempty" doc:"The instance type the provider launched; absent for a host that registered itself."`
-	Zone          *string               `json:"zone,omitempty" doc:"The availability zone the provider launched it in."`
-	Market        *string               `json:"market,omitempty" enum:"on-demand,spot" doc:"on-demand or spot, as the provider launched it."`
-	Volumes       *[]HostVolume         `json:"volumes,omitempty" doc:"The block-storage volumes deleted with it, as the provider reported them (assumed: supplied by an operator for a host from before luxd recorded them); absent while not known, and for a host that registered itself."`
-	LastHeartbeat *time.Time            `json:"lastHeartbeat,omitempty"`
-	Times         map[string]*time.Time `json:"times" doc:"Its lifecycle. A host whose launch failed has no terminateRequested or terminated: no instance ever ran."`
-	Launch        *HostLaunch           `json:"launch,omitempty" doc:"How luxd's launch of it went; absent for a host that registered itself, or one from before launches were recorded."`
-	DiskPressure  *proto.DiskPressure   `json:"diskPressure,omitempty" doc:"Present while its runner's low-free-space guard reports disk pressure (lux-runner --disk-low-free): the host takes no new Run until free disk is back at the recovery mark. Absent otherwise, and from runners without the guard."`
+	Allocated     spec.Resources            `json:"allocated"`
+	Versions      map[string]any            `json:"versions"`
+	Platform      bool                      `json:"platform"`
+	LiveRuns      int                       `json:"liveRuns"`
+	ProviderID    *string                   `json:"providerId,omitempty"`
+	InstanceType  *string                   `json:"instanceType,omitempty" doc:"The instance type the provider launched; absent for a host that registered itself."`
+	Zone          *string                   `json:"zone,omitempty" doc:"The availability zone the provider launched it in."`
+	Market        *string                   `json:"market,omitempty" enum:"on-demand,spot" doc:"on-demand or spot, as the provider launched it."`
+	Volumes       *[]HostVolume             `json:"volumes,omitempty" doc:"The block-storage volumes deleted with it, as the provider reported them (assumed: supplied by an operator for a host from before luxd recorded them); absent while not known, and for a host that registered itself."`
+	Network       *HostNetwork              `json:"network,omitempty" doc:"Its network placement as the provider reports it: its own subnets and zone, every subnet of its network with its zone, and its billable public IPv4 addresses. Refreshed on each provider check; absent while not known, and for a host that registered itself."`
+	NetClasses    map[string]proto.NetBytes `json:"netClasses,omitempty" doc:"The host's own network transfer (outside any Run), cumulative bytes per billing class and direction: local, zone, region-service, region-public, provider:<region>, provider-global, internet, unknown. unknown is traffic off the host's subnets with no provider catalog to classify it: not priced. Absent from runners that predate it."`
+	LastHeartbeat *time.Time                `json:"lastHeartbeat,omitempty"`
+	Times         map[string]*time.Time     `json:"times" doc:"Its lifecycle. A host whose launch failed has no terminateRequested or terminated: no instance ever ran."`
+	Launch        *HostLaunch               `json:"launch,omitempty" doc:"How luxd's launch of it went; absent for a host that registered itself, or one from before launches were recorded."`
+	DiskPressure  *proto.DiskPressure       `json:"diskPressure,omitempty" doc:"Present while its runner's low-free-space guard reports disk pressure (lux-runner --disk-low-free): the host takes no new Run until free disk is back at the recovery mark. Absent otherwise, and from runners without the guard."`
 	// Placements: on GET /v1/hosts/{id} only, its live placements (the
 	// caller's; every tenant's for an operator).
 	Placements []HostPlacement `json:"placements,omitempty"`
@@ -2411,7 +2430,7 @@ const hostColumns = `h.id, h.name, coalesce(ht.name, ''), coalesce(hp.name, ''),
 	h.provider_id, h.instance_type, h.zone, h.market, h.last_heartbeat,
 	h.provision_requested_at, h.provisioned_at, h.registered_at, h.first_placement_at, h.last_placement_ended_at,
 	h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at,
-	h.launch_outcome, h.launch_finished_at, ` + hostLaunchError + `, h.volumes, h.disk_pressure`
+	h.launch_outcome, h.launch_finished_at, ` + hostLaunchError + `, h.volumes, h.disk_pressure, h.network, CASE WHEN $1 = '' OR h.tenant_id = $1 THEN h.host_net_classes ELSE NULL END`
 
 // hostSeesProviderError, for SQL on hosts h with $1 as visibleHosts: a
 // platform host's provider error (account ids, role ARNs) is only for a
@@ -2467,7 +2486,7 @@ func hostScanDest(h *Host) hostDest {
 	var launchErr string
 	fields := []any{&h.ID, &h.Name, &h.Tenant, &h.Pool, &h.PoolID, &h.State, &h.StateReason, &h.Draining, &h.Labels, &h.Capacity, &h.Versions,
 		&h.Platform, &h.LiveRuns, &h.Allocated, &h.ProviderID, &h.InstanceType, &h.Zone, &h.Market, &h.LastHeartbeat,
-		&t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7], &t[8], &t[9], &outcome, &launched, &launchErr, &h.Volumes, &h.DiskPressure}
+		&t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7], &t[8], &t[9], &outcome, &launched, &launchErr, &h.Volumes, &h.DiskPressure, &h.Network, &h.NetClasses}
 	return hostDest{fields, func() {
 		h.Times = map[string]*time.Time{
 			"provisionRequested": t[0], "provisioned": t[1], "registered": t[2], "firstPlacement": t[3],

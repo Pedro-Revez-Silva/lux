@@ -13,6 +13,7 @@ import (
 )
 
 type planningProvider struct {
+	fakeLaunchProvider
 	calls     int
 	hosts     []string
 	instances map[string]Instance

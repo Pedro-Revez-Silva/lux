@@ -25,7 +25,7 @@ func holdRunner(t *testing.T) (*Runner, string) {
 		t.Fatal(err)
 	}
 	r := &Runner{cfg: Config{DataDir: dir, AssignHold: hold}, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		pm: &podman.Podman{Bin: "/bin/false"}, egress: &egress.Firewall{},
+		pm: &podman.Podman{Bin: "/bin/false"}, egress: egress.Unloaded(),
 		placements: map[string]*placement{}, subs: map[string]context.CancelFunc{}, control: newSerialQueues()}
 	r.conn = newConn(r)
 	r.conn.polling = true

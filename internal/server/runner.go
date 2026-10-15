@@ -24,6 +24,7 @@ import (
 func (s *Server) runnerRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /runner/v1/ws", s.wrap(s.serveRunnerWS))
 	mux.Handle("POST /runner/v1/poll", s.wrap(s.servePoll))
+	mux.Handle("GET /runner/v1/network", s.wrap(s.serveNetwork))
 	mux.Handle("PUT /runner/v1/blobs/{id}", s.wrap(s.serveBlobUpload))
 	mux.Handle("POST /runner/v1/blobs/{id}/upload", s.wrap(s.serveBlobUploadStart))
 	mux.Handle("POST /runner/v1/blobs/{id}/complete", s.wrap(s.serveBlobUploadComplete))
@@ -196,6 +197,9 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 			}
 		}
 		w.HostID = hostID
+		if w.Network, w.HostNet, err = s.hostNetwork(ctx, tx, hostID); err != nil {
+			return err
+		}
 		return later.write()
 	})
 	if err == nil {
@@ -261,7 +265,7 @@ func retryHostPlacements(ctx context.Context, fn func() error) error {
 func (s *Server) reconcileHostPlacements(ctx context.Context, tx pgx.Tx, hostID string, reported []proto.LivePlacement, runs []string, w *proto.Welcome) error {
 	// A new assignment after discovery has no Run lock. Retry discovery
 	// without taking a Run lock after a host lock.
-	rows, err := tx.Query(ctx, `SELECT run_id, epoch, state FROM placements
+	rows, err := tx.Query(ctx, `SELECT run_id, epoch, state, net_classes FROM placements
 		WHERE host_id = $1 AND state IN `+livePlacementStates+` ORDER BY run_id`, hostID)
 	if err != nil {
 		return err
@@ -269,9 +273,15 @@ func (s *Server) reconcileHostPlacements(ctx context.Context, tx pgx.Tx, hostID 
 	live := []proto.LivePlacement{}
 	for rows.Next() {
 		var lp proto.LivePlacement
-		if err := rows.Scan(&lp.RunID, &lp.Epoch, &lp.State); err != nil {
+		// Usage carries only the classes luxd recorded: the floor a
+		// re-adopted placement's counters continue from.
+		var net map[string]proto.NetBytes
+		if err := rows.Scan(&lp.RunID, &lp.Epoch, &lp.State, &net); err != nil {
 			rows.Close()
 			return err
+		}
+		if len(net) > 0 {
+			lp.Usage = &proto.Usage{Net: net}
 		}
 		live = append(live, lp)
 	}
@@ -348,7 +358,18 @@ func nonNil[T any](v []T) []T {
 
 // handleReport applies one runner report and returns the reply frame.
 func (s *Server) handleReport(ctx context.Context, hostID string, f proto.Frame) proto.Frame {
-	refused, err := s.applyReport(ctx, hostID, f)
+	var refused bool
+	var err error
+	var networkVersion string
+	if f.Type == proto.MsgHeartbeat {
+		var hb proto.Heartbeat
+		err = json.Unmarshal(f.Data, &hb)
+		if err == nil {
+			err = s.heartbeatVersion(ctx, hostID, hb, &networkVersion)
+		}
+	} else {
+		refused, err = s.applyReport(ctx, hostID, f)
+	}
 	if err != nil {
 		var stale *staleError
 		if errors.As(err, &stale) {
@@ -360,8 +381,13 @@ func (s *Server) handleReport(ctx context.Context, hostID string, f proto.Frame)
 			Data: proto.Marshal(proto.Nack{Error: err.Error()})}
 	}
 	ack := proto.Frame{Type: proto.MsgAck, ID: f.ID, RunID: f.RunID, Epoch: f.Epoch}
-	if refused {
-		ack.Data = proto.Marshal(proto.Ack{Refused: true})
+	var a proto.Ack
+	if f.Type == proto.MsgHeartbeat {
+		a.NetworkVersion = networkVersion
+	}
+	a.Refused = refused
+	if a != (proto.Ack{}) {
+		ack.Data = proto.Marshal(a)
 	}
 	return ack
 }
@@ -515,6 +541,10 @@ func (s *Server) applyReport(ctx context.Context, hostID string, f proto.Frame) 
 }
 
 func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbeat) error {
+	return s.heartbeatVersion(ctx, hostID, hb, new(string))
+}
+
+func (s *Server) heartbeatVersion(ctx context.Context, hostID string, hb proto.Heartbeat, version *string) error {
 	n := len(hb.Leases)
 	runs, epochs := make([]string, n), make([]int, n)
 	mem, disk, cpu := make([]int64, n), make([]int64, n), make([]float64, n)
@@ -524,8 +554,13 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 	// Absent from older runners and without PSI: NULL, never 0.
 	peakCPU, cpuNow := make([]*float64, n), make([]*float64, n)
 	cpuStall, memStall, memFull, ioStall, ioFull := make([]*float64, n), make([]*float64, n), make([]*float64, n), make([]*float64, n), make([]*float64, n)
+	nets := make([]map[string]proto.NetBytes, n)
 	for i, l := range hb.Leases {
 		runs[i], epochs[i] = l.RunID, l.Epoch
+		nets[i] = map[string]proto.NetBytes{}
+		if l.Usage != nil && len(l.Usage.Net) > 0 {
+			nets[i] = l.Usage.Net
+		}
 		if u := l.Usage; u != nil {
 			mem[i], disk[i], pids[i], cpu[i], rx[i], tx_[i] = u.PeakMemoryBytes, u.PeakDiskBytes, u.PeakPids, u.CPUSeconds, u.NetRxBytes, u.NetTxBytes
 			curMem[i], curPids[i] = u.MemoryBytes, u.Pids
@@ -547,13 +582,18 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 		var later laterEvents
 		var back bool
 		var was *proto.DiskPressure
+		var hostNet map[string]proto.NetBytes
+		if hb.Usage != nil {
+			hostNet = hb.Usage.Net
+		}
 		if err := tx.QueryRow(ctx, `WITH old AS (SELECT id, state, disk_pressure FROM hosts WHERE id = $1 FOR NO KEY UPDATE)
 			UPDATE hosts SET last_heartbeat = now(),
 			state = CASE WHEN hosts.state = 'lost' THEN (CASE WHEN draining THEN 'draining' ELSE 'ready' END) ELSE hosts.state END,
 			caches = jsonb_set(caches, '{gitMirrors}', $2),
-			disk_pressure = CASE WHEN $4 THEN $3 ELSE hosts.disk_pressure END
+			disk_pressure = CASE WHEN $4 THEN $3 ELSE hosts.disk_pressure END,
+			host_net_classes = CASE WHEN $5::jsonb IS NULL OR $5::jsonb = '{}' THEN hosts.host_net_classes ELSE lux_net_max(hosts.host_net_classes, $5::jsonb) END
 			FROM old WHERE hosts.id = old.id
-			RETURNING old.state = 'lost' AND hosts.state = 'ready', old.disk_pressure`, hostID, nonNil(hb.GitMirrors), pressure, pressureKnown).Scan(&back, &was); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			RETURNING old.state = 'lost' AND hosts.state = 'ready', old.disk_pressure, coalesce(hosts.net_classes->>'version', '')`, hostID, nonNil(hb.GitMirrors), pressure, pressureKnown, hostNet).Scan(&back, &was, version); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
 		// Back from lost (a network blip longer than the lease).
@@ -583,6 +623,7 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 		if n > 0 {
 			// Leases renewed and usage peaks raised for every placement at once.
 			_, err := tx.Exec(ctx, `UPDATE placements p SET
+					net_classes       = CASE WHEN u.net = '{}' THEN p.net_classes ELSE lux_net_max(p.net_classes, u.net) END,
 					lease_expires_at  = now() + $2::interval,
 					peak_memory_bytes = greatest(p.peak_memory_bytes, nullif(u.mem, 0)),
 					peak_disk_bytes   = greatest(p.peak_disk_bytes, nullif(u.disk, 0)),
@@ -597,12 +638,12 @@ func (s *Server) heartbeat(ctx context.Context, hostID string, hb proto.Heartbea
 					io_stall_seconds          = greatest(p.io_stall_seconds, u.io_stall),
 					io_full_stall_seconds     = greatest(p.io_full_stall_seconds, u.io_full)
 				FROM unnest($3::text[], $4::int[], $5::bigint[], $6::bigint[], $7::int[], $8::float8[], $9::bigint[], $10::bigint[],
-						$11::float8[], $12::float8[], $13::float8[], $14::float8[], $15::float8[], $16::float8[])
-					AS u(run_id, epoch, mem, disk, pids, cpu, rx, tx, peak_cpu, cpu_stall, mem_stall, mem_full, io_stall, io_full)
+						$11::float8[], $12::float8[], $13::float8[], $14::float8[], $15::float8[], $16::float8[], $17::jsonb[])
+					AS u(run_id, epoch, mem, disk, pids, cpu, rx, tx, peak_cpu, cpu_stall, mem_stall, mem_full, io_stall, io_full, net)
 				WHERE p.run_id = u.run_id AND p.epoch = u.epoch AND p.host_id = $1
 				  AND p.state IN `+livePlacementStates,
 				hostID, interval(s.cfg.LeaseDuration), runs, epochs, mem, disk, pids, cpu, rx, tx_,
-				peakCPU, cpuStall, memStall, memFull, ioStall, ioFull)
+				peakCPU, cpuStall, memStall, memFull, ioStall, ioFull, nets)
 			if err != nil {
 				return err
 			}
@@ -772,10 +813,11 @@ func recordUsage(ctx context.Context, tx pgx.Tx, runID string, epoch int, u *pro
 			memory_stall_seconds      = greatest(memory_stall_seconds, $11::float8),
 			memory_full_stall_seconds = greatest(memory_full_stall_seconds, $12::float8),
 			io_stall_seconds          = greatest(io_stall_seconds, $13::float8),
-			io_full_stall_seconds     = greatest(io_full_stall_seconds, $14::float8)
+			io_full_stall_seconds     = greatest(io_full_stall_seconds, $14::float8),
+			net_classes               = lux_net_max(net_classes, $15::jsonb)
 		WHERE run_id = $1 AND epoch = $2`,
 		runID, epoch, u.PeakMemoryBytes, u.PeakDiskBytes, u.PeakPids, u.CPUSeconds, u.NetRxBytes, u.NetTxBytes,
-		u.PeakCPUCores, u.CPUStallSeconds, u.MemoryStallSeconds, u.MemoryFullStallSeconds, u.IOStallSeconds, u.IOFullStallSeconds)
+		u.PeakCPUCores, u.CPUStallSeconds, u.MemoryStallSeconds, u.MemoryFullStallSeconds, u.IOStallSeconds, u.IOFullStallSeconds, u.Net)
 	return err
 }
 

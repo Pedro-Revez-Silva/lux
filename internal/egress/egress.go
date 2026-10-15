@@ -17,7 +17,9 @@
 //   - input rules so a restricted Run reaches the host only on the DNS
 //     stub's port;
 //   - a DNS redirect: port 53 from any restricted Run goes to its stub.
-//     Unrestricted Runs use the host's resolvers.
+//     Unrestricted Runs use the host's resolvers;
+//   - network transfer counters per Run and for the host, by billing class,
+//     in base chains of their own that only count (netclass.go).
 //
 // IPv6 from a restricted Run is dropped (allow sets are IPv4, and nothing
 // else accepts); the hard blocks cover IPv6 for unrestricted Runs too.
@@ -34,7 +36,9 @@ package egress
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net"
 	"net/netip"
@@ -44,6 +48,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -99,12 +104,18 @@ type Lookup struct {
 
 // Firewall is the runner's view of the nftables table and the DNS stubs.
 type Firewall struct {
+	// opMu serializes lifecycle kernel transactions and accounting
+	// publication. Take before mu; never hold across resolution, callbacks
+	// or stub close.
+	opMu     sync.Mutex
 	mu       sync.Mutex
 	lookup   func(ctx context.Context, host string) ([]netip.Addr, error) // IPv4 addresses of host
 	nft      func(script string) error
-	runs     map[string]*run // by bridge interface
-	blocked  []netip.Prefix  // parsed once: always blocked, plus the control plane
+	list     func() ([]byte, error) // `nft -j list counters table inet lux`
+	runs     map[string]*run        // by bridge interface
+	blocked  []netip.Prefix         // parsed once: always blocked, plus the control plane
 	resolved map[string]map[netip.Addr]bool
+	acct     accounting
 }
 
 type run struct {
@@ -138,7 +149,18 @@ const maxWildcardNames = 256
 func New(extra []netip.Prefix) (*Firewall, error) {
 	f := newFirewall(extra, func(ctx context.Context, host string) ([]netip.Addr, error) {
 		return net.DefaultResolver.LookupNetIP(ctx, "ip4", host)
-	}, nftScript)
+	}, nftScript, nftListCounters)
+	if err := f.setup(); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// setup replaces the table, keeping the counters of the one it replaces.
+func (f *Firewall) setup() error {
+	if err := f.keepCounters(); err != nil {
+		return err
+	}
 	// One transaction: create-if-missing, delete, recreate. There is never
 	// a moment without the table, so a Run is never open.
 	var b strings.Builder
@@ -158,16 +180,19 @@ func New(extra []netip.Prefix) (*Firewall, error) {
 	if len(v6) > 0 {
 		fmt.Fprintf(&b, "add element inet lux blocked6 { %s }\n", strings.Join(v6, ", "))
 	}
+	b.WriteString(f.countingSetup())
 	if err := f.nft(b.String()); err != nil {
-		return nil, fmt.Errorf("nftables: %w", err)
+		return fmt.Errorf("nftables: %w", err)
 	}
-	return f, nil
+	return nil
 }
 
-// newFirewall is a Firewall that resolves with lookup and loads rules with
-// nft; New passes the system resolver and the nft binary.
-func newFirewall(extra []netip.Prefix, lookup func(context.Context, string) ([]netip.Addr, error), nft func(string) error) *Firewall {
-	f := &Firewall{lookup: lookup, nft: nft, runs: map[string]*run{}, resolved: map[string]map[netip.Addr]bool{}}
+// newFirewall is a Firewall that resolves with lookup, loads rules with nft
+// and reads counters with list; New passes the system resolver and the nft
+// binary.
+func newFirewall(extra []netip.Prefix, lookup func(context.Context, string) ([]netip.Addr, error), nft func(string) error, list func() ([]byte, error)) *Firewall {
+	f := &Firewall{lookup: lookup, nft: nft, list: list, runs: map[string]*run{}, resolved: map[string]map[netip.Addr]bool{},
+		acct: newAccounting()}
 	for _, p := range alwaysBlocked {
 		f.blocked = append(f.blocked, netip.MustParsePrefix(p))
 	}
@@ -180,7 +205,7 @@ func newFirewall(extra []netip.Prefix, lookup func(context.Context, string) ([]n
 // that drive a placement through its network setup without root.
 func Unloaded() *Firewall {
 	return newFirewall(nil, func(context.Context, string) ([]netip.Addr, error) { return nil, nil },
-		func(string) error { return nil })
+		func(string) error { return nil }, func() ([]byte, error) { return []byte(`{"nftables":[]}`), nil })
 }
 
 // Chain and set names derive from the bridge interface, which is already
@@ -196,11 +221,40 @@ func setName(iface string) string   { return "allow_" + iface }
 // unrestricted, the Run may reach anything but the hard blocks, and
 // resolves through the host's resolvers.
 func (f *Firewall) Apply(ctx context.Context, iface string, gateway netip.Addr, unrestricted bool, rules []spec.EgressRule, onDNS func(Lookup)) error {
-	f.Remove(iface)
+	// Re-applying keeps the Run's counters: only its rules are replaced.
+	f.remove(iface, false)
 	r, err := newRun(unrestricted, rules, onDNS)
 	if err != nil {
 		return err
 	}
+	if !unrestricted {
+		st, err := startStub(gateway, f, iface)
+		if err != nil {
+			return fmt.Errorf("dns stub on %s: %w", gateway, err)
+		}
+		r.stub = st
+	}
+	f.opMu.Lock()
+	f.mu.Lock()
+	err = f.transact(func() string { return egressScript(iface, unrestricted, r.cidrs) + f.runCountingScript(iface) })
+	if err == nil {
+		f.runs[iface] = r
+	}
+	f.mu.Unlock()
+	f.opMu.Unlock()
+	if err != nil {
+		if r.stub != nil {
+			r.stub.close()
+		}
+		return fmt.Errorf("nftables for %s: %w", iface, err)
+	}
+	f.resolveRun(ctx, iface, r)
+	return nil
+}
+
+// egressScript is a Run's filtering: its chain, allow set and map entries.
+// Counting is separate (runCountingScript) and never changes it.
+func egressScript(iface string, unrestricted bool, cidrs []netip.Prefix) string {
 	c, s := chainName(iface), setName(iface)
 	var b strings.Builder
 	fmt.Fprintf(&b, "add chain inet lux %s\n", c)
@@ -213,27 +267,15 @@ func (f *Firewall) Apply(ctx context.Context, iface string, gateway netip.Addr, 
 		fmt.Fprintf(&b, "add set inet lux %s { type ipv4_addr; flags interval; }\n", s)
 		fmt.Fprintf(&b, "add rule inet lux %s ip daddr @%s accept\n", c, s)
 		fmt.Fprintf(&b, "add rule inet lux %s counter drop\n", c)
-		if len(r.cidrs) > 0 {
-			fmt.Fprintf(&b, "add element inet lux %s { %s }\n", s, join(r.cidrs))
+		if len(cidrs) > 0 {
+			fmt.Fprintf(&b, "add element inet lux %s { %s }\n", s, join(cidrs))
 		}
 	}
 	fmt.Fprintf(&b, "add element inet lux runs { %q : jump %s }\n", iface, c)
 	if !unrestricted {
 		fmt.Fprintf(&b, "add element inet lux run_ifaces { %q }\n", iface)
-		st, err := startStub(gateway, f, iface)
-		if err != nil {
-			return fmt.Errorf("dns stub on %s: %w", gateway, err)
-		}
-		r.stub = st
 	}
-	if err := f.nft(b.String()); err != nil {
-		if r.stub != nil {
-			r.stub.close()
-		}
-		return fmt.Errorf("nftables for %s: %w", iface, err)
-	}
-	f.install(ctx, iface, r)
-	return nil
+	return b.String()
 }
 
 // install makes r the Run on iface and resolves its names now (adding
@@ -241,6 +283,12 @@ func (f *Firewall) Apply(ctx context.Context, iface string, gateway netip.Addr, 
 func (f *Firewall) install(ctx context.Context, iface string, r *run) {
 	f.mu.Lock()
 	f.runs[iface] = r
+	f.mu.Unlock()
+	f.resolveRun(ctx, iface, r)
+}
+
+func (f *Firewall) resolveRun(ctx context.Context, iface string, r *run) {
+	f.mu.Lock()
 	hosts := slices.Collect(maps.Keys(r.hosts))
 	f.mu.Unlock()
 	for _, h := range hosts {
@@ -499,13 +547,55 @@ func (f *Firewall) report(iface string, l Lookup) {
 }
 
 // Remove tears a Run's egress down (its network is going away), in one
-// script: map entries first, then the chain and set they point to.
-func (f *Firewall) Remove(iface string) {
+// script: map entries first, then the chain and set they point to, and its
+// counters. It returns the counters' last reading, taken just before they
+// are deleted (nil if there was none): the bytes since the last sample,
+// which would otherwise be lost.
+func (f *Firewall) Remove(iface string) map[string]proto.NetBytes {
+	return f.remove(iface, true)
+}
+
+func (f *Firewall) remove(iface string, counters bool) map[string]proto.NetBytes {
+	// The final read stays outside opMu: a full counter dump must not delay
+	// other Runs' lifecycle transactions.
+	var final map[string]proto.NetBytes
 	f.mu.Lock()
+	counted := f.acct.counted[iface]
+	f.mu.Unlock()
+	if counters && counted {
+		if c, err := f.Counters(); err == nil {
+			final = c.Runs[iface]
+		}
+	}
+	f.opMu.Lock()
+	f.mu.Lock()
+	counted = f.acct.counted[iface]
 	r := f.runs[iface]
+	var script string
+	if r != nil {
+		script = fmt.Sprintf("delete element inet lux runs { %q }\ndelete chain inet lux %s\n", iface, chainName(iface))
+		if !r.unrestricted {
+			script = fmt.Sprintf("delete element inet lux run_ifaces { %q }\n", iface) + script +
+				fmt.Sprintf("delete set inet lux %s\n", setName(iface))
+		}
+	}
+	var err error
+	if counters && counted {
+		err = f.transact(func() string {
+			counting := f.removeCountingScript(iface)
+			delete(f.acct.counted, iface)
+			return script + counting
+		})
+	} else if script != "" {
+		err = f.nft(script)
+	}
+	if err != nil {
+		slog.Warn("remove egress", "iface", iface, "err", err)
+		f.mu.Unlock()
+		f.opMu.Unlock()
+		return final
+	}
 	delete(f.runs, iface)
-	// A name no remaining Run allows is no longer refreshed; dropping its
-	// addresses keeps f.resolved bounded by the live Runs' hosts.
 	if r != nil {
 		for h := range r.hosts {
 			if !f.listed(h) {
@@ -514,18 +604,11 @@ func (f *Firewall) Remove(iface string) {
 		}
 	}
 	f.mu.Unlock()
-	if r == nil {
-		return
-	}
-	if r.stub != nil {
+	f.opMu.Unlock()
+	if r != nil && r.stub != nil {
 		r.stub.close()
 	}
-	script := fmt.Sprintf("delete element inet lux runs { %q }\ndelete chain inet lux %s\n", iface, chainName(iface))
-	if !r.unrestricted {
-		script = fmt.Sprintf("delete element inet lux run_ifaces { %q }\n", iface) + script +
-			fmt.Sprintf("delete set inet lux %s\n", setName(iface))
-	}
-	_ = f.nft(script)
+	return final
 }
 
 func join(ps []netip.Prefix) string {
@@ -534,6 +617,37 @@ func join(ps []netip.Prefix) string {
 		parts = append(parts, p.String())
 	}
 	return strings.Join(parts, ", ")
+}
+
+func nftListCounters() ([]byte, error) {
+	var out, errb bytes.Buffer
+	c := exec.Command("nft", "-j", "list", "counters", "table", "inet", "lux")
+	c.Stdout, c.Stderr = &out, &errb
+	if err := c.Run(); err != nil {
+		// Listing all tables distinguishes absence without interpreting localized diagnostics.
+		tables, listErr := exec.Command("nft", "-j", "list", "tables").Output()
+		if listErr == nil {
+			var doc struct {
+				Nftables []struct {
+					Table struct {
+						Family string `json:"family"`
+						Name   string `json:"name"`
+					} `json:"table"`
+				} `json:"nftables"`
+			}
+			if json.Unmarshal(tables, &doc) == nil {
+				found := false
+				for _, item := range doc.Nftables {
+					found = found || item.Table.Family == "inet" && item.Table.Name == "lux"
+				}
+				if !found {
+					return []byte(`{"nftables":[]}`), nil
+				}
+			}
+		}
+		return nil, fmt.Errorf("%v: %s", err, strings.TrimSpace(errb.String()))
+	}
+	return out.Bytes(), nil
 }
 
 func nftScript(script string) error {

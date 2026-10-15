@@ -110,7 +110,7 @@ esac
 	r.conn = newConn(r)
 	r.conn.polling = true
 	r.uploads = newUploader(r)
-	r.egress = &egress.Firewall{}
+	r.egress = egress.Unloaded()
 	r.lease.Store(int64(3 * time.Second))
 	r.mounts.Store(runtimeVolume("run1"), filepath.Join(dir, "rt"))
 	r.mounts.Store(volumeName("run1", "data"), data)

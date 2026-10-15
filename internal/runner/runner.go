@@ -107,9 +107,17 @@ type Runner struct {
 	uploads    *uploader
 	control    *serialQueues
 	egress     *egress.Firewall
-	images     *imageUse
-	graph      string // Podman's graph root, once asked
-	graphOnce  sync.Once
+	// netMu serializes counter readings (a sample, a Run's final reading
+	// before its counters go) and guards hostNet: a reading taken before a
+	// final one must not land after it and look like a reset.
+	netMu         sync.Mutex
+	hostNet       netBaseline
+	hostNetSeeded bool
+	hostNetKnown  bool
+	hostNetBoot   string
+	images        *imageUse
+	graph         string // Podman's graph root, once asked
+	graphOnce     sync.Once
 	// imagesDirPath: containers/storage's image metadata directory, once
 	// Podman has said (imagesDir).
 	imagesDirMu   sync.Mutex
@@ -242,6 +250,13 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 			return d.Free, err
 		})
 	}
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return nil, fmt.Errorf("network boot identity: %w", err)
+	}
+	if err := r.restoreHostNetwork(strings.TrimSpace(string(boot))); err != nil {
+		return nil, err
+	}
 	r.api = newAPI(cfg.URL, cfg.Token, cfg.Name)
 	r.conn = newConn(r)
 	r.uploads = newUploader(r)
@@ -304,6 +319,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.nestedAppArmor = appArmorRestrictsUserns(appArmorSysctl)
 	}
 	r.readopt(ctx)
+	r.egress.PruneCounters()
 	// Before the first heartbeat: a restart under pressure must not report
 	// none until the next sample round.
 	r.startGuard(ctx)
@@ -380,6 +396,9 @@ func (r *Runner) hello(ctx context.Context) proto.Hello {
 // onWelcome reconciles with what luxd thinks runs here: anything else is
 // stale (its Run moved on while this host was away) and is stopped.
 func (r *Runner) onWelcome(ctx context.Context, w proto.Welcome) {
+	if r.egress != nil {
+		r.welcomeNetwork(w)
+	}
 	if w.LeaseSeconds > 0 {
 		r.lease.Store(int64(w.LeaseSeconds * float64(time.Second)))
 	}
@@ -660,6 +679,9 @@ func (r *Runner) heartbeatLoop(ctx context.Context) {
 // filesystem capacity and headroom, and the guard's pressure, when it is on.
 func (r *Runner) hostUsage(hu podman.HostUsage) *proto.HostUsage {
 	u := &proto.HostUsage{CPUSeconds: hu.CPUSeconds, MemoryBytes: hu.MemoryBytes, DiskBytes: hu.DiskBytes}
+	r.netMu.Lock()
+	u.Net = r.hostNet.value()
+	r.netMu.Unlock()
 	if hu.DiskOK {
 		u.FSFreeBytes = &hu.DiskFree
 	}
@@ -728,6 +750,7 @@ func (r *Runner) usageLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+		r.sampleNetwork()
 		var wg sync.WaitGroup
 		for _, p := range r.livePlacements() {
 			// A finishing one was sampled by finish, and its volumes are

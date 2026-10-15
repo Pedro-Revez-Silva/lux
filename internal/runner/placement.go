@@ -98,6 +98,7 @@ type placement struct {
 	diskProbeFailed bool
 	netRx           int64
 	netTx           int64
+	netClasses      netBaseline
 	cgroup          string
 	cpuPeak         cpuPeak
 	// imagePlatforms: what the image's reference offers (learnPlatforms);
@@ -518,7 +519,7 @@ func (p *placement) run(ctx context.Context) {
 	fail := func(stage string, err error) {
 		p.endStartingReports()
 		// Nothing runs on the Run's network without a container.
-		p.r.egress.Remove(bridgeName(p.runID))
+		p.removeNetwork()
 		if p.pendingStop() != "" {
 			p.finishWithoutContainer(ctx, "exited", "stopped before start")
 			return
@@ -694,7 +695,7 @@ func (p *placement) supervise(ctx context.Context) {
 	p.mark("exited")
 	// Nothing on the Run's network any more: its rules and stub go (its
 	// bridge, until removed, falls to the fail-closed drop).
-	p.r.egress.Remove(bridgeName(p.runID))
+	p.removeNetwork()
 	p.closeShim()
 	// Nothing writes the output file after the container exits: the tailer
 	// reads to its end and returns, so no final event is missed.
@@ -1599,7 +1600,7 @@ func tailRecords(ctx context.Context, path string, since int64, follow bool, don
 func (p *placement) usage() *proto.Usage {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	u := &proto.Usage{PeakDiskBytes: p.peakDisk, NetRxBytes: p.netRx, NetTxBytes: p.netTx}
+	u := &proto.Usage{PeakDiskBytes: p.peakDisk, NetRxBytes: p.netRx, NetTxBytes: p.netTx, Net: p.netClasses.value()}
 	if p.cgroup != "" {
 		if cu, err := podman.CgroupUsage(p.cgroup); err == nil {
 			u.PeakMemoryBytes, u.PeakPids, u.CPUSeconds = cu.PeakMemoryBytes, cu.PeakPids, cu.CPUSeconds

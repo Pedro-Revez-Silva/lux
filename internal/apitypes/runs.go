@@ -76,50 +76,52 @@ type Resumability struct {
 }
 
 type Placement struct {
-	Epoch                  int        `json:"epoch"`
-	Host                   string     `json:"host"`
-	HostName               string     `json:"hostName"`
-	State                  string     `json:"state"`
-	ExitCode               *int       `json:"exitCode,omitempty"`
-	ExitReason             string     `json:"exitReason,omitempty"`
-	StopReason             string     `json:"stopReason,omitempty"`
-	AssignedAt             time.Time  `json:"assignedAt"`
-	AcceptedAt             *time.Time `json:"acceptedAt,omitempty"`
-	ImageReadyAt           *time.Time `json:"imageReadyAt,omitempty"`
-	VolumesRestoredAt      *time.Time `json:"volumesRestoredAt,omitempty"`
-	ReposReadyAt           *time.Time `json:"reposReadyAt,omitempty" doc:"Its repositories were cloned and a resume's sync fetched (at once without repositories)."`
-	ContainerStartedAt     *time.Time `json:"containerStartedAt,omitempty"`
-	WorkloadStartedAt      *time.Time `json:"workloadStartedAt,omitempty"`
-	StopRequestedAt        *time.Time `json:"stopRequestedAt,omitempty"`
-	ExitedAt               *time.Time `json:"exitedAt,omitempty"`
-	SnapshotDoneAt         *time.Time `json:"snapshotDoneAt,omitempty"`
-	UploadedAt             *time.Time `json:"uploadedAt,omitempty"`
-	PeakMemoryBytes        *int64     `json:"peakMemoryBytes,omitempty"`
-	PeakDiskBytes          *int64     `json:"peakDiskBytes,omitempty"`
-	PeakPids               *int       `json:"peakPids,omitempty"`
-	CPUSeconds             *float64   `json:"cpuSeconds,omitempty"`
-	NetRxBytes             *int64     `json:"netRxBytes,omitempty"`
-	NetTxBytes             *int64     `json:"netTxBytes,omitempty"`
-	SnapshotBytes          *int64     `json:"snapshotBytes,omitempty"`
-	MemoryLimit            *int64     `json:"memoryLimit,omitempty" doc:"Bytes: the container's memory limit, the Run's resources.memory scaled to its host's share (MemTotal less the runner's headroom, over the memory the host offers). Absent until the container starts, and for placements from before luxd recorded it."`
-	PeakCPUCores           *float64   `json:"peakCpuCores,omitempty" doc:"The highest CPU rate, in cores, between two consecutive readings of the container's cgroup (about 10 s apart). Absent from runners that predate it."`
-	CPUStallSeconds        *float64   `json:"cpuStallSeconds,omitempty" doc:"cpu.pressure's some total: seconds in which some task waited for CPU. Absent without PSI (or from older runners), never 0 for it."`
-	MemoryStallSeconds     *float64   `json:"memoryStallSeconds,omitempty" doc:"memory.pressure's some total, in seconds."`
-	MemoryFullStallSeconds *float64   `json:"memoryFullStallSeconds,omitempty" doc:"memory.pressure's full total: seconds in which every task stalled on memory."`
-	IOStallSeconds         *float64   `json:"ioStallSeconds,omitempty" doc:"io.pressure's some total, in seconds."`
-	IOFullStallSeconds     *float64   `json:"ioFullStallSeconds,omitempty" doc:"io.pressure's full total, in seconds."`
-	ImagePlatforms         []string   `json:"imagePlatforms,omitempty" doc:"The platforms (os/arch[/variant]) the image's reference offers: every entry of a manifest list or OCI index, a single-arch image's own, an image built on the host the host's. Absent when the runner could not tell, or predates it."`
+	Epoch                  int                       `json:"epoch"`
+	Host                   string                    `json:"host"`
+	HostName               string                    `json:"hostName"`
+	State                  string                    `json:"state"`
+	ExitCode               *int                      `json:"exitCode,omitempty"`
+	ExitReason             string                    `json:"exitReason,omitempty"`
+	StopReason             string                    `json:"stopReason,omitempty"`
+	AssignedAt             time.Time                 `json:"assignedAt"`
+	AcceptedAt             *time.Time                `json:"acceptedAt,omitempty"`
+	ImageReadyAt           *time.Time                `json:"imageReadyAt,omitempty"`
+	VolumesRestoredAt      *time.Time                `json:"volumesRestoredAt,omitempty"`
+	ReposReadyAt           *time.Time                `json:"reposReadyAt,omitempty" doc:"Its repositories were cloned and a resume's sync fetched (at once without repositories)."`
+	ContainerStartedAt     *time.Time                `json:"containerStartedAt,omitempty"`
+	WorkloadStartedAt      *time.Time                `json:"workloadStartedAt,omitempty"`
+	StopRequestedAt        *time.Time                `json:"stopRequestedAt,omitempty"`
+	ExitedAt               *time.Time                `json:"exitedAt,omitempty"`
+	SnapshotDoneAt         *time.Time                `json:"snapshotDoneAt,omitempty"`
+	UploadedAt             *time.Time                `json:"uploadedAt,omitempty"`
+	PeakMemoryBytes        *int64                    `json:"peakMemoryBytes,omitempty"`
+	PeakDiskBytes          *int64                    `json:"peakDiskBytes,omitempty"`
+	PeakPids               *int                      `json:"peakPids,omitempty"`
+	CPUSeconds             *float64                  `json:"cpuSeconds,omitempty"`
+	NetRxBytes             *int64                    `json:"netRxBytes,omitempty"`
+	NetTxBytes             *int64                    `json:"netTxBytes,omitempty"`
+	SnapshotBytes          *int64                    `json:"snapshotBytes,omitempty"`
+	MemoryLimit            *int64                    `json:"memoryLimit,omitempty" doc:"Bytes: the container's memory limit, the Run's resources.memory scaled to its host's share (MemTotal less the runner's headroom, over the memory the host offers). Absent until the container starts, and for placements from before luxd recorded it."`
+	PeakCPUCores           *float64                  `json:"peakCpuCores,omitempty" doc:"The highest CPU rate, in cores, between two consecutive readings of the container's cgroup (about 10 s apart). Absent from runners that predate it."`
+	CPUStallSeconds        *float64                  `json:"cpuStallSeconds,omitempty" doc:"cpu.pressure's some total: seconds in which some task waited for CPU. Absent without PSI (or from older runners), never 0 for it."`
+	MemoryStallSeconds     *float64                  `json:"memoryStallSeconds,omitempty" doc:"memory.pressure's some total, in seconds."`
+	MemoryFullStallSeconds *float64                  `json:"memoryFullStallSeconds,omitempty" doc:"memory.pressure's full total: seconds in which every task stalled on memory."`
+	IOStallSeconds         *float64                  `json:"ioStallSeconds,omitempty" doc:"io.pressure's some total, in seconds."`
+	IOFullStallSeconds     *float64                  `json:"ioFullStallSeconds,omitempty" doc:"io.pressure's full total, in seconds."`
+	NetClasses             map[string]proto.NetBytes `json:"netClasses,omitempty" doc:"Bytes the placement's network forwarded, per billing class and direction (rx from, tx to): local, zone, region-service, region-public, provider:<region>, provider-global, internet, unknown. Only what every firewall rule let through counts. unknown: off the host's subnets with no provider catalog to classify it; never priced. Absent from runners that predate it."`
+	ImagePlatforms         []string                  `json:"imagePlatforms,omitempty" doc:"The platforms (os/arch[/variant]) the image's reference offers: every entry of a manifest list or OCI index, a single-arch image's own, an image built on the host the host's. Absent when the runner could not tell, or predates it."`
 }
 
 // RunUsage rolls placements up: peaks are maxima, totals are sums.
 type RunUsage struct {
-	PeakMemoryBytes int64   `json:"peakMemoryBytes"`
-	PeakDiskBytes   int64   `json:"peakDiskBytes"`
-	PeakPids        int     `json:"peakPids"`
-	CPUSeconds      float64 `json:"cpuSeconds"`
-	NetRxBytes      int64   `json:"netRxBytes"`
-	NetTxBytes      int64   `json:"netTxBytes"`
-	Placements      int     `json:"placements"`
+	PeakMemoryBytes int64                     `json:"peakMemoryBytes"`
+	PeakDiskBytes   int64                     `json:"peakDiskBytes"`
+	PeakPids        int                       `json:"peakPids"`
+	CPUSeconds      float64                   `json:"cpuSeconds"`
+	NetRxBytes      int64                     `json:"netRxBytes"`
+	NetTxBytes      int64                     `json:"netTxBytes"`
+	NetClasses      map[string]proto.NetBytes `json:"netClasses,omitempty" doc:"Every placement's netClasses summed per class and direction."`
+	Placements      int                       `json:"placements"`
 	// Absent when no placement reported them.
 	PeakCPUCores           *float64 `json:"peakCpuCores,omitempty"`
 	CPUStallSeconds        *float64 `json:"cpuStallSeconds,omitempty"`

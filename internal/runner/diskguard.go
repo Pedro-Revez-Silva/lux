@@ -580,7 +580,8 @@ func (r *Runner) sendHeartbeat(ctx context.Context) {
 	hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	// Acked: its peak RSS reached luxd. Else it carries to the next.
-	if r.conn.Report(hctx, proto.Frame{Type: proto.MsgHeartbeat, Data: proto.Marshal(hb)}) == nil {
+	if ack, err := r.conn.ReportAck(hctx, proto.Frame{Type: proto.MsgHeartbeat, Data: proto.Marshal(hb)}); err == nil {
 		r.proc.Stored()
+		r.refreshNetwork(ctx, ack.NetworkVersion)
 	}
 }

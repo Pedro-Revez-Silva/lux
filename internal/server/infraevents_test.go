@@ -74,7 +74,10 @@ func queryOne[T any](t *testing.T, s *Server, q string, args ...any) T {
 }
 
 // failingProvider refuses every launch and terminate with err.
-type failingProvider struct{ err error }
+type failingProvider struct {
+	fakeLaunchProvider
+	err error
+}
 
 func (p *failingProvider) Launch(context.Context, json.RawMessage, map[string]string, map[string]string) (Launched, error) {
 	return Launched{}, p.err
@@ -165,7 +168,7 @@ func TestInfraEventsAreWrittenWithTheirChange(t *testing.T) {
 		{
 			typ: evLaunchFailed,
 			act: func(s *Server, ctx context.Context) error {
-				_ = s.launch(ctx, &failingProvider{errors.New("InvalidParameterValue: duplicate tag")},
+				_ = s.launch(ctx, &failingProvider{err: errors.New("InvalidParameterValue: duplicate tag")},
 					poolRow{ID: "pool1", Name: "burst", Provider: "ec2", TenantID: new("t1")}, nil)
 				return nil
 			},
@@ -410,7 +413,7 @@ func TestRepeatedLaunchFailuresCollapse(t *testing.T) {
 	infraFixture(t, s, ctx)
 	pl := poolRow{ID: "pool1", Name: "burst", Provider: "ec2", TenantID: new("t1")}
 	up := map[string]any{"hosts": 1, "reason": "waiting runs", "waiting": 1}
-	dup := &failingProvider{errors.New("operation error EC2: RunInstances, https response error StatusCode: 400, RequestID: 5f1c-aa, api error InvalidParameterValue: duplicate tag")}
+	dup := &failingProvider{err: errors.New("operation error EC2: RunInstances, https response error StatusCode: 400, RequestID: 5f1c-aa, api error InvalidParameterValue: duplicate tag")}
 	for i := range 5 {
 		// Each pass its own request id: still the same failure.
 		dup.err = fmt.Errorf("operation error EC2: RunInstances, https response error StatusCode: 400, RequestID: %d0c-aa, api error InvalidParameterValue: duplicate tag", i)
@@ -434,7 +437,7 @@ func TestRepeatedLaunchFailuresCollapse(t *testing.T) {
 	}
 
 	// Another error: a new event.
-	if err := s.launch(ctx, &failingProvider{errors.New("InsufficientInstanceCapacity")}, pl, up); err == nil {
+	if err := s.launch(ctx, &failingProvider{err: errors.New("InsufficientInstanceCapacity")}, pl, up); err == nil {
 		t.Fatal("launch succeeded")
 	}
 	if n := len(events(t, s, evLaunchFailed)); n != 2 {
@@ -444,7 +447,7 @@ func TestRepeatedLaunchFailuresCollapse(t *testing.T) {
 	if err := s.launch(ctx, &fakeLaunchProvider{}, pl, up); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.launch(ctx, &failingProvider{errors.New("InsufficientInstanceCapacity")}, pl, up); err == nil {
+	if err := s.launch(ctx, &failingProvider{err: errors.New("InsufficientInstanceCapacity")}, pl, up); err == nil {
 		t.Fatal("launch succeeded")
 	}
 	if n := len(events(t, s, evLaunchFailed)); n != 3 {

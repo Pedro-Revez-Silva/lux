@@ -412,6 +412,10 @@ func (a *app) getCmd() *cobra.Command {
 				fmt.Fprintf(w, "usage:     peak memory %s, peak disk %s, cpu %.1fs\n",
 					spec.BytesText(u.PeakMemoryBytes), spec.BytesText(u.PeakDiskBytes), u.CPUSeconds)
 			}
+			if u := run.Usage; u != nil && len(u.NetClasses) > 0 {
+				fmt.Fprintln(w, "network:")
+				writeNetClasses(w, u.NetClasses)
+			}
 			if rs := run.Resume; rs != nil {
 				from := "from scratch"
 				if rs.Snapshot != nil {
