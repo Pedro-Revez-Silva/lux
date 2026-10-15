@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -701,7 +702,7 @@ func (p *placement) supervise(ctx context.Context) {
 	<-tailDone
 
 	exit := p.readExit(code)
-	if st, err := p.r.pm.Inspect(ctx, ctr); err == nil && st.OOMKilled {
+	if st, err := p.r.pm.Inspect(ctx, ctr); err == nil && ranOutOfMemory(exit, st.OOMKilled) {
 		exit.Reason, exit.Message = "oom", "killed: out of memory"
 	}
 	p.finish(ctx, exit)
@@ -709,8 +710,14 @@ func (p *placement) supervise(ctx context.Context) {
 
 func (p *placement) readExit(code int) *exitRecord {
 	rt, _ := p.r.mountpoint(context.Background(), runtimeVolume(p.runID))
-	e := &exitRecord{Code: code, Reason: "exited"}
 	b, err := os.ReadFile(filepath.Join(rt, proto.ExitFile(p.epoch)))
+	return exitFrom(code, b, err)
+}
+
+// exitFrom is the exit record of a container that exited with code, from
+// its shim's exit file (b, or the error reading it).
+func exitFrom(code int, b []byte, err error) *exitRecord {
+	e := &exitRecord{Code: code, Reason: "exited"}
 	if err != nil {
 		e.Reason, e.Message = "crashed", "the container exited without the shim recording why"
 		e.Failed = true
@@ -719,11 +726,24 @@ func (p *placement) readExit(code int) *exitRecord {
 	var info proto.ExitInfo
 	if json.Unmarshal(b, &info) == nil {
 		e.Code, e.Reason, e.Message, e.OutputSeq = info.ExitCode, info.Reason, info.Message, info.LastSeq
+		e.signal, e.memoryOOM, e.shimReported = info.Signal, info.MemoryOOM, true
 		if info.Reason == "start-failed" {
 			e.Failed = true
 		}
 	}
 	return e
+}
+
+// Podman's OOMKilled includes nested containers. Prefer the shim's local
+// Run-limit pressure count plus an exited workload's SIGKILL/137; without
+// that count, retain Podman's fallback. Cumulative pressure cannot tie a
+// specific kill to the limit (docs/podman.md#out-of-memory).
+func ranOutOfMemory(e *exitRecord, podmanOOMKilled bool) bool {
+	if !e.shimReported || e.memoryOOM == nil {
+		return podmanOOMKilled
+	}
+	killed := e.signal == syscall.SIGKILL.String() || e.Code == 128+int(syscall.SIGKILL)
+	return e.Reason == "exited" && *e.memoryOOM > 0 && killed
 }
 
 // finish snapshots the state volumes and reports: snapshot first, so that
@@ -1147,6 +1167,22 @@ func (p *placement) createArgs(sp spec.RunSpec, image string, network podman.Net
 	return append(args, image)
 }
 
+// withSizeEnv is the spec's env with the Run's size added for the
+// workload: LUX_CPUS, its cpus as asked (cpu.max is that many CPUs' time),
+// and LUX_MEMORY_LIMIT, memoryLimit in bytes down to whole pages, as
+// cgroup v2 keeps memory.max. Neither is set when zero.
+func withSizeEnv(env map[string]string, cpus float64, memoryLimit int64) map[string]string {
+	out := make(map[string]string, len(env)+2)
+	if cpus > 0 {
+		out["LUX_CPUS"] = strconv.FormatFloat(cpus, 'f', -1, 64)
+	}
+	if page := int64(os.Getpagesize()); memoryLimit >= page {
+		out["LUX_MEMORY_LIMIT"] = strconv.FormatInt(memoryLimit/page*page, 10)
+	}
+	maps.Copy(out, env)
+	return out
+}
+
 // mounts are every volume the container mounts: the spec's, then the
 // runner's engine stores.
 func (p *placement) mounts() []volumeRef {
@@ -1174,7 +1210,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 		Workdir:      sp.Workload.Workdir,
 		User:         user,
 		TTY:          sp.Workload.TTY,
-		Env:          sp.Env,
+		Env:          withSizeEnv(sp.Env, sp.Resources.CPUs, p.r.mem.limit(int64(sp.Resources.Memory))),
 		GraceSec:     sp.Workload.Grace.Seconds(),
 		Secrets:      sp.Secrets,
 		ArtifactsDir: proto.ShimRunDir + "/" + stagingDir,
@@ -1191,6 +1227,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 	}
 	cfg.InputsDir, cfg.InputsRoot = sp.InputsDir(p.user.Home)
 	cfg.Sync = p.sync
+	cfg.DelegateCgroup = sp.Sandbox.NestedContainers
 	if b := sp.Workload.BeforeStop; b != nil {
 		cfg.BeforeStop = b.Command
 		cfg.BeforeStopTimeoutSec = b.Timeout.Seconds()

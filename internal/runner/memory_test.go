@@ -1,13 +1,17 @@
 package runner
 
 import (
+	"context"
+	"encoding/json"
 	"math/big"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"testing"
 
 	"github.com/marcioapm/lux/internal/podman"
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -107,6 +111,34 @@ func TestMemoryScaleRefusesNoRoom(t *testing.T) {
 		if _, err := newMemoryScale(c.total, c.headroom, 32*gib); err == nil {
 			t.Errorf("MemTotal %d, headroom %d: accepted", c.total, c.headroom)
 		}
+	}
+}
+
+func TestShimConfigFreshPlacementMemoryLimit(t *testing.T) {
+	rt := t.TempDir()
+	r := &Runner{mem: mustScale(t, 30*gib+gib/2, gib/2, 32*gib)}
+	r.mounts.Store(runtimeVolume("run_1"), rt)
+	p := &placement{r: r, runID: "run_1", epoch: 1, assign: &proto.Assign{}, state: &runState{}}
+	sp := spec.RunSpec{Resources: spec.Resources{Memory: spec.Bytes(16*gib + 7)}}
+	if err := p.writeShimConfig(context.Background(), sp, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(rt, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg proto.ShimConfig
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	args := p.createArgs(sp, "img", podman.Network{})
+	i := slices.Index(args, "--memory")
+	if i < 0 || i+1 >= len(args) {
+		t.Fatalf("missing container memory limit: %v", args)
+	}
+	want := strconv.FormatInt(15*gib, 10)
+	if args[i+1] != want || cfg.Env["LUX_MEMORY_LIMIT"] != args[i+1] {
+		t.Fatalf("config memory %q, container memory %q, want %s", cfg.Env["LUX_MEMORY_LIMIT"], args[i+1], want)
 	}
 }
 

@@ -82,6 +82,10 @@ type exitRecord struct {
 	Message   string `json:"message,omitempty"`
 	OutputSeq int64  `json:"outputSeq"`
 	Failed    bool   `json:"failed,omitempty"`
+	// From the shim's exit file, for ranOutOfMemory only.
+	shimReported bool
+	signal       string
+	memoryOOM    *int64
 }
 
 func readRunState(dir string) (*runState, error) {

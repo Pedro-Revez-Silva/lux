@@ -337,11 +337,18 @@ func (s *Shim) awaitSyncRetry(wait time.Duration) *proto.SyncArgs {
 	}
 }
 
+func (s *Shim) syncCommand(a proto.SyncArgs, env []string) *exec.Cmd {
+	cmd := s.command([]string{proto.ShimBinary, "sync", string(proto.Marshal(a))}, env)
+	cmd.Dir = "/"
+	// The shim's own work: it stays in the shim's cgroup.
+	cmd.SysProcAttr.UseCgroupFD = false
+	return cmd
+}
+
 // runSync runs `lux-shim sync` as the workload user; every repository
 // failed when it cannot.
 func (s *Shim) runSync(a proto.SyncArgs, env []string) []proto.SyncResult {
-	cmd := s.command([]string{proto.ShimBinary, "sync", string(proto.Marshal(a))}, env)
-	cmd.Dir = "/"
+	cmd := s.syncCommand(a, env)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	// The reaper reaps every child: it hands this one's exit over.

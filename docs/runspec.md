@@ -166,6 +166,17 @@ availability immediately. See [CLI](cli.md#runs).
   Code's `~/.claude`). A spec that leaves them off is rejected, because it
   would lose its conversation on the first resume.
 - `env` names must be valid variable names and must not start with `LUX_`.
+- **The Run's size is in the workload's environment**, for tools that
+  size their parallelism or heap: `LUX_CPUS` is `resources.cpus` as
+  given (`0.5`, `2`), and `LUX_MEMORY_LIMIT` is the container's memory
+  limit in bytes, the value of its `/sys/fs/cgroup/memory.max` (the
+  placement's `memoryLimit`: `resources.memory` scaled to the host's
+  share, in whole pages). They are set for the workload, init,
+  `beforeStop`, servers and `lux exec`. lux sets no other sizing variable
+  (`OMP_NUM_THREADS` and the like are the spec's to set). Nested
+  containers do not inherit them: pass them on (`docker run -e
+  LUX_CPUS`). They take precedence over the image's environment; an `env`
+  secret of the same name overrides them. Spec `env` cannot use `LUX_` names.
 - Secrets are `env` (the default) or `file` (placed on a tmpfs and linked
   at `path`). A file secret is never in a snapshot. Every resume must
   supply every secret again.
@@ -562,6 +573,20 @@ A host started without `--nested` refuses nested Runs.
 It is still in its own user namespace (an unprivileged uid range on the
 host). The containers it starts use the Run's network, so they have its
 egress rules and hard blocks, and nothing more.
+
+**Limits of nested containers.** Rootless Podman enforces `-m`, `--cpus`
+and `--pids-limit` within the Run's host-owned limits. The workload starts
+in `/workload/main`; engines create siblings under `/workload`, bounded
+to 1024 descendants including `main` for non-root workload users. Root
+workloads can change that bound, but cannot raise the Run's limits.
+Delegation failures emit `lux.warning`; nested limits may then be unenforced.
+Rootless Docker uses cgroup driver `none` and does not enforce per-container
+limits. See [Podman](podman.md#limits-of-nested-containers) for the layout,
+ownership boundary and fallback behavior.
+
+A placement's `oom` attribution uses cumulative Run-limit pressure over
+that placement and an exited workload's SIGKILL/137, not a nested limit's
+own count; see the attribution caveats in [out of memory](podman.md#out-of-memory).
 
 ## Images with the prompt
 

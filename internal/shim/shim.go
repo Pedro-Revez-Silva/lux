@@ -94,6 +94,10 @@ type Shim struct {
 	groups map[int]bool
 	// srv: the Run's servers' processes (servers.go).
 	srv servers
+	// workCgroup is workload/main when the Run's cgroup is delegated
+	// (cgroup.go): tenant processes start in it. nil: they start beside
+	// the shim.
+	workCgroup *os.File
 }
 
 // Main is the shim's entry point. It returns the process exit code.
@@ -137,6 +141,8 @@ func (s *Shim) run() int {
 		return 125
 	}
 	s.out = out
+	// Before the reaper: delegating waits for a probe process of its own.
+	s.delegateAt(cgroupRoot, probeCloneInto)
 
 	// PID 1 must reap: orphans reparent to us.
 	go s.reap(nil)
@@ -310,6 +316,7 @@ func (s *Shim) finish(info proto.ExitInfo) int {
 	// Close first: it records what was still held.
 	s.out.Close()
 	info.LastSeq = s.out.Seq()
+	info.MemoryOOM = s.placementMemoryOOM(cgroupRoot)
 	b, _ := json.Marshal(info)
 	path := filepath.Join(proto.ShimRunDir, proto.ExitFile(s.cfg.Epoch))
 	_ = os.WriteFile(path+".tmp", b, 0o644)
@@ -974,6 +981,10 @@ func (s *Shim) command(argv []string, env []string) *exec.Cmd {
 		cmd.Dir = "/"
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if s.workCgroup != nil {
+		cmd.SysProcAttr.UseCgroupFD = true
+		cmd.SysProcAttr.CgroupFD = int(s.workCgroup.Fd())
+	}
 	if s.user.uid != 0 || s.user.gid != 0 {
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(s.user.uid), Gid: uint32(s.user.gid), Groups: s.user.groups}
 	}

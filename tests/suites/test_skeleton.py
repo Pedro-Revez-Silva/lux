@@ -164,6 +164,53 @@ def test_resource_defaults_and_requests_reach_the_container(lux, runners, hosts)
     assert lux.get(asked)["placements"][0]["memoryLimit"] == int(out[2])
 
 
+def test_a_run_without_nested_containers_is_not_delegated(lux, runners, hosts):
+    """Without sandbox.nestedContainers the shim leaves the Run's cgroup as
+    the container got it: the workload is in its root, no controller is
+    enabled below it, and it cannot make cgroups of its own."""
+    runners.start(hosts[0], "--nested")
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c",
+                                "cat /proc/self/cgroup; echo subtree=$(cat /sys/fs/cgroup/cgroup.subtree_control); "
+                                "mkdir /sys/fs/cgroup/x 2>/dev/null && echo MKDIR-OK; ls -d /sys/fs/cgroup/workload 2>/dev/null; true"))
+    run = lux.wait_state(run_id, "succeeded", "failed")
+    out = lux.logs(run_id).splitlines()
+    assert run["state"] == "succeeded", (run, out)
+    assert out == ["0::/", "subtree="], out
+    warnings = [r["event"]["data"] for r in lux.records(run_id, "--events") if r.get("event", {}).get("type") == "lux.warning"]
+    assert not warnings, warnings
+
+
+def test_the_runs_size_is_in_its_environment(lux, runners, hosts):
+    """LUX_CPUS is the Run's cpus as asked, LUX_MEMORY_LIMIT the bytes of
+    its container's memory.max; a spec env naming any other variable keeps
+    it, and OMP_NUM_THREADS is never set by lux."""
+    runners.start(hosts[0])
+    show = 'echo "cpus=$LUX_CPUS mem=$LUX_MEMORY_LIMIT max=$(cat /sys/fs/cgroup/memory.max) omp=${OMP_NUM_THREADS-unset}"'
+    run_id = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", show, resources={"cpus": 0.5, "memory": "1Gi"}))
+    lux.wait_state(run_id, "succeeded")
+    line = lux.logs(run_id).split()
+    limit = hosts[0].memory_limit(1 << 30)
+    assert line == ["cpus=0.5", f"mem={limit}", f"max={limit}", "omp=unset"], line
+    assert lux.get(run_id)["placements"][0]["memoryLimit"] == limit
+
+    own = lux.submit(generic(ALPINE_IMAGE, "sh", "-c", show, resources={"cpus": 3, "memory": "512Mi"},
+                             env={"OMP_NUM_THREADS": "7"}))
+    lux.wait_state(own, "succeeded")
+    limit = hosts[0].memory_limit(512 << 20)
+    assert lux.logs(own).split() == ["cpus=3", f"mem={limit}", f"max={limit}", "omp=7"], lux.logs(own)
+
+
+def test_a_run_over_its_own_memory_is_oom(lux, runners, hosts):
+    """A workload killed by its Run's memory limit ends failed, its
+    placement's exit reason oom."""
+    runners.start(hosts[0])
+    run_id = lux.submit(generic(ALPINE_IMAGE, "awk", 'BEGIN{x="a";for(i=0;i<30;i++)x=x x;print length(x)}',
+                                resources={"memory": "256Mi"}))
+    run = lux.wait_state(run_id, "succeeded", "failed")
+    assert run["state"] == "failed" and run["exitCode"] == 137, run
+    assert run["placements"][0]["exitReason"] == "oom", run["placements"]
+
+
 def test_memory_is_the_hosts_share(lux, runners, hosts):
     """A host offering exactly what Linux sees less the headroom gives a Run
     all it asked; offering twice that, half."""

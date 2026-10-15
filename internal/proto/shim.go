@@ -95,6 +95,11 @@ type ShimConfig struct {
 	Services []spec.Service `json:"services,omitempty"`
 	// Sync: checkouts to move before init (a resume's sync).
 	Sync *SyncArgs `json:"sync,omitempty"`
+	// DelegateCgroup: the shim splits the Run's cgroup so a container
+	// engine in the workload can make cgroups with limits of its own
+	// (sandbox.nestedContainers; docs/podman.md#limits-of-nested-containers).
+	// A shim that cannot falls back to one cgroup and says so once.
+	DelegateCgroup bool `json:"delegateCgroup,omitempty"`
 }
 
 // ShimServicesDir holds each service's socket (a tmpfs of its own).
@@ -372,6 +377,12 @@ type ExitInfo struct {
 	Reason  string `json:"reason"`
 	Message string `json:"message,omitempty"`
 	LastSeq int64  `json:"lastSeq"`
+	// MemoryOOM is the oom count of memory.events.local in the Run's own
+	// cgroup at exit: how often the Run's memory.max was reached with
+	// nothing left to reclaim. A limit that fired in a nested container's
+	// cgroup is not counted. Absent when the shim could not read it (no
+	// such file) or predates the field.
+	MemoryOOM *int64 `json:"memoryOOM,omitempty"`
 }
 
 // SyncArgs is `lux-shim sync`'s argument: checkouts to move, each to a
