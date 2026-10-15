@@ -28,18 +28,6 @@ type CostLine struct {
 	Reported time.Time      `json:"reportedAt"`
 }
 
-// CostTotal is a sum of lines in one currency: amounts in different
-// currencies are never added together.
-type CostTotal struct {
-	Family      string `json:"family,omitempty" doc:"In byFamily only."`
-	DisplayName string `json:"displayName,omitempty" doc:"In byFamily when the family is described by a plugin or is compute."`
-	Color       string `json:"color,omitempty" doc:"In byFamily when a plugin supplies a color hint."`
-	Currency    string `json:"currency"`
-	Amount      string `json:"amount" doc:"final + estimate."`
-	Final       string `json:"final" doc:"The part from final lines."`
-	Estimate    string `json:"estimate" doc:"The part from lines that may still change."`
-}
-
 // CostSource is how far one source has answered for the Run.
 type CostSource struct {
 	Source     string     `json:"source"`
@@ -148,12 +136,6 @@ func (s *Server) runCostStatus(sources []CostSource, lines bool) ([]CostSource, 
 		}
 	}
 	return sources, costStatus(current, lines)
-}
-
-// RunCostBrief is a Run's cost as the Runs list carries it.
-type RunCostBrief struct {
-	Status string      `json:"status" enum:"pending,complete,incomplete,final" doc:"As in GET /v1/runs/{id}/cost."`
-	Totals []CostTotal `json:"totals" doc:"Per currency, ordered by currency; empty while pending."`
 }
 
 // listRunCosts reads the cost of each of runs in the caller's transaction,

@@ -478,7 +478,7 @@ connection.
 ```bash
 lux exec <run> [-t | -T] -- command...
 lux shell <run>
-lux attach <run>
+lux attach <run> [--restore]
 lux port-forward <run> <port-name> <local-port> [--address 127.0.0.1]
 ```
 
@@ -491,6 +491,27 @@ lux port-forward <run> <port-name> <local-port> [--address 127.0.0.1]
   `workload.tty: true`: its output from now on, and your typing. Ctrl-]
   detaches; the workload keeps running. What the workload prints on its
   terminal is also the Run's output, as always.
+
+  `--restore` first redraws the terminal as it is now, as tmux does on
+  attach: lux-shim keeps the terminal's parsed state (not its bytes) —
+  the screen, main or alternate (a full-screen program's), with colours
+  and attributes; up to 2000 lines of the main screen's scrollback, which
+  land in your terminal's own history; the cursor, title, scroll region
+  and the modes a program sets (application cursor and keypad, bracketed
+  paste, mouse reporting). The Run's terminal is resized to yours first.
+  Live output follows with nothing lost or repeated in between. If your
+  side falls behind the workload by more than the redraw's own budget
+  (4 MiB queued, each read counted as 64 bytes more than its length,
+  so many tiny writes reach it sooner), the attach is ended with
+  `attach fell behind; attach again` rather than continued with a gap;
+  attach again to redraw. The
+  redraw is ordinary output (StreamOpen `restore`; on the API,
+  `GET /v1/runs/{id}/attach?restore=true&rows=R&cols=C`), followed by
+  one `{"restored": true}` message with no data where live output
+  starts; it comes first when the host sends no redraw (its emulator
+  failed, or the screen alone is over the 4 MiB budget). A host whose
+  lux-shim predates it sends neither redraw nor marker, and attach just
+  continues live.
 - **shell** opens a login shell on a terminal: `bash -l` where bash is
   on the workload's PATH, `sh -l` otherwise (`lux exec -t <run> --
   /bin/sh -c 'command -v bash >/dev/null && exec bash -l; exec /bin/sh -l'`).

@@ -92,7 +92,7 @@ func raiseCheck(t *testing.T, s *Server, id string, req resumeRequest, size, rai
 // testCPUs is the cpus of testShape's size name.
 func testCPUs(t *testing.T, name string) float64 {
 	t.Helper()
-	m, err := testShape.model()
+	m, err := shapeModel(testShape)
 	if err != nil {
 		t.Fatal(err)
 	}

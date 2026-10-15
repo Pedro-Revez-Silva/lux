@@ -608,6 +608,9 @@ type StreamOpen struct {
 	Port     int      `json:"port,omitempty"`
 	Rows     int      `json:"rows,omitempty"`
 	Cols     int      `json:"cols,omitempty"`
+	// Restore, attach only: the output starts with a snapshot of the
+	// terminal (sized Rows×Cols when given), then continues live.
+	Restore bool `json:"restore,omitempty" doc:"attach only, luxd to runner (a client asks with attach's restore, rows and cols query parameters): start the output with a snapshot of the terminal, then live output."`
 	// Window is flow control for the stream's output: the runner sends at
 	// most this many output StreamData frames ahead of luxd, which grants
 	// more (StreamData.Credit) as its reader takes them. 0 (a luxd from
@@ -633,6 +636,9 @@ type StreamData struct {
 	// Credit, luxd → runner only: this many more output frames may be sent
 	// (StreamOpen.Window). A runner from before takes it as empty input.
 	Credit int `json:"credit,omitempty" doc:"luxd to runner only (tunnel flow control); a client that sends it ends its stream."`
+	// Restored, attach with restore only, host to client: the snapshot
+	// (if any) is over and live output follows. Sent once, with no data.
+	Restored bool `json:"restored,omitempty" doc:"attach with restore only, host to client: sent once, with no data, after the snapshot's last output message (or first, when the host sends no snapshot); live output follows. A host from before sends neither snapshot nor this."`
 }
 
 // Push asks the runner to push each repository's current commit to the

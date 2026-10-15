@@ -52,6 +52,21 @@ cd tests && uv run python run_tests.py       # bring up Postgres, versitygw (S3)
 
 See [docs/development.md](docs/development.md).
 
+## Go API
+
+Go programs outside this module use `github.com/marcioapm/lux/api`: the
+client (`api.New`, or `api.FromConfig(api.LoadConfig())` to sign in as the
+`lux` CLI does), the RunSpec, the stream messages of exec and attach, and
+the types luxd answers with. It follows lux releases; its types are
+aliases of lux's own and may grow fields. It takes in none of luxd's
+dependencies.
+
+```go
+c := api.FromConfig(api.LoadConfig())
+var run api.Run
+err := c.Do(ctx, "GET", "/v1/runs/"+id, nil, &run)
+```
+
 ## License
 
 lux is source-available under the [Elastic License 2.0](LICENSE) (ELv2).

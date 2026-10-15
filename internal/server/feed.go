@@ -11,15 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// FeedEvent is an event in the feed of every Run and server the caller
-// sees: a Run's (runId), or a server's (serverId, and runId its attached
-// Run's, null while it has none).
-type FeedEvent struct {
-	Event
-	RunID  *string `json:"runId" nullable:"true" doc:"The Run's id. Null only for an event of a server attached to no Run."`
-	Tenant string  `json:"tenant"`
-}
-
 type feedInput struct {
 	TenantQuery
 	After       string `query:"after" doc:"From after this event id (default: from now)."`

@@ -15,6 +15,8 @@ internal/
   proto/        luxd ↔ runner and runner ↔ shim messages
   spec/         the RunSpec: parsing, validation, defaults
   cli/, client/ the CLI and its API client
+  apitypes/     the API's response types clients decode into (server aliases them)
+api/            the public Go package for clients outside this module
 console/        the operator console: React + TypeScript, built with Bun; console.go embeds dist/ in luxd
 packages/design-system/  the console's tokens and components, and their gallery
 tests/          the end-to-end harness (Python, uv, pytest)
@@ -88,6 +90,24 @@ go run ./cmd/luxd openapi > docs/openapi.yaml
 `TestOpenAPIIsCurrent` fails while the committed copy is stale. A running
 luxd serves the same spec at `/openapi.yaml` and `/openapi.json`. The
 runner's routes (`/runner/v1/...`) are not part of it.
+
+## The public Go package
+
+`api/` (`github.com/marcioapm/lux/api`) is what a Go client in another
+module imports, `internal/` being closed to it: type aliases of lux's own
+types and thin wrappers, never copies. It covers the client
+(`internal/client`, `LoadConfig` included, which the CLI also uses), the
+RunSpec (`internal/spec`), the stream messages (`internal/proto`) and the
+answers clients decode (`internal/apitypes`).
+
+A response type a client needs lives in `internal/apitypes`, not in
+`internal/server`, which aliases it: importing `internal/server` would bring
+pgx, the AWS SDK, huma and go-oidc into every client binary.
+`TestDependencyClosureHasNoServerDependencies` (`go list -deps`) fails if
+`api` reaches any of them. A method a server type needs that would tie
+`apitypes` to luxd is a function in `internal/server` instead. Adding a
+field is compatible; renaming or removing one is a breaking change for
+clients, as it is for the HTTP API.
 
 ## The end-to-end harness
 

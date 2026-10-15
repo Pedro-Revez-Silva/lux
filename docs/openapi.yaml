@@ -3579,6 +3579,9 @@ components:
         exitCode:
           format: int64
           type: integer
+        restored:
+          description: "attach with restore only, host to client: sent once, with no data, after the snapshot's last output message (or first, when the host sends no snapshot); live output follows. A host from before sends neither snapshot nor this."
+          type: boolean
         rows:
           format: int64
           type: integer
@@ -3600,6 +3603,9 @@ components:
         port:
           format: int64
           type: integer
+        restore:
+          description: "attach only, luxd to runner (a client asks with attach's restore, rows and cols query parameters): start the output with a snapshot of the terminal, then live output."
+          type: boolean
         rows:
           format: int64
           type: integer
@@ -6754,7 +6760,7 @@ paths:
   /v1/runs/{id}/attach:
     get:
       description: |-
-        A WebSocket (send `Upgrade: websocket`), relayed to the Run's host, carrying JSON text messages. Needs a generic workload with workload.tty. A browser authenticates with `?ticket=` (POST /v1/runs/{id}/tickets, kind exec) instead of a header; a page of another origin than luxd's is refused (403 bad_origin). Then StreamData both ways: `{"data": <base64>}` for bytes, `{"eof": true}` to close input, `{"rows", "cols"}` to resize. The stream ends with one `{"exitCode": N}` (exec) or `{"error": "..."}`, or just the socket closing, and luxd closes it.
+        A WebSocket (send `Upgrade: websocket`), relayed to the Run's host, carrying JSON text messages. Needs a generic workload with workload.tty. Without `?restore=true` the output is what the terminal writes from now on; with it, it starts with a snapshot of the terminal's screen (see restore). A browser authenticates with `?ticket=` (POST /v1/runs/{id}/tickets, kind exec) instead of a header; a page of another origin than luxd's is refused (403 bad_origin). Then StreamData both ways: `{"data": <base64>}` for bytes, `{"eof": true}` to close input, `{"rows", "cols"}` to resize. The stream ends with one `{"exitCode": N}` (exec) or `{"error": "..."}`, or just the socket closing, and luxd closes it.
 
         Without the upgrade the same URL answers 200 `{"status": "ok"}` if the stream could be opened, and the error it would get otherwise, so a client can check first.
 
@@ -6775,6 +6781,33 @@ paths:
           schema:
             description: A stream ticket (kind exec), instead of an Authorization header.
             type: string
+        - description: "Start the output with a snapshot that redraws the terminal as it is: reset, scrollback lines, the screen (main or alternate) with its attributes, then modes, cursor and title. Live output follows with nothing lost or repeated in between: a client that falls behind by more than 4 MiB of queued output (each queued read counted as 64 bytes more than its length) is ended with {\"error\": \"attach fell behind; attach again\"} rather than continued with a gap, and attaches again. Sent as ordinary output messages, then one {\"restored\": true} with no data where live output starts; that marker comes first when the host sends no snapshot (its terminal emulator failed, or the screen alone is over the 4 MiB limit). A host from before sends neither snapshot nor marker, so a client must cope with their absence."
+          explode: false
+          in: query
+          name: restore
+          schema:
+            description: "Start the output with a snapshot that redraws the terminal as it is: reset, scrollback lines, the screen (main or alternate) with its attributes, then modes, cursor and title. Live output follows with nothing lost or repeated in between: a client that falls behind by more than 4 MiB of queued output (each queued read counted as 64 bytes more than its length) is ended with {\"error\": \"attach fell behind; attach again\"} rather than continued with a gap, and attaches again. Sent as ordinary output messages, then one {\"restored\": true} with no data where live output starts; that marker comes first when the host sends no snapshot (its terminal emulator failed, or the screen alone is over the 4 MiB limit). A host from before sends neither snapshot nor marker, so a client must cope with their absence."
+            type: boolean
+        - description: "With restore: the client's terminal size, which the Run's terminal is resized to before the snapshot (with cols)."
+          explode: false
+          in: query
+          name: rows
+          schema:
+            description: "With restore: the client's terminal size, which the Run's terminal is resized to before the snapshot (with cols)."
+            format: int64
+            maximum: 200
+            minimum: 0
+            type: integer
+        - description: "With restore: see rows."
+          explode: false
+          in: query
+          name: cols
+          schema:
+            description: "With restore: see rows."
+            format: int64
+            maximum: 500
+            minimum: 0
+            type: integer
       responses:
         "101":
           description: Switching to the WebSocket.

@@ -25,7 +25,8 @@ import (
 //
 // Client protocol (JSON text messages, proto.StreamData):
 //   - exec: the client sends one proto.StreamOpen first ({"command":[...],
-//     "tty":true,"rows":..,"cols":..}); attach and ports need none.
+//     "tty":true,"rows":..,"cols":..}); attach and ports need none (attach
+//     takes ?restore=true&rows=&cols= instead: StreamOpen.Restore);
 //   - then StreamData both ways: {"data":<base64>} for bytes, {"eof":true}
 //     to close input, {"rows","cols"} to resize;
 //   - the stream ends with one {"exitCode":N} (exec) or {"error":"..."}, or
@@ -112,6 +113,15 @@ type runStreamInput struct {
 	Ticket string `query:"ticket" doc:"A stream ticket (kind exec), instead of an Authorization header."`
 }
 
+// attachStreamInput is runStreamInput with attach's restore.
+type attachStreamInput struct {
+	RunPath
+	Ticket  string `query:"ticket" doc:"A stream ticket (kind exec), instead of an Authorization header."`
+	Restore bool   `query:"restore" doc:"Start the output with a snapshot that redraws the terminal as it is: reset, scrollback lines, the screen (main or alternate) with its attributes, then modes, cursor and title. Live output follows with nothing lost or repeated in between: a client that falls behind by more than 4 MiB of queued output (each queued read counted as 64 bytes more than its length) is ended with {\"error\": \"attach fell behind; attach again\"} rather than continued with a gap, and attaches again. Sent as ordinary output messages, then one {\"restored\": true} with no data where live output starts; that marker comes first when the host sends no snapshot (its terminal emulator failed, or the screen alone is over the 4 MiB limit). A host from before sends neither snapshot nor marker, so a client must cope with their absence."`
+	Rows    int    `query:"rows" minimum:"0" maximum:"200" doc:"With restore: the client's terminal size, which the Run's terminal is resized to before the snapshot (with cols)."`
+	Cols    int    `query:"cols" minimum:"0" maximum:"500" doc:"With restore: see rows."`
+}
+
 // runStream is exec or attach.
 func (s *Server) runStream(kind string) func(http.ResponseWriter, *http.Request, *runStreamInput) error {
 	h := s.streamHandler(kind)
@@ -120,27 +130,43 @@ func (s *Server) runStream(kind string) func(http.ResponseWriter, *http.Request,
 	}
 }
 
+func (s *Server) attachStream() func(http.ResponseWriter, *http.Request, *attachStreamInput) error {
+	return func(w http.ResponseWriter, r *http.Request, in *attachStreamInput) error {
+		open := proto.StreamOpen{Restore: in.Restore}
+		if in.Restore && in.Rows > 0 && in.Cols > 0 {
+			open.Rows, open.Cols = in.Rows, in.Cols
+		}
+		return s.serveStream(w, r, "attach", in.ID, "", open)
+	}
+}
+
 func (s *Server) streamHandler(kind string) func(http.ResponseWriter, *http.Request, *portInput) error {
 	return func(w http.ResponseWriter, r *http.Request, in *portInput) error {
-		t, err := s.resolveStream(r, kind, in.ID, in.Name)
-		if err != nil {
-			return err
-		}
-		if r.Header.Get("Upgrade") == "" {
-			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-			return nil
-		}
-		// The origin was checked already (streamAuth), against more than
-		// the request's own host, which is all Accept's check allows.
-		ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-		if err != nil {
-			return nil
-		}
-		ws.SetReadLimit(4 << 20)
-		defer ws.CloseNow()
-		s.relayStream(r.Context(), ws, in.ID, kind, t)
+		return s.serveStream(w, r, kind, in.ID, in.Name, proto.StreamOpen{})
+	}
+}
+
+// serveStream checks a stream can be opened and relays it; open carries
+// what the client asked for in the URL (attach's restore).
+func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, kind, runID, port string, open proto.StreamOpen) error {
+	t, err := s.resolveStream(r, kind, runID, port)
+	if err != nil {
+		return err
+	}
+	if r.Header.Get("Upgrade") == "" {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return nil
 	}
+	// The origin was checked already (streamAuth), against more than
+	// the request's own host, which is all Accept's check allows.
+	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	if err != nil {
+		return nil
+	}
+	ws.SetReadLimit(4 << 20)
+	defer ws.CloseNow()
+	s.relayStream(r.Context(), ws, runID, kind, t, open)
+	return nil
 }
 
 // hubStream is one stream to a Run's host, through the runner's
@@ -234,10 +260,10 @@ func (h *hubStream) close() {
 	})
 }
 
-func (s *Server) relayStream(ctx context.Context, ws *websocket.Conn, runID, kind string, t streamTarget) {
+func (s *Server) relayStream(ctx context.Context, ws *websocket.Conn, runID, kind string, t streamTarget, open proto.StreamOpen) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	open := proto.StreamOpen{Kind: kind, Port: t.port}
+	open.Kind, open.Port = kind, t.port
 	if kind == "exec" {
 		if err := wsjson.Read(ctx, ws, &open); err != nil || len(open.Command) == 0 {
 			closeWith(ctx, ws, []byte(`{"error":"exec needs a command"}`))

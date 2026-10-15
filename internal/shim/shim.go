@@ -1070,7 +1070,7 @@ func (s *Shim) startWorkloadTTY(cmd *exec.Cmd, argv []string) (*adapter.Process,
 		return nil, fmt.Errorf("start %s: %w", argv[0], err)
 	}
 	s.workPid = cmd.Process.Pid
-	s.term = newTerminal(ptmx)
+	s.term = newTerminal(ptmx, 24, 80)
 	s.proc = &adapter.Process{Cmd: cmd, Stdin: ptmx, Stdout: io.NopCloser(s.term), Stderr: io.NopCloser(strings.NewReader(""))}
 	return s.proc, nil
 }

@@ -20,26 +20,12 @@ import (
 // Fractional pool sizes (docs/design/sizes.md): a shaped pool's ladder, a
 // Run's size request, and how both are persisted.
 
-// PoolShape is an operator-declared nominal host shape; pools.shape.
-type PoolShape struct {
-	Family      string     `json:"family" doc:"The size family, a lowercase slug (e.g. m): the first part of every size name. Pool metadata, never inferred from the provider."`
-	Arch        string     `json:"arch" enum:"arm64,amd64" doc:"The hosts' architecture, the last part of every size name."`
-	CPUs        float64    `json:"cpus" doc:"Nominal CPUs of a whole host: a power of two."`
-	Memory      spec.Bytes `json:"memory" doc:"Nominal memory of a whole host, in the terms Runs ask in."`
-	Disk        spec.Bytes `json:"disk" doc:"Nominal disk of a whole host (from its launch template, not its instance type)."`
-	MinCPUs     float64    `json:"minCpus" doc:"The smallest size's CPUs: a power of two, at least 0.5. The ladder halves the whole host down to it."`
-	DefaultCPUs float64    `json:"defaultCpus" doc:"The CPUs of the size a Run that asks for no resources gets: one of the ladder's."`
-	// DiskHeadroom: nil reads as DefaultDiskHeadroom (a shape stored
-	// before the field, or a request without it).
-	DiskHeadroom *spec.Bytes `json:"diskHeadroom,omitempty" doc:"Bytes of each host's disk kept from Runs, for the OS, tools and image storage (lux-runner --disk-headroom): a Run's disk limit is its size's disk × min(1, (filesystem capacity − diskHeadroom) / disk). At least 0 and less than disk. Absent: 10 GiB."`
-}
-
 // DefaultDiskHeadroom is a shape's diskHeadroom when it names none: an
 // initial floor for the OS, tools and image storage, not a measured one.
 const DefaultDiskHeadroom = spec.Bytes(10 << 30)
 
 // diskHeadroom is sh's disk headroom, its default when unset.
-func (sh PoolShape) diskHeadroom() spec.Bytes {
+func shapeDiskHeadroom(sh PoolShape) spec.Bytes {
 	if sh.DiskHeadroom == nil {
 		return DefaultDiskHeadroom
 	}
@@ -50,7 +36,7 @@ func (sh PoolShape) diskHeadroom() spec.Bytes {
 // runner with: the shape's nominal host and the pool's disk headroom, so
 // it advertises the shape and scales disk to it (CapDiskScale). nil for
 // an unshaped pool, whose hosts' environment is unchanged.
-func (sh *PoolShape) runnerEnv() map[string]string {
+func shapeRunnerEnv(sh *PoolShape) map[string]string {
 	if sh == nil {
 		return nil
 	}
@@ -58,21 +44,11 @@ func (sh *PoolShape) runnerEnv() map[string]string {
 		"LUX_RUNNER_CPUS":          strconv.FormatFloat(sh.CPUs, 'f', -1, 64),
 		"LUX_RUNNER_MEMORY":        strconv.FormatInt(int64(sh.Memory), 10),
 		"LUX_RUNNER_DISK":          strconv.FormatInt(int64(sh.Disk), 10),
-		"LUX_RUNNER_DISK_HEADROOM": strconv.FormatInt(int64(sh.diskHeadroom()), 10),
+		"LUX_RUNNER_DISK_HEADROOM": strconv.FormatInt(int64(shapeDiskHeadroom(*sh)), 10),
 	}
 }
 
-// PoolSize is one entry of a shaped pool's ladder.
-type PoolSize struct {
-	Name     string     `json:"name" example:"m-2-arm64"`
-	CPUs     float64    `json:"cpus"`
-	Memory   spec.Bytes `json:"memory" doc:"Bytes."`
-	Disk     spec.Bytes `json:"disk" doc:"Bytes."`
-	Fraction float64    `json:"fraction" doc:"Of a whole host: 1, 0.5, 0.25, ..."`
-	Default  bool       `json:"default,omitempty" doc:"The size a Run that asks for no resources gets."`
-}
-
-func (sh PoolShape) model() (*sizing.Model, error) {
+func shapeModel(sh PoolShape) (*sizing.Model, error) {
 	return sizing.New(sizing.Shape{
 		Dimensions: sizing.Dimensions{CPUs: sh.CPUs, Memory: sh.Memory, Disk: sh.Disk},
 		Family:     sh.Family, Arch: sh.Arch, MinCPUs: sh.MinCPUs, DefaultCPUs: sh.DefaultCPUs,
@@ -82,8 +58,8 @@ func (sh PoolShape) model() (*sizing.Model, error) {
 // storedModel is the model of pool's stored shape. Every write checks the
 // shape (CheckPoolShape), so New refuses a stored one only if its rules
 // tightened after it was stored: a 500 pool_shape_invalid naming the pool.
-func (sh PoolShape) storedModel(pool string) (*sizing.Model, error) {
-	m, err := sh.model()
+func shapeStoredModel(sh PoolShape, pool string) (*sizing.Model, error) {
+	m, err := shapeModel(sh)
 	if err != nil {
 		return nil, errf(http.StatusInternalServerError, "pool_shape_invalid", "pool %s: stored shape: %v", pool, err)
 	}
@@ -94,8 +70,8 @@ func (sh PoolShape) storedModel(pool string) (*sizing.Model, error) {
 // storedModel) lists no sizes rather than failing the whole pool listing;
 // submits and resumes into the pool get pool_shape_invalid. scanPool has no
 // logger to report it with.
-func (sh PoolShape) sizes() []PoolSize {
-	m, err := sh.model()
+func shapeSizes(sh PoolShape) []PoolSize {
+	m, err := shapeModel(sh)
 	if err != nil {
 		return nil
 	}
@@ -109,8 +85,8 @@ func (sh PoolShape) sizes() []PoolSize {
 
 // hasSize reports whether name is a size of sh's current ladder whose
 // cpus, memory and disk are cur's.
-func (sh PoolShape) hasSize(name string, cur spec.Resources) bool {
-	m, err := sh.model()
+func shapeHasSize(sh PoolShape, name string, cur spec.Resources) bool {
+	m, err := shapeModel(sh)
 	return err == nil && sizeCurrent(m, name, cur)
 }
 
@@ -177,11 +153,11 @@ func ParseShape(s string) (*PoolShape, error) {
 // ValidShape is sh's model, or a 422 invalid_pool for a shape sizing.New
 // refuses or a disk headroom outside [0, disk).
 func ValidShape(sh PoolShape) (*sizing.Model, error) {
-	m, err := sh.model()
+	m, err := shapeModel(sh)
 	if err != nil {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "%s", err.Error())
 	}
-	if h := sh.diskHeadroom(); h < 0 || h >= sh.Disk {
+	if h := shapeDiskHeadroom(sh); h < 0 || h >= sh.Disk {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_pool", "invalid pool shape: diskHeadroom %d must be at least 0 and less than disk %d", h, sh.Disk)
 	}
 	return m, nil
@@ -283,31 +259,6 @@ func CheckPoolShape(ctx context.Context, db *store.Store, provider string, templ
 	})
 }
 
-// SizeRequest is what a Run asked for in resources, as the sizing model
-// reads it: only the fields given (a zero is not given).
-type SizeRequest struct {
-	Size   string      `json:"size,omitempty"`
-	CPUs   *float64    `json:"cpus,omitempty"`
-	Memory *spec.Bytes `json:"memory,omitempty" doc:"Bytes."`
-	Disk   *spec.Bytes `json:"disk,omitempty" doc:"Bytes."`
-}
-
-// SizeResolved is the size a Run has, and its resources.
-type SizeResolved struct {
-	Size   string     `json:"size"`
-	CPUs   float64    `json:"cpus"`
-	Memory spec.Bytes `json:"memory" doc:"Bytes."`
-	Disk   spec.Bytes `json:"disk" doc:"Bytes."`
-}
-
-// RunSizing is a Run's request and resolution on a shaped pool.
-type RunSizing struct {
-	Requested  *SizeRequest  `json:"requested,omitempty" doc:"What its submit asked for in resources.size, cpus, memory and disk, only those given (empty: none, the pool's default size). Absent for a Run submitted to an unshaped pool. A resume's request is in its answer's resize and its resume.requested event."`
-	Resolved   *SizeResolved `json:"resolved,omitempty" doc:"The size the Run has now, and its cpus, memory and disk (as spec.resources). Absent while it is in an unshaped pool, or while its pool's current sizes have no size of that name with the Run's cpus, memory and disk (the shape changed since, even if the name stayed): its next resume resolves it again."`
-	RaisedFrom string        `json:"raisedFrom,omitempty" doc:"With raisedFor: the size the resume that set its size asked for (its request resolved to)."`
-	RaisedFor  string        `json:"raisedFor,omitempty" enum:"saved state" doc:"With resolved: why its size is larger than the resume that set it asked for. saved state: raisedFrom could not hold the Run's saved state, so it got the smallest larger size that could. Absent when it got what was asked."`
-}
-
 // sizeRequestOf is r's size request: its size, cpus, memory and disk
 // that are not zero.
 func sizeRequestOf(r spec.Resources) SizeRequest {
@@ -325,7 +276,7 @@ func sizeRequestOf(r spec.Resources) SizeRequest {
 	return q
 }
 
-func (q SizeRequest) model() sizing.Request {
+func requestModel(q SizeRequest) sizing.Request {
 	var r sizing.Request
 	r.Size = sizing.Optional[string]{Present: q.Size != "", Value: q.Size}
 	if q.CPUs != nil {
@@ -340,7 +291,7 @@ func (q SizeRequest) model() sizing.Request {
 	return r
 }
 
-func (q SizeRequest) equal(o SizeRequest) bool {
+func sameRequest(q, o SizeRequest) bool {
 	return q.Size == o.Size && samePtr(q.CPUs, o.CPUs) && samePtr(q.Memory, o.Memory) && samePtr(q.Disk, o.Disk)
 }
 
@@ -398,12 +349,12 @@ func resolveSubmitSize(ctx context.Context, tx pgx.Tx, rp resolvedPool, raw spec
 		}
 		return nil, nil, nil
 	}
-	m, err := sh.storedModel(rp.Name)
+	m, err := shapeStoredModel(*sh, rp.Name)
 	if err != nil {
 		return nil, nil, err
 	}
 	req := sizeRequestOf(raw)
-	got, err := m.Resolve(req.model())
+	got, err := m.Resolve(requestModel(req))
 	if err != nil {
 		return nil, nil, sizingError(rp.Name, err)
 	}
@@ -420,7 +371,7 @@ func checkReplay(existing *Run, raw spec.Resources) error {
 	if existing.Sizing == nil || existing.Sizing.Requested == nil {
 		return nil
 	}
-	if !existing.Sizing.Requested.equal(sizeRequestOf(raw)) {
+	if !sameRequest(*existing.Sizing.Requested, sizeRequestOf(raw)) {
 		return errf(http.StatusConflict, "idempotency_conflict",
 			"Idempotency-Key was used for Run %s, submitted with other resources", existing.ID)
 	}
@@ -588,7 +539,7 @@ func resumeSize(ctx context.Context, tx pgx.Tx, z resumeSizing, req *resumeResou
 		}
 		return resizeRun(ctx, tx, z.runID, z.cur, asked)
 	}
-	m, err := z.shape.storedModel(z.dest.Name)
+	m, err := shapeStoredModel(*z.shape, z.dest.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -596,10 +547,10 @@ func resumeSize(ctx context.Context, tx pgx.Tx, z resumeSizing, req *resumeResou
 	// the Run's size.
 	switch {
 	case sizeRequestOf(asked) != (SizeRequest{}):
-		return resizeShaped(ctx, tx, z.runID, z.dest.Name, z.cur, m, asked, sizeRequestOf(asked).model())
+		return resizeShaped(ctx, tx, z.runID, z.dest.Name, z.cur, m, asked, requestModel(sizeRequestOf(asked)))
 	case z.moving(), z.resolved != "" && !sizeCurrent(m, z.resolved, z.cur):
 		held := sizeRequestOf(spec.Resources{CPUs: z.cur.CPUs, Memory: z.cur.Memory, Disk: z.cur.Disk})
-		return resizeShaped(ctx, tx, z.runID, z.dest.Name, z.cur, m, asked, held.model())
+		return resizeShaped(ctx, tx, z.runID, z.dest.Name, z.cur, m, asked, requestModel(held))
 	case req != nil:
 		return resizeRun(ctx, tx, z.runID, z.cur, asked)
 	}

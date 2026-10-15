@@ -843,7 +843,7 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 		return err
 	}
 	env := map[string]string{"LUX_URL": s.cfg.RunnerURL, "LUX_HOST_TOKEN": token, "LUX_HOST_NAME": name}
-	maps.Copy(env, pl.Shape.runnerEnv())
+	maps.Copy(env, shapeRunnerEnv(pl.Shape))
 	tags := LaunchTags(s.deployment, pl.ID, pl.Name, hostID)
 	l, launchErr := prov.Launch(ctx, pl.Template, tags, env)
 	if launchErr != nil {

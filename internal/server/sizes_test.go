@@ -1048,12 +1048,12 @@ func TestPoolShapeDiskHeadroom(t *testing.T) {
 				t.Errorf("stored diskHeadroom %v, want %v", got, c.want)
 			}
 			sh := queryOne[*PoolShape](t, s, `SELECT shape FROM pools WHERE name = 'shaped'`)
-			if env := sh.runnerEnv(); env["LUX_RUNNER_DISK_HEADROOM"] != c.runner {
+			if env := shapeRunnerEnv(sh); env["LUX_RUNNER_DISK_HEADROOM"] != c.runner {
 				t.Errorf("runner env %v, want LUX_RUNNER_DISK_HEADROOM=%s", env, c.runner)
 			}
 		})
 	}
-	if (*PoolShape)(nil).runnerEnv() != nil {
+	if shapeRunnerEnv(nil) != nil {
 		t.Error("an unshaped pool's runner env is not empty")
 	}
 }

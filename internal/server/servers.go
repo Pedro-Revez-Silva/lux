@@ -77,31 +77,6 @@ func serverUp(state string) bool {
 	return state == ServerStarting || state == ServerReady || state == ServerUnreachable
 }
 
-// RunServer is a Run's server, as the Run's API shows it.
-type RunServer struct {
-	ID            string            `json:"id" doc:"The server's id (srv_…): GET /v1/servers/{id}."`
-	Name          string            `json:"name"`
-	Port          int               `json:"port"`
-	Command       []string          `json:"command" nullable:"true" doc:"argv; null: only the port is exposed."`
-	Workdir       string            `json:"workdir"`
-	Env           map[string]string `json:"env"`
-	FromSpec      bool              `json:"fromSpec" doc:"Declared in the spec's workload.servers."`
-	State         string            `json:"state" enum:"stopped,starting,ready,unreachable,exited"`
-	ExitCode      *int              `json:"exitCode,omitempty" doc:"When exited."`
-	Error         *string           `json:"error,omitempty" doc:"When exited: the last line its command wrote to stderr, if any."`
-	Since         time.Time         `json:"since" doc:"When its state last changed."`
-	ReadySince    *time.Time        `json:"readySince" nullable:"true" doc:"When it last became ready (null unless ready)."`
-	StopReason    *string           `json:"stopReason" nullable:"true" enum:"stopped,run stopped,migrated,host lost,detached" doc:"Why it is stopped: stopped by request (it stays down: a new placement does not start it), its placement ended, or it was detached."`
-	StoppedEpoch  *int              `json:"stoppedEpoch" nullable:"true" doc:"The placement epoch it stopped in (null if it never ran)."`
-	Epoch         *int              `json:"epoch" nullable:"true" doc:"The placement epoch its current state is of."`
-	Hostname      *string           `json:"hostname" nullable:"true" doc:"Its preview host name; null when previews are not configured."`
-	URL           *string           `json:"url" nullable:"true" doc:"Its preview URL; null when previews are not configured."`
-	Wake          string            `json:"wake" enum:"request,never"`
-	Lifetime      string            `json:"lifetime" enum:"run,owner" doc:"run: deleted when its Run is terminated. owner: kept until its owner deletes it."`
-	Labels        map[string]string `json:"labels"`
-	LastRequestAt *time.Time        `json:"lastRequestAt,omitempty" doc:"When its preview URL was last requested (written at most every preview.activity_every)."`
-}
-
 // serverRow is a run_servers row with what its Run says about it.
 type serverRow struct {
 	ID, TenantID, Name, Host string

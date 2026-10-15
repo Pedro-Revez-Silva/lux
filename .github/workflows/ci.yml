@@ -136,6 +136,11 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo apparmor_parser -R /etc/apparmor.d/usr.bin.pas* 2>/dev/null || true
 
+      # lux attach --restore's suite attaches from a real terminal, tmux;
+      # it fails rather than skips without it under CI.
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
       - name: e2e shard
         working-directory: tests
         env:

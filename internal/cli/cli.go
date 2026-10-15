@@ -12,12 +12,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 
-	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/marcioapm/lux/internal/client"
@@ -75,26 +73,6 @@ type exitCode int
 
 func (e exitCode) Error() string { return fmt.Sprintf("exit %d", int(e)) }
 
-type config struct {
-	URL    string `toml:"url"`
-	APIKey string `toml:"api_key"`
-	Tenant string `toml:"tenant"`
-}
-
-func loadConfig() config {
-	var c config
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return c
-	}
-	b, err := os.ReadFile(filepath.Join(dir, "lux", "config.toml"))
-	if err != nil {
-		return c
-	}
-	_ = toml.Unmarshal(b, &c)
-	return c
-}
-
 func (a *app) root() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "lux",
@@ -104,13 +82,9 @@ func (a *app) root() *cobra.Command {
 		SilenceErrors: true,
 		Version:       version.Version,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			cfg := loadConfig()
-			if a.url == "" {
-				a.url = cmp.Or(os.Getenv("LUX_URL"), cfg.URL)
-			}
-			if a.key == "" {
-				a.key = cmp.Or(os.Getenv("LUX_API_KEY"), cfg.APIKey)
-			}
+			cfg := client.LoadConfig()
+			a.url = cmp.Or(a.url, cfg.URL)
+			a.key = cmp.Or(a.key, cfg.APIKey)
 			if a.url == "" {
 				return errors.New("no lux URL: set LUX_URL, --url, or url in ~/.config/lux/config.toml")
 			}
@@ -122,9 +96,6 @@ func (a *app) root() *cobra.Command {
 			}
 			a.c = client.New(a.url, a.key)
 			a.c.Tenant = cfg.Tenant
-			if env, ok := os.LookupEnv("LUX_TENANT"); ok {
-				a.c.Tenant = env
-			}
 			// An explicitly empty flag overrides both the environment and config.
 			if cmd.Flags().Changed("tenant") {
 				a.c.Tenant = a.tenant

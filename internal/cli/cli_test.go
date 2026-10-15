@@ -115,3 +115,42 @@ func TestTenantRequiredHint(t *testing.T) {
 		t.Errorf("stderr:\n%s\nwant:\n%s", got, want)
 	}
 }
+
+// The API key: --api-key, else a non-empty LUX_API_KEY, else the config's.
+func TestAPIKeyPrecedence(t *testing.T) {
+	unset := "\x00"
+	for _, c := range []struct {
+		name string
+		env  string
+		flag []string
+		want string
+	}{
+		{name: "flag", env: "kenv", flag: []string{"--api-key", "kflag"}, want: "kflag"},
+		{name: "env", env: "kenv", want: "kenv"},
+		{name: "env set empty", env: "", want: "kcfg"},
+		{name: "config", env: unset, want: "kcfg"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			isolateConfig(t, `api_key = "kcfg"`)
+			if c.env != unset {
+				t.Setenv("LUX_API_KEY", c.env)
+			}
+			var auth []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				auth = append(auth, r.Header.Get("Authorization"))
+				_, _ = w.Write([]byte(`{"items": []}`))
+			}))
+			defer srv.Close()
+			var out, errOut bytes.Buffer
+			a := &app{stdin: strings.NewReader(""), stdout: &out, stderr: &errOut}
+			root := a.root()
+			root.SetArgs(append(append([]string{"--url", srv.URL}, c.flag...), "ls", "-o", "json"))
+			if err := root.Execute(); err != nil {
+				t.Fatalf("%v: %s", err, errOut.String())
+			}
+			if len(auth) == 0 || auth[0] != "Bearer "+c.want {
+				t.Fatalf("Authorization %q, want Bearer %s", auth, c.want)
+			}
+		})
+	}
+}

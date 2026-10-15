@@ -23,6 +23,7 @@ require (
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.46.0
+	golang.org/x/text v0.42.0
 )
 
 require (
@@ -46,5 +47,4 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
 )

@@ -82,14 +82,6 @@ const (
 	blockDiskPressure  = "disk_pressure"
 )
 
-// AdmissionBlocker is why a Run would not start on some hosts now.
-type AdmissionBlocker struct {
-	Code             string `json:"code" enum:"no_hosts,constraint,capability,not_enough_spare,space_not_settled,normal_demand_pending,disk_pressure" doc:"no_hosts: no live connected host in its pool or chosen host; constraint: labels, nesting, tenancy, pool shape, or another chosen host; capability: the host's lux-runner lacks a feature the Run needs; not_enough_spare: not enough unreserved cpus, memory, disk or run slots; space_not_settled (spot): the spare space has not been continuously free for more than 60s; normal_demand_pending (spot): a queued normal Run could use that space; disk_pressure: the host's runner reports low free disk, and the host takes no new Run until it recovers."`
-	Hosts            int    `json:"hosts" doc:"How many hosts this blocks."`
-	Reason           string `json:"reason,omitempty" doc:"The first such host's reason, for constraint and capability."`
-	RemainingSeconds *int   `json:"remainingSeconds,omitempty" doc:"space_not_settled: the shortest wait after which the space would qualify if nothing changes."`
-}
-
 // admission is where a Run would start now, or why on no host.
 type admission struct {
 	Host     *candidateHost
