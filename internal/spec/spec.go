@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type RunSpec struct {
@@ -109,7 +110,11 @@ type Server struct {
 	Workdir   string            `json:"workdir,omitempty" yaml:"workdir,omitempty" doc:"Where the command runs; a relative path is against the workload's workdir (default: the workload's workdir)."`
 	Env       map[string]string `json:"env,omitempty" yaml:"env,omitempty" doc:"More environment for the command (not secret: it is stored with the Run)."`
 	AfterSync []string          `json:"afterSync,omitempty" yaml:"afterSync,omitempty" doc:"argv run before the command whenever it starts after a repository sync (a resume with sync, POST /v1/runs/{id}/sync), e.g. an install. Without it a sync of a running Run leaves the server running (hot reload)."`
+	Inject    string            `json:"inject,omitempty" yaml:"inject,omitempty" doc:"HTML added right after the <head> tag of the HTML pages a browser navigates to: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."`
 }
+
+// MaxServerInject bounds a server's inject, in bytes.
+const MaxServerInject = 8 << 10
 
 // serverNameRe: a DNS label's worth of a preview host name, which also
 // carries the Run's suffix: 1-30 characters, a letter first, no - last.
@@ -145,6 +150,14 @@ func (s *RunSpec) ValidateServer(at string, sv Server) []string {
 	}
 	if strings.ContainsRune(sv.Workdir, 0) || slices.Contains(strings.Split(sv.Workdir, "/"), "..") {
 		errs = append(errs, fmt.Sprintf("%s.workdir: no .. and no NUL", at))
+	}
+	switch {
+	case len(sv.Inject) > MaxServerInject:
+		errs = append(errs, fmt.Sprintf("%s.inject: %d bytes, at most %d", at, len(sv.Inject), MaxServerInject))
+	case !utf8.ValidString(sv.Inject):
+		errs = append(errs, fmt.Sprintf("%s.inject: not valid UTF-8", at))
+	case strings.ContainsRune(sv.Inject, 0):
+		errs = append(errs, fmt.Sprintf("%s.inject: contains NUL", at))
 	}
 	for k := range sv.Env {
 		if !envRe.MatchString(k) {

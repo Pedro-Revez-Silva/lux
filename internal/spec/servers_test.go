@@ -16,6 +16,7 @@ func TestServers(t *testing.T) {
 		Server{Name: "a", Port: 1},
 		Server{Name: "db-2", Port: 65535},
 		Server{Name: strings.Repeat("a", 30), Port: 8080},
+		Server{Name: "inj", Port: 8081, Inject: strings.Repeat("é", MaxServerInject/2)},
 	)
 	if err := ok.Normalize(BuiltinDefaults); err != nil {
 		t.Fatal(err)
@@ -40,6 +41,9 @@ func TestServers(t *testing.T) {
 		{[]Server{{Name: "web", Port: 1, Env: map[string]string{"A-B": "1"}}}, "invalid name"},
 		{[]Server{{Name: "web", Port: 1}, {Name: "web", Port: 2}}, "duplicate name"},
 		{[]Server{{Name: "admin", Port: 1}}, "network.ports name"},
+		{[]Server{{Name: "web", Port: 1, Inject: strings.Repeat("a", MaxServerInject+1)}}, "inject: 8193 bytes, at most 8192"},
+		{[]Server{{Name: "web", Port: 1, Inject: "<meta>\x00"}}, "inject: contains NUL"},
+		{[]Server{{Name: "web", Port: 1, Inject: "<meta content=\"\xff\">"}}, "inject: not valid UTF-8"},
 	} {
 		sp := base(c.sv...)
 		err := sp.Normalize(BuiltinDefaults)

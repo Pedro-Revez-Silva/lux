@@ -529,17 +529,17 @@ by its id (`srv_…`) or, for a Run's, by the Run and its name.
 # The tenant's servers
 lux server create <name> <port> [--hostname H] [--wake request|never] [--idle-after 10m] [--wake-timeout 5m]
            [--lifetime owner|run] [--expire-after 720h] [--run RUN] [-l K=V]... [--env K=V]... [--workdir DIR]
-           [--after-sync WORD]... [-- command...]
+           [--after-sync WORD]... [--inject HTML] [-- command...]
 lux server ls [--state asleep,waking] [--wake request] [-l K=V]   # id, state, run, last request, idle in, URL
 lux server show <srv_id | hostname>
-lux server update <srv_id> [--port N] [--wake ...] [--idle-after ...] [-l K=V]... [-- command...]
+lux server update <srv_id> [--port N] [--wake ...] [--idle-after ...] [--inject HTML] [-l K=V]... [-- command...]
 lux server attach <srv_id> <run>               # a Run on a host starts it now; a stopped one at its next placement
 lux server detach <srv_id>                     # its command stops; the Run is untouched
 lux server start|stop|restart <srv_id>
 lux server rm <srv_id>                         # detaches it first; its URL is gone
 
 # A Run's servers
-lux server add <run> <name> <port> [--workdir DIR] [--env K=V]... [--no-start] [-- command...]
+lux server add <run> <name> <port> [--workdir DIR] [--env K=V]... [--inject HTML] [--no-start] [-- command...]
 lux server ls <run> [name]                     # state, since, preview URL, command
 lux server start|stop|restart <run> <name>
 lux server rm <run> <name>                     # stops it first
@@ -550,7 +550,9 @@ lux server wait <run> <name> [--state ready] [--timeout 2m]
 `add` starts a server with a command at once (the Run must be running)
 unless `--no-start`; one without a command is only its port; it ends with
 its Run (lifetime `run`). `create` makes one of the tenant's: a server
-that wakes on request is lifetime `owner`. `lux get` lists the Run's
+that wakes on request is lifetime `owner`. `--inject` is HTML its preview
+adds after `<head>` on its HTML pages ([runspec](runspec.md#what-inject-touches));
+`update --inject ''` removes it. `lux get` lists the Run's
 servers too. Every command takes `-o json` (the API's object, or a list
 of them). `lux events --all` prints server events as what happened to
 which URL: `server.wake_requested srv_… web.pr9.<domain>  by ada@… at /goals`.

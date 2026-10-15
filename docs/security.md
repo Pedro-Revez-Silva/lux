@@ -109,6 +109,10 @@ domain ([Operators](operators.md#previews)). What protects that:
   person's email or the key's name). From the container, every
   `Set-Cookie` loses its `Domain`, so a preview can set cookies for its
   own host only.
+- **A server's `inject`** ([runspec](runspec.md#what-inject-touches)) is
+  HTML its tenant chose, added to its own preview's pages and no other's;
+  it runs with the page's origin, as the page's own code does. It is not
+  secret, and lux leaves the page's `Content-Security-Policy` as it is.
 - **What is left:** preview hosts are subdomains of the preview domain, so
   they are same-site with anything else under its registrable domain, and
   browsers send them cookies other apps set with `Domain=` that parent.

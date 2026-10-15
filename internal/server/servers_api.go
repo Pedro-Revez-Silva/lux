@@ -39,6 +39,7 @@ type TenantServer struct {
 	Workdir       string            `json:"workdir"`
 	Env           map[string]string `json:"env"`
 	AfterSync     []string          `json:"afterSync" nullable:"true"`
+	Inject        string            `json:"inject" doc:"HTML its preview adds right after the <head> tag of the HTML pages it serves; empty: none."`
 	Labels        map[string]string `json:"labels"`
 	Wake          string            `json:"wake" enum:"request,never"`
 	IdleAfter     spec.Duration     `json:"idleAfter" doc:"How long without a request before server.idle (0: never)."`
@@ -68,7 +69,7 @@ type TenantServer struct {
 func (s *Server) tenantServer(v serverRow, now time.Time) TenantServer {
 	t := TenantServer{ID: v.ID, Name: v.Name, Hostname: optString(s.previewHostname(v.Host)), URL: s.previewURL(v.Host),
 		State: v.derive(now), Process: v.State, Desired: "up", Port: v.Port, Command: v.Command, Workdir: v.Workdir, Env: v.Env,
-		AfterSync: v.AfterSync, Labels: v.Labels, Wake: v.Wake, IdleAfter: secs(v.IdleAfterS), WakeTimeout: secs(v.WakeTimeoutS),
+		AfterSync: v.AfterSync, Inject: v.Inject, Labels: v.Labels, Wake: v.Wake, IdleAfter: secs(v.IdleAfterS), WakeTimeout: secs(v.WakeTimeoutS),
 		Lifetime: v.Lifetime, Owner: v.Owner, RunID: v.RunID, RunName: v.RunName, RunState: v.RunState, FromSpec: v.FromSpec,
 		ExitCode: v.ExitCode, Error: v.Error, Since: v.Since, ReadySince: v.ReadySince, StopReason: v.StopReason, Epoch: v.Epoch,
 		LastRequestAt: v.LastRequestAt, IdleAt: v.idleAt(), WakeRequested: v.WakeRequestedAt, Wakes: v.Wakes, CreatedAt: v.CreatedAt,
@@ -174,6 +175,7 @@ type CreateServerInput struct {
 	Workdir     string            `json:"workdir,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
 	AfterSync   []string          `json:"afterSync,omitempty" doc:"argv run before the command when it starts after a repository sync."`
+	Inject      string            `json:"inject,omitempty" doc:"HTML added right after the <head> tag of the HTML pages a browser navigates to: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."`
 	Labels      map[string]string `json:"labels,omitempty"`
 	Hostname    string            `json:"hostname,omitempty" doc:"Its unique preview host name: a full name under the preview domain (any number of labels), or one DNS label without a dot (1-63 characters), to which lux appends the domain. Default: <name>-<8 characters of its id>.<domain>."`
 	Wake        string            `json:"wake,omitempty" enum:"request,never" doc:"request: a signed-in request while no running Run serves it asks its owner for one (server.wake_requested on GET /v1/events). Default never."`
@@ -216,7 +218,7 @@ func (s *Server) createServer(ctx context.Context, in *createServerInput) (*tena
 	if lifetime == LifetimeRun && b.RunID == "" {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_server", "lifetime run needs a runId")
 	}
-	sv := spec.Server{Name: b.Name, Port: b.Port, Command: b.Command, Workdir: b.Workdir, Env: b.Env, AfterSync: b.AfterSync}
+	sv := spec.Server{Name: b.Name, Port: b.Port, Command: b.Command, Workdir: b.Workdir, Env: b.Env, AfterSync: b.AfterSync, Inject: b.Inject}
 	if err := checkServer(spec.RunSpec{}, sv); err != nil {
 		return nil, err
 	}
@@ -254,10 +256,10 @@ func (s *Server) createServer(ctx context.Context, in *createServerInput) (*tena
 	// Created unattached; with a runId, attached in the same transaction.
 	insert := func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO run_servers (id, tenant_id, run_id, name, host, port, command, workdir, env, after_sync, labels,
-				wake, idle_after_s, wake_timeout_s, expire_after_s, lifetime, owner)
-			VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+				wake, idle_after_s, wake_timeout_s, expire_after_s, lifetime, owner, inject)
+			VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
 			id, p.TenantID, b.Name, host, b.Port, nilIfEmpty(b.Command), b.Workdir, nonNilMap(b.Env), nilIfEmpty(b.AfterSync),
-			nonNilMap(b.Labels), wake, idle, timeout, expire, lifetime, p.Actor())
+			nonNilMap(b.Labels), wake, idle, timeout, expire, lifetime, p.Actor(), b.Inject)
 		if err := uniqueViolation(err); err != nil {
 			return err
 		}
@@ -428,7 +430,7 @@ func (s *Server) attachServer(ctx context.Context, in *attachInput) (*tenantServ
 		if err != nil {
 			return err
 		}
-		if err := checkServer(sp, spec.Server{Name: v.Name, Port: v.Port, Command: v.Command, Workdir: v.Workdir, Env: v.Env, AfterSync: v.AfterSync}); err != nil {
+		if err := checkServer(sp, spec.Server{Name: v.Name, Port: v.Port, Command: v.Command, Workdir: v.Workdir, Env: v.Env, AfterSync: v.AfterSync, Inject: v.Inject}); err != nil {
 			return err
 		}
 		return attachTx(ctx, tx, p, in.ID, in.Body.RunID, state, epoch)
@@ -689,6 +691,7 @@ type PatchServerInput struct {
 	Workdir     *string            `json:"workdir,omitempty"`
 	Env         *map[string]string `json:"env,omitempty"`
 	AfterSync   *[]string          `json:"afterSync,omitempty" doc:"[] removes it."`
+	Inject      *string            `json:"inject,omitempty" doc:"\"\" removes it. Applies to the next request to its preview."`
 	Labels      *map[string]string `json:"labels,omitempty" doc:"Replaces them."`
 	Wake        *string            `json:"wake,omitempty" enum:"request,never"`
 	IdleAfter   *spec.Duration     `json:"idleAfter,omitempty"`
@@ -706,7 +709,7 @@ func (s *Server) patchServer(ctx context.Context, in *patchServerInput) (*tenant
 	p := principal(ctx)
 	b := in.Body
 	err := s.changeServer(ctx, p.TenantID, in.ID, func(tx pgx.Tx, v serverRow) error {
-		sv := spec.Server{Name: v.Name, Port: v.Port, Command: v.Command, Workdir: v.Workdir, Env: v.Env, AfterSync: v.AfterSync}
+		sv := spec.Server{Name: v.Name, Port: v.Port, Command: v.Command, Workdir: v.Workdir, Env: v.Env, AfterSync: v.AfterSync, Inject: v.Inject}
 		labels, wake, lifetime := v.Labels, v.Wake, v.Lifetime
 		idle, timeout, expire := v.IdleAfterS, v.WakeTimeoutS, v.ExpireAfterS
 		changed := []string{}
@@ -724,6 +727,9 @@ func (s *Server) patchServer(ctx context.Context, in *patchServerInput) (*tenant
 		}
 		if b.AfterSync != nil {
 			sv.AfterSync, changed = nilIfEmpty(*b.AfterSync), append(changed, "afterSync")
+		}
+		if b.Inject != nil {
+			sv.Inject, changed = *b.Inject, append(changed, "inject")
 		}
 		if b.Labels != nil {
 			if err := checkLabels(*b.Labels); err != nil {
@@ -783,10 +789,10 @@ func (s *Server) patchServer(ctx context.Context, in *patchServerInput) (*tenant
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE run_servers SET port = $2, command = $3, workdir = $4, env = $5, after_sync = $6, labels = $7,
-				wake = $8, idle_after_s = $9, wake_timeout_s = $10, expire_after_s = $11, lifetime = $12, updated_at = now(),
+				wake = $8, idle_after_s = $9, wake_timeout_s = $10, expire_after_s = $11, lifetime = $12, inject = $13, updated_at = now(),
 				wake_requested_at = CASE WHEN $8 = 'never' THEN NULL ELSE wake_requested_at END
 			WHERE id = $1`, v.ID, sv.Port, nilIfEmpty(sv.Command), sv.Workdir, nonNilMap(sv.Env), nilIfEmpty(sv.AfterSync), nonNilMap(labels),
-			wake, idle, timeout, expire, lifetime); err != nil {
+			wake, idle, timeout, expire, lifetime, sv.Inject); err != nil {
 			return err
 		}
 		v.Labels = labels

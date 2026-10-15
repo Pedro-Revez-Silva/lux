@@ -285,7 +285,7 @@ func (s *Server) routes(api huma.API) {
 	}, "run", s.addServer)
 	register(s, api, huma.Operation{
 		OperationID: "putServer", Method: http.MethodPut, Path: "/v1/runs/{id}/servers/{name}", Tags: []string{"servers"},
-		Summary: "Change a server", Description: "Its port, command, workdir and env. A running one keeps what it was started with until it is started again.",
+		Summary: "Change a server", Description: "Its port, command, workdir, env, afterSync and inject: what the body leaves out is cleared. A running one keeps what it was started with until it is started again.",
 		Errors: []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "run", s.putServer)
 	for _, a := range []struct{ action, summary, doc string }{

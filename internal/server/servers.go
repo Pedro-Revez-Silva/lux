@@ -98,6 +98,7 @@ type serverRow struct {
 	IdleAfterS, WakeTimeoutS int
 	ExpireAfterS             *int
 	AfterSync                []string
+	Inject                   string
 	WakeRequestedAt          *time.Time
 	WakeBy, WakePath         *string
 	Wakes                    int
@@ -113,7 +114,7 @@ type serverRow struct {
 const serverSelect = `SELECT sv.id, sv.tenant_id, sv.name, sv.host, sv.port, sv.command, sv.workdir, sv.env, sv.labels, sv.from_spec,
 	sv.state, sv.exit_code, sv.error, sv.since, sv.ready_since, sv.stop_reason, sv.stopped_epoch, sv.epoch, sv.last_request_at,
 	sv.run_id, sv.wake, sv.lifetime, sv.owner, sv.idle_after_s, sv.wake_timeout_s, sv.expire_after_s, sv.after_sync,
-	sv.wake_requested_at, sv.wake_by, sv.wake_path, sv.wakes, sv.idle_notified_at, sv.created_at, sv.updated_at,
+	sv.wake_requested_at, sv.wake_by, sv.wake_path, sv.wakes, sv.idle_notified_at, sv.created_at, sv.updated_at, sv.inject,
 	coalesce(r.state, ''), coalesce(r.name, ''), coalesce(p.stop_reason, ''),
 	CASE WHEN r.state = 'stopping' THEN NOT ` + failsOnMoveSQL + ` ELSE true END
 	FROM run_servers sv LEFT JOIN runs r ON r.id = sv.run_id
@@ -125,7 +126,7 @@ func scanServerRow(row pgx.Row) (serverRow, error) {
 	err := row.Scan(&v.ID, &v.TenantID, &v.Name, &v.Host, &v.Port, &v.Command, &v.Workdir, &v.Env, &v.Labels, &v.FromSpec,
 		&v.State, &v.ExitCode, &v.Error, &v.Since, &v.ReadySince, &v.StopReason, &v.StoppedEpoch, &v.Epoch, &v.LastRequestAt,
 		&v.RunID, &v.Wake, &v.Lifetime, &v.Owner, &v.IdleAfterS, &v.WakeTimeoutS, &v.ExpireAfterS, &v.AfterSync,
-		&v.WakeRequestedAt, &v.WakeBy, &v.WakePath, &v.Wakes, &v.IdleNotifiedAt, &v.CreatedAt, &v.UpdatedAt,
+		&v.WakeRequestedAt, &v.WakeBy, &v.WakePath, &v.Wakes, &v.IdleNotifiedAt, &v.CreatedAt, &v.UpdatedAt, &v.Inject,
 		&v.RunState, &v.RunName, &v.PlacementStop, &resumes)
 	if v.Env == nil {
 		v.Env = map[string]string{}
@@ -238,7 +239,7 @@ func optString(v string) *string {
 }
 
 func (s *Server) runServer(v serverRow) RunServer {
-	return RunServer{ID: v.ID, Name: v.Name, Port: v.Port, Command: v.Command, Workdir: v.Workdir, Env: v.Env, FromSpec: v.FromSpec,
+	return RunServer{ID: v.ID, Name: v.Name, Port: v.Port, Command: v.Command, Workdir: v.Workdir, Env: v.Env, Inject: v.Inject, FromSpec: v.FromSpec,
 		State: v.State, ExitCode: v.ExitCode, Error: v.Error, Since: v.Since, ReadySince: v.ReadySince, StopReason: v.StopReason,
 		StoppedEpoch: v.StoppedEpoch, Epoch: v.Epoch, Hostname: optString(s.previewHostname(v.Host)), URL: s.previewURL(v.Host),
 		Wake: v.Wake, Lifetime: v.Lifetime, Labels: v.Labels, LastRequestAt: v.LastRequestAt}
@@ -273,9 +274,9 @@ func serverByName(ctx context.Context, tx pgx.Tx, runID, name string) (serverRow
 // submit: attached to the Run, ending with it.
 func insertSpecServers(ctx context.Context, tx pgx.Tx, tenantID, runID, owner string, sp spec.RunSpec) error {
 	for _, sv := range sp.Workload.Servers {
-		if _, err := tx.Exec(ctx, `INSERT INTO run_servers (id, tenant_id, run_id, name, port, command, workdir, env, from_spec, owner, after_sync)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9, $10)`, ids.New(ids.Server), tenantID, runID, sv.Name, sv.Port,
-			nilIfEmpty(sv.Command), sv.Workdir, nonNilMap(sv.Env), owner, nilIfEmpty(sv.AfterSync)); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO run_servers (id, tenant_id, run_id, name, port, command, workdir, env, from_spec, owner, after_sync, inject)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9, $10, $11)`, ids.New(ids.Server), tenantID, runID, sv.Name, sv.Port,
+			nilIfEmpty(sv.Command), sv.Workdir, nonNilMap(sv.Env), owner, nilIfEmpty(sv.AfterSync), sv.Inject); err != nil {
 			return uniqueViolation(err)
 		}
 	}
@@ -709,6 +710,7 @@ type ServerInput struct {
 	Workdir   string            `json:"workdir,omitempty" doc:"Where the command runs; relative: against the workload's workdir."`
 	Env       map[string]string `json:"env,omitempty" doc:"More environment for its command (not secret)."`
 	AfterSync []string          `json:"afterSync,omitempty" doc:"argv run before the command when it starts after a repository sync."`
+	Inject    string            `json:"inject,omitempty" doc:"HTML added right after the <head> tag of the HTML pages a browser navigates to: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."`
 	Start     *bool             `json:"start,omitempty" doc:"POST: start it now (the Run must be running). Default: true when it has a command."`
 	Lifetime  string            `json:"lifetime,omitempty" enum:"run,owner" doc:"POST: run (default): deleted when the Run finishes for good; owner: kept, detached, until deleted (DELETE /v1/servers/{id})."`
 	Labels    map[string]string `json:"labels,omitempty" doc:"POST: free-form labels (GET /v1/servers?label=k=v)."`
@@ -747,7 +749,7 @@ func serverRun(ctx context.Context, tx pgx.Tx, runID string) (state string, epoc
 func (s *Server) addServer(ctx context.Context, in *addServerInput) (*serverOutput, error) {
 	p := principal(ctx)
 	b := in.Body
-	sv := spec.Server{Name: b.Name, Port: b.Port, Command: b.Command, Workdir: b.Workdir, Env: b.Env, AfterSync: b.AfterSync}
+	sv := spec.Server{Name: b.Name, Port: b.Port, Command: b.Command, Workdir: b.Workdir, Env: b.Env, AfterSync: b.AfterSync, Inject: b.Inject}
 	lifetime := cmp.Or(b.Lifetime, LifetimeRun)
 	if lifetime != LifetimeRun && lifetime != LifetimeOwner {
 		return nil, errf(http.StatusUnprocessableEntity, "invalid_server", "lifetime: want run or owner")
@@ -776,10 +778,10 @@ func (s *Server) addServer(ctx context.Context, in *addServerInput) (*serverOutp
 			return errf(http.StatusConflict, "not_running", "run is %s: a server starts only in a running Run (add it with start: false)", state)
 		}
 		id := ids.New(ids.Server)
-		tag, err := tx.Exec(ctx, `INSERT INTO run_servers (id, tenant_id, run_id, name, port, command, workdir, env, after_sync, lifetime, labels, owner)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (run_id, name) DO NOTHING`,
+		tag, err := tx.Exec(ctx, `INSERT INTO run_servers (id, tenant_id, run_id, name, port, command, workdir, env, after_sync, lifetime, labels, owner, inject)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) ON CONFLICT (run_id, name) DO NOTHING`,
 			id, p.TenantID, in.ID, sv.Name, sv.Port, nilIfEmpty(sv.Command), sv.Workdir, nonNilMap(sv.Env), nilIfEmpty(sv.AfterSync),
-			lifetime, nonNilMap(b.Labels), p.Actor())
+			lifetime, nonNilMap(b.Labels), p.Actor(), sv.Inject)
 		if err != nil {
 			return uniqueViolation(err)
 		}
@@ -839,12 +841,12 @@ func (s *Server) putServer(ctx context.Context, in *putServerInput) (*serverOutp
 		if b.Lifetime != "" || b.Labels != nil {
 			return errf(http.StatusUnprocessableEntity, "invalid_server", "lifetime and labels are changed with PATCH /v1/servers/{id}")
 		}
-		if err := checkServer(sp, spec.Server{Name: in.Name, Port: b.Port, Command: b.Command, Workdir: b.Workdir, Env: b.Env, AfterSync: b.AfterSync}); err != nil {
+		if err := checkServer(sp, spec.Server{Name: in.Name, Port: b.Port, Command: b.Command, Workdir: b.Workdir, Env: b.Env, AfterSync: b.AfterSync, Inject: b.Inject}); err != nil {
 			return err
 		}
-		tag, err := tx.Exec(ctx, `UPDATE run_servers SET port = $3, command = $4, workdir = $5, env = $6, after_sync = $7, updated_at = now()
+		tag, err := tx.Exec(ctx, `UPDATE run_servers SET port = $3, command = $4, workdir = $5, env = $6, after_sync = $7, inject = $8, updated_at = now()
 			WHERE run_id = $1 AND name = $2`,
-			in.ID, in.Name, b.Port, nilIfEmpty(b.Command), b.Workdir, nonNilMap(b.Env), nilIfEmpty(b.AfterSync))
+			in.ID, in.Name, b.Port, nilIfEmpty(b.Command), b.Workdir, nonNilMap(b.Env), nilIfEmpty(b.AfterSync), b.Inject)
 		if err != nil {
 			return err
 		}

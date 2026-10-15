@@ -118,11 +118,13 @@ func parseKVs(flag string, kvs []string) (map[string]string, error) {
 type serverFlags struct {
 	workdir, hostname, wake, lifetime, runID string
 	idleAfter, wakeTimeout, expireAfter      string
+	inject                                   string
 	envs, labels, afterSync                  []string
 }
 
 func (f *serverFlags) add(cmd *cobra.Command, create bool) {
 	cmd.Flags().StringVar(&f.workdir, "workdir", "", "where the command runs (relative: to the workload's workdir)")
+	cmd.Flags().StringVar(&f.inject, "inject", "", "HTML added right after the <head> tag of the HTML pages a browser navigates to (\"\": none; not secret)")
 	cmd.Flags().StringArrayVar(&f.envs, "env", nil, "K=V for its command (repeatable)")
 	cmd.Flags().StringArrayVarP(&f.labels, "label", "l", nil, "K=V label (repeatable)")
 	cmd.Flags().StringVar(&f.wake, "wake", "", "request: a request while nothing serves it asks its owner for a Run (server.wake_requested); never")
@@ -168,7 +170,7 @@ func (a *app) serverCreateCmd() *cobra.Command {
 				return err
 			}
 			in := server.CreateServerInput{Name: args[0], Port: port, Workdir: f.workdir, Env: env, Labels: labels, Hostname: f.hostname,
-				Wake: f.wake, Lifetime: f.lifetime, RunID: f.runID, AfterSync: f.afterSync,
+				Wake: f.wake, Lifetime: f.lifetime, RunID: f.runID, AfterSync: f.afterSync, Inject: f.inject,
 				IdleAfter: dur(f.idleAfter), WakeTimeout: dur(f.wakeTimeout), ExpireAfter: dur(f.expireAfter)}
 			if len(args) > 2 {
 				in.Command = args[2:]
@@ -209,6 +211,9 @@ func (a *app) serverUpdateCmd() *cobra.Command {
 			if cmd.Flags().Changed("after-sync") {
 				in.AfterSync = &f.afterSync
 			}
+			if cmd.Flags().Changed("inject") {
+				in.Inject = &f.inject
+			}
 			if env, err := parseKVs("env", f.envs); err != nil {
 				return err
 			} else if env != nil {
@@ -244,7 +249,7 @@ func (a *app) serverShowCmd() *cobra.Command {
 				{"id", sv.ID}, {"name", sv.Name}, {"state", sv.State}, {"url", orDash(strPtr(sv.URL))},
 				{"run", orDash(strPtr(sv.RunID))}, {"process", sv.Process}, {"desired", sv.Desired},
 				{"port", strconv.Itoa(sv.Port)}, {"command", orDash(strings.Join(sv.Command, " "))},
-				{"after sync", orDash(strings.Join(sv.AfterSync, " "))},
+				{"after sync", orDash(strings.Join(sv.AfterSync, " "))}, {"inject", orDash(sv.Inject)},
 				{"wake", sv.Wake}, {"idle after", sv.IdleAfter.String()}, {"wake timeout", sv.WakeTimeout.String()},
 				{"lifetime", sv.Lifetime}, {"owner", sv.Owner}, {"last request", ago(sv.LastRequestAt)}, {"wakes", strconv.Itoa(sv.Wakes)},
 			}
@@ -324,7 +329,7 @@ func serverPath(run string, rest ...string) string {
 }
 
 func (a *app) serverAddCmd() *cobra.Command {
-	var workdir string
+	var workdir, inject string
 	var envs []string
 	var noStart bool
 	cmd := &cobra.Command{
@@ -339,7 +344,7 @@ must be running) unless --no-start.`,
 			if err != nil {
 				return fmt.Errorf("port: %q is not a number", args[2])
 			}
-			in := server.ServerInput{Name: args[1], Port: port, Workdir: workdir}
+			in := server.ServerInput{Name: args[1], Port: port, Workdir: workdir, Inject: inject}
 			if len(args) > 3 {
 				in.Command = args[3:]
 			}
@@ -366,6 +371,7 @@ must be running) unless --no-start.`,
 	}
 	cmd.Flags().StringVar(&workdir, "workdir", "", "where the command runs (relative: to the workload's workdir)")
 	cmd.Flags().StringArrayVar(&envs, "env", nil, "K=V for its command (repeatable)")
+	cmd.Flags().StringVar(&inject, "inject", "", "HTML added right after the <head> tag of the HTML pages a browser navigates to (not secret)")
 	cmd.Flags().BoolVar(&noStart, "no-start", false, "add it without starting it")
 	return cmd
 }

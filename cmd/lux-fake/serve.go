@@ -18,6 +18,7 @@ import (
 //	/cookie    sets cookies, one with Domain=, and says so
 //	/events    server-sent events, a second apart: ?n= of them (default 3)
 //	/exit      exits the process with code 3, after a line on stderr
+//	/static/   the files of its working directory
 func serve(args []string) {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "usage: lux-fake serve <port> [text]")
@@ -65,6 +66,7 @@ func serve(args []string) {
 		fmt.Fprintln(os.Stderr, "fatal: asked to exit")
 		os.Exit(3)
 	})
+	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("."))))
 	fmt.Printf("serving on :%s\n", args[0])
 	if err := http.ListenAndServe(":"+args[0], mux); err != nil {
 		fmt.Fprintln(os.Stderr, "listen:", err)

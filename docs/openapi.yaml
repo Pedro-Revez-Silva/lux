@@ -471,6 +471,9 @@ components:
                 - 4h
               type: string
             - type: number
+        inject:
+          description: "HTML added right after the <head> tag of the HTML pages a browser navigates to: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."
+          type: string
         labels:
           additionalProperties:
             type: string
@@ -1432,6 +1435,9 @@ components:
                 - 4h
               type: string
             - type: number
+        inject:
+          description: "\"\" removes it. Applies to the next request to its preview."
+          type: string
         labels:
           additionalProperties:
             type: string
@@ -2922,6 +2928,9 @@ components:
         id:
           description: "The server's id (srv_…): GET /v1/servers/{id}."
           type: string
+        inject:
+          description: "HTML its preview adds right after the <head> tag of the HTML pages it serves; empty: none."
+          type: string
         labels:
           additionalProperties:
             type: string
@@ -3311,6 +3320,9 @@ components:
             type: string
           description: "More environment for the command (not secret: it is stored with the Run)."
           type: object
+        inject:
+          description: "HTML added right after the <head> tag of the HTML pages a browser navigates to: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."
+          type: string
         name:
           description: "Unique: 1-30 lowercase letters, digits and -, starting with a letter, not ending in -. Its preview URL is <name>-<8 characters of its id>.<preview domain>."
           type: string
@@ -3344,6 +3356,9 @@ components:
             type: string
           description: More environment for its command (not secret).
           type: object
+        inject:
+          description: "HTML added right after the <head> tag of the HTML pages a browser navigates to: a <script>, <link> or <meta>. Not secret: it is stored with the Run and visible to anyone who can read the page. At most 8 KiB."
+          type: string
         labels:
           additionalProperties:
             type: string
@@ -3936,6 +3951,9 @@ components:
           description: "Ready: when it goes idle without another request."
           format: date-time
           type: string
+        inject:
+          description: "HTML its preview adds right after the <head> tag of the HTML pages it serves; empty: none."
+          type: string
         labels:
           additionalProperties:
             type: string
@@ -4152,6 +4170,9 @@ components:
           type:
             - array
             - "null"
+        serverInject:
+          description: "Whether servers support inject: HTML the preview listener adds to their HTML pages. Always true on releases supporting server-inject."
+          type: boolean
         tenant:
           description: The key's tenant's name; empty for an operator key.
           type: string
@@ -8096,7 +8117,7 @@ paths:
         - servers
     put:
       description: |-
-        Its port, command, workdir and env. A running one keeps what it was started with until it is started again.
+        Its port, command, workdir, env, afterSync and inject: what the body leaves out is cleared. A running one keeps what it was started with until it is started again.
 
         Needs the `run` scope.
       operationId: putServer

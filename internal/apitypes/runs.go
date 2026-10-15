@@ -188,6 +188,7 @@ type RunServer struct {
 	Command       []string          `json:"command" nullable:"true" doc:"argv; null: only the port is exposed."`
 	Workdir       string            `json:"workdir"`
 	Env           map[string]string `json:"env"`
+	Inject        string            `json:"inject" doc:"HTML its preview adds right after the <head> tag of the HTML pages it serves; empty: none."`
 	FromSpec      bool              `json:"fromSpec" doc:"Declared in the spec's workload.servers."`
 	State         string            `json:"state" enum:"stopped,starting,ready,unreachable,exited"`
 	ExitCode      *int              `json:"exitCode,omitempty" doc:"When exited."`

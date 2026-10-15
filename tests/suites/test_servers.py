@@ -393,3 +393,37 @@ def test_preview_holds_a_starting_server(lux, runners, hosts, fake_image):
     r = pv.get("/")
     assert r.status_code == 200 and "finally" in r.text, (r.status_code, r.text)
     lux.run("terminate", run_id)
+
+
+INJECT = '<meta name="lux-test" content="1">'
+INJECT_PAGE = "<!doctype html><html><head><title>t</title></head><body>static</body></html>"
+INJECT_JS = 'document.title = "<head>";'
+
+
+def test_preview_inject(lux, runners, hosts, fake_image):
+    """A server's inject goes right after <head> on its pages, as a browser
+    navigates to them; its other files are served as they are."""
+    runners.start(hosts[0])
+    site = ("mkdir -p /tmp/site && cd /tmp/site"
+            f" && printf '%s' '{INJECT_PAGE}' > index.html && printf '%s' '{INJECT_JS}' > app.js"
+            " && exec lux-fake serve 8080")
+    run_id = lux.submit(idle(fake_image, workload={"adapter": "generic", "command": ["sleep", "infinity"], "servers": [
+        {"name": "web", "port": 8080, "command": ["sh", "-c", site], "inject": INJECT}]}))
+    lux.wait_state(run_id, "running")
+    sv = wait_server(lux, run_id, "web", "ready")
+    assert sv["inject"] == INJECT, sv
+    pv = Preview.of(lux, run_id, "web")
+    sign_in(lux, pv, run_id)
+    nav = {"Sec-Fetch-Dest": "document", "Accept-Encoding": "gzip"}
+    r = pv.get("/static/", headers=nav)
+    assert r.status_code == 200 and r.text == INJECT_PAGE.replace("<head>", "<head>" + INJECT, 1), r.text
+    assert "Content-Length" not in r.headers and "Last-Modified" not in r.headers, r.headers
+    # An asset of the same server, fetched as a script: as the server sent it.
+    r = pv.get("/static/app.js", html=False, headers={"Sec-Fetch-Dest": "script"})
+    assert r.status_code == 200 and r.text == INJECT_JS, r.text
+    assert r.headers.get("Content-Length") == str(len(INJECT_JS)) and r.headers.get("Last-Modified"), r.headers
+    # Cleared, the next request gets the page as it is.
+    lux.run("server", "update", sv["id"], "--inject", "")
+    r = pv.get("/static/", headers=nav)
+    assert r.status_code == 200 and r.text == INJECT_PAGE, r.text
+    lux.run("terminate", run_id)

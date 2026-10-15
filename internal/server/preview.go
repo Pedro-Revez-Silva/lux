@@ -95,7 +95,7 @@ func newPreviews(s *Server) *previews {
 	p.rp = &httputil.ReverseProxy{
 		Rewrite:        p.rewrite,
 		Transport:      p.transport(),
-		ModifyResponse: stripCookieDomains,
+		ModifyResponse: modifyPreviewResponse,
 		ErrorHandler:   p.proxyError,
 		// Server-sent events and the like flush as they come.
 		FlushInterval: -1,
@@ -268,8 +268,11 @@ func (p *previews) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil || t == nil {
 		return
 	}
-	ctx := context.WithValue(r.Context(), previewTargetKey{}, previewTarget{runID: *v.RunID, name: v.Name, user: user.User, t: *t})
-	p.rp.ServeHTTP(w, r.WithContext(ctx))
+	pt := previewTarget{runID: *v.RunID, name: v.Name, user: user.User, t: *t}
+	if v.Inject != "" && isNavigation(r) && !strings.HasPrefix(r.URL.Path, "/.lux/") {
+		pt.inject = v.Inject
+	}
+	p.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), previewTargetKey{}, pt)))
 }
 
 // waitTarget is the path a waking page drops into once the server is up:
@@ -531,6 +534,8 @@ type previewTargetKey struct{}
 type previewTarget struct {
 	runID, name, user string
 	t                 streamTarget
+	// inject: the server's snippet, set only for a document navigation.
+	inject string
 }
 
 // rewrite makes the request the container sees: to the server's port, with
@@ -548,6 +553,18 @@ func (p *previews) rewrite(pr *httputil.ProxyRequest) {
 	pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
 	pr.Out.Header.Set("X-Forwarded-Proto", cmp.Or(p.s.cfg.Preview.Scheme, "https"))
 	pr.Out.Header.Set("X-Lux-User", pt.user)
+	if pt.inject != "" {
+		prepareInjectRequest(pr.Out)
+	}
+}
+
+// modifyPreviewResponse: cookies host-only, and a navigation's page given
+// the server's inject.
+func modifyPreviewResponse(resp *http.Response) error {
+	if pt, ok := resp.Request.Context().Value(previewTargetKey{}).(previewTarget); ok && pt.inject != "" {
+		injectResponse(resp, pt.inject)
+	}
+	return stripCookieDomains(resp)
 }
 
 // cleanPreviewHeaders removes lux's and Access's credentials from what goes
