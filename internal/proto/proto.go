@@ -484,6 +484,63 @@ type BlobInfo struct {
 	SHA256 string `json:"sha256"`
 }
 
+// BlobPartSize is the part size of a direct-to-S3 multipart upload: the
+// runner splits a blob larger than this into parts of exactly this size
+// (the last one shorter).
+const BlobPartSize = 64 << 20
+
+// BlobParts is how many parts a blob of size bytes is uploaded in: one for
+// an empty blob.
+func BlobParts(size int64) int {
+	return max(1, int((size+BlobPartSize-1)/BlobPartSize))
+}
+
+// BlobUploadRequest is POST /runner/v1/blobs/{id}/upload: the runner asking
+// for presigned URLs to upload a blob straight to S3. SHA256 is the whole
+// file's (hex), Parts each part's SHA-256 (base64), in order.
+type BlobUploadRequest struct {
+	Size   int64    `json:"size"`
+	SHA256 string   `json:"sha256"`
+	Parts  []string `json:"parts"`
+}
+
+// PresignedRequest is a URL to PUT to with exactly Headers: they are
+// signed into it.
+type PresignedRequest struct {
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
+}
+
+type PresignedPart struct {
+	Number int32 `json:"number"`
+	PresignedRequest
+}
+
+// BlobUploadResponse is one of: Uploaded (S3 already has it), Single (one
+// PutObject), or UploadID and Parts (a multipart upload).
+type BlobUploadResponse struct {
+	Uploaded bool              `json:"uploaded,omitempty"`
+	Single   *PresignedRequest `json:"single,omitempty"`
+	UploadID string            `json:"uploadId,omitempty"`
+	Parts    []PresignedPart   `json:"parts,omitempty"`
+}
+
+// BlobCompleteRequest is POST /runner/v1/blobs/{id}/complete; UploadID and
+// Parts are empty after a single PutObject. Abort drops multipart upload
+// UploadID instead (the runner gave up on it): luxd answers
+// {"aborted": true} and records nothing.
+type BlobCompleteRequest struct {
+	UploadID string         `json:"uploadId,omitempty"`
+	Parts    []UploadedPart `json:"parts,omitempty"`
+	Abort    bool           `json:"abort,omitempty"`
+}
+
+type UploadedPart struct {
+	Number int32  `json:"number"`
+	ETag   string `json:"etag"`
+	SHA256 string `json:"sha256"` // base64
+}
+
 // Artifact is a collected file: BlobInfo is its stored blob (zstd), and
 // FileSize/FileSHA256 the file itself, as a download returns it.
 type Artifact struct {

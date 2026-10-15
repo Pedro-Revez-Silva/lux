@@ -39,6 +39,8 @@ func TestRunnerRoutesAreVersioned(t *testing.T) {
 		{"POST", "/runner/v1/poll"},
 		{"GET", "/runner/v1/blobs/b1"},
 		{"PUT", "/runner/v1/blobs/b1"},
+		{"POST", "/runner/v1/blobs/b1/upload"},
+		{"POST", "/runner/v1/blobs/b1/complete"},
 		{"GET", "/runner/v1/bin/manifest"},
 		{"GET", "/runner/v1/bin/linux-arm64/lux-runner"},
 	} {

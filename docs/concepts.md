@@ -125,8 +125,9 @@ A spec declares **volumes**, which are named directories in the container:
 
 A **snapshot** is the state volumes as of one exit, plus a manifest. The
 runner exports each volume (`podman volume export`, zstd) and keeps the
-snapshot locally. It then uploads it through luxd to S3 in the background.
-Runners never hold S3 credentials.
+snapshot locally. It then uploads it to S3 in the background, straight from
+the host, with presigned URLs luxd signs for it. Runners never hold S3
+credentials.
 
 ### Which snapshots are kept
 

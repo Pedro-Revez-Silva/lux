@@ -58,7 +58,9 @@ separate private repo should hold the real values and state.
   100 GB — FCOS keeps container storage on `/var`, on this same volume),
   at the gp3 baseline IOPS/throughput (3000/125: no provisioned-IOPS
   surcharge). No SSH, no instance profile: Fedora CoreOS has no SSM agent,
-  and runners never hold S3 credentials, so there is nothing to attach
+  and runners never hold S3 credentials (they upload and download with
+  presigned URLs luxd signs, so they need egress to S3, not a role), so
+  there is nothing to attach
   one for; reach a runner's containers through lux itself
   (`lux exec`/`lux attach`), and debug a boot failure with
   `aws ec2 get-console-output`.

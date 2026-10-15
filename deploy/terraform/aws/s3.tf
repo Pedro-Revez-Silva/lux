@@ -63,11 +63,13 @@ resource "aws_s3_bucket_versioning" "blobs" {
   }
 }
 
-# Only incomplete multipart uploads expire here: blob uploads go through
-# the S3 transfer manager (multipart), and an upload luxd abandons (a
-# restart, a runner gone mid-stream) leaves parts that are billed but
-# invisible to listings. No object expiry and no versioning: luxd's
-# reaper (internal/server/reaper.go) owns blob retention.
+# Only incomplete multipart uploads expire here: runners upload large
+# blobs straight to S3 as multipart uploads (and luxd's transfer manager
+# for older runners). An abandoned upload is aborted by the runner through
+# luxd, or by luxd when S3 refuses to complete it; this rule is the
+# backstop for the rest (a runner gone mid-upload, a restart), whose parts
+# are billed but invisible to listings. No object expiry and no
+# versioning: luxd's reaper (internal/server/reaper.go) owns blob retention.
 resource "aws_s3_bucket_lifecycle_configuration" "blobs" {
   bucket = aws_s3_bucket.blobs.id
 

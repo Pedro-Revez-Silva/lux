@@ -699,7 +699,7 @@ with `lux artifacts <run> --download DIR`. There are two kinds:
 Nothing else is collected: a file written anywhere without publishing it,
 and not under `artifacts.paths`, stays where it is.
 
-Each artifact is stored like a snapshot blob (uploaded through luxd to S3)
+Each artifact is stored like a snapshot blob (uploaded from the host to S3)
 with its size, sha256 and content type, and listed with the placement
 epoch that made it. When it is uploaded and can be downloaded, the Run's
 event stream gets `artifact.published` `{artifactId, path, name, version,

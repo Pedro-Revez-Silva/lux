@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -303,6 +304,10 @@ func (r *Runner) updateRecord(snapID string, fn func(*snapshotRecord)) {
 	}
 }
 
+// fallbackWarning: the streaming PUT fallback is logged once per process,
+// so every byte going through luxd again does not go unnoticed.
+var fallbackWarning sync.Once
+
 func (u *uploader) upload(ctx context.Context, up pendingUpload) error {
 	f, err := os.Open(up.Path)
 	if err != nil {
@@ -314,6 +319,16 @@ func (u *uploader) upload(ctx context.Context, up pendingUpload) error {
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil {
+		return err
+	}
+	err = u.r.api.uploadDirect(ctx, up.BlobID, f, fi.Size())
+	if !errors.Is(err, errNoDirectUpload) {
+		return err
+	}
+	fallbackWarning.Do(func() {
+		u.r.log.Warn("luxd has no direct upload route; uploading blobs through luxd", "blob", up.BlobID)
+	})
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
 	return u.r.api.upload(ctx, up.BlobID, f, fi.Size())

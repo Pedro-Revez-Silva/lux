@@ -189,7 +189,7 @@ CREATE TABLE blobs (
   size        bigint NOT NULL DEFAULT 0,
   sha256      text NOT NULL DEFAULT '',
   -- host: only on the host that wrote it; s3: uploaded. There is no
-  -- control-plane disk tier: uploads stream through luxd to S3.
+  -- control-plane disk tier: runners upload to S3 with presigned URLs.
   location    text NOT NULL CHECK (location IN ('host', 's3', 'deleted')),
   host_id     text REFERENCES hosts(id),
   s3_key      text,

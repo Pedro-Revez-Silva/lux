@@ -89,8 +89,9 @@ func TestDeleteArtifacts(t *testing.T) {
 	}
 }
 
-// An artifact still on its host is deleted too; when its upload arrives,
-// the object is dropped and the blob stays deleted.
+// An artifact still on its host is deleted too, and its key with it (a
+// direct upload's PUT may be in S3 already); when its upload arrives, the
+// object is dropped and the blob stays deleted.
 func TestDeleteArtifactsBeforeUpload(t *testing.T) {
 	s, ctx, f := retentionFixture(t, StateTerminated, StateTerminated, 1, 1)
 	execSQL(t, s, ctx, `UPDATE blobs SET location = 'host', s3_key = NULL WHERE id = 'bA-art'`)
@@ -98,8 +99,8 @@ func TestDeleteArtifactsBeforeUpload(t *testing.T) {
 	if code, body := callJSON(t, s, key, http.MethodDelete, "/v1/runs/ra/artifacts"); code != http.StatusOK || body["deleted"] != float64(1) {
 		t.Fatalf("delete: %d %v", code, body)
 	}
-	if got := f.Deleted(); len(got) != 0 {
-		t.Fatalf("S3 deletes for a blob never uploaded: %v", got)
+	if got := f.Deleted(); !slices.Equal(got, []string{blob.Key("t1", "ra", "bA-art")}) {
+		t.Fatalf("S3 deletes %v, want the blob's key", got)
 	}
 	if loc := blobLocations(t, s, "ra")["bA-art"]; loc != "deleted" {
 		t.Fatalf("bA-art: %s", loc)
@@ -130,7 +131,10 @@ func TestDeleteArtifactsDuringUpload(t *testing.T) {
 	if loc := blobLocations(t, s, "ra")["bA-art"]; loc != "deleted" {
 		t.Fatalf("bA-art: %s, want deleted", loc)
 	}
-	if got := f.Deleted(); !slices.Equal(got, []string{blob.Key("t1", "ra", "bA-art")}) {
+	// Once by the delete's claim (the key, before the bytes landed), once
+	// after the upload.
+	k := blob.Key("t1", "ra", "bA-art")
+	if got := f.Deleted(); !slices.Equal(got, []string{k, k}) {
 		t.Fatalf("S3 deletes %v, want the uploaded object", got)
 	}
 }

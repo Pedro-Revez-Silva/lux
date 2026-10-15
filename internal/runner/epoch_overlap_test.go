@@ -112,6 +112,12 @@ func (f *finishFixture) serveUploads(t *testing.T) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
+		// A luxd without the direct upload routes (its mux's own 404):
+		// blobs come by PUT.
+		if r.Method == http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Method == http.MethodPut {
 			f.mu.Lock()
 			f.uploaded = append(f.uploaded, path.Base(r.URL.Path))

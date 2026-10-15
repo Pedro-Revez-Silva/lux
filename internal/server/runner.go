@@ -25,6 +25,8 @@ func (s *Server) runnerRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /runner/v1/ws", s.wrap(s.serveRunnerWS))
 	mux.Handle("POST /runner/v1/poll", s.wrap(s.servePoll))
 	mux.Handle("PUT /runner/v1/blobs/{id}", s.wrap(s.serveBlobUpload))
+	mux.Handle("POST /runner/v1/blobs/{id}/upload", s.wrap(s.serveBlobUploadStart))
+	mux.Handle("POST /runner/v1/blobs/{id}/complete", s.wrap(s.serveBlobUploadComplete))
 	mux.Handle("GET /runner/v1/blobs/{id}", s.wrap(s.serveRunnerBlobDownload))
 	mux.Handle("GET /runner/v1/bin/manifest", s.wrap(s.serveRunnerBinManifest))
 	mux.Handle("GET /runner/v1/bin/{osArch}/{name}", s.wrap(s.serveRunnerBin))

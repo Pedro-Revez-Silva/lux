@@ -8,12 +8,33 @@ epoch."""
 from __future__ import annotations
 
 import json
+import re
 import time
+from pathlib import Path
 
 import pytest
 
 from conftest import CLIError, fake_agent, generic
 from env import ALPINE_IMAGE, wait_until
+
+
+@pytest.fixture(scope="module", autouse=True)
+def luxd_debug(env):
+    """luxd logs every request (LUX_DEBUG=1) for this suite, so a test can
+    see which upload routes the runners used; through extra["luxd_env"],
+    so a luxd another fixture restarts keeps it."""
+    luxd_env = env.extra.setdefault("luxd_env", {})
+    prev = luxd_env.get("LUX_DEBUG")
+    luxd_env["LUX_DEBUG"] = "1"
+    env.stop_luxd()
+    env.start_luxd()
+    yield
+    if prev is None:
+        luxd_env.pop("LUX_DEBUG", None)
+    else:
+        luxd_env["LUX_DEBUG"] = prev
+    env.stop_luxd()
+    env.start_luxd()
 
 
 def placement_hosts(run: dict) -> list[str]:
@@ -40,6 +61,11 @@ def test_migration(env, lux, runners, hosts, fake_image):
 
     # Host A goes away; the Run must resume on B from the uploaded snapshot.
     lux.wait_uploaded(run_id)
+    # The snapshot went straight to S3: no blob PUT through luxd, and
+    # luxd recorded at least one direct upload.
+    log = (Path(env.log_dir) / "luxd.log").read_text(errors="replace")
+    assert not re.search(r"method=PUT path=/runner/v1/blobs/", log), "a blob was uploaded through luxd"
+    assert re.search(r"path=/runner/v1/blobs/\S+/complete status=200", log), "no direct upload completed"
     runners.stop(a)
     runners.start(b)
 
