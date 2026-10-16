@@ -174,9 +174,17 @@ func (r *Runner) runStream(ctx context.Context, runID string, epoch int, id stri
 	send := func(typ string, data []byte) {
 		_ = r.conn.Send(context.WithoutCancel(ctx), proto.Frame{Type: typ, RunID: runID, Epoch: epoch, Stream: id, Data: data})
 	}
-	closeWith := func(d proto.StreamData) { send(proto.MsgStreamClose, proto.Marshal(d)) }
+	// luxd hears one close per stream: the first end wins.
+	closed := false
+	sendClose := func(data []byte) {
+		if !closed {
+			closed = true
+			send(proto.MsgStreamClose, data)
+		}
+	}
+	closeWith := func(d proto.StreamData) { sendClose(proto.Marshal(d)) }
 	// Ended by the runner (a cause other than plain cancellation): luxd
-	// hears why. Every other end below sends its own close.
+	// hears why, unless an end below has already sent its close.
 	defer func() {
 		if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
 			closeWith(proto.StreamData{Error: cause.Error()})
@@ -214,15 +222,25 @@ func (r *Runner) runStream(ctx context.Context, runID string, epoch int, id stri
 	go func() {
 		defer close(inputDone)
 		enc := json.NewEncoder(conn)
+		writing := true
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case d := <-st.input:
+				if o.Kind != "tunnel" {
+					// The shim stops reading once the command has exited
+					// (its exit line may already be on the way): the
+					// output below ends the stream, with that line or
+					// with "the container went away". Later input is
+					// dropped, not left to fill st.input.
+					if writing && enc.Encode(d) != nil {
+						writing = false
+					}
+					continue
+				}
 				var err error
 				switch {
-				case o.Kind != "tunnel":
-					err = enc.Encode(d)
 				case d.EOF:
 					if tc, ok := conn.(*net.TCPConn); ok {
 						err = tc.CloseWrite()
@@ -280,7 +298,7 @@ func (r *Runner) runStream(ctx context.Context, runID string, epoch int, id stri
 		}
 		_ = json.Unmarshal(line, &last)
 		if last.ExitCode != nil || last.Error != "" {
-			send(proto.MsgStreamClose, line)
+			sendClose(line)
 			return
 		}
 		send(proto.MsgStreamData, line)
