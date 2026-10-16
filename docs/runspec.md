@@ -514,7 +514,12 @@ own flag, or an EC2 pool whose template sets `"nestedContainers": true`
 (see [operations](operations.md#ec2-pools)). Its image must
 have the engine (Podman, or `dockerd-rootless` with RootlessKit and
 `slirp4netns`), `fuse-overlayfs`, and `newuidmap`/`newgidmap`, and the
-workload user needs `/etc/subuid` and `/etc/subgid` entries.
+workload user needs `/etc/subuid` and `/etc/subgid` entries. For Podman
+on Ubuntu hosts with the passt package's AppArmor profiles,
+`/usr/bin/pasta` (and `/usr/bin/pasta.avx2` where it exists) must be hard
+links to or copies of `passt`, not symlinks, made after the last
+install or upgrade of passt; otherwise inner containers get no network
+(see [podman](podman.md#nested-containers)).
 `tests/images/nested` (Podman) and `tests/images/docker` (Docker, with
 BuildKit and compose) are minimal examples.
 

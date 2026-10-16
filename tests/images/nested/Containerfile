@@ -1,9 +1,14 @@
 # A workload image with Podman in it, for the nested-containers suite: the
 # workload (user agent) runs rootless Podman inside its Run's container.
 # alpine.tar is an image to run in there, so no test reaches a registry.
+# pasta is hard-linked, not Alpine's symlink to passt: AppArmor attaches by
+# exec path, and only Ubuntu's pasta profile lets it open the netns
+# (docs/podman.md, Nested containers). passt.avx2 exists only on x86_64.
 FROM docker.io/library/alpine:3.24.2
 RUN apk add --no-cache podman fuse-overlayfs shadow-uidmap libcap-setcap \
  && setcap cap_setuid=ep /usr/bin/newuidmap && setcap cap_setgid=ep /usr/bin/newgidmap \
+ && ln -f /usr/bin/passt /usr/bin/pasta \
+ && if [ -e /usr/bin/passt.avx2 ]; then ln -f /usr/bin/passt.avx2 /usr/bin/pasta.avx2; fi \
  && adduser -D -u 1000 agent \
  && printf 'agent:1:999\nagent:1001:64535\n' > /etc/subuid && cp /etc/subuid /etc/subgid \
  && mkdir -p /home/agent/.config/containers \

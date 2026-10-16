@@ -150,7 +150,26 @@ container. Under `--userns=auto` that needed more than the commonly cited
   (mount and ptrace ones among them). Seccomp, the capability set and the
   Run's own user namespace still bound them. A narrower profile (the
   default plus `userns`) is a possible follow-up. Fedora hosts have no
-  AppArmor, so the e2e suite does not see this.
+  AppArmor, so the e2e suite does not see this there; CI's Ubuntu runner
+  does.
+- **AppArmor attaches by executable path, and Ubuntu has two pasta
+  profiles.** Ubuntu's passt package loads `passt` for
+  `/usr/bin/passt{,.avx2}` and `pasta` for `/usr/bin/pasta{,.avx2}`; they
+  apply inside a Run too, against the path the Run sees. Alpine ships
+  `pasta` as a symlink to `passt`, so the kernel execs `passt.avx2` and
+  attaches the `passt` profile. That profile has no read rule for the
+  network namespace Podman bind-mounts under its runtime directory
+  (`$XDG_RUNTIME_DIR/netns`, else `/tmp/storage-run-<uid>/netns`): it may
+  only write `owner /tmp/**` and `owner @{HOME}/**`. Every inner container
+  with a network then fails with "pasta failed with exit code 1: Couldn't
+  open network namespace … Permission denied" (kernel audit:
+  `profile="passt" comm="passt.avx2"`). `tests/images/nested` hard-links
+  pasta instead: the exec path stays `pasta`, so the `pasta` profile
+  applies, and it allows the namespace under `/tmp` or `/run/user/<n>`.
+  Link `pasta.avx2` too where it exists: pasta re-execs
+  `<its own path>.avx2`, and through the symlink that is `passt.avx2`,
+  which the `pasta` profile runs unconfined.
+  An `apk upgrade` of passt in a later layer restores the symlinks.
 - **Rootless Docker** (`dockerd-rootless`, RootlessKit) works with the
   same grants, including BuildKit and compose; `tests/images/docker` is an
   example. `docker run --privileged` inside is refused (it cannot mount
