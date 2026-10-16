@@ -97,7 +97,7 @@ type ShimConfig struct {
 	Sync *SyncArgs `json:"sync,omitempty"`
 	// DelegateCgroup: the shim splits the Run's cgroup so a container
 	// engine in the workload can make cgroups with limits of its own
-	// (sandbox.nestedContainers; docs/podman.md#limits-of-nested-containers).
+	// (sandbox.cgroupDelegation; docs/podman.md#limits-of-nested-containers).
 	// A shim that cannot falls back to one cgroup and says so once.
 	DelegateCgroup bool `json:"delegateCgroup,omitempty"`
 }

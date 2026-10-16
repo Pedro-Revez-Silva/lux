@@ -355,6 +355,7 @@ type Port struct {
 
 type Sandbox struct {
 	NestedContainers bool `json:"nestedContainers,omitempty" yaml:"nestedContainers,omitempty"`
+	CgroupDelegation bool `json:"cgroupDelegation,omitempty" yaml:"cgroupDelegation,omitempty" doc:"Opt in to writable cgroup delegation for per-container limits. Default false; requires nestedContainers. Does not add host permissions."`
 	ReadOnlyRoot     bool `json:"readOnlyRoot,omitempty" yaml:"readOnlyRoot,omitempty"`
 }
 
@@ -559,6 +560,9 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	var errs []string
 	fail := func(f string, a ...any) { errs = append(errs, fmt.Sprintf(f, a...)) }
 
+	if s.Sandbox.CgroupDelegation && !s.Sandbox.NestedContainers {
+		fail("sandbox.cgroupDelegation: requires sandbox.nestedContainers: true")
+	}
 	if (s.Image.Ref == "") == (s.Image.Build == nil) {
 		fail("image: exactly one of ref or build is required")
 	}

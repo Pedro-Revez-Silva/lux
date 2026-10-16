@@ -142,6 +142,41 @@ func TestShimConfigFreshPlacementMemoryLimit(t *testing.T) {
 	}
 }
 
+// The shim splits the cgroup only for nested Runs that opted in; the
+// {false,true} row covers a spec that bypassed Normalize. LUX_CPUS and
+// LUX_MEMORY_LIMIT reach every Run regardless.
+func TestShimConfigDelegatesOnlyWhenAsked(t *testing.T) {
+	for _, c := range []struct{ nested, delegation, want bool }{
+		{false, false, false}, {true, false, false}, {true, true, true}, {false, true, false},
+	} {
+		rt := t.TempDir()
+		r := &Runner{mem: mustScale(t, 30*gib+gib/2, gib/2, 32*gib)}
+		r.mounts.Store(runtimeVolume("run_1"), rt)
+		p := &placement{r: r, runID: "run_1", epoch: 1, assign: &proto.Assign{}, state: &runState{}}
+		sp := spec.RunSpec{
+			Sandbox:   spec.Sandbox{NestedContainers: c.nested, CgroupDelegation: c.delegation},
+			Resources: spec.Resources{CPUs: 2, Memory: spec.Bytes(gib)},
+		}
+		if err := p.writeShimConfig(context.Background(), sp, nil); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(filepath.Join(rt, "config.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg proto.ShimConfig
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DelegateCgroup != c.want {
+			t.Errorf("nested=%t delegation=%t: delegateCgroup=%t, want %t", c.nested, c.delegation, cfg.DelegateCgroup, c.want)
+		}
+		if cfg.Env["LUX_CPUS"] != "2" || cfg.Env["LUX_MEMORY_LIMIT"] != strconv.FormatInt(p.r.mem.limit(gib), 10) {
+			t.Errorf("nested=%t delegation=%t: env %v", c.nested, c.delegation, cfg.Env)
+		}
+	}
+}
+
 // The container is created with the scaled limit as both --memory and
 // --memory-swap.
 func TestContainerGetsTheScaledMemory(t *testing.T) {

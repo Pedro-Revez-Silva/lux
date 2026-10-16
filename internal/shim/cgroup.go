@@ -19,7 +19,7 @@ import (
 )
 
 // A private cgroup namespace makes /sys/fs/cgroup the Run's root.
-// Nested Runs split it before tenant processes start:
+// Runs with sandbox.cgroupDelegation split it before tenant processes start:
 //
 //	/                 Run limits; no processes; controllers enabled below
 //	├── lux.shim/     the shim (PID 1) and its own helpers

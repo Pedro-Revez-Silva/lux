@@ -28,8 +28,98 @@ docker load -q -i /opt/alpine.tar >/dev/null
 FROM = f"FROM {ALPINE_IMAGE}"
 
 
-def docker(script: str, **extra) -> dict:
-    return generic(DOCKER_IMAGE, "sh", "-c", DOCKERD + script, sandbox={"nestedContainers": True}, **extra)
+def docker(script: str, *, cgroup_delegation: bool = False, **extra) -> dict:
+    sandbox = {"nestedContainers": True}
+    if cgroup_delegation:
+        sandbox["cgroupDelegation"] = True
+    return generic(DOCKER_IMAGE, "sh", "-c", DOCKERD + script, sandbox=sandbox, **extra)
+
+
+# Prints, each line prefixed with $1 (run or inner): the process's cgroup;
+# the memory.max and cpu.max of that cgroup, which ClickHouse and the JVM
+# size from; the first limit found walking up from it to the namespace root
+# (what the kernel enforces); whether the Run's cgroup was split; and, for
+# information only, whether a cgroup can be made where delegation would
+# allow it.
+CGROUP_PROBE = r"""
+own=$(cut -d: -f3 /proc/self/cgroup)
+c=/sys/fs/cgroup$own
+echo "$1:cgroup=$(cat /proc/self/cgroup)"
+echo "$1:memory=$(cat $c/memory.max)"
+echo "$1:cpu=$(tr ' ' _ < $c/cpu.max)"
+if [ -e /sys/fs/cgroup/workload ]; then echo "$1:split=SPLIT"; else echo "$1:split=NO-SPLIT"; fi
+d=$own m=max cpu=max
+while :; do
+    [ "$m" = max ] && m=$(cat /sys/fs/cgroup$d/memory.max)
+    [ "${cpu%% *}" = max ] && cpu=$(cat /sys/fs/cgroup$d/cpu.max)
+    [ "$d" = / ] && break
+    d=$(dirname "$d")
+done
+echo "$1:effective-memory=$m"
+echo "$1:effective-cpu=$(echo $cpu | tr ' ' _)"
+for d in "$c" /sys/fs/cgroup/workload; do
+    [ -d "$d" ] || continue
+    if mkdir "$d/lux-write-probe" 2>/tmp/mkdir.err; then
+        rmdir "$d/lux-write-probe"; echo "$1:mkdir:$d=ok"
+    else
+        echo "$1:mkdir:$d=$(tr ' ' _ </tmp/mkdir.err)"
+    fi
+done
+"""
+
+
+def cgroup_probe(lux, *, cgroup_delegation: bool) -> tuple[dict, str]:
+    """Runs CGROUP_PROBE in a 2 CPU / 1 GiB Run and in a Docker container
+    inside it, and returns the labelled values and the full log."""
+    script = f"""
+set -eu
+cat > /tmp/cgroup-probe.sh <<'PROBE'
+{CGROUP_PROBE}
+PROBE
+sh /tmp/cgroup-probe.sh run
+docker run --rm -v /tmp/cgroup-probe.sh:/probe:ro {ALPINE_IMAGE} sh /probe inner
+"""
+    run_id = lux.submit(docker(script, cgroup_delegation=cgroup_delegation, resources={"cpus": 2, "memory": "1Gi"}))
+    run = lux.wait_state(run_id, "succeeded", "failed", timeout=180)
+    out = lux.logs(run_id)
+    assert run["state"] == "succeeded", (run, out)
+    probe = dict(w.split("=", 1) for w in out.split() if w.startswith(("run:", "inner:")) and "=" in w)
+    return probe, out
+
+
+def test_default_cgroups_show_run_limits(lux, runners, hosts):
+    """Without sandbox.cgroupDelegation the shim does not split the Run's
+    cgroup and a non-root workload cannot create cgroups, so rootless runc
+    leaves Docker's containers in the Run's cgroup: the Run and its
+    containers read the Run's memory.max and cpu.max in their own cgroup,
+    which is what ClickHouse and the JVM size themselves from (#113
+    regression: there the container's own cgroup read max)."""
+    runners.start(hosts[0], "--nested")
+    probe, out = cgroup_probe(lux, cgroup_delegation=False)
+    limit = str(hosts[0].memory_limit(1 << 30))
+    want = {
+        "run:cgroup": "0::/", "run:split": "NO-SPLIT", "run:memory": limit, "run:cpu": "200000_100000",
+        "inner:cgroup": "0::/", "inner:memory": limit, "inner:cpu": "200000_100000",
+    }
+    assert {k: probe.get(k) for k in want} == want, out
+
+
+def test_delegated_docker_sees_run_limits_through_host_cgroupns(lux, runners, hosts):
+    """With sandbox.cgroupDelegation rootless runc makes each Docker
+    container its own unlimited cgroup under /workload. The image's
+    daemon.json (default-cgroupns-mode=host) keeps the containers in the
+    Run's cgroup namespace (rootlesskit does not unshare it), so they see
+    the Run's limits by walking up from their own cgroup."""
+    runners.start(hosts[0], "--nested")
+    probe, out = cgroup_probe(lux, cgroup_delegation=True)
+    limit = str(hosts[0].memory_limit(1 << 30))
+    want = {
+        "run:cgroup": "0::/workload/main", "run:split": "SPLIT",
+        "inner:effective-memory": limit, "inner:effective-cpu": "200000_100000",
+    }
+    assert {k: probe.get(k) for k in want} == want, out
+    assert probe.get("inner:cgroup", "").startswith("0::/workload/"), out
+    assert probe.get("inner:cgroup") != "0::/workload/main", out
 
 
 def test_docker_runs_builds_and_composes(lux, runners, hosts):

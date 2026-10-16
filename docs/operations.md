@@ -36,6 +36,9 @@ arrive, a few seconds late.
 
 ### Upgrading
 
+Upgrade runners for the `sandbox.cgroupDelegation: false` default to apply:
+a new luxd with an older runner still delegates every nested Run.
+
 1. Check the configuration with the new binary: `luxd validate`, run as
    the service user with the unit's environment. It fails (exit 1) on
    anything `luxd serve` would refuse before connecting, with the same

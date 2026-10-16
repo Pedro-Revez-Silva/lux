@@ -1228,7 +1228,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 	}
 	cfg.InputsDir, cfg.InputsRoot = sp.InputsDir(p.user.Home)
 	cfg.Sync = p.sync
-	cfg.DelegateCgroup = sp.Sandbox.NestedContainers
+	cfg.DelegateCgroup = sp.Sandbox.NestedContainers && sp.Sandbox.CgroupDelegation
 	if b := sp.Workload.BeforeStop; b != nil {
 		cfg.BeforeStop = b.Command
 		cfg.BeforeStopTimeoutSec = b.Timeout.Seconds()

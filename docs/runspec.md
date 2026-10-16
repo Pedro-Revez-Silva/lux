@@ -96,6 +96,7 @@ network:
 
 sandbox:
   nestedContainers: false
+  cgroupDelegation: false
   readOnlyRoot: false
 
 artifacts:
@@ -579,7 +580,17 @@ It is still in its own user namespace (an unprivileged uid range on the
 host). The containers it starts use the Run's network, so they have its
 egress rules and hard blocks, and nothing more.
 
-**Limits of nested containers.** Rootless Podman enforces `-m`, `--cpus`
+**Limits of nested containers.** Cgroup delegation is off by default: a
+non-root workload cannot create cgroups (the Run's cgroup belongs to the
+Run's root), so its nested containers stay in the Run's cgroup, share its
+limits and see them at their cgroup root. A root workload in a nested Run
+can create cgroups; lux does not split or delegate its cgroup when the flag
+is off. Set `sandbox.cgroupDelegation: true` to opt in; this requires
+`sandbox.nestedContainers: true` and adds no host permissions.
+Changed: existing nested Runs that need Podman inner limits must set
+`sandbox.cgroupDelegation: true`; resumed Runs created before this change
+lose delegation unless their spec opts in.
+With delegation, rootless Podman enforces `-m`, `--cpus`
 and `--pids-limit` within the Run's host-owned limits. The workload starts
 in `/workload/main`; engines create siblings under `/workload`, bounded
 to 1024 descendants including `main` for non-root workload users. Root

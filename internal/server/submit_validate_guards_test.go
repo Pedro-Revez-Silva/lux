@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -211,5 +212,29 @@ func TestSubmitValidateOnlyNormalRun(t *testing.T) {
 				t.Fatal("validation created a Run")
 			}
 		})
+	}
+}
+
+// cgroupDelegation without nestedContainers is refused at submit, with the
+// field named, and nothing is stored.
+func TestSubmitRefusesCgroupDelegationWithoutNested(t *testing.T) {
+	s := testServer(t)
+	shapedPool(t, s, "pool", nil)
+	sp := baseSpec("pool", spec.Resources{})
+	sp.Sandbox.CgroupDelegation = true
+	for _, validateOnly := range []bool{true, false} {
+		_, err := s.submitRun(tenantCtx("t1"), &submitRunInput{ValidateOnly: validateOnly, Body: sp})
+		var he *HTTPError
+		if !errors.As(err, &he) || he.Status != http.StatusUnprocessableEntity || he.Code != "invalid_spec" ||
+			!slices.Contains(he.Details, "sandbox.cgroupDelegation: requires sandbox.nestedContainers: true") {
+			t.Fatalf("validateOnly=%t: %v, want 422 invalid_spec naming sandbox.cgroupDelegation", validateOnly, err)
+		}
+	}
+	if n := queryOne[int](t, s, `SELECT count(*) FROM runs`); n != 0 {
+		t.Fatalf("refused spec stored: %d runs", n)
+	}
+	sp.Sandbox.NestedContainers = true
+	if _, err := s.submitRun(tenantCtx("t1"), &submitRunInput{ValidateOnly: true, Body: sp}); err != nil {
+		t.Fatalf("with nestedContainers: %v", err)
 	}
 }

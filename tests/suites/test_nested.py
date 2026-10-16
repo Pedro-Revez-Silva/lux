@@ -13,17 +13,27 @@ from suites.test_diff import diff_spec, in_checkout
 INNER = f"podman load -q -i /opt/alpine.tar >/dev/null && podman run --rm {ALPINE_IMAGE}"
 
 
-def nested(script: str, **extra) -> dict:
+def nested(script: str, *, cgroup_delegation: bool = False, **extra) -> dict:
     # Errors to stdout, which the assertions show: an inner engine that
     # fails says why only on stderr.
-    return generic(NESTED, "sh", "-c", f"exec 2>&1; {script}", sandbox={"nestedContainers": True}, **extra)
+    sandbox = {"nestedContainers": True}
+    if cgroup_delegation:
+        sandbox["cgroupDelegation"] = True
+    return generic(NESTED, "sh", "-c", f"exec 2>&1; {script}", sandbox=sandbox, **extra)
 
 
 def test_a_run_runs_containers_inside(lux, runners, hosts):
+    """Without sandbox.cgroupDelegation the Run's cgroup is not split: the
+    workload is at its cgroup root and there is no workload/."""
     runners.start(hosts[0], "--nested")
-    run_id = lux.submit(nested(f"{INNER} echo inner-ok"))
+    run_id = lux.submit(nested(
+        "echo run-cgroup=$(cat /proc/self/cgroup); "
+        "[ -e /sys/fs/cgroup/workload ] && echo SPLIT || echo NO-SPLIT; "
+        f"{INNER} echo inner-ok"))
     run = lux.wait_state(run_id, "succeeded", "failed", timeout=120)
-    assert run["state"] == "succeeded" and "inner-ok" in lux.logs(run_id), (run.get("stateReason"), lux.logs(run_id))
+    out = lux.logs(run_id).split()
+    assert run["state"] == "succeeded" and "inner-ok" in out, (run.get("stateReason"), out)
+    assert "run-cgroup=0::/" in out and "NO-SPLIT" in out, out
 
 
 def test_only_on_hosts_that_offer_it(lux, runners, hosts):
@@ -159,7 +169,7 @@ def test_inner_limits_are_enforced(lux, runners, hosts):
         "for f in cpu.max memory.max; do "
         "[ \"$(cat /sys/fs/cgroup$leaf/$f)\" = \"$(cat /sys/fs/cgroup/$f)\" ] || exit 1; done; "
         f"echo leaf-limits-match cgroup=$(cat /proc/self/cgroup); {OFFLINE} --rm -m 64m --cpus 0.5 --pids-limit 50 {ALPINE_IMAGE} sh -c '{show}'",
-        resources={"cpus": 2, "memory": "1Gi"}))
+        cgroup_delegation=True, resources={"cpus": 2, "memory": "1Gi"}))
     run = lux.wait_state(run_id, "succeeded", "failed", timeout=180)
     out = lux.logs(run_id).split()
     assert run["state"] == "succeeded", (run.get("stateReason"), out)
@@ -174,7 +184,7 @@ def test_inner_oom_kills_the_inner_container_only(lux, runners, hosts):
     runners.start(hosts[0], "--nested")
     run_id = lux.submit(nested(
         f"{OFFLINE} --name a -m 64m --memory-swap 64m {ALPINE_IMAGE} {alloc(27)}; echo rc=$?; "
-        "podman inspect a --format 'oomkilled={{.State.OOMKilled}}'", resources={"memory": "1Gi"}))
+        "podman inspect a --format 'oomkilled={{.State.OOMKilled}}'", cgroup_delegation=True, resources={"memory": "1Gi"}))
     run = lux.wait_state(run_id, "succeeded", "failed", timeout=180)
     out = lux.logs(run_id)
     assert "rc=137" in out.split() and "oomkilled=true" in out.split(), out
@@ -187,7 +197,7 @@ def test_a_nested_run_over_its_own_memory_is_oom(lux, runners, hosts):
     killed by the Run's limit, and reported so."""
     runners.start(hosts[0], "--nested")
     spec = generic(NESTED, "awk", 'BEGIN{x="a";for(i=0;i<30;i++)x=x x;print length(x)}',
-                   sandbox={"nestedContainers": True}, resources={"memory": "256Mi"})
+                   sandbox={"nestedContainers": True, "cgroupDelegation": True}, resources={"memory": "256Mi"})
     run_id = lux.submit(spec)
     run = lux.wait_state(run_id, "succeeded", "failed", timeout=120)
     assert run["state"] == "failed" and run["exitCode"] == 137, run
@@ -207,7 +217,7 @@ def test_inner_limits_cannot_raise_the_runs(lux, runners, hosts):
         "echo max > /sys/fs/cgroup/workload/cgroup.max.descendants && echo RAISED-DESCENDANTS; "
         "echo root=$(cat /sys/fs/cgroup/memory.max) descendants=$(cat /sys/fs/cgroup/workload/cgroup.max.descendants); "
         f"{OFFLINE} --rm -m 4g --memory-swap 4g {ALPINE_IMAGE} {alloc(30)}; echo rc=$?")
-    run_id = lux.submit(nested(script, resources={"memory": "1Gi"}))
+    run_id = lux.submit(nested(script, cgroup_delegation=True, resources={"memory": "1Gi"}))
     run = lux.wait_state(run_id, "succeeded", "failed", timeout=180)
     out = lux.logs(run_id)
     assert "RAISED" not in out, out
@@ -222,7 +232,7 @@ def test_main_cannot_become_internal_and_exec_still_works(lux, runners, hosts):
         "mkdir /sys/fs/cgroup/workload/main/x || exit 1; "
         "echo $$ > /sys/fs/cgroup/workload/main/x/cgroup.procs || exit 1; "
         "if echo +memory > /sys/fs/cgroup/workload/main/cgroup.subtree_control; "
-        "then echo MAIN-INTERNAL; else echo MAIN-LEAF; fi; sleep 600"))
+        "then echo MAIN-INTERNAL; else echo MAIN-LEAF; fi; sleep 600", cgroup_delegation=True))
     out = lux.wait_output(run_id, "MAIN-LEAF", timeout=120)
     assert "MAIN-INTERNAL" not in out, out
     out = lux.run("exec", run_id, "-T", "--", "cat", "/proc/self/cgroup", input="").stdout
@@ -237,7 +247,7 @@ def test_exec_and_diff_work_in_a_delegated_run(lux, runners, hosts, fake_image, 
     git_server.create("ndiff", {"a.txt": "one\n"})
     runners.start(hosts[0], "--nested")
     spec = diff_spec(fake_image, git_server, "write c.txt committed\ncommit add c", "ndiff")
-    spec["sandbox"] = {"nestedContainers": True}
+    spec["sandbox"] = {"nestedContainers": True, "cgroupDelegation": True}
     run_id = lux.submit(spec)
     lux.wait_output(run_id, "committed")
     lux.wait_activity(run_id, "idle")

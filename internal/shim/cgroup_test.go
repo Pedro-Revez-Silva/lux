@@ -3,6 +3,7 @@ package shim
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -224,6 +225,39 @@ func TestDelegateFallbackStartsCommand(t *testing.T) {
 	}
 	if warnings != 1 || !strings.Contains(string(b), "not delegated") {
 		t.Fatalf("warnings %d: %s", warnings, b)
+	}
+}
+
+// Without DelegateCgroup (the default for every Run) the shim leaves a
+// delegable cgroup unsplit, warns nothing, and starts tenants where it is.
+func TestDelegateOffLeavesCgroupAlone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	out, err := OpenOutput(path, NewRedactor(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := fakeCgroup(t, "cpu memory pids io")
+	user := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	s := &Shim{cfg: proto.ShimConfig{User: user}, out: out, user: &userInfo{home: "/"}}
+	probed := false
+	s.delegateAt(root, func(int) error { probed = true; return nil })
+	out.Close()
+	if probed || s.workCgroup != nil {
+		t.Fatalf("probed %t, workCgroup %v", probed, s.workCgroup)
+	}
+	for _, d := range []string{shimCgroup, workloadCgroup} {
+		if _, err := os.Stat(filepath.Join(root, d)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s created: %v", d, err)
+		}
+	}
+	if got := readTrim(t, filepath.Join(root, "cgroup.subtree_control")); got != "" {
+		t.Errorf("subtree_control written: %q", got)
+	}
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), "lux.warning") {
+		t.Errorf("warned: %s", b)
+	}
+	if cmd := s.command([]string{"/bin/true"}, nil); cmd.SysProcAttr != nil && cmd.SysProcAttr.UseCgroupFD {
+		t.Error("tenant cloned into a cgroup")
 	}
 }
 

@@ -3387,6 +3387,9 @@ components:
     Sandbox:
       additionalProperties: false
       properties:
+        cgroupDelegation:
+          description: Opt in to writable cgroup delegation for per-container limits. Default false; requires nestedContainers. Does not add host permissions.
+          type: boolean
         nestedContainers:
           type: boolean
         readOnlyRoot:

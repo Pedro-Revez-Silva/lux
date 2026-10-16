@@ -9,4 +9,7 @@ RUN apk add --no-cache docker docker-rootless-extras docker-cli-buildx docker-cl
  && printf 'agent:1:999\nagent:1001:64535\n' > /etc/subuid && cp /etc/subuid /etc/subgid
 COPY --chmod=644 alpine.tar /opt/alpine.tar
 USER agent
+# "host" is the enclosing Run's cgroup namespace, never the physical host's.
+RUN mkdir -p /home/agent/.config/docker \
+ && printf '{"default-cgroupns-mode":"host"}\n' > /home/agent/.config/docker/daemon.json
 WORKDIR /home/agent
