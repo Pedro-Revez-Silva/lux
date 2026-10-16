@@ -32,6 +32,10 @@ func writeNetClasses(w io.Writer, net map[string]proto.NetBytes) {
 		if k == string(proto.NetUnknown) {
 			note = "  (unclassified: no provider catalog)"
 		}
-		fmt.Fprintf(w, "  %-22s rx %-10s tx %s%s\n", k, spec.BytesText(b.Rx), spec.BytesText(b.Tx), note)
+		delivered := ""
+		if b.RxDelivered > b.Rx {
+			delivered = "  (delivered " + spec.BytesText(b.RxDelivered) + ")"
+		}
+		fmt.Fprintf(w, "  %-22s rx %-10s tx %s%s%s\n", k, spec.BytesText(b.Rx), spec.BytesText(b.Tx), delivered, note)
 	}
 }

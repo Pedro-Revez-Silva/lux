@@ -10,11 +10,12 @@ package egress
 //     sends (Firewall.SetClasses); per other region net_p_<region>4/6, and
 //     net_provider4/6, their union, which gates the per-region rules so
 //     traffic to the internet is not tested against every region.
-//   - per Run, named counters lux_<iface>_<key>_{tx,rx} (key a proto.NetKey,
-//     '-' and ':' as '_'), and chains tx_<iface> classifying by destination
-//     and rx_<iface> by source (txp_/rxp_ per region). The base chain count
-//     (forward hook, priority 100, policy accept) sends packets from the
-//     Run's bridge to the first and packets routed to it to the second.
+//   - per Run, named counters lux_<iface>_<key>_{tx,rx,rxd} (key a
+//     proto.NetKey, '-' and ':' as '_'), and chains tx_<iface> classifying
+//     by destination and rx_<iface> and rxd_<iface> by source (txp_/rxp_/
+//     rxdp_ per region). The base chain count (forward hook, priority 100,
+//     policy accept) sends packets from the Run's bridge to the first and
+//     packets routed to it to the second.
 //     Running after the egress chain and netavark's (priority 0) it sees
 //     accepted L3 traffic after those known filters, not invoice-complete
 //     transfer. Later hooks can drop outbound; locally dropped inbound may
@@ -24,9 +25,14 @@ package egress
 //     bill them. Only the forward path counts: a Run's traffic to its own
 //     host (its DNS stub, the gateway) never crosses the network.
 //     Unrestricted Runs are counted the same way.
+//   - count_in (forward hook, priority -300, ahead of every filter) sends
+//     packets routed to a Run's bridge to rxd_<iface>: inbound as the
+//     provider delivered it, dropped or not (proto.NetBytes.RxDelivered,
+//     what transfer is priced by). Same verdict rule as count.
 //   - the host's own traffic (the runner's link to luxd, pulls, fetches,
 //     uploads) in host_out and host_in, base chains on the output and
-//     input hooks at priority 100, into lux_host_<key>_{tx,rx}. Loopback
+//     input hooks at priority 100, into lux_host_<key>_{tx,rx}, and in
+//     count_in_host (input, -300) into lux_host_<key>_rxd. Loopback
 //     and container bridges are skipped: those bytes stay on the host, and
 //     a Run's forwarded bytes are its own counters'.
 //
@@ -65,8 +71,12 @@ var hostLocalIfaces = []string{"lo", "lux*", "podman*", "cni-*", "docker*", "vir
 // (per region) goes between region-public and provider-global.
 var (
 	beforeProvider = []proto.NetClass{proto.NetLocal, proto.NetZone, proto.NetRegionService, proto.NetRegionPublic}
-	afterProvider  = []proto.NetClass{proto.NetProviderGlobal}
+	afterProvider  = []proto.NetClass{proto.NetProviderGlobalFree, proto.NetProviderGlobal}
 )
+
+// Counter directions: tx and rx after the filters, rxd (RxDelivered)
+// inbound ahead of them.
+var counterDirs = []string{"tx", "rx", "rxd"}
 
 func nftName(s string) string { return strings.NewReplacer("-", "_", ":", "_", ".", "_").Replace(s) }
 
@@ -132,6 +142,9 @@ type accounting struct {
 	kept         map[string]keptCounter
 	hostKept     bool
 	ifaceSubnets func() []netip.Prefix
+	// ingress: count_in and count_in_host exist. Always on outside the
+	// tests that prove they change no filtering.
+	ingress bool
 }
 
 type keptCounter struct{ packets, bytes int64 }
@@ -153,7 +166,7 @@ func (f *Firewall) transact(build func() string) error {
 
 func newAccounting() accounting {
 	return accounting{counted: map[string]bool{}, names: map[string]counterRef{}, kept: map[string]keptCounter{},
-		ifaceSubnets: interfaceSubnets}
+		ifaceSubnets: interfaceSubnets, ingress: true}
 }
 
 // classLists are NetworkClasses parsed and masked, each list without
@@ -192,6 +205,7 @@ func (f *Firewall) effective(nc *proto.NetworkClasses) (classLists, error) {
 	for c, list := range map[proto.NetClass][]string{
 		proto.NetLocal: in.Local, proto.NetZone: in.Zone, proto.NetRegionService: in.RegionService,
 		proto.NetRegionPublic: in.RegionPublic, proto.NetProviderGlobal: in.ProviderGlobal,
+		proto.NetProviderGlobalFree: in.ProviderGlobalFree,
 	} {
 		ps, err := parsePrefixes(string(c), list)
 		if err != nil {
@@ -363,7 +377,7 @@ func (f *Firewall) countersScript(owner string) string {
 		if !ok {
 			continue
 		}
-		if strings.HasPrefix(key, "provider_") && key != "provider_global" {
+		if strings.HasPrefix(key, "provider_") && key != "provider_global" && key != "provider_global_free" {
 			key = "provider:" + strings.ReplaceAll(strings.TrimPrefix(key, "provider_"), "_", "-")
 		} else {
 			key = strings.ReplaceAll(key, "_", "-")
@@ -372,7 +386,7 @@ func (f *Firewall) countersScript(owner string) string {
 		delete(f.acct.kept, n)
 	}
 	for _, k := range f.acct.layout.keys() {
-		for _, dir := range []string{"tx", "rx"} {
+		for _, dir := range counterDirs {
 			n := counterName(owner, k, dir)
 			if _, ok := f.acct.names[n]; ok {
 				continue
@@ -389,9 +403,9 @@ func (f *Firewall) countersScript(owner string) string {
 }
 
 // cutDir splits a counter name's "<key>_<dir>" tail; ok only if the first
-// "_tx" or "_rx" in s ends it.
+// "_<dir>" in s ends it.
 func cutDir(s string) (key, dir string, ok bool) {
-	for _, d := range []string{"tx", "rx"} {
+	for _, d := range counterDirs {
 		if k, rest, found := strings.Cut(s, "_"+d); found && rest == "" {
 			return k, d, true
 		}
@@ -399,18 +413,27 @@ func cutDir(s string) (key, dir string, ok bool) {
 	return "", "", false
 }
 
-func txChain(iface string) string { return "tx_" + iface }
-func rxChain(iface string) string { return "rx_" + iface }
+// runCounts are a Run's counting directions: chain <dir>_<iface> (and
+// <dir>p_<iface> per region), reached through map runs_<dir>, classifying
+// by addr.
+var runCounts = []struct{ dir, addr string }{{"tx", "daddr"}, {"rx", "saddr"}, {"rxd", "saddr"}}
 
 // runChainNames are a Run's counting chains and their per-region parts.
 func runChainNames(iface string) []string {
-	return []string{txChain(iface), "txp_" + iface, rxChain(iface), "rxp_" + iface}
+	var out []string
+	for _, c := range runCounts {
+		out = append(out, c.dir+"_"+iface, c.dir+"p_"+iface)
+	}
+	return out
 }
 
 // runChains are a Run's counting chains' rules (the chains exist).
 func runChains(l layout, iface string) string {
-	return classifyRules(l, txChain(iface), "txp_"+iface, iface, "daddr", "tx") +
-		classifyRules(l, rxChain(iface), "rxp_"+iface, iface, "saddr", "rx")
+	var b strings.Builder
+	for _, c := range runCounts {
+		b.WriteString(classifyRules(l, c.dir+"_"+iface, c.dir+"p_"+iface, iface, c.addr, c.dir))
+	}
+	return b.String()
 }
 
 // runCountingScript makes a Run's counters and chains and the map entries
@@ -426,26 +449,39 @@ func (f *Firewall) runCountingScript(iface string) string {
 		fmt.Fprintf(&b, "add chain inet lux %s\n", c)
 	}
 	b.WriteString(runChains(f.acct.layout, iface))
-	fmt.Fprintf(&b, "add element inet lux runs_tx { %q : jump %s }\n", iface, txChain(iface))
-	fmt.Fprintf(&b, "add element inet lux runs_rx { %q : jump %s }\n", iface, rxChain(iface))
+	for _, c := range runCounts {
+		fmt.Fprintf(&b, "add element inet lux runs_%s { %q : jump %s_%s }\n", c.dir, iface, c.dir, iface)
+	}
 	return b.String()
 }
 
-// hostChains are host_out's and host_in's rules (the chains exist).
+// hostChains are host_out's, host_in's and count_in_host's rules (the
+// chains exist).
 func hostChains(l layout) string {
 	var b strings.Builder
 	for _, g := range hostLocalIfaces {
 		fmt.Fprintf(&b, "add rule inet lux host_out oifname %q accept\n", g)
 		fmt.Fprintf(&b, "add rule inet lux host_in iifname %q accept\n", g)
+		fmt.Fprintf(&b, "add rule inet lux count_in_host iifname %q accept\n", g)
 	}
 	b.WriteString(classifyRules(l, "host_out", "host_outp", "host", "daddr", "tx"))
 	b.WriteString(classifyRules(l, "host_in", "host_inp", "host", "saddr", "rx"))
+	b.WriteString(classifyRules(l, "count_in_host", "count_in_hostp", "host", "saddr", "rxd"))
 	return b.String()
 }
 
+// hostChainNames are every host counting chain, flushed on a layout change.
+var hostChainNames = []string{"host_out", "host_outp", "host_in", "host_inp", "count_in_host", "count_in_hostp"}
+
 // countingSetup is New's part for accounting, in its transaction: kept
 // counters, the sets (with no classes from luxd yet: interface subnets
-// Local, the rest unknown), the count chain and the host's counting.
+// Local, the rest unknown), the count chains and the host's counting.
+//
+// count_in (forward) and count_in_host (input) run at priority -300,
+// before lux's filters (-10), netavark's (0) and any distribution firewall
+// at the usual 0: what they count is inbound as the provider delivered it,
+// including what a filter then drops, since the provider bills those
+// bytes too. Like count, their only verdicts are accept and jumps.
 func (f *Firewall) countingSetup() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -459,21 +495,35 @@ func (f *Firewall) countingSetup() string {
 	b.WriteString(setsScript(cl))
 	b.WriteString("add map inet lux runs_tx { type ifname : verdict; }\n")
 	b.WriteString("add map inet lux runs_rx { type ifname : verdict; }\n")
+	b.WriteString("add map inet lux runs_rxd { type ifname : verdict; }\n")
 	b.WriteString("add chain inet lux count { type filter hook forward priority 100; policy accept; }\n")
+	b.WriteString("add chain inet lux count_in" + ingressHook(f.acct.ingress, "forward") + "\n")
 	// A Run's packets to or from another bridge on this host (another
 	// container network) never cross the network.
 	for _, g := range hostLocalIfaces {
 		fmt.Fprintf(&b, "add rule inet lux count iifname \"lux*\" oifname %q accept\n", g)
 		fmt.Fprintf(&b, "add rule inet lux count oifname \"lux*\" iifname %q accept\n", g)
+		fmt.Fprintf(&b, "add rule inet lux count_in oifname \"lux*\" iifname %q accept\n", g)
 	}
 	b.WriteString("add rule inet lux count iifname vmap @runs_tx\n")
 	b.WriteString("add rule inet lux count oifname vmap @runs_rx\n")
+	b.WriteString("add rule inet lux count_in oifname vmap @runs_rxd\n")
 	b.WriteString(f.countersScript("host"))
 	b.WriteString("add chain inet lux host_out { type filter hook output priority 100; policy accept; }\n")
 	b.WriteString("add chain inet lux host_in { type filter hook input priority 100; policy accept; }\n")
-	b.WriteString("add chain inet lux host_outp\nadd chain inet lux host_inp\n")
+	b.WriteString("add chain inet lux count_in_host" + ingressHook(f.acct.ingress, "input") + "\n")
+	b.WriteString("add chain inet lux host_outp\nadd chain inet lux host_inp\nadd chain inet lux count_in_hostp\n")
 	b.WriteString(hostChains(f.acct.layout))
 	return b.String()
+}
+
+// ingressHook declares an ingress counting chain as a base chain on hook
+// at -300 or, when off, as a regular chain no packet reaches.
+func ingressHook(on bool, hook string) string {
+	if !on {
+		return ""
+	}
+	return " { type filter hook " + hook + " priority -300; policy accept; }"
 }
 
 // SetClasses replaces the classification lists (see the file comment for
@@ -519,7 +569,7 @@ func (f *Firewall) classesScript(cl classLists) string {
 		b.WriteString(f.countersScript(iface))
 	}
 	b.WriteString(setsScript(cl))
-	for _, c := range []string{"host_out", "host_outp", "host_in", "host_inp"} {
+	for _, c := range hostChainNames {
 		fmt.Fprintf(&b, "flush chain inet lux %s\n", c)
 	}
 	b.WriteString(hostChains(cl.layout))
@@ -558,7 +608,9 @@ func (f *Firewall) ClassesVersion() string {
 // made for iface, map entries first. Call with f.mu held.
 func (f *Firewall) removeCountingScript(iface string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "delete element inet lux runs_tx { %q }\ndelete element inet lux runs_rx { %q }\n", iface, iface)
+	for _, c := range runCounts {
+		fmt.Fprintf(&b, "delete element inet lux runs_%s { %q }\n", c.dir, iface)
+	}
 	for _, c := range runChainNames(iface) {
 		fmt.Fprintf(&b, "delete chain inet lux %s\n", c)
 	}
@@ -636,10 +688,13 @@ func (f *Firewall) Counters() (Counts, error) {
 			continue
 		}
 		nb := m[ref.key]
-		if ref.dir == "tx" {
+		switch ref.dir {
+		case "tx":
 			nb.Tx = c.Bytes
-		} else {
+		case "rx":
 			nb.Rx = c.Bytes
+		case "rxd":
+			nb.RxDelivered = c.Bytes
 		}
 		m[ref.key] = nb
 	}

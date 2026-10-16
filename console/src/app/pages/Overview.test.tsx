@@ -211,8 +211,8 @@ test("Every Auto sends no history res", async () => {
 
 for (const [cost, rank, showFilter] of [
   ["all", "all", {}],
-  ["compute", "compute", { family: ["compute", "block-storage"] }],
-  ["external", "external", { nofamily: ["compute", "block-storage"] }],
+  ["compute", "compute", { family: ["compute", "block-storage", "public-ip", "data-transfer"] }],
+  ["external", "external", { nofamily: ["compute", "block-storage", "public-ip", "data-transfer"] }],
 ] as const) {
   test(`?cost=${cost}: every summary that lists values is folded ranked by ${rank}; only the breakdown series filters by family`, async () => {
     const p = await render("operator", `http://localhost/?tab=cost&by=key&cost=${cost}`);

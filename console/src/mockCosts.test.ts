@@ -47,9 +47,9 @@ test("mock /v1/costs: repeated family and nofamily keep or drop every value, tot
     return [b.totals.map((r) => r.group.family).sort(), [...new Set((b.unallocated ?? []).map((u) => u.family))].sort()];
   };
   expect(fams("family=compute&family=block-storage")).toEqual([["block-storage", "compute"], ["block-storage", "compute"]]);
-  expect(fams("nofamily=compute&nofamily=block-storage")).toEqual([["ai"], []]);
+  expect(fams("nofamily=compute&nofamily=block-storage&nofamily=public-ip&nofamily=data-transfer")).toEqual([["ai"], []]);
   expect(fams("family=compute")).toEqual([["compute"], ["compute"]]);
-  expect(fams("nofamily=compute")).toEqual([["ai", "block-storage"], ["block-storage"]]);
+  expect(fams("nofamily=compute")).toEqual([["ai", "block-storage"], ["block-storage", "data-transfer", "public-ip"]]);
 });
 
 test("mock /v1/costs rank: compute counts block storage, external never does", () => {

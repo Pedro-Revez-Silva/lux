@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/marcioapm/lux/internal/server"
+	"github.com/marcioapm/lux/internal/spec"
 )
 
 // basisNote is said once per command: amounts are list prices.
@@ -31,7 +32,10 @@ func (a *app) costCmd() *cobra.Command {
 		Use:   "cost <run>",
 		Short: "What a Run cost: totals per currency, families, lines and sources",
 		Long: `What a Run cost, as its cost sources reported it: compute (the hosts it
-ran on: the Compute and Block storage families) and each cost plugin. Totals are per currency, never added across
+ran on: the Compute, Block storage, Public IPv4 and Data transfer families)
+and each cost plugin. Network transfer no price applies to (unclassified,
+a host whose network discovery was partial, no price) is listed apart as
+unpriced: it is not free. Totals are per currency, never added across
 currencies, and split into the final part and the estimate that may still
 change. The status is pending until a source reports, incomplete while a
 source has not answered, complete, or final once every source has settled.
@@ -98,6 +102,16 @@ func (a *app) renderRunCost(c *server.RunCost) {
 		}
 		a.table("FAMILY\tITEM\tSOURCE\tAMOUNT\tCURRENCY\tFROM–TO\tKIND", rows)
 	}
+	if len(c.Unpriced) > 0 {
+		// Transfer in no line is not free: say how much and why.
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "unpriced network transfer (in no line above; not free):")
+		rows := make([][]string, 0, len(c.Unpriced))
+		for _, u := range c.Unpriced {
+			rows = append(rows, []string{u.Class, u.Reason, spec.BytesText(u.Rx), spec.BytesText(u.Tx)})
+		}
+		a.table("CLASS\tREASON\tRX\tTX", rows)
+	}
 	if len(c.Sources) > 0 {
 		fmt.Fprintln(w)
 		rows := make([][]string, 0, len(c.Sources))
@@ -156,14 +170,16 @@ func (a *app) costsCmd() *cobra.Command {
 		Long: `Costs over a range of whole UTC hours (--since, default 7d, as lux
 history; or --from/--to, RFC 3339), per currency, grouped by up to two of
 --by tenant (operators), pool, host, family, run, key or label:KEY. Grouping by
-pool or host applies to compute and block storage; other families show as "(none)". key is
+pool or host applies to the host-tied families (compute, block storage,
+public IPv4, data transfer); other families show as "(none)". key is
 who submitted the Runs: the API key's name, a person's email, or "(none)"
 for Runs from before luxd recorded it.
 --label KEY=VALUE and --no-label KEY count only matching Runs: repeating a
 key's --label accepts any of its values; different keys must all match.
 --interval hour|day adds a series (in UTC). Without a label filter, the
 hosts' cost not charged to any Run is shown as unallocated, per family
-(compute, block storage): an operator's over every host, or, with a tenant
+(compute, block storage, public IPv4, and the hosts' own data transfer): an
+operator's over every host, or, with a tenant
 key or --tenant, that of the tenant's own pools' hosts.
 
 Amounts are list prices, rounded half-even to 4 decimals; -o json prints

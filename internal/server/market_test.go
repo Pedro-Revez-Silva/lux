@@ -110,6 +110,10 @@ func (f *marketFake) BlockStorage(context.Context, string, string) (BlockStorage
 	return BlockStoragePrice{}, errors.New("not asked")
 }
 
+func (f *marketFake) DataTransfer(context.Context, string) (DataTransferPrices, error) {
+	return DataTransferPrices{}, errors.New("not asked")
+}
+
 func (f *marketFake) InstanceTypes(_ context.Context, region string, names []string) ([]InstanceTypeInfo, error) {
 	f.call("describe " + region + " " + strings.Join(names, ","))
 	if f.typesErr != nil {

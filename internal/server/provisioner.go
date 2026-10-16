@@ -60,15 +60,17 @@ type NetworkSubnet struct {
 
 // ProviderPrefixes is a provider's address catalog for one region. Provider
 // is keyed by the other region: inter-region rates differ per destination.
-// ProviderGlobal is what the catalog publishes with no region (AWS GLOBAL:
-// CloudFront, Route 53): neither in-region nor inter-region.
+// ProviderGlobal is what the catalog publishes with no region (AWS GLOBAL):
+// neither in-region nor inter-region; ProviderGlobalFree the part of it
+// transfer to which is free (AWS: CLOUDFRONT).
 type ProviderPrefixes struct {
-	Source         string
-	FetchedAt      time.Time
-	RegionService  []string
-	RegionPublic   []string
-	ProviderGlobal []string
-	Provider       map[string][]string
+	Source             string
+	FetchedAt          time.Time
+	RegionService      []string
+	RegionPublic       []string
+	ProviderGlobal     []string
+	ProviderGlobalFree []string
+	Provider           map[string][]string
 }
 
 // HostVolume is one block-storage volume of a host: its type, provisioned size,

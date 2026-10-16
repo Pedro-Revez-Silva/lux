@@ -180,7 +180,7 @@ func TestPrefixesClassificationCacheConditionalAndFallback(t *testing.T) {
 			fmt.Fprint(w, `{"prefixes":[{"ip_prefix":"invalid","region":"eu-north-1","service":"S3"}]}`)
 		default:
 			w.Header().Set("ETag", `"catalog-1"`)
-			fmt.Fprint(w, `{"prefixes":[{"ip_prefix":"192.0.2.0/24","region":"eu-north-1","service":"AMAZON"},{"ip_prefix":"192.0.2.0/24","region":"eu-north-1","service":"EC2"},{"ip_prefix":"198.51.100.0/24","region":"eu-north-1","service":"AMAZON"},{"ip_prefix":"198.51.100.0/24","region":"eu-north-1","service":"S3"},{"ip_prefix":"13.32.0.0/15","region":"GLOBAL","service":"CLOUDFRONT"},{"ip_prefix":"203.0.113.0/24","region":"us-east-1","service":"S3"}],"ipv6_prefixes":[{"ipv6_prefix":"2001:db8::/48","region":"eu-north-1","service":"DYNAMODB"}]}`)
+			fmt.Fprint(w, `{"prefixes":[{"ip_prefix":"192.0.2.0/24","region":"eu-north-1","service":"AMAZON"},{"ip_prefix":"192.0.2.0/24","region":"eu-north-1","service":"EC2"},{"ip_prefix":"198.51.100.0/24","region":"eu-north-1","service":"AMAZON"},{"ip_prefix":"198.51.100.0/24","region":"eu-north-1","service":"S3"},{"ip_prefix":"13.32.0.0/15","region":"GLOBAL","service":"CLOUDFRONT"},{"ip_prefix":"13.32.0.0/15","region":"GLOBAL","service":"AMAZON"},{"ip_prefix":"15.177.0.0/18","region":"GLOBAL","service":"ROUTE53_HEALTHCHECKS"},{"ip_prefix":"203.0.113.0/24","region":"us-east-1","service":"S3"}],"ipv6_prefixes":[{"ipv6_prefix":"2001:db8::/48","region":"eu-north-1","service":"DYNAMODB"}]}`)
 		}
 	}))
 	defer fake.Close()
@@ -189,7 +189,7 @@ func TestPrefixesClassificationCacheConditionalAndFallback(t *testing.T) {
 	now := time.Now()
 	p.now = func() time.Time { return now }
 	template := json.RawMessage(`{"region":"eu-north-1"}`)
-	want := server.ProviderPrefixes{Source: "ec2-ip-ranges", FetchedAt: now, RegionPublic: []string{"192.0.2.0/24"}, RegionService: []string{"198.51.100.0/24", "2001:db8::/48"}, ProviderGlobal: []string{"13.32.0.0/15"}, Provider: map[string][]string{"us-east-1": {"203.0.113.0/24"}}}
+	want := server.ProviderPrefixes{Source: "ec2-ip-ranges", FetchedAt: now, RegionPublic: []string{"192.0.2.0/24"}, RegionService: []string{"198.51.100.0/24", "2001:db8::/48"}, ProviderGlobal: []string{"15.177.0.0/18"}, ProviderGlobalFree: []string{"13.32.0.0/15"}, Provider: map[string][]string{"us-east-1": {"203.0.113.0/24"}}}
 	check := func() {
 		t.Helper()
 		got, err := p.Prefixes(context.Background(), template)

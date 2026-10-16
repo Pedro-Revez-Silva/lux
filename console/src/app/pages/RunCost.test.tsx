@@ -83,6 +83,33 @@ test("Run cost: Block storage is its own family row and line, named and swatched
   }
 });
 
+test("Run cost: data transfer is a family row and line; unpriced transfer is named, never read as zero", async () => {
+  const withTransfer: RunCostData = {
+    ...COST,
+    byFamily: [...COST.byFamily, { family: "data-transfer", displayName: "Data transfer", currency: "USD", amount: "0.27", final: "0.27", estimate: "0" }],
+    lines: [...COST.lines, line("data-transfer", "compute", "internet:tx", "0.27")],
+    unpriced: [{ class: "unknown", reason: "unclassified", rx: 0, tx: 3_000_000_000 }],
+  };
+  const p = await render(withTransfer);
+  try {
+    await until(() => p.card("Cost")?.querySelector("tbody tr") != null, "the lines");
+    const card = p.card("Cost")!;
+    expect(cells(card).find((l) => l[1] === "internet:tx")![0]).toBe("Data transfer");
+    const note = card.querySelector('[data-unpriced="unknown"]');
+    expect(note?.textContent).toContain("no provider catalog");
+    expect(card.querySelector(".cost-unpriced")?.textContent).toContain("not free");
+  } finally {
+    await p.done();
+  }
+  const plain = await render(COST);
+  try {
+    await until(() => plain.card("Cost")?.querySelector("tbody tr") != null, "the lines");
+    expect(plain.card("Cost")!.querySelector(".cost-unpriced")).toBeNull();
+  } finally {
+    await plain.done();
+  }
+});
+
 test("Run cost placements: one row per placement, compute and block storage apart, an en dash where a placement has no block storage", async () => {
   const p = await render(COST);
   try {

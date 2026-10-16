@@ -371,6 +371,15 @@ func (s *Server) routes(api huma.API) {
 		Errors:      []int{http.StatusNotFound, http.StatusUnprocessableEntity},
 	}, "admin", s.clearHostPrice)
 	register(s, api, huma.Operation{
+		OperationID: "setHostNetwork", Method: http.MethodPut, Path: "/v1/hosts/{id}/network", Tags: []string{"hosts"},
+		Summary: "Set a static host's network catalog and transfer prices",
+		Description: "A host that registered itself (a static pool's) has no provider to describe its network or price its transfer: " +
+			"network lists the subnets in its own zone (local, free) and in its region's other zones (zone); with them, traffic " +
+			"outside them is internet rather than unknown. transferPrices prices each class per GB, and publicIPv4PerHour its public IPv4 addresses per hour. " +
+			"The body replaces both: an absent field clears it. A host its pool's provider launched is refused (422). Who may: as for its price.",
+		Errors: []int{http.StatusNotFound, http.StatusUnprocessableEntity},
+	}, "admin", s.setHostNetwork)
+	register(s, api, huma.Operation{
 		OperationID: "listPools", Method: http.MethodGet, Path: "/v1/pools", Tags: []string{"pools"},
 		Summary: "List pools", Description: "The tenant's pools and the platform pools it can use. Operators: every pool.",
 	}, "read", s.listPools)
@@ -1147,7 +1156,7 @@ func addNet(acc, v map[string]proto.NetBytes) map[string]proto.NetBytes {
 	}
 	for k, b := range v {
 		a := acc[k]
-		acc[k] = proto.NetBytes{Rx: a.Rx + b.Rx, Tx: a.Tx + b.Tx}
+		acc[k] = proto.NetBytes{Rx: a.Rx + b.Rx, Tx: a.Tx + b.Tx, RxDelivered: a.RxDelivered + b.RxDelivered}
 	}
 	return acc
 }
@@ -2367,21 +2376,23 @@ type Host struct {
 	Capacity    proto.Capacity    `json:"capacity"`
 	// Allocated and LiveRuns: what its live placements asked for. A tenant
 	// sees only its own placements' share of a platform host.
-	Allocated     spec.Resources            `json:"allocated"`
-	Versions      map[string]any            `json:"versions"`
-	Platform      bool                      `json:"platform"`
-	LiveRuns      int                       `json:"liveRuns"`
-	ProviderID    *string                   `json:"providerId,omitempty"`
-	InstanceType  *string                   `json:"instanceType,omitempty" doc:"The instance type the provider launched; absent for a host that registered itself."`
-	Zone          *string                   `json:"zone,omitempty" doc:"The availability zone the provider launched it in."`
-	Market        *string                   `json:"market,omitempty" enum:"on-demand,spot" doc:"on-demand or spot, as the provider launched it."`
-	Volumes       *[]HostVolume             `json:"volumes,omitempty" doc:"The block-storage volumes deleted with it, as the provider reported them (assumed: supplied by an operator for a host from before luxd recorded them); absent while not known, and for a host that registered itself."`
-	Network       *HostNetwork              `json:"network,omitempty" doc:"Its network placement as the provider reports it: its own subnets and zone, every subnet of its network with its zone, and its billable public IPv4 addresses. Refreshed on each provider check; absent while not known, and for a host that registered itself."`
-	NetClasses    map[string]proto.NetBytes `json:"netClasses,omitempty" doc:"The host's own network transfer (outside any Run), cumulative bytes per billing class and direction: local, zone, region-service, region-public, provider:<region>, provider-global, internet, unknown. unknown is traffic off the host's subnets with no provider catalog to classify it: not priced. Absent from runners that predate it."`
-	LastHeartbeat *time.Time                `json:"lastHeartbeat,omitempty"`
-	Times         map[string]*time.Time     `json:"times" doc:"Its lifecycle. A host whose launch failed has no terminateRequested or terminated: no instance ever ran."`
-	Launch        *HostLaunch               `json:"launch,omitempty" doc:"How luxd's launch of it went; absent for a host that registered itself, or one from before launches were recorded."`
-	DiskPressure  *proto.DiskPressure       `json:"diskPressure,omitempty" doc:"Present while its runner's low-free-space guard reports disk pressure (lux-runner --disk-low-free): the host takes no new Run until free disk is back at the recovery mark. Absent otherwise, and from runners without the guard."`
+	Allocated      spec.Resources            `json:"allocated"`
+	Versions       map[string]any            `json:"versions"`
+	Platform       bool                      `json:"platform"`
+	LiveRuns       int                       `json:"liveRuns"`
+	ProviderID     *string                   `json:"providerId,omitempty"`
+	InstanceType   *string                   `json:"instanceType,omitempty" doc:"The instance type the provider launched; absent for a host that registered itself."`
+	Zone           *string                   `json:"zone,omitempty" doc:"The availability zone the provider launched it in."`
+	Market         *string                   `json:"market,omitempty" enum:"on-demand,spot" doc:"on-demand or spot, as the provider launched it."`
+	Volumes        *[]HostVolume             `json:"volumes,omitempty" doc:"The block-storage volumes deleted with it, as the provider reported them (assumed: supplied by an operator for a host from before luxd recorded them); absent while not known, and for a host that registered itself."`
+	Network        *HostNetwork              `json:"network,omitempty" doc:"Its network placement as the provider reports it: its own subnets and zone, every subnet of its network with its zone, and its billable public IPv4 addresses. Refreshed on each provider check; absent while not known, and for a host that registered itself."`
+	NetClasses     map[string]proto.NetBytes `json:"netClasses,omitempty" doc:"The host's own network transfer (outside any Run), cumulative bytes per billing class and direction: local, zone, region-service, region-public, provider:<region>, provider-global-free, provider-global, internet, unknown. rxDelivered: inbound ahead of every filter, what transfer is priced by. unknown is traffic off the host's subnets with no provider catalog to classify it: not priced. Absent from runners that predate it."`
+	StaticNetwork  *StaticNetwork            `json:"staticNetwork,omitempty" doc:"A static host's network catalog, as its operator set it (PUT /v1/hosts/{id}/network). Absent for a tenant viewing a platform host."`
+	TransferPrices *DataTransferPrices       `json:"transferPrices,omitempty" doc:"A static host's network transfer prices and public IPv4 charge, as its operator set them or its pool's default when it registered. Absent for a tenant viewing a platform host."`
+	LastHeartbeat  *time.Time                `json:"lastHeartbeat,omitempty"`
+	Times          map[string]*time.Time     `json:"times" doc:"Its lifecycle. A host whose launch failed has no terminateRequested or terminated: no instance ever ran."`
+	Launch         *HostLaunch               `json:"launch,omitempty" doc:"How luxd's launch of it went; absent for a host that registered itself, or one from before launches were recorded."`
+	DiskPressure   *proto.DiskPressure       `json:"diskPressure,omitempty" doc:"Present while its runner's low-free-space guard reports disk pressure (lux-runner --disk-low-free): the host takes no new Run until free disk is back at the recovery mark. Absent otherwise, and from runners without the guard."`
 	// Placements: on GET /v1/hosts/{id} only, its live placements (the
 	// caller's; every tenant's for an operator).
 	Placements []HostPlacement `json:"placements,omitempty"`
@@ -2424,13 +2435,16 @@ const visiblePlacements = "($1 = '' OR pl.tenant_id = $1)"
 
 // Select hostColumns FROM hostsFrom ($1: the principal's tenant id, for
 // which of its placements count).
+// A platform host's own traffic, catalog and prices are its operator's:
+// a tenant that sees the host does not see them.
 const hostColumns = `h.id, h.name, coalesce(ht.name, ''), coalesce(hp.name, ''), coalesce(h.pool_id, ''), h.state, ` + hostStateReason + `,
 	h.draining, h.labels, h.capacity, h.versions, h.tenant_id IS NULL,
 	hl.n, jsonb_build_object('cpus', hl.cpus, 'memory', hl.mem, 'disk', hl.disk),
 	h.provider_id, h.instance_type, h.zone, h.market, h.last_heartbeat,
 	h.provision_requested_at, h.provisioned_at, h.registered_at, h.first_placement_at, h.last_placement_ended_at,
 	h.drain_requested_at, h.terminate_requested_at, h.terminated_at, h.lost_at, h.created_at,
-	h.launch_outcome, h.launch_finished_at, ` + hostLaunchError + `, h.volumes, h.disk_pressure, h.network, CASE WHEN $1 = '' OR h.tenant_id = $1 THEN h.host_net_classes ELSE NULL END`
+	h.launch_outcome, h.launch_finished_at, ` + hostLaunchError + `, h.volumes, h.disk_pressure, h.network, CASE WHEN $1 = '' OR h.tenant_id = $1 THEN h.host_net_classes END,
+	CASE WHEN $1 = '' OR h.tenant_id = $1 THEN h.network_static END, CASE WHEN $1 = '' OR h.tenant_id = $1 THEN h.transfer_prices END`
 
 // hostSeesProviderError, for SQL on hosts h with $1 as visibleHosts: a
 // platform host's provider error (account ids, role ARNs) is only for a
@@ -2486,7 +2500,8 @@ func hostScanDest(h *Host) hostDest {
 	var launchErr string
 	fields := []any{&h.ID, &h.Name, &h.Tenant, &h.Pool, &h.PoolID, &h.State, &h.StateReason, &h.Draining, &h.Labels, &h.Capacity, &h.Versions,
 		&h.Platform, &h.LiveRuns, &h.Allocated, &h.ProviderID, &h.InstanceType, &h.Zone, &h.Market, &h.LastHeartbeat,
-		&t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7], &t[8], &t[9], &outcome, &launched, &launchErr, &h.Volumes, &h.DiskPressure, &h.Network, &h.NetClasses}
+		&t[0], &t[1], &t[2], &t[3], &t[4], &t[5], &t[6], &t[7], &t[8], &t[9], &outcome, &launched, &launchErr, &h.Volumes, &h.DiskPressure, &h.Network, &h.NetClasses,
+		&h.StaticNetwork, &h.TransferPrices}
 	return hostDest{fields, func() {
 		h.Times = map[string]*time.Time{
 			"provisionRequested": t[0], "provisioned": t[1], "registered": t[2], "firstPlacement": t[3],
@@ -3122,18 +3137,20 @@ type listPoolsOutput struct {
 	Body PoolList `nameHint:"PoolList"`
 }
 
-// poolColumns: Select poolColumns FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id.
+// poolColumns: Select poolColumns FROM pools p LEFT JOIN tenants t ON t.id = p.tenant_id,
+// with $1 the reader's tenant ("" for an operator): a platform pool's
+// default transfer prices are operator-only, as its hosts' are (hostColumns).
 const poolColumns = `p.id, p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
 	coalesce(p.scale_down_after_s, 0), p.warm_while_active,
 	p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, ''), p.is_default, p.shape,
-	coalesce(p.placement, '')`
+	coalesce(p.placement, ''), CASE WHEN $1 = '' OR p.tenant_id = $1 THEN p.transfer_prices END`
 
 func scanPool(row pgx.Row) (Pool, error) {
 	var pl Pool
 	var sda int
 	var isDefault bool
 	err := row.Scan(&pl.ID, &pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts,
-		&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &isDefault, &pl.Shape, &pl.Placement)
+		&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &isDefault, &pl.Shape, &pl.Placement, &pl.TransferPrices)
 	pl.ScaleDownAfter.Duration = time.Duration(sda) * time.Second
 	pl.IsDefault = &isDefault
 	if pl.Shape != nil {
@@ -3430,6 +3447,9 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	if err := ValidPoolPrice(pl.Provider, pl.HourlyPrice, pl.Currency); err != nil {
 		return nil, err
 	}
+	if err := ValidPoolTransferPrices(pl.Provider, pl.TransferPrices); err != nil {
+		return nil, err
+	}
 	if err := CheckPoolShape(ctx, s.db, pl.Provider, pl.Template, pl.Shape); err != nil {
 		return nil, err
 	}
@@ -3455,16 +3475,16 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 		err := SavePool(ctx, tx, p.TenantID, pl.Name, pl.IsDefault, func() error {
 			var storedID string
 			err := tx.QueryRow(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
-					scale_down_after_s, warm_while_active, hourly_price, price_currency, shape, placement)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''), $13, nullif($14, ''))
+					scale_down_after_s, warm_while_active, hourly_price, price_currency, shape, placement, transfer_prices)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''), $13, nullif($14, ''), $15)
 				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
 					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
 					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency, shape = EXCLUDED.shape,
-					placement = EXCLUDED.placement,
+					placement = EXCLUDED.placement, transfer_prices = EXCLUDED.transfer_prices,
 					`+PoolRevive+` RETURNING id`,
 				newID, p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
-				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency, pl.Shape, pl.Placement).Scan(&storedID)
+				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency, pl.Shape, pl.Placement, pl.TransferPrices).Scan(&storedID)
 			if err != nil {
 				return err
 			}

@@ -20,11 +20,12 @@ import (
 func catalog(version string) *proto.NetworkClasses {
 	return &proto.NetworkClasses{
 		Version: version, Source: proto.NetSourceEC2,
-		Local:          []string{"10.0.0.0/24", "2001:db8:0::/64"},
-		Zone:           []string{"10.0.0.0/16", "2001:db8::/48"}, // covers Local: Local wins
-		RegionService:  []string{"52.216.0.0/15", "2600:1f18:1000::/40"},
-		RegionPublic:   []string{"52.0.0.0/8", "2600:1f18::/32"}, // covers the service: service wins
-		ProviderGlobal: []string{"13.32.0.0/15"},
+		Local:              []string{"10.0.0.0/24", "2001:db8:0::/64"},
+		Zone:               []string{"10.0.0.0/16", "2001:db8::/48"}, // covers Local: Local wins
+		RegionService:      []string{"52.216.0.0/15", "2600:1f18:1000::/40"},
+		RegionPublic:       []string{"52.0.0.0/8", "2600:1f18::/32"}, // covers the service: service wins
+		ProviderGlobalFree: []string{"13.32.0.0/15"},
+		ProviderGlobal:     []string{"15.177.0.0/18"},
 		Provider: map[string][]string{
 			"eu-west-1": {"34.240.0.0/13", "2a05:d018::/36"},
 			"us-west-2": {"35.80.0.0/12"},
@@ -76,7 +77,8 @@ func TestClassificationPrecedenceAndDirection(t *testing.T) {
 		{"52.1.1.1", "region-public"},
 		{"34.241.0.1", "provider:eu-west-1"},
 		{"35.81.0.1", "provider:us-west-2"},
-		{"13.33.0.1", "provider-global"},
+		{"13.33.0.1", "provider-global-free"},
+		{"15.177.0.1", "provider-global"},
 		{"8.8.8.8", "internet"},
 		{"2001:db8:0::9", "local"},
 		{"2001:db8:0:5::9", "zone"},
@@ -91,6 +93,7 @@ func TestClassificationPrecedenceAndDirection(t *testing.T) {
 		b := expected[c.key]
 		b.Tx += n
 		b.Rx += n + 1
+		b.RxDelivered += n + 1
 		expected[c.key] = b
 		k.send(out(c.peer, n), false)
 		k.send(in(c.peer, n+1), false)
@@ -199,7 +202,7 @@ func TestHostTraffic(t *testing.T) {
 	k.send(packet{hook: "output", oif: runIface, src: "10.89.0.1", dst: "10.89.0.2", proto: "udp", bytes: 9}, false)
 	k.send(out("8.8.8.8", 3), false)
 	got, _ := f.Counters()
-	want := map[string]proto.NetBytes{"region-service": {Tx: 100, Rx: 4000}}
+	want := map[string]proto.NetBytes{"region-service": {Tx: 100, Rx: 4000, RxDelivered: 4000}}
 	if !maps.Equal(got.Host, want) {
 		t.Errorf("host: got %v, want %v", got.Host, want)
 	}
@@ -236,7 +239,7 @@ func TestAccountingNeverChangesFiltering(t *testing.T) {
 				t.Errorf("unrestricted=%t %+v: %s with counting, %s without", unrestricted, p, with, without)
 			}
 		}
-		for _, base := range []string{"count", "host_out", "host_in"} {
+		for _, base := range []string{"count", "count_in", "host_out", "host_in", "count_in_host"} {
 			for v := range k.verdicts(base) {
 				if v != "accept" && v != "return" {
 					t.Errorf("%s reaches verdict %q", base, v)
@@ -256,6 +259,136 @@ func TestAccountingNeverChangesFiltering(t *testing.T) {
 			}
 		}
 		_ = f
+	}
+}
+
+// ingressRuleset is the table's every rule and chain declaration after
+// setup, a Run and a catalog, with the ingress counters on or off.
+func ingressRuleset(t *testing.T, ingress, unrestricted bool, gateway string) (*kernel, *Firewall, []string) {
+	t.Helper()
+	k := newKernel()
+	var scripts []string
+	f := newFirewall(nil, func(context.Context, string) ([]netip.Addr, error) { return nil, nil }, func(s string) error {
+		scripts = append(scripts, s)
+		return k.nft(s)
+	}, k.list)
+	f.acct.ifaceSubnets = func() []netip.Prefix { return nil }
+	f.acct.ingress = ingress
+	if err := f.setup(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.SetClasses(catalog("v1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Apply(context.Background(), runIface, netip.MustParseAddr(gateway), unrestricted, []spec.EgressRule{{CIDR: "52.1.0.0/16"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Remove(runIface) })
+	return k, f, scripts
+}
+
+func TestIngressCountersAheadOfFilters(t *testing.T) {
+	k, _, scripts := ingressRuleset(t, true, false, "10.89.0.1")
+	for name, hook := range map[string]string{"count_in": "forward", "count_in_host": "input"} {
+		c := k.st.chains[name]
+		if c == nil || c.hook != hook || c.prio != -300 {
+			t.Errorf("%s: %+v, want a base chain on %s at -300", name, c, hook)
+		}
+		for other, oc := range k.st.chains {
+			if oc.hook == hook && other != name && oc.prio <= -300 {
+				t.Errorf("%s (priority %d) runs before %s", other, oc.prio, name)
+			}
+		}
+	}
+	// The filtering: egressScript is what Apply sends for the Run's filter
+	// whether or not ingress counting is on.
+	want := egressScript(runIface, false, []netip.Prefix{netip.MustParsePrefix("52.1.0.0/16")})
+	found := false
+	for _, s := range scripts {
+		found = found || strings.HasPrefix(s, want)
+	}
+	if !found {
+		t.Errorf("Apply did not send the egress script unchanged; scripts: %q", scripts)
+	}
+}
+
+// filtering is the part of a setup or Apply script before its counting
+// part (which starts with the classification sets or the Run's counters).
+func filtering(s string) string {
+	for _, mark := range []string{"add set inet lux net_", "add counter inet lux lux_"} {
+		if i := strings.Index(s, mark); i >= 0 {
+			s = s[:i]
+		}
+	}
+	return s
+}
+
+// TestIngressCountersChangeNoFiltering: the filtering scripts are
+// byte-identical with and without count_in, the filter chains hold the
+// same rules, and every probe gets the same verdict.
+func TestIngressCountersChangeNoFiltering(t *testing.T) {
+	for _, unrestricted := range []bool{false, true} {
+		n := 0
+		if unrestricted {
+			n = 4
+		}
+		with, _, sw := ingressRuleset(t, true, unrestricted, fmt.Sprintf("10.89.0.%d", n+1))
+		without, _, so := ingressRuleset(t, false, unrestricted, fmt.Sprintf("10.89.0.%d", n+3))
+		if len(sw) != len(so) {
+			t.Fatalf("%d scripts with count_in, %d without", len(sw), len(so))
+		}
+		for i := range sw {
+			if filtering(sw[i]) != filtering(so[i]) {
+				t.Errorf("unrestricted=%t script %d: filtering differs:\n%s\n---\n%s", unrestricted, i, filtering(sw[i]), filtering(so[i]))
+			}
+		}
+		if !strings.Contains(sw[0], "hook forward priority -300") || strings.Contains(so[0], "priority -300") {
+			t.Fatal("ingress switch has no effect on the setup script")
+		}
+		for _, c := range []string{"egress", "to_host", "dns", chainName(runIface)} {
+			if !slices.EqualFunc(with.rules()[c], without.rules()[c], slices.Equal[[]string]) {
+				t.Errorf("unrestricted=%t: chain %s differs with count_in", unrestricted, c)
+			}
+		}
+		for _, p := range probes() {
+			if a, b := with.send(p, false), without.send(p, false); a != b {
+				t.Errorf("unrestricted=%t %+v: %s with count_in, %s without", unrestricted, p, a, b)
+			}
+		}
+	}
+}
+
+// TestRxDeliveredCountsDropped: a packet routed to the Run that a later
+// filter drops (netavark's forward chain at priority 0, modelled here,
+// drops unsolicited inbound) was delivered by the provider and billed:
+// rxDelivered counts it, rx does not.
+func TestRxDeliveredCountsDropped(t *testing.T) {
+	k := newKernel()
+	f := setupRun(t, k, catalog("v1"), false, spec.EgressRule{CIDR: "52.1.0.0/16"})
+	k.st.chains["netavark"] = &kchain{hook: "forward", prio: 0, rules: [][]string{
+		{"ct", "state", "established,related", "accept"}, {"oifname", `"lux*"`, "drop"}}}
+	unsolicited := in("8.8.8.8", 700)
+	unsolicited.established = false
+	if v := k.send(unsolicited, false); v != "drop" {
+		t.Fatalf("unsolicited inbound: %s", v)
+	}
+	if v := k.send(in("52.1.2.3", 40), false); v != "accept" {
+		t.Fatalf("reply: %s", v)
+	}
+	// The host's own input: a packet to a port the host refuses is still
+	// delivered to its interface.
+	k.st.chains["host_drop"] = &kchain{hook: "input", prio: 0, rules: [][]string{{"iifname", `"eth0"`, "drop"}}}
+	k.send(packet{hook: "input", iif: "eth0", src: "8.8.4.4", dst: "10.0.0.9", proto: "tcp", bytes: 60}, false)
+	got, err := f.Counters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]proto.NetBytes{"internet": {RxDelivered: 700}, "region-public": {Rx: 40, RxDelivered: 40}}
+	if !maps.Equal(got.Runs[runIface], want) {
+		t.Errorf("run: got %v, want %v", got.Runs[runIface], want)
+	}
+	if h := got.Host["internet"]; h.RxDelivered != 60 || h.Rx != 0 {
+		t.Errorf("host: %v, want 60 delivered and none accepted", got.Host)
 	}
 }
 

@@ -185,9 +185,13 @@ const (
 	// NetProvider: the provider's addresses in another region. Counted per
 	// destination region (NetKey), since inter-region rates differ by it.
 	NetProvider NetClass = "provider"
-	// NetProviderGlobal: provider prefixes published with no region (AWS's
-	// "GLOBAL": CloudFront, Route 53, some AMAZON). Neither inter-region
-	// nor in-region; priced separately or not at all.
+	// NetProviderGlobalFree: provider prefixes published with no region
+	// whose transfer from the provider's compute is free (AWS: CLOUDFRONT
+	// only; origin fetches from EC2 to CloudFront are not charged).
+	NetProviderGlobalFree NetClass = "provider-global-free"
+	// NetProviderGlobal: the other provider prefixes published with no
+	// region (AWS's "GLOBAL": Route 53, Global Accelerator, AMAZON). AWS
+	// bills them as data transfer out to the internet.
 	NetProviderGlobal NetClass = "provider-global"
 	// NetInternet: everything no list holds, when the host has a provider
 	// catalog.
@@ -201,9 +205,10 @@ const (
 // several lists takes the first. Narrower before wider: a private subnet is
 // never also a public prefix, and a free service's prefixes are listed
 // inside the provider's broader in-region ranges (AWS's AMAZON entries
-// contain S3's), so the free service must win over region-public. Internet
-// and unknown are the fall-through, one or the other (NetworkClasses.Catalog).
-var NetClasses = []NetClass{NetLocal, NetZone, NetRegionService, NetRegionPublic, NetProvider, NetProviderGlobal, NetInternet, NetUnknown}
+// contain S3's), so the free service must win over region-public, and
+// CloudFront over the rest of GLOBAL. Internet and unknown are the
+// fall-through, one or the other (NetworkClasses.Catalog).
+var NetClasses = []NetClass{NetLocal, NetZone, NetRegionService, NetRegionPublic, NetProvider, NetProviderGlobalFree, NetProviderGlobal, NetInternet, NetUnknown}
 
 // NetKey is a Usage.Net key: the class, or "provider:<region>" for
 // NetProvider, which is only ever counted per destination region.
@@ -216,10 +221,14 @@ func NetKey(c NetClass, region string) string {
 
 // NetBytes is one class's bytes: Rx received from peers in the class, Tx
 // sent to them. Both are billed by most providers (AWS bills cross-AZ and
-// in-region public traffic in each direction).
+// in-region public traffic in each direction). Rx counts what passed the
+// host's filters; RxDelivered counts inbound ahead of every filter, as the
+// provider delivered (and bills) it, so RxDelivered >= Rx when both were
+// counted from the start. Absent from older runners.
 type NetBytes struct {
-	Rx int64 `json:"rx"`
-	Tx int64 `json:"tx"`
+	Rx          int64 `json:"rx"`
+	Tx          int64 `json:"tx"`
+	RxDelivered int64 `json:"rxDelivered,omitempty"`
 }
 
 // MaxNet is the per-key, per-direction maximum of a and b: how luxd merges
@@ -234,7 +243,7 @@ func MaxNet(a, b map[string]NetBytes) map[string]NetBytes {
 	}
 	for k, v := range b {
 		o := out[k]
-		out[k] = NetBytes{Rx: max(o.Rx, v.Rx), Tx: max(o.Tx, v.Tx)}
+		out[k] = NetBytes{Rx: max(o.Rx, v.Rx), Tx: max(o.Tx, v.Tx), RxDelivered: max(o.RxDelivered, v.RxDelivered)}
 	}
 	return out
 }
@@ -277,6 +286,10 @@ type NetworkClasses struct {
 	RegionService  []string   `json:"regionService,omitempty"`
 	RegionPublic   []string   `json:"regionPublic,omitempty"`
 	ProviderGlobal []string   `json:"providerGlobal,omitempty"`
+	// ProviderGlobalFree: GLOBAL prefixes of the provider's free services
+	// (AWS: CLOUDFRONT); an older runner ignores the field and counts them
+	// as internet.
+	ProviderGlobalFree []string `json:"providerGlobalFree,omitempty"`
 	// Provider: by region, the provider's prefixes in every other region.
 	Provider map[string][]string `json:"provider,omitempty"`
 }

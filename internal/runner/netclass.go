@@ -37,6 +37,9 @@ func (n *netBaseline) observe(current map[string]proto.NetBytes) map[string]prot
 		if c.Tx < last.Tx {
 			b.Tx += last.Tx
 		}
+		if c.RxDelivered < last.RxDelivered {
+			b.RxDelivered += last.RxDelivered
+		}
 		n.Base[k] = b
 	}
 	n.Last = maps.Clone(current)
@@ -55,13 +58,10 @@ func (n *netBaseline) value() map[string]proto.NetBytes {
 		out = map[string]proto.NetBytes{}
 	}
 	for k, v := range n.Last {
-		b := out[k]
-		b.Rx += v.Rx
-		b.Tx += v.Tx
-		out[k] = b
+		out[k] = addNet(out[k], v)
 	}
 	for k, v := range out {
-		if v.Rx == 0 && v.Tx == 0 {
+		if v == (proto.NetBytes{}) {
 			delete(out, k)
 		}
 	}
@@ -69,6 +69,10 @@ func (n *netBaseline) value() map[string]proto.NetBytes {
 		return nil
 	}
 	return out
+}
+
+func addNet(a, b proto.NetBytes) proto.NetBytes {
+	return proto.NetBytes{Rx: a.Rx + b.Rx, Tx: a.Tx + b.Tx, RxDelivered: a.RxDelivered + b.RxDelivered}
 }
 
 // reconcile raises the total to at least what luxd recorded (a Welcome's
@@ -81,6 +85,7 @@ func (n *netBaseline) reconcile(reported map[string]proto.NetBytes) {
 		b, c := n.Base[k], n.Last[k]
 		b.Rx = max(b.Rx, v.Rx-c.Rx)
 		b.Tx = max(b.Tx, v.Tx-c.Tx)
+		b.RxDelivered = max(b.RxDelivered, v.RxDelivered-c.RxDelivered)
 		n.Base[k] = b
 	}
 }
@@ -90,8 +95,7 @@ func (n *netBaseline) reconcile(reported map[string]proto.NetBytes) {
 func (n *netBaseline) seed(reported map[string]proto.NetBytes) {
 	n.initBase()
 	for k, v := range reported {
-		b := n.Base[k]
-		n.Base[k] = proto.NetBytes{Rx: b.Rx + v.Rx, Tx: b.Tx + v.Tx}
+		n.Base[k] = addNet(n.Base[k], v)
 	}
 }
 

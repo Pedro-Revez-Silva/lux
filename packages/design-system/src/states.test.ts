@@ -45,11 +45,15 @@ test("block storage is always --chart-3, whatever its hint or companions, and ne
   expect(color([{ family: "block-storage", color: "violet" }], "block-storage")).toBe("var(--chart-3)");
   expect(color([{ family: "compute" }, { family: "ai", color: "violet" }, { family: "block-storage", displayName: "Block storage" }], "block-storage")).toBe("var(--chart-3)");
   expect(familyColor("block-storage")).not.toBe(familyColor("compute"));
+  const own = ["compute", "block-storage", "public-ip", "data-transfer"].map((f) => familyColor(f));
+  expect(new Set(own).size).toBe(4);
 });
 
 test("labels: the displayName, else Compute for compute, else the key", () => {
   const d = familyDisplay([{ family: "compute" }, { family: "ai", displayName: "AI models" }, { family: "egress" }, { family: "block-storage" }]);
   expect([d.get("compute")!.label, d.get("ai")!.label, d.get("egress")!.label, d.get("block-storage")!.label]).toEqual(["Compute", "AI models", "egress", "Block storage"]);
+  const t = familyDisplay([{ family: "public-ip" }, { family: "data-transfer" }]);
+  expect([t.get("public-ip")!.label, t.get("data-transfer")!.label]).toEqual(["Public IPv4", "Data transfer"]);
 });
 
 test("each storage kind has its own label and categorical slot, never compute's", () => {

@@ -926,7 +926,7 @@ What an instance needs:
   the runner as `LUX_RUNNER_MEMORY`; without it the launch still goes
   ahead, logged, and the host offers its MemTotal; a shaped pool's hosts
   get the shape's memory instead and need no lookup), plus
-  `pricing:GetProducts` for on-demand and EBS prices,
+  `pricing:GetProducts` for on-demand, EBS, data-transfer and public IPv4 prices,
   `ec2:DescribeSpotPriceHistory` for spot prices and `ec2:DescribeVolumes`
   for each host's block-storage volumes (their size and type price its
   block storage; without it a host's block storage stays missing, never

@@ -395,7 +395,7 @@ components:
         currency:
           type: string
         family:
-          description: "On unallocated rows: the host-tied family (compute or block-storage)."
+          description: "On unallocated rows: the host-tied family (compute, block-storage, public-ip or data-transfer)."
           type: string
         group:
           additionalProperties:
@@ -767,7 +767,7 @@ components:
         netClasses:
           additionalProperties:
             $ref: "#/components/schemas/NetBytes"
-          description: "The host's own network transfer (outside any Run), cumulative bytes per billing class and direction: local, zone, region-service, region-public, provider:<region>, provider-global, internet, unknown. unknown is traffic off the host's subnets with no provider catalog to classify it: not priced. Absent from runners that predate it."
+          description: "The host's own network transfer (outside any Run), cumulative bytes per billing class and direction: local, zone, region-service, region-public, provider:<region>, provider-global-free, provider-global, internet, unknown. rxDelivered: inbound ahead of every filter, what transfer is priced by. unknown is traffic off the host's subnets with no provider catalog to classify it: not priced. Absent from runners that predate it."
           type: object
         network:
           $ref: "#/components/schemas/HostNetwork"
@@ -792,6 +792,9 @@ components:
           type: string
         stateReason:
           type: string
+        staticNetwork:
+          $ref: "#/components/schemas/StaticNetwork"
+          description: A static host's network catalog, as its operator set it (PUT /v1/hosts/{id}/network). Absent for a tenant viewing a platform host.
         tenant:
           description: The owning tenant's name; empty for a platform host.
           type: string
@@ -803,6 +806,9 @@ components:
               - "null"
           description: "Its lifecycle. A host whose launch failed has no terminateRequested or terminated: no instance ever ran."
           type: object
+        transferPrices:
+          $ref: "#/components/schemas/TransferPrices"
+          description: A static host's network transfer prices and public IPv4 charge, as its operator set them or its pool's default when it registered. Absent for a tenant viewing a platform host.
         versions:
           additionalProperties: {}
           type: object
@@ -823,7 +829,7 @@ components:
         currency:
           type: string
         family:
-          description: "A host-tied family: compute or block-storage."
+          description: "A host-tied family: compute, block-storage, public-ip or data-transfer."
           type: string
         hostId:
           type: string
@@ -864,7 +870,7 @@ components:
         currency:
           type: string
         family:
-          description: "A host-tied family: compute or block-storage."
+          description: "A host-tied family: compute, block-storage, public-ip or data-transfer."
           type: string
         hour:
           format: date-time
@@ -883,7 +889,7 @@ components:
           description: "What the period was priced from: for block storage, the volumes, the unit prices per volume type (perGBMonth, perIOPSMonth, perGiBpsMonth) and hoursPerMonth."
           type: object
         family:
-          description: "A host-tied family: compute or block-storage."
+          description: "A host-tied family: compute, block-storage, public-ip or data-transfer."
           type: string
         from:
           format: date-time
@@ -977,6 +983,29 @@ components:
             - "null"
         zone:
           type: string
+      type: object
+    HostNetworkSet:
+      additionalProperties: false
+      properties:
+        host:
+          description: The host's id.
+          type: string
+        network:
+          $ref: "#/components/schemas/StaticNetwork"
+          description: "The catalog its runner classifies traffic by. Absent: none (only local, from the host's own subnets, and unknown)."
+        transferPrices:
+          $ref: "#/components/schemas/TransferPrices"
+          description: "Per-GB transfer prices by class and direction, and publicIPv4PerHour (the host's whole public IPv4 charge per hour). Absent: nothing priced; its transfer is listed as unpriced (no-price)."
+      type: object
+    HostNetworkSettings:
+      additionalProperties: false
+      properties:
+        network:
+          $ref: "#/components/schemas/StaticNetwork"
+          description: "The catalog its runner classifies traffic by. Absent: none (only local, from the host's own subnets, and unknown)."
+        transferPrices:
+          $ref: "#/components/schemas/TransferPrices"
+          description: "Per-GB transfer prices by class and direction, and publicIPv4PerHour (the host's whole public IPv4 charge per hour). Absent: nothing priced; its transfer is listed as unpriced (no-price)."
       type: object
     HostPlacement:
       additionalProperties: false
@@ -1368,6 +1397,9 @@ components:
         rx:
           format: int64
           type: integer
+        rxDelivered:
+          format: int64
+          type: integer
         tx:
           format: int64
           type: integer
@@ -1516,6 +1548,20 @@ components:
         workdir:
           type: string
       type: object
+    PerGB:
+      additionalProperties: false
+      properties:
+        rx:
+          description: Per GB received, a decimal string.
+          examples:
+            - "0.01"
+          type: string
+        tx:
+          description: Per GB sent, a decimal string.
+          examples:
+            - "0.09"
+          type: string
+      type: object
     Percentiles:
       additionalProperties: false
       properties:
@@ -1648,6 +1694,9 @@ components:
           description: The owning tenant's name; empty for a platform pool.
           readOnly: true
           type: string
+        transferPrices:
+          $ref: "#/components/schemas/TransferPrices"
+          description: "Static pools: the default network transfer prices (per GB, by class and direction) and public IPv4 charge of hosts registering into the pool. Copied to each host when it first registers; changing it does not reprice existing hosts (PUT /v1/hosts/{id}/network does, one host). Refused for ec2 pools, which the provider prices. Like every field, a set without it removes it. Absent for a tenant viewing a platform pool."
         warmHosts:
           format: int64
           type: integer
@@ -1719,7 +1768,7 @@ components:
             - array
             - "null"
         totals:
-          description: The Runs' cost of the pool's machines in the range (compute and block storage; never AI or other external families), per currency.
+          description: The Runs' cost of the pool's machines in the range (compute, block storage, public IPv4 and data transfer; never AI or other external families), per currency.
           items:
             $ref: "#/components/schemas/MoneyAmount"
           type:
@@ -1751,7 +1800,7 @@ components:
         currency:
           type: string
         family:
-          description: "A host-tied family: compute or block-storage."
+          description: "A host-tied family: compute, block-storage, public-ip or data-transfer."
           type: string
         hostId:
           type: string
@@ -1778,7 +1827,7 @@ components:
         currency:
           type: string
         family:
-          description: "A host-tied family: compute or block-storage."
+          description: "A host-tied family: compute, block-storage, public-ip or data-transfer."
           type: string
       type: object
     PoolList:
@@ -2795,6 +2844,13 @@ components:
           type:
             - array
             - "null"
+        unpriced:
+          description: "Network transfer no price applies to, so no line counts it: it is not free. Summed over the Run's placements per class and reason."
+          items:
+            $ref: "#/components/schemas/Unpriced"
+          type:
+            - array
+            - "null"
       type: object
     RunCostBrief:
       additionalProperties: false
@@ -2897,7 +2953,7 @@ components:
         netClasses:
           additionalProperties:
             $ref: "#/components/schemas/NetBytes"
-          description: "Bytes the placement's network forwarded, per billing class and direction (rx from, tx to): local, zone, region-service, region-public, provider:<region>, provider-global, internet, unknown. Only what every firewall rule let through counts. unknown: off the host's subnets with no provider catalog to classify it; never priced. Absent from runners that predate it."
+          description: "Bytes the placement's network forwarded, per billing class and direction (rx from, tx to): local, zone, region-service, region-public, provider:<region>, provider-global-free, provider-global, internet, unknown. rx and tx count only what every firewall rule let through; rxDelivered counts inbound ahead of every filter, as the provider delivered (and bills) it, dropped packets included, and is what transfer is priced by. unknown: off the host's subnets with no provider catalog to classify it; never priced. Absent from runners that predate it."
           type: object
         netRxBytes:
           format: int64
@@ -3579,6 +3635,24 @@ components:
             - array
             - "null"
       type: object
+    StaticNetwork:
+      additionalProperties: false
+      properties:
+        local:
+          description: "CIDRs in the host's own zone: free to reach."
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+        zone:
+          description: "CIDRs in other zones of the host's region: billed at transferPrices.zone."
+          items:
+            type: string
+          type:
+            - array
+            - "null"
+      type: object
     Status:
       additionalProperties: false
       properties:
@@ -4166,6 +4240,54 @@ components:
           format: int64
           type: integer
       type: object
+    TransferPrices:
+      additionalProperties: false
+      properties:
+        currency:
+          description: ISO 4217.
+          examples:
+            - USD
+          type: string
+        internet:
+          $ref: "#/components/schemas/PerGB"
+          description: internet and provider-global (every GLOBAL prefix but CloudFront's).
+        provider:
+          additionalProperties:
+            $ref: "#/components/schemas/PerGB"
+          description: provider:<region>, by destination region.
+          type: object
+        publicIPv4PerHour:
+          description: "A provider region's: per in-use address per hour. A static host's: the host's whole public IPv4 charge per hour (0 or absent: none)."
+          examples:
+            - "0.005"
+          type: string
+        regionPublic:
+          $ref: "#/components/schemas/PerGB"
+        zone:
+          $ref: "#/components/schemas/PerGB"
+      type: object
+    Unpriced:
+      additionalProperties: false
+      properties:
+        class:
+          description: The billing class (a netClasses key).
+          type: string
+        reason:
+          description: "unclassified: class unknown, off the host's subnets with no provider catalog to classify it. partial-network: the host's network discovery was partial, so none of its billable transfer is priced. no-price: a billable class without a known price (none cached for the host's region yet, an inter-region destination the price list lacks, a static host without that class's price)."
+          enum:
+            - unclassified
+            - partial-network
+            - no-price
+          type: string
+        rx:
+          description: Bytes received, as the provider delivered them.
+          format: int64
+          type: integer
+        tx:
+          description: Bytes sent.
+          format: int64
+          type: integer
+      type: object
     Volume:
       additionalProperties: false
       properties:
@@ -4530,12 +4652,12 @@ paths:
             maximum: 50
             minimum: 1
             type: integer
-        - description: "With top: all (default), compute (the host-tied families: compute and block-storage), or external (every other family): the cost that ranks the values and that runs counts. Refused when it counts none of the families family/nofamily keep."
+        - description: "With top: all (default), compute (the host-tied families: compute, block-storage, public-ip and data-transfer), or external (every other family): the cost that ranks the values and that runs counts. Refused when it counts none of the families family/nofamily keep."
           explode: false
           in: query
           name: rank
           schema:
-            description: "With top: all (default), compute (the host-tied families: compute and block-storage), or external (every other family): the cost that ranks the values and that runs counts. Refused when it counts none of the families family/nofamily keep."
+            description: "With top: all (default), compute (the host-tied families: compute, block-storage, public-ip and data-transfer), or external (every other family): the cost that ranks the values and that runs counts. Refused when it counts none of the families family/nofamily keep."
             enum:
               - all
               - compute
@@ -5556,6 +5678,76 @@ paths:
       summary: A host's resource use over time
       tags:
         - history
+  /v1/hosts/{id}/network:
+    put:
+      description: |-
+        A host that registered itself (a static pool's) has no provider to describe its network or price its transfer: network lists the subnets in its own zone (local, free) and in its region's other zones (zone); with them, traffic outside them is internet rather than unknown. transferPrices prices each class per GB, and publicIPv4PerHour its public IPv4 addresses per hour. The body replaces both: an absent field clears it. A host its pool's provider launched is refused (422). Who may: as for its price.
+
+        Needs the `admin` scope.
+      operationId: setHostNetwork
+      parameters:
+        - description: The host's id or name (a name of a host that is not terminated).
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The host's id or name (a name of a host that is not terminated).
+            type: string
+        - description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+          explode: false
+          in: query
+          name: tenant
+          schema:
+            description: "Operator keys: only this tenant (id or name). Tenant keys ignore it."
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HostNetworkSettings"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostNetworkSet"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Set a static host's network catalog and transfer prices
+      tags:
+        - hosts
   /v1/hosts/{id}/price:
     delete:
       description: |-

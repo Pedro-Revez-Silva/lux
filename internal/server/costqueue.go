@@ -576,12 +576,17 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, _ *c
 		return err
 	}
 	b := newComputeLines(now)
-	for _, family := range hostFamilies {
+	for _, family := range sharedFamilies {
 		if err := writeFamilySnapshots(ctx, tx, runID, family, &e, b, now); err != nil {
 			return err
 		}
 	}
 	e.Lines = b.lines(runID)
+	transfer, err := writeTransferSnapshots(ctx, tx, runID, &e, now)
+	if err != nil {
+		return err
+	}
+	e.Lines = append(e.Lines, transfer...)
 	if len(e.Missing) > 0 {
 		for i := range e.Lines {
 			e.Lines[i].Details["missingRate"] = true
@@ -617,7 +622,7 @@ func (s *Server) writeCompute(ctx context.Context, tx pgx.Tx, runID string, _ *c
 	if err := replaceComputeHours(ctx, tx, e.TenantID, runID, e.Hours, s.cfg.Costs.Hourly); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, attempts, next_at, settles_left, last_error)
+	_, err = tx.Exec(ctx, `INSERT INTO cost_sources (run_id, tenant_id, source, status, answered_at, attempts, next_at, settles_left, last_error)
 		VALUES ($1,$2,'compute',$3,now(),$4,$5,NULL,$6)
 		ON CONFLICT (run_id, source) DO UPDATE SET status=EXCLUDED.status, answered_at=EXCLUDED.answered_at,
 		attempts=EXCLUDED.attempts, next_at=EXCLUDED.next_at, settles_left=NULL, last_error=EXCLUDED.last_error`,
@@ -641,11 +646,13 @@ type snapshotEntry struct {
 }
 
 // writeFamilySnapshots refreshes a Run's unfrozen placement snapshots of one
-// host-tied family and adds their amounts to b and e.Hours; what has no
+// shared family and adds their amounts to b and e.Hours; what has no
 // usable rate goes to e.Missing. Block storage is a provider host's own:
 // a placement on a host that registered itself, or on one with no volume
 // deleted with it (volumes []), has none; one whose volumes are not known
-// yet (NULL) is missing.
+// yet (NULL) is missing. Public IPv4 applies on a host with a public-ip
+// period, or recorded addresses (missing until its period opens); a host
+// whose network was never recorded has none.
 func writeFamilySnapshots(ctx context.Context, tx pgx.Tx, runID, family string, e *computeEval, b *computeLines, now time.Time) error {
 	rows, err := tx.Query(ctx, `SELECT p.id, p.run_id, p.epoch, coalesce((p.resources->>'cpus')::float8, 0),
 		coalesce((p.resources->>'memory')::int8, 0), p.created_at, p.ended_at,
@@ -654,8 +661,11 @@ func writeFamilySnapshots(ctx context.Context, tx pgx.Tx, runID, family string, 
 		s.rate_from, s.per_hour::text, s.currency, s.cap_cpus, s.cap_memory, s.amount::text, s.priced_to, coalesce(s.finalized, false)
 		FROM placements p JOIN hosts h ON h.id = p.host_id
 		LEFT JOIN cost_placement_snapshots s ON s.placement_id = p.id AND s.family = $2
-		WHERE p.run_id = $1 AND ($2 = 'compute' OR (h.provision_requested_at IS NOT NULL
-			AND (h.volumes IS NULL OR jsonb_array_length(h.volumes) > 0)))
+		WHERE p.run_id = $1 AND CASE $2
+			WHEN 'compute' THEN true
+			WHEN 'block-storage' THEN h.provision_requested_at IS NOT NULL AND (h.volumes IS NULL OR jsonb_array_length(h.volumes) > 0)
+			ELSE EXISTS (SELECT 1 FROM host_rates r WHERE r.host_id = h.id AND r.family = $2)
+				OR coalesce((h.network->>'publicIPv4')::int, 0) > 0 END
 		ORDER BY p.created_at, p.id`, runID, family)
 	if err != nil {
 		return err
@@ -711,7 +721,7 @@ func writeFamilySnapshots(ctx context.Context, tx pgx.Tx, runID, family string, 
 		if err != nil {
 			return err
 		}
-		amount, err := pricePlacementSnapshot(ctx, tx, v.p, v.hostID, rate, end)
+		amount, err := pricePlacementSnapshot(ctx, tx, ownRateWindow(family, v.p, rate.From), v.hostID, rate, end)
 		if err != nil {
 			return err
 		}
@@ -756,6 +766,9 @@ func writeFamilySnapshots(ctx context.Context, tx pgx.Tx, runID, family string, 
 			"cpus": v.p.CPUs, "memory": v.p.Memory, "amount": *v.amount,
 			"share": sh, "ratePerHour": *v.perHour, "finalized": v.final}
 		item := volumesItem(v.volumes)
+		if family == familyPublicIP {
+			item = "ipv4"
+		}
 		if family == familyCompute {
 			item = v.h.item()
 			if v.h.Market != "" {
@@ -777,7 +790,11 @@ func writeFamilySnapshots(ctx context.Context, tx pgx.Tx, runID, family string, 
 		l.amount.Add(l.amount, amount)
 		l.from, l.to = minTime(l.from, v.p.From), maxTime(l.to, end)
 		l.placements = append(l.placements, d)
-		allocateCostHours(v.p.From, end, amount, func(hour time.Time, allocated *big.Rat) {
+		from := v.p.From
+		if v.rateFrom != nil {
+			from = ownRateWindow(family, v.p, *v.rateFrom).From
+		}
+		allocateCostHours(from, end, amount, func(hour time.Time, allocated *big.Rat) {
 			e.Hours = append(e.Hours, computeHour{hour, v.hostID, family, *v.currency, allocated})
 		})
 	}
@@ -799,15 +816,29 @@ func volumesItem(vols *[]HostVolume) string {
 	return strings.Join(parts, "+")
 }
 
-// resolveOwnRate is hostID's own period of family covering start, else its
+// resolveOwnRate is hostID's own period of family covering start, else the
+// first to open after it (ownRateWindow prices from then), else its
 // latest: no other host's rate is borrowed.
 func resolveOwnRate(ctx context.Context, tx pgx.Tx, hostID, family string, start time.Time) (ratePeriod, error) {
 	var rate ratePeriod
 	err := tx.QueryRow(ctx, `SELECT valid_from, valid_to, per_hour::text, currency, cap_cpus, cap_memory, source
 		FROM host_rates WHERE host_id = $1 AND family = $2
-		ORDER BY (valid_from <= $3 AND (valid_to IS NULL OR valid_to > $3)) DESC, valid_from DESC LIMIT 1`, hostID, family, start).
+		ORDER BY (valid_from <= $3 AND (valid_to IS NULL OR valid_to > $3)) DESC,
+			CASE WHEN valid_from > $3 THEN valid_from END NULLS LAST, valid_from DESC LIMIT 1`, hostID, family, start).
 		Scan(&rate.From, &rate.To, &rate.PerHour, &rate.Currency, &rate.CapCPUs, &rate.CapMemory, &rate.Source)
 	return rate, err
+}
+
+// ownRateWindow is the part of p a host-tied family's period from
+// rateFrom prices: a period that opened after p started (a public-ip
+// charge set or addresses attached later) prices p from then, not from p's
+// start. Compute's rate may be another host's (resolvePlacementRate), so
+// its window is p's.
+func ownRateWindow(family string, p placementWindow, rateFrom time.Time) placementWindow {
+	if family != familyCompute && rateFrom.After(p.From) {
+		p.From = rateFrom
+	}
+	return p
 }
 
 // resolvePlacementRate prefers an observation covering the placement start,

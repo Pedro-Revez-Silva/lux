@@ -79,6 +79,13 @@ FAKE_ROOT_VOLUME = {"type": "gp3", "size": 100, "iops": 3000, "throughput": 125,
 _EBS_FIXTURE = Path(__file__).resolve().parent.parent / "internal" / "ec2" / "testdata" / "ebs-pricing-eu-north-1.json"
 EBS_PRICING = {("eu-north-1", "gp3"): json.loads(_EBS_FIXTURE.read_text())}
 
+# A real Pricing API answer for eu-north-1's data transfer (AWSDataTransfer,
+# by transferType: AWS Outbound, IntraRegion, InterRegion Outbound) and its
+# in-use public IPv4 charge (AmazonVPC), paged as AWS pages them; luxd's own
+# provider tests read the same file.
+_TRANSFER_FIXTURE = Path(__file__).resolve().parent.parent / "internal" / "ec2" / "testdata" / "datatransfer-pricing-eu-north-1.json"
+TRANSFER_PRICING = {"eu-north-1": json.loads(_TRANSFER_FIXTURE.read_text())}
+
 # On-demand list prices the fake quotes (made up), by (region, type).
 ON_DEMAND_PRICES = {("eu-north-1", FAKE_TEMPLATE_TYPE): "0.1000000000", ("us-east-1", FAKE_TEMPLATE_TYPE): "0.1000000000"}
 
@@ -507,13 +514,28 @@ class FakeEC2:
     # -- the Pricing API (LUX_PRICING_ENDPOINT points here too) -------------
 
     def _get_products(self, req: dict) -> tuple[int, dict]:
-        """GetProducts on AmazonEC2, as luxd asks it: an instance type's
+        """GetProducts as luxd asks it: on AmazonEC2 an instance type's
         on-demand price (ON_DEMAND_PRICES), or a volume type's EBS products,
-        one page each, from the real eu-north-1 gp3 answer (EBS_PRICING). An
+        one page each, from the real eu-north-1 gp3 answer (EBS_PRICING); on
+        AWSDataTransfer a transferType's products, on AmazonVPC the public
+        IPv4 ones, from the real eu-north-1 answer (TRANSFER_PRICING). An
         unknown key answers no products, as AWS does."""
         f = {x["Field"]: x["Value"] for x in req.get("Filters", [])}
         with self.lock:
-            self.pricing_calls.append(f)
+            self.pricing_calls.append({"ServiceCode": req.get("ServiceCode", ""), **f})
+        transfer = None
+        if req.get("ServiceCode") == "AWSDataTransfer":
+            transfer = TRANSFER_PRICING.get(f.get("fromRegionCode"), {}).get(f.get("transferType"), [])
+        elif req.get("ServiceCode") == "AmazonVPC":
+            transfer = TRANSFER_PRICING.get(f.get("regionCode"), {}).get("AmazonVPC", []) if f.get("group") == "VPCPublicIPv4Address" else []
+        if transfer is not None:
+            i = int(req.get("NextToken") or 0)
+            if i >= len(transfer):
+                return 200, {"PriceList": [], "FormatVersion": "aws_v1"}
+            page = dict(transfer[i])
+            if i + 1 < len(transfer):
+                page["NextToken"] = str(i + 1)
+            return 200, page
         if "volumeApiName" in f:
             pages = EBS_PRICING.get((f.get("regionCode"), f["volumeApiName"]), [])
             i = int(req.get("NextToken") or 0)

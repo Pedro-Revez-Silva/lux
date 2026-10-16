@@ -384,6 +384,16 @@ export interface RunCost {
   byFamily: CostTotal[];
   lines: CostLine[];
   sources: CostSource[];
+  /** Network transfer no price applies to: in no line, and not free. Absent from older luxd. */
+  unpriced?: Unpriced[];
+}
+
+/** Network transfer of one class in no line (RunCost.unpriced). */
+export interface Unpriced {
+  class: string;
+  reason: "unclassified" | "partial-network" | "no-price" | string;
+  rx: number;
+  tx: number;
 }
 
 export interface CostSummaryRow {
@@ -391,7 +401,7 @@ export interface CostSummaryRow {
   at?: string;
   /** With group: the group's value per group key ("(none)" when absent). */
   group?: Record<string, string>;
-  /** On unallocated rows: the host-tied family (compute or block-storage). */
+  /** On unallocated rows: the host-tied family (compute, block-storage, public-ip or data-transfer). */
   family?: string;
   currency: string;
   amount: string;
@@ -403,7 +413,7 @@ export interface CostSummaryRow {
 
 export interface HostAllocation {
   hostId: string;
-  /** A host-tied family: compute or block-storage. */
+  /** A host-tied family: compute, block-storage, public-ip or data-transfer. */
   family: string;
   currency: string;
   allocated: string;
@@ -478,7 +488,7 @@ export interface CostSummaryParams {
 
 export interface HostCostHour {
   hour: string;
-  /** A host-tied family: compute or block-storage (a string: a family luxd adds later still reads). */
+  /** A host-tied family: compute, block-storage, public-ip or data-transfer (a string: a family luxd adds later still reads). */
   family: string;
   currency: string;
   allocated: string;
@@ -983,7 +993,7 @@ export interface PoolHostTime {
   at?: string;
   hostId?: string;
   hostName?: string;
-  /** A host-tied family: compute or block-storage. */
+  /** A host-tied family: compute, block-storage, public-ip or data-transfer. */
   family: string;
   currency: string;
   allocated: string;

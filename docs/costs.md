@@ -1,7 +1,8 @@
 # Run costs (design)
 
-Status: **compute, prices, plugins, hourly views, the CLI and the console
-are built**, with the per-placement estimate rules described below. These
+Status: **compute, block storage, public IPv4, data transfer, prices,
+plugins, hourly views, the CLI and the console are built**, with the
+per-placement estimate rules described below. These
 are list-price estimates, not invoice-accurate charges.
 
 This doc covers what each Run costs: the hosts it ran on (built in) and
@@ -166,8 +167,9 @@ currencies:
 **Families** are open. lux stores and shows whatever strings arrive. A
 plugin's describe endpoint may give a display name and a colour hint for
 its families (section 4). An unknown family is shown by its raw name with a
-neutral colour. `compute` and `block-storage` are lux's own families
-(display names "Compute" and "Block storage").
+neutral colour. `compute`, `block-storage`, `public-ip` and `data-transfer`
+are lux's own families (display names "Compute", "Block storage", "Public
+IPv4" and "Data transfer"), all host-tied.
 
 ## 2. Compute cost (built in)
 
@@ -428,6 +430,181 @@ several joined by `+` in a stable order), `details.placements` as compute's
 without `market`/`zone`. The compute source is final only when both
 families are final for every placement.
 
+### Data transfer (built in)
+
+**Built** (migrations `082`, `083`, `085`, `086`; `internal/server/transfer*.go`,
+`internal/egress/netclass.go`). Network transfer is priced as the provider
+bills it: by **class** and **direction**, per GB. The runner counts bytes
+per class ([telemetry](telemetry.md#network-transfer)); luxd multiplies them
+by the class's list price. Family `data-transfer` ("Data transfer"), never
+folded into `compute`.
+
+```
+amount(p) = Σ over (class, direction) of bytes(p, class, direction) / 10^9 × perGB(class, direction)
+```
+
+- **GB is 10^9 bytes.** AWS bills transfer "per GB" in decimal gigabytes,
+  not GiB.
+- **Inbound is `rxDelivered`**, counted ahead of every filter: the
+  provider bills bytes it delivered even when the host then drops them.
+  `rx` (after the filters) stands in where `rxDelivered` is absent or lower.
+- **Not shared.** A placement's bytes are its own: there is no occupancy
+  split as for compute. A host's own traffic (the runner's link to luxd,
+  image pulls, snapshot uploads) belongs to no Run and is **unallocated**.
+
+| Class | Rate (AWS) | Lines |
+| --- | --- | --- |
+| `local`, `region-service`, `provider-global-free` | free | none (not a zero line) |
+| `zone`, `region-public` | `IntraRegion`, each direction | `zone:rx`, `zone:tx`, … |
+| `provider:<region>` | `InterRegion Outbound` to that region; inbound free | `provider:eu-west-1:tx` |
+| `provider-global` | internet out (`GLOBAL` services other than CloudFront bill as internet) | `provider-global:tx` |
+| `internet` | `AWS Outbound` to External, first non-zero tier; inbound free | `internet:tx` |
+| `unknown` | none | none: listed as **unpriced** |
+
+**Worked example** (eu-north-1 list prices from the Pricing API, October
+2026: internet out 0.09, IntraRegion 0.01, to eu-west-1 0.02 per GB). A
+placement sends 3 GB to the internet, 0.5 GB to and receives 1 GB from
+(delivered; 0.25 GB passed its filters) another zone, 5 GB to eu-west-1,
+1 GB to Route 53, and 7 GB to CloudFront:
+
+| Line | Bytes | per GB | Amount |
+| --- | --- | --- | --- |
+| `internet:tx` | 3 GB | 0.09 | 0.27 |
+| `zone:tx` | 0.5 GB | 0.01 | 0.005 |
+| `zone:rx` | 1 GB (`rxDelivered`) | 0.01 | 0.01 |
+| `provider:eu-west-1:tx` | 5 GB | 0.02 | 0.10 |
+| `provider-global:tx` | 1 GB | 0.09 | 0.09 |
+| CloudFront | 7 GB | free | — |
+| **total** | | | **0.475** |
+
+**Lines.** Source `compute`, one line per Run per class and direction (and
+currency), `details: {class, direction, bytes, perGB, currency,
+placements: [{epoch, hostId, from, to, bytes, perGB, amount, finalized}]}`.
+
+**Snapshots.** `cost_transfer_snapshots` holds one per placement, like
+block storage's: refreshed while the placement is live, **frozen** once it
+has ended and is priced, never repriced. A provider host's placement with
+billable bytes and no price cached for its region yet is **missing**: the
+compute source is `incomplete` and retried, never zero. The price loop
+keeps every live provider region's prices cached; the drainer never calls
+the provider.
+
+**Unpriced.** `GET /v1/runs/{id}/cost` carries `unpriced: [{class, reason,
+rx, tx}]`: transfer in no line, so that absence never reads as $0.
+`unclassified` is `unknown` traffic (no catalog). `partial-network`: the
+host's network discovery was partial (`hosts.network.partial`), so its
+classes cannot be trusted and **none** of its billable transfer is priced.
+`no-price`: a billable class with no price (an inter-region destination the
+price list lacks, a static host without that class's price). Unpriced
+bytes do not hold up finality: no retry could price them. A static host
+whose operator priced some classes but not others lists the others as
+`no-price`; an explicit `0` is free.
+
+**Hours.** Heartbeat samples carry a placement's cumulative counters when
+they changed; a Run's hourly rows place each sample's growth in its hour
+(the rest of the final reading in the end's hour), so `GET /v1/costs`
+shows transfer when it happened, not spread over the placement nor all at
+its end. Only each hour's last reading counts. Each hour is rounded
+cumulatively to the placement's exact total, so the hours sum to the
+snapshot amount; the Run's line sums per-item amounts each rounded to
+1e-9, so hours and line can differ by at most 0.5e-9 per (class,
+direction). The host-hour refresh does the same with the host's own counters
+(`host_samples.net_classes`), writing **unallocated** `data-transfer` rows
+per host: runner↔luxd across zones shows up as that host's cost, hour by
+hour. A host hour is the growth from the last sample before it. A host
+that registered in that hour or the one before measures from zero (its
+counters start at boot), so a new host's first hour, its image pulls, is
+priced. With no earlier sample otherwise, the hour gets no row rather than
+everything since boot: **not priced** are the first hour after the upgrade
+that introduced host transfer sampling, and a rebuilt hour (a public-ip or
+block-storage rewind) whose earlier samples are past `history.hours`. The
+next hour is priced; luxd logs the skipped hour once per host.
+
+**Prices have no rate periods.** Unlike compute, block storage and public
+IPv4 (`host_rates`), per-GB transfer prices are not kept as periods. A
+placement is priced at the prices cached (provider) or set (static) when
+it is evaluated, and frozen at its end. A price change while a placement
+is live therefore reprices all of its bytes, those moved before the change
+included, and its past hourly rows with them; a rebuilt host hour is
+priced at the price of the day it is rebuilt. This is a known deviation
+from `host_rates`: harmless for AWS list prices, which rarely change, but
+a static host's operator who changes a price mid-placement sees the new
+price on all of it.
+
+**Partial discovery follows the host's current network.** A placement's
+lines and hours are priced, or listed `partial-network`, by its host's
+`hosts.network.partial` at each evaluation until the placement freezes,
+so a host that turns partial mid-placement unprices all of a live
+placement's transfer, hours included. A rebuilt host hour also uses the
+current flag: no history of `partial` is kept, so hours written before a
+flip keep their pricing unless a rewind rebuilds them.
+
+**Cross-AZ.** AWS publishes both `DataTransfer-Regional-Bytes` ($0.01) and
+`DataTransfer-xAZ-*` ($0) usage types with the same description; lux
+prices cross-AZ at the regional rate; confirm against your CUR.
+
+**Runners older than `provider-global-free`** do not count that class:
+they count CloudFront's prefixes as `internet`, which is priced, so their
+CloudFront traffic is overcharged at the internet rate until the runner is
+upgraded.
+
+**Missing today.** No free tier (account-wide, and spent by any real
+account; list price). Tiered internet pricing is taken at its first
+non-zero tier, not by monthly volume. NAT gateway processing, VPC
+endpoints, load balancers and Transit Gateway are not modelled; their
+traffic is classed by its peer address only.
+
+### Public IPv4 (built in)
+
+**Built** (migration `084`, `internal/server/publicip.go`). AWS charges each
+in-use public IPv4 address by the hour, used or not, like a disk. Family
+`public-ip` ("Public IPv4"), host-tied and shared exactly like compute and
+block storage: a `host_rates` period (`family = 'public-ip'`) with
+
+```
+per_hour = PublicIPv4PerHour × hosts.network.publicIPv4
+```
+
+(`$0.005` an address-hour in every region at the time of writing).
+
+**When the first period starts.** A provider host's first period starts at
+its `registered_at` if its address count was already recorded when it
+registered; otherwise from when a provider check first recorded addresses
+on it (`hosts.public_ip_from`: an address attached after launch, a count
+of 0 that became n, a network recorded late). A static host's first period
+starts at its registration when its charge came with it (its pool's
+default, on its first hello); a `--price-public-ip` set later starts from
+when it is set, never backdated. Opening a first period rewinds the host's
+hourly cursor to its start and re-queues the host's Runs placed after it,
+final ones included, as block storage does; a placement that started
+before the period is charged from the period's start. A provider check
+that records another count closes the open period and opens one at the new
+count (none at zero). The
+same `computeCost` occupancy formula splits it, so allocated + unallocated
+= the addresses' cost, in `GET /v1/hosts/{id}/cost`, pool cost and the
+`unallocated`/`hosts` rows of `GET /v1/costs`. Run lines: item `ipv4`.
+
+For one address and the worked example above, A, B and C pay 1/8, 3/8 and
+1/8 of each address-hour's $0.005 and 3/8 is unallocated.
+
+### Static hosts
+
+A static host has no provider to describe or price its network. Its
+operator does (`PUT /v1/hosts/{id}/network`, `lux hosts set <host>
+--network-local <cidr>[,…] --network-zone <cidr>[,…] --price-transfer
+internet=0.0010[,zone=0.01,…] --price-public-ip 0.0 --currency USD`; a
+static pool's defaults with `lux pools set --price-transfer
+--price-public-ip`, copied to a host when it first registers, as
+`hourly_price` is). With a catalog its classes' `Source` is `static`, so
+traffic outside the listed subnets is `internet`; without one, only
+`local` and `unknown` exist and nothing is priced. `--price-public-ip` is
+the host's whole charge per hour; 0 or unset opens no period, and a change
+opens a new one. Transfer prices have no periods (see "Data transfer").
+A price is per class: a class with neither direction priced is
+`no-price`, but an omitted direction inside a priced class is not charged
+(`zone=0.01` prices both directions). `lux hosts get` prints the price
+table.
+
 ## 3. Prices
 
 ### Sources
@@ -445,11 +622,9 @@ families are final for every placement.
 - **List prices only.** Savings Plans, Reserved Instances, EDP or other
   discounts, credits, and tax appear only in the provider's bill. lux
   shows list-price costs and says so in the UI and the API
-  (`"basis": "list"`). A host's own volumes are priced (block storage,
-  below); S3, snapshots and data transfer are not. A cost plugin could
-  report them. The [network measurements](telemetry.md#network-transfer)
-  classify accepted L3 traffic and count public IPv4 attachments, not
-  invoice-accurate transfer or allocated/unallocated public-IP costs.
+  (`"basis": "list"`). A host's own volumes, its public IPv4 addresses and
+  its and its Runs' network transfer are priced (below); S3 and snapshots
+  are not. A cost plugin could report them.
 - **EBS** (block storage): the Pricing API, `GetProducts` on `AmazonEC2`,
   filtered by `regionCode` and `volumeApiName` (the volume type). Three
   products answer: productFamily `Storage` (unit `GB-Mo`), `System
@@ -468,6 +643,21 @@ families are final for every placement.
   A type not in the table, or a billed dimension without a price, is
   missing, never zero. For a gp3 100 GiB disk at 3000 IOPS and 125 MiB/s in
   eu-north-1: 100 × 0.0836 = 8.36 USD a month, 0.011452055 an hour.
+
+- **Data transfer**: the Pricing API, `GetProducts` on `AWSDataTransfer`,
+  filtered by `fromRegionCode` and `transferType`: `AWS Outbound` (the
+  product to `External`; tiered, its first non-zero tier is taken),
+  `IntraRegion` (one price, charged on each side) and `InterRegion
+  Outbound` (one product per destination; those to `AWS Region` with a
+  `toRegionCode` are kept, Local Zones, Wavelength and edge locations are
+  not). The answer for eu-north-1 had 37 destination regions; to
+  CloudFront (an edge location) is $0. Cached per (region, class,
+  direction) in `price_cache` (`os = 'TRANSFER'`) with the block-storage
+  refresh and stale-copy fallback.
+- **Public IPv4**: `GetProducts` on `AmazonVPC`, `regionCode` and group
+  `VPCPublicIPv4Address`, the product whose usage type ends in
+  `PublicIPv4:InUseAddress` (unit `Hrs`). Cached with the transfer prices
+  (`public-ipv4:hour`).
 
 **IAM** luxd needs on top of what it has today (`ec2:RunInstances`,
 `ec2:TerminateInstances`, `ec2:DescribeInstances`, `ec2:CreateTags`):
@@ -1192,7 +1382,8 @@ operators), and also:
 
 **Top N.** With `top=N`, the first group's values are ranked per currency
 (never across currencies) by their total over the range of what `rank`
-counts (`compute`: the host-tied families, `compute` and `block-storage`;
+counts (`compute`: the host-tied families, `compute`, `block-storage`,
+`public-ip` and `data-transfer`;
 `external`: every other family),
 largest first, ties by value (byte order). A value with no such cost ranks
 last. Every value past the N-th is folded into one row per second-group
@@ -1232,8 +1423,8 @@ repeatable-read snapshot with the request's tenant scope; only an operator
 without a tenant scope receives system-wide host allocations.
 
 Amounts in a range come from `cost_hourly`. Grouping by `pool` or `host`
-applies only to the host-tied families (`compute`, `block-storage`). Other
-families appear under `"(none)"`.
+applies only to the host-tied families (`compute`, `block-storage`,
+`public-ip`, `data-transfer`). Other families appear under `"(none)"`.
 
 Without a label filter, the response also has `unallocated: [{family,
 currency, amount}]` and, grouped by `host`, `hosts: [{hostId, family,
@@ -1296,7 +1487,8 @@ host). A platform host's cost is the operators'. The host's tenant reads
 ### `GET /v1/pools/{name}/cost`
 
 A pool's cost is its machines': `totals`, `series` and `topRuns` count
-only the host-tied families (`compute`, `block-storage`) of Runs on its
+only the host-tied families (`compute`, `block-storage`, `public-ip`,
+`data-transfer`) of Runs on its
 hosts. AI and other external families, which belong to no host, are not a
 pool's cost (before, other families of Runs bound to the pool were
 counted). Its host time per family, `idle: [{family, currency, amount}]`,
@@ -1385,6 +1577,8 @@ see.
     placement without block storage (a static host, volumes not known) has
     an en dash there, not 0;
   - pending: an empty state, "No cost reported yet", never `$0.00`.
+  - unpriced network transfer (`unpriced`): a callout naming each class,
+    its bytes and why it is not priced, since it is in no total.
   - Not built: reserved vs used efficiency (the API has no such field).
 - **Runs list:** a Cost column from `cost` on `GET /v1/runs`, as `lux ls`
   shows it (`CostFigure`): the total for one currency, `multi` for several,
@@ -1556,6 +1750,18 @@ operators can delete them with `luxd admin costs forget-source <name>`
 9. **Plugin list via environment.** The other settings map one-to-one to
    `LUX_*` variables. Is a JSON `LUX_COSTS_PLUGINS` acceptable for the
    array?
+
+10. **Inbound transfer boundary.** *Closed.* Inbound is measured ahead of
+    every local filter (`rxDelivered`, nftables priority -300 on the
+    forward and input hooks) and priced from it; `rx` after the filters
+    stays as what the Run actually received
+    ([telemetry](telemetry.md#network-transfer)).
+11. **Tiered internet pricing.** The first non-zero tier is a list-price
+    upper bound for most accounts. Should lux track an account's monthly
+    volume and pick the tier, or leave that to invoice reconciliation?
+12. **NAT gateways and VPC endpoints.** Traffic through them is classed by
+    its peer, not by the path: NAT processing ($/GB) and endpoint charges
+    are not priced. Does any deployment route Runs through either?
 
 Decided:
 

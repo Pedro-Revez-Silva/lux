@@ -399,24 +399,28 @@ func procRollup() (cols, aggs []string) {
 	return cols, aggs
 }
 
+// lastNetClasses folds the per-class counters (cumulative, and written
+// only on the samples where they changed) to the bucket's latest.
+const lastNetClasses = "(array_agg(net_classes ORDER BY at DESC) FILTER (WHERE net_classes IS NOT NULL))[1]"
+
 var (
 	procNames, procAggs = procRollup()
 	// The filesystem's free bytes are a level (the bucket's mean); its
 	// capacity and headroom are fixed per runner start (the maximum).
 	hostRollup = rollup{table: "host_samples", keys: []string{"host_id"},
 		cols: append([]string{"cpu_seconds", "mem_bytes", "disk_bytes", "disk_free", "fs_capacity", "disk_headroom",
-			"placements", "alloc_cpus", "alloc_mem"}, procNames...),
+			"placements", "alloc_cpus", "alloc_mem", "net_classes"}, procNames...),
 		aggs: append([]string{"max(cpu_seconds)", "avg(mem_bytes)::bigint", "avg(disk_bytes)::bigint",
 			"avg(disk_free)::bigint", "max(fs_capacity)", "max(disk_headroom)",
-			"round(avg(placements))::int", "avg(alloc_cpus)", "avg(alloc_mem)::bigint"}, procAggs...),
+			"round(avg(placements))::int", "avg(alloc_cpus)", "avg(alloc_mem)::bigint", lastNetClasses}, procAggs...),
 		match: "d.host_id = s.host_id"}
 	// peak_cpu_cores is a peak and the stall totals counters: each the
 	// bucket's maximum, so a burst inside a minute or hour is kept.
 	placementRollup = rollup{table: "placement_samples", keys: []string{"run_id", "epoch", "tenant_id"},
 		cols: []string{"cpu_seconds", "mem_bytes", "disk_bytes", "pids", "net_rx", "net_tx",
-			"peak_cpu_cores", "cpu_stall", "mem_stall", "mem_full_stall", "io_stall", "io_full_stall"},
+			"peak_cpu_cores", "cpu_stall", "mem_stall", "mem_full_stall", "io_stall", "io_full_stall", "net_classes"},
 		aggs: []string{"max(cpu_seconds)", "avg(mem_bytes)::bigint", "max(disk_bytes)", "round(avg(pids))::int", "max(net_rx)", "max(net_tx)",
-			"max(peak_cpu_cores)", "max(cpu_stall)", "max(mem_stall)", "max(mem_full_stall)", "max(io_stall)", "max(io_full_stall)"},
+			"max(peak_cpu_cores)", "max(cpu_stall)", "max(mem_stall)", "max(mem_full_stall)", "max(io_stall)", "max(io_full_stall)", lastNetClasses},
 		match: "d.run_id = s.run_id AND d.epoch = s.epoch"}
 	// Runs and hosts by state are the bucket's last sample; stored bytes
 	// are levels.

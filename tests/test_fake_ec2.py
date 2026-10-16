@@ -86,8 +86,8 @@ def test_describe_volumes_answers_the_filtered_instances_root_disk(ec2):
     assert describe_volumes(ec2, "i-aaa")[0] == 403
 
 
-def get_products(ec2, filters: dict, token: str = "") -> dict:
-    body = {"ServiceCode": "AmazonEC2", "Filters": [{"Type": "TERM_MATCH", "Field": k, "Value": v} for k, v in filters.items()]}
+def get_products(ec2, filters: dict, token: str = "", service: str = "AmazonEC2") -> dict:
+    body = {"ServiceCode": service, "Filters": [{"Type": "TERM_MATCH", "Field": k, "Value": v} for k, v in filters.items()]}
     if token:
         body["NextToken"] = token
     req = urllib.request.Request(ec2.url, data=json.dumps(body).encode(),
@@ -109,6 +109,34 @@ def test_get_products_pages_the_real_gp3_answer(ec2):
             break
     assert sorted(units) == [("GB-Mo", "0.0836000000"), ("GiBps-mo", "42.8032000000"), ("IOPS-Mo", "0.0052000000")]
     assert get_products(ec2, {"regionCode": "eu-north-1", "volumeApiName": "io2"})["PriceList"] == []
+
+
+def all_products(ec2, filters: dict, service: str) -> list[dict]:
+    out, token = [], ""
+    while True:
+        page = get_products(ec2, filters, token, service)
+        out += [json.loads(p) for p in page["PriceList"]]
+        token = page.get("NextToken", "")
+        if not token:
+            return out
+
+
+def test_get_products_answers_the_real_transfer_and_public_ip_products(ec2):
+    def usd(product, unit):
+        return {d["pricePerUnit"]["USD"] for t in product["terms"]["OnDemand"].values() for d in t["priceDimensions"].values()
+                if d["unit"] == unit and d["beginRange"] == "0"}
+    [out] = [p for p in all_products(ec2, {"fromRegionCode": "eu-north-1", "transferType": "AWS Outbound"}, "AWSDataTransfer")
+             if p["product"]["attributes"]["toLocation"] == "External"]
+    assert usd(out, "GB") == {"0.0900000000"}
+    [intra] = all_products(ec2, {"fromRegionCode": "eu-north-1", "transferType": "IntraRegion"}, "AWSDataTransfer")
+    assert usd(intra, "GB") == {"0.0100000000"}
+    inter = all_products(ec2, {"fromRegionCode": "eu-north-1", "transferType": "InterRegion Outbound"}, "AWSDataTransfer")
+    regions = {p["product"]["attributes"]["toRegionCode"] for p in inter if p["product"]["attributes"]["toLocationType"] == "AWS Region"}
+    assert len(inter) > 100 and "eu-west-1" in regions, (len(inter), sorted(regions))
+    ips = all_products(ec2, {"regionCode": "eu-north-1", "group": "VPCPublicIPv4Address"}, "AmazonVPC")
+    [in_use] = [p for p in ips if p["product"]["attributes"]["usagetype"].endswith("PublicIPv4:InUseAddress")]
+    assert usd(in_use, "Hrs") == {"0.0050000000"}
+    assert all_products(ec2, {"fromRegionCode": "us-east-1", "transferType": "IntraRegion"}, "AWSDataTransfer") == []
 
 
 def call(ec2, **form) -> tuple[int, str]:

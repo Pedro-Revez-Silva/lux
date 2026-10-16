@@ -207,6 +207,11 @@ type ipRanges struct {
 // Only same-region S3 and DynamoDB traffic is classified as free service traffic.
 var freeRegionalServices = map[string]bool{"S3": true, "DYNAMODB": true}
 
+// freeGlobalServices are the GLOBAL services EC2 sends to at no charge:
+// CloudFront (origin fetches from AWS origins are free). Every other GLOBAL
+// prefix (Route 53, Global Accelerator, AMAZON) bills as internet out.
+var freeGlobalServices = map[string]bool{"CLOUDFRONT": true}
+
 func (p *Provider) Prefixes(ctx context.Context, template json.RawMessage) (server.ProviderPrefixes, error) {
 	t, err := parse(template)
 	if err != nil {
@@ -227,6 +232,8 @@ func (p *Provider) Prefixes(ctx context.Context, template json.RawMessage) (serv
 	for _, r := range append(slices.Clone(p.prefixCatalog.Prefixes), p.prefixCatalog.IPv6Prefixes...) {
 		cidr := r.cidr()
 		switch {
+		case r.Region == "GLOBAL" && freeGlobalServices[r.Service]:
+			out.ProviderGlobalFree = append(out.ProviderGlobalFree, cidr)
 		case r.Region == "GLOBAL":
 			out.ProviderGlobal = append(out.ProviderGlobal, cidr)
 		case r.Region != t.Region:
@@ -240,7 +247,14 @@ func (p *Provider) Prefixes(ctx context.Context, template json.RawMessage) (serv
 	for r, list := range out.Provider {
 		out.Provider[r] = uniquePrefixes(list)
 	}
-	out.ProviderGlobal = uniquePrefixes(out.ProviderGlobal)
+	out.ProviderGlobalFree = uniquePrefixes(out.ProviderGlobalFree)
+	// CloudFront's prefixes are repeated under GLOBAL AMAZON too; free wins
+	// (the runner's precedence would pick it anyway; this keeps the lists
+	// apart).
+	out.ProviderGlobal = slices.DeleteFunc(uniquePrefixes(out.ProviderGlobal), func(cidr string) bool {
+		_, free := slices.BinarySearch(out.ProviderGlobalFree, cidr)
+		return free
+	})
 	out.RegionService = uniquePrefixes(out.RegionService)
 	// AWS repeats service prefixes under AMAZON; free classification wins.
 	out.RegionPublic = slices.DeleteFunc(uniquePrefixes(out.RegionPublic), func(cidr string) bool {

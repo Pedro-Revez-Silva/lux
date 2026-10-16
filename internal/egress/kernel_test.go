@@ -445,14 +445,16 @@ type packet struct {
 }
 
 // send evaluates p through its hook's base chains in priority order; with
-// skipCounting, the counting chains (priority 100) are left out. It
-// returns the final verdict.
+// skipCounting, the counting chains (priority 100, and the ingress
+// counters at -300) are left out. A chain's drop ends the evaluation, so
+// a chain at a lower priority sees the packet and one at a higher does
+// not. It returns the final verdict.
 func (k *kernel) send(p packet, skipCounting bool) string {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	var base []string
 	for n, c := range k.st.chains {
-		if c.hook == p.hook && !(skipCounting && c.prio == 100) {
+		if c.hook == p.hook && !(skipCounting && (c.prio == 100 || c.prio == -300)) {
 			base = append(base, n)
 		}
 	}

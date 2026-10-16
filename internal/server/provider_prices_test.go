@@ -23,6 +23,10 @@ type fakePriceProvider struct {
 	blockStorage      map[string]BlockStoragePrice
 	blockStorageErr   error
 	blockStorageCalls []string
+
+	transfer      map[string]DataTransferPrices
+	transferErr   error
+	transferCalls []string
 }
 
 type fakeOnDemandAnswer struct {
@@ -65,6 +69,19 @@ func (p *fakePriceProvider) BlockStorage(_ context.Context, region, kind string)
 	price, ok := p.blockStorage[kind]
 	if !ok {
 		return BlockStoragePrice{}, errors.New("unexpected block storage price request")
+	}
+	return price, nil
+}
+
+// DataTransfer answers transfer[region], or transferErr.
+func (p *fakePriceProvider) DataTransfer(_ context.Context, region string) (DataTransferPrices, error) {
+	p.transferCalls = append(p.transferCalls, region)
+	if p.transferErr != nil {
+		return DataTransferPrices{}, p.transferErr
+	}
+	price, ok := p.transfer[region]
+	if !ok {
+		return DataTransferPrices{}, errors.New("unexpected data transfer price request")
 	}
 	return price, nil
 }

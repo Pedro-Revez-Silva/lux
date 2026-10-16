@@ -23,11 +23,11 @@ export function shows(show: CostShow, family: string): boolean {
   return show === "all" || (show === "compute") === HOST_FAMILIES.includes(family);
 }
 
-/** Which of a split's three sides a family is on: compute, block storage, or what plugins report. */
+/** Which of a split's three sides a family is on: the host (compute, public IPv4, data transfer), its disk, or what plugins report. */
 export type Side = "compute" | "blockStorage" | "external";
 export function sideOf(family: string): Side {
   if (!HOST_FAMILIES.includes(family)) return "external";
-  return family === COMPUTE ? "compute" : "blockStorage";
+  return family === BLOCK_STORAGE ? "blockStorage" : "compute";
 }
 
 /** Whether show leaves a side out: Compute and Block storage under External, External under Compute. */

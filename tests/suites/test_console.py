@@ -1227,7 +1227,9 @@ def test_pool_cost_tab_and_run_placements_with_block_storage(page, env, lux, pri
     except AssertionError as e:
         raise AssertionError(f"{e}: {seen.get('cost')}") from None
     lines = {l["family"]: l for l in cost["lines"]}
-    assert set(lines) == {"compute", "block-storage"}, cost["lines"]
+    # A fake-EC2 host also holds one public IPv4 address, so its Runs carry
+    # the public-ip family next to compute and block storage.
+    assert set(lines) == {"compute", "block-storage", "public-ip"}, cost["lines"]
 
     # The host's hours are refreshed apart from the Run's lines: wait for both families' rows.
     def pool_cost():
@@ -1270,9 +1272,11 @@ def test_pool_cost_tab_and_run_placements_with_block_storage(page, env, lux, pri
         # Cost by host: Host, Up, Compute, Block storage, Total, Unallocated, Utilisation; each family its own figure.
         mine = {h["family"]: h for h in c.get("hosts") or [] if h["hostId"] == host["id"]}
         fam_total = lambda f: str(Decimal(mine[f]["allocated"]) + Decimal(mine[f]["unallocated"]))
+        # Total and Unallocated sum every host-tied family the API returns
+        # (public-ip included); the two named columns stay their own figures.
         want_host = [_dollars(fam_total("compute")), _dollars(fam_total("block-storage")),
-                     _dollars(str(Decimal(fam_total("compute")) + Decimal(fam_total("block-storage")))),
-                     _dollars(str(Decimal(mine["compute"]["unallocated"]) + Decimal(mine["block-storage"]["unallocated"])))]
+                     _dollars(str(sum(Decimal(fam_total(f)) for f in mine))),
+                     _dollars(str(sum(Decimal(mine[f]["unallocated"]) for f in mine)))]
         got_host = row.locator("td").all_inner_texts()[2:6]
         seen["who"] = (got, want, got_host, want_host)
         return (got == want and got_host == want_host) or None
@@ -1282,7 +1286,7 @@ def test_pool_cost_tab_and_run_placements_with_block_storage(page, env, lux, pri
         raise AssertionError(f"{e}: {seen.get('who')}") from None
     cells = row.locator("td").all_inner_texts()
     assert re.fullmatch(r"\d+\.\d h", cells[1]) and re.fullmatch(r"(<1|\d+)%|–", cells[6]), cells
-    assert api["idle"] and {i["family"] for i in api["idle"]} == {"compute", "block-storage"}, api["idle"]
+    assert api["idle"] and {i["family"] for i in api["idle"]} == {"compute", "block-storage", "public-ip"}, api["idle"]
     expect(tab.get_by_text("AI models")).to_have_count(0)
     expect(tab.locator(".callout")).to_have_text("Pool cost is the machines only — instance and disk. AI and other external costs belong to Runs.")
     # A host opens on its Cost tab: its rate periods say which family each is.

@@ -455,6 +455,15 @@ every host, with a TENANT column (--tenant: what that tenant sees).`,
 			if n := h.Network; n != nil {
 				fmt.Fprintf(w, "network:   zone %s, subnets %s, %d public IPv4\n", orDash(n.Zone), orDash(strings.Join(n.SubnetCIDRs, " ")), n.PublicIPv4)
 			}
+			if n := h.StaticNetwork; n != nil {
+				fmt.Fprintf(w, "network:   local %s, zone %s (operator's catalog)\n", orDash(strings.Join(n.Local, " ")), orDash(strings.Join(n.Zone, " ")))
+			}
+			if h.TransferPrices != nil {
+				fmt.Fprintln(w, "transfer prices:")
+				for _, l := range transferPriceLines(h.TransferPrices) {
+					fmt.Fprintln(w, "  "+l)
+				}
+			}
 			if len(h.NetClasses) > 0 {
 				fmt.Fprintln(w, "host traffic:")
 				writeNetClasses(w, h.NetClasses)
@@ -516,8 +525,46 @@ provider. Your own hosts; operators, any host.`,
 	priceCmd.Flags().StringVar(&price.HourlyPrice, "hourly-price", "", "price per hour, a decimal (e.g. 0.40)")
 	priceCmd.Flags().StringVar(&price.Currency, "currency", "", "ISO 4217 currency of --hourly-price (e.g. USD)")
 	priceCmd.Flags().BoolVar(&clearPrice, "clear", false, "remove the host's price")
+	var netLocal, netZone, priceTransfer, pricePublicIP, netCurrency string
+	setCmd := &cobra.Command{
+		Use:   "set <host>",
+		Short: "Set a static host's network catalog and transfer prices",
+		Long: `Set the network catalog and transfer prices of a host that registered
+itself (a static pool's): no provider describes or prices its network.
+
+--network-local and --network-zone list the CIDRs in the host's own zone
+(free) and in its region's other zones. With either, traffic outside them
+is internet; without, it is unknown and never priced.
+
+--price-transfer prices classes per GB (10^9 bytes): internet=0.0010,
+zone=0.01, region-public=0.01, provider:<region>=0.02. zone and
+region-public price both directions, internet and provider outbound only;
+class.rx= or class.tx= sets one direction. --price-public-ip is the host's
+public IPv4 charge per hour (0 or omitted: none). Both need --currency.
+
+Every flag replaces the host's setting: omitted ones are cleared. A host
+its pool's provider launched is refused. Your own hosts; operators, any host.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var body server.HostNetworkSettings
+			if netLocal != "" || netZone != "" {
+				body.Network = &server.StaticNetwork{Local: splitCIDRs(netLocal), Zone: splitCIDRs(netZone)}
+			}
+			prices, err := parseTransferPrices(priceTransfer, pricePublicIP, netCurrency)
+			if err != nil {
+				return err
+			}
+			body.TransferPrices = prices
+			return a.c.Do(ctxOf(cmd), "PUT", "/v1/hosts/"+url.PathEscape(args[0])+"/network", body, nil)
+		},
+	}
+	setCmd.Flags().StringVar(&netLocal, "network-local", "", "CIDRs in the host's own zone, comma-separated")
+	setCmd.Flags().StringVar(&netZone, "network-zone", "", "CIDRs in the region's other zones, comma-separated")
+	setCmd.Flags().StringVar(&priceTransfer, "price-transfer", "", "per-GB prices, class=price[,…]: internet, zone, region-public, provider:<region> (class.rx= / class.tx= for one direction)")
+	setCmd.Flags().StringVar(&pricePublicIP, "price-public-ip", "", "the host's public IPv4 charge per hour")
+	setCmd.Flags().StringVar(&netCurrency, "currency", "", "ISO 4217 currency of the prices (e.g. USD)")
 	events := a.infraEventsCmd("events <host>", "What happened to a host (by id or name), newest first", "/v1/hosts/", nil)
-	cmd.AddCommand(ls, get, drain, priceCmd, events)
+	cmd.AddCommand(ls, get, drain, priceCmd, setCmd, events)
 	return cmd
 }
 
@@ -640,7 +687,8 @@ func counts(m map[string]int) string {
 
 // poolFields are pools set's flags that replace a pool's settings: without
 // any of them, --default only moves the mark.
-var poolFields = []string{"provider", "min", "max", "warm", "scale-down-after", "warm-while-active", "template", "hourly-price", "currency", "shape", "placement"}
+var poolFields = []string{"provider", "min", "max", "warm", "scale-down-after", "warm-while-active", "template", "hourly-price", "currency", "shape", "placement",
+	"price-transfer", "price-public-ip"}
 
 func (a *app) poolsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "pools", Short: "Host pools"}
@@ -705,7 +753,7 @@ name): a tenant's pool and a platform pool may share a name.`,
 		},
 	}
 	var p server.Pool
-	var template, shape string
+	var template, shape, poolTransfer, poolPublicIP string
 	var isDefault, replace, dryRun bool
 	set := &cobra.Command{
 		Use:   "set <name>",
@@ -767,6 +815,11 @@ alone, --default changes only the mark of an existing pool.`,
 			if err := server.ValidPlacement(p.Placement); err != nil {
 				return fmt.Errorf("--placement %q: want spread or pack", p.Placement)
 			}
+			prices, err := parseTransferPrices(poolTransfer, poolPublicIP, p.Currency)
+			if err != nil {
+				return err
+			}
+			p.TransferPrices = prices
 			if marker && !dryRun {
 				// Exactly these two fields: server.Pool would send its
 				// zero settings too, which luxd refuses without provider.
@@ -880,7 +933,9 @@ finds this pool. --platform renames the platform's pool of that name
 	set.Flags().StringVar(&shape, "shape", "", "make it a shaped pool: family=m,arch=arm64,cpus=8,memory=32Gi,disk=160Gi,min-cpus=0.5,default-cpus=2 (every key)")
 	set.Flags().StringVar(&p.Placement, "placement", "", "spread or pack (default: pack for a shaped pool, spread otherwise)")
 	set.Flags().StringVar(&p.HourlyPrice, "hourly-price", "", "static pools: default hourly price of hosts registering into it, a decimal (with --currency); existing hosts keep theirs. Like every flag here, it replaces the pool's: omitted, the pool has no default price")
-	set.Flags().StringVar(&p.Currency, "currency", "", "ISO 4217 currency of --hourly-price (e.g. USD)")
+	set.Flags().StringVar(&p.Currency, "currency", "", "ISO 4217 currency of --hourly-price, --price-transfer and --price-public-ip (e.g. USD)")
+	set.Flags().StringVar(&poolTransfer, "price-transfer", "", "static pools: default per-GB transfer prices of hosts registering into it, class=price[,…] (as lux hosts set)")
+	set.Flags().StringVar(&poolPublicIP, "price-public-ip", "", "static pools: default public IPv4 charge per hour of hosts registering into it")
 	set.Flags().BoolVar(&isDefault, "default", false, "mark it the tenant's default pool, for Runs that name none (--default=false clears it; omitted: unchanged)")
 	set.Flags().BoolVar(&replace, "replace", false, "write even when the set removes template keys, a shape, a placement, a scale-down time, warm-while-active or a price the pool has")
 	set.Flags().BoolVar(&dryRun, "dry-run", false, "print what would change and write nothing")

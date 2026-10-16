@@ -375,7 +375,7 @@ type PoolHostTime struct {
 	At          *time.Time    `json:"at,omitempty"`
 	HostID      string        `json:"hostId,omitempty"`
 	HostName    string        `json:"hostName,omitempty"`
-	Family      string        `json:"family" doc:"A host-tied family: compute or block-storage."`
+	Family      string        `json:"family" doc:"A host-tied family: compute, block-storage, public-ip or data-transfer."`
 	Currency    string        `json:"currency"`
 	Allocated   string        `json:"allocated" doc:"Host time reserved by Runs (their compute cost comes from it)."`
 	Unallocated string        `json:"unallocated" doc:"Host time no Run reserved: idle."`
@@ -385,7 +385,7 @@ type PoolHostTime struct {
 
 // PoolIdle is a pool's unallocated host time of one family and currency.
 type PoolIdle struct {
-	Family   string `json:"family" doc:"A host-tied family: compute or block-storage."`
+	Family   string `json:"family" doc:"A host-tied family: compute, block-storage, public-ip or data-transfer."`
 	Currency string `json:"currency"`
 	Amount   string `json:"amount"`
 }
@@ -411,7 +411,7 @@ type poolCostOutput struct {
 		To         time.Time        `json:"to"`
 		Basis      string           `json:"basis"`
 		Interval   string           `json:"interval"`
-		Totals     []MoneyAmount    `json:"totals" doc:"The Runs' cost of the pool's machines in the range (compute and block storage; never AI or other external families), per currency."`
+		Totals     []MoneyAmount    `json:"totals" doc:"The Runs' cost of the pool's machines in the range (compute, block storage, public IPv4 and data transfer; never AI or other external families), per currency."`
 		Series     []PoolCostPoint  `json:"series" doc:"The same by family and bucket; a bucket without a row is no cost reported, not zero."`
 		Families   []CostFamilyInfo `json:"families,omitempty"`
 		TopRuns    []PoolTopRun     `json:"topRuns" doc:"The costliest Runs by the pool's machines, up to 10 per currency, costliest first."`
@@ -424,13 +424,14 @@ type poolCostOutput struct {
 // poolRunCost is a FROM item c of the Runs' cost_hourly rows on the pools
 // pool (SQL comparing a pool id: "= $1", "= ANY($1)") in [from, to): c.pool,
 // c.hour, c.run_id, c.family, c.currency, c.amount. A pool's cost is its
-// machines': the host-tied families (compute, block storage), by the host
+// machines': the host-tied families (compute, block storage, public IPv4,
+// data transfer), by the host
 // each placement ran on (the row's pool_id). AI and other external families
 // belong to no host and are not a pool's cost.
 func poolRunCost(pool, from, to string) string {
 	return `(SELECT c.pool_id AS pool, c.hour, c.run_id, c.family, c.currency, c.amount FROM cost_hourly c
 			WHERE c.run_id IS NOT NULL AND c.pool_id ` + pool + ` AND c.hour >= ` + from + ` AND c.hour < ` + to + `
-				AND c.family IN ('compute', 'block-storage')) c`
+				AND c.family IN ('compute', 'block-storage', 'public-ip', 'data-transfer')) c`
 }
 
 // poolCost reads cost_hourly by the pool's id: Runs' cost under the

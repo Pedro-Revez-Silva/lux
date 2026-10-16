@@ -49,6 +49,41 @@ func TestNetBaselineResetsAndReadoption(t *testing.T) {
 	check(sample(3, 4), sample(148, 304))
 }
 
+// RxDelivered follows the same baseline rules as Rx and Tx: a reset folds
+// it in, a Welcome floors it, a seed adds it, and it survives a restart.
+func TestNetBaselineRxDelivered(t *testing.T) {
+	d := func(rx, rxd int64) map[string]proto.NetBytes {
+		return map[string]proto.NetBytes{"internet": {Rx: rx, RxDelivered: rxd}}
+	}
+	n := netBaseline{}
+	n.observe(d(10, 50))
+	if got := n.observe(d(2, 7)); !maps.Equal(got, d(12, 57)) {
+		t.Fatalf("after reset: %v", got)
+	}
+	raw, err := json.Marshal(n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n = netBaseline{}
+	if err := json.Unmarshal(raw, &n); err != nil {
+		t.Fatal(err)
+	}
+	n.observe(d(2, 9))
+	n.reconcile(d(12, 100))
+	if got := n.value(); !maps.Equal(got, d(12, 100)) {
+		t.Fatalf("after floor: %v", got)
+	}
+	n.seed(d(0, 5))
+	if got := n.value(); !maps.Equal(got, d(12, 105)) {
+		t.Fatalf("after seed: %v", got)
+	}
+	// A key with only delivered bytes (all of them dropped) is reported.
+	n = netBaseline{}
+	if got := n.observe(d(0, 3)); !maps.Equal(got, d(0, 3)) {
+		t.Fatalf("dropped-only key: %v", got)
+	}
+}
+
 func TestNetWelcomeFloorDoesNotDoubleCount(t *testing.T) {
 	n := netBaseline{}
 	n.observe(map[string]proto.NetBytes{"provider:eu-west-1": {Tx: 100}})

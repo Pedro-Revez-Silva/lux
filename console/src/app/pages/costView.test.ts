@@ -45,12 +45,12 @@ const runFam = (run: string, family: string, currency: string, amount: string): 
 
 test("Show as the summary's repeated family filter: Compute keeps both host families, External excludes both", () => {
   expect(showFamily("all")).toEqual({});
-  expect(showFamily("compute")).toEqual({ family: ["compute", "block-storage"] });
-  expect(showFamily("external")).toEqual({ nofamily: ["compute", "block-storage"] });
+  expect(showFamily("compute")).toEqual({ family: ["compute", "block-storage", "public-ip", "data-transfer"] });
+  expect(showFamily("external")).toEqual({ nofamily: ["compute", "block-storage", "public-ip", "data-transfer"] });
 });
 
 test("shows: Compute counts compute and block storage, External every other family, All every family", () => {
-  for (const f of ["compute", "block-storage"]) {
+  for (const f of ["compute", "block-storage", "public-ip", "data-transfer"]) {
     expect(shows("compute", f)).toBe(true);
     expect(shows("external", f)).toBe(false);
     expect(shows("all", f)).toBe(true);
@@ -60,8 +60,9 @@ test("shows: Compute counts compute and block storage, External every other fami
     expect(shows("external", f)).toBe(true);
     expect(shows("all", f)).toBe(true);
   }
-  expect(HOST_FAMILIES).toEqual(["compute", "block-storage"]);
-  expect(["compute", "block-storage", "ai"].map(sideOf)).toEqual(["compute", "blockStorage", "external"]);
+  expect(HOST_FAMILIES).toEqual(["compute", "block-storage", "public-ip", "data-transfer"]);
+  // Public IPv4 and data transfer are the host's, beside compute; the disk stays apart.
+  expect(["compute", "block-storage", "public-ip", "data-transfer", "ai"].map(sideOf)).toEqual(["compute", "blockStorage", "compute", "compute", "external"]);
 });
 
 test("sideHidden: Block storage hides with Compute under External, and is live under Compute", () => {

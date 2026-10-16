@@ -205,6 +205,28 @@ func TestCostCommand(t *testing.T) {
 	}
 }
 
+// Data-transfer lines are a family like any other; unpriced transfer is
+// listed apart, with its reason, and only when there is some.
+func TestCostCommandTransfer(t *testing.T) {
+	c := fixtureRunCost()
+	c.ByFamily = append(c.ByFamily, server.CostTotal{Family: "data-transfer", DisplayName: "Data transfer", Currency: "USD", Amount: "0.27", Final: "0.27", Estimate: "0"})
+	c.Lines = append(c.Lines, server.CostLine{RunID: "run_1", Source: "compute", Family: "data-transfer", Item: "internet:tx", Amount: "0.27", Currency: "USD",
+		From: costT0, To: costT0.Add(time.Hour), Final: true, Details: map[string]any{"bytes": 3e9}})
+	c.Unpriced = []server.Unpriced{{Class: "unknown", Reason: "unclassified", Rx: 0, Tx: 4 << 30}}
+	f := &fakeLuxd{bodies: map[string]any{"/v1/runs/run_1/cost": c}}
+	out, err := runCLI(t, f, "cost", "run_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lineWith(t, out, "Data", "transfer", "(data-transfer)", "internet:tx", "compute", "0.27", "USD", "final")
+	lineWith(t, out, "unpriced", "network", "transfer")
+	lineWith(t, out, "unknown", "unclassified", "0", "B", "4.0", "GiB")
+	f = &fakeLuxd{bodies: map[string]any{"/v1/runs/run_1/cost": fixtureRunCost()}}
+	if out, _ := runCLI(t, f, "cost", "run_1"); strings.Contains(out, "unpriced") {
+		t.Errorf("unpriced section without unpriced transfer:\n%s", out)
+	}
+}
+
 func TestCostCommandPending(t *testing.T) {
 	f := &fakeLuxd{bodies: map[string]any{"/v1/runs/run_2/cost": server.RunCost{
 		RunID: "run_2", Status: "pending", Basis: "list", Totals: []server.CostTotal{}, ByFamily: []server.CostTotal{},

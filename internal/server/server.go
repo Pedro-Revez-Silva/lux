@@ -199,6 +199,9 @@ type Server struct {
 	// instance type), whatever came of it (market.go).
 	marketMu    sync.Mutex
 	marketTried map[[3]string]time.Time
+	// hostTransferBaselineLogged: hosts whose unpriced transfer hour
+	// (writeHostTransferHour) this process has logged, so each logs once.
+	hostTransferBaselineLogged sync.Map
 }
 
 func New(cfg Config, db *store.Store, blobs *blob.Store, log *slog.Logger) *Server {
@@ -383,6 +386,10 @@ func (s *Server) priceLoop(ctx context.Context) {
 		// starve block storage on every pass.
 		refreshCtx, cancel = context.WithTimeout(ctx, refreshTimeout)
 		s.refreshBlockStorage(refreshCtx)
+		cancel()
+		refreshCtx, cancel = context.WithTimeout(ctx, refreshTimeout)
+		s.refreshTransferPrices(refreshCtx)
+		s.refreshPublicIP(refreshCtx)
 		cancel()
 		wait(ctx, nil, every)
 	}

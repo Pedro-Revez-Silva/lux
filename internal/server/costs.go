@@ -46,6 +46,15 @@ type RunCost struct {
 	ByFamily []CostTotal  `json:"byFamily"`
 	Lines    []CostLine   `json:"lines"`
 	Sources  []CostSource `json:"sources"`
+	Unpriced []Unpriced   `json:"unpriced" doc:"Network transfer no price applies to, so no line counts it: it is not free. Summed over the Run's placements per class and reason."`
+}
+
+// Unpriced is network transfer of one class that is in no line.
+type Unpriced struct {
+	Class  string `json:"class" doc:"The billing class (a netClasses key)."`
+	Reason string `json:"reason" enum:"unclassified,partial-network,no-price" doc:"unclassified: class unknown, off the host's subnets with no provider catalog to classify it. partial-network: the host's network discovery was partial, so none of its billable transfer is priced. no-price: a billable class without a known price (none cached for the host's region yet, an inter-region destination the price list lacks, a static host without that class's price)."`
+	Rx     int64  `json:"rx" doc:"Bytes received, as the provider delivered them."`
+	Tx     int64  `json:"tx" doc:"Bytes sent."`
 }
 
 type runCostOutput struct {
@@ -54,7 +63,7 @@ type runCostOutput struct {
 
 func (s *Server) runCost(ctx context.Context, in *RunPath) (*runCostOutput, error) {
 	p := principal(ctx)
-	c := &RunCost{RunID: in.ID, Basis: "list", Totals: []CostTotal{}, ByFamily: []CostTotal{}, Lines: []CostLine{}, Sources: []CostSource{}}
+	c := &RunCost{RunID: in.ID, Basis: "list", Totals: []CostTotal{}, ByFamily: []CostTotal{}, Lines: []CostLine{}, Sources: []CostSource{}, Unpriced: []Unpriced{}}
 	err := s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		if err := requireRun(ctx, tx, in.ID); err != nil {
 			return err
@@ -100,6 +109,16 @@ func (s *Server) runCost(ctx context.Context, in *RunPath) (*runCostOutput, erro
 			return err
 		}
 		c.Sources, err = pgx.CollectRows(rows, pgx.RowToStructByPos[CostSource])
+		if err != nil {
+			return err
+		}
+		rows, err = tx.Query(ctx, `SELECT u->>'class', u->>'reason', sum((u->>'rx')::bigint)::bigint, sum((u->>'tx')::bigint)::bigint
+			FROM cost_transfer_snapshots s, jsonb_array_elements(s.unpriced) u
+			WHERE s.run_id = $1 GROUP BY 1, 2 ORDER BY 1, 2`, in.ID)
+		if err != nil {
+			return err
+		}
+		c.Unpriced, err = pgx.CollectRows(rows, pgx.RowToStructByPos[Unpriced])
 		return err
 	})
 	if err != nil {
@@ -218,6 +237,10 @@ func (f costFamilies) lookup(family string) (string, string) {
 		return "Compute", ""
 	case familyBlockStorage:
 		return "Block storage", ""
+	case familyDataTransfer:
+		return "Data transfer", ""
+	case familyPublicIP:
+		return "Public IPv4", ""
 	}
 	d := f[family]
 	return d.name, d.color
@@ -230,7 +253,7 @@ func (s *Server) costFamilyMetadata() costFamilies {
 		p.mu.RLock()
 		if p.usable {
 			for family, d := range p.desc.Families {
-				if family == familyCompute || family == familyBlockStorage {
+				if family == familyCompute || family == familyBlockStorage || family == familyDataTransfer || family == familyPublicIP {
 					continue
 				}
 				if first, ok := families[family]; ok {

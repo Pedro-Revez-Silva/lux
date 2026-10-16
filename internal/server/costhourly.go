@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -340,16 +342,17 @@ func (s *Server) updateHostHours(ctx context.Context) error {
 	return nil
 }
 
-// writeHostHour rebuilds a host's rows for one hour, per host-tied family:
+// writeHostHour rebuilds a host's rows for one hour, per shared family:
 // allocated and unallocated from that family's rate periods. Only compute's
-// missing time is tracked as gaps (and retried); a block-storage period
-// opens over the whole billed window and rewinds the host's cursor itself
-// (openBlockStorageRate), so its missing time needs no retry of its own.
+// missing time is tracked as gaps (and retried); a block-storage or the
+// first public-ip period opens over the whole billed window and rewinds the
+// host's cursor itself (openBlockStorageRate, syncPublicIPRate), so their
+// missing time needs no retry of its own.
 func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, to time.Time, provisioned, registered, terminated *time.Time) error {
 	if _, err := tx.Exec(ctx, `DELETE FROM cost_hourly WHERE host_id = $1 AND run_id IS NULL AND hour = $2`, id, hour); err != nil {
 		return err
 	}
-	for _, family := range hostFamilies {
+	for _, family := range sharedFamilies {
 		in, err := loadHostCompute(ctx, tx, id, family, hour, to)
 		if err != nil {
 			return err
@@ -367,7 +370,59 @@ func (s *Server) writeHostHour(ctx context.Context, tx pgx.Tx, id string, hour, 
 			return err
 		}
 	}
-	return nil
+	return s.writeHostTransferHour(ctx, tx, id, hour)
+}
+
+// writeHostTransferHour writes the unallocated data-transfer row of a
+// host's own traffic in hour (the runner's link to luxd, pulls, uploads;
+// never a Run's): its counters' growth from the last sample before the
+// hour to the last within it, at the host's prices. With no earlier
+// sample, a host registered in this hour or the one before measures from
+// zero: its counters start at boot, about when it registered, and its
+// first sample may land in the hour after. Any other host's growth is
+// unknown (the counters ran since before luxd sampled them, or the earlier
+// samples are past retention), so the hour gets no row. No price, or
+// nothing billable: no row.
+func (s *Server) writeHostTransferHour(ctx context.Context, tx pgx.Tx, id string, hour time.Time) error {
+	var last, before map[string]proto.NetBytes
+	var fresh bool
+	// The last sample before the hour: one backward scan of the primary key
+	// (host_id, res, at) per resolution, not a sort of the host's history.
+	err := tx.QueryRow(ctx, `SELECT
+			(SELECT net_classes FROM host_samples WHERE host_id = $1 AND net_classes IS NOT NULL AND at >= $2 AND at < $3 ORDER BY at DESC, res LIMIT 1),
+			(SELECT x.net_classes FROM unnest('{0,60,3600}'::int[]) r(res),
+				LATERAL (SELECT at, net_classes FROM host_samples
+					WHERE host_id = $1 AND res = r.res AND at < $2 AND net_classes IS NOT NULL ORDER BY at DESC LIMIT 1) x
+				ORDER BY x.at DESC, r.res LIMIT 1),
+			coalesce((SELECT date_trunc('hour', registered_at, 'UTC') >= $2::timestamptz - interval '1 hour' FROM hosts WHERE id = $1), false)`,
+		id, hour, hour.Add(time.Hour)).Scan(&last, &before, &fresh)
+	if err != nil || last == nil {
+		return err
+	}
+	if before == nil && !fresh {
+		if _, logged := s.hostTransferBaselineLogged.LoadOrStore(id, struct{}{}); !logged {
+			s.log.Info("costs: host transfer hour not priced: no earlier sample to measure it from", "host", id, "hour", hour)
+		}
+		return nil
+	}
+	v := transferSnapshot{hostID: id}
+	if err := tx.QueryRow(ctx, `SELECT h.provision_requested_at IS NOT NULL AND coalesce(pl.provider, '') <> 'static', coalesce(pl.provider, ''),
+			coalesce(h.launch_template->>'region', ''), coalesce((h.network->>'partial')::boolean, false)
+		FROM hosts h LEFT JOIN pools pl ON pl.id = h.pool_id WHERE h.id = $1`, id).Scan(&v.providerHost, &v.provider, &v.region, &v.partial); err != nil {
+		return err
+	}
+	prices, err := placementTransferPrices(ctx, tx, &v)
+	if err != nil || prices == nil {
+		return err
+	}
+	_, _, amount := priceTransfer(netGrowth(before, last), prices, v.partial)
+	if amount.Sign() == 0 {
+		return nil
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO cost_hourly (hour, source, family, currency, host_id, pool_id, allocated, unallocated)
+		SELECT $1, 'compute', $2, $3, id, pool_id, 0, $4::numeric FROM hosts WHERE id = $5`,
+		hour, familyDataTransfer, prices.Currency, moneyString(amount), id)
+	return err
 }
 
 // writeHostHourGaps records an hour's unpriced compute intervals. They stay

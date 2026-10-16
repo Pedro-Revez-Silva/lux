@@ -1,6 +1,6 @@
 import { useMemo } from "react";
-import { Card, ColorKey, compareMoney, CostStatusBadge, EmptyState, familyColor, familyDisplay, formatDuration, formatTimestamp, KeyValue, ListPriceNote, meterText, Money, MoneyList, Table, Tooltip, type Column, RelativeTime } from "@lux/design-system";
-import { api, isRunActive, useQuery, type CostLine, type CostTotal, type Run, type RunCost as RunCostData } from "../../api/index.ts";
+import { Callout, Card, ColorKey, compareMoney, CostStatusBadge, EmptyState, familyColor, familyDisplay, formatBytes, formatDuration, formatTimestamp, KeyValue, ListPriceNote, meterText, Money, MoneyList, Table, Tooltip, type Column, RelativeTime } from "@lux/design-system";
+import { api, isRunActive, useQuery, type CostLine, type CostTotal, type Run, type RunCost as RunCostData, type Unpriced } from "../../api/index.ts";
 import { DASH, ErrorBlock, ErrorStrip, HostLink } from "./common.tsx";
 import { placementRows, placementTotals, type PlacementRow } from "./hostCostView.ts";
 
@@ -117,6 +117,7 @@ function CostBody({ cost }: { cost: RunCostData }) {
       </div>
       <KeyValue items={cost.byFamily.map((f) => ({ key: <Family family={f.family ?? ""} families={families} />, value: <FamilyAmount total={f} />, mono: true }))} />
       <Table columns={cols} rows={rows} rowKey={(l) => `${l.source}:${l.item}:${l.currency}`} dense />
+      {cost.unpriced && cost.unpriced.length > 0 && <UnpricedTransfer rows={cost.unpriced} />}
       <div className="cost-sources muted">
         {cost.sources.map((s) => (
           <span key={s.source}>
@@ -125,6 +126,27 @@ function CostBody({ cost }: { cost: RunCostData }) {
         ))}
       </div>
     </div>
+  );
+}
+
+const UNPRICED_REASON: Record<string, string> = {
+  unclassified: "no provider catalog to classify it",
+  "partial-network": "the host's network discovery was partial",
+  "no-price": "no price known for it",
+};
+
+/** Network transfer in no line: absence is not zero, so it is named. */
+function UnpricedTransfer({ rows }: { rows: Unpriced[] }) {
+  return (
+    <Callout className="cost-unpriced">
+      Network transfer not priced, so not in the total (it is not free):{" "}
+      {rows.map((u, i) => (
+        <span key={`${u.class}:${u.reason}`} data-unpriced={u.class}>
+          {i > 0 && "; "}
+          {u.class} {formatBytes(u.rx)} in, {formatBytes(u.tx)} out ({UNPRICED_REASON[u.reason] ?? u.reason})
+        </span>
+      ))}
+    </Callout>
   );
 }
 

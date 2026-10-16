@@ -108,8 +108,9 @@ public IPv4 addresses it holds, which providers bill by the hour), and
 Providers bill bytes by where they go and in which direction, not all
 bytes alike. Per placement (`placements[].netClasses`, summed in the Run's
 `usage.netClasses`) and per host (`netClasses` on `GET /v1/hosts`), lux
-counts cumulative bytes per **class**, `rx` (received from a peer in it)
-and `tx` (sent to one):
+counts cumulative bytes per **class**, `rx` (received from a peer in it),
+`tx` (sent to one) and `rxDelivered` (received, counted ahead of every
+filter; see below):
 
 | Class | Peer | AWS example |
 | --- | --- | --- |
@@ -118,7 +119,8 @@ and `tx` (sent to one):
 | `region-service` | The provider's free services in the region | S3, DynamoDB in-region |
 | `region-public` | The provider's other public addresses in the region | EC2/Elastic IP public addresses: billed each direction |
 | `provider:<region>` | The provider's addresses in another region, per region | Inter-region, which is priced per destination |
-| `provider-global` | Provider prefixes published with no region | CloudFront, Route 53 (`GLOBAL` in ip-ranges.json) |
+| `provider-global-free` | Provider prefixes with no region whose transfer is free | CloudFront (`GLOBAL`, service `CLOUDFRONT`) |
+| `provider-global` | The other provider prefixes with no region | Route 53, Global Accelerator, `AMAZON` (`GLOBAL`): billed as internet out |
 | `internet` | Anything else, when a provider catalog is known | Internet out |
 | `unknown` | Anything off the host's own subnets with **no** catalog | — |
 
@@ -127,12 +129,26 @@ classify (a host luxd knows no provider for, or a runner whose luxd sent no
 catalog yet). It is never priced.
 
 **What counts.** The runner counts in nftables (`table inet lux`), in base
-chains of their own at priority 100 that only count and accept, after the
-known lux (priority -10) and netavark (priority 0) filters. This measures
-accepted L3 traffic at these hooks, **not invoice-complete transfer**.
-Inbound bytes dropped locally may already be provider-billed; outbound
-bytes counted here may still be dropped by later chains, postrouting or
-network failures. Replies count too. A Run's counters see only forwarded packets, so its traffic to its
+chains of their own that only count and accept: they can never change a
+verdict (the Run's filtering script is byte-identical with and without
+them). Two boundaries:
+
+- `rx` and `tx`: chains at priority 100, after the known lux (priority -10)
+  and netavark (priority 0) filters. They count accepted L3 traffic: what
+  a Run actually exchanged. Outbound bytes counted here may still be
+  dropped by later chains, postrouting or network failures.
+- `rxDelivered`: chains `count_in` (forward hook) and `count_in_host`
+  (input hook) at priority **-300**, ahead of every filter. They count
+  inbound as the provider delivered it to the host, including packets a
+  filter then drops (unsolicited traffic to a restricted Run, a scan the
+  host's firewall refuses). The provider bills those bytes too.
+
+Both exist because they answer different questions: `rx` is what the Run
+received, `rxDelivered` what the host was billed for receiving. **Cost
+uses `rxDelivered`** ([costs](costs.md#data-transfer-built-in)); where it is
+absent (an older runner) or lower than `rx` (a runner upgraded mid-
+placement, whose ingress counter started later), cost uses `rx`, a lower
+bound. Replies count too. A Run's counters see only forwarded packets, so its traffic to its
 own host (its DNS stub, the gateway) and to other containers on the host
 is not counted. The host's own counters (input and output) leave out
 loopback and container bridges: those bytes stay on the host, and a Run's
@@ -145,11 +161,14 @@ most once a day with `If-None-Match`, the last good copy kept on failure;
 `LUX_IPRANGES_URL` overrides it): `local` is the subnets of the host's zone,
 `zone` the rest of its VPC's; in-region `S3` and `DYNAMODB` prefixes are
 `region-service`, other in-region ones `region-public`, every other
-region's `provider:<region>`, `GLOBAL` ones `provider-global`. An address
-in several lists takes the first in that table's order. The lists, their
-source (`ec2-ip-ranges`, or `none` when no catalog could be fetched yet;
-`static`, for operator-configured lists, is reserved and not produced
-yet) and when the catalog was fetched reach the runner in its Welcome; a heartbeat's ack carries their
+region's `provider:<region>`; `GLOBAL` ones `provider-global-free` for
+service `CLOUDFRONT` and `provider-global` otherwise (one extra class rather
+than a service tag in the key, so the counter count grows by one per
+owner, not per service). An address in several lists takes the first in
+that table's order. The lists, their source (`ec2-ip-ranges`, `static` for
+a static host's operator-supplied catalog (`lux hosts set <host>
+--network-local … --network-zone …`), or `none` when no catalog is known)
+and when the catalog was fetched reach the runner in its Welcome; a heartbeat's ack carries their
 version, and a runner holding another fetches `GET /runner/v1/network`. A
 change of lists only refills nftables sets, in one transaction: no counter
 is reset. With no lists from luxd, the runner's own interface subnets are
@@ -173,13 +192,17 @@ between that read and deletion can be lost. A host crash/reboot can lose the
 tail since its last durable report; there is no byte bound without a traffic
 rate bound. Table replacement preserves its snapshot but host traffic between
 snapshot and replacement can be lost. Accounting remains separate from
-filtering. Provider-billable reception would require an additional measurement
-boundary before local drops, with provider-specific exclusions, attribution and
-invoice reconciliation; that boundary is not implemented here.
+filtering. Inbound dropped before priority -300 (a provider's security
+group, an earlier nftables table at a lower priority) never reaches the
+host and is not billed as host transfer either; what reaches the NIC and is
+dropped below the IP layer is not counted.
 
 luxd keeps per-class/direction maxima in `placements.net_classes` and
-`hosts.host_net_classes`. Neither network transfer nor public-IP allocation
-has prices, rate periods, or allocated/unallocated cost families yet.
+`hosts.host_net_classes`, and heartbeat samples carry them when they
+changed (`placement_samples.net_classes`, `host_samples.net_classes`), so
+cost can place transfer in the hours it happened. Prices, the
+`data-transfer` and `public-ip` families and what is not priced:
+[costs](costs.md#data-transfer-built-in).
 
 ### Operational state and launch outcome
 

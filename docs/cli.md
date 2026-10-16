@@ -279,6 +279,9 @@ lux hosts get <host>            # lifecycle, capacity, allocation, live Runs
 lux hosts drain <host> [--force-evict]   # admin: no new Runs; without --force-evict its live Runs finish where they are
 lux hosts price <host> --hourly-price 0.40 --currency USD   # admin: a static host's flat price, from now on
 lux hosts price <host> --clear           # admin: no price, so its Runs get no compute cost from now on
+lux hosts set <host> --network-local 10.1.0.0/24 --network-zone 10.1.0.0/16 \
+  --price-transfer internet=0.0010,zone=0.01 --price-public-ip 0.005 --currency USD
+                                # admin: a static host's network catalog and transfer prices (omitted flags clear)
 lux pools ls                             # DEFAULT: * on the pool Runs naming no pool go to; operators without --tenant: every tenant's, OWNER platform or the tenant
                                          # -o json: each pool's platforms (os/arch) and capabilities.nestedContainers, as lux resume --pool checks them; absent/null when unknown
 lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON] [--shape SHAPE] [--default] [--replace] [--dry-run]

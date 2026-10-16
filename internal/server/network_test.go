@@ -58,7 +58,8 @@ func hostA() HostNetwork {
 func catalogEU(at time.Time) ProviderPrefixes {
 	return ProviderPrefixes{Source: proto.NetSourceEC2, FetchedAt: at,
 		RegionService: []string{"52.218.0.0/17"}, RegionPublic: []string{"52.16.0.0/15"},
-		ProviderGlobal: []string{"13.32.0.0/15"}, Provider: map[string][]string{"us-east-1": {"3.80.0.0/12"}}}
+		ProviderGlobal: []string{"15.177.0.0/18"}, ProviderGlobalFree: []string{"13.32.0.0/15"},
+		Provider: map[string][]string{"us-east-1": {"3.80.0.0/12"}}}
 }
 
 func TestNetworkClassesFromHostAndCatalog(t *testing.T) {
@@ -71,7 +72,7 @@ func TestNetworkClassesFromHostAndCatalog(t *testing.T) {
 		t.Errorf("provenance %q %v", nc.Source, nc.FetchedAt)
 	}
 	if !slices.Equal(nc.RegionService, []string{"52.218.0.0/17"}) || !slices.Equal(nc.RegionPublic, []string{"52.16.0.0/15"}) ||
-		!slices.Equal(nc.ProviderGlobal, []string{"13.32.0.0/15"}) || !slices.Equal(nc.Provider["us-east-1"], []string{"3.80.0.0/12"}) {
+		!slices.Equal(nc.ProviderGlobal, []string{"15.177.0.0/18"}) || !slices.Equal(nc.ProviderGlobalFree, []string{"13.32.0.0/15"}) || !slices.Equal(nc.Provider["us-east-1"], []string{"3.80.0.0/12"}) {
 		t.Errorf("provider lists %+v", nc)
 	}
 	if again := networkClasses(hostA(), catalogEU(at)); again.Version != nc.Version || nc.Version == "" {
@@ -296,11 +297,20 @@ func TestRunnerNetworkEndpoint(t *testing.T) {
 
 // Placement and host classes merge per key and direction by maximum, from
 // heartbeats and exit statuses alike; absent keys are kept; the Run's usage
-// sums its placements; and GET shows them.
+// sums its placements; and GET shows them. A platform host's own traffic,
+// static catalog and transfer prices are shown to operators only, on each
+// of the three read paths; a tenant's own host shows its own.
 func TestHostNetworkTotalsVisibility(t *testing.T) {
 	s := testServer(t)
 	keys := poolFixture(t, s, context.Background())
-	execSQL(t, s, context.Background(), `UPDATE hosts SET host_net_classes='{"internet":{"tx":123}}' WHERE id IN ('hp','ha')`)
+	execSQL(t, s, context.Background(), `UPDATE hosts SET host_net_classes='{"internet":{"tx":123}}',
+		network_static = '{"local":["10.9.0.0/24"]}', transfer_prices = '{"currency":"USD","internet":{"tx":"0.001"}}' WHERE id IN ('hp','ha')`)
+	operatorOnly := func(h Host) bool {
+		return h.NetClasses["internet"].Tx == 123 && h.StaticNetwork != nil && h.TransferPrices != nil
+	}
+	hidden := func(h Host) bool {
+		return h.NetClasses == nil && h.StaticNetwork == nil && h.TransferPrices == nil
+	}
 	for _, c := range []struct {
 		key, query string
 		platform   bool
@@ -341,17 +351,50 @@ func TestHostNetworkTotalsVisibility(t *testing.T) {
 			for _, h := range hosts {
 				if h.ID == "hp" {
 					seen = true
-					if (h.NetClasses["internet"].Tx == 123) != c.platform {
-						t.Fatalf("%s %s leaked/omitted: %v", c.key, path, h.NetClasses)
+					if c.platform && !operatorOnly(h) || !c.platform && !hidden(h) {
+						t.Fatalf("%s %s leaked/omitted: %v %+v %+v", c.key, path, h.NetClasses, h.StaticNetwork, h.TransferPrices)
 					}
 				}
-				if h.ID == "ha" && h.NetClasses["internet"].Tx != 123 {
-					t.Fatal("owner totals missing")
+				if h.ID == "ha" && !operatorOnly(h) {
+					t.Fatalf("owner's own network missing: %v %+v %+v", h.NetClasses, h.StaticNetwork, h.TransferPrices)
 				}
 			}
 			if !seen {
 				t.Fatalf("platform host not found: %s %s", path, raw)
 			}
+		}
+	}
+}
+
+// A platform static pool's default transfer prices and public IPv4 charge
+// are operator-only, like its hosts'; a tenant's own pool shows its own.
+func TestPoolTransferPricesVisibility(t *testing.T) {
+	s := testServer(t)
+	keys := poolFixture(t, s, context.Background())
+	execSQL(t, s, context.Background(), `UPDATE pools SET transfer_prices = '{"currency":"USD","internet":{"tx":"0.001"},"publicIPv4PerHour":"0.004"}'
+		WHERE id IN ('p-shared', 'p-a')`)
+	for _, c := range []struct {
+		key, query string
+		platform   bool
+	}{{"a", "", false}, {"b", "", false}, {"op", "", true}, {"op", "?tenant=a", false}} {
+		var list PoolList
+		if code := getJSON(t, s, keys[c.key], "/v1/pools"+c.query, &list); code != 200 {
+			t.Fatalf("%s: %d", c.key, code)
+		}
+		seen := false
+		for _, pl := range list.Pools {
+			switch {
+			case pl.ID == "p-shared":
+				seen = true
+				if got := pl.TransferPrices != nil; got != c.platform {
+					t.Errorf("%s%s: platform pool transferPrices %+v, want shown %v", c.key, c.query, pl.TransferPrices, c.platform)
+				}
+			case pl.ID == "p-a" && (pl.TransferPrices == nil || pl.TransferPrices.PublicIPv4PerHour != "0.004"):
+				t.Errorf("%s%s: own pool transferPrices %+v", c.key, c.query, pl.TransferPrices)
+			}
+		}
+		if !seen {
+			t.Fatalf("%s%s: platform pool not listed", c.key, c.query)
 		}
 	}
 }
@@ -467,6 +510,8 @@ func TestNetMaxFunction(t *testing.T) {
 		{`null`, `{"zone": {"rx": 1, "tx": 2}}`, `{"zone": {"rx": 1, "tx": 2}}`},
 		{`{"zone": {"rx": 1, "tx": 2}}`, `null`, `{"zone": {"rx": 1, "tx": 2}}`},
 		{`{"zone": {"rx": 9000000000, "tx": 0}}`, `{}`, `{"zone": {"rx": 9000000000, "tx": 0}}`},
+		{`{"internet": {"rx": 1, "tx": 0, "rxDelivered": 7}}`, `{"internet": {"rx": 2, "tx": 0, "rxDelivered": 5}}`, `{"internet": {"rx": 2, "tx": 0, "rxDelivered": 7}}`},
+		{`{"internet": {"rx": 1, "tx": 0}}`, `{"internet": {"rx": 0, "tx": 0, "rxDelivered": 4}}`, `{"internet": {"rx": 1, "tx": 0, "rxDelivered": 4}}`},
 	}
 	for _, c := range cases {
 		var got string

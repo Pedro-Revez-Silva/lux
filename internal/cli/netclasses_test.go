@@ -25,3 +25,12 @@ func TestWriteNetClassesOrderAndUnknown(t *testing.T) {
 		t.Errorf("unknown not marked unclassified:\n%s", b.String())
 	}
 }
+
+func TestWriteNetClassesDelivered(t *testing.T) {
+	var b strings.Builder
+	writeNetClasses(&b, map[string]proto.NetBytes{"internet": {Rx: 1000, RxDelivered: 3000}, "zone": {Rx: 5, RxDelivered: 5}})
+	lines := strings.Split(strings.TrimSpace(b.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[1], "delivered") || strings.Contains(lines[0], "delivered") {
+		t.Errorf("delivered shown only where it exceeds rx:\n%s", b.String())
+	}
+}

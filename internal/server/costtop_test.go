@@ -129,7 +129,7 @@ func TestCostSummaryTop(t *testing.T) {
 	for _, q := range []string{
 		"&top=3", "&group=run&rank=compute",
 		"&group=run&family=compute&nofamily=compute", "&group=run&family=ai&nofamily=compute",
-		"&group=run&top=3&family=ai&rank=compute", "&group=run&top=3&nofamily=compute&nofamily=block-storage&rank=compute",
+		"&group=run&top=3&family=ai&rank=compute", "&group=run&top=3&nofamily=compute&nofamily=block-storage&nofamily=data-transfer&nofamily=public-ip&rank=compute",
 		"&group=run&top=3&family=compute&rank=external",
 	} {
 		if code := getJSON(t, s, keys["t1"], costPath(q), &got); code != http.StatusBadRequest {
@@ -248,8 +248,11 @@ func TestCostRankCountsNone(t *testing.T) {
 		{"compute", []string{"ai", "storage"}, nil, true},
 		{"compute", nil, []string{"compute"}, false},
 		{"compute", nil, []string{"block-storage"}, false},
-		{"compute", nil, []string{"compute", "block-storage"}, true},
-		{"compute", nil, []string{"block-storage", "ai", "compute"}, true},
+		{"compute", nil, []string{"compute", "block-storage"}, false},
+		{"compute", nil, []string{"compute", "block-storage", "data-transfer", "public-ip"}, true},
+		{"compute", nil, []string{"block-storage", "ai", "public-ip", "data-transfer", "compute"}, true},
+		{"compute", []string{"data-transfer"}, nil, false},
+		{"external", []string{"public-ip", "data-transfer"}, nil, true},
 		{"external", nil, nil, false},
 		{"external", []string{"compute"}, nil, true},
 		{"external", []string{"block-storage"}, nil, true},
@@ -293,7 +296,7 @@ func TestCostSummaryRankComputeCountsBlockStorage(t *testing.T) {
 		t.Errorf("rank=external runs %v", r)
 	}
 	for _, q := range []string{
-		"&group=run&top=3&nofamily=compute&nofamily=block-storage&rank=compute",
+		"&group=run&top=3&nofamily=compute&nofamily=block-storage&nofamily=data-transfer&nofamily=public-ip&rank=compute",
 		"&group=run&top=3&family=ai&family=storage&rank=compute",
 		"&group=run&top=3&family=compute&family=block-storage&rank=external",
 		"&group=run&top=3&family=block-storage&rank=external",

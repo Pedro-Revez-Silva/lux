@@ -22,7 +22,7 @@ type costSummaryInput struct {
 	NoFamily []string `query:"nofamily,explode" doc:"Every family but these: repeat up to 8 times, each value non-empty."`
 	Interval string   `query:"interval" doc:"hour or day; include a time series."`
 	Top      int      `query:"top" minimum:"1" maximum:"50" doc:"Keep the first group's N values costing the most per currency (ties by value) and fold the rest into one row per second-group value and currency, marked other: true (its value reads (other)), in totals and series; (none) is never folded nor counted, and the second group is kept. Needs a group. The row limit applies to the folded rows. Totals rows then carry runs, and otherCount says how many values were folded."`
-	Rank     string   `query:"rank" enum:"all,compute,external," doc:"With top: all (default), compute (the host-tied families: compute and block-storage), or external (every other family): the cost that ranks the values and that runs counts. Refused when it counts none of the families family/nofamily keep."`
+	Rank     string   `query:"rank" enum:"all,compute,external," doc:"With top: all (default), compute (the host-tied families: compute, block-storage, public-ip and data-transfer), or external (every other family): the cost that ranks the values and that runs counts. Refused when it counts none of the families family/nofamily keep."`
 	Runs     bool     `query:"runs" doc:"Without top: totals rows carry runs too (with top they always do)."`
 }
 
@@ -116,12 +116,12 @@ type CostSummaryRow struct {
 	Amount   string            `json:"amount"`
 	Runs     *int              `json:"runs,omitempty" doc:"With top or runs, on totals: the Runs with cost (that rank counts, with top) under this row's first-group value, across the second group."`
 	Other    bool              `json:"other,omitempty" doc:"With top: the first-group value is the fold of every value past the top N, not a value of its own (a real value may also read (other))."`
-	Family   string            `json:"family,omitempty" doc:"On unallocated rows: the host-tied family (compute or block-storage)."`
+	Family   string            `json:"family,omitempty" doc:"On unallocated rows: the host-tied family (compute, block-storage, public-ip or data-transfer)."`
 }
 
 type HostAllocation struct {
 	HostID      string `json:"hostId"`
-	Family      string `json:"family" doc:"A host-tied family: compute or block-storage."`
+	Family      string `json:"family" doc:"A host-tied family: compute, block-storage, public-ip or data-transfer."`
 	Currency    string `json:"currency"`
 	Allocated   string `json:"allocated"`
 	Unallocated string `json:"unallocated"`
@@ -672,13 +672,13 @@ type hostCostInput struct {
 }
 type hostCostHour struct {
 	Hour        time.Time `json:"hour"`
-	Family      string    `json:"family" doc:"A host-tied family: compute or block-storage."`
+	Family      string    `json:"family" doc:"A host-tied family: compute, block-storage, public-ip or data-transfer."`
 	Currency    string    `json:"currency"`
 	Allocated   string    `json:"allocated"`
 	Unallocated *string   `json:"unallocated,omitempty" doc:"Operators, and the tenant owning the host's pool; absent for a tenant on a platform pool's host."`
 }
 type hostCostRate struct {
-	Family   string         `json:"family" doc:"A host-tied family: compute or block-storage."`
+	Family   string         `json:"family" doc:"A host-tied family: compute, block-storage, public-ip or data-transfer."`
 	From     time.Time      `json:"from"`
 	To       *time.Time     `json:"to,omitempty"`
 	PerHour  string         `json:"perHour"`

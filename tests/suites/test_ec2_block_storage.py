@@ -56,7 +56,9 @@ def test_a_launched_hosts_disk_is_its_runs_block_storage(env, lux, operator, pri
         return c if c["status"] == "final" else None
     cost = wait_until(final_cost, 120, 1, "the Run's cost never became final")
     by_family = {line["family"]: line for line in cost["lines"]}
-    assert set(by_family) == {"compute", "block-storage"}, cost["lines"]
+    # A fake-EC2 host holds one public IPv4 address, so its Runs also carry
+    # the public-ip family (shared like compute and block storage).
+    assert set(by_family) == {"compute", "block-storage", "public-ip"}, cost["lines"]
     bs, compute = by_family["block-storage"], by_family["compute"]
     assert bs["source"] == "compute" and bs["item"] == "gp3:100GiB" and bs["final"], bs
     [p] = bs["details"]["placements"]
@@ -68,7 +70,7 @@ def test_a_launched_hosts_disk_is_its_runs_block_storage(env, lux, operator, pri
     assert abs(Decimal(bs["amount"]) - expected) <= Decimal("0.000000002"), (bs["amount"], expected)
     assert Decimal(bs["amount"]) > 0
     families = {f["family"]: f.get("displayName") for f in cost["byFamily"]}
-    assert families == {"compute": "Compute", "block-storage": "Block storage"}, cost["byFamily"]
+    assert families == {"compute": "Compute", "block-storage": "Block storage", "public-ip": "Public IPv4"}, cost["byFamily"]
     # lux cost names the family as luxd does.
     assert "Block storage (block-storage)" in lux.run("cost", run_id).stdout
 

@@ -30,7 +30,8 @@ import (
 // provenance) does.
 func networkClasses(n HostNetwork, p ProviderPrefixes) proto.NetworkClasses {
 	nc := proto.NetworkClasses{Source: cmp.Or(p.Source, proto.NetSourceNone),
-		RegionService: p.RegionService, RegionPublic: p.RegionPublic, ProviderGlobal: p.ProviderGlobal, Provider: p.Provider}
+		RegionService: p.RegionService, RegionPublic: p.RegionPublic, ProviderGlobal: p.ProviderGlobal,
+		ProviderGlobalFree: p.ProviderGlobalFree, Provider: p.Provider}
 	if !p.FetchedAt.IsZero() {
 		at := p.FetchedAt.UTC()
 		nc.FetchedAt = &at
@@ -51,10 +52,16 @@ func networkClasses(n HostNetwork, p ProviderPrefixes) proto.NetworkClasses {
 	}
 	slices.Sort(nc.Local)
 	slices.Sort(nc.Zone)
+	nc.Version = netClassesVersion(nc)
+	return nc
+}
+
+// netClassesVersion hashes nc's lists and provenance (not its Version).
+func netClassesVersion(nc proto.NetworkClasses) string {
+	nc.Version = ""
 	raw, _ := json.Marshal(nc)
 	sum := sha256.Sum256(raw)
-	nc.Version = hex.EncodeToString(sum[:12])
-	return nc
+	return hex.EncodeToString(sum[:12])
 }
 
 // recordNetwork asks each provider, once per region, for the network of
@@ -120,7 +127,7 @@ func (s *Server) recordNetwork(ctx context.Context) {
 				if !ok {
 					continue
 				}
-				if err := s.storeNetworkRefresh(ctx, h.ID, n, prefixes); err != nil && ctx.Err() == nil {
+				if err := s.storeNetworkRefresh(ctx, h.ID, h.Provider, h.Region, n, prefixes); err != nil && ctx.Err() == nil {
 					s.log.Warn("network: store", "host", h.ID, "err", err)
 				}
 			}
@@ -128,8 +135,15 @@ func (s *Server) recordNetwork(ctx context.Context) {
 	}
 }
 
-func (s *Server) storeNetworkRefresh(ctx context.Context, hostID string, n HostNetwork, prefixes ProviderPrefixes) error {
-	return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+// storeNetworkRefresh writes a host's network and classes when either
+// changed. A changed public IPv4 count opens a new public-ip period at the
+// region's cached price; a host's first is openPublicIP's, from when its
+// addresses were first recorded here (hosts.public_ip_from) if that was
+// after it registered.
+func (s *Server) storeNetworkRefresh(ctx context.Context, hostID, provider, region string, n HostNetwork, prefixes ProviderPrefixes) error {
+	var first bool
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		first = false
 		var old *HostNetwork
 		var previous *proto.NetworkClasses
 		// The stored catalog is only needed to stand in for a failed prefix fetch.
@@ -147,16 +161,50 @@ func (s *Server) storeNetworkRefresh(ctx context.Context, hostID string, n HostN
 			prefixes = ProviderPrefixes{}
 		case prefixes.Source == "" && previous != nil && previous.Catalog():
 			prefixes.Source, prefixes.RegionService, prefixes.RegionPublic = previous.Source, previous.RegionService, previous.RegionPublic
-			prefixes.ProviderGlobal, prefixes.Provider = previous.ProviderGlobal, previous.Provider
+			prefixes.ProviderGlobal, prefixes.ProviderGlobalFree, prefixes.Provider = previous.ProviderGlobal, previous.ProviderGlobalFree, previous.Provider
 			if previous.FetchedAt != nil {
 				prefixes.FetchedAt = *previous.FetchedAt
 			}
 		}
 		n.SubnetCIDRs, n.VPCSubnets = nonNil(n.SubnetCIDRs), nonNil(n.VPCSubnets)
 		nc := networkClasses(n, prefixes)
-		_, err := tx.Exec(ctx, `UPDATE hosts SET network=$2, net_classes=$3 WHERE id=$1 AND (network IS DISTINCT FROM $2::jsonb OR net_classes IS DISTINCT FROM $3::jsonb)`, hostID, n, nc)
+		tag, err := tx.Exec(ctx, `UPDATE hosts SET network=$2, net_classes=$3 WHERE id=$1 AND (network IS DISTINCT FROM $2::jsonb OR net_classes IS DISTINCT FROM $3::jsonb)`, hostID, n, nc)
+		if err != nil || tag.RowsAffected() == 0 || (old != nil && old.PublicIPv4 == n.PublicIPv4) {
+			return err
+		}
+		var known bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM host_rates WHERE host_id = $1 AND family = 'public-ip')`, hostID).Scan(&known); err != nil {
+			return err
+		}
+		if !known {
+			// Addresses appearing on a registered host (recorded late, or
+			// attached after launch) are charged from now, not from its
+			// registration.
+			first = n.PublicIPv4 > 0
+			if first && (old == nil || old.PublicIPv4 == 0) {
+				_, err = tx.Exec(ctx, `UPDATE hosts SET public_ip_from = clock_timestamp() WHERE id = $1 AND registered_at IS NOT NULL`, hostID)
+			}
+			return err
+		}
+		price, _, err := cachedDataTransfer(ctx, tx, provider, region)
+		if err != nil || price.PublicIPv4PerHour == "" {
+			return err
+		}
+		_, err = syncPublicIPRate(ctx, tx, hostID, price.PublicIPv4PerHour, price.Currency, provider+"-vpc-pricing")
 		return err
 	})
+	if err != nil || !first {
+		return err
+	}
+	var price DataTransferPrices
+	if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		price, _, err = cachedDataTransfer(ctx, tx, provider, region)
+		return err
+	}); err != nil {
+		return err
+	}
+	s.openPublicIP(ctx, publicIPHost{ID: hostID, Provider: provider, Region: region}, price)
+	return nil
 }
 
 // hostNetwork is a host's stored classes (nil: none known, the runner

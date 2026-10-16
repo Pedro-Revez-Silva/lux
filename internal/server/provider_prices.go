@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/marcioapm/lux/internal/apitypes"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -20,7 +22,20 @@ type PriceProvider interface {
 	OnDemand(context.Context, string, string) (HourlyRate, error)                          // region, instance type
 	SpotHistory(context.Context, string, string, time.Time, time.Time) ([]SpotRate, error) // zone, type, from, to
 	BlockStorage(context.Context, string, string) (BlockStoragePrice, error)               // region, volume type
+	DataTransfer(context.Context, string) (DataTransferPrices, error)                      // region
 }
+
+// PerGB and DataTransferPrices are network transfer prices by billing class
+// (proto.NetClass) and direction, and the public IPv4 charge
+// (apitypes.TransferPrices). A provider region's: Internet the first
+// non-zero tier of outbound to the internet (list price, no free tier: it
+// is account-wide and spent by any real account), inbound from the
+// internet free; Zone and RegionPublic both directions; Provider by
+// destination region, outbound only; PublicIPv4PerHour per in-use address.
+type (
+	PerGB              = apitypes.PerGB
+	DataTransferPrices = apitypes.TransferPrices
+)
 
 // BlockStoragePrice is a volume type's monthly list prices per unit, as
 // decimal strings: provisioned storage per GiB-month, provisioned IOPS per

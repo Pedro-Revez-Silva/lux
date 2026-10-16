@@ -24,6 +24,9 @@ type Pool struct {
 	// pool's existing hosts (PUT /v1/hosts/{id}/price does, one host).
 	HourlyPrice string `json:"hourlyPrice,omitempty" doc:"Static pools: the default hourly price of hosts registering into the pool, a decimal string with up to 9 fractional digits. Copied to each host when it first registers; changing it does not reprice existing hosts. Refused for ec2 pools, which the provider prices." example:"0.40"`
 	Currency    string `json:"currency,omitempty" doc:"The currency of hourlyPrice (ISO 4217); both or neither." example:"USD"`
+	// TransferPrices: a static pool's default network prices, copied to
+	// each host when it first registers.
+	TransferPrices *TransferPrices `json:"transferPrices,omitempty" doc:"Static pools: the default network transfer prices (per GB, by class and direction) and public IPv4 charge of hosts registering into the pool. Copied to each host when it first registers; changing it does not reprice existing hosts (PUT /v1/hosts/{id}/network does, one host). Refused for ec2 pools, which the provider prices. Like every field, a set without it removes it. Absent for a tenant viewing a platform pool."`
 	// IsDefault: nil in a request leaves the mark as it is.
 	IsDefault *bool `json:"isDefault,omitempty" doc:"Runs whose spec names no pool go to this pool (the tenant's; a platform default serves tenants without one). At most one per tenant: marking one clears the tenant's previous default. On create or update, omitted leaves the mark as it is. A body without provider changes only the mark of an existing pool: besides name and isDefault its fields must be absent or zero (\"\", 0, false, null, {}); any other value needs provider."`
 	// HostSize, HostSizeFrom and InstanceType are read-only: a request's
@@ -105,4 +108,24 @@ type SizeResolved struct {
 	CPUs   float64    `json:"cpus"`
 	Memory spec.Bytes `json:"memory" doc:"Bytes."`
 	Disk   spec.Bytes `json:"disk" doc:"Bytes."`
+}
+
+// PerGB is a transfer price per decimal gigabyte (10^9 bytes, the unit
+// providers bill transfer in) for bytes received and sent; empty or "0":
+// that direction is not charged.
+type PerGB struct {
+	Rx string `json:"rx,omitempty" doc:"Per GB received, a decimal string." example:"0.01"`
+	Tx string `json:"tx,omitempty" doc:"Per GB sent, a decimal string." example:"0.09"`
+}
+
+// TransferPrices are network transfer list prices by billing class and
+// direction, and the public IPv4 address charge: a provider region's, or a
+// static host's operator-supplied ones.
+type TransferPrices struct {
+	Currency          string           `json:"currency" doc:"ISO 4217." example:"USD"`
+	Internet          PerGB            `json:"internet" doc:"internet and provider-global (every GLOBAL prefix but CloudFront's)."`
+	Zone              PerGB            `json:"zone"`
+	RegionPublic      PerGB            `json:"regionPublic"`
+	Provider          map[string]PerGB `json:"provider,omitempty" doc:"provider:<region>, by destination region."`
+	PublicIPv4PerHour string           `json:"publicIPv4PerHour,omitempty" doc:"A provider region's: per in-use address per hour. A static host's: the host's whole public IPv4 charge per hour (0 or absent: none)." example:"0.005"`
 }

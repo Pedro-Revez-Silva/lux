@@ -29,6 +29,10 @@ func (p *blockingPriceProvider) BlockStorage(context.Context, string, string) (B
 	return BlockStoragePrice{}, errors.New("unexpected block storage request")
 }
 
+func (p *blockingPriceProvider) DataTransfer(context.Context, string) (DataTransferPrices, error) {
+	return DataTransferPrices{}, errors.New("unexpected data transfer request")
+}
+
 func TestPriceRefreshDoesNotBlockLaunchOrCostDrain(t *testing.T) {
 	s := testServer(t)
 	p := &blockingPriceProvider{started: make(chan time.Time, 1)}
