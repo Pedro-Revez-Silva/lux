@@ -218,7 +218,7 @@ func TestInfraEventsAreWrittenWithTheirChange(t *testing.T) {
 			act: func(s *Server, ctx context.Context) error {
 				code := 0
 				return s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
-					return s.placementExited(ctx, tx, "t1", "r1", 1, proto.Status{State: "exited", ExitCode: &code}, StateRunning, false)
+					return s.placementExited(ctx, tx, "t1", "h1", "r1", 1, proto.Status{State: "exited", ExitCode: &code}, StateRunning, false)
 				})
 			},
 			changed: func(t *testing.T, s *Server) bool {

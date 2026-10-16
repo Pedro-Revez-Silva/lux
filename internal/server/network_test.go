@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/proto"
 )
@@ -399,9 +398,9 @@ func TestPoolTransferPricesVisibility(t *testing.T) {
 	}
 }
 
-// Heartbeat locks hosts then placements; an exit status locks the run, then
-// the placement, then the host. That inverse order deadlocks on main too, so
-// 40P01 is retried here; it is not a production retry.
+// Heartbeats and an exit report for the same host and placement at once:
+// every counter is kept (lux_net_max on both rows) and nothing deadlocks
+// (TestStatusReportsLockTheHostFirst has the order).
 func TestNetworkConcurrentReportsAndExit(t *testing.T) {
 	s := testServer(t)
 	ctx := context.Background()
@@ -411,28 +410,12 @@ func TestNetworkConcurrentReportsAndExit(t *testing.T) {
 	for _, net := range []map[string]proto.NetBytes{{"zone": {Rx: 10}, "internet": {Tx: 4}}, {"zone": {Tx: 20}, "provider:us-east-1": {Rx: 7}}} {
 		go func() {
 			<-start
-			var err error
-			for range 3 {
-				err = s.heartbeat(ctx, "h1", proto.Heartbeat{Usage: &proto.HostUsage{Net: net}, Leases: []proto.LivePlacement{{RunID: r1, Epoch: 1, Usage: &proto.Usage{Net: net}}}})
-				var pgerr *pgconn.PgError
-				if !errors.As(err, &pgerr) || pgerr.Code != "40P01" {
-					break
-				}
-			}
-			done <- err
+			done <- s.heartbeat(ctx, "h1", proto.Heartbeat{Usage: &proto.HostUsage{Net: net}, Leases: []proto.LivePlacement{{RunID: r1, Epoch: 1, Usage: &proto.Usage{Net: net}}}})
 		}()
 	}
 	go func() {
 		<-start
-		var err error
-		for range 3 {
-			err = reportUsageStatus(s, ctx, proto.Status{State: "exited", Usage: &proto.Usage{Net: map[string]proto.NetBytes{"zone": {Rx: 10, Tx: 20}, "internet": {Tx: 4}, "provider:us-east-1": {Rx: 7}, "unknown": {Tx: 23}}}})
-			var pgerr *pgconn.PgError
-			if !errors.As(err, &pgerr) || pgerr.Code != "40P01" {
-				break
-			}
-		}
-		done <- err
+		done <- reportUsageStatus(s, ctx, proto.Status{State: "exited", Usage: &proto.Usage{Net: map[string]proto.NetBytes{"zone": {Rx: 10, Tx: 20}, "internet": {Tx: 4}, "provider:us-east-1": {Rx: 7}, "unknown": {Tx: 23}}}})
 	}()
 	close(start)
 	for range 3 {

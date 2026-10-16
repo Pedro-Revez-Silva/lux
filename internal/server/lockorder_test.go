@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/store"
 )
 
@@ -334,4 +335,55 @@ func TestServerChangeRetriesWhenTheServerMoves(t *testing.T) {
 			t.Fatalf("after the refused delete: %+v", got.RunID)
 		}
 	})
+}
+
+// A heartbeat holds its host's row while it renews the host's placements'
+// leases; a status report that writes a host's row (a start's
+// first_placement_at, an end's last_placement_ended_at) takes it before it
+// writes its placement, so it waits for the heartbeat rather than holding
+// the placement the heartbeat needs next. Neither deadlocks, and the report
+// still writes its host row once it has the lock.
+func TestStatusReportsLockTheHostFirst(t *testing.T) {
+	for _, c := range []struct {
+		name, placement string
+		status          proto.Status
+		wrote           string
+	}{
+		{"running", "starting", proto.Status{State: "running"}, `first_placement_at IS NOT NULL`},
+		{"exited", "running", proto.Status{State: "exited", ExitCode: new(int)}, `last_placement_ended_at IS NOT NULL`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := testServer(t)
+			slowDeadlockCheck(t, s)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			serversFixture(t, s, ctx)
+			execSQL(t, s, ctx, `UPDATE placements SET state = $1 WHERE id = 'p1'`, c.placement)
+			// The heartbeat's order: the host's row, then its placements.
+			hb := holdTx(ctx, s, func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, `SELECT 1 FROM hosts WHERE id = 'h1' FOR NO KEY UPDATE`)
+				return err
+			})
+			if !hb.settle(t, ctx, s) {
+				t.Fatal("the heartbeat waited on nothing")
+			}
+			reported := make(chan error, 1)
+			go func() { reported <- reportUsageStatus(s, ctx, c.status) }()
+			waitBlocked(t, s)
+			if err := hb.finishWith(t, ctx, func(tx pgx.Tx) error {
+				_, err := tx.Exec(ctx, `UPDATE placements SET lease_expires_at = now() + interval '1 minute' WHERE host_id = 'h1'`)
+				return err
+			}); err != nil {
+				t.Fatalf("heartbeat: %v", err)
+			}
+			if err := await(t, ctx, reported, 1)[0]; err != nil {
+				t.Fatalf("report: %v", err)
+			}
+			var wrote bool
+			systemScan(t, s, `SELECT `+c.wrote+` FROM hosts WHERE id = 'h1'`, nil, &wrote)
+			if !wrote {
+				t.Fatalf("the report did not write %s", c.wrote)
+			}
+		})
+	}
 }

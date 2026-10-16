@@ -203,7 +203,7 @@ func TestSchedulerCandidateLockBoundary(t *testing.T) {
 			entered <- pid
 			<-release
 			code := 0
-			return s.placementExited(ctx, tx, "t1", "old", 1,
+			return s.placementExited(ctx, tx, "t1", "a", "old", 1,
 				proto.Status{State: "exited", ExitCode: &code}, StateRunning, false)
 		})
 	}()
