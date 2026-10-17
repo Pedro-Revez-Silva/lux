@@ -44,6 +44,20 @@ const (
 	// ShimCapReclaim: a ShimStop with KillAtUnixMs SIGTERMs at once, runs no
 	// beforeStop, ignores workload grace, and SIGKILLs at that instant.
 	ShimCapReclaim = "reclaim-v1"
+	// ShimCapOCIDefaults: the shim has ShimOCIDefaultsCmd, so the runner
+	// may register it as delegated nested Runs' precreate hook.
+	ShimCapOCIDefaults = "oci-defaults-v1"
+)
+
+// ShimOCIDefaultsCmd is `lux-shim oci-defaults MEMORY CPU_QUOTA CPU_PERIOD`,
+// a Podman precreate hook. A nested Run's workload gets
+// CONTAINERS_CONF_OVERRIDE=ShimOCIConf, whose hooks_dir (ShimOCIHooksDir)
+// registers it, so containers it starts default to the Run's limits.
+const (
+	ShimOCIDefaultsCmd = "oci-defaults"
+	ShimOCIDir         = ShimRunDir + "/oci"
+	ShimOCIConf        = ShimOCIDir + "/containers.conf"
+	ShimOCIHooksDir    = ShimOCIDir + "/hooks.d"
 )
 
 type ShimConfig struct {

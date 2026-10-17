@@ -1122,6 +1122,7 @@ func (p *placement) createContainer(ctx context.Context, sp spec.RunSpec, image 
 	if err := p.r.pm.Remove(ctx, containerName(p.runID)); err != nil {
 		return err
 	}
+	p.r.allocateCpuset(p, sp.Resources.CPUs)
 	if err := p.writeShimConfig(ctx, sp, prompt); err != nil {
 		return err
 	}
@@ -1157,6 +1158,9 @@ func (p *placement) createArgs(sp spec.RunSpec, image string, network podman.Net
 		"--memory-swap", memory,
 		"--pids-limit", fmt.Sprintf("%d", sp.Resources.Pids),
 	)
+	if set := p.cpuset(); set != "" {
+		args = append(args, "--cpuset-cpus", set)
+	}
 	if sp.Sandbox.ReadOnlyRoot {
 		args = append(args, "--read-only", "--read-only-tmpfs")
 	}
@@ -1211,7 +1215,7 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 		Workdir:      sp.Workload.Workdir,
 		User:         user,
 		TTY:          sp.Workload.TTY,
-		Env:          withSizeEnv(sp.Env, sp.Resources.CPUs, p.r.mem.limit(int64(sp.Resources.Memory))),
+		Env:          withCpusetEnv(withSizeEnv(sp.Env, sp.Resources.CPUs, p.r.mem.limit(int64(sp.Resources.Memory))), p.cpuset()),
 		GraceSec:     sp.Workload.Grace.Seconds(),
 		Secrets:      sp.Secrets,
 		ArtifactsDir: proto.ShimRunDir + "/" + stagingDir,
@@ -1229,6 +1233,21 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 	cfg.InputsDir, cfg.InputsRoot = sp.InputsDir(p.user.Home)
 	cfg.Sync = p.sync
 	cfg.DelegateCgroup = sp.Sandbox.NestedContainers && sp.Sandbox.CgroupDelegation
+	// Inner-container defaults need the delegated cgroup: without it inner
+	// engines cannot make cgroups and their containers already sit in the
+	// Run's, reading its limits.
+	if cfg.DelegateCgroup {
+		if p.r.shimOCIDefaults {
+			if err := writeInnerDefaults(rt, p.r.mem.limit(int64(sp.Resources.Memory)), sp.Resources.CPUs); err != nil {
+				return err
+			}
+			cfg.Env = innerDefaultsEnv(cfg.Env, sp.Env)
+		} else {
+			p.r.noOCIDefaults.Do(func() {
+				p.r.log.Warn("this runner's --shim lacks " + proto.ShimCapOCIDefaults + ": containers nested Runs start get no default limits (docs/podman.md)")
+			})
+		}
+	}
 	if b := sp.Workload.BeforeStop; b != nil {
 		cfg.BeforeStop = b.Command
 		cfg.BeforeStopTimeoutSec = b.Timeout.Seconds()

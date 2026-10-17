@@ -3,6 +3,8 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -150,7 +152,7 @@ func TestShimConfigDelegatesOnlyWhenAsked(t *testing.T) {
 		{false, false, false}, {true, false, false}, {true, true, true}, {false, true, false},
 	} {
 		rt := t.TempDir()
-		r := &Runner{mem: mustScale(t, 30*gib+gib/2, gib/2, 32*gib)}
+		r := &Runner{mem: mustScale(t, 30*gib+gib/2, gib/2, 32*gib), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 		r.mounts.Store(runtimeVolume("run_1"), rt)
 		p := &placement{r: r, runID: "run_1", epoch: 1, assign: &proto.Assign{}, state: &runState{}}
 		sp := spec.RunSpec{

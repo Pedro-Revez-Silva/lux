@@ -119,6 +119,25 @@ def build_nested_images(podman: bool, docker: bool) -> tuple[str | None, str | N
     return (NESTED_IMAGE if podman else None), (DOCKER_IMAGE if docker else None)
 
 
+# Real applications that size themselves from their cgroup (test_run_size),
+# copied from these pinned images into one image on top of NESTED_IMAGE
+# (tests/images/sizing), so nested Runs and their inner containers run them
+# too. Preloaded into the hosts only when that suite runs.
+CLICKHOUSE_IMAGE = "docker.io/clickhouse/clickhouse-server:26.8.28.14-alpine"
+JVM21_IMAGE = "docker.io/library/eclipse-temurin:21.0.12.1_1-jre-alpine-3.24"
+JVM17_IMAGE = "docker.io/library/eclipse-temurin:17.0.20.1_1-jre-alpine-3.24"
+SIZING_IMAGE = "localhost/lux-sizing:test"
+
+
+def size_images(selected: bool) -> dict[str, str | None]:
+    if not selected:
+        return {"sizing": None}
+    ensure_local(CLICKHOUSE_IMAGE, JVM21_IMAGE, JVM17_IMAGE)
+    _build_image(SIZING_IMAGE, {}, TESTS_DIR / "images" / "sizing" / "Containerfile",
+                 {"BASE": NESTED_IMAGE, "CLICKHOUSE": CLICKHOUSE_IMAGE, "JVM21": JVM21_IMAGE, "JVM17": JVM17_IMAGE})
+    return {"sizing": SIZING_IMAGE}
+
+
 # The opt-in real-agent suites: the credentials each needs, and where its
 # self-contained executable is.
 AGENTS = {

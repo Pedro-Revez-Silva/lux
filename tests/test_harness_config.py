@@ -168,3 +168,78 @@ def test_serve_passes_nested_to_the_image_build_and_the_runners(monkeypatch, fla
     assert calls["podman"] is nested, calls
     if nested:
         assert calls["images"]["nested"] == "localhost/lux-nested:test", calls
+
+
+# The real-app images are pulled from registries: a bare --serve runs no suite
+# and must not pull them; a named suite brings them only if it needs them.
+@pytest.mark.parametrize("args, sizing", [
+    (["--serve"], False),
+    (["--serve", "--nested"], False),
+    (["--serve", "suites/test_serve.py"], False),
+    (["--serve", "suites/test_run_size.py"], True),
+    (["suites/test_nested.py"], False),
+    (["suites/test_run_size.py::test_plain_run"], True),
+    ([], True),
+    (["suites/"], True),
+])
+def test_dry_run_preloads_real_app_images_only_for_suites_that_need_them(args, sizing):
+    p = subprocess.run([sys.executable, "run_tests.py", "--dry-run", *args], cwd=TESTS_DIR,
+                       capture_output=True, text=True)
+    assert p.returncode == 0, (p.stdout, p.stderr)
+    assert "building" not in p.stdout, p.stdout
+    assert f"sizing={'yes' if sizing else 'no'}" in p.stdout, p.stdout
+
+
+# Fake EC2 instances join through add_host mid-test and must not load the
+# nested and real-app images (~1.7 GB): loading them delays the instance's
+# registration past the EC2 suites' waits. Only the environment's own hosts do.
+def test_only_the_environments_own_hosts_load_the_nested_and_real_app_images(monkeypatch, tmp_path):
+    import build
+    import env as envmod
+
+    saves, loads = {}, []
+    monkeypatch.setattr(build, "ensure_local", lambda *a: None)
+
+    def sh(*args, **_kw):
+        if args[:2] == ("docker", "save"):
+            saves[Path(args[3]).name] = list(args[4:])
+            Path(args[3]).touch()
+        return ""
+    monkeypatch.setattr(envmod, "sh", sh)
+    monkeypatch.setattr(envmod, "_load", lambda host, tar, refs: loads.append((host, tar.name, refs)))
+    monkeypatch.setattr(envmod.TestEnvironment, "add_host",
+                        lambda self, name: envmod._load(name, Path("images.tar"), self._host_images()[0]) or name)
+
+    e = envmod.TestEnvironment(n_hosts=2)
+    e.log_dir, e.fake_image = str(tmp_path), "localhost/lux-fake:test"
+    e.extra["images"] = {"nested": "localhost/lux-nested:test", "docker": "localhost/lux-docker:test",
+                         "sizing": None, "claude": "localhost/lux-claude:test"}
+    e._hosts()
+
+    every = [envmod.ALPINE_IMAGE, "localhost/lux-fake:test", "localhost/lux-claude:test"]
+    own = ["localhost/lux-nested:test", "localhost/lux-docker:test"]
+    assert saves == {"images.tar": every, "own-hosts.tar": own}, saves
+    assert sorted(loads) == sorted([(h, "images.tar", every) for h in e.hosts]
+                                   + [(h, "own-hosts.tar", own) for h in e.hosts]), loads
+    assert not (tmp_path / "own-hosts.tar").exists()
+
+    loads.clear()
+    e.add_host("ec2-1")  # a fake EC2 instance
+    assert loads == [("ec2-1", "images.tar", every)], loads
+
+
+def test_without_nested_or_real_app_images_there_is_one_tar(monkeypatch, tmp_path):
+    import build
+    import env as envmod
+
+    saves = []
+    monkeypatch.setattr(build, "ensure_local", lambda *a: None)
+    monkeypatch.setattr(envmod, "sh", lambda *a, **_k: saves.append(Path(a[3]).name) if a[:2] == ("docker", "save") else "")
+    monkeypatch.setattr(envmod, "_load", lambda *a: None)
+    monkeypatch.setattr(envmod.TestEnvironment, "add_host", lambda self, name: name)
+
+    e = envmod.TestEnvironment(n_hosts=1)
+    e.log_dir = str(tmp_path)
+    e.extra["images"] = {"nested": None, "claude": "localhost/lux-claude:test"}
+    e._hosts()
+    assert saves == ["images.tar"], saves

@@ -44,17 +44,28 @@ func shimKnowsSyncModes(path string) bool {
 	return len(res) == 1 && res[0].Mode == proto.SyncModeProbe
 }
 
-// shimKnowsReclaim asks the lux-shim at path for its capabilities: one
-// listing proto.ShimCapReclaim signals a spot reclamation at once and skips
-// beforeStop. An older shim has no such subcommand (it fails, or starts as
-// PID 1 without its config and exits), so it never answers yes.
-func shimKnowsReclaim(path string) bool {
+// shimCapabilities asks the lux-shim at path for its capabilities
+// (proto.ShimCapabilitiesCmd). An older shim has no such subcommand (it
+// fails, or starts as PID 1 without its config and exits), so it lists none.
+func shimCapabilities(path string) []string {
 	out, ok := probeShim(path, proto.ShimCapabilitiesCmd)
 	var caps []string
 	if !ok || json.Unmarshal(out, &caps) != nil {
-		return false
+		return nil
 	}
-	return slices.Contains(caps, proto.ShimCapReclaim)
+	return caps
+}
+
+// shimKnowsReclaim: the lux-shim at path lists proto.ShimCapReclaim, so it
+// signals a spot reclamation at once and skips beforeStop.
+func shimKnowsReclaim(path string) bool {
+	return slices.Contains(shimCapabilities(path), proto.ShimCapReclaim)
+}
+
+// shimKnowsOCIDefaults: the lux-shim at path lists
+// proto.ShimCapOCIDefaults, so it can be delegated nested Runs' precreate hook.
+func shimKnowsOCIDefaults(path string) bool {
+	return slices.Contains(shimCapabilities(path), proto.ShimCapOCIDefaults)
 }
 
 // probeShim runs the lux-shim at path with args and returns its stdout,

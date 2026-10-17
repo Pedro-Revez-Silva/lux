@@ -178,6 +178,32 @@ availability immediately. See [CLI](cli.md#runs).
   containers do not inherit them: pass them on (`docker run -e
   LUX_CPUS`). They take precedence over the image's environment; an `env`
   secret of the same name overrides them. Spec `env` cannot use `LUX_` names.
+- **On a host whose runner pins Runs (`lux-runner --cpuset`)**, a Run is
+  also confined to `ceil(resources.cpus)` of the host's CPUs: `nproc`,
+  its affinity and its cgroup's `cpuset.cpus.effective` show that many,
+  and `LUX_CPUSET` holds them in cpu-list form (`4-5`). `cpu.max` still
+  holds `resources.cpus` of CPU time. The runner places by demand (each
+  pinned Run's `cpus` spread over its set): a fractional Run joins a CPU
+  other fractions already use, as long as their sum stays within one CPU,
+  and whole-CPU Runs take CPUs nothing else uses, then the least used
+  ones. A set is chosen when the container is created and never moved:
+  CPUs a Run frees go to later Runs, not to Runs already running, so a
+  host whose Runs come and go can have pinned Runs sharing CPUs while
+  others are idle. A resume may be pinned to other CPUs.
+- **Containers a nested Run with `sandbox.cgroupDelegation: true` starts
+  with Podman default to the Run's size.** One started without `-m` has
+  the Run's memory limit as its `memory.max`, with swap off as for the Run
+  itself, and one without `--cpus` the Run's `resources.cpus` as its
+  `cpu.max`; its own `-m` or `--cpus` win up to the Run's and are lowered
+  to the Run's above it, and `--cgroup-conf memory.max=`/`cpu.max=` win,
+  still capped by the Run's limits. Programs that size themselves from
+  their cgroup (ClickHouse, the JVM) then size to the Run, not the host
+  ([why](podman.md#default-limits-of-nested-containers)).
+  lux does it with a Podman `precreate` hook registered through
+  `CONTAINERS_CONF_OVERRIDE`; a spec that sets `CONTAINERS_CONF_OVERRIDE`
+  itself opts out, and a runner whose `--shim` predates the hook registers
+  none. Without delegation lux registers no hook: inner containers stay
+  in the Run's cgroup (see *Limits of nested containers* below).
 - Secrets are `env` (the default) or `file` (placed on a tmpfs and linked
   at `path`). A file secret is never in a snapshot. Every resume must
   supply every secret again.

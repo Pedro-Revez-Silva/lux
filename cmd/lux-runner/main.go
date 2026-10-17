@@ -138,6 +138,7 @@ func config(fs *flag.FlagSet, args []string, getenv func(string) string) (cfg ru
 	fs.StringVar(&cfg.ProviderID, "provider-id", getenv("LUX_PROVIDER_ID"), "cloud instance id, for provisioned hosts")
 	fs.BoolVar(&cfg.ForcePoll, "poll", false, "use HTTP polling instead of a WebSocket")
 	fs.StringVar(&cfg.EC2IMDS, "ec2-imds", getenv("LUX_EC2_IMDS"), "EC2 instance metadata URL to watch for spot interruptions (http://169.254.169.254 on EC2; empty: off)")
+	fs.BoolVar(&cfg.Cpuset, "cpuset", false, "pin each Run to ceil(resources.cpus) of this host's CPUs (--cpuset-cpus): disjoint while CPUs are free, the least used after; fractions packed")
 	fs.BoolVar(&cfg.Nested, "nested", nestedDefault, "offer nested containers (needs /dev/fuse and /dev/net/tun; default from LUX_NESTED=true)")
 	fs.DurationVar(&cfg.HostTTL, "host-ttl", 24*time.Hour, "how long to keep local snapshot copies after upload, and images lux pulled or built after their last use")
 	fs.Float64Var(&cfg.ImageDiskHigh, "image-disk-high", 80, "percent use of the disk holding Podman's storage over which lux's unused images are removed, least recently used first (0: off)")

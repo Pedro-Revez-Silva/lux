@@ -31,6 +31,9 @@ type runState struct {
 	Image         string      `json:"image"`
 	// Container is the id of the container this placement created.
 	Container string `json:"container,omitempty"`
+	// Cpuset: the CPUs this placement's container is pinned to (cpu-list
+	// form), with --cpuset. A restarted runner counts it as held.
+	Cpuset string `json:"cpuset,omitempty"`
 	// Times, unix ms, for status reports.
 	Times map[string]int64 `json:"times,omitempty"`
 	// Exit, once known.

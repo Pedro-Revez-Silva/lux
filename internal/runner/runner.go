@@ -82,6 +82,9 @@ type Config struct {
 	// is labelled nested=true, and such Runs get what rootless Podman
 	// inside them needs (see nested.go).
 	Nested bool
+	// Cpuset pins each Run's container to ceil(resources.cpus) CPUs of
+	// the runner's own affinity mask (cpusetFor).
+	Cpuset bool
 	// AssignHold is test-only (LUX_TEST_ASSIGN_HOLD): while the file it
 	// names exists, each assignment is held before it is taken up and
 	// acked. See holdAssignment and noteUnknownEpoch.
@@ -147,6 +150,11 @@ type Runner struct {
 	shimSyncModes bool
 	// shimReclaim: its --shim answers spot reclamation (shimKnowsReclaim).
 	shimReclaim bool
+	// shimOCIDefaults: its --shim has the nested precreate hook
+	// (shimKnowsOCIDefaults); without it nested Runs get no hook, and
+	// noOCIDefaults warns of that once.
+	shimOCIDefaults bool
+	noOCIDefaults   sync.Once
 	// mem scales a Run's resources.memory to its container's limit.
 	mem memoryScale
 	// disk scales a Run's resources.disk to the limit it is held to.
@@ -162,6 +170,8 @@ type Runner struct {
 	handover time.Duration
 	// guardTick, when set, replaces guardEvery. Tests only.
 	guardTick time.Duration
+	// hostCPUs: the CPUs Runs are pinned within (--cpuset); nil: not pinned.
+	hostCPUs []int
 }
 
 // mountpoint is where a volume's data is on this host. It never changes for
@@ -244,6 +254,12 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 		disk:       disk,
 		hbNow:      make(chan struct{}, 1),
 	}
+	if cfg.Cpuset {
+		if r.hostCPUs, err = affinityCPUs(); err != nil {
+			return nil, fmt.Errorf("--cpuset: %w", err)
+		}
+		log.Info("cpuset", "cpus", cpuList(r.hostCPUs))
+	}
 	if guard != nil {
 		r.attachGuard(guard, func() (int64, error) {
 			d, err := hoststat.ReadDisk(cfg.DataDir)
@@ -280,6 +296,7 @@ func New(cfg Config, log *slog.Logger) (*Runner, error) {
 	r.shimSHA256 = sha256File(cfg.Shim)
 	r.shimSyncModes = shimKnowsSyncModes(cfg.Shim)
 	r.shimReclaim = shimKnowsReclaim(cfg.Shim)
+	r.shimOCIDefaults = shimKnowsOCIDefaults(cfg.Shim)
 	return r, nil
 }
 

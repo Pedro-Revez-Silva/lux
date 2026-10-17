@@ -10,6 +10,7 @@
     uv run python run_tests.py --serve           # a lux to develop against (see serve.py)
     uv run python run_tests.py --serve --nested  # ... whose hosts offer nested containers
     uv run python run_tests.py -j 4              # 4 environments, suites split between them
+    uv run python run_tests.py --dry-run ...     # which optional images it would build or preload
 
 Each invocation gets its own database, bucket, Docker network and hosts, so
 runs do not collide with each other or with a development instance.
@@ -29,7 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from build import build_agent_images, build_binaries, build_fake_image, build_nested_images  # noqa: E402
+from build import build_agent_images, build_binaries, build_fake_image, build_nested_images, size_images  # noqa: E402
 from env import TestEnvironment  # noqa: E402
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -41,6 +42,29 @@ def local_previews(port: int) -> dict[str, str]:
     there over http (preview.scheme http is allowed only under localhost)."""
     return {"LUX_PREVIEW_DOMAIN": "lux.localhost", "LUX_PREVIEW_SCHEME": "http",
             "LUX_PREVIEW_LISTEN": f"127.0.0.1:{port}", "LUX_PREVIEW_PUBLIC_PORT": str(port)}
+
+
+# The optional images each suite needs beyond the fake image.
+SUITE_IMAGES = {
+    "test_nested.py": {"nested"},
+    "test_nested_docker.py": {"docker"},
+    "test_run_size.py": {"nested", "docker", "sizing"},
+}
+
+
+def image_plan(files: list[str], every: bool, serve: bool, nested: bool, agents: bool) -> dict[str, bool]:
+    """Which optional images to build or pull and preload into hosts. A run
+    with no suite named runs all of them, except under --serve, which runs
+    none: there the real-app images (sizing, pulled from registries) come
+    only with a named suite that needs them. The locally built nested and
+    docker images still come with a bare --serve, to try nesting with."""
+    wanted = set().union(*(SUITE_IMAGES.get(f, set()) for f in files))
+    return {
+        "agents": agents,
+        "nested": every or nested or "nested" in wanted,
+        "docker": every or "docker" in wanted,
+        "sizing": (every and not serve) or "sizing" in wanted,
+    }
 
 
 def main() -> None:
@@ -64,6 +88,8 @@ def main() -> None:
                              "M CI machines; with -j, split that share further")
     parser.add_argument("--nested", action="store_true",
                         help="with --serve: every host's runner offers nested containers (lux-runner --nested)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print which optional images this invocation would build or preload, and exit")
     args, pytest_args = parser.parse_known_args()
     if args.nested and not args.serve:
         parser.error("--nested needs --serve (the suites start their own nested runners)")
@@ -73,16 +99,12 @@ def main() -> None:
         down(args.down or None)
         return
 
-    print("building:")
-    built = build_binaries()
-    fake_image = build_fake_image(built.get("lux-fake"))
-    # Agent images are big: build (and ship to hosts) only when their suite runs.
-    agent_images = build_agent_images(any("agents" in a for a in pytest_args))
-
-    # The nested images are only for their suites (a full run, or one naming
+    # The optional images are only for their suites (a full run, or one naming
     # them). Suites named on the command line (paths); options and their
     # values are not.
     selected = [a for a in pytest_args if a.startswith("suites/") or a.endswith(".py")]
+    # Agent images are big: build (and ship to hosts) only when their suite is named.
+    agents = any("agents" in a for a in pytest_args)
     if args.shard:
         if selected:
             sys.exit("--shard picks its own suites: name none")
@@ -97,11 +119,18 @@ def main() -> None:
     # directory (suites/) selects every suite in it.
     files = [a.split("::")[0].rsplit("/", 1)[-1] for a in selected]
     every = not selected or "" in files
-    # --serve --nested preloads the Podman one, an image to try nesting with.
-    nested, docker = build_nested_images(
-        podman=every or args.nested or "test_nested.py" in files,
-        docker=every or "test_nested_docker.py" in files)
-    images = {**agent_images, "nested": nested, "docker": docker, **{ref: ref for ref in args.image}}
+    plan = image_plan(files, every, args.serve, args.nested, agents)
+    if args.dry_run:
+        print("images: " + " ".join(f"{k}={'yes' if v else 'no'}" for k, v in plan.items()))
+        return
+
+    print("building:")
+    built = build_binaries()
+    fake_image = build_fake_image(built.get("lux-fake"))
+    agent_images = build_agent_images(plan["agents"])
+    nested, docker = build_nested_images(podman=plan["nested"], docker=plan["docker"])
+    sizing = size_images(plan["sizing"])
+    images = {**agent_images, **sizing, "nested": nested, "docker": docker, **{ref: ref for ref in args.image}}
     binaries = {k: str(v) if v else None for k, v in built.items()}
 
     if args.jobs > 1 and not (args.serve or args.infra_only):

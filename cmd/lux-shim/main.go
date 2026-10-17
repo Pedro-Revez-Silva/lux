@@ -4,7 +4,8 @@
 // the runner's live diff, run with podman exec (shim.Diff); `lux-shim sync`
 // moves checkouts to new commits (shim.Sync); `lux-shim publish FILE` is
 // the workload's: it makes FILE an artifact of the Run (shim.Publish);
-// `lux-shim capabilities` lists the features the runner may rely on.
+// `lux-shim oci-defaults` is the OCI hook giving nested containers the
+// Run's limits by default (shim.OCIDefaults); `lux-shim capabilities` lists the features the runner may rely on.
 package main
 
 import (
@@ -23,6 +24,9 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "publish" {
 		os.Exit(shim.Publish(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == proto.ShimOCIDefaultsCmd {
+		os.Exit(shim.OCIDefaults(os.Args[2:], os.Stdin, os.Stdout))
 	}
 	if len(os.Args) > 1 && os.Args[1] == proto.ShimCapabilitiesCmd {
 		os.Exit(shim.Capabilities(os.Stdout))

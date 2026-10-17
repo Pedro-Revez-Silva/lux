@@ -1,0 +1,20 @@
+# The nested Podman workload image with the real applications of the
+# run-size suite in /opt/apps, for its nested rows: the Run, or an inner
+# alpine container with /opt/apps mounted in, runs them without loading
+# their images inside the Run. Copied verbatim from the pinned images.
+# ClickHouse is a glibc binary: run it through the glibc loader copied
+# beside it, `/opt/apps/glibc/ld-2.35.so --library-path /opt/apps/glibc`.
+ARG BASE
+ARG CLICKHOUSE
+ARG JVM21
+ARG JVM17
+FROM ${CLICKHOUSE} AS clickhouse
+FROM ${JVM21} AS jvm21
+FROM ${JVM17} AS jvm17
+FROM ${BASE}
+COPY --from=clickhouse /usr/bin/clickhouse /opt/apps/clickhouse
+COPY --from=clickhouse /etc/clickhouse-server /opt/apps/clickhouse-server
+COPY --from=clickhouse /lib/ld-2.35.so /lib/libc.so.6 /lib/libdl.so.2 /lib/libm.so.6 /lib/libpthread.so.0 \
+     /lib/librt.so.1 /lib/libresolv.so.2 /lib/libnss_dns.so.2 /lib/libnss_files.so.2 /opt/apps/glibc/
+COPY --from=jvm21 /opt/java/openjdk /opt/apps/jvm21
+COPY --from=jvm17 /opt/java/openjdk /opt/apps/jvm17

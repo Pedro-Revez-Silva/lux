@@ -9,9 +9,11 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/marcioapm/lux/internal/passwd"
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -172,4 +174,49 @@ func (r *Runner) hostSeccompProfile(ctx context.Context) (string, error) {
 		return p, nil
 	}
 	return "", errors.New("podman reports no default seccomp profile: nested containers need one to extend")
+}
+
+// innerDefaultsPeriod is the CPU period nested containers' default quota
+// is given in, Podman's own for --cpus.
+const innerDefaultsPeriod = 100000
+
+// writeInnerDefaults registers, for Podman inside a nested Run, a
+// precreate OCI hook (lux-shim oci-defaults) that gives each container it
+// starts the Run's memory limit and CPU quota unless that container was
+// given its own: in a private cgroup namespace a container sees only its
+// own cgroup, and without limits there ClickHouse and the JVM size
+// themselves to the host (docs/podman.md). It is Podman's documented
+// hooks_dir, in a containers.conf the workload gets as
+// CONTAINERS_CONF_OVERRIDE (innerDefaultsEnv); rt is the runtime volume.
+func writeInnerDefaults(rt string, memory int64, cpus float64) error {
+	dir := filepath.Join(rt, strings.TrimPrefix(proto.ShimOCIDir, proto.ShimRunDir+"/"))
+	hooks := filepath.Join(dir, "hooks.d")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		return err
+	}
+	hook, err := json.Marshal(map[string]any{
+		"version": "1.0.0",
+		"hook": map[string]any{"path": proto.ShimBinary, "args": []string{"lux-shim", proto.ShimOCIDefaultsCmd,
+			strconv.FormatInt(memory, 10), strconv.FormatInt(int64(cpus*innerDefaultsPeriod), 10), strconv.Itoa(innerDefaultsPeriod)}},
+		"when":   map[string]any{"always": true},
+		"stages": []string{"precreate"},
+	})
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(filepath.Join(hooks, "lux-run-limits.json"), hook, 0o644); err != nil {
+		return err
+	}
+	// Appended: the image's and the host's hook directories still apply.
+	conf := fmt.Sprintf("[engine]\nhooks_dir = [%q, {append=true}]\n", proto.ShimOCIHooksDir)
+	return writeFileAtomic(filepath.Join(dir, "containers.conf"), []byte(conf), 0o644)
+}
+
+// innerDefaultsEnv points Podman in a nested Run at writeInnerDefaults'
+// containers.conf, unless the spec sets CONTAINERS_CONF_OVERRIDE itself.
+func innerDefaultsEnv(env, specEnv map[string]string) map[string]string {
+	if _, ok := specEnv["CONTAINERS_CONF_OVERRIDE"]; !ok {
+		env["CONTAINERS_CONF_OVERRIDE"] = proto.ShimOCIConf
+	}
+	return env
 }

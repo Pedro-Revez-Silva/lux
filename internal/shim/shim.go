@@ -603,7 +603,7 @@ func (s *Shim) stop(reason string, shorter time.Duration) {
 // Capabilities prints the shim features the runner probes for
 // (proto.ShimCapabilitiesCmd).
 func Capabilities(w io.Writer) int {
-	if err := json.NewEncoder(w).Encode([]string{proto.ShimCapReclaim}); err != nil {
+	if err := json.NewEncoder(w).Encode([]string{proto.ShimCapReclaim, proto.ShimCapOCIDefaults}); err != nil {
 		return 1
 	}
 	return 0
