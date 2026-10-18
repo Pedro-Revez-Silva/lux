@@ -197,6 +197,8 @@ func (s *Server) routes(api huma.API) {
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusServiceUnavailable},
 	}, "run", s.syncRun)
+	register(s, api, huma.Operation{OperationID: "checkpointRun", Method: http.MethodPost, Path: "/v1/runs/{id}/checkpoint", Tags: []string{"runs"}, Summary: "Checkpoint a running Run's committed git refs", Errors: []int{404, 409, 503}}, "run", s.checkpointRun)
+	register(s, api, huma.Operation{OperationID: "listCheckpoints", Method: http.MethodGet, Path: "/v1/runs/{id}/checkpoints", Tags: []string{"runs"}, Summary: "List the latest git checkpoints", Errors: []int{404}}, "read", s.listCheckpoints)
 	register(s, api, huma.Operation{
 		OperationID: "runDiff", Method: http.MethodGet, Path: "/v1/runs/{id}/diff", Tags: []string{"runs"},
 		Summary: "What a running Run changed in its repositories",
@@ -715,6 +717,9 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		if err != nil {
 			return err
 		}
+		if err := resolveCheckpointSources(ctx, tx, p.TenantID, &stored); err != nil {
+			return err
+		}
 		var prompt []spec.Attachment
 		stored, prompt = splitPromptAttachments(stored)
 		_, err = tx.Exec(ctx, `INSERT INTO runs (id, tenant_id, name, labels, spec, secrets, state, idempotency_key, pool_id, needs_host_since, prompt_attachments,
@@ -722,6 +727,9 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 			VALUES ($1, $2, $3, $4, $5, $6, 'submitted', $7, $8, now(), $9, nullif($10, ''), nullif($11, ''), $12, $13)`,
 			id, p.TenantID, sp.Name, nonNilMap(sp.Labels), stored, refs, idemArg, rp.ID, prompt, p.KeyID, p.Email, requested, size)
 		if err != nil {
+			return err
+		}
+		if err := pinCheckpointSources(ctx, tx, p.TenantID, id, stored); err != nil {
 			return err
 		}
 		ev := map[string]any{"by": p.Actor(), "pool": rp.Name, "poolFrom": rp.From}
@@ -1239,6 +1247,11 @@ func (s *Server) getRun(ctx context.Context, in *RunPath) (*runOutput, error) {
 			return nil, err
 		}
 	}
+	checkpoints, err := s.listCheckpoints(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	run.Checkpoints = checkpoints.Body.Checkpoints
 	return &runOutput{run}, nil
 }
 
@@ -1693,6 +1706,20 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 	// The live state a validateOnly resume did not check.
 	var stateUnchecked string
 	attempt := func(tx pgx.Tx) error {
+		// Lock the destination and every checkpoint source in one deterministic
+		// order. Otherwise reciprocal `from` resumes can deadlock while each
+		// holds its destination and waits for the other's source.
+		lockIDs := []string{id}
+		for _, r := range adding {
+			if r.From != nil && r.From.Run != "" && r.From.Run != id {
+				lockIDs = append(lockIDs, r.From.Run)
+			}
+		}
+		if len(lockIDs) > 1 {
+			if _, err := tx.Exec(ctx, `SELECT id FROM runs WHERE id = ANY($1) ORDER BY id FOR UPDATE`, lockIDs); err != nil {
+				return err
+			}
+		}
 		var state string
 		var refs []spec.SecretRef
 		var sp spec.RunSpec
@@ -1778,6 +1805,11 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		}
 		specChanged := false
 		if len(adding) > 0 {
+			addedSpec := spec.RunSpec{Git: &spec.Git{Repositories: adding}}
+			if err := resolveCheckpointSources(ctx, tx, p.TenantID, &addedSpec); err != nil {
+				return err
+			}
+			adding = addedSpec.Git.Repositories
 			added, err := addRepositories(&sp, refs, adding, req.RequestID, s.cfg.Defaults)
 			if err != nil {
 				return err
@@ -1809,6 +1841,9 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		values = kept
 		if specChanged = specChanged || len(declared) > 0 || len(req.RemoveSecrets) > 0; specChanged {
 			stored, _, _ := sp.SplitSecrets()
+			if err := pinCheckpointSources(ctx, tx, p.TenantID, id, stored); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(ctx, `UPDATE runs SET spec = $2 WHERE id = $1`, id, stored); err != nil {
 				return err
 			}

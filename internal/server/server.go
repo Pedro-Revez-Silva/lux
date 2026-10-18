@@ -35,8 +35,9 @@ const (
 )
 
 type Config struct {
-	Listen    string
-	PublicURL string
+	CheckpointBytes int64
+	Listen          string
+	PublicURL       string
 	// RunnerURL is the URL runners use to reach luxd (LUX_URL in their
 	// env), which may be a private address clients can't reach. Empty:
 	// PublicURL.

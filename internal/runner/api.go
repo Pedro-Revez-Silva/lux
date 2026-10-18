@@ -310,7 +310,11 @@ func readHTTPError(resp *http.Response, what string) *httpError {
 // download returns a blob's body: luxd redirects to a presigned URL, which
 // is fetched without the host token.
 func (a *api) download(ctx context.Context, blobID string) (io.ReadCloser, error) {
-	r, err := a.req(ctx, http.MethodGet, "/runner/v1/blobs/"+blobID+"?host="+a.host, nil)
+	return a.downloadScoped(ctx, blobID, "")
+}
+
+func (a *api) downloadScoped(ctx context.Context, blobID, scope string) (io.ReadCloser, error) {
+	r, err := a.req(ctx, http.MethodGet, "/runner/v1/blobs/"+blobID+"?host="+a.host+scope, nil)
 	if err != nil {
 		return nil, err
 	}

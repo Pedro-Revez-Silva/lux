@@ -231,7 +231,9 @@ if one failed.
 ## Git
 
 ```bash
+lux checkpoint <run> [--wait]              # save committed git refs for other Runs
 lux push <run> [--wait] [--credential repo=VALUE]   # push each repository to git.push.branch (leased)
+
 lux diff <run> [--base clone|head] [--stat]   # what a running Run changed, per repository
 ```
 

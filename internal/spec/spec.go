@@ -286,11 +286,20 @@ type Git struct {
 	DroppedCredentials []string `json:"droppedCredentials,omitempty" yaml:"-" doc:"Set by luxd: credentials removed from secrets with a failed clone's repository, the only one using them. A resume's value under one of these names is not declared as a secret the workload sees."`
 }
 
+type RepositoryFrom struct {
+	Run        string `json:"run" yaml:"run"`
+	Repo       string `json:"repo" yaml:"repo"`
+	Checkpoint string `json:"checkpoint,omitempty" yaml:"-"`
+	Head       string `json:"head,omitempty" yaml:"-"`
+	Branch     string `json:"branch,omitempty" yaml:"-"`
+}
+
 type Repository struct {
-	Name       string `json:"name" yaml:"name"`
-	URL        string `json:"url" yaml:"url"`
-	Ref        string `json:"ref,omitempty" yaml:"ref,omitempty"`
-	Credential string `json:"credential,omitempty" yaml:"credential,omitempty"`
+	From       *RepositoryFrom `json:"from,omitempty" yaml:"from,omitempty"`
+	Name       string          `json:"name" yaml:"name"`
+	URL        string          `json:"url" yaml:"url"`
+	Ref        string          `json:"ref,omitempty" yaml:"ref,omitempty"`
+	Credential string          `json:"credential,omitempty" yaml:"credential,omitempty"`
 	// Path inside the container; defaults to <workspace volume>/repos/<name>.
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
 	// Push: false keeps a repository out of pushes (one cloned for context;
@@ -752,8 +761,11 @@ func (s *RunSpec) Normalize(d Defaults) error {
 				fail("git.repositories[%d]: invalid or duplicate name %q", i, r.Name)
 			}
 			names[r.Name] = true
-			if r.URL == "" {
-				fail("git.repositories[%d].url is required", i)
+			if r.From != nil && (r.From.Run == "" || r.From.Repo == "") {
+				fail("git.repositories[%d].from needs run and repo", i)
+			}
+			if r.URL == "" && r.From == nil {
+				fail("git.repositories[%d].url is required (or use from)", i)
 			} else if u, err := url.Parse(r.URL); err == nil && u.User != nil {
 				// It would end up in the checkout's config, the snapshot and
 				// logs: credentials go through `credential`, never the URL.

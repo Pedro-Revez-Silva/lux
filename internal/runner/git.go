@@ -4,12 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/klauspost/compress/zstd"
 
 	"github.com/marcioapm/lux/internal/gitws"
 	"github.com/marcioapm/lux/internal/passwd"
@@ -70,7 +75,22 @@ func (p *placement) materialize(ctx context.Context, r spec.Repository, user pas
 	if err != nil {
 		return nil, err
 	}
-	res, err := p.r.git.Materialize(ctx, p.gitRepo(r), dir)
+	repo := p.gitRepo(r)
+	if r.From != nil {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return nil, nil
+		}
+		if r.From.Branch != "" && !proto.ValidBranch(r.From.Branch) {
+			return nil, fmt.Errorf("checkpoint branch %q is not a valid branch name", r.From.Branch)
+		}
+		bundle, err := p.downloadCheckpoint(ctx, r.From.Checkpoint)
+		if err != nil {
+			return nil, err
+		}
+		defer os.Remove(bundle)
+		repo.Bundle, repo.HeadBranch = bundle, r.From.Branch
+	}
+	res, err := p.r.git.Materialize(ctx, repo, dir)
 	if err != nil || !res.Cloned {
 		return nil, err
 	}
@@ -84,6 +104,39 @@ func (p *placement) materialize(ctx context.Context, r spec.Repository, user pas
 		_ = os.Lchown(d, user.UID, user.GID)
 	}
 	return res, nil
+}
+
+// downloadCheckpoint fetches a pinned checkpoint for this placement into a
+// temporary bundle in DataDir, decompressed and capped at the assignment's
+// checkpoint limit; the caller removes it.
+func (p *placement) downloadCheckpoint(ctx context.Context, id string) (string, error) {
+	body, err := p.r.api.downloadScoped(ctx, id, "&run="+url.QueryEscape(p.runID)+"&epoch="+strconv.Itoa(p.epoch))
+	if err != nil {
+		return "", err
+	}
+	defer body.Close()
+	zr, err := zstd.NewReader(body)
+	if err != nil {
+		return "", err
+	}
+	defer zr.Close()
+	f, err := os.CreateTemp(p.r.cfg.DataDir, "checkpoint-*.bundle")
+	if err != nil {
+		return "", err
+	}
+	limit := p.checkpointLimit()
+	n, err := io.Copy(f, io.LimitReader(zr, limit+1))
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil && n > limit {
+		err = fmt.Errorf("checkpoint exceeds the %d-byte limit", limit)
+	}
+	if err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }
 
 // checkoutDir is where a checkout goes on the host: inside its volume,
@@ -133,6 +186,9 @@ func (p *placement) checkoutDir(path string) (mountpoint, dir string, err error)
 // repository from the Run's spec on it.
 func (p *placement) reportClone(ctx context.Context, r spec.Repository, data map[string]any) error {
 	data["repo"] = r.Name
+	if r.From != nil {
+		data["from"] = map[string]string{"run": r.From.Run, "checkpoint": r.From.Checkpoint}
+	}
 	if r.AddedBy != "" {
 		data["requestId"] = r.AddedBy
 	}
@@ -373,34 +429,9 @@ func (p *placement) push(ctx context.Context, req proto.Push) {
 	p.event(ctx, "git.push", map[string]any{"requestId": req.RequestID, "results": results})
 }
 
-// bundleScript runs in the checkout as `sh -c bundleScript sh BUNDLE
-// STATE...`. The workload keeps running, so nothing here is atomic with
-// it: the operation states are checked before HEAD is read as S, after,
-// and after the bundle is made, and the bundle must hold S alone. The
-// first state found where git resolves it is printed as
-// lux-operation:STATE; a bundle whose head is not S prints lux-moved. Any
-// failure (no sh, no git, not a checkout) exits non-zero. Only empty
-// output leaves a bundle to push.
-const bundleScript = `set -e
-b=$1; shift
-check() {
-	for s in "$@"; do
-		p=$(git rev-parse --git-path "$s")
-		if [ -e "$p" ] || [ -L "$p" ]; then
-			printf 'lux-operation:%s\n' "$s"
-			exit 0
-		fi
-	done
-}
-check "$@"
-S=$(git rev-parse --verify HEAD)
-check "$@"
-git bundle create --quiet "$b" HEAD
-check "$@"
-heads=$(git bundle list-heads "$b")
-if [ "$heads" != "$S HEAD" ]; then
-	echo lux-moved
-fi`
+// bundleScript is the shared workload-side bundler used by pushes and
+// checkpoints. Pushes select HEAD only.
+const bundleScript = proto.BundleScript
 
 // errMovedWhilePushed: HEAD moved between being read and being bundled.
 var errMovedWhilePushed = errors.New("the checkout changed while it was being pushed; push again")
@@ -430,7 +461,7 @@ func (p *placement) bundle(ctx context.Context, r spec.Repository) (path, op str
 	name := r.Name + ".bundle"
 	user := fmt.Sprintf("%d:%d", p.user.UID, p.user.GID)
 	args := []string{"exec", "--user", user, "--workdir", r.Path, containerName(p.runID),
-		"sh", "-c", bundleScript, "sh", proto.ShimRunDir + "/push/" + name}
+		"sh", "-c", bundleScript, "sh", "push", proto.ShimRunDir + "/push/" + name}
 	path = filepath.Join(dir, name)
 	out, err := p.r.pm.Run(ctx, append(args, proto.OperationStates...)...)
 	got := strings.TrimSpace(string(out))

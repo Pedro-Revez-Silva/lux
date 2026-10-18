@@ -400,6 +400,12 @@ func (a *app) getCmd() *cobra.Command {
 			if line := sizingLine(run.Sizing); line != "" {
 				fmt.Fprintf(w, "size:      %s\n", line)
 			}
+			if len(run.Checkpoints) > 0 {
+				fmt.Fprintln(w, "checkpoints:")
+				for _, c := range run.Checkpoints {
+					fmt.Fprintf(w, "  %s %s %s %d bytes\n", c.Repo, c.ID, c.Head, c.Size)
+				}
+			}
 			if len(run.Placements) > 0 {
 				fmt.Fprintln(w, "placements:")
 				for _, p := range run.Placements {

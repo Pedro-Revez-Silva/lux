@@ -168,6 +168,16 @@ components:
           format: int64
           type: integer
       type: object
+    CheckpointOutputBody:
+      additionalProperties: false
+      properties:
+        checkpoints:
+          items:
+            $ref: "#/components/schemas/GitCheckpoint"
+          type:
+            - array
+            - "null"
+      type: object
     Control:
       additionalProperties: false
       properties:
@@ -703,6 +713,33 @@ components:
           type:
             - array
             - "null"
+      type: object
+    GitCheckpoint:
+      additionalProperties: false
+      properties:
+        branch:
+          type: string
+        createdAt:
+          format: date-time
+          type: string
+        epoch:
+          format: int64
+          type: integer
+        head:
+          type: string
+        id:
+          type: string
+        refs:
+          additionalProperties:
+            type: string
+          type: object
+        repo:
+          type: string
+        size:
+          format: int64
+          type: integer
+        uploaded:
+          type: boolean
       type: object
     History:
       additionalProperties: false
@@ -2268,6 +2305,8 @@ components:
           type: string
         credential:
           type: string
+        from:
+          $ref: "#/components/schemas/RepositoryFrom"
         name:
           type: string
         path:
@@ -2277,6 +2316,20 @@ components:
         ref:
           type: string
         url:
+          type: string
+      type: object
+    RepositoryFrom:
+      additionalProperties: false
+      properties:
+        branch:
+          type: string
+        checkpoint:
+          type: string
+        head:
+          type: string
+        repo:
+          type: string
+        run:
           type: string
       type: object
     RequestAccepted:
@@ -2396,6 +2449,12 @@ components:
       properties:
         activity:
           type: string
+        checkpoints:
+          items:
+            $ref: "#/components/schemas/GitCheckpoint"
+          type:
+            - array
+            - "null"
         cost:
           $ref: "#/components/schemas/RunCostBrief"
           description: "In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."
@@ -2673,6 +2732,12 @@ components:
       properties:
         activity:
           type: string
+        checkpoints:
+          items:
+            $ref: "#/components/schemas/GitCheckpoint"
+          type:
+            - array
+            - "null"
         cost:
           $ref: "#/components/schemas/RunCostBrief"
           description: "In GET /v1/runs only: the totals per currency and the status of GET /v1/runs/{id}/cost."
@@ -3789,6 +3854,12 @@ components:
           description: "validateOnly: why it would not start now, by kind."
           items:
             $ref: "#/components/schemas/AdmissionBlocker"
+          type:
+            - array
+            - "null"
+        checkpoints:
+          items:
+            $ref: "#/components/schemas/GitCheckpoint"
           type:
             - array
             - "null"
@@ -7278,6 +7349,131 @@ paths:
       security:
         - apiKey: []
       summary: Terminate a Run (deprecated alias)
+      tags:
+        - runs
+  /v1/runs/{id}/checkpoint:
+    post:
+      description: Needs the `run` scope.
+      operationId: checkpointRun
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+        - explode: false
+          in: query
+          name: wait
+          schema:
+            type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckpointOutputBody"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Conflict
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Service Unavailable
+      security:
+        - apiKey: []
+      summary: Checkpoint a running Run's committed git refs
+      tags:
+        - runs
+  /v1/runs/{id}/checkpoints:
+    get:
+      description: Needs the `read` scope.
+      operationId: listCheckpoints
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CheckpointOutputBody"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: List the latest git checkpoints
       tags:
         - runs
   /v1/runs/{id}/cost:

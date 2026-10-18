@@ -12,7 +12,20 @@ import (
 )
 
 // Run is the API representation of a Run.
+type GitCheckpoint struct {
+	ID        string            `json:"id"`
+	Repo      string            `json:"repo"`
+	Head      string            `json:"head"`
+	Branch    string            `json:"branch"`
+	Refs      map[string]string `json:"refs"`
+	Size      int64             `json:"size"`
+	Epoch     int               `json:"epoch"`
+	CreatedAt time.Time         `json:"createdAt"`
+	Uploaded  bool              `json:"uploaded"`
+}
+
 type Run struct {
+	Checkpoints []GitCheckpoint   `json:"checkpoints,omitempty"`
 	ID          string            `json:"id"`
 	Tenant      string            `json:"tenant" doc:"The owning tenant's name."`
 	Name        string            `json:"name,omitempty"`

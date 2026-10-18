@@ -535,6 +535,10 @@ func (r *Runner) handleControl(ctx context.Context, f proto.Frame) bool {
 			// Off the control queue, like a push: fetching can take a while.
 			go p.syncRunning(context.WithoutCancel(ctx), req)
 		}
+	case "checkpoint":
+		if p := r.placement(f.RunID, f.Epoch); p != nil {
+			go p.checkpointRunning(context.WithoutCancel(ctx))
+		}
 	case proto.MsgPush:
 		if p := r.placement(f.RunID, f.Epoch); p != nil {
 			var req proto.Push

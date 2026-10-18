@@ -16,6 +16,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "checkpoint" {
+		os.Exit(shim.Checkpoint(os.Args[2:]))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "diff" {
 		os.Exit(shim.Diff(os.Args[2:]))
 	}

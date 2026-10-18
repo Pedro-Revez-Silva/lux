@@ -51,12 +51,47 @@ func TestMaterializeIsIdempotentAndKeepsWork(t *testing.T) {
 	}
 }
 
+func TestMaterializeCheckpointBundle(t *testing.T) {
+	bare, _ := remote(t)
+	source := filepath.Join(t.TempDir(), "source")
+	gitRun(t, filepath.Dir(source), "clone", "-q", bare, source)
+	gitRun(t, source, "checkout", "-q", "-b", "unpublished")
+	gitRun(t, source, "commit", "-q", "--allow-empty", "-m", "local")
+	head := gitRun(t, source, "rev-parse", "HEAD")
+	bundle := filepath.Join(t.TempDir(), "checkpoint.bundle")
+	gitRun(t, source, "bundle", "create", bundle, "--branches", "HEAD")
+	dir := filepath.Join(t.TempDir(), "clone")
+	res, err := New(t.TempDir()).Materialize(context.Background(), Repo{Tenant: "t", Name: "copy", URL: bare, Bundle: bundle, HeadBranch: "unpublished"}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Base != head || res.Branch != "unpublished" {
+		t.Fatalf("%+v", res)
+	}
+	if got := gitRun(t, dir, "remote", "get-url", "origin"); got != bare {
+		t.Fatalf("origin %s", got)
+	}
+}
+
 func TestUnknownRef(t *testing.T) {
 	bare, _ := remote(t)
 	m := New(t.TempDir())
 	_, err := m.Materialize(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: "nope"}, filepath.Join(t.TempDir(), "r"))
 	if err == nil || !strings.Contains(err.Error(), `"nope" not found`) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// A ref that looks like an option is looked up as a ref, never passed to
+// checkout as one: "-f" would otherwise check out the default HEAD.
+func TestOptionLikeRefIsARef(t *testing.T) {
+	bare, _ := remote(t)
+	m := New(t.TempDir())
+	for _, ref := range []string{"-f", "--orphan=x"} {
+		_, err := m.Materialize(context.Background(), Repo{Tenant: "t", Name: "r", URL: bare, Ref: ref}, filepath.Join(t.TempDir(), "r"))
+		if err == nil || !strings.Contains(err.Error(), `"`+ref+`" not found`) {
+			t.Errorf("ref %q: %v", ref, err)
+		}
 	}
 }
 

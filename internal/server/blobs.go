@@ -298,7 +298,14 @@ func (s *Server) abortUpload(ctx context.Context, key, uploadID string) {
 func (s *Server) blobUploaded(ctx context.Context, b *runnerBlob) error {
 	key := b.key()
 	var gone bool
+	var checkpointKeys []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		checkpointKeys = nil
+		if b.kind == "checkpoint" {
+			if _, err := tx.Exec(ctx, `SELECT id FROM runs WHERE id=$1 FOR UPDATE`, b.runID); err != nil {
+				return err
+			}
+		}
 		tag, err := tx.Exec(ctx, `UPDATE blobs SET location = 's3', s3_key = $2, uploaded_at = now()
 			WHERE id = $1 AND location = 'host'`, b.id, key)
 		if err != nil {
@@ -316,7 +323,24 @@ func (s *Server) blobUploaded(ctx context.Context, b *runnerBlob) error {
 		}
 		// Only the upload that moved the blob to s3 adds the event, and
 		// last: event streams come after every row lock.
-		if tag.RowsAffected() == 0 || b.kind != "artifact" {
+		if tag.RowsAffected() == 0 {
+			return nil
+		}
+		if b.kind == "checkpoint" {
+			if err := checkpointUploaded(ctx, tx, b.id); err != nil {
+				return err
+			}
+			rows, err := tx.Query(ctx, `UPDATE blobs b SET location='deleted',deleted_at=now()
+				FROM git_checkpoints c WHERE c.id=b.id AND c.run_id=$1 AND b.run_id=$1 AND NOT c.latest AND c.uploaded
+				AND b.location='s3' AND NOT EXISTS (SELECT 1 FROM git_checkpoint_refs cr WHERE cr.checkpoint_id=c.id)
+				RETURNING b.s3_key`, b.runID)
+			if err != nil {
+				return err
+			}
+			checkpointKeys, err = pgx.CollectRows(rows, pgx.RowTo[string])
+			return err
+		}
+		if b.kind != "artifact" {
 			return nil
 		}
 		return artifactUploaded(ctx, tx, b.id)
@@ -328,6 +352,7 @@ func (s *Server) blobUploaded(ctx context.Context, b *runnerBlob) error {
 		s.deleteObjects(context.WithoutCancel(ctx), "upload of a deleted blob", []string{key})
 		return errf(http.StatusGone, "gone", "blob %s was deleted", b.id)
 	}
+	s.deleteObjects(context.WithoutCancel(ctx), "superseded checkpoint", checkpointKeys)
 	s.Kick() // a resume elsewhere may have been waiting for this upload
 	return nil
 }
@@ -362,8 +387,28 @@ func (s *Server) serveRunnerBlobDownload(w http.ResponseWriter, r *http.Request)
 		return err
 	}
 	id := r.PathValue("id")
+	q := r.URL.Query()
+	host := q.Get("host")
+	// A checkpoint download names the destination placement (run, epoch);
+	// a snapshot volume download names neither.
+	checkpoint := q.Has("run") || q.Has("epoch")
+	dst := q.Get("run")
+	epoch, epochErr := strconv.Atoi(q.Get("epoch"))
+	if checkpoint && (dst == "" || epochErr != nil) {
+		return errf(http.StatusNotFound, "not_found", "no blob %s for a run assigned to this host", id)
+	}
 	var key, location string
 	err = s.db.Tx(r.Context(), store.System(), func(tx pgx.Tx) error {
+		if checkpoint {
+			return tx.QueryRow(r.Context(), `SELECT coalesce(b.s3_key, ''), b.location FROM blobs b
+				JOIN git_checkpoint_refs cr ON cr.checkpoint_id = b.id AND cr.tenant_id = b.tenant_id
+				JOIN runs dst ON dst.id = cr.run_id AND dst.tenant_id = cr.tenant_id
+				JOIN placements p ON p.run_id = dst.id AND p.epoch = dst.current_epoch
+				JOIN hosts h ON h.id = p.host_id
+				WHERE b.id = $1 AND b.kind = 'checkpoint' AND h.token_id = $2 AND h.name = $3
+				  AND p.state IN ('assigned', 'starting', 'running')
+				  AND dst.id = $4 AND p.epoch = $5`, id, tok.ID, host, dst, epoch).Scan(&key, &location)
+		}
 		return tx.QueryRow(r.Context(), `SELECT coalesce(b.s3_key, ''), b.location FROM blobs b
 			JOIN runs rn ON rn.id = b.run_id
 			JOIN snapshots sn ON sn.id = rn.snapshot_id AND sn.run_id = rn.id
@@ -371,7 +416,7 @@ func (s *Server) serveRunnerBlobDownload(w http.ResponseWriter, r *http.Request)
 			JOIN hosts h ON h.id = p.host_id
 			WHERE b.id = $1 AND b.kind = 'volume' AND b.epoch = sn.epoch AND h.token_id = $2 AND h.name = $3
 			  AND EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(nullif(sn.manifest->'volumes', 'null'), '[]')) v
-				WHERE v->>'blobId' = b.id)`, id, tok.ID, r.URL.Query().Get("host")).Scan(&key, &location)
+				WHERE v->>'blobId' = b.id)`, id, tok.ID, host).Scan(&key, &location)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errf(http.StatusNotFound, "not_found", "no blob %s for a run assigned to this host", id)

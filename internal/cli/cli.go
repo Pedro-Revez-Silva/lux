@@ -57,6 +57,8 @@ func (a *app) main(args []string) int {
 			fmt.Fprintln(a.stderr, "lux: name one with --tenant, LUX_TENANT, or tenant in ~/.config/lux/config.toml")
 		}
 		switch {
+		case ae.Code == "no_checkpoint":
+			return 3
 		case ae.Status == 404:
 			return 3
 		case ae.Status == 409 || ae.Status == 422:
@@ -109,7 +111,7 @@ func (a *app) root() *cobra.Command {
 	root.PersistentFlags().StringVarP(&a.output, "output", "o", "text", "output format: text | json")
 	root.AddCommand(
 		a.runCmd(), a.lsCmd(), a.getCmd(), a.logsCmd(), a.eventsCmd(), a.steerCmd(), a.interruptCmd(),
-		a.stopCmd(), a.resumeCmd(), a.terminateCmd(), a.cancelCmd(), a.renameCmd(), a.waitCmd(), a.pushCmd(), a.diffCmd(), a.snapshotsCmd(),
+		a.stopCmd(), a.resumeCmd(), a.terminateCmd(), a.cancelCmd(), a.renameCmd(), a.waitCmd(), a.pushCmd(), a.checkpointCmd(), a.diffCmd(), a.snapshotsCmd(),
 		a.artifactsCmd(), a.execCmd(), a.attachCmd(), a.portForwardCmd(), a.hostsCmd(), a.poolsCmd(),
 		a.tenantsCmd(), a.statusCmd(), a.historyCmd(), a.costCmd(), a.costsCmd(), a.migrateCmd(), a.shellCmd(), a.serverCmd(), a.syncCmd(),
 	)

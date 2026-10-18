@@ -149,7 +149,8 @@ type snapshotRecord struct {
 	Reported bool `json:"reported,omitempty"`
 	// Published, on a published artifact's record (named by its artifact
 	// id): the report, once its one blob is written.
-	Published *proto.ArtifactPublished `json:"published,omitempty"`
+	Published  *proto.ArtifactPublished `json:"published,omitempty"`
+	Checkpoint *proto.CheckpointReady   `json:"checkpoint,omitempty"`
 }
 
 type egressState struct {

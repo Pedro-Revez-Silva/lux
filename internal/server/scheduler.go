@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -639,6 +640,40 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	}
 
 	a := proto.Assign{RunID: r.ID, TenantID: r.TenantID, Epoch: epoch, Spec: r.Spec, ImageResolved: r.ImageResolved, Sync: r.PendingSync}
+	a.CheckpointBytes = s.cfg.CheckpointBytes
+	if a.CheckpointBytes <= 0 {
+		a.CheckpointBytes = proto.DefaultCheckpointBytes
+	}
+	a.CheckpointRefs = map[string]string{}
+	rows, err := tx.Query(ctx, `SELECT repo,refs FROM git_checkpoints WHERE run_id=$1 AND latest AND uploaded`, r.ID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var repo string
+		var refs map[string]string
+		if err := rows.Scan(&repo, &refs); err != nil {
+			rows.Close()
+			return err
+		}
+		var names []string
+		for ref := range refs {
+			if ref != "HEAD" {
+				names = append(names, ref)
+			}
+		}
+		slices.Sort(names)
+		var lines []string
+		for _, ref := range names {
+			lines = append(lines, refs[ref]+" "+ref)
+		}
+		lines = append(lines, refs["HEAD"]+" HEAD")
+		a.CheckpointRefs[repo] = strings.Join(lines, "\n")
+	}
+	rows.Close()
+	if rows.Err() != nil {
+		return rows.Err()
+	}
 	if r.SnapshotID != nil {
 		if a.GitBases, a.SyncBases, err = lineageBases(ctx, tx, r.ID, epoch); err != nil {
 			return err

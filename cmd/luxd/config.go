@@ -30,7 +30,8 @@ import (
 // key: [s3] bucket) and the variable in its env tag. docs/operations.md
 // lists them.
 type config struct {
-	Database struct {
+	CheckpointLimit size `toml:"checkpoint_limit" env:"LUX_CHECKPOINT_LIMIT"`
+	Database        struct {
 		URL         string `toml:"url" env:"LUX_DATABASE_URL"`
 		AppPassword string `toml:"app_password" env:"LUX_APP_PASSWORD"`
 	} `toml:"database"`

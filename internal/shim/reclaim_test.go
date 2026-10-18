@@ -244,6 +244,23 @@ func TestShimReclaimKillsRunningBeforeStopHook(t *testing.T) {
 	}
 }
 
+// A reclamation skips the stop-time git checkpoint: staging may take far
+// longer than the reclamation's deadline. It is reported as skipped.
+func TestShimReclaimSkipsCheckpointStaging(t *testing.T) {
+	s, _, dir := reclaimShim(t)
+	stage := filepath.Join(dir, "checkpoints-1")
+	s.cfg.Checkpoint = &proto.CheckpointArgs{Dir: stage, Repos: []proto.CheckpointRepo{{Name: "api", Path: dir}}}
+	s.reclaim(time.Now().Add(300 * time.Millisecond))
+	s.stageCheckpoints()
+	if _, err := os.Stat(stage); !os.IsNotExist(err) {
+		t.Fatalf("staged on a reclamation: %v", err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "out.jsonl"))
+	if !strings.Contains(string(b), "git checkpoint: skipped on a spot reclamation") {
+		t.Fatalf("output %s", b)
+	}
+}
+
 // A reclamation that lands after an ordinary stop registered its hook (its
 // 30s deadline) but before the hook started: the hook never starts.
 func TestShimReclaimBeforeHookStarts(t *testing.T) {

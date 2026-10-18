@@ -108,7 +108,8 @@ type ShimConfig struct {
 	// values stay in the shim's memory.
 	Services []spec.Service `json:"services,omitempty"`
 	// Sync: checkouts to move before init (a resume's sync).
-	Sync *SyncArgs `json:"sync,omitempty"`
+	Sync       *SyncArgs       `json:"sync,omitempty"`
+	Checkpoint *CheckpointArgs `json:"checkpoint,omitempty"`
 	// DelegateCgroup: the shim splits the Run's cgroup so a container
 	// engine in the workload can make cgroups with limits of its own
 	// (sandbox.cgroupDelegation; docs/podman.md#limits-of-nested-containers).

@@ -428,7 +428,16 @@ becomes an artifact. Publishing a name again makes a new version; nothing
 is overwritten. A host lost before its runner reported a published file
 loses it. See [the RunSpec](runspec.md#artifacts).
 
+### Git checkpoints
+
+A git checkpoint is a committed-only bundle of a Run's local branches and
+`HEAD`. It is stored as a tenant-scoped blob. A destination Run can pin a
+checkpoint from another Run in the same tenant; the pin keeps it through
+source retention and until destination retention. Uncommitted files are not
+in a checkpoint.
+
 ## Servers
+
 
 A **server** is a named URL that reaches a port in a Run, optionally with a
 command lux runs in the Run's container ([the RunSpec](runspec.md#servers)

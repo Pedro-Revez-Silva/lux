@@ -215,3 +215,68 @@ func TestReapRetentionS3Failure(t *testing.T) {
 		t.Fatalf("S3 deletes %v", got)
 	}
 }
+
+// pinnedSources adds n t2 Runs terminated 100+ days ago whose only S3 blob
+// is a checkpoint pinned by the stopped Run dst.
+func pinnedSources(t *testing.T, s *Server, ctx context.Context, n int) {
+	t.Helper()
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch) VALUES ('dst', 't2', '{}', 'stopped', 1)`)
+	execSQL(t, s, ctx, `INSERT INTO runs (id, tenant_id, spec, state, current_epoch, finished_at, terminated_at)
+		SELECT 'src' || lpad(i::text, 3, '0'), 't2', '{}', 'terminated', 1, now() - make_interval(days => 100 + i), now() - make_interval(days => 100 + i)
+		FROM generate_series(1, $1) i`, n)
+	execSQL(t, s, ctx, `INSERT INTO blobs (id, tenant_id, run_id, epoch, kind, name, location, s3_key)
+		SELECT id || '-cp', 't2', id, 1, 'checkpoint', 'api', 's3', id || '/cp' FROM runs WHERE id LIKE 'src___'`)
+	execSQL(t, s, ctx, `INSERT INTO git_checkpoints (id, tenant_id, run_id, repo, head, refs, size, epoch, uploaded, latest)
+		SELECT id || '-cp', 't2', id, 'api', repeat('a', 40), '{}', 1, 1, true, true FROM runs WHERE id LIKE 'src___'`)
+	execSQL(t, s, ctx, `INSERT INTO git_checkpoint_refs (tenant_id, run_id, repo, checkpoint_id)
+		SELECT 't2', 'dst', 'copy' || id, id || '-cp' FROM runs WHERE id LIKE 'src___'`)
+}
+
+func pinnedSourcesInS3(t *testing.T, s *Server) int {
+	t.Helper()
+	var n int
+	systemScan(t, s, `SELECT count(*) FROM blobs WHERE kind = 'checkpoint' AND location = 's3' AND run_id LIKE 'src___'`, nil, &n)
+	return n
+}
+
+// More pinned old sources than a pass's batch do not keep a younger due
+// Run from being reaped, and their pinned checkpoints stay.
+func TestReapRetentionPastPinnedCheckpoints(t *testing.T) {
+	s, ctx, f := retentionFixture(t, StateStopped, StateTerminated, 1, 30)
+	pinnedSources(t, s, ctx, 25)
+	if err := s.reapRetention(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"rb/bB-out-snapB", "rb/bB-out-snapB2", "rb/bB-vol-snapB", "rb/bB-vol-snapB2"}
+	if got := f.Deleted(); !slices.Equal(got, want) {
+		t.Errorf("S3 deletes %v, want rb's %v", got, want)
+	}
+	if n := pinnedSourcesInS3(t, s); n != 25 {
+		t.Errorf("pinned checkpoints in S3: %d, want 25", n)
+	}
+}
+
+// A pin lives as long as its destination's own retention: a destination
+// terminated within it keeps its sources' checkpoints; past it the pins go
+// and the checkpoints are reaped.
+func TestReapRetentionKeepsPinsOfRetainedDestination(t *testing.T) {
+	s, ctx, f := retentionFixture(t, StateStopped, StateStopped, 1, 1)
+	pinnedSources(t, s, ctx, 3)
+	execSQL(t, s, ctx, `UPDATE runs SET state = 'terminated', terminated_at = now() - interval '1 day' WHERE id = 'dst'`)
+	if err := s.reapRetention(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Deleted(); len(got) != 0 {
+		t.Fatalf("deleted with the destination within retention: %v", got)
+	}
+	if n := pinnedSourcesInS3(t, s); n != 3 {
+		t.Fatalf("pinned checkpoints in S3: %d, want 3", n)
+	}
+	execSQL(t, s, ctx, `UPDATE runs SET terminated_at = now() - interval '6 days' WHERE id = 'dst'`)
+	if err := s.reapRetention(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := pinnedSourcesInS3(t, s); n != 0 {
+		t.Fatalf("checkpoints of an expired destination still in S3: %d", n)
+	}
+}

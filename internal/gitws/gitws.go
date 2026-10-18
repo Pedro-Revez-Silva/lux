@@ -32,11 +32,13 @@ import (
 type Repo struct {
 	// Tenant owns the mirror it is fetched into: mirrors are never shared
 	// between tenants, since one may hold what another can't read.
-	Tenant string
-	Name   string
-	URL    string
-	Ref    string // branch, tag or sha
-	Token  string // credential for fetch and push; "" for public repos
+	Tenant     string
+	Name       string
+	URL        string
+	Ref        string // branch, tag or sha
+	Token      string // credential for fetch and push; "" for public repos
+	Bundle     string
+	HeadBranch string
 }
 
 // Result is what was checked out.
@@ -191,7 +193,11 @@ func (m *Manager) Materialize(ctx context.Context, r Repo, dir string) (*Result,
 	if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
 		return &Result{Name: r.Name}, nil
 	}
-	mirror, err := m.mirror(ctx, r)
+	mirror := r.Bundle
+	var err error
+	if mirror == "" {
+		mirror, err = m.mirror(ctx, r)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -215,20 +221,24 @@ func (m *Manager) Materialize(ctx context.Context, r Repo, dir string) (*Result,
 	}
 	ref := r.Ref
 	if ref == "" || ref == "HEAD" {
-		// The remote's default branch, as the mirror records it.
-		if ref, err = git(ctx, mirror, "", "symbolic-ref", "--short", "HEAD"); err != nil {
+		if r.Bundle != "" {
+			ref = r.HeadBranch
+			if ref == "" {
+				ref = "HEAD"
+			}
+		} else if ref, err = git(ctx, mirror, "", "symbolic-ref", "--short", "HEAD"); err != nil {
 			return nil, err
 		}
 	}
 	res := &Result{Name: r.Name, Cloned: true}
 	// A branch is checked out as a local branch tracking origin; a tag or
-	// sha detached.
+	// sha detached. --end-of-options: a ref is never read as an option.
 	if _, err := git(ctx, dir, "", "rev-parse", "--verify", "-q", "refs/remotes/origin/"+ref); err == nil {
-		if _, err := git(ctx, dir, "", "checkout", "--quiet", "-B", ref, "origin/"+ref); err != nil {
+		if _, err := git(ctx, dir, "", "checkout", "--quiet", "-B", ref, "--end-of-options", "origin/"+ref); err != nil {
 			return nil, err
 		}
 		res.Branch = ref
-	} else if _, err := git(ctx, dir, "", "checkout", "--quiet", "--detach", ref); err != nil {
+	} else if _, err := git(ctx, dir, "", "checkout", "--quiet", "--detach", "--end-of-options", ref); err != nil {
 		return nil, fmt.Errorf("ref %q not found in %s", ref, Scrub(r.URL))
 	}
 	if res.Base, err = git(ctx, dir, "", "rev-parse", "HEAD"); err != nil {

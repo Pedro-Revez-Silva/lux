@@ -932,6 +932,46 @@ Every clone is a `git.clone` event: `{repo, status: "cloned", commit}`, or
 Clones are the runner's, on the host, never the Run's, so a repository
 needs no `network.egress` rule and none is checked.
 
+### Checkpoints and clones from Runs
+
+A checkpoint is a bundle of a checkout's local branches and `HEAD`.
+Uncommitted changes are not included: commit what you want others to see.
+The shim stages bundles after the workload and `beforeStop` finish, before
+it exits. The runner uploads them like snapshot blobs. A crash that prevents
+staging leaves the previous checkpoint; it does not record a new one.
+`lux checkpoint <run> --wait` asks a running Run for a checkpoint now.
+Each uploaded checkpoint is a `git.checkpoint` event `{repo, head, refs,
+size}`; a repository whose branches and `HEAD` have not moved since its
+latest checkpoint keeps that one and is a `git.checkpoint` event `{repo,
+unchanged: true}`. `--wait` returns once every repository has one or the
+other.
+`lux get` lists the latest uploaded checkpoints.
+
+A repository can use `from` instead of `url`:
+
+```yaml
+git:
+  repositories:
+    - name: review
+      from: {run: run_source, repo: api}
+```
+
+The source must belong to the same tenant and have an uploaded checkpoint.
+It may be running, stopped or ended. luxd pins that checkpoint at submission,
+so later source commits do not change the clone. The reference keeps its
+bundle until the destination's retention expires, even if the source expires.
+The default ref is the source's HEAD branch, or detached HEAD. `origin` is
+the source repository's URL. No forge credential is needed to clone the bundle.
+A clone's `git.clone` event includes `from: {run, checkpoint}`.
+A resume request's `git.repositories` accepts the same `from` shape; the
+`lux resume --add-repo` flag takes only a `url`.
+
+Bundles default to a 512 MiB limit (`checkpoint_limit` in luxd, or
+`LUX_CHECKPOINT_LIMIT`). A failed or oversized bundle warns and never fails
+the stop. Checkpoints follow snapshot retention, except while pinned.
+Fresh-source requests, remote refresh after bundle cloning, and stopped-Run
+diffs are not supported.
+
 ### Adding repositories on resume
 
 A resume can add repositories to a stopped, lost, failed or succeeded Run. Pass them in

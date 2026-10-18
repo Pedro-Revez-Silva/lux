@@ -389,11 +389,13 @@ type Heartbeat struct {
 // Assign starts (or resumes) a placement. Secrets travel only in this
 // message, only over the WebSocket, and are never persisted by either side.
 type Assign struct {
-	RunID    string            `json:"runId"`
-	TenantID string            `json:"tenantId"`
-	Epoch    int               `json:"epoch"`
-	Spec     spec.RunSpec      `json:"spec"`
-	Secrets  map[string]string `json:"secrets"`
+	CheckpointBytes int64             `json:"checkpointBytes,omitempty"`
+	CheckpointRefs  map[string]string `json:"checkpointRefs,omitempty"`
+	RunID           string            `json:"runId"`
+	TenantID        string            `json:"tenantId"`
+	Epoch           int               `json:"epoch"`
+	Spec            spec.RunSpec      `json:"spec"`
+	Secrets         map[string]string `json:"secrets"`
 	// Resume is set when the Run has run before.
 	Resume *ResumeInfo `json:"resume,omitempty"`
 	// Input to deliver as the first message (resume with input).

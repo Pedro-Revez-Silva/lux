@@ -313,6 +313,7 @@ func (s *Shim) fail(reason, msg string) int {
 }
 
 func (s *Shim) finish(info proto.ExitInfo) int {
+	s.stageCheckpoints()
 	// Close first: it records what was still held.
 	s.out.Close()
 	info.LastSeq = s.out.Seq()

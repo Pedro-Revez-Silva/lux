@@ -177,6 +177,7 @@ func serve(ctx context.Context, c config, plan servePlan) error {
 		settle = append(settle, d.Duration)
 	}
 	srv := server.New(server.Config{
+		CheckpointBytes:      int64(c.CheckpointLimit.Bytes),
 		Listen:               c.Listen,
 		PublicURL:            c.PublicURL,
 		RunnerURL:            c.RunnerURL,

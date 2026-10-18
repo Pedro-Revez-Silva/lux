@@ -766,10 +766,16 @@ func (s *Server) deleteObjects(ctx context.Context, what string, keys []string) 
 func (s *Server) reapRetention(ctx context.Context) error {
 	var keys []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `DELETE FROM git_checkpoint_refs cr USING runs r, tenants t
+			WHERE cr.run_id = r.id AND t.id = r.tenant_id AND r.state = 'terminated'
+			AND r.terminated_at < now() - make_interval(days => t.retention_days)`); err != nil {
+			return err
+		}
 		rows, err := tx.Query(ctx, `
 			WITH due AS (
 				SELECT r.id FROM runs r JOIN tenants t ON t.id = r.tenant_id
-				WHERE r.id = ANY (ARRAY(SELECT DISTINCT run_id FROM blobs WHERE location = 's3' AND kind <> 'artifact'))
+				WHERE r.id = ANY (ARRAY(SELECT DISTINCT run_id FROM blobs WHERE location = 's3' AND kind <> 'artifact'
+					AND NOT EXISTS (SELECT 1 FROM git_checkpoint_refs cr WHERE cr.checkpoint_id = blobs.id)))
 				  AND r.state = 'terminated'
 				  AND r.terminated_at IS NOT NULL AND r.terminated_at < now() - make_interval(days => t.retention_days)
 				ORDER BY r.terminated_at LIMIT 20
@@ -781,6 +787,7 @@ func (s *Server) reapRetention(ctx context.Context) error {
 			-- claimed on a later pass, once it has arrived.
 			UPDATE blobs SET location = 'deleted', deleted_at = now()
 			WHERE run_id IN (SELECT id FROM due) AND location = 's3' AND kind <> 'artifact'
+			  AND NOT EXISTS (SELECT 1 FROM git_checkpoint_refs cr WHERE cr.checkpoint_id = blobs.id)
 			RETURNING s3_key`)
 		if err != nil {
 			return err

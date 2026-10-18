@@ -263,7 +263,7 @@ func (r *Runner) markReported(snapID string) {
 		runID, epoch = rec.RunID, rec.Epoch
 	})
 	for id, rec := range r.snapshotRecords() {
-		if id != snapID && !rec.Reported && rec.Published == nil && rec.RunID == runID && rec.Epoch == epoch {
+		if id != snapID && !rec.Reported && rec.Published == nil && rec.Checkpoint == nil && rec.RunID == runID && rec.Epoch == epoch {
 			r.updateRecord(id, func(rec *snapshotRecord) { rec.Reported = true })
 		}
 	}
