@@ -220,6 +220,28 @@ availability immediately. See [CLI](cli.md#runs).
   at `path`). A file secret is never in a snapshot. Every resume must
   supply every secret again.
 - Volume paths must be absolute. `/.lux` is reserved.
+  `kind` is `state` (the default), `ephemeral` or `cache`.
+  Cache names match `[a-z0-9][a-z0-9._-]{0,62}`. A cache cannot overlap
+  a state volume, a repository path, an adapter session path or `$LUX_INPUTS`.
+  Use separate state mounts for the checkout and session, not a state
+  mount over the whole home when a cache lives inside it.
+  For example:
+
+  ```yaml
+  volumes:
+    - { name: workspace, path: /workspace, kind: state }
+    - { name: session, path: /home/agent/.claude, kind: state }
+    - { name: gomod, path: /home/agent/go/pkg/mod, kind: cache }
+  ```
+
+  A cache is shared by the tenant's Runs on that host with the same name,
+  workload UID and GID, never another tenant's. Different UID or GID means
+  a separate cache, so ownership stays stable. It is never snapshotted,
+  uploaded or restored. A resume here reuses it; another host has its own
+  cache, possibly empty. Contents may vanish anytime: no secrets or files
+  needed to resume. Concurrent mounts are allowed; lux does not lock.
+  Use tools whose caches support concurrent writers (Go, npm, uv, pip,
+  Gradle). Cache bytes belong to the host, not `resources.disk`.
 - **Resources** are what a Run gets and what the scheduler reserves on its
   host: `cpus` (a CPU quota; `0.5` is half a CPU), `memory` (what the Run
   asks for, in its host's terms, the machine's gross memory; the

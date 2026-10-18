@@ -479,7 +479,7 @@ func TestDiskGuardReclaimsAPressureStoppedRunsUploadedCopy(t *testing.T) {
 	f.serveUploads(t)
 	data := volumeName("run1", "data")
 	script, _ := os.ReadFile(f.bin)
-	writeFile(t, f.bin, strings.Replace(string(script), `"volume rm")`, `"volume ls") echo `+data+` ;;
+	writeFile(t, f.bin, strings.Replace(string(script), `"volume rm")`, `"volume ls") [ "$4" = label=lux.run=run1 ] && echo `+data+`; exit 0 ;;
 "volume rm")`, 1))
 	if err := os.Chmod(f.bin, 0o755); err != nil {
 		t.Fatal(err)

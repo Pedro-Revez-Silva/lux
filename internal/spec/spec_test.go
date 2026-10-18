@@ -148,6 +148,57 @@ func TestNormalizeExample(t *testing.T) {
 	}
 }
 
+func TestCacheVolumes(t *testing.T) {
+	cacheSpec := func(adapter, name, path string) RunSpec {
+		return RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Adapter: adapter, Command: []string{"true"}},
+			Volumes: []Volume{{Name: name, Path: path, Kind: "cache"}}}
+	}
+	for _, c := range []struct {
+		name string
+		ok   bool
+	}{
+		{"gomod", true}, {"npm.v2", true}, {strings.Repeat("a", 63), true},
+		{"", false}, {"../x", false}, {"A", false}, {".cache", false},
+		{"a/b", false}, {strings.Repeat("a", 64), false},
+	} {
+		t.Run("name/"+c.name, func(t *testing.T) {
+			s := cacheSpec("", c.name, "/cache")
+			if err := s.Normalize(BuiltinDefaults); (err == nil) != c.ok {
+				t.Fatalf("Normalize: %v, want valid %v", err, c.ok)
+			}
+		})
+	}
+	for _, c := range []struct {
+		path, state, adapter, repo, problem string
+	}{
+		{"/cache", "", "", "", ""},
+		{"/cache", "/cache/state", "", "", "overlaps state"},
+		{"/data/cache", "/data", "", "", "overlaps state"},
+		{"/data", "/data", "", "", "overlaps state"},
+		{"/data2", "/data", "", "", ""},
+		{"/cache", "", "", "/cache/repo", "not on a state volume"},
+		{"/home/agent/.claude", "", "claude-code", "", "overlaps adapter session"},
+		{"/home/agent/.claude/cache", "", "claude-code", "", "overlaps adapter session"},
+		{"/.lux/run/inputs", "", "", "", "cannot contain $LUX_INPUTS"},
+		{"$LUX_INPUTS", "", "", "", "cannot contain $LUX_INPUTS"},
+		{"/data/.lux-inputs", "/data", "", "", "overlaps state"},
+	} {
+		t.Run(c.path+"/"+c.state, func(t *testing.T) {
+			s := cacheSpec(c.adapter, "cache", c.path)
+			if c.state != "" {
+				s.Volumes = append(s.Volumes, Volume{Name: "state", Path: c.state, Kind: "state"})
+			}
+			if c.repo != "" {
+				s.Git = &Git{Repositories: []Repository{{Name: "repo", URL: "https://example.com/repo", Path: c.repo}}}
+			}
+			err := s.Normalize(BuiltinDefaults)
+			if c.problem == "" && err != nil || c.problem != "" && (err == nil || !strings.Contains(err.Error(), c.problem)) {
+				t.Fatalf("Normalize: %v, want %q", err, c.problem)
+			}
+		})
+	}
+}
+
 func TestAdapterStatePathsMustBeOnStateVolume(t *testing.T) {
 	s := RunSpec{Image: Image{Ref: "x"}, Workload: Workload{Adapter: "claude-code"}}
 	err := s.Normalize(BuiltinDefaults)

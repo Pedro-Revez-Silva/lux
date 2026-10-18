@@ -5,10 +5,43 @@ quotas are enforced."""
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from conftest import CLIError, fake_agent, generic
 from env import ALPINE_IMAGE, S3_SECRET_KEY, wait_until
+
+
+def test_cache_shared_per_tenant_never_snapshotted(env, lux, tenant_factory, runners, hosts):
+    pool = "cache-" + uuid.uuid4().hex[:8]
+    env.luxd_admin("create-pool", "--name", pool, "--provider", "static", "--shared")
+    token = env.luxd_admin("create-host-token", "--pool", pool)["token"]
+    runners.start(hosts[0], token=token, name=pool)
+    volumes = [{"name": "gomod", "path": "/cache", "kind": "cache"},
+               {"name": "state", "path": "/state", "kind": "state"}]
+
+    def submit(client, command):
+        return client.submit(generic(ALPINE_IMAGE, "sh", "-c", command,
+                                     volumes=volumes, placement={"pool": pool}))
+
+    a = submit(lux, "echo cached > /cache/module; sleep 3600")
+    lux.wait_state(a, "running")
+    lux.run("exec", a, "--", "sh", "-c", "test -f /cache/module")
+    lux.run("stop", a, "--wait")
+    snapshot = lux.wait_uploaded(a)
+    assert [v["name"] for v in snapshot["manifest"]["volumes"]] == ["state"]
+    lux.run("resume", a, "--wait")
+    assert lux.run("exec", a, "--", "cat", "/cache/module").stdout.strip() == "cached"
+    lux.run("stop", a, "--wait")
+
+    b = submit(lux, "cat /cache/module")
+    lux.wait_state(b, "succeeded")
+    assert lux.logs(b).strip() == "cached"
+    other = tenant_factory()
+    c = submit(other, "test -z \"$(ls -A /cache)\" && echo empty")
+    other.wait_state(c, "succeeded")
+    assert other.logs(c).strip() == "empty"
 
 
 def s3_keys(env, run_id: str) -> list[str]:

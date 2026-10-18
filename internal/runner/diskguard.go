@@ -389,7 +389,8 @@ func (r *Runner) attachGuard(g *diskGuard, free func() (int64, error)) {
 		if len(removed) > 0 {
 			r.log.Warn("disk pressure: removed unused images", "images", removed)
 		}
-		return len(removed) > 0
+		cacheRemoved := r.reclaimCaches(ctx, g.free, g.recovFree)
+		return len(removed) > 0 || cacheRemoved
 	}
 	g.copies = r.localCopies
 	// The next heartbeat's LocalSnapshots tells luxd the copy is gone.

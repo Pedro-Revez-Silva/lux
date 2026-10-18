@@ -121,6 +121,12 @@ A spec declares **volumes**, which are named directories in the container:
   These are the only thing guaranteed to survive a move.
   Put the git checkout and the agent's session transcript here.
 - `ephemeral` volumes start empty on every placement.
+- `cache` volumes are host-local, shared by the tenant's Runs using the same
+  name and workload UID and GID on that host. They are never snapshotted,
+  uploaded or restored. A resume on the same host reuses them; a move uses
+  the destination host's cache, possibly empty. Contents are best-effort
+  and may vanish anytime. Keep no secrets or irreplaceable files here.
+  Several Runs may mount one cache at once; lux does not lock it.
 - File secrets live on a tmpfs, which is never part of a snapshot.
 
 A **snapshot** is the state volumes as of one exit, plus a manifest. The

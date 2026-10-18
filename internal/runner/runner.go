@@ -119,6 +119,8 @@ type Runner struct {
 	hostNetKnown  bool
 	hostNetBoot   string
 	images        *imageUse
+	cacheOnce     sync.Once
+	caches        *cacheUse
 	graph         string // Podman's graph root, once asked
 	graphOnce     sync.Once
 	// imagesDirPath: containers/storage's image metadata directory, once

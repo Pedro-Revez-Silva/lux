@@ -536,8 +536,14 @@ lasts, the runner:
 2. **Reclaims caches.** It removes lux's unused images, least recently
    used first, toward the recovery mark, with the protections of
    `--image-disk-high`: never an image a container uses, one a local copy
-   waiting for a resume needs, or one used in the last 10 minutes. Then
-   it discards the local copies of Runs no longer live on the host that
+   waiting for a resume needs, or one used in the last 10 minutes. Next
+   it removes unmounted `kind: cache` volumes, least recently mounted or
+   unmounted first, measuring free space after each until the recovery
+   mark. A starting placement's cache and any volume still attached to a
+   container are kept. Caches go before saved Run copies: they are
+   disposable and cannot help a Run resume. Cache volumes have no per-cache
+   size cap and count only against host free space, not a Run's disk limit.
+   Then it discards the local copies of Runs no longer live on the host that
    S3 holds, oldest exit first, until the recovery mark: a copy goes only
    once every snapshot of its Run is reported and uploaded and no upload
    is pending (what `--host-ttl` waits for, without the wait; the rule

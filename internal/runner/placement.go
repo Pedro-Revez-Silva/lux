@@ -581,6 +581,7 @@ func (p *placement) run(ctx context.Context) {
 		fail("volumes", err)
 		return
 	}
+	defer p.holdCaches(sp)()
 	if err := p.prepareVolumes(startCtx, sp, a.Resume); err != nil {
 		fail("volumes", err)
 		return
@@ -903,6 +904,9 @@ func (p *placement) removeWorkloadDisk(ctx context.Context, id string, vols []vo
 		}
 	}
 	for _, v := range vols {
+		if v.Kind == "cache" {
+			continue
+		}
 		if err := p.r.pm.VolumeRemove(rmCtx, v.Volume); err != nil {
 			return err
 		}
@@ -954,7 +958,11 @@ func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, resume 
 	labels := map[string]string{LabelManaged: "true", LabelRun: p.runID, LabelTenant: p.tenantID}
 	var refs []volumeRef
 	for _, v := range sp.Volumes {
-		refs = append(refs, volumeRef{Name: v.Name, Volume: volumeName(p.runID, v.Name), Path: v.Path, Kind: v.Kind})
+		name := volumeName(p.runID, v.Name)
+		if v.Kind == "cache" {
+			name = p.cacheVolume(v.Name)
+		}
+		refs = append(refs, volumeRef{Name: v.Name, Volume: name, Path: v.Path, Kind: v.Kind})
 	}
 	// Under p.mu: a stop arriving now saves p.state while the volumes are made.
 	p.mu.Lock()
@@ -989,6 +997,10 @@ func (p *placement) prepareVolumes(ctx context.Context, sp spec.RunSpec, resume 
 
 	for _, v := range append(slices.Clone(refs), p.state.EngineVolumes...) {
 		switch {
+		case v.Kind == "cache":
+			if err := p.prepareCache(ctx, v); err != nil {
+				return err
+			}
 		case v.Kind == "ephemeral":
 			// Empty on every placement, as a new host's.
 			_ = p.r.pm.VolumeRemove(ctx, v.Volume)
@@ -1702,6 +1714,9 @@ func (p *placement) sampleSlow(ctx context.Context) {
 		disk += n
 	}
 	for _, v := range vols {
+		if v.Kind == "cache" {
+			continue
+		}
 		wg.Go(func() {
 			mp, err := p.r.mountpoint(ctx, v.Volume)
 			if err != nil {
