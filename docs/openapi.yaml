@@ -1486,6 +1486,15 @@ components:
           format: int64
           type: integer
       type: object
+    PatchRunInput:
+      additionalProperties: false
+      properties:
+        name:
+          description: "The new name: at most 200 bytes of UTF-8, no control characters; \"\" clears it. Also the stored spec's name."
+          type: string
+      required:
+        - name
+      type: object
     PatchServerInput:
       additionalProperties: false
       properties:
@@ -3147,6 +3156,7 @@ components:
             type: string
           type: object
         name:
+          description: "For humans: at most 200 bytes of UTF-8, no control characters. Changeable later (PATCH /v1/runs/{id})."
           type: string
         network:
           $ref: "#/components/schemas/Network"
@@ -6901,6 +6911,68 @@ paths:
       security:
         - apiKey: []
       summary: Get a Run
+      tags:
+        - runs
+    patch:
+      description: |-
+        Renames it, in any state, terminated included: `name` and `spec.name` both become the new name, and a `renamed` event (`from`, `to`, `by`) is recorded. Nothing else changes: not its workload, placement, epoch, snapshots or labels. The same name again changes nothing and records no event. 422 invalid_spec: no name, or one over 200 bytes, not UTF-8, or with a control character. Answers the Run as GET /v1/runs/{id} does.
+
+        Needs the `run` scope.
+      operationId: patchRun
+      parameters:
+        - description: The Run's id.
+          in: path
+          name: id
+          required: true
+          schema:
+            description: The Run's id.
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchRunInput"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+          description: OK
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Not Found
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Unprocessable Entity
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+          description: Internal Server Error
+      security:
+        - apiKey: []
+      summary: Change a Run
       tags:
         - runs
   /v1/runs/{id}/artifacts:

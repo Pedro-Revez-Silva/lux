@@ -55,6 +55,14 @@ func (s *Server) routes(api huma.API) {
 		Errors: []int{http.StatusNotFound},
 	}, "read", s.getRun)
 	register(s, api, huma.Operation{
+		OperationID: "patchRun", Method: http.MethodPatch, Path: "/v1/runs/{id}", Tags: []string{"runs"},
+		Summary: "Change a Run",
+		Description: "Renames it, in any state, terminated included: `name` and `spec.name` both become the new name, and a `renamed` event (`from`, `to`, `by`) is recorded. " +
+			"Nothing else changes: not its workload, placement, epoch, snapshots or labels. The same name again changes nothing and records no event. " +
+			"422 invalid_spec: no name, or one over 200 bytes, not UTF-8, or with a control character. Answers the Run as GET /v1/runs/{id} does.",
+		Errors: []int{http.StatusNotFound, http.StatusUnprocessableEntity},
+	}, "run", s.patchRun)
+	register(s, api, huma.Operation{
 		OperationID: "listEvents", Method: http.MethodGet, Path: "/v1/runs/{id}/events", Tags: []string{"runs"},
 		Summary: "List a Run's lifecycle events",
 		Errors:  []int{http.StatusNotFound},
@@ -655,7 +663,9 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 	// The resources as asked, before Normalize fills luxd's defaults: a
 	// shaped pool resolves these, never the defaults.
 	raw := sp.Resources
-	if err := sp.Normalize(s.cfg.Defaults); err != nil {
+	// The name is checked here, not in Normalize, which also runs on
+	// stored specs (resume) whose names predate the rule.
+	if err := withNameProblem(sp.Name, sp.Normalize(s.cfg.Defaults)); err != nil {
 		return nil, invalidSpec(err)
 	}
 	if err := s.checkMCPNotControlPlane(ctx, sp); err != nil {

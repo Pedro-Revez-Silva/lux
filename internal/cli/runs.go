@@ -908,6 +908,25 @@ func (a *app) stopCmd() *cobra.Command {
 	return a.lifecycle("stop", "Stop a Run gracefully (resumable)", "stop", "stopped", "succeeded", "failed", "terminated", "lost")
 }
 
+func (a *app) renameCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "rename <run> <name>",
+		Short: "Rename a Run, in any state ('' clears its name)",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var run Run
+			if err := a.c.Do(ctxOf(cmd), "PATCH", "/v1/runs/"+args[0], map[string]string{"name": args[1]}, &run); err != nil {
+				return err
+			}
+			if a.output == "json" {
+				return a.json(run)
+			}
+			fmt.Fprintf(a.stdout, "renamed %s to %s\n", run.ID, run.Name)
+			return nil
+		},
+	}
+}
+
 func (a *app) terminateCmd() *cobra.Command {
 	// A terminate request ends terminated on every path (an ended Run at
 	// once, a live one when its placement exits or is lost).

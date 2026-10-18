@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
@@ -108,9 +109,47 @@ var jsonFormat = huma.Format{
 // decodeStrict decodes a request body as readJSON does: unknown fields
 // refused, anything after the first value ignored.
 func decodeStrict(data []byte, v any) error {
+	// A submitted name keeps its raw bytes, so CheckRunName refuses invalid
+	// UTF-8 rather than accepting encoding/json's U+FFFD replacement.
+	if sp, ok := v.(*spec.RunSpec); ok && !utf8.Valid(data) {
+		if raw, found := rawRunName(data); found && !utf8.Valid(raw) {
+			type plain spec.RunSpec
+			dec := json.NewDecoder(bytes.NewReader(data))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode((*plain)(sp)); err != nil {
+				return err
+			}
+			sp.Name = string(raw)
+			return nil
+		}
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	return dec.Decode(v)
+}
+
+// rawRunName is the raw value of the top-level member encoding/json would
+// decode into RunSpec.Name: the key matched case-insensitively as it does,
+// null skipped (a no-op for a string), the last remaining one winning.
+func rawRunName(data []byte) (raw []byte, found bool) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, false
+	}
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, false
+		}
+		if key, ok := key.(string); ok && strings.EqualFold(key, "name") && string(value) != "null" {
+			raw, found = value, true
+		}
+	}
+	return raw, found
 }
 
 // Schema names, where two packages use the same type name.

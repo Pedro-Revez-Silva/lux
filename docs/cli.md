@@ -37,6 +37,7 @@ lux get <run>                                  # state, stage, placements, usage
 lux logs <run> [-f] [--since <cursor>] [--events] [--stderr=false] [--server NAME | --servers]
 lux events <run>                               # lifecycle events
 lux wait <run> [--state s1,s2] [--timeout 5m]  # default: until it ends; exits with its code
+lux rename <run> <name>                        # in any state; '' clears it; prints "renamed <id> to <name>"
 ```
 
 Specs are YAML or JSON (`-f -` reads stdin). A secret's value can come from
@@ -82,6 +83,11 @@ capacity is temporarily unavailable.
 lux run --spot --dry-run --image alpine -- echo hello
 lux run -f spot.yaml --dry-run -o json
 ```
+
+`lux rename` changes a Run's name (`PATCH /v1/runs/{id}`). Like `lux stop`, it
+takes the Run's full id and needs the `run` scope. The name follows the
+RunSpec's rules ([name](runspec.md#name)); a name luxd refuses exits 4
+(`invalid_spec`). Labels never change.
 
 `lux logs -o json` prints one JSON record per line:
 `{"cursor","epoch","seq","t","ch","data"|"event"}`. Pass a record's

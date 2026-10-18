@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"net/url"
@@ -17,12 +18,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
 type RunSpec struct {
 	Spot      bool              `json:"spot,omitempty" yaml:"spot,omitempty" doc:"Opt into opportunistic Run scheduling, independent of the host's EC2 market. Requires resumePolicy never; omitted resumePolicy normalizes to never. Spot demand never launches hosts. Admission requires spare capacity continuously free for more than 60s and a compatible runner."`
-	Name      string            `json:"name,omitempty" yaml:"name,omitempty"`
+	Name      string            `json:"name,omitempty" yaml:"name,omitempty" doc:"For humans: at most 200 bytes of UTF-8, no control characters. Changeable later (PATCH /v1/runs/{id})."`
 	Labels    map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
 	Image     Image             `json:"image" yaml:"image"`
 	Workload  Workload          `json:"workload" yaml:"workload"`
@@ -115,6 +117,27 @@ type Server struct {
 
 // MaxServerInject bounds a server's inject, in bytes.
 const MaxServerInject = 8 << 10
+
+// MaxRunName bounds a Run's name, in bytes.
+const MaxRunName = 200
+
+// CheckRunName is what a Run's name must be, at submit and on rename: at
+// most MaxRunName bytes of UTF-8 without control characters (C0, DEL,
+// C1). "" is no name.
+func CheckRunName(name string) error {
+	if len(name) > MaxRunName {
+		return fmt.Errorf("name: %d bytes, at most %d", len(name), MaxRunName)
+	}
+	if !utf8.ValidString(name) {
+		return errors.New("name: not valid UTF-8")
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("name: control character %U", r)
+		}
+	}
+	return nil
+}
 
 // serverNameRe: a DNS label's worth of a preview host name, which also
 // carries the Run's suffix: 1-30 characters, a letter first, no - last.
