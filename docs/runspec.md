@@ -21,6 +21,7 @@ workload:
   workdir: /workspace/repos/api
   user: agent                   # default: the image's USER
   grace: 30s                    # graceful stop before SIGKILL
+  idleTimeout: 5m               # agent only; stop when idle; unset or 0: never
   beforeStop:                   # run in the container on every stop, first
     command: [sh, -c, "git -C /workspace/repos/api diff > /tmp/final.patch && /.lux/bin/lux-shim publish /tmp/final.patch"]
     timeout: 10s                # default 10s or half of `grace`; at most `grace`
@@ -358,6 +359,39 @@ availability immediately. See [CLI](cli.md#runs).
   such pool has (none, another tenant's, a removed pool) is refused at
   submit with 422 `unknown_pool`; the Run is not created. A spec that sets
   both `pool` and `poolId` is refused with 422 `invalid_spec`.
+
+## Idle timeout
+
+`workload.idleTimeout` parks an agent after it has been idle for this long.
+Unset or `0` disables it. Otherwise it must be between `1m` and `24h`.
+Only `acp`, `claude-code`, `codex` and `opencode` report activity;
+`generic` with a non-zero idle timeout is refused, 422 `invalid_spec`.
+
+The Run must be running and idle with no pending input. Pending means:
+
+- an input request (`lux steer`, `POST /v1/runs/{id}/input`) with text,
+  raw bytes or attachments that has neither failed nor been consumed and,
+  if its delivery had no consumption receipt, has not been followed by
+  an activity change since the request;
+- a delivery with a consumption receipt, including the first prompt and
+  a resume prompt, that has neither failed nor been consumed.
+
+A delivery without a receipt settles at the next activity change after
+its request: busy when it starts a turn, idle when the turn it joined
+ends, even if a short turn's idle is recorded before the delivery. An
+interrupt with no content (`lux interrupt`) reports no delivery and is
+never pending; it still resets the clock.
+
+The clock starts at the latest idle activity change, input request, or
+placement reaching running. Busy activity and new input reset it; repeated
+idle reports do not. A resume starts a fresh clock. luxd checks on each
+reaper tick, so the stop can be one tick later than the duration.
+
+This is a graceful stop, not a failure: `beforeStop` runs and state volumes
+are snapshotted. The stop and state reasons are `idle`; an `idle` event
+carries `reason: idle` and `idleSeconds`. Resume with `lux resume --input`
+as usual. `timeout` still limits total running time and fails the Run.
+`resumePolicy` is unchanged, including `never`, which forbids resuming any stop.
 
 ## Resume policy
 

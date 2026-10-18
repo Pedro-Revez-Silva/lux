@@ -50,7 +50,7 @@ any state ──(terminate, or expiry of a resting Run)──▶ terminated (fin
 | `starting` | Image ready, volumes restored, container starting, init running. |
 | `running` | The workload is running. `activity` says whether an agent is `busy` or `idle` (waiting for input). |
 | `stopping` | Asked to wind down. The adapter stops the workload gracefully, then it is killed after the grace period. |
-| `stopped` | Exited on request with its state saved. **Resumable.** A Run stopped by a move (force-evicting drain, spot preemption, migrate) is then resumed by lux at once, unless its spec's `resumePolicy` says otherwise: `restart` starts it again from scratch, `manual` ends it `failed` and `never` ends it `terminated` ([resume policy](runspec.md#resume-policy)). |
+| `stopped` | Exited on request with its state saved. **Resumable.** An idle timeout stops with reason `idle`; resume it with `lux resume [--input]`. A Run stopped by a move (force-evicting drain, spot preemption, migrate) is then resumed by lux at once, unless its spec's `resumePolicy` says otherwise: `restart` starts it again from scratch, `manual` ends it `failed` and `never` ends it `terminated` ([resume policy](runspec.md#resume-policy)). |
 | `resuming` | Waiting for a host for its next placement. |
 | `succeeded` / `failed` | Ended: its workload exited. **Resumable**, like `stopped` (the adapter's resume path, with its session). A Run whose `resumePolicy` is `never` never rests here: it ends `terminated`, its outcome in `stateReason`. |
 | `terminated` | Ended for good: the only terminal state. Never resumed, and its snapshots and output go after the tenant's retention. A Run becomes terminated by `lux terminate` (`POST /v1/runs/{id}/terminate`), or by lux when it expires. |
@@ -94,7 +94,7 @@ starts. luxd derives it from the Run and its current placement:
 | `repositories` | Cloning repositories and fetching a resume's sync. A spec without repositories passes through it at once. | `volumesRestoredAt` | runner |
 | `container` | Creating and starting the container. | `reposReadyAt` | runner |
 | `running` | The container started (init, then the workload, run in it: `state` is `starting` until luxd sees the shim up). | `containerStartedAt`; luxd's `started_at` for a runner that reports no container start. | runner (luxd on fallback) |
-| `stopping` | A stop was asked of its live placement: the workload winds down, then the state volumes are snapshotted and reported. `stageReason` is the stop's: `stop`, `terminate`, `drain`, `preempt`, `migrate`, `timeout`, `disk`. | `stopRequestedAt` | luxd |
+| `stopping` | A stop was asked of its live placement: the workload winds down, then the state volumes are snapshotted and reported. `stageReason` is the stop's: `stop`, `terminate`, `drain`, `preempt`, `migrate`, `timeout`, `idle`, `disk`. | `stopRequestedAt` | luxd |
 | `stopped`, `lost`, `succeeded`, `failed`, `terminated` | Its state, resting. | When it entered that state: its placement's end, or a later change (a terminate, an expiry). | luxd |
 
 `running` starts at `containerStartedAt`, where `container` ends, so the

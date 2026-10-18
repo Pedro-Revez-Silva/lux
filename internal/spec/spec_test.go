@@ -32,6 +32,24 @@ resources: { cpus: 1.5, memory: 512Mi }
 timeout: 90m
 `
 
+func TestIdleTimeout(t *testing.T) {
+	for _, adapter := range []string{"generic", "acp", "claude-code", "codex", "opencode"} {
+		for _, duration := range []time.Duration{-time.Second, 0, time.Second, time.Minute, 24 * time.Hour, 24*time.Hour + time.Second} {
+			t.Run(fmt.Sprintf("%s/%s", adapter, duration), func(t *testing.T) {
+				s := RunSpec{Image: Image{Ref: "alpine"}, Workload: Workload{Adapter: adapter, Command: []string{"true"}, IdleTimeout: Duration{duration}}, Volumes: []Volume{{Name: "home", Path: "/home/agent", Kind: "state"}, {Name: "work", Path: "/workspace", Kind: "state"}}}
+				err := s.Normalize(BuiltinDefaults)
+				valid := duration == 0 || (adapter != "generic" && duration >= time.Minute && duration <= 24*time.Hour)
+				if (err == nil) != valid {
+					t.Fatalf("valid=%v, got %v", valid, err)
+				}
+				if !valid && !strings.Contains(err.Error(), "workload.idleTimeout") {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+}
+
 func TestCgroupDelegationValidationAndSerialization(t *testing.T) {
 	for _, c := range []struct {
 		sandbox            string

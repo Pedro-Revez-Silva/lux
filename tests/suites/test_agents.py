@@ -26,6 +26,25 @@ def test_starts_reports_a_session_and_waits_for_input(lux, runners, hosts, harne
     assert "waiting for input" in lux.run("ls").stdout
 
 
+def test_idle_timeout_parks_and_resumes_session(lux, runners, hosts, harness):
+    runners.start(hosts[0])
+    spec = harness.spec(harness.say("ready"))
+    spec["workload"]["idleTimeout"] = "1m"
+    run_id = lux.submit(spec)
+    first = lux.wait_activity(run_id, "idle", timeout=harness.timeout)
+    stopped = lux.wait_state(run_id, "stopped", timeout=100)
+    assert stopped["stateReason"] == "idle", stopped
+    assert stopped["resumable"], stopped
+    assert any(e["data"].get("reason") == "idle" for e in lux.events(run_id, "state"))
+    assert lux.events(run_id, "idle")[0]["data"]["idleSeconds"] >= 60
+    lux.run("resume", run_id, "--input", harness.say("continued"))
+    resumed = lux.wait_activity(run_id, "idle", timeout=harness.timeout)
+    assert resumed["sessionId"] == first["sessionId"]
+    assert resumed["epoch"] == first["epoch"] + 1
+    assert "continued" in lux.logs(run_id).lower()
+    lux.run("terminate", run_id)
+
+
 def test_steering_is_delivered_and_acknowledged(lux, runners, hosts, harness):
     runners.start(hosts[0])
     run_id = lux.submit(harness.spec(harness.say("first")))

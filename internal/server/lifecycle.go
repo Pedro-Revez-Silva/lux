@@ -512,7 +512,7 @@ func (s *Server) placementExited(ctx context.Context, tx pgx.Tx, tenantID, hostI
 		if spec.RefusesResume(policy) {
 			next = StateTerminated
 		}
-	case stopReason == "stop" || moveStop:
+	case stopReason == "stop" || stopReason == "idle" || moveStop:
 		// A requested stop: resumable (and a move resumed below).
 		next, reason = StateStopped, stopReason
 	case st.State == "failed":

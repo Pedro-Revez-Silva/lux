@@ -28,7 +28,7 @@ was reached; `1` anything else.
 ## Runs
 
 ```bash
-lux run -f spec.yaml [--spot] [--dry-run | --follow | --wait] [--name N] [-l k=v] [--pool P] [--size NAME] [--idempotency-key K] [--secrets-from .env]
+lux run -f spec.yaml [--spot] [--dry-run | --follow | --wait] [--name N] [--idle-timeout D] [-l k=v] [--pool P] [--size NAME] [--idempotency-key K] [--secrets-from .env]
 lux run --image alpine -- echo hello           # a quick generic Run
 lux run --image alpine --pool arm64 -- uname -m
 lux run --image alpine --pool m --size m-2-arm64 -- make test   # a size of a shaped pool
@@ -49,6 +49,10 @@ Flags win over the spec file: `--pool` replaces `placement.pool`, as
 `--image` and `--name` replace theirs, and `--size` sets
 `resources.size`. Without `--pool` or `placement.pool`, the server picks
 the pool.
+
+`--idle-timeout D` overrides `workload.idleTimeout`, including `0` to
+disable it. Agent adapters only; otherwise `1m` to `24h`. An idle stop
+saves state for `lux resume --input`. `lux get` shows the configured timeout.
 
 `--size` names a size of a [shaped pool](concepts.md#shaped-pools)
 (`lux pools sizes <pool>`); it cannot be combined with `resources.cpus`,

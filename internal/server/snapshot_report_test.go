@@ -300,6 +300,9 @@ func TestSnapshotReportRefusedEndsRunWithoutResume(t *testing.T) {
 		{"drain, restart", "drain", "restart", true, true, StateResuming, "auto-restart after drain"},
 		{"stop", "stop", "", true, true, StateStopped, "stop; " + refusedSnapshotReason},
 		{"stop, no earlier snapshot", "stop", "", false, true, StateStopped, "stop; " + refusedNoSnapshotReason},
+		{"idle", "idle", "", true, false, StateStopped, "idle"},
+		{"idle, manual", "idle", "manual", true, false, StateStopped, "idle"},
+		{"idle, restart", "idle", "restart", true, false, StateStopped, "idle"},
 		{"timeout", "timeout", "", true, true, StateFailed, "timeout; " + refusedSnapshotReason},
 		{"migrate, accepted", "migrate", "", true, false, StateResuming, "auto-resume after migrate"},
 	} {
@@ -337,7 +340,7 @@ func TestSnapshotReportRefusedEndsRunWithoutResume(t *testing.T) {
 			if f := s.handleReport(ctx, "hb", exited); f.Type != proto.MsgAck {
 				t.Fatalf("exit: %s %s", f.Type, f.Data)
 			}
-			restart := c.policy == "restart"
+			restart := c.policy == "restart" && c.state == StateResuming
 			if restart {
 				wantSnap = "" // forgotten: the next placement is a first one
 			}

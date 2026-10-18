@@ -90,6 +90,24 @@ func TestRunDryRunDoesNotResolveSecretValues(t *testing.T) {
 	}
 }
 
+func TestRunIdleTimeoutFlag(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "spec.yaml")
+	if err := os.WriteFile(file, []byte("image: {ref: alpine}\nworkload: {adapter: acp, idleTimeout: 5m}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{nil, "5m0s"}, {[]string{"--idle-timeout", "2m"}, "2m0s"}, {[]string{"--idle-timeout", "0"}, "0s"},
+	} {
+		body := submitted(t, append([]string{"run", "-f", file}, c.args...)...)
+		if got := body["workload"].(map[string]any)["idleTimeout"]; got != c.want {
+			t.Fatalf("got %v want %s", got, c.want)
+		}
+	}
+}
+
 func TestRunSpotFlag(t *testing.T) {
 	body := submitted(t, "run", "--spot", "--image", "alpine", "--", "true")
 	if body["spot"] != true {
@@ -287,5 +305,24 @@ func TestGetPrintsTheStage(t *testing.T) {
 	since, _ := time.Parse(time.RFC3339, "2026-10-09T12:00:05Z")
 	if want := "stage:     stopping (migrate) since " + since.Local().Format(time.RFC3339) + "\n"; !strings.Contains(out, want) {
 		t.Errorf("lux get printed:\n%s\nwant a line %q", out, want)
+	}
+	if strings.Contains(out, "idle") {
+		t.Errorf("lux get printed an idle line without idleTimeout:\n%s", out)
+	}
+}
+
+// lux get shows a set idle timeout in the label column.
+func TestGetPrintsTheIdleTimeout(t *testing.T) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"run_1","state":"running","createdAt":"2026-10-09T12:00:00Z",
+			"spec":{"workload":{"adapter":"codex","idleTimeout":"15m"}}}`))
+	})
+	out, err := runCLI(t, h, "get", "run_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "adapter:   codex\nidle stop: 15m0s\n"; !strings.Contains(out, want) {
+		t.Errorf("lux get printed:\n%s\nwant %q", out, want)
 	}
 }

@@ -35,7 +35,7 @@ const storageReapEvery = time.Minute
 // reapOnce is one reaper tick. lastStorage is when the storage reapers
 // last ran (zero: never); it is moved when they run.
 func (s *Server) reapOnce(ctx context.Context, lastStorage *time.Time) {
-	reapers := []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapExpiry}
+	reapers := []func(context.Context) error{s.reapLeases, s.reapHosts, s.reapTimeouts, s.reapIdle, s.reapExpiry}
 	if time.Since(*lastStorage) >= storageReapEvery {
 		*lastStorage = time.Now()
 		reapers = append(reapers, s.reapSuperseded, s.reapRetention)
@@ -351,6 +351,116 @@ func (s *Server) reapTimeouts(ctx context.Context) error {
 		s.hub.Notify(h)
 	}
 	return err
+}
+
+// reapIdle parks idle agents through the same stop path as a requested stop.
+// The clock uses luxd's event times for the current placement: a busy→idle
+// change or any input moves it, a repeated idle report does not. A
+// content-free interrupt goes out as MsgInterrupt and reports no input phase,
+// so it never counts as pending. A delivery without a receipt never reports
+// consumed; any activity report after its input row settles it, since
+// adapters report busy before such a delivery and a short turn's idle can be
+// recorded before it.
+func (s *Server) reapIdle(ctx context.Context) error {
+	var hosts []string
+	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT id FROM (`+idleDueQuery("")+`) due ORDER BY id LIMIT 50`)
+		if err != nil {
+			return err
+		}
+		candidates, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return err
+		}
+		if err := lockReaperRuns(ctx, tx, candidates); err != nil {
+			return err
+		}
+		if err := lockCostHosts(ctx, tx, candidates); err != nil {
+			return err
+		}
+		rows, err = tx.Query(ctx, idleDueQuery(`AND r.id = ANY($1)`)+` ORDER BY c.id`, candidates)
+		if err != nil {
+			return err
+		}
+		type idleRun struct {
+			ID, Tenant string
+			Epoch      int
+			Seconds    float64
+		}
+		due, err := pgx.CollectRows(rows, pgx.RowToStructByPos[idleRun])
+		if err != nil {
+			return err
+		}
+		for _, r := range due {
+			h, err := s.requestStop(ctx, tx, r.Tenant, r.ID, "idle")
+			if err != nil {
+				return err
+			}
+			if h != "" {
+				hosts = append(hosts, h)
+				if err := addEvent(ctx, tx, r.Tenant, r.ID, r.Epoch, "idle", map[string]any{"reason": "idle", "idleSeconds": r.Seconds}); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err == nil {
+		for _, h := range hosts {
+			s.hub.Notify(h)
+		}
+	}
+	return err
+}
+
+// idleDueQuery selects the Runs reapIdle parks; runFilter narrows the
+// candidates. Only placements older than their idleTimeout reach the event
+// lookups, each keyed on run_id (run_events_run). Plan constraints:
+//   - pending is a target-list EXISTS so it runs per candidate, not as an
+//     anti-join over all of run_events;
+//   - OFFSET 0 fences open so each terminal probe is a full primary-key lookup;
+//   - the receipt-free delivery lookup must not reference open.id, so it is
+//     hashed once per Run rather than rescanned per input.
+func idleDueQuery(runFilter string) string {
+	return `WITH live AS MATERIALIZED (
+		SELECT r.id, r.tenant_id, r.current_epoch AS epoch, p.started_at,
+			(r.spec->'workload'->>'idleTimeout')::interval AS timeout
+		FROM runs r JOIN placements p ON p.run_id = r.id AND p.epoch = r.current_epoch
+		WHERE r.state = 'running' AND r.activity = 'idle' AND p.state = 'running'
+		  AND p.started_at IS NOT NULL AND p.stop_requested_at IS NULL
+		  AND coalesce(r.spec->'workload'->>'idleTimeout', '') NOT IN ('', '0s')
+		  AND now() - p.started_at > (r.spec->'workload'->>'idleTimeout')::interval
+		  ` + runFilter + `
+	), clock AS MATERIALIZED (
+		SELECT l.*, greatest(l.started_at,
+			(SELECT max(created_at) FROM (
+				SELECT created_at, data->>'activity' AS activity, lag(data->>'activity') OVER (ORDER BY id) AS previous
+				FROM run_events WHERE run_id = l.id AND epoch = l.epoch AND type = 'activity'
+			) changes WHERE activity = 'idle' AND previous IS DISTINCT FROM 'idle'),
+			(SELECT max(created_at) FROM run_events WHERE run_id = l.id AND epoch = l.epoch AND type = 'input')
+		) AS since,
+		(SELECT max(id) FROM run_events WHERE run_id = l.id AND epoch = l.epoch AND type = 'activity') AS last_activity
+		FROM live l
+	), due AS MATERIALIZED (
+		SELECT c.*, EXISTS (
+			SELECT 1 FROM (
+				SELECT e.id, e.type, e.data->>'requestId' AS request_id FROM run_events e
+				WHERE e.run_id = c.id AND e.epoch = c.epoch
+				AND ((e.type = 'input.delivered' AND e.data->>'receipt' = 'true')
+					OR (e.type = 'input' AND NOT (e.data @> '{"interrupt":true,"text":"","rawBytes":0}' AND NOT e.data ? 'attachments')))
+				OFFSET 0
+			) open
+			WHERE NOT EXISTS (SELECT 1 FROM run_input_events terminal WHERE terminal.run_id = c.id
+				AND terminal.request_id = open.request_id AND terminal.type IN ('input.consumed', 'input.failed'))
+			AND (open.type = 'input.delivered' OR open.id > coalesce(c.last_activity, 0) OR NOT EXISTS (
+				SELECT 1 FROM run_events delivered WHERE delivered.run_id = c.id AND delivered.epoch = c.epoch
+				AND delivered.type = 'input.delivered' AND delivered.data->>'requestId' = open.request_id
+				AND delivered.data->>'receipt' = 'false'))
+		) AS pending
+		FROM clock c WHERE now() - c.since > c.timeout
+	)
+	SELECT c.id, c.tenant_id, c.epoch, extract(epoch FROM (now() - c.since))::double precision
+	FROM due c WHERE NOT c.pending`
 }
 
 // reapOutdatedStaticHosts tells a static host drained for outdated

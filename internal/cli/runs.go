@@ -31,6 +31,7 @@ func (a *app) runCmd() *cobra.Command {
 	var file, idem, secretsFrom, pool, size string
 	var follow, wait, spot, dryRun bool
 	var labels []string
+	var idleTimeout time.Duration
 	cmd := &cobra.Command{
 		Use:   "run -f spec.yaml [-- command...]",
 		Short: "Submit a Run",
@@ -74,6 +75,9 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 			}
 			if name, _ := cmd.Flags().GetString("name"); name != "" {
 				sp.Name = name
+			}
+			if cmd.Flags().Changed("idle-timeout") {
+				sp.Workload.IdleTimeout = spec.Duration{Duration: idleTimeout}
 			}
 			if pool != "" {
 				sp.Placement.Pool = pool
@@ -127,6 +131,7 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 	cmd.Flags().StringVarP(&file, "file", "f", "", "spec file (YAML or JSON; - for stdin)")
 	cmd.Flags().String("image", "", "image ref, for a quick generic Run")
 	cmd.Flags().String("name", "", "a name for humans")
+	cmd.Flags().DurationVar(&idleTimeout, "idle-timeout", 0, "stop an idle agent after D (1m to 24h; 0 disables; overrides workload.idleTimeout)")
 	cmd.Flags().StringVar(&pool, "pool", "", "pool to place the Run in (overrides the spec's placement.pool)")
 	cmd.Flags().StringVar(&size, "size", "", "a size of a shaped pool (lux pools sizes <pool>), e.g. m-2-arm64 (sets resources.size)")
 	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "label key=value (repeatable)")
@@ -373,6 +378,9 @@ func (a *app) getCmd() *cobra.Command {
 				fmt.Fprintf(w, "exit code: %d\n", *run.ExitCode)
 			}
 			fmt.Fprintf(w, "adapter:   %s\n", run.Spec.Workload.Adapter)
+			if d := run.Spec.Workload.IdleTimeout.Duration; d > 0 {
+				fmt.Fprintf(w, "idle stop: %s\n", d)
+			}
 			if run.Spec.Image.Ref != "" {
 				fmt.Fprintf(w, "image:     %s\n", run.Spec.Image.Ref)
 			} else if run.Image != nil {

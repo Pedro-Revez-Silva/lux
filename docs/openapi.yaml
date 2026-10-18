@@ -4402,6 +4402,13 @@ components:
                 - 4h
               type: string
             - type: number
+        idleTimeout:
+          description: "Stop and snapshot an idle agent after this duration with no pending input. Agent adapters only. Zero or unset: never; otherwise 1m to 24h. Each placement starts a fresh clock. The stop reason is idle, not a failure."
+          oneOf:
+            - examples:
+                - 4h
+              type: string
+            - type: number
         mcpServers:
           description: MCP servers (streamable HTTP) the agent connects to, through its adapter. Each URL's host must be allowed by network.egress (unless unrestricted), and may not be the control plane's.
           items:

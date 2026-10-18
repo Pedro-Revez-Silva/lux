@@ -92,9 +92,10 @@ type Workload struct {
 	Attachments []Attachment `json:"attachments,omitempty" yaml:"attachments,omitempty" doc:"Images given to the agent with its first prompt (request id prompt), each also written to $LUX_INPUTS/prompt/. At most 10, each at most 5 MiB decoded. Agent adapters only: a generic workload is refused (400 attachments_unsupported); a bad one is refused with 400 invalid_attachment."`
 	Workdir     string       `json:"workdir,omitempty" yaml:"workdir,omitempty"`
 	// User the workload runs as; defaults to the image's user.
-	User   string  `json:"user,omitempty" yaml:"user,omitempty"`
-	TTY    bool    `json:"tty,omitempty" yaml:"tty,omitempty"`
-	Resume *Resume `json:"resume,omitempty" yaml:"resume,omitempty"`
+	User        string   `json:"user,omitempty" yaml:"user,omitempty"`
+	TTY         bool     `json:"tty,omitempty" yaml:"tty,omitempty"`
+	Resume      *Resume  `json:"resume,omitempty" yaml:"resume,omitempty"`
+	IdleTimeout Duration `json:"idleTimeout,omitempty" yaml:"idleTimeout,omitempty" doc:"Stop and snapshot an idle agent after this duration with no pending input. Agent adapters only. Zero or unset: never; otherwise 1m to 24h. Each placement starts a fresh clock. The stop reason is idle, not a failure."`
 	// Grace is how long a graceful stop waits before SIGKILL.
 	Grace      Duration    `json:"grace,omitempty" yaml:"grace,omitempty"`
 	BeforeStop *BeforeStop `json:"beforeStop,omitempty" yaml:"beforeStop,omitempty" doc:"A command run in the container on every stop, before the workload is signalled: a stop asked for, a terminate, a timeout, a drain. Its output is the Run's; it can publish files as artifacts (/.lux/bin/lux-shim publish FILE). It cannot run when the container dies or its host is lost."`
@@ -621,6 +622,14 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	}
 	if w.TTY && w.Adapter != "generic" {
 		fail("workload.tty is only for generic workloads: agent adapters own their stdio")
+	}
+	if w.IdleTimeout.Duration != 0 {
+		if w.Adapter == "generic" {
+			fail("workload.idleTimeout: requires an agent adapter (acp, claude-code, codex or opencode); generic reports no activity")
+		}
+		if w.IdleTimeout.Duration < time.Minute || w.IdleTimeout.Duration > 24*time.Hour {
+			fail("workload.idleTimeout: must be 0 (disabled) or between 1m and 24h")
+		}
 	}
 	if w.Grace.Duration < 0 {
 		fail("workload.grace must not be negative")
