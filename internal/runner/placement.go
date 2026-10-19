@@ -712,7 +712,12 @@ func (p *placement) supervise(ctx context.Context) {
 
 func (p *placement) readExit(code int) *exitRecord {
 	rt, _ := p.r.mountpoint(context.Background(), runtimeVolume(p.runID))
-	b, err := os.ReadFile(filepath.Join(rt, proto.ExitFile(p.epoch)))
+	var b []byte
+	f, err := openRegular(filepath.Join(rt, proto.ExitFile(p.epoch)))
+	if err == nil {
+		b, err = io.ReadAll(f)
+		f.Close()
+	}
 	return exitFrom(code, b, err)
 }
 
@@ -1580,7 +1585,7 @@ func tailRecords(ctx context.Context, path string, since int64, follow bool, don
 	var f *os.File
 	for {
 		var err error
-		f, err = os.Open(path)
+		f, err = openRegular(path)
 		if err == nil {
 			break
 		}
@@ -1896,7 +1901,7 @@ func (p *placement) snapshot(ctx, exportCtx context.Context) (*proto.SnapshotDon
 	}
 	// Output.
 	if path, err := p.outputPath(ctx, p.epoch); err == nil {
-		if f, err := os.Open(path); err == nil {
+		if f, err := openRegular(path); err == nil {
 			blobID := ids.New(ids.Blob)
 			size, sum, err := p.r.writeBlob(blobID, func(w io.Writer) error { _, err := io.Copy(w, f); return err })
 			f.Close()

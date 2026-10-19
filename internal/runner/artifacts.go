@@ -135,7 +135,7 @@ func (c *collector) walkVolume(mountpoint, mountPath string, inner []string, pat
 // artifactBlob stores one file as a blob (zstd, like every blob). ctype ""
 // is detected from the name and the first bytes.
 func (p *placement) artifactBlob(blobID string, root *os.Root, rel, name, ctype string) (proto.Artifact, error) {
-	f, err := root.OpenFile(rel, os.O_RDONLY|oNoFollow, 0)
+	f, err := root.OpenFile(rel, os.O_RDONLY|oNoFollow|oNonBlock, 0)
 	if err != nil {
 		return proto.Artifact{}, err
 	}
