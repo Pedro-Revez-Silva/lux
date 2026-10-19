@@ -386,16 +386,17 @@ def test_a_tenant_key_overview_has_no_control_host(page, tenant_factory):
 
 
 def _priced_host(lux, runners, host, price: str = "4") -> str:
-    """A ready static host of the tenant's, priced before any Run is placed
-    on it, so its Runs' compute lines have a rate from their start. A few
-    seconds of a small share of it must still show as whole cents, not
-    "<$0.0001", so the price is high."""
+    """A ready static host with its pool price set before registration.
+
+    A few seconds of a small share must still show as whole cents, not
+    "<$0.0001", so the price is high. Setting the pool default first opens
+    the host rate before any host-hour refresh can run.
+    """
+    lux.run("pools", "set", "default", "--provider", "static", "--hourly-price", price, "--currency", "USD")
     runners.start(host)
-    host_id = wait_until(lambda: next((h["id"] for h in lux.json("hosts", "ls")
-                                       if h["name"] == host.name and h["state"] == "ready"), None),
-                         30, 1, "the host never registered")
-    lux.run("hosts", "price", host_id, "--hourly-price", price, "--currency", "USD")
-    return host_id
+    return wait_until(lambda: next((h["id"] for h in lux.json("hosts", "ls")
+                                    if h["name"] == host.name and h["state"] == "ready"), None),
+                      30, 1, "the host never registered")
 
 
 def _costed_run(lux, text: str, name: str = "", labels: dict | None = None) -> str:
