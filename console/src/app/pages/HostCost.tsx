@@ -1,17 +1,19 @@
 import { useMemo } from "react";
-import { Card, ColorKey, EmptyState, familyColor, formatTimestamp, Money, Table, Tooltip, type Column, type TimeRange } from "@lux/design-system";
+import { Card, ColorKey, EmptyState, familyColor, formatBytes, formatTimestamp, Money, Table, Tooltip, type Column, type TimeRange } from "@lux/design-system";
 import { api, useQuery, type Host, type HostCostRate } from "../../api/index.ts";
 import { costRange, stepNote } from "../every.ts";
 import { useScope } from "../scope.tsx";
 import { ErrorBlock, ErrorStrip } from "./common.tsx";
 import { BLOCK_STORAGE } from "./costView.ts";
 import { HostCostChart, HostCostTiles } from "./HostCostParts.tsx";
-import { billedHours, familyLabel, hostCharts, volumeSummary, volumeText, whoPaid } from "./hostCostView.ts";
+import { billedHours, familyLabel, hostCharts, netClassRows, volumeSummary, volumeText, whoPaid, type NetClassRow } from "./hostCostView.ts";
 
 /**
- * A host's cost per hour or UTC day (the page's step): compute and block
- * storage apart, each charged to Runs and (when the reader may see it)
- * unallocated, stacked; and, for operators, its rate periods per family.
+ * A host's cost per hour or UTC day (the page's step): compute, block
+ * storage, public IPv4 and data transfer apart, each charged to Runs and
+ * (when the reader may see it) the rest: unallocated time, or for data
+ * transfer the host's own traffic, stacked; the host's own network bytes;
+ * and, for operators, its rate periods per family.
  * Shown to those who can read the host's history: operators, and a tenant
  * for its own host. The tenant sees unallocated only while the host is in
  * one of its own pools: luxd omits it otherwise.
@@ -42,10 +44,11 @@ export function HostCost({ host, range, operator }: { host: Host; range: TimeRan
     <div className="stack host-cost">
       <ErrorStrip error={q.error} />
       <HostCostTiles since={since} paid={view?.paid ?? []} hours={hours} volumes={volumes} unallocated={visible} loading={!c} />
+      {visible && <HostNetwork classes={host.netClasses} />}
       <HostCostChart
         charts={view?.charts ?? []}
         title={visible ? `Host cost per ${daily ? "day" : "hour"}` : `Charged to your Runs per ${daily ? "day" : "hour"}`}
-        subtitle={visible ? `charged to Runs vs unallocated, ${per}, over ${since}` : `allocated to your Runs, ${per}, over ${since}`}
+        subtitle={visible ? `charged to Runs vs unallocated, ${per}, over ${since} · data transfer's rest is the host's own traffic` : `allocated to your Runs, ${per}, over ${since}`}
         loading={!c}
         step={daily ? "day" : "hour"}
       />
@@ -126,6 +129,23 @@ const RATE_COLS: Column<HostCostRate>[] = [
     sortValue: (r) => r.source,
   },
 ];
+
+const NET_COLS: Column<NetClassRow>[] = [
+  { key: "class", header: "Class", cell: (r) => <span className="mono">{r.netClass}</span>, sortValue: (r) => r.netClass, lead: true },
+  { key: "rx", header: "Received", cell: (r) => formatBytes(r.rx), sortValue: (r) => r.rx, align: "right", mono: true, width: 110 },
+  { key: "tx", header: "Sent", cell: (r) => formatBytes(r.tx), sortValue: (r) => r.tx, align: "right", mono: true, width: 110 },
+];
+
+/** The host's own network bytes per class and direction (GET /v1/hosts/{id}'s netClasses): what its Data transfer "Host's own" is priced from. Cumulative, not the cost tab's range. */
+function HostNetwork({ classes }: { classes: Host["netClasses"] }) {
+  const rows = netClassRows(classes);
+  if (!rows.length) return null;
+  return (
+    <Card title="Host's own network" subtitle="bytes outside any Run, per class, since the runner started counting · not limited to the range" flush>
+      <Table columns={NET_COLS} rows={rows} rowKey={(r) => r.netClass} dense />
+    </Card>
+  );
+}
 
 function RatesTable({ rates }: { rates: HostCostRate[] }) {
   return <Table columns={RATE_COLS} rows={rates} rowKey={(r) => `${r.family}:${r.from}`} dense />;

@@ -1484,6 +1484,15 @@ rule as `hostHistory`: operators, and the host's own tenant (for its own
 host). A platform host's cost is the operators'. The host's tenant reads
 `unallocated` only while the host is in one of its own pools.
 
+For `compute`, `block-storage` and `public-ip`, `allocated` is the Runs'
+share of the host's period and `unallocated` its idle part, both from the
+host row. For `data-transfer`, `allocated` is the sum of the Runs' own
+transfer on the host in that hour (their Run rows' `amount`, every
+tenant's) and `unallocated` is the host's own traffic (the host row:
+image pulls, snapshot uploads, its link to luxd). The two are joined at
+read time into one row per hour, family and currency; an hour with Run
+transfer and no host row still has its row (`unallocated` 0).
+
 ### `GET /v1/pools/{name}/cost`
 
 A pool's cost is its machines': `totals`, `series` and `topRuns` count
@@ -1498,7 +1507,10 @@ and to the tenant owning the pool; never a platform pool's to a tenant.
 Each `hosts` row also carries the host's `hours` (its billed window,
 provision request or registration to termination or now, within the range;
 the same on each of its family rows) and its `volumes` as `GET /v1/hosts`
-has them. `GET /v1/hosts/{id}/cost`'s `rates` carry `details`: for block
+has them. As on `GET /v1/hosts/{id}/cost`, `data-transfer`'s `allocated`
+in `hostSeries` and `hosts` is the transfer of the Runs on the pool's hosts
+that the reader may see, and
+its `unallocated` (and `idle`) the hosts' own traffic. `GET /v1/hosts/{id}/cost`'s `rates` carry `details`: for block
 storage, the volumes, the unit prices per volume type and `hoursPerMonth`
 the period was priced from.
 
@@ -1558,11 +1570,20 @@ family table list Block storage as its own family row from
 `byFamily`/`families`; the Runs list's `cost` carries per-currency totals
 only (no families), so its tooltip has no family row to add.
 
-Pool and host cost are the machines only, compute and block storage, and
-the two are always shown apart, so a bigger disk never reads as a dearer
-machine. A reader luxd gives no host time (a tenant on a platform pool)
-sees its own Runs' figures only, never a zero or a dash for what it may not
-see.
+Pool and host cost are the machines only: compute, block storage, public
+IPv4 and data transfer, always shown apart, so a bigger disk never reads
+as a dearer machine and a busy network never as idle time. Each family is
+split into what Runs were charged and the rest. For compute, block
+storage and public IPv4 the rest is unallocated (idle) host time. For data
+transfer it is labelled "Host's own": the runner's own traffic (image
+pulls, snapshot uploads, its link to luxd), which no Run sent and which is
+not idle time; Runs' transfer is what their own placements sent and
+received. Unallocated tiles and figures count idle time only, never the
+host's own transfer. Utilisation is compute and block storage only, the
+families billed by host time: their Runs' part ÷ their cost (its tooltip
+says so). A reader luxd gives no host time (a tenant on a platform pool)
+sees its own Runs' figures only, never a zero or a dash for what it may
+not see.
 
 - **Run page, Cost card** (the "Resources & cost" tab, above
   `RunResources`), from `GET /v1/runs/{id}/cost`, polled every 15s while
@@ -1586,9 +1607,14 @@ see.
   estimate part, or `incomplete`). Its Tooltip names the status and gives
   the exact amounts.
 - **Host page**, its Cost tab: tiles (host cost with its host-hours,
-  Compute, Block storage with the host's volumes, Unallocated, Utilisation),
-  and per hour (or per UTC day with Every Day) bars stacked by family, each
-  charged to Runs and unallocated (a lighter shade), from
+  Compute, Block storage with the host's volumes, Public IPv4, Data
+  transfer with its Runs and Host's own parts, Unallocated, Utilisation),
+  a "Host's own network" table of the host's cumulative bytes per class,
+  received and sent (from `GET /v1/hosts/{id}`'s `netClasses`; shown when
+  the reader may see unallocated and the runner reports it), and per hour
+  (or per UTC day with Every Day) bars stacked by family, each charged to
+  Runs and the rest in a lighter shade (unallocated; Host's own for data
+  transfer), from
   `/v1/hosts/{id}/cost`. A tenant on a platform pool's host sees what its
   Runs were charged only. Operators also get the rate periods: family,
   period, price per hour, and the source once (`static`, `on-demand`,
@@ -1649,22 +1675,26 @@ see.
 - **Pool page, Cost tab**: the page's Every (hour or day), from one
   `/v1/pools/{name}/cost`. Tiles: host cost (lead, with host-hours), Compute
   (average per hour), Block storage (the volumes when every host has the
-  same, else how many shapes), Unallocated (its share of host cost) and
-  Utilisation (charged to Runs ÷ host cost). Host cost per hour or day,
-  stacked bars of the four series; "Who paid" (Runs, Unallocated, Total for
-  Compute, Block storage and both, a bar per family); Cost by host (up
-  hours, compute, block storage, total, unallocated, a utilisation meter;
-  costliest first, each host linked to its Cost tab); Top runs; and "Pool
-  cost is the machines only". The summary tile above the tabs is host cost
-  and unallocated, one figure each per currency. Not built: why time was
+  same, else how many shapes), Public IPv4, Data transfer (Runs and Host's
+  own), Unallocated (idle time, its share of host cost) and Utilisation
+  (compute and block storage charged to Runs ÷ their cost). Host cost per
+  hour or day, stacked bars of each family's two parts; "Who paid" (Runs,
+  Unallocated / host's own, Total for each family and all, a bar per
+  family, data transfer's split Runs / Host's own); Cost by host (up
+  hours, compute, block storage, public IPv4, data transfer, total (all
+  four), unallocated, host's own transfer, a utilisation meter; costliest
+  first, each host linked to its Cost tab); Top runs; and "Pool cost is
+  the machines only". The summary tile above the tabs is host cost and
+  unallocated (idle time), one figure each per currency. Not built: why time was
   unallocated (booting, ready with no Run, part-filled, waiting to scale
   down), which needs server-side data.
 - **Overview, Cost tab**: Block storage is a KPI, a By family row and a
   breakdown column of its own. Show Compute sends
   `family=compute&family=block-storage`; External sends
   `nofamily=compute&nofamily=block-storage`. Unallocated host
-  time reads Compute and Block storage apart, for operators over every
-  tenant and for a tenant when luxd sends its own pools'.
+  time reads Compute and Block storage apart, and the hosts' own data
+  transfer as "Hosts' own transfer" when it is non-zero, for operators
+  over every tenant and for a tenant when luxd sends its own pools'.
 - Every page with money says "list price" once, explained in a Tooltip.
   Amounts are never added across currencies. An amount rounded for display
   shows its exact value in a Tooltip (`Money`).

@@ -37,7 +37,7 @@ test("mock /v1/costs top=N: the fold is other: true, otherCount counts it, nothi
 
 test("mock /v1/costs runs=true: Runs per family without a fold", () => {
   const fam = ask("group=family&runs=true");
-  expect(Object.fromEntries(fam.totals.map((r) => [r.group.family, r.runs]))).toEqual({ ai: 7, "block-storage": 8, compute: 8 });
+  expect(Object.fromEntries(fam.totals.map((r) => [r.group.family, r.runs]))).toEqual({ ai: 7, "block-storage": 8, compute: 8, "data-transfer": 8, "public-ip": 8 });
   expect(ask("group=family").totals.every((r) => r.runs === undefined)).toBe(true);
 });
 
@@ -49,7 +49,7 @@ test("mock /v1/costs: repeated family and nofamily keep or drop every value, tot
   expect(fams("family=compute&family=block-storage")).toEqual([["block-storage", "compute"], ["block-storage", "compute"]]);
   expect(fams("nofamily=compute&nofamily=block-storage&nofamily=public-ip&nofamily=data-transfer")).toEqual([["ai"], []]);
   expect(fams("family=compute")).toEqual([["compute"], ["compute"]]);
-  expect(fams("nofamily=compute")).toEqual([["ai", "block-storage"], ["block-storage", "data-transfer", "public-ip"]]);
+  expect(fams("nofamily=compute")).toEqual([["ai", "block-storage", "data-transfer", "public-ip"], ["block-storage", "data-transfer", "public-ip"]]);
 });
 
 test("mock /v1/costs rank: compute counts block storage, external never does", () => {

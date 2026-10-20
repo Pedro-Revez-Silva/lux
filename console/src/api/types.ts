@@ -623,6 +623,8 @@ export interface Host {
   market?: "on-demand" | "spot";
   /** The block-storage volumes deleted with it; absent while not known, and for a host that registered itself. */
   volumes?: HostVolume[];
+  /** The host's own network transfer (outside any Run), cumulative bytes per billing class and direction since its runner started counting; absent from runners that predate it. */
+  netClasses?: Record<string, NetBytes>;
   lastHeartbeat?: string;
   times: Record<HostTimeKey, string | null>;
   /** How luxd's launch of it went (provisioned hosts); failed: the provider refused and no instance ran. */
@@ -635,6 +637,13 @@ export interface HostLaunch {
   requestedAt?: string;
   finishedAt?: string;
   error?: string;
+}
+
+/** Bytes of one network class (proto.NetBytes): rxDelivered is inbound ahead of every filter, what transfer is priced by. */
+export interface NetBytes {
+  rx: number;
+  tx: number;
+  rxDelivered?: number;
 }
 
 /** A provider volume deleted with its host (HostVolume in internal/server). */

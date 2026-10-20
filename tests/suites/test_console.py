@@ -924,7 +924,7 @@ def test_host_page_shows_cost_to_its_owner_and_rates_to_operators(page, env, lux
     page.sign_in(lux.api_key, f"/hosts/{host_id}?tab=cost")
     expect(page.get_by_text(re.compile(r"^charged to Runs vs unallocated, per hour"))).to_have_count(1, timeout=15_000)
     tiles = page.locator(".host-cost .stat-label")
-    expect(tiles).to_have_text(["Host cost (24h)", "Compute", "Block storage", "Unallocated", "Utilisation"])
+    expect(tiles).to_have_text(["Host cost (24h)", "Compute", "Block storage", "Public IPv4", "Data transfer", "Unallocated", "Utilisation"])
     # Rate periods are the operators'.
     expect(page.get_by_role("heading", name="Rate periods", exact=True)).to_have_count(0)
     assert not page.errors, page.errors
@@ -949,7 +949,7 @@ def test_host_page_shows_cost_to_its_owner_and_rates_to_operators(page, env, lux
     # (?tenant= on the read): unallocated of its own pool, no rate periods.
     with page.expect_request(lambda r: f"/v1/hosts/{host_id}/cost" in r.url and f"tenant={lux.tenant_id}" in r.url, timeout=15_000):
         page.goto(env.luxd_url + f"/hosts/{host_id}?tab=cost&tenant={lux.tenant_id}")
-    expect(tiles).to_have_text(["Host cost (24h)", "Compute", "Block storage", "Unallocated", "Utilisation"], timeout=15_000)
+    expect(tiles).to_have_text(["Host cost (24h)", "Compute", "Block storage", "Public IPv4", "Data transfer", "Unallocated", "Utilisation"], timeout=15_000)
     expect(page.get_by_role("heading", name="Rate periods", exact=True)).to_have_count(0)
     assert not page.errors, page.errors
 
@@ -1242,11 +1242,16 @@ def test_pool_cost_tab_and_run_placements_with_block_storage(page, env, lux, pri
     page.sign_in(lux.api_key, "/pools/burst?tab=cost")
     tab = page.locator(".pool-cost")
     # The tenant owns the pool: every tile, unallocated included.
-    expect(tab.locator(".stat-label")).to_have_text(["Host cost (24h)", "Compute", "Block storage", "Unallocated", "Utilisation"], timeout=15_000)
+    expect(tab.locator(".stat-label")).to_have_text(["Host cost (24h)", "Compute", "Block storage", "Public IPv4", "Data transfer", "Unallocated", "Utilisation"], timeout=15_000)
     # Block storage's line names the host's disk, as luxd recorded it.
-    expect(tab.locator(".stat", has_text="Block storage").locator(".stat-unit")).to_contain_text("100 GiB gp3")
+    # By its label: Utilisation's basis also names block storage.
+    block_tile = tab.locator(".stat").filter(has=page.locator(".stat-label", has_text=re.compile(r"^Block storage$")))
+    expect(block_tile.locator(".stat-unit")).to_contain_text("100 GiB gp3")
     legend = tab.locator(".host-cost-chart .tschart-legend-label")
-    expect(legend).to_have_text(["Compute · runs", "Compute · unallocated", "Block storage · runs", "Block storage · unallocated"])
+    # Compute and block storage first; public IPv4 and data transfer follow when the range has them.
+    expect(legend.nth(3)).to_have_text("Block storage · unallocated")
+    assert legend.all_inner_texts()[:4] == ["Compute · runs", "Compute · unallocated", "Block storage · runs", "Block storage · unallocated"], legend.all_inner_texts()
+    assert set(legend.all_inner_texts()[4:]) <= {"Public IPv4 · runs", "Public IPv4 · unallocated", "Data transfer · runs", "Data transfer · Host's own"}, legend.all_inner_texts()
 
     # Who paid and Cost by host match the API, per family. Host rows grow each refresh (the hour is open):
     # read both until they agree.
@@ -1270,15 +1275,17 @@ def test_pool_cost_tab_and_run_placements_with_block_storage(page, env, lux, pri
             idle = sum(Decimal(r["unallocated"]) for r in series if r["family"] == fam)
             want.append((_cents_shown(alloc), _cents_shown(idle), _cents_shown(alloc + idle)))
         got = [tuple(r[1:4]) for r in rows[:2]]
-        # Cost by host: Host, Up, Compute, Block storage, Total, Unallocated, Utilisation; each family its own figure.
+        # Cost by host: Host, Up, Compute, Block storage, Public IPv4, Data transfer, Total, Unallocated,
+        # Host's own transfer, Utilisation; each family its own figure.
         mine = {h["family"]: h for h in c.get("hosts") or [] if h["hostId"] == host["id"]}
         fam_total = lambda f: str(Decimal(mine[f]["allocated"]) + Decimal(mine[f]["unallocated"]))
-        # Total and Unallocated sum every host-tied family the API returns
-        # (public-ip included); the two named columns stay their own figures.
+        # Total sums every host-tied family the API returns; Unallocated is
+        # idle time (data transfer's unallocated is the host's own traffic, apart).
         want_host = [_dollars(fam_total("compute")), _dollars(fam_total("block-storage")),
                      _dollars(str(sum(Decimal(fam_total(f)) for f in mine))),
-                     _dollars(str(sum(Decimal(mine[f]["unallocated"]) for f in mine)))]
-        got_host = row.locator("td").all_inner_texts()[2:6]
+                     _dollars(str(sum(Decimal(mine[f]["unallocated"]) for f in mine if f != "data-transfer")))]
+        cells = row.locator("td").all_inner_texts()
+        got_host = [cells[2], cells[3], cells[6], cells[7]]
         seen["who"] = (got, want, got_host, want_host)
         return (got == want and got_host == want_host) or None
     try:
@@ -1286,10 +1293,10 @@ def test_pool_cost_tab_and_run_placements_with_block_storage(page, env, lux, pri
     except AssertionError as e:
         raise AssertionError(f"{e}: {seen.get('who')}") from None
     cells = row.locator("td").all_inner_texts()
-    assert re.fullmatch(r"\d+\.\d h", cells[1]) and re.fullmatch(r"(<1|\d+)%|–", cells[6]), cells
+    assert re.fullmatch(r"\d+\.\d h", cells[1]) and re.fullmatch(r"(<1|\d+)%|–", cells[9]), cells
     assert api["idle"] and {i["family"] for i in api["idle"]} == {"compute", "block-storage", "public-ip"}, api["idle"]
     expect(tab.get_by_text("AI models")).to_have_count(0)
-    expect(tab.locator(".callout")).to_have_text("Pool cost is the machines only — instance and disk. AI and other external costs belong to Runs.")
+    expect(tab.locator(".callout")).to_have_text("Pool cost is the machines only — instance, disk, public IPv4 and network transfer. AI and other external costs belong to Runs.")
     # A host opens on its Cost tab: its rate periods say which family each is.
     row.get_by_role("link").click()
     page.wait_for_url(re.compile(rf"/hosts/{host['id']}\?tab=cost"))

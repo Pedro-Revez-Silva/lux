@@ -460,6 +460,10 @@ const FAMILIES: { family: string; displayName: string; color?: string }[] = [
   { family: "video", displayName: "Video", color: "amber" },
   { family: "storage", displayName: "Storage", color: "#2bb5a0" },
   { family: "egress", displayName: "Egress" },
+  // Host-tied families: fixed slots, no hint.
+  { family: "block-storage", displayName: "Block storage" },
+  { family: "public-ip", displayName: "Public IPv4" },
+  { family: "data-transfer", displayName: "Data transfer" },
 ];
 
 /** The AI series with one hour refunded: a -$6 credit, more than that hour's compute. */
@@ -587,7 +591,7 @@ function Costs() {
         />
       </Card>
       <p className="sg-note">
-        familySlot: {FAMILIES.map((f) => `${f.family}${f.color ? ` (${f.color})` : ""} → ${familySlot(f.family, f.color)}`).join(" · ")}. Named hints map to a slot (blue hints avoid slot 1, which is compute&apos;s), <Code>#rrggbb</Code> to the nearest hue, no hint to a slot from the family&apos;s name. A family's slot never depends on its companions: egress and video share slot 4 above, an accepted collision.
+        familySlot: {FAMILIES.map((f) => `${f.family}${f.color ? ` (${f.color})` : ""} → ${familySlot(f.family, f.color)}`).join(" · ")}. Named hints map to a slot (blue hints avoid slot 1, which is compute&apos;s), <Code>#rrggbb</Code> to the nearest hue, no hint to a slot from the family&apos;s name. A family's slot never depends on its companions: egress, video and data transfer share slot 4 above, an accepted collision.
       </p>
     </Section>
   );
@@ -628,10 +632,18 @@ function PartsDemo() {
                 { label: "Block storage · unallocated", value: 0.67, text: "$0.67", color: fadedCss("var(--chart-3)") },
               ]}
             />
+            <PartBar
+              label="Data transfer: charged to runs vs the host's own"
+              height={8}
+              parts={[
+                { label: "Data transfer · runs", value: 9.02, text: "$9.02", color: familyColor("data-transfer") },
+                { label: "Data transfer · Host's own", value: 0.03, text: "$0.03", color: fadedCss(familyColor("data-transfer")) },
+              ]}
+            />
           </div>
         </Card>
       </div>
-      <p className="sg-note">The last bar: one family split into charged to runs and unallocated, the unallocated part in fadedCss(colour), the DOM twin of a chart series' faded shade (the same FADE_KEEP mix toward --bg-surface), so a PartBar under a chart reads like its legend.</p>
+      <p className="sg-note">The block storage bar: one family split into charged to runs and unallocated, the unallocated part in fadedCss(colour), the DOM twin of a chart series' faded shade (the same FADE_KEEP mix toward --bg-surface), so a PartBar under a chart reads like its legend. Data transfer uses the same split, but its faded part is the host's own traffic (image pulls, uploads, its link to luxd), not idle time: label it "Host's own" on a host and "Hosts' own" on a pool, never "unallocated".</p>
       <h3 className="sg-h3">.grid-2-1: a main card and a narrower one beside it</h3>
       <div className="grid grid-2-1">
         <Card title="Host cost per day" subtitle="two thirds">

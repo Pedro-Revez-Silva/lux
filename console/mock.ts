@@ -13,7 +13,7 @@
 import index from "./index.html";
 import { COST_TENANTS, costLabels, costSummary, submittedBy } from "./mockCosts.ts";
 import { history, hostHistory, poolMetrics, POOLS } from "./mockHistory.ts";
-import { costHost, hostCost, poolCost, runCost } from "./mockHostCost.ts";
+import { costHost, hostCost, hostNetClasses, poolCost, runCost } from "./mockHostCost.ts";
 import { sessionOutput, sessionRun, sessionRunJson, SESSION_RUNS } from "./mockSessions.ts";
 
 const RUN_ID = "run_k3jq7x2mfa9vbn4z";
@@ -143,7 +143,7 @@ const HOSTS = [
     launch: { outcome: "launched", requestedAt: ago(2 * 86400), finishedAt: ago(2 * 86400 - 35) },
     placements: [],
   },
-].map((h) => ({ ...h, ...(costHost(h.id)?.volumes ? { volumes: costHost(h.id)!.volumes } : {}) }));
+].map((h) => ({ ...h, ...(costHost(h.id)?.volumes ? { volumes: costHost(h.id)!.volumes } : {}), ...(costHost(h.id) ? { netClasses: hostNetClasses(h.id) } : {}) }));
 
 /** GET /v1/hosts: live hosts by default, ended ones with lifecycle=all or ended; one page. A tenant sees its own and the platform's. */
 function hostsList(u: URL) {

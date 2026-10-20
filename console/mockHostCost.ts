@@ -1,10 +1,12 @@
-// Host-tied cost for the mock, shaped as PR 2's luxd answers it
+// Host-tied cost for the mock, shaped as luxd answers it
 // (internal/server/poolstats.go poolCost, costread.go hostCost, costqueue.go
-// Run lines): each host's compute and block-storage periods, split every
-// hour into what its placements reserved (allocated) and what they did not
-// (unallocated), per family. A host whose volumes are not known has no
-// block-storage period, so no block-storage rows (missing, never zero).
-// Amounts are integers of nano-units (luxd's 9 digits), so every sum is exact.
+// Run lines): each host's compute, block-storage and public-ip periods,
+// split every hour into what its placements reserved (allocated) and what
+// they did not (unallocated), and its data transfer: the Runs' (allocated)
+// and the host's own traffic (unallocated). A host whose volumes are not
+// known has no block-storage period, so no block-storage rows (missing,
+// never zero). Amounts are integers of nano-units (luxd's 9 digits), so
+// every sum is exact.
 import { noise, SINCE } from "./mockCosts.ts";
 
 interface Volume {
@@ -45,6 +47,18 @@ const COST_HOSTS: CostHost[] = [
 
 export const costHost = (id: string) => COST_HOSTS.find((h) => h.id === id);
 
+/** GET /v1/hosts/{id}'s netClasses: the host's own cumulative bytes per class (image pulls in from the internet, snapshot uploads out to S3 in-region, its link to luxd). */
+export function hostNetClasses(id: string): Record<string, { rx: number; tx: number; rxDelivered?: number }> {
+  const scale = 1 + (costHost(id)?.name.length ?? 0) / 10;
+  const gib = 1024 ** 3;
+  return {
+    internet: { rx: Math.round(3.2 * gib * scale), tx: Math.round(0.04 * gib * scale), rxDelivered: Math.round(3.3 * gib * scale) },
+    "region-service": { rx: Math.round(0.6 * gib * scale), tx: Math.round(5.1 * gib * scale) },
+    zone: { rx: Math.round(0.02 * gib * scale), tx: Math.round(0.03 * gib * scale) },
+    local: { rx: 0, tx: 0 },
+  };
+}
+
 const HOUR = 3600;
 
 const money = (nanos: number) => {
@@ -65,12 +79,20 @@ function occupancy(host: CostHost, hour: number): number {
 interface HostHour {
   hour: number;
   host: CostHost;
-  family: "compute" | "block-storage";
+  family: "compute" | "block-storage" | "public-ip" | "data-transfer";
   allocated: number;
   unallocated: number;
 }
 
-/** The host-hour rows of [from, to): one per host, hour and family it has a period for; a partial hour is billed for its part. */
+/** One public IPv4 address's list price per hour, nano-USD. */
+const PUBLIC_IP_HOURLY = 5_000_000;
+
+/**
+ * The host-hour rows of [from, to): one per host, hour and family it has a
+ * period for; a partial hour is billed for its part. Data transfer is not
+ * shared time: allocated is what the Runs sent (luxd joins their Run rows),
+ * unallocated the host's own traffic.
+ */
 function hostHours(from: number, to: number, hosts: CostHost[]): HostHour[] {
   const now = Date.now() / 1000;
   const out: HostHour[] = [];
@@ -83,13 +105,17 @@ function hostHours(from: number, to: number, hosts: CostHost[]): HostHour[] {
       if (b <= a) continue;
       const part = (b - a) / HOUR;
       const used = occupancy(host, hour);
-      const rates: [HostHour["family"], number][] = [["compute", host.compute]];
+      const rates: [HostHour["family"], number][] = [["compute", host.compute], ["public-ip", PUBLIC_IP_HOURLY]];
       if (host.volumes?.length) rates.push(["block-storage", ebsHourly(host.volumes)]);
       for (const [family, rate] of rates) {
         const billed = Math.round(rate * part);
         const allocated = Math.round(billed * used);
         out.push({ hour, host, family, allocated, unallocated: billed - allocated });
       }
+      // Runs' transfer follows how busy the host was; its own (pulls, uploads, luxd) is a small steady trickle.
+      const runsTransfer = Math.round(used * (40_000_000 + noise(hour / HOUR + host.name.length * 7) * 600_000_000) * part);
+      const ownTransfer = Math.round((300_000 + noise(hour / HOUR + host.name.length * 13) * 2_000_000) * part);
+      out.push({ hour, host, family: "data-transfer", allocated: runsTransfer, unallocated: ownTransfer });
     }
   }
   return out;
@@ -106,7 +132,12 @@ const sumBy = <T>(rows: T[], key: (r: T) => string, pick: (r: T) => number) => {
   return m;
 };
 
-const FAMILIES = [{ family: "block-storage", displayName: "Block storage" }, { family: "compute", displayName: "Compute" }];
+const FAMILIES = [
+  { family: "block-storage", displayName: "Block storage" },
+  { family: "compute", displayName: "Compute" },
+  { family: "data-transfer", displayName: "Data transfer" },
+  { family: "public-ip", displayName: "Public IPv4" },
+];
 // The Runs on the default pool: a tenant (acme) has 40% of it. Their names are mockCosts.ts's.
 const TOP_RUNS = [
   { id: "run_k3jq7x2mfa9vbn4z", name: "agent-refactor-42", tenant: "ten_acme", part: 0.22 },
@@ -207,6 +238,7 @@ export function hostCost(u: URL, id: string, tenant: string | null, poolTenant: 
       details: { volumes: host.volumes, prices: { gp3: { currency: "USD", perGBMonth: String(GP3_PER_GB_MONTH), perIOPSMonth: "0.0052", perGiBpsMonth: "39.2" } }, hoursPerMonth: HOURS_PER_MONTH },
     });
   }
+  rates.unshift({ family: "public-ip", from: start, ...end, perHour: money(PUBLIC_IP_HOURLY), currency: "USD", source: "ec2-public-ipv4" });
   body.rates = rates;
   return body;
 }

@@ -903,6 +903,7 @@ components:
       additionalProperties: false
       properties:
         allocated:
+          description: "Charged to the host's Runs: their share of the host's period (compute, block-storage, public-ip); for data-transfer, the transfer of the host's Runs."
           type: string
         currency:
           type: string
@@ -913,7 +914,7 @@ components:
           format: date-time
           type: string
         unallocated:
-          description: Operators, and the tenant owning the host's pool; absent for a tenant on a platform pool's host.
+          description: "Charged to no Run: idle host time (compute, block-storage, public-ip); for data-transfer, the host's own traffic. Operators, and the tenant owning the host's pool; absent for a tenant on a platform pool's host."
           type: string
       type: object
     HostCostRate:
@@ -1774,21 +1775,21 @@ components:
           format: date-time
           type: string
         hostSeries:
-          description: Host time per bucket and family, allocated and idle; visible as idle.
+          description: "Host cost per bucket and family: charged to Runs, and the rest (idle time; for data-transfer, the hosts' own traffic); visible as idle."
           items:
             $ref: "#/components/schemas/PoolHostTime"
           type:
             - array
             - "null"
         hosts:
-          description: Host time per host and family in the range, allocated and idle; visible as idle.
+          description: "Host cost per host and family: charged to Runs, and the rest (idle time; for data-transfer, the hosts' own traffic); visible as idle."
           items:
             $ref: "#/components/schemas/PoolHostTime"
           type:
             - array
             - "null"
         idle:
-          description: "Host time no Run reserved, per family and currency. Not part of totals. Present (maybe empty) exactly when the reader may see the pool's host time: operators over every tenant, and the tenant owning the pool; never a platform pool's to a tenant."
+          description: "Host time no Run reserved, per family and currency (for data-transfer, the hosts' own traffic). Not part of totals. Present (maybe empty) exactly when the reader may see the pool's host time: operators over every tenant, and the tenant owning the pool; never a platform pool's to a tenant."
           items:
             $ref: "#/components/schemas/PoolIdle"
           type: array
@@ -1838,7 +1839,7 @@ components:
       additionalProperties: false
       properties:
         allocated:
-          description: Host time reserved by Runs (their compute cost comes from it).
+          description: "Charged to Runs: host time they reserved (compute, block-storage, public-ip); for data-transfer, the transfer of the Runs on the pool's hosts."
           type: string
         at:
           format: date-time
@@ -1857,7 +1858,7 @@ components:
           format: double
           type: number
         unallocated:
-          description: "Host time no Run reserved: idle."
+          description: "Charged to no Run: idle host time (compute, block-storage, public-ip); for data-transfer, the hosts' own traffic."
           type: string
         volumes:
           description: "Per host: its recorded block-storage volumes, as GET /v1/hosts has them; absent while not known and for a host that registered itself."

@@ -109,13 +109,19 @@ test("split: Block storage is a side of its own and counts under Show Compute, n
   ]);
 });
 
-test("unallocatedSides: luxd's unallocated rows as Compute and Block storage, per currency; a row without family is compute", () => {
+test("unallocatedSides: luxd's unallocated rows as Compute, Block storage and the hosts' own transfer, per currency; a row without family is compute", () => {
   expect(
     unallocatedSides([
       { family: "block-storage", currency: "USD", amount: "0.67" },
       { family: "compute", currency: "USD", amount: "6.27" },
       { family: "compute", currency: "EUR", amount: "1" },
       { currency: "USD", amount: "0.01" },
+      { family: "data-transfer", currency: "USD", amount: "0.03" },
+      // A zero is not shown: the strip names the hosts' own transfer only when there is some.
+      { family: "data-transfer", currency: "EUR", amount: "0" },
+      // Public IPv4's idle part is not compute's.
+      { family: "public-ip", currency: "USD", amount: "5" },
+      { family: "public-ip", currency: "EUR", amount: "0" },
     ]),
   ).toEqual({
     compute: [
@@ -123,8 +129,10 @@ test("unallocatedSides: luxd's unallocated rows as Compute and Block storage, pe
       { currency: "USD", amount: "6.28" },
     ],
     blockStorage: [{ currency: "USD", amount: "0.67" }],
+    publicIp: [{ currency: "USD", amount: "5" }],
+    hostTransfer: [{ currency: "USD", amount: "0.03" }],
   });
-  expect(unallocatedSides(undefined)).toEqual({ compute: [], blockStorage: [] });
+  expect(unallocatedSides(undefined)).toEqual({ compute: [], blockStorage: [], publicIp: [], hostTransfer: [] });
 });
 
 test("split: a side with no cost is no figure, not zero; a currency with no shown cost is absent", () => {

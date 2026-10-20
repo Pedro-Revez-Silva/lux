@@ -57,9 +57,11 @@ ended one) and acme's own `ci` pool host answer the Hosts list and each
 host's page: its history with a runner process, its volumes (one host's
 assumed, the ended one's not known), and its events. Host-tied cost
 (`mockHostCost.ts`) is shaped as luxd's: pool and host cost per family
-(compute and block storage), unallocated to an operator and to a tenant on
+(compute, block storage, public IPv4, and data transfer split into the
+Runs' and the host's own), unallocated to an operator and to a tenant on
 its own pool only (with `MOCK_ROLE=tenant`, `default` hides it and `ci`
-shows it), rate periods with block storage's details, and the Run's cost
+shows it), the hosts' own network bytes (`netClasses`), rate periods with
+block storage's details, and the Run's cost
 with its placements. Four more Runs (`mockSessions.ts`) show the Run
 page's Session tab, their output streamed record by record: a live
 `opencode` Run with nested subagents, a compaction, a steer and a

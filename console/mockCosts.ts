@@ -1,6 +1,7 @@
 // GET /v1/costs and /v1/costs/labels for the mock: hourly cost rows for the
-// last 30 days, of a few Runs across two tenants, in three families
-// (compute, block storage beside it, and AI models from a plugin), with a
+// last 30 days, of a few Runs across two tenants, in the host-tied families
+// (compute, block storage, public IPv4, data transfer) and AI models from a
+// plugin, with a
 // quiet night with no rows (gaps, not
 // zeros) and an AI spike two hours ago. Runs carry labels (app=jervasion or
 // dude, one without app; repository and phase labels) and who submitted
@@ -90,6 +91,9 @@ function generate(): { rows: Row[]; unallocated: Map<number, Map<string, number>
         rows.push({ hour, tenant: r.tenant, run: r.id, family: "compute", currency, micros: compute });
         // The host's disk, shared by the same reservation: about a twelfth of the machine.
         rows.push({ hour, tenant: r.tenant, run: r.id, family: "block-storage", currency, micros: Math.round(compute / 12) });
+        // Its share of the host's public IPv4 address, and what it sent and received: transfer swings with the work.
+        rows.push({ hour, tenant: r.tenant, run: r.id, family: "public-ip", currency, micros: Math.round(compute / 40) });
+        rows.push({ hour, tenant: r.tenant, run: r.id, family: "data-transfer", currency, micros: Math.round((5_000 + noise(seed + 3) * 120_000) * r.compute * scale) });
         if (r.ai > 0) {
           let ai = Math.round((40_000 + noise(seed + 2) * 400_000) * r.ai * scale);
           if (h === 2 && ri === 0) ai = Math.round(34_812_345 * scale);
@@ -219,7 +223,7 @@ export function costSummary(u: URL, tenantOf: string | null = null): { status: n
   if (Object.keys(otherCount).length) body.otherCount = otherCount;
   if (interval) body.series = aggregate(true);
   const named = (g: string) => [...new Set(totals.filter((t) => !(t.other && groups[0] === g)).map((t) => t.group![g]!))];
-  if (groups.includes("family")) body.families = named("family").sort().map((f) => (f === "ai" ? { family: f, displayName: "AI models", color: "violet" } : f === "compute" ? { family: f, displayName: "Compute" } : f === "block-storage" ? { family: f, displayName: "Block storage" } : { family: f }));
+  if (groups.includes("family")) body.families = named("family").sort().map((f) => (f === "ai" ? { family: f, displayName: "AI models", color: "violet" } : f === "compute" ? { family: f, displayName: "Compute" } : f === "block-storage" ? { family: f, displayName: "Block storage" } : f === "public-ip" ? { family: f, displayName: "Public IPv4" } : f === "data-transfer" ? { family: f, displayName: "Data transfer" } : { family: f }));
   if (groups.includes("run")) body.runs = named("run").sort().map((id) => ({ id, name: runInfo(id)?.name ?? "", ...(Object.keys(runInfo(id)?.labels ?? {}).length ? { labels: runInfo(id)!.labels } : {}) }));
   if (groups.includes("key")) {
     body.keys = named("key")
@@ -241,11 +245,14 @@ export function costSummary(u: URL, tenantOf: string | null = null): { status: n
     for (const [h, by] of s.unallocated) if (h >= s.from && h < s.to) for (const [c, v] of by) idle.set(c, (idle.get(c) ?? 0) + v);
     const fams = HOST_FAMILIES.filter(families(q)).sort();
     body.unallocated = share === 0 ? [] : [...idle].sort(([a], [b]) => a.localeCompare(b)).flatMap(([currency, v]) =>
-      fams.map((family) => ({ family, currency, amount: money(Math.round(v * share * (family === "compute" ? 11 / 12 : 1 / 12))) })),
+      fams.map((family) => ({ family, currency, amount: money(Math.round(v * share * IDLE_SHARE[family]!)) })),
     );
   }
   return { status: 200, body };
 }
+
+/** How the hosts' unallocated cost splits by family: mostly idle compute; data transfer's is the hosts' own traffic. */
+const IDLE_SHARE: Record<string, number> = { compute: 0.85, "block-storage": 0.08, "public-ip": 0.04, "data-transfer": 0.03 };
 
 /** The part of the hosts' unallocated time that is in each tenant's own pools. */
 const OWN_POOL_SHARE: Record<string, number> = { ten_acme: 0.2 };

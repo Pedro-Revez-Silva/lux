@@ -1,6 +1,7 @@
 """The cost screens on the mock console: the pool Cost tab splits host cost
-into compute and block storage, each charged to Runs or unallocated, and
-the Run's cost lists what each placement paid for its host."""
+into compute, block storage, public IPv4 and data transfer, each charged to
+Runs or not (idle time; the hosts' own transfer), and the Run's cost lists
+what each placement paid for its host."""
 
 from __future__ import annotations
 
@@ -43,28 +44,40 @@ def test_pool_cost_tab_splits_host_cost_by_family_and_who_paid(page, mock_consol
     tab.locator(".host-cost-chart canvas").first.wait_for(timeout=20_000)
 
     # The tiles read what the API says, per family, summed exactly.
-    idle = sum(Decimal(i["amount"]) for i in api["idle"])
-    alloc = {f: sum(Decimal(r["allocated"]) for r in api["hostSeries"] if r["family"] == f) for f in ("compute", "block-storage")}
-    unalloc = {f: sum(Decimal(r["unallocated"]) for r in api["hostSeries"] if r["family"] == f) for f in ("compute", "block-storage")}
+    families = ("compute", "block-storage", "public-ip", "data-transfer")
+    idle = sum(Decimal(i["amount"]) for i in api["idle"] if i["family"] != "data-transfer")
+    alloc = {f: sum(Decimal(r["allocated"]) for r in api["hostSeries"] if r["family"] == f) for f in families}
+    unalloc = {f: sum(Decimal(r["unallocated"]) for r in api["hostSeries"] if r["family"] == f) for f in families}
     tiles = {t.locator(".stat-label").inner_text(): t.locator(".stat-value").inner_text() for t in tab.locator(".stat").all()}
     assert tiles["Host cost (7d)"] == _dollars(str(sum(alloc.values()) + sum(unalloc.values()))), tiles
     assert tiles["Compute"] == _dollars(str(alloc["compute"] + unalloc["compute"])), tiles
     assert tiles["Block storage"] == _dollars(str(alloc["block-storage"] + unalloc["block-storage"])), tiles
+    assert tiles["Data transfer"] == _dollars(str(alloc["data-transfer"] + unalloc["data-transfer"])), tiles
+    # Unallocated is idle time: the hosts' own transfer is not in it.
     assert tiles["Unallocated"] == _dollars(str(idle)), tiles
 
-    # The chart: four series, compute and block storage each charged to Runs and unallocated.
+    # The chart: each family charged to Runs and the rest; data transfer's rest is the host's own.
     legend = tab.locator(".host-cost-chart .tschart-legend-label").all_inner_texts()
-    assert legend == ["Compute · runs", "Compute · unallocated", "Block storage · runs", "Block storage · unallocated"], legend
+    assert legend == [
+        "Compute · runs",
+        "Compute · unallocated",
+        "Block storage · runs",
+        "Block storage · unallocated",
+        "Public IPv4 · runs",
+        "Public IPv4 · unallocated",
+        "Data transfer · runs",
+        "Data transfer · Hosts' own",
+    ], legend
 
-    # Who paid: Compute and Block storage rows apart, then their total.
+    # Who paid: each family apart, then their total.
     paid = _rows(_card(page, "Who paid"))
-    assert [r[0] for r in paid] == ["Compute", "Block storage", "Total"], paid
+    assert [r[0] for r in paid] == ["Compute", "Block storage", "Public IPv4", "Data transfer", "Total"], paid
     assert paid[1][2] == _dollars(str(unalloc["block-storage"])), paid
 
-    # Cost by host: costliest first; a host whose volumes are not known has no block storage (a dash, not $0).
+    # Cost by host: costliest first (the total counts all four families); a host whose volumes are not known has no block storage (a dash, not $0).
     hosts = _card(page, "Cost by host")
     rows = _rows(hosts)
-    totals = [Decimal(r[4].lstrip("$").replace(",", "")) for r in rows]
+    totals = [Decimal(r[6].lstrip("$").replace(",", "")) for r in rows]
     assert totals == sorted(totals, reverse=True), rows
     unknown = next(r for r in rows if r[0] == "gp-eu-west-1-b2")
     assert unknown[3] == "–", unknown
@@ -100,13 +113,14 @@ def test_run_cost_placements_join_compute_and_block_storage(page, mock_console):
     assert not page.errors, page.errors
 
 
-def test_overview_show_compute_counts_block_storage_and_external_neither(page, mock_console):
+def test_overview_show_compute_counts_host_families_and_external_none(page, mock_console):
     get = lambda q: requests.get(f"{mock_console}/v1/costs?since=7d&{q}", headers={"Authorization": "Bearer x"}, timeout=10).json()
     by_family = {r["group"]["family"]: Decimal(r["amount"]) for r in get("group=family")["totals"] if r["currency"] == "USD"}
-    host = by_family["compute"] + by_family["block-storage"]
+    host_families = ("compute", "block-storage", "public-ip", "data-transfer")
+    host = sum(by_family[f] for f in host_families)
     # The mock honours repeated family and nofamily, as luxd does.
-    assert sum(Decimal(r["amount"]) for r in get("family=compute&family=block-storage")["totals"]) == host
-    assert {r["group"]["family"] for r in get("group=family&nofamily=compute&nofamily=block-storage")["totals"]} == {"ai"}
+    assert sum(Decimal(r["amount"]) for r in get("&".join(f"family={f}" for f in host_families))["totals"]) == host
+    assert {r["group"]["family"] for r in get("group=family&" + "&".join(f"nofamily={f}" for f in host_families))["totals"]} == {"ai"}
 
     card = page.locator("section.card.cost-card")
     total = card.locator(".kpi").first

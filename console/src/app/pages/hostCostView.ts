@@ -1,17 +1,27 @@
-// What the pool, host and Run cost screens show of host-tied cost: compute
-// and block storage, always apart, each split into what Runs reserved and
-// what nobody did (unallocated). Amounts stay decimal strings, summed exactly
-// per currency and never across currencies; numbers are for geometry only.
+// What the pool, host and Run cost screens show of host-tied cost: compute,
+// block storage, public IPv4 and data transfer, always apart, each split
+// into what Runs were charged and what no Run was: idle host time for the
+// shared families, the host's own traffic for data transfer. Amounts stay
+// decimal strings, summed exactly per currency and never across currencies;
+// numbers are for geometry only.
 import { familyDisplay, sumMoney } from "@lux/design-system";
-import type { CostLine, CostPlacement, HostVolume, MoneyTotal } from "../../api/index.ts";
+import type { CostLine, CostPlacement, HostVolume, MoneyTotal, NetBytes } from "../../api/index.ts";
+import { DATA_TRANSFER, HOST_FAMILIES, PUBLIC_IP } from "../../costFamilies.ts";
 import { BLOCK_STORAGE, byCurrency, COMPUTE, push, ratio, sum } from "./costView.ts";
 
-/** The host-tied families, in the order every screen lists them. */
-const HOST_FAMILIES: readonly string[] = [COMPUTE, BLOCK_STORAGE];
+export { DATA_TRANSFER, HOST_FAMILIES, PUBLIC_IP };
 const isHostFamily = (f: string) => HOST_FAMILIES.includes(f);
+/** The families billed by time: utilisation is their Runs' share. */
+const TIME_FAMILIES: readonly string[] = [COMPUTE, BLOCK_STORAGE];
+/** The families shared between a host's Runs: their unallocated part is idle time. */
+const SHARED_FAMILIES: readonly string[] = [COMPUTE, BLOCK_STORAGE, PUBLIC_IP];
 
 const LABELS = familyDisplay(HOST_FAMILIES.map((family) => ({ family })));
 export const familyLabel = (f: string) => LABELS.get(f)?.label ?? f;
+/** Data transfer's part no Run was charged on one host; a pool's screens say "Hosts' own". */
+export const HOST_OWN = "Host's own";
+/** What a family's part no Run was charged is called: the host's own traffic for data transfer, idle time otherwise. */
+export const ownPartLabel = (f: string, ownLabel = HOST_OWN) => (f === DATA_TRANSFER ? ownLabel : "unallocated");
 
 /** One figure per currency, summed over families (a pool's idle per family and currency, say). */
 export function sumPerCurrency(rows: readonly { currency: string; amount: string }[] | null | undefined): MoneyTotal[] {
@@ -21,7 +31,7 @@ export function sumPerCurrency(rows: readonly { currency: string; amount: string
   });
 }
 
-/** Host time of one family: what Runs reserved, what nobody did, and both. */
+/** Host cost of one family: what Runs were charged, what no Run was (idle time; for data transfer, the host's own traffic), and both. */
 export interface Paid {
   runs: string | null;
   unallocated: string | null;
@@ -32,8 +42,15 @@ export interface WhoPaid {
   currency: string;
   compute: Paid;
   blockStorage: Paid;
-  /** Both families. */
+  publicIp: Paid;
+  /** unallocated: the host's own traffic (image pulls, uploads, its link to luxd), not idle time. */
+  dataTransfer: Paid;
+  /** Every host-tied family. */
   all: Paid;
+  /** Compute, block storage and public IPv4: unallocated is idle host time. */
+  shared: Paid;
+  /** Compute and block storage, the families billed by host time: utilisation's basis. */
+  time: Paid;
 }
 
 interface HostTimeRow {
@@ -54,15 +71,24 @@ function paid(rows: readonly HostTimeRow[]): Paid {
   };
 }
 
-/** Per currency, who paid for the host time: Runs or nobody, per family and both. A family with no row is all null, never zero. */
+const ofFamilies = (rs: readonly HostTimeRow[], fs: readonly string[]) => paid(rs.filter((r) => fs.includes(r.family)));
+
+/** Per currency, who paid for the host: Runs or no Run, per family and summed. A family with no row is all null, never zero. */
 export function whoPaid(rows: readonly HostTimeRow[] | null | undefined): WhoPaid[] {
   return [...byCurrency((rows ?? []).filter((r) => isHostFamily(r.family)))].map(([currency, rs]) => ({
     currency,
-    compute: paid(rs.filter((r) => r.family === COMPUTE)),
-    blockStorage: paid(rs.filter((r) => r.family === BLOCK_STORAGE)),
+    compute: ofFamilies(rs, [COMPUTE]),
+    blockStorage: ofFamilies(rs, [BLOCK_STORAGE]),
+    publicIp: ofFamilies(rs, [PUBLIC_IP]),
+    dataTransfer: ofFamilies(rs, [DATA_TRANSFER]),
     all: paid(rs),
+    shared: ofFamilies(rs, SHARED_FAMILIES),
+    time: ofFamilies(rs, TIME_FAMILIES),
   }));
 }
+
+/** Runs' share of compute and block storage, the families billed by host time; null when they cost nothing. */
+export const utilisation = (p: WhoPaid) => ratio(p.time.runs, p.time.total);
 
 export interface HostCostRow {
   hostId: string;
@@ -72,10 +98,16 @@ export interface HostCostRow {
   hours: number | null;
   compute: string | null;
   blockStorage: string | null;
+  publicIp: string | null;
+  dataTransfer: string | null;
+  /** Every host-tied family. */
   total: string;
   allocated: string;
+  /** Idle host time: compute, block storage and public IPv4 no Run reserved. */
   unallocated: string;
-  /** allocated ÷ total; null when the host cost nothing. */
+  /** Data transfer no Run sent: the host's own traffic; null when the host has no transfer row (an en dash, not $0). */
+  hostOwn: string | null;
+  /** Compute and block storage charged to Runs ÷ their total; null when they cost nothing. */
   utilisation: number | null;
 }
 
@@ -86,12 +118,12 @@ type HostRow = HostTimeRow & { hostId?: string; hostName?: string; hours?: numbe
 export function hostCostRows(rows: readonly HostRow[] | null | undefined): HostCostRow[] {
   const groups = new Map<string, HostRow[]>();
   for (const r of rows ?? []) {
-    if (r.hostId) push(groups, `${r.hostId}\u0000${r.currency}`, r);
+    if (r.hostId && isHostFamily(r.family)) push(groups, `${r.hostId}\u0000${r.currency}`, r);
   }
   return [...groups.values()].map((rs) => {
     const p = paid(rs);
-    const fam = (f: string) => paid(rs.filter((r) => r.family === f)).total;
-    const total = p.total ?? "0";
+    const time = ofFamilies(rs, TIME_FAMILIES);
+    const fam = (f: string) => ofFamilies(rs, [f]).total;
     return {
       hostId: rs[0]!.hostId!,
       hostName: rs[0]!.hostName || rs[0]!.hostId!,
@@ -99,10 +131,13 @@ export function hostCostRows(rows: readonly HostRow[] | null | undefined): HostC
       hours: rs.find((r) => r.hours != null)?.hours ?? null,
       compute: fam(COMPUTE),
       blockStorage: fam(BLOCK_STORAGE),
-      total,
+      publicIp: fam(PUBLIC_IP),
+      dataTransfer: fam(DATA_TRANSFER),
+      total: p.total ?? "0",
       allocated: p.runs ?? "0",
-      unallocated: p.unallocated ?? "0",
-      utilisation: ratio(p.runs, total),
+      unallocated: ofFamilies(rs, SHARED_FAMILIES).unallocated ?? "0",
+      hostOwn: ofFamilies(rs, [DATA_TRANSFER]).unallocated,
+      utilisation: ratio(time.runs, time.total ?? "0"),
     };
   });
 }
@@ -127,6 +162,20 @@ export function perHour(amount: string | null | undefined, hours: number | null 
   if (amount == null || hours == null || !(hours > 0)) return null;
   // An average is a ratio: exact digits mean nothing past the 9th.
   return (Number(amount) / hours).toFixed(9);
+}
+
+export interface NetClassRow {
+  netClass: string;
+  rx: number;
+  tx: number;
+}
+
+/** A host's own netClasses as rows, most bytes first; a class with no bytes either way is left out. rx is rxDelivered where the runner reports it (what transfer is priced by). */
+export function netClassRows(classes: Record<string, NetBytes> | null | undefined): NetClassRow[] {
+  return Object.entries(classes ?? {})
+    .map(([netClass, b]) => ({ netClass, rx: b.rxDelivered ?? b.rx, tx: b.tx }))
+    .filter((r) => r.rx > 0 || r.tx > 0)
+    .sort((a, b) => b.rx + b.tx - (a.rx + a.tx) || a.netClass.localeCompare(b.netClass));
 }
 
 /** One volume set in words: "100 GiB gp3", several joined "100 GiB gp3 + 20 GiB gp2"; detail adds IOPS and throughput where given. */
@@ -174,12 +223,12 @@ export interface HostChart {
   totals: string[];
 }
 
-/** The series of the host-cost chart: each family charged to Runs, then (when visible) unallocated faded; a family with no row draws nothing, so its legend entry is absent too. */
-function hostChartSeries(families: readonly string[], unallocated: boolean): { family: string; part: "runs" | "unallocated"; label: string; color: string; faded?: boolean }[] {
+/** The series of the host-cost chart: each family charged to Runs, then (when visible) its part no Run was charged, faded; a family with no row draws nothing, so its legend entry is absent too. */
+function hostChartSeries(families: readonly string[], unallocated: boolean, ownLabel: string): { family: string; part: "runs" | "unallocated"; label: string; color: string; faded?: boolean }[] {
   return HOST_FAMILIES.filter((f) => families.includes(f)).flatMap((family) => {
     const color = LABELS.get(family)!.color;
     const runs = { family, part: "runs" as const, label: `${familyLabel(family)} · runs`, color };
-    return unallocated ? [runs, { family, part: "unallocated" as const, label: `${familyLabel(family)} · unallocated`, color, faded: true }] : [runs];
+    return unallocated ? [runs, { family, part: "unallocated" as const, label: `${familyLabel(family)} · ${ownPartLabel(family, ownLabel)}`, color, faded: true }] : [runs];
   });
 }
 
@@ -189,14 +238,14 @@ function hostChartSeries(families: readonly string[], unallocated: boolean): { f
  * stacked. Rows finer than the step (hours on a daily chart) are summed
  * exactly; a bucket without a row is a gap, not zero.
  */
-export function hostCharts(rows: readonly TimedHostRow[], from: string, to: string, step: number): HostChart[] {
+export function hostCharts(rows: readonly TimedHostRow[], from: string, to: string, step: number, ownLabel = HOST_OWN): HostChart[] {
   const start = Math.floor(Date.parse(from) / 1000 / step) * step;
   const end = Math.floor(Date.parse(to) / 1000);
   const x: number[] = [];
   for (let t = start; t < end; t += step) x.push(t);
   const index = new Map(x.map((t, i) => [t, i]));
   return [...byCurrency(rows.filter((r) => isHostFamily(r.family)))].map(([currency, rs]) => {
-    const series = hostChartSeries([...new Set(rs.map((r) => r.family))], rs.some((r) => r.unallocated != null));
+    const series = hostChartSeries([...new Set(rs.map((r) => r.family))], rs.some((r) => r.unallocated != null), ownLabel);
     const cells = series.map(() => x.map((): string[] => []));
     for (const r of rs) {
       const i = index.get(Math.floor(r.t / step) * step);
@@ -233,7 +282,7 @@ const placementsOf = (l: CostLine): CostPlacement[] => {
 };
 
 /**
- * A Run's placements with what each paid per host-tied family, joined from
+ * A Run's placements with what each paid of compute and block storage, joined from
  * the compute and block-storage lines' details.placements on epoch, host and
  * currency (one placement per epoch; one line per item, so a Run on two
  * instance types has two compute lines). A placement with no block-storage
@@ -242,7 +291,7 @@ const placementsOf = (l: CostLine): CostPlacement[] => {
 export function placementRows(lines: readonly CostLine[]): PlacementRow[] {
   const rows = new Map<string, PlacementRow>();
   for (const l of lines) {
-    if (l.source !== "compute" || !isHostFamily(l.family)) continue;
+    if (l.source !== "compute" || !TIME_FAMILIES.includes(l.family)) continue;
     for (const p of placementsOf(l)) {
       const k = `${p.epoch}\u0000${p.hostId}\u0000${l.currency}`;
       const r = rows.get(k) ?? { epoch: p.epoch, hostId: p.hostId, currency: l.currency, from: p.from, to: p.to, share: null, compute: null, blockStorage: null, total: "0" };

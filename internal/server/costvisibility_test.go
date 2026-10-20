@@ -204,6 +204,123 @@ func TestCostHostRowsTenantOwnPoolsExactly(t *testing.T) {
 	}
 }
 
+// hostHoursOf renders host cost hours as "<hour offset> family currency
+// allocated/unallocated" (offset in hours from base; "-": unallocated absent).
+func hostHoursOf(hours []hostCostHour, base time.Time) []string {
+	var out []string
+	for _, h := range hours {
+		u := "-"
+		if h.Unallocated != nil {
+			u = *h.Unallocated
+		}
+		out = append(out, fmt.Sprintf("%+d %s %s %s/%s", int(h.Hour.Sub(base).Hours()), h.Family, h.Currency, h.Allocated, u))
+	}
+	slices.Sort(out)
+	return out
+}
+
+// transferFixture adds data transfer to costVisibilityFixture: on ha (a's
+// own pool) two Runs' transfer and the host's own in hour 0, a Run's
+// transfer and no host row in hour +1, and a EUR Run row; on hb-shared (b's
+// host on the platform pool) a Run's transfer and the host's own.
+func transferFixture(t *testing.T) (*Server, map[string]string, time.Time) {
+	t.Helper()
+	s, keys, hour := costVisibilityFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO hosts (id, tenant_id, name, pool_id, state, capacity) VALUES
+		('hb-shared', 'tb', 'hb-shared', 'p-shared', 'ready', '{"cpus": 4, "memory": 100}')`)
+	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, tenant_id, run_id, source, family, currency, host_id, pool_id, amount) VALUES
+		($1, 'ta', 'ra-own', 'compute', 'data-transfer', 'USD', 'ha', 'p-a', 0.02),
+		($1, 'ta', 'ra', 'compute', 'data-transfer', 'USD', 'ha', 'p-a', 0.01),
+		($1, 'ta', 'ra-own', 'compute', 'data-transfer', 'EUR', 'ha', 'p-a', 0.5),
+		($2, 'ta', 'ra-own', 'compute', 'data-transfer', 'USD', 'ha', 'p-a', 0.04),
+		($1, 'tb', 'rb', 'compute', 'data-transfer', 'USD', 'hb-shared', 'p-shared', 0.07)`, hour, hour.Add(time.Hour))
+	execSQL(t, s, ctx, `INSERT INTO cost_hourly (hour, source, family, currency, host_id, pool_id, allocated, unallocated) VALUES
+		($1, 'compute', 'data-transfer', 'USD', 'ha', 'p-a', 0, 0.005),
+		($1, 'compute', 'data-transfer', 'USD', 'hb-shared', 'p-shared', 0, 0.01)`, hour)
+	return s, keys, hour
+}
+
+// Host cost, data transfer: allocated is the host's Runs' transfer per hour
+// and currency, unallocated the host row's own traffic, merged in one row;
+// an hour with Run transfer and no host row still has its row; compute's
+// allocated stays the host row's (Run compute rows are not added to it). A
+// tenant on a platform pool's host sees its Runs' transfer, not the host's own.
+func TestHostCostDataTransferRunsAndOwn(t *testing.T) {
+	s, keys, hour := transferFixture(t)
+	for _, c := range []struct {
+		key, host string
+		want      []string
+	}{
+		{"a", "ha", []string{"+0 block-storage USD 0.03/0.01", "+0 compute USD 0.3/0.1", "+0 data-transfer EUR 0.5/0", "+0 data-transfer USD 0.03/0.005", "+1 data-transfer USD 0.04/0"}},
+		{"op", "hb-shared", []string{"+0 data-transfer USD 0.07/0.01"}},
+		{"b", "hb-shared", []string{"+0 data-transfer USD 0.07/-"}},
+	} {
+		var body struct{ Hours []hostCostHour }
+		if code := getJSON(t, s, keys[c.key], "/v1/hosts/"+c.host+"/cost?since=6h", &body); code != http.StatusOK {
+			t.Fatalf("%s %s: %d", c.key, c.host, code)
+		}
+		if got := hostHoursOf(body.Hours, hour); !slices.Equal(got, c.want) {
+			t.Errorf("%s %s hours %v, want %v", c.key, c.host, got, c.want)
+		}
+	}
+}
+
+// Pool cost, data transfer: idle is the hosts' own traffic; hostSeries and
+// hosts carry the Runs' transfer as allocated, per bucket and per host,
+// currencies apart; totals are unchanged (Run rows, as before). A tenant on
+// a platform pool still gets no host time.
+func TestPoolCostDataTransferRunsAndOwn(t *testing.T) {
+	s, keys, hour := transferFixture(t)
+	timeOf := func(rows []PoolHostTime) []string {
+		var out []string
+		for _, r := range rows {
+			at := "host"
+			if r.At != nil {
+				at = fmt.Sprintf("%+d", int(r.At.Sub(hour).Hours()))
+			}
+			if r.Family == familyDataTransfer {
+				out = append(out, fmt.Sprintf("%s%s %s %s/%s", at, r.HostID, r.Currency, r.Allocated, r.Unallocated))
+			}
+		}
+		slices.Sort(out)
+		return out
+	}
+	for _, c := range []struct {
+		key, path, idle, totals string
+		series, hosts           []string
+	}{
+		{"a", "/v1/pools/own/cost?since=6h", "map[block-storage USD:0.01 compute USD:0.1 data-transfer USD:0.005]", "map[EUR:0.5 USD:1.1]",
+			[]string{"+0 EUR 0.5/0", "+0 USD 0.03/0.005", "+1 USD 0.04/0"}, []string{"hostha EUR 0.5/0", "hostha USD 0.07/0.005"}},
+		{"op", "/v1/pools/shared/cost?owner=platform&since=6h", "map[block-storage USD:0.002 compute USD:0.25 data-transfer USD:0.01]", "map[EUR:0.05 USD:0.47]",
+			[]string{"+0 USD 0.07/0.01"}, []string{"hosthb-shared USD 0.07/0.01"}},
+	} {
+		var body costBody
+		if code := getJSON(t, s, keys[c.key], c.path, &body); code != http.StatusOK {
+			t.Fatalf("%s %s: %d", c.key, c.path, code)
+		}
+		if got := fmt.Sprint(idleOf(body.Idle)); got != c.idle {
+			t.Errorf("%s %s idle %s, want %s", c.key, c.path, got, c.idle)
+		}
+		if got := fmt.Sprint(money(body.Totals)); got != c.totals {
+			t.Errorf("%s %s totals %s, want %s", c.key, c.path, got, c.totals)
+		}
+		if got := timeOf(body.HostSeries); !slices.Equal(got, c.series) {
+			t.Errorf("%s %s hostSeries %v, want %v", c.key, c.path, got, c.series)
+		}
+		if got := timeOf(body.Hosts); !slices.Equal(got, c.hosts) {
+			t.Errorf("%s %s hosts %v, want %v", c.key, c.path, got, c.hosts)
+		}
+	}
+	var b costBody
+	if code := getJSON(t, s, keys["b"], "/v1/pools/shared/cost?owner=platform&since=6h", &b); code != http.StatusOK {
+		t.Fatalf("b pool cost: %d", code)
+	}
+	if len(b.Idle) != 0 || len(b.Hosts) != 0 || len(b.HostSeries) != 0 {
+		t.Errorf("b reads a platform pool's host time: %v %v %v", b.Idle, b.Hosts, b.HostSeries)
+	}
+}
+
 // Host cost: hours per family; the owner tenant of a host in its own pool
 // reads its unallocated; rates carry their family (operators).
 func TestHostCostPerFamily(t *testing.T) {

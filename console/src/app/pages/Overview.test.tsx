@@ -482,9 +482,24 @@ test("Overview Cost: unallocated host time is split into Compute and Block stora
       const u = p.el.querySelector(".cost-unallocated")!;
       expect(u.querySelector('[data-unallocated="compute"]')!.textContent).toBe("Compute $6.27");
       expect(u.querySelector('[data-unallocated="block-storage"]')!.textContent).toBe("Block storage $0.67");
+      // UNALLOCATED has no data-transfer row: no Hosts' own transfer entry.
+      expect(u.querySelector('[data-unallocated="public-ip"]')).toBeNull();
+      expect(u.querySelector('[data-unallocated="data-transfer"]')).toBeNull();
     } finally {
       await p.done();
     }
+  }
+  // The hosts' own transfer, when luxd sends some, is named apart and not folded into Compute.
+  const withTransfer = [...UNALLOCATED, { family: "data-transfer", currency: "USD", amount: "0.03" }, { family: "public-ip", currency: "USD", amount: "0.05" }];
+  const t = await render("operator", "http://localhost/?tab=cost", (path) => (path.startsWith("/v1/costs?") && groupsOf(path) === "family" ? summary(BS_FAMILIES, [], { unallocated: withTransfer }) : familyAnswer(path)));
+  try {
+    await until(() => t.el.querySelector('.cost-unallocated [data-unallocated="data-transfer"]') != null, "the hosts' own transfer");
+    const u = t.el.querySelector(".cost-unallocated")!;
+    expect(u.querySelector('[data-unallocated="public-ip"]')!.textContent).toBe("Public IPv4 $0.05");
+    expect(u.querySelector('[data-unallocated="data-transfer"]')!.textContent).toBe("Hosts' own transfer $0.03");
+    expect(u.querySelector('[data-unallocated="compute"]')!.textContent).toBe("Compute $6.27");
+  } finally {
+    await t.done();
   }
   // luxd sends a tenant no unallocated rows when it has no pool of its own: nothing is shown, not $0.
   const p = await render("tenant", "http://localhost/?tab=cost", (path) => (path.startsWith("/v1/costs?") && groupsOf(path) === "family" ? summary(BS_FAMILIES, [], { unallocated: [] }) : familyAnswer(path)));

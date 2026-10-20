@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { CostLine } from "../../api/index.ts";
-import { billedHours, hostCharts, hostCostRows, hostHours, perHour, placementRows, placementTotals, sumPerCurrency, volumeSummary, volumeText, whoPaid } from "./hostCostView.ts";
+import { billedHours, hostCharts, hostCostRows, hostHours, netClassRows, perHour, placementRows, placementTotals, sumPerCurrency, utilisation, volumeSummary, volumeText, whoPaid } from "./hostCostView.ts";
 
 test("sumPerCurrency: idle per family and currency becomes one exact figure per currency, never across currencies", () => {
   const idle = [
@@ -26,11 +26,22 @@ test("hostCostRows: one row per host with compute and block storage apart, total
     hostRow("h2", "compute", "0.1", "0.3", { hours: 4.8 }),
   ]);
   expect(rows).toEqual([
-    { hostId: "h1", hostName: "h1-name", currency: "USD", hours: 6.9, compute: "0.783", blockStorage: "0.079", total: "0.862", allocated: "0.775", unallocated: "0.087", utilisation: 0.775 / 0.862 },
-    { hostId: "h2", hostName: "h2-name", currency: "USD", hours: 4.8, compute: "0.4", blockStorage: null, total: "0.4", allocated: "0.1", unallocated: "0.3", utilisation: 0.25 },
+    { hostId: "h1", hostName: "h1-name", currency: "USD", hours: 6.9, compute: "0.783", blockStorage: "0.079", publicIp: null, dataTransfer: null, total: "0.862", allocated: "0.775", unallocated: "0.087", hostOwn: null, utilisation: 0.775 / 0.862 },
+    { hostId: "h2", hostName: "h2-name", currency: "USD", hours: 4.8, compute: "0.4", blockStorage: null, publicIp: null, dataTransfer: null, total: "0.4", allocated: "0.1", unallocated: "0.3", hostOwn: null, utilisation: 0.25 },
   ]);
   // A host that cost nothing has no utilisation (not 0%).
   expect(hostCostRows([hostRow("h3", "compute", "0", "0")])[0]!.utilisation).toBeNull();
+});
+
+test("hostCostRows: public IPv4 and data transfer are columns of their own and in the total; unallocated is idle time, the host's own transfer apart; utilisation is compute and block storage only", () => {
+  const [r] = hostCostRows([
+    hostRow("h1", "compute", "0.6", "0.4"),
+    hostRow("h1", "public-ip", "0.003", "0.002"),
+    hostRow("h1", "data-transfer", "9.02", "0.03"),
+    hostRow("h1", "ai", "5", "0"),
+  ]);
+  expect(r).toMatchObject({ compute: "1", blockStorage: null, publicIp: "0.005", dataTransfer: "9.05", total: "10.055", allocated: "9.623", unallocated: "0.402", hostOwn: "0.03" });
+  expect(r!.utilisation).toBe(0.6);
 });
 
 test("hostHours counts each host once, though its rows repeat per family", () => {
@@ -54,6 +65,37 @@ test("whoPaid: Runs vs unallocated per family and both; a family with no row is 
   expect(whoPaid([{ family: "compute", currency: "USD", allocated: "2" }])[0]!.all).toEqual({ runs: "2", unallocated: null, total: "2" });
   // Families that are not a host's (AI) are not host cost.
   expect(whoPaid([{ family: "ai", currency: "USD", allocated: "5", unallocated: "0" }])).toEqual([]);
+});
+
+test("whoPaid: all four host-tied families; shared is idle time, dataTransfer's unallocated the host's own; utilisation ignores transfer and public IP", () => {
+  const [p] = whoPaid([
+    { family: "compute", currency: "USD", allocated: "3", unallocated: "1" },
+    { family: "block-storage", currency: "USD", allocated: "0.5", unallocated: "0.5" },
+    { family: "public-ip", currency: "USD", allocated: "0.2", unallocated: "0.07" },
+    { family: "data-transfer", currency: "USD", allocated: "9.02", unallocated: "0.03" },
+  ]);
+  expect(p!.publicIp).toEqual({ runs: "0.2", unallocated: "0.07", total: "0.27" });
+  expect(p!.dataTransfer).toEqual({ runs: "9.02", unallocated: "0.03", total: "9.05" });
+  expect(p!.all).toEqual({ runs: "12.72", unallocated: "1.6", total: "14.32" });
+  expect(p!.shared.unallocated).toBe("1.57");
+  expect(p!.time).toEqual({ runs: "3.5", unallocated: "1.5", total: "5" });
+  expect(utilisation(p!)).toBe(0.7);
+  // Transfer alone: no time-billed family, no utilisation (not 100%).
+  expect(utilisation(whoPaid([{ family: "data-transfer", currency: "USD", allocated: "1", unallocated: "0" }])[0]!)).toBeNull();
+});
+
+test("netClassRows: bytes per class, rxDelivered where reported, empty classes dropped, most first", () => {
+  expect(
+    netClassRows({
+      local: { rx: 0, tx: 0 },
+      internet: { rx: 10, tx: 500, rxDelivered: 40 },
+      zone: { rx: 2000, tx: 1 },
+    }),
+  ).toEqual([
+    { netClass: "zone", rx: 2000, tx: 1 },
+    { netClass: "internet", rx: 40, tx: 500 },
+  ]);
+  expect(netClassRows(undefined)).toEqual([]);
 });
 
 test("volumeSummary: the volumes when every host has the same, else the number of shapes; hosts not known counted apart", () => {
@@ -111,6 +153,23 @@ test("hostCharts: four series (each family runs and unallocated, faded), gaps no
   const [t] = hostCharts([{ t: t0, family: "compute", currency: "USD", allocated: "1" }], "2026-10-09T00:00:00Z", "2026-10-09T02:00:00Z", 3600);
   expect(t!.series.map((s) => s.label)).toEqual(["Compute · runs"]);
   expect(t!.ys).toEqual([[1, null]]);
+});
+
+test("hostCharts: all four families stacked; data transfer's faded part is the host's own, the others' unallocated", () => {
+  const t0 = Date.parse("2026-10-09T00:00:00Z") / 1000;
+  const rows = ["data-transfer", "public-ip", "block-storage", "compute", "ai"].map((family) => ({ t: t0, family, currency: "USD", allocated: "1", unallocated: "0.5" }));
+  const [c] = hostCharts(rows, "2026-10-09T00:00:00Z", "2026-10-09T01:00:00Z", 3600);
+  expect(c!.series.map((s) => [s.label, !!s.faded])).toEqual([
+    ["Compute · runs", false],
+    ["Compute · unallocated", true],
+    ["Block storage · runs", false],
+    ["Block storage · unallocated", true],
+    ["Public IPv4 · runs", false],
+    ["Public IPv4 · unallocated", true],
+    ["Data transfer · runs", false],
+    ["Data transfer · Host's own", true],
+  ]);
+  expect(c!.ys.flat()).toEqual([1, 0.5, 1, 0.5, 1, 0.5, 1, 0.5]);
 });
 
 const line = (family: string, item: string, placements: object[], currency = "USD"): CostLine => ({ runId: "r", source: "compute", family, item, amount: "0", currency, from: "", to: "", final: true, details: { placements }, reportedAt: "" });

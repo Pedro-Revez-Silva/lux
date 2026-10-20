@@ -674,8 +674,8 @@ type hostCostHour struct {
 	Hour        time.Time `json:"hour"`
 	Family      string    `json:"family" doc:"A host-tied family: compute, block-storage, public-ip or data-transfer."`
 	Currency    string    `json:"currency"`
-	Allocated   string    `json:"allocated"`
-	Unallocated *string   `json:"unallocated,omitempty" doc:"Operators, and the tenant owning the host's pool; absent for a tenant on a platform pool's host."`
+	Allocated   string    `json:"allocated" doc:"Charged to the host's Runs: their share of the host's period (compute, block-storage, public-ip); for data-transfer, the transfer of the host's Runs."`
+	Unallocated *string   `json:"unallocated,omitempty" doc:"Charged to no Run: idle host time (compute, block-storage, public-ip); for data-transfer, the host's own traffic. Operators, and the tenant owning the host's pool; absent for a tenant on a platform pool's host."`
 }
 type hostCostRate struct {
 	Family   string         `json:"family" doc:"A host-tied family: compute, block-storage, public-ip or data-transfer."`
@@ -729,9 +729,16 @@ func (s *Server) hostCost(ctx context.Context, in *hostCostInput) (*hostCostOutp
 			}
 		}
 		out.Body.HostID = id
+		// Data transfer's host row holds only the host's own traffic; what its
+		// Runs sent is on their Run rows, joined in here as allocated. The
+		// literal family matches the partial index of migration 088.
 		rows, err := tx.Query(ctx, `SELECT hour, family, currency, trim_scale(sum(allocated))::text,
-			trim_scale(sum(unallocated))::text FROM cost_hourly
-			WHERE host_id = $1 AND run_id IS NULL AND hour >= $2 AND hour < $3
+			trim_scale(sum(unallocated))::text FROM (
+				SELECT hour, family, currency, allocated, unallocated FROM cost_hourly
+				WHERE host_id = $1 AND run_id IS NULL AND hour >= $2 AND hour < $3
+				UNION ALL
+				SELECT hour, family, currency, amount, 0 FROM cost_hourly
+				WHERE host_id = $1 AND run_id IS NOT NULL AND family = 'data-transfer' AND hour >= $2 AND hour < $3) c
 			GROUP BY hour, family, currency ORDER BY hour, currency, family`, id, from, to)
 		if err != nil {
 			return err

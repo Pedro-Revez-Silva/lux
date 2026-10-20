@@ -377,8 +377,8 @@ type PoolHostTime struct {
 	HostName    string        `json:"hostName,omitempty"`
 	Family      string        `json:"family" doc:"A host-tied family: compute, block-storage, public-ip or data-transfer."`
 	Currency    string        `json:"currency"`
-	Allocated   string        `json:"allocated" doc:"Host time reserved by Runs (their compute cost comes from it)."`
-	Unallocated string        `json:"unallocated" doc:"Host time no Run reserved: idle."`
+	Allocated   string        `json:"allocated" doc:"Charged to Runs: host time they reserved (compute, block-storage, public-ip); for data-transfer, the transfer of the Runs on the pool's hosts."`
+	Unallocated string        `json:"unallocated" doc:"Charged to no Run: idle host time (compute, block-storage, public-ip); for data-transfer, the hosts' own traffic."`
 	Hours       *float64      `json:"hours,omitempty" doc:"Per host: the hours of its billed window (provision request, or registration, to termination or now) within the range; the same on each of its family rows."`
 	Volumes     *[]HostVolume `json:"volumes,omitempty" doc:"Per host: its recorded block-storage volumes, as GET /v1/hosts has them; absent while not known and for a host that registered itself."`
 }
@@ -415,9 +415,9 @@ type poolCostOutput struct {
 		Series     []PoolCostPoint  `json:"series" doc:"The same by family and bucket; a bucket without a row is no cost reported, not zero."`
 		Families   []CostFamilyInfo `json:"families,omitempty"`
 		TopRuns    []PoolTopRun     `json:"topRuns" doc:"The costliest Runs by the pool's machines, up to 10 per currency, costliest first."`
-		Idle       *[]PoolIdle      `json:"idle,omitempty" doc:"Host time no Run reserved, per family and currency. Not part of totals. Present (maybe empty) exactly when the reader may see the pool's host time: operators over every tenant, and the tenant owning the pool; never a platform pool's to a tenant."`
-		HostSeries []PoolHostTime   `json:"hostSeries,omitempty" doc:"Host time per bucket and family, allocated and idle; visible as idle."`
-		Hosts      []PoolHostTime   `json:"hosts,omitempty" doc:"Host time per host and family in the range, allocated and idle; visible as idle."`
+		Idle       *[]PoolIdle      `json:"idle,omitempty" doc:"Host time no Run reserved, per family and currency (for data-transfer, the hosts' own traffic). Not part of totals. Present (maybe empty) exactly when the reader may see the pool's host time: operators over every tenant, and the tenant owning the pool; never a platform pool's to a tenant."`
+		HostSeries []PoolHostTime   `json:"hostSeries,omitempty" doc:"Host cost per bucket and family: charged to Runs, and the rest (idle time; for data-transfer, the hosts' own traffic); visible as idle."`
+		Hosts      []PoolHostTime   `json:"hosts,omitempty" doc:"Host cost per host and family: charged to Runs, and the rest (idle time; for data-transfer, the hosts' own traffic); visible as idle."`
 	} `nameHint:"PoolCost"`
 }
 
@@ -436,10 +436,9 @@ func poolRunCost(pool, from, to string) string {
 
 // poolCost reads cost_hourly by the pool's id: Runs' cost under the
 // caller's scope (RLS gives a tenant its own rows only), and the pool's host
-// time per family: an operator over every tenant reads any pool's, a tenant
-// (or an operator narrowed to one) its own pools' only (RLS,
-// cost_hourly_own_hosts), never a platform pool's. Buckets are whole hours,
-// as GET /v1/costs has them.
+// time per family to an operator over every tenant for any pool, and to a
+// tenant (or an operator narrowed to one) for its own pools only, never a
+// platform pool's. Buckets are whole hours, as GET /v1/costs has them.
 func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutput, error) {
 	p := principal(ctx)
 	from, to, _, err := s.historyRange(in.HistoryQuery)
@@ -519,9 +518,13 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 	if p.TenantID != "" && (pool.TenantID == nil || *pool.TenantID != p.TenantID) {
 		return out, nil
 	}
-	// RLS (cost_hourly_own_hosts) is the guard; the pool is the tenant's own
-	// (checked above), so c.pool_id = $1 needs no further predicate.
 	const hostRows = `c.run_id IS NULL AND c.pool_id = $1 AND c.hour >= $2 AND c.hour < $3`
+	// Host time per family: the host rows, plus, for data transfer (whose
+	// host row is only the host's own traffic), the Runs' transfer as allocated.
+	const hostTime = `(SELECT c.hour, c.host_id, c.family, c.currency, c.allocated, c.unallocated FROM cost_hourly c WHERE ` + hostRows + `
+		UNION ALL
+		SELECT c.hour, c.host_id, c.family, c.currency, c.amount, 0 FROM cost_hourly c
+		WHERE c.run_id IS NOT NULL AND c.family = 'data-transfer' AND c.pool_id = $1 AND c.hour >= $2 AND c.hour < $3) c`
 	err = s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT c.family, c.currency, trim_scale(sum(c.unallocated))::text FROM cost_hourly c WHERE `+hostRows+`
 			GROUP BY 1, 2 ORDER BY 2, 1`, pool.ID, from, to)
@@ -536,7 +539,7 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 		b.Idle = &idle
 		rows, err = tx.Query(ctx, `SELECT `+bucket+`, '', '', c.family, c.currency, trim_scale(sum(c.allocated))::text, trim_scale(sum(c.unallocated))::text,
 			NULL::float8, NULL::jsonb
-			FROM cost_hourly c WHERE `+hostRows+` GROUP BY 1, 4, 5 ORDER BY 1, 5, 4`, pool.ID, from, to)
+			FROM `+hostTime+` GROUP BY 1, 4, 5 ORDER BY 1, 5, 4`, pool.ID, from, to)
 		if err != nil {
 			return err
 		}
@@ -547,7 +550,7 @@ func (s *Server) poolCost(ctx context.Context, in *poolCostInput) (*poolCostOutp
 		rows, err = tx.Query(ctx, `SELECT NULL::timestamptz, h.id, h.name, c.family, c.currency, trim_scale(sum(c.allocated))::text, trim_scale(sum(c.unallocated))::text,
 				greatest(0, extract(epoch FROM least(coalesce(h.terminated_at, now()), $3) - greatest(coalesce(h.provision_requested_at, h.registered_at, h.created_at), $2)) / 3600)::float8,
 				h.volumes
-			FROM cost_hourly c JOIN hosts h ON h.id = c.host_id WHERE `+hostRows+`
+			FROM `+hostTime+` JOIN hosts h ON h.id = c.host_id
 			GROUP BY h.id, c.family, c.currency ORDER BY 5, sum(sum(c.allocated) + sum(c.unallocated)) OVER (PARTITION BY h.id, c.currency) DESC, 2, 4`, pool.ID, from, to)
 		if err != nil {
 			return err

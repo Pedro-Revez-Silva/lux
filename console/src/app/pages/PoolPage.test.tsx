@@ -39,26 +39,35 @@ const withHostTime: PoolCost = {
   to: TO,
   basis: "list",
   interval: "hour",
-  totals: [{ currency: "USD", amount: "7.32" }],
+  totals: [{ currency: "USD", amount: "16.62" }],
   series: [
     { at: FROM, family: "block-storage", currency: "USD", amount: "0.71" },
     { at: FROM, family: "compute", currency: "USD", amount: "6.61" },
+    { at: FROM, family: "data-transfer", currency: "USD", amount: "9.02" },
+    { at: FROM, family: "public-ip", currency: "USD", amount: "0.28" },
   ],
   families: [{ family: "block-storage", displayName: "Block storage" }, { family: "compute", displayName: "Compute" }],
   topRuns: [{ id: "run_a", name: "review web#412", currency: "USD", amount: "2.5", estimate: false }],
   idle: [
     { family: "block-storage", currency: "USD", amount: "0.67" },
     { family: "compute", currency: "USD", amount: "6.27" },
+    { family: "data-transfer", currency: "USD", amount: "0.03" },
+    { family: "public-ip", currency: "USD", amount: "0.02" },
   ],
   hostSeries: [
     { at: FROM, family: "block-storage", currency: "USD", allocated: "0.71", unallocated: "0.67" },
     { at: FROM, family: "compute", currency: "USD", allocated: "6.61", unallocated: "6.27" },
+    { at: FROM, family: "data-transfer", currency: "USD", allocated: "9.02", unallocated: "0.03" },
+    { at: FROM, family: "public-ip", currency: "USD", allocated: "0.28", unallocated: "0.02" },
   ],
   hosts: [
     { hostId: "h1", hostName: "default-5ar45u7s", family: "block-storage", currency: "USD", allocated: "0.07", unallocated: "0.009", hours: 6.9, volumes: [vol] },
     { hostId: "h1", hostName: "default-5ar45u7s", family: "compute", currency: "USD", allocated: "0.704", unallocated: "0.079", hours: 6.9, volumes: [vol] },
+    { hostId: "h1", hostName: "default-5ar45u7s", family: "data-transfer", currency: "USD", allocated: "9", unallocated: "0.01", hours: 6.9, volumes: [vol] },
     { hostId: "h2", hostName: "default-hjogolfb", family: "block-storage", currency: "USD", allocated: "0.64", unallocated: "0.661", hours: 4.8, volumes: [vol] },
     { hostId: "h2", hostName: "default-hjogolfb", family: "compute", currency: "USD", allocated: "5.906", unallocated: "6.191", hours: 4.8, volumes: [vol] },
+    { hostId: "h2", hostName: "default-hjogolfb", family: "data-transfer", currency: "USD", allocated: "0.02", unallocated: "0.02", hours: 4.8, volumes: [vol] },
+    { hostId: "h2", hostName: "default-hjogolfb", family: "public-ip", currency: "USD", allocated: "0.28", unallocated: "0.02", hours: 4.8, volumes: [vol] },
   ],
 };
 /** The same to a tenant on a platform pool: its own Runs' cost, no host time at all. An AI row (luxd from before PR 2) is not a pool's cost and draws nothing. */
@@ -111,45 +120,64 @@ const rowsOf = (card: Element | undefined) => [...(card?.querySelectorAll("tbody
 async function fullView(role: "operator" | "tenant", pool: Pool) {
   const p = await render(role, pool, withHostTime);
   try {
-    await until(() => p.tiles().length === 5, "the five tiles");
+    await until(() => p.tiles().length === 7, "the seven tiles");
     expect(p.tiles()).toEqual([
-      ["Host cost (24h)", "$14.26", "list price · 11.7 host-hours"],
+      ["Host cost (24h)", "$23.61", "list price · 11.7 host-hours"],
       ["Compute", "$12.88", `${"$1.1009"}/h avg`],
       ["Block storage", "$1.38", `100 GiB gp3 · ${"$0.1179"}/h avg`],
-      ["Unallocated", "$6.94", "49% of host cost · no Run reserved it"],
-      ["Utilisation", "51%", "charged to Runs ÷ host cost"],
+      ["Public IPv4", "$0.30", `${"$0.0256"}/h avg`],
+      ["Data transfer", "$9.05", "Runs $9.02 · Hosts' own $0.03"],
+      // Idle time of compute, block storage and public IPv4; the hosts' own transfer is not idle.
+      ["Unallocated", "$6.96", "29% of host cost · no Run reserved it"],
+      // Compute and block storage only: 7.32 of 14.26.
+      ["Utilisation", "51%", "charged to Runs ÷ host cost · compute and block storage"],
     ]);
     expect(p.titles()).toEqual(["Host cost per hour", "Who paid", "Cost by host", "Top runs in this pool"]);
-    // Who paid: Compute and Block storage apart, then their total.
+    // Who paid: each host-tied family apart, then their total.
     expect(rowsOf(p.card("Who paid"))).toEqual([
       ["Compute", "$6.61", "$6.27", "$12.88"],
       ["Block storage", "$0.71", "$0.67", "$1.38"],
-      ["Total", "$7.32", "$6.94", "$14.26"],
+      ["Public IPv4", "$0.28", "$0.02", "$0.30"],
+      ["Data transfer", "$9.02", "$0.03", "$9.05"],
+      ["Total", "$16.62", "$6.99", "$23.61"],
     ]);
-    expect([...p.card("Who paid")!.querySelectorAll("[data-family-split]")].map((s) => s.textContent)).toEqual(["Compute51% charged to Runs · 49% unallocated", "Block storage51% charged to Runs · 49% unallocated"]);
-    // Cost by host: costliest first, each family apart, a link to its Cost tab.
+    expect([...p.card("Who paid")!.querySelectorAll("[data-family-split]")].map((s) => s.textContent)).toEqual([
+      "Compute51% charged to Runs · 49% unallocated",
+      "Block storage51% charged to Runs · 49% unallocated",
+      "Public IPv493% charged to Runs · 7% unallocated",
+      "Data transfer100% charged to Runs · <1% Hosts' own",
+    ]);
+    // Cost by host: costliest first, each family apart (the total includes public IPv4 and data transfer), a link to its Cost tab.
     const hosts = rowsOf(p.card("Cost by host"));
-    expect(hosts.map((r) => r.slice(0, 6))).toEqual([
-      ["default-hjogolfb", "4.8 h", "$12.097", "$1.301", "$13.398", "$6.852"],
-      ["default-5ar45u7s", "6.9 h", "$0.783", "$0.079", "$0.862", "$0.088"],
+    expect(hosts.map((r) => r.slice(0, 10))).toEqual([
+      ["default-hjogolfb", "4.8 h", "$12.097", "$1.301", "$0.30", "$0.04", "$13.738", "$6.872", "$0.02", "49%"],
+      ["default-5ar45u7s", "6.9 h", "$0.783", "$0.079", "–", "$9.01", "$9.872", "$0.088", "$0.01", "90%"],
     ]);
-    expect(hosts.map((r) => r[6])).toEqual(["49%", "90%"]);
     expect(p.card("Cost by host")!.querySelector("a")!.getAttribute("href")).toStartWith("/hosts/h2?tab=cost");
-    // The chart's legend: four series, faded unallocated; never an AI one.
+    // The chart's legend: eight series, faded unallocated (data transfer: the host's own); never an AI one.
     const legend = [...p.card("Host cost per hour")!.querySelectorAll(".tschart-legend-label")].map((l) => l.textContent);
-    expect(legend).toEqual(["Compute · runs", "Compute · unallocated", "Block storage · runs", "Block storage · unallocated"]);
+    expect(legend).toEqual([
+      "Compute · runs",
+      "Compute · unallocated",
+      "Block storage · runs",
+      "Block storage · unallocated",
+      "Public IPv4 · runs",
+      "Public IPv4 · unallocated",
+      "Data transfer · runs",
+      "Data transfer · Hosts' own",
+    ]);
     expect(p.tab()!.textContent).not.toMatch(/AI models/);
-    expect(p.tab()!.querySelector(".callout")!.textContent).toBe("Pool cost is the machines only — instance and disk. AI and other external costs belong to Runs.");
-    // The summary tile above the tabs: one host cost and one unallocated figure, summed over families.
+    expect(p.tab()!.querySelector(".callout")!.textContent).toBe("Pool cost is the machines only — instance, disk, public IPv4 and network transfer. AI and other external costs belong to Runs.");
+    // The summary tile above the tabs: one host cost and one unallocated (idle) figure, summed over families.
     expect(p.summary()!.querySelector(".stat-label")!.textContent).toBe("Host cost (24h)");
-    expect(p.summary()!.querySelector(".stat-value")!.textContent).toBe("$14.26");
-    expect(p.summary()!.querySelector(".stat-unit")!.textContent).toBe("list price · $6.94 unallocated");
+    expect(p.summary()!.querySelector(".stat-value")!.textContent).toBe("$23.61");
+    expect(p.summary()!.querySelector(".stat-unit")!.textContent).toBe("list price · $6.96 unallocated");
   } finally {
     await p.done();
   }
 }
 
-test("pool Cost tab, operator: host cost, Compute and Block storage apart, unallocated, who paid and by host", async () => {
+test("pool Cost tab, operator: host cost, each host-tied family apart, unallocated and the hosts' own transfer, who paid and by host", async () => {
   await fullView("operator", PLATFORM);
 });
 
@@ -160,11 +188,13 @@ test("pool Cost tab, a tenant on its own pool: the same figures, unallocated inc
 test("pool Cost tab, a tenant on a platform pool: its Runs' figures only, no unallocated, no zeros or dashes for it", async () => {
   const p = await render("tenant", PLATFORM, runsOnly);
   try {
-    await until(() => p.tiles().length === 3, "the three tiles");
+    await until(() => p.tiles().length === 5, "the five tiles");
     expect(p.tiles()).toEqual([
-      ["Charged to your Runs (24h)", "$1.20", "list price · compute and block storage"],
+      ["Charged to your Runs (24h)", "$1.20", "list price · the machines"],
       ["Compute", "$1.10", "your Runs' share of the machines"],
       ["Block storage", "$0.10", "your Runs' share of the disks"],
+      ["Public IPv4", "–", "your Runs' share of the addresses"],
+      ["Data transfer", "–", "what your Runs sent and received"],
     ]);
     expect(p.titles()).toEqual(["Charged to your Runs per hour", "Top runs in this pool"]);
     const text = p.tab()!.textContent!;
@@ -174,6 +204,35 @@ test("pool Cost tab, a tenant on a platform pool: its Runs' figures only, no una
     expect(p.summary()!.querySelector(".stat-label")!.textContent).toBe("Cost (24h)");
     expect(p.summary()!.querySelector(".stat-value")!.textContent).toBe("$1.20");
     expect(p.summary()!.textContent).not.toMatch(/unallocated|idle/);
+  } finally {
+    await p.done();
+  }
+});
+
+test("pool Cost tab: compute-only host series keeps Compute and Block storage in Who paid", async () => {
+  const cost = { ...withHostTime, hostSeries: withHostTime.hostSeries!.filter((r) => r.family === "compute") };
+  const p = await render("operator", PLATFORM, cost);
+  try {
+    await until(() => rowsOf(p.card("Who paid")).length === 3, "the Who paid rows");
+    expect(rowsOf(p.card("Who paid"))).toEqual([
+      ["Compute", "$6.61", "$6.27", "$12.88"],
+      ["Block storage", "–", "–", "–"],
+      ["Total", "$6.61", "$6.27", "$12.88"],
+    ]);
+  } finally {
+    await p.done();
+  }
+});
+
+test("pool Cost tab: a host with no transfer row shows an en dash for its own transfer, never $0", async () => {
+  const cost = { ...withHostTime, hosts: withHostTime.hosts!.filter((r) => r.family !== "data-transfer") };
+  const p = await render("operator", PLATFORM, cost);
+  try {
+    await until(() => rowsOf(p.card("Cost by host")).length > 0, "the Cost by host rows");
+    // Columns as in the full view: host, up, compute, block storage, public IPv4, data transfer, total, unallocated, host's own transfer.
+    const hosts = rowsOf(p.card("Cost by host"));
+    expect(hosts.map((r) => r[5])).toEqual(["–", "–"]);
+    expect(hosts.map((r) => r[8])).toEqual(["–", "–"]);
   } finally {
     await p.done();
   }
