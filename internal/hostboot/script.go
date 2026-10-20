@@ -80,7 +80,8 @@ echo "lux: bootstrap complete"
 `
 
 // Script renders the userData "script" format: scriptBody with the env
-// exported ahead of it.
+// exported ahead of it and the writeback limits after it. Bootstrap, the
+// same body for static hosts, leaves those limits alone.
 func Script(env Env) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/bash\n")
@@ -88,6 +89,7 @@ func Script(env Env) string {
 		fmt.Fprintf(&b, "export %s=%s\n", kv[0], shellQuote(kv[1]))
 	}
 	b.WriteString(strings.TrimPrefix(scriptBody, "#!/bin/bash\n"))
+	b.WriteString(writebackScript)
 	return b.String()
 }
 

@@ -111,6 +111,33 @@ RestartSec=10s
 WantedBy=multi-user.target
 `
 
+// WritebackSysctlPath and WritebackSysctl cap a luxd-launched runner host's
+// dirty page cache. All Runs share one filesystem and an overlay unmount
+// syncs all of it, so under the kernel default (20% of available memory)
+// one Run's teardown waits behind every other Run's unwritten data; at
+// 256 MiB that wait is about 2s at gp3's 125 MiB/s baseline. Ignition and
+// Script install it; Bootstrap does not, since static hosts may run other
+// workloads (docs/operations.md, "EC2 pools").
+const WritebackSysctlPath = "/etc/sysctl.d/90-lux-writeback.conf"
+
+const WritebackSysctl = `vm.dirty_background_bytes = 67108864
+vm.dirty_bytes = 268435456
+`
+
+// writebackScript is Script's tail. cloud-init runs after systemd-sysctl has
+// applied /etc/sysctl.d, so the file is also loaded here with sysctl -p. A
+// host without sysctl (procps) keeps the file for its next boot and still
+// boots its runner: the cap is not worth failing a host over.
+const writebackScript = `mkdir -p /etc/sysctl.d
+cat > ` + WritebackSysctlPath + ` <<'LUX_SYSCTL'
+` + WritebackSysctl + `LUX_SYSCTL
+if command -v sysctl >/dev/null 2>&1; then
+  sysctl -q -p ` + WritebackSysctlPath + ` || echo "lux: warning: could not load ` + WritebackSysctlPath + `; it applies from the next boot" >&2
+else
+  echo "lux: warning: no sysctl on this host; ` + WritebackSysctlPath + ` applies from the next boot" >&2
+fi
+`
+
 // FetchBinariesPath is where every format installs FetchBinariesScript.
 const FetchBinariesPath = InstallDir + "/lux-fetch-binaries.sh"
 

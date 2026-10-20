@@ -50,8 +50,9 @@ func dataURL(content string) string {
 }
 
 // Ignition renders the config Fedora CoreOS reads from EC2 user data: the
-// env file, the fetch script and the enabled unit. zincati.service is
-// masked so a runner host never auto-updates and reboots mid-Run.
+// env file, the fetch script, the writeback limits and the enabled unit.
+// zincati.service is masked so a runner host never auto-updates and
+// reboots mid-Run.
 func Ignition(env Env) ([]byte, error) {
 	cfg := ignitionConfig{
 		Ignition: ignitionMeta{Version: ignitionSpec},
@@ -59,6 +60,7 @@ func Ignition(env Env) ([]byte, error) {
 			Files: []ignitionFile{
 				{Path: "/etc/lux/runner.env", Mode: 0o600, Contents: ignitionFileContents{Source: dataURL(env.Lines())}},
 				{Path: FetchBinariesPath, Mode: 0o755, Contents: ignitionFileContents{Source: dataURL(FetchBinariesScript)}},
+				{Path: WritebackSysctlPath, Mode: 0o644, Contents: ignitionFileContents{Source: dataURL(WritebackSysctl)}},
 			},
 		},
 		Systemd: ignitionSystemd{

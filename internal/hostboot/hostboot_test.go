@@ -3,6 +3,8 @@ package hostboot
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -80,6 +82,127 @@ func TestIgnitionShape(t *testing.T) {
 	}
 	if len(b) > 16<<10 {
 		t.Errorf("rendered Ignition config is %d bytes, over the EC2 user-data limit", len(b))
+	}
+}
+
+// parseSysctl reads a sysctl.d file the way systemd-sysctl does: key = value
+// lines, blank lines and #/; comments ignored.
+func parseSysctl(t *testing.T, raw string) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line[0] == '#' || line[0] == ';' {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			t.Fatalf("not a sysctl line: %q", line)
+		}
+		got[strings.TrimSpace(k)] = strings.TrimSpace(v)
+	}
+	return got
+}
+
+// installedFile returns the mode and decoded contents of the file Ignition
+// config b installs at path. Its own struct, not ignitionConfig, so a wrong
+// json tag in the production type is caught rather than agreed with.
+func installedFile(t *testing.T, b []byte, path string) (mode int, content string) {
+	t.Helper()
+	var cfg struct {
+		Storage struct {
+			Files []struct {
+				Path     string `json:"path"`
+				Mode     int    `json:"mode"`
+				Contents struct {
+					Source string `json:"source"`
+				} `json:"contents"`
+			} `json:"files"`
+		} `json:"storage"`
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range cfg.Storage.Files {
+		if f.Path != path {
+			continue
+		}
+		b64, ok := strings.CutPrefix(f.Contents.Source, "data:;base64,")
+		if !ok {
+			t.Fatalf("%s source is not a base64 data URL: %.40s", path, f.Contents.Source)
+		}
+		raw, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f.Mode, string(raw)
+	}
+	t.Fatalf("no %s in the Ignition config", path)
+	return 0, ""
+}
+
+var wantWriteback = map[string]string{"vm.dirty_background_bytes": "67108864", "vm.dirty_bytes": "268435456"}
+
+// An Ignition host gets the writeback limits as a sysctl.d file, which
+// systemd-sysctl applies at boot, before lux-runner starts.
+func TestIgnitionCapsWriteback(t *testing.T) {
+	b, err := Ignition(Env{URL: "http://10.0.1.10:7070", HostToken: "luxh_x", HostName: "h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode, raw := installedFile(t, b, "/etc/sysctl.d/90-lux-writeback.conf")
+	if mode != 0o644 {
+		t.Errorf("mode %o, want 644", mode)
+	}
+	if got := parseSysctl(t, raw); !maps.Equal(got, wantWriteback) {
+		t.Errorf("sysctls %v, want %v", got, wantWriteback)
+	}
+}
+
+// A script-format host (an EC2 pool on a stock AMI) writes the same file
+// and loads it at once: cloud-init runs after systemd-sysctl has already
+// applied /etc/sysctl.d.
+func TestScriptCapsWriteback(t *testing.T) {
+	root := bootScript(t, Script(Env{URL: "http://luxd", HostToken: "luxh_x", HostName: "h"}))
+	raw, err := os.ReadFile(root + "/etc/sysctl.d/90-lux-writeback.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parseSysctl(t, string(raw)); !maps.Equal(got, wantWriteback) {
+		t.Errorf("sysctls %v, want %v", got, wantWriteback)
+	}
+	loaded, err := os.ReadFile(root + "/sysctl.calls")
+	if err != nil || !strings.Contains(string(loaded), "-p "+root+"/etc/sysctl.d/90-lux-writeback.conf") {
+		t.Errorf("the script did not load the file with sysctl -p; sysctl calls: %q", loaded)
+	}
+}
+
+// A host without sysctl, or one where loading the file fails, still
+// boots its runner: Script runs under set -e, and the cap is not worth
+// failing a host over. The file is still written for the next boot.
+func TestScriptBootsWithoutWorkingSysctl(t *testing.T) {
+	for name, sysctl := range map[string]string{"missing": "", "failing": "exit 1"} {
+		t.Run(name, func(t *testing.T) {
+			root := bootScriptWith(t, Script(Env{URL: "http://luxd", HostToken: "luxh_x", HostName: "h"}), sysctl)
+			if _, err := os.Stat(root + "/etc/sysctl.d/90-lux-writeback.conf"); err != nil {
+				t.Errorf("the file was not written: %v", err)
+			}
+			if _, err := os.Stat(root + "/etc/lux/runner.env"); err != nil {
+				t.Errorf("the runner was not set up: %v", err)
+			}
+		})
+	}
+}
+
+// The bootstrap script sets up static hosts, which may run other things:
+// run, it must neither write a sysctl.d file nor call sysctl.
+func TestBootstrapLeavesWritebackAlone(t *testing.T) {
+	root := bootScript(t, Bootstrap(), "LUX_URL=http://luxd", "LUX_HOST_TOKEN=luxh_x", "LUX_HOST_NAME=h")
+	if _, err := os.Stat(root + "/etc/sysctl.d"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("bootstrap.sh created /etc/sysctl.d (stat err %v)", err)
+	}
+	if calls, err := os.ReadFile(root + "/sysctl.calls"); err == nil {
+		t.Errorf("bootstrap.sh ran sysctl: %q", calls)
 	}
 }
 
@@ -187,16 +310,16 @@ func TestScriptQuotesValues(t *testing.T) {
 	}
 }
 
-// Script exports the env ahead of the shared, unfilled script body: the
-// two must differ only by that prefix.
+// Script exports the env ahead of the shared, unfilled script body and
+// adds the writeback limits after it: the two differ only by those.
 func TestScriptWrapsBootstrap(t *testing.T) {
 	env := Env{URL: "http://10.0.1.10:7070", HostToken: "luxh_x", HostName: "h"}
 	got := Script(env)
 	if !strings.HasPrefix(got, "#!/bin/bash\nexport LUX_URL='http://10.0.1.10:7070'\nexport LUX_HOST_TOKEN='luxh_x'\nexport LUX_HOST_NAME='h'\n") {
 		t.Errorf("Script did not export the env first:\n%s", got[:200])
 	}
-	if !strings.HasSuffix(got, strings.TrimPrefix(scriptBody, "#!/bin/bash\n")) {
-		t.Error("Script's body diverged from the shared scriptBody")
+	if !strings.HasSuffix(got, strings.TrimPrefix(scriptBody, "#!/bin/bash\n")+writebackScript) {
+		t.Error("Script is not the exports, the shared scriptBody, then the writeback limits")
 	}
 }
 
@@ -277,37 +400,45 @@ func TestShapedEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cfg struct {
-		Storage struct {
-			Files []struct {
-				Path     string `json:"path"`
-				Contents struct {
-					Source string `json:"source"`
-				} `json:"contents"`
-			} `json:"files"`
-		} `json:"storage"`
+
+	if _, got := installedFile(t, b, "/etc/lux/runner.env"); got != shapedLines {
+		t.Errorf("ignition runner.env %q, want %q", got, shapedLines)
 	}
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		t.Fatal(err)
-	}
-	for _, f := range cfg.Storage.Files {
-		if f.Path != "/etc/lux/runner.env" {
-			continue
-		}
-		_, b64, _ := strings.Cut(f.Contents.Source, ",")
-		got, err := base64.StdEncoding.DecodeString(b64)
-		if err != nil || string(got) != shapedLines {
-			t.Errorf("ignition runner.env %q, want %q", got, shapedLines)
-		}
-		return
-	}
-	t.Error("no runner.env in the ignition config")
 }
 
 // bootRunnerEnv runs script under bash with its fixed paths moved into a
 // temp root and podman, nft, git and systemctl stubbed, then returns the
 // /etc/lux/runner.env it wrote, parsed. environ is added to a bare env.
 func bootRunnerEnv(t *testing.T, script string, environ ...string) map[string]string {
+	t.Helper()
+	root := bootScript(t, script, environ...)
+	data, err := os.ReadFile(root + "/etc/lux/runner.env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			t.Fatalf("runner.env line %q is not KEY=value", line)
+		}
+		got[k] = v
+	}
+	return got
+}
+
+// bootScript runs a rendered script against a temp root (its /etc, the
+// install dir and cgroup paths rewritten there; podman, nft, git,
+// systemctl and sysctl stubbed, sysctl recording its arguments in
+// sysctl.calls) and returns that root.
+func bootScript(t *testing.T, script string, environ ...string) string {
+	t.Helper()
+	return bootScriptWith(t, script, "<record>", environ...)
+}
+
+// bootScriptWith is bootScript with sysctl's stub body chosen: "<record>"
+// records its arguments, "" leaves sysctl off PATH altogether.
+func bootScriptWith(t *testing.T, script, sysctl string, environ ...string) string {
 	t.Helper()
 	root := t.TempDir()
 	stubs := filepath.Join(root, "stubs")
@@ -319,7 +450,23 @@ func bootRunnerEnv(t *testing.T, script string, environ ...string) map[string]st
 	if err := os.WriteFile(root+"/sys/fs/cgroup/cgroup.controllers", nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for name, body := range map[string]string{"podman": "echo 5.2.0", "nft": "exit 0", "git": "exit 0", "systemctl": "exit 0"} {
+	stubBodies := map[string]string{"podman": "echo 5.2.0", "nft": "exit 0", "git": "exit 0", "systemctl": "exit 0"}
+	switch sysctl {
+	case "<record>":
+		stubBodies["sysctl"] = `echo "$*" >> "` + root + `/sysctl.calls"`
+	case "":
+		// No stub: the script's PATH is stubs, /usr/bin and /bin, so a host
+		// sysctl there would still be found. Fail the test rather than pass
+		// it for the wrong reason.
+		for _, d := range []string{"/usr/bin", "/bin"} {
+			if _, err := os.Stat(d + "/sysctl"); err == nil {
+				t.Skipf("%s/sysctl exists on this machine; cannot simulate a host without it", d)
+			}
+		}
+	default:
+		stubBodies["sysctl"] = sysctl
+	}
+	for name, body := range stubBodies {
 		if err := os.WriteFile(filepath.Join(stubs, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -340,19 +487,7 @@ func bootRunnerEnv(t *testing.T, script string, environ ...string) map[string]st
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("running the script: %v\n%s", err, out)
 	}
-	data, err := os.ReadFile(root + "/etc/lux/runner.env")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := map[string]string{}
-	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			t.Fatalf("runner.env line %q is not KEY=value", line)
-		}
-		got[k] = v
-	}
-	return got
+	return root
 }
 
 // systemd starts the runner from /etc/lux/runner.env, not from the
