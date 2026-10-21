@@ -429,7 +429,9 @@ func (s *Server) routes(api huma.API) {
 		Description: "Server-sent events: one `lux` event per Run or server event, oldest first, each with its id (`id:`, and resume with Last-Event-ID or `after`). " +
 			"A server's event (server.created, updated, deleted, attached, detached, state, wake_requested, idle, expired) carries `serverId`, and in `data` its id, name, host, hostname, url, labels and runId; " +
 			"`runId` is null only for one of a server attached to no Run. " +
-			"From now, from `after`, or the `last` N; with `follow=false` the stream ends after what is there now.",
+			"From now, from `after`, or the `last` N; with `follow=false` the stream ends after what is there now. " +
+			"`label` and `type` send only the events of Runs with those labels and of those types (`last` then counts those); " +
+			"without them, every event.",
 		Responses: map[string]*huma.Response{"200": {Description: "OK", Content: map[string]*huma.MediaType{"text/event-stream": {Schema: sseEvents(
 			sseEvent("lux", "A Run's or a server's event.", schemaRef[FeedEvent](api)),
 			sseEvent("error", "The stream failed.", schemaRef[outputError](api)),

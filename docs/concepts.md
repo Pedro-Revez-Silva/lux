@@ -383,7 +383,12 @@ stores them:
 The tenant's **event feed**, `GET /v1/events` (`lux events --all`), is
 every event of its Runs and servers as server-sent events, each with its
 id: a client resumes after a disconnect with `Last-Event-ID`. Server
-events are listed under [Servers](#servers).
+events are listed under [Servers](#servers). `label=key=value`
+(repeatable, all must match the event's Run; a server's event matches
+through its attached Run, never while it has none) and `type=` (a
+comma-separated list) narrow it to the events a client follows. With a filter, `last=N` is
+the newest N matching events among the most recent 20,000 events; fewer
+if fewer match there, and from now if none do.
 
 A placement's stdout, stderr and structured events are written by the shim
 to a file on the host. Every record has a sequence number and secrets are

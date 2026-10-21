@@ -649,21 +649,27 @@ func (a *app) printLogs(ctx context.Context, id, since string, follow bool, o lo
 func (a *app) eventsCmd() *cobra.Command {
 	var all, follow bool
 	var after int64
+	var labels, types []string
 	cmd := &cobra.Command{
 		Use:   "events <run> | --all",
 		Short: "Print a Run's lifecycle events, or every Run's",
 		Long: `Print a Run's lifecycle events. With --all, the events of every Run you
 can see (an operator: every tenant's; --tenant narrows it) as they happen,
-from now or from --after an event id; --follow=false prints what there is.`,
+from now or from --after an event id; --follow=false prints what there is.
+--label and --type narrow --all to the events of Runs with those labels
+and of those types.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if all == (len(args) == 1) {
 				return fmt.Errorf("give a run, or --all")
+			}
+			if !all && (cmd.Flags().Changed("label") || cmd.Flags().Changed("type")) {
+				return fmt.Errorf("--label and --type go with --all")
 			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if all {
-				return a.feed(ctxOf(cmd), after, follow)
+				return a.feed(ctxOf(cmd), after, follow, labels, types)
 			}
 			var resp struct {
 				Events []server.Event `json:"events"`
@@ -688,14 +694,22 @@ from now or from --after an event id; --follow=false prints what there is.`,
 	cmd.Flags().BoolVar(&all, "all", false, "every Run's events")
 	cmd.Flags().BoolVar(&follow, "follow", true, "with --all: keep streaming")
 	cmd.Flags().Int64Var(&after, "after", -1, "with --all: from after this event id (default: from now)")
+	cmd.Flags().StringArrayVarP(&labels, "label", "l", nil, "with --all: only events of Runs with label key=value (repeatable: all must match)")
+	cmd.Flags().StringSliceVar(&types, "type", nil, "with --all: only events of these types (comma-separated or repeatable)")
 	return cmd
 }
 
 // feed prints GET /v1/events: one line per event (JSON lines with -o json).
-func (a *app) feed(ctx context.Context, after int64, follow bool) error {
+func (a *app) feed(ctx context.Context, after int64, follow bool, labels, types []string) error {
 	q := url.Values{"follow": {fmt.Sprint(follow)}}
 	if after >= 0 {
 		q.Set("after", fmt.Sprint(after))
+	}
+	if len(labels) > 0 {
+		q["label"] = labels
+	}
+	if len(types) > 0 {
+		q.Set("type", strings.Join(types, ","))
 	}
 	return a.c.Stream(ctx, "/v1/events", q, func(ev client.SSEEvent) error {
 		if ev.Event != "lux" {

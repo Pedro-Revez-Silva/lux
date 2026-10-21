@@ -436,6 +436,7 @@ lux history [--since 24h]       # the same over time
 lux history <run>               # a Run's resource use, across placements
 lux history --host <host>
 lux events --all                # every Run's events as they happen
+lux events --all -l team=x --type state,exited   # only those Runs' events of those types
 ```
 
 ## Costs

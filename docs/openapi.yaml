@@ -4917,7 +4917,7 @@ paths:
   /v1/events:
     get:
       description: |-
-        Server-sent events: one `lux` event per Run or server event, oldest first, each with its id (`id:`, and resume with Last-Event-ID or `after`). A server's event (server.created, updated, deleted, attached, detached, state, wake_requested, idle, expired) carries `serverId`, and in `data` its id, name, host, hostname, url, labels and runId; `runId` is null only for one of a server attached to no Run. From now, from `after`, or the `last` N; with `follow=false` the stream ends after what is there now.
+        Server-sent events: one `lux` event per Run or server event, oldest first, each with its id (`id:`, and resume with Last-Event-ID or `after`). A server's event (server.created, updated, deleted, attached, detached, state, wake_requested, idle, expired) carries `serverId`, and in `data` its id, name, host, hostname, url, labels and runId; `runId` is null only for one of a server attached to no Run. From now, from `after`, or the `last` N; with `follow=false` the stream ends after what is there now. `label` and `type` send only the events of Runs with those labels and of those types (`last` then counts those); without them, every event.
 
         Needs the `read` scope.
       operationId: eventFeed
@@ -4936,12 +4936,12 @@ paths:
           schema:
             description: "From after this event id (default: from now)."
             type: string
-        - description: Start with the last N events (at most 500), instead of from now.
+        - description: "Start with the last N events (at most 500), instead of from now. With label or type: the newest N matching events among the most recent 20,000 events; fewer if fewer match there."
           explode: false
           in: query
           name: last
           schema:
-            description: Start with the last N events (at most 500), instead of from now.
+            description: "Start with the last N events (at most 500), instead of from now. With label or type: the newest N matching events among the most recent 20,000 events; fewer if fewer match there."
             format: int64
             type: integer
         - description: "false: end after what there is now."
@@ -4950,6 +4950,26 @@ paths:
           name: follow
           schema:
             description: "false: end after what there is now."
+            type: string
+        - description: Only events of Runs with this label (key=value); repeat to require several. A server's event matches through the Run it is attached to (runId); one attached to no Run never matches.
+          explode: true
+          in: query
+          name: label
+          schema:
+            description: Only events of Runs with this label (key=value); repeat to require several. A server's event matches through the Run it is attached to (runId); one attached to no Run never matches.
+            items:
+              type: string
+            type:
+              - array
+              - "null"
+        - description: Only events of these types (comma-separated).
+          explode: false
+          in: query
+          name: type
+          schema:
+            description: Only events of these types (comma-separated).
+            examples:
+              - state,exited,input.consumed
             type: string
         - description: "A reconnecting client's last event id: resumes after it."
           in: header
