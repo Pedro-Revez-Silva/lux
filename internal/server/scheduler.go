@@ -83,6 +83,10 @@ type pendingRun struct {
 	PendingSync   []proto.SyncRef
 	ImageResolved *proto.ImageResolution
 	HasSecrets    bool
+	// ManagedAuth: it needs luxd's managed registry credential (it
+	// publishes, or names a managed or shared image), so a runner with
+	// proto.CapManagedImages (Server.markManagedAuth).
+	ManagedAuth bool
 	// PoolID: runs.pool_id, the pool it is bound to; nil until a pool of
 	// its spec's name exists (bindPool).
 	PoolID *string
@@ -162,6 +166,7 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 				rows.Close()
 				return err
 			}
+			s.markManagedAuth(r)
 			items = append(items, it)
 		}
 		rows.Close()
@@ -254,6 +259,7 @@ func (s *Server) scheduleBatch(ctx context.Context, pos cursorPos) (cursorPos, b
 					if demand, demandOK, err = normalDemand(ctx, tx, hosts); err != nil {
 						return err
 					}
+					s.markManagedAuth(slicePtrs(demand)...)
 					demandRead = true
 				}
 				if demandOK {

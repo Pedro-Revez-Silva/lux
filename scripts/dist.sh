@@ -46,7 +46,7 @@ wanted() { [[ " $ARCHES " == *" $1 "* ]]; }
 # pool-placement: a pool's placement (spread or pack; shaped pools pack by default); an older luxd refuses the field and spreads every pool.
 # disk-pressure: disk-scale runners guard the host's free space (--disk-low-free, --disk-recover-free) instead of the 2x ceiling; luxd blocks admissions on a host's diskPressure and stops on disk.pressure_stop. Upgrade luxd first.
 # server-inject: a server's inject (workload.servers[].inject, the servers APIs, lux server --inject): HTML the preview listener adds after <head> on its HTML pages; an older luxd refuses the field.
-FEATURES=(validate resume-secrets sync-modes resume-policy egress-wildcards artifact-publish git-credentials pool-sizes disk-grace disk-shaping pool-placement disk-pressure server-inject)
+FEATURES=(validate resume-secrets sync-modes resume-policy egress-wildcards artifact-publish git-credentials pool-sizes disk-grace disk-shaping pool-placement disk-pressure server-inject managed-images)
 
 rm -rf "$DIST"
 mkdir -p "$DIST"

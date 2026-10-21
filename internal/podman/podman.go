@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -118,6 +119,32 @@ func (p *Podman) Push(ctx context.Context, image, dest, authfile string) error {
 	_, err := p.Run(ctx, withAuth([]string{"push", "-q"}, authfile, image, dest)...)
 	return err
 }
+
+// PushDigest pushes a local image to dest and returns the manifest digest
+// the registry stored it under (sha256:...), as podman wrote it to a
+// digest file in dir (removed before it returns).
+func (p *Podman) PushDigest(ctx context.Context, image, dest, authfile, dir string) (string, error) {
+	f, err := os.CreateTemp(dir, "digest-")
+	if err != nil {
+		return "", err
+	}
+	f.Close()
+	defer os.Remove(f.Name())
+	if _, err := p.Run(ctx, withAuth([]string{"push", "-q", "--digestfile", f.Name()}, authfile, image, dest)...); err != nil {
+		return "", err
+	}
+	b, err := os.ReadFile(f.Name())
+	if err != nil {
+		return "", err
+	}
+	d := strings.TrimSpace(string(b))
+	if !digestRe.MatchString(d) {
+		return "", fmt.Errorf("push %s: no manifest digest (got %q)", dest, d)
+	}
+	return d, nil
+}
+
+var digestRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 func withAuth(args []string, authfile string, rest ...string) []string {
 	if authfile != "" {

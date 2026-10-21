@@ -121,3 +121,19 @@ idle_check = "5s"                  # LUX_PREVIEW_IDLE_CHECK: how often luxd look
 
 [preview.cloudflare_access]
 aud = ""                           # LUX_PREVIEW_CF_ACCESS_AUD: the preview Access application's AUD tag (team: console.cloudflare_access.team)
+
+[images]
+# The managed image registry (docs/runspec.md#published-images): Runs with
+# image.build.publish push their image to <repository>/<tenant id> and get
+# back repository@sha256:<digest>, which later Runs use as image.ref with no
+# registry credentials of their own. One credential, that can push and pull
+# there, stays luxd's and the runners': read for each assignment that needs
+# it, never stored or given to a Run. Empty repository: off (publish is
+# refused). No credential value belongs in this file.
+repository = ""                    # LUX_IMAGES_REPOSITORY, e.g. ghcr.io/acme/lux-images
+credential_file = ""               # LUX_IMAGES_CREDENTIAL_FILE: absolute path to user:token (or a bare token)
+credential_env = ""                # LUX_IMAGES_CREDENTIAL_ENV: or the name of luxd's environment variable holding it
+# Every tenant may pull every image in a shared repository: list only
+# repositories meant for all of them (a policy-free runtime base), never one
+# that also holds private images.
+shared = []                        # LUX_IMAGES_SHARED (comma-separated): repositories every tenant may pull with it (common bases), never push

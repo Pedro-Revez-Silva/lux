@@ -428,7 +428,32 @@ type Assign struct {
 	SyncBases map[string]string `json:"syncBases,omitempty"`
 	// Sync: repositories whose restored checkout moves to a ref before init.
 	Sync []SyncRef `json:"sync,omitempty"`
+	// ManagedImages: luxd's managed image registry, for a Run that
+	// publishes to it or pulls from it. Its credential is attached when the
+	// message is sent, like Secrets, and never stored; the runner never
+	// hands it to the shim, a build or the container.
+	ManagedImages *ManagedImages `json:"managedImages,omitempty"`
 }
+
+// ManagedImages is the managed image registry an assignment may use:
+// Repository, the Run's tenant's own (pushed to and pulled from), and
+// Shared repositories (pulled from), all with Credential and no other.
+type ManagedImages struct {
+	// Root: the operator's repository; every tenant's is under it.
+	Root       string   `json:"root"`
+	Repository string   `json:"repository"`
+	Shared     []string `json:"shared,omitempty"`
+	// Credential: user:password, or a bare token. "" when luxd could not
+	// read it: the runner then fails what needs it, saying so.
+	Credential string `json:"credential,omitempty"`
+}
+
+// CapManagedImages is the Hello capability of a runner that builds with
+// image.build.contextFiles and contexts and publishes with
+// image.build.publish (with Assign.ManagedImages). Runs using any of them,
+// or a managed image, are placed only on such runners: an older one
+// would ignore the fields.
+const CapManagedImages = "managed-images-v1"
 
 // SyncRef asks for a repository's checkout to be moved to ref (a branch,
 // tag or sha), fetched through the host's mirror. Mode says when it may
@@ -511,6 +536,11 @@ const CapDiskScale = "disk-scale"
 type ImageResolution struct {
 	Containerfile string `json:"containerfile"`
 	ImageID       string `json:"imageId"`
+	// PublishedRef and Platform: with image.build.publish, the image as
+	// the managed registry has it (repository@sha256:<manifest digest>,
+	// confirmed by pulling it back) and the platform it was built for.
+	PublishedRef string `json:"publishedRef,omitempty" doc:"With image.build.publish: the published image, repository@sha256:<manifest digest>. Usable as image.ref by later Runs of the tenant, without registry credentials."`
+	Platform     string `json:"platform,omitempty" doc:"With image.build.publish: the platform the published image was built for (linux/arm64, linux/amd64)."`
 }
 
 type ResumeInfo struct {

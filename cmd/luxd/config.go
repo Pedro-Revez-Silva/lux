@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -147,6 +148,13 @@ type config struct {
 			AUD string `toml:"aud" env:"LUX_PREVIEW_CF_ACCESS_AUD"`
 		} `toml:"cloudflare_access"`
 	} `toml:"preview"`
+	// Images: the managed image registry (image.build.publish).
+	Images struct {
+		Repository     string   `toml:"repository" env:"LUX_IMAGES_REPOSITORY"`
+		CredentialFile string   `toml:"credential_file" env:"LUX_IMAGES_CREDENTIAL_FILE"`
+		CredentialEnv  string   `toml:"credential_env" env:"LUX_IMAGES_CREDENTIAL_ENV"`
+		Shared         []string `toml:"shared" env:"LUX_IMAGES_SHARED"`
+	} `toml:"images"`
 }
 
 // Nil timeout and max_batch use the transport defaults; explicit zero is invalid.
@@ -547,6 +555,7 @@ func (c config) check() error {
 		}
 		checkSettle(key+".settle", p.Settle)
 	}
+	problems = append(problems, c.imagesProblems()...)
 	if c.Costs.Compute.PricesRefresh.Duration <= 0 {
 		problems = append(problems, "costs.compute.prices_refresh (LUX_COSTS_PRICES_REFRESH) must be positive")
 	}
@@ -701,3 +710,39 @@ func validInstanceType(s string) bool {
 	}
 	return true
 }
+
+// imagesProblems checks [images]: a repository with its credential's
+// source, or nothing; shared repositories need the repository.
+func (c *config) imagesProblems() []string {
+	im := c.Images
+	var problems []string
+	if im.Repository == "" {
+		if im.CredentialFile != "" || im.CredentialEnv != "" || len(im.Shared) > 0 {
+			problems = append(problems, "images.repository (LUX_IMAGES_REPOSITORY) is required with images.credential_file, credential_env or shared")
+		}
+		return problems
+	}
+	if !spec.ManagedRepoRoot(im.Repository) {
+		problems = append(problems, "images.repository (LUX_IMAGES_REPOSITORY): need a lowercase repository with its registry and no tag, e.g. ghcr.io/acme/lux-images")
+	}
+	switch {
+	case im.CredentialFile != "" && im.CredentialEnv != "":
+		problems = append(problems, "images.credential_file and images.credential_env are mutually exclusive")
+	case im.CredentialFile == "" && im.CredentialEnv == "":
+		problems = append(problems, "images.repository needs images.credential_file (LUX_IMAGES_CREDENTIAL_FILE) or images.credential_env (LUX_IMAGES_CREDENTIAL_ENV)")
+	case im.CredentialFile != "" && !filepath.IsAbs(im.CredentialFile):
+		problems = append(problems, "images.credential_file must be an absolute path")
+	case im.CredentialEnv != "" && !envNameRe.MatchString(im.CredentialEnv):
+		problems = append(problems, "images.credential_env must name an environment variable (A-Z, 0-9, _)")
+	}
+	for _, r := range im.Shared {
+		if !spec.ManagedRepoRoot(r) {
+			problems = append(problems, fmt.Sprintf("images.shared (LUX_IMAGES_SHARED) %q: need a repository with its registry and no tag", r))
+		} else if r == im.Repository || strings.HasPrefix(r, im.Repository+"/") {
+			problems = append(problems, fmt.Sprintf("images.shared (LUX_IMAGES_SHARED) %q: inside images.repository, where every repository is a tenant's", r))
+		}
+	}
+	return problems
+}
+
+var envNameRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)

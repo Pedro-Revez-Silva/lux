@@ -814,14 +814,25 @@ func dropFailedRepo(ctx context.Context, tx pgx.Tx, runID string, data map[strin
 
 // recordImageResolved keeps a Run's first image build (every FROM pinned,
 // and the image id), so later placements build the same thing. The first
-// one reported wins.
+// one reported wins. A published image (publishedRef, platform) is kept
+// with it: with the first build, or, should the resolution predate it,
+// the first reported for the same pinned Containerfile. It is written in
+// the report's transaction, under its placement's fence.
 func recordImageResolved(ctx context.Context, tx pgx.Tx, runID string, data map[string]any) error {
 	b, _ := json.Marshal(data)
 	var res proto.ImageResolution
 	if err := json.Unmarshal(b, &res); err != nil || res.Containerfile == "" {
 		return err
 	}
-	_, err := tx.Exec(ctx, `UPDATE runs SET image_resolved = $2 WHERE id = $1 AND image_resolved IS NULL`, runID, res)
+	if res.PublishedRef == "" {
+		res.Platform = ""
+	}
+	_, err := tx.Exec(ctx, `UPDATE runs SET image_resolved = CASE WHEN image_resolved IS NULL THEN $2::jsonb
+			ELSE image_resolved || jsonb_build_object('publishedRef', $3::text, 'platform', $4::text) END
+		WHERE id = $1 AND (image_resolved IS NULL
+			OR ($3 <> '' AND coalesce(image_resolved->>'publishedRef', '') = ''
+				AND image_resolved->>'containerfile' = $5))`,
+		runID, res, res.PublishedRef, res.Platform, res.Containerfile)
 	return err
 }
 

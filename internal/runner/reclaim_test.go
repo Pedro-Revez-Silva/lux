@@ -50,11 +50,11 @@ func TestShimKnowsReclaim(t *testing.T) {
 		modes, reclaim, disk bool
 		want                 []string
 	}{
-		{false, false, false, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet}},
-		{false, false, true, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapDiskScale}},
-		{false, true, true, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapSpotReclaim, proto.CapDiskScale}},
-		{true, true, true, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapSyncModes, proto.CapSpotReclaim, proto.CapDiskScale}},
-		{true, false, false, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapSyncModes}},
+		{false, false, false, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapManagedImages}},
+		{false, false, true, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapManagedImages, proto.CapDiskScale}},
+		{false, true, true, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapManagedImages, proto.CapSpotReclaim, proto.CapDiskScale}},
+		{true, true, true, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapManagedImages, proto.CapSyncModes, proto.CapSpotReclaim, proto.CapDiskScale}},
+		{true, false, false, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapManagedImages, proto.CapSyncModes}},
 	} {
 		r := &Runner{shimSyncModes: c.modes, shimReclaim: c.reclaim, disk: diskScale{on: c.disk}}
 		if got := r.capabilities(); !slices.Equal(got, c.want) {

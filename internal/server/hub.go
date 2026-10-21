@@ -512,19 +512,6 @@ func (s *Server) refuseSync(ctx context.Context, tx pgx.Tx, hostID string, id in
 	return later.write()
 }
 
-func (s *Server) attachSecrets(runID string, data json.RawMessage) json.RawMessage {
-	vals, ok := s.secrets.get(runID)
-	if !ok || len(vals) == 0 {
-		return data
-	}
-	var a proto.Assign
-	if err := json.Unmarshal(data, &a); err != nil {
-		return data
-	}
-	a.Secrets = vals
-	return proto.Marshal(a)
-}
-
 // attachCredentials adds to a push or sync the git credentials luxd holds
 // for message id: at send time, never stored.
 func (s *Server) attachCredentials(id int64, typ string, data json.RawMessage) json.RawMessage {

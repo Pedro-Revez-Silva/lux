@@ -132,5 +132,14 @@ domain ([Operators](operators.md#previews)). What protects that:
   read it ([Operations](operations.md#configuration)).
 - **Only luxd holds S3 credentials.** Runners upload and download through
   luxd and presigned URLs.
+- **The managed image registry's credential** (`[images]`,
+  [published images](runspec.md#published-images)) is luxd's and the
+  runners': read by luxd from a file or its environment for each
+  assignment that needs it, sent to that assignment's runner only, and
+  never stored, logged, or given to a shim, a build or a container. The
+  runner offers it to Podman only for the Run's tenant's repository and
+  the shared ones; a tenant names neither another tenant's repository nor
+  where its build is pushed. A shared repository is every tenant's to
+  pull, whole: share only one meant for all of them.
 - **Runners** authenticate with host tokens (`luxd admin
   create-host-token`), scoped to a tenant or the platform and a pool.

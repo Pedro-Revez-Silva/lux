@@ -44,6 +44,8 @@ const (
 	// kindDiskPressure: the host's runner reports disk pressure; it takes
 	// no new placement, whatever the Run, until the pressure ends.
 	kindDiskPressure
+	// kindManagedImages: the Run's image needs proto.CapManagedImages.
+	kindManagedImages
 )
 
 func shapeText(cpus float64, memory, disk int64) string {
@@ -99,6 +101,10 @@ func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 	if proto.SafeSyncModes(r.PendingSync) && !slices.Contains(h.Caps, proto.CapSyncModes) {
 		constraint(kindSyncModes, "host's lux-runner predates sync modes")
 	}
+	// An older runner would build without the context, or not publish.
+	if (r.ManagedAuth || needsManagedImagesRunner(r.Spec)) && !slices.Contains(h.Caps, proto.CapManagedImages) {
+		constraint(kindManagedImages, "host's lux-runner predates managed images (build contexts, publish, managed registry credential)")
+	}
 	if r.Spec.Spot && !slices.Contains(h.Caps, proto.CapSpotReclaim) {
 		constraint(kindSpotReclaim, "host's lux-runner lacks spot reclamation support")
 	}
@@ -151,7 +157,7 @@ type waitCapacity struct {
 }
 
 // waitKinds is the reason's fixed order: the resource kinds, then constraints.
-var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested", "syncModes", "shape", "diskPressure"}
+var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested", "syncModes", "shape", "diskPressure", "managedImages"}
 
 // add counts h's blockers, unless one of them rules h out for this Run on
 // pool, tenancy or chosen-host grounds, or h is not connected to this luxd
@@ -174,6 +180,8 @@ func (w *waitCapacity) add(blockers []fitBlocker) {
 			kind = "shape"
 		case kindDiskPressure:
 			kind = "diskPressure"
+		case kindManagedImages:
+			kind = "managedImages"
 		default:
 			return
 		}
@@ -225,6 +233,8 @@ func (w *waitCapacity) reason(r pendingRun) string {
 			what = plural(n, "does", "do") + " not advertise its pool's shape (" + shapeText(sh.CPUs, int64(sh.Memory), int64(sh.Disk)) + ") with disk scaling"
 		case "diskPressure":
 			what = plural(n, "is", "are") + " under disk pressure (low free disk)"
+		case "managedImages":
+			what = plural(n, "runs a lux-runner", "run lux-runners") + " without managed images (its image is published, built with a context, or in the managed registry)"
 		}
 		// The subject is named once: the first part says which hosts, later
 		// parts only how many (nothing for the chosen host).
@@ -248,4 +258,14 @@ func plural(n int, one, many string) string {
 		return one
 	}
 	return many
+}
+
+// needsManagedImagesRunner: the Run's image build uses what only a runner
+// with proto.CapManagedImages does (a context, publishing), whatever luxd's
+// configuration. A Run that needs the managed registry's credential (an
+// image or FROM in it) is pendingRun.ManagedAuth, which only luxd's
+// configuration decides.
+func needsManagedImagesRunner(sp spec.RunSpec) bool {
+	b := sp.Image.Build
+	return b != nil && (b.Publish || len(b.ContextFiles) > 0 || len(b.Contexts) > 0)
 }

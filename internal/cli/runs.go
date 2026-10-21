@@ -390,6 +390,9 @@ func (a *app) getCmd() *cobra.Command {
 						fmt.Fprintf(w, "           %s\n", f.With(f.Image))
 					}
 				}
+				if run.Image.PublishedRef != "" {
+					fmt.Fprintf(w, "published: %s (%s)\n", run.Image.PublishedRef, run.Image.Platform)
+				}
 			} else {
 				fmt.Fprintln(w, "image:     built (not yet)")
 			}

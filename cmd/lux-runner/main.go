@@ -205,6 +205,9 @@ func main() {
 	}
 	// Test-only (tests/suites): not a flag, so it stays out of --help.
 	cfg.AssignHold = os.Getenv("LUX_TEST_ASSIGN_HOLD")
+	if v := os.Getenv("LUX_TEST_WITHOUT_CAPABILITIES"); v != "" {
+		cfg.WithoutCapabilities = strings.Split(v, ",")
+	}
 	level := slog.LevelInfo
 	if os.Getenv("LUX_DEBUG") != "" {
 		level = slog.LevelDebug

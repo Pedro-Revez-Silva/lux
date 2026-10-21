@@ -139,12 +139,32 @@ components:
             type: string
           type: object
         cache:
-          description: "A registry repository (no tag), e.g. registry.example.com/team/lux-cache, shared by hosts: a host pulls <cache>:<build key> instead of building, and pushes what it builds there. The key covers the tenant, egress rules, pinned Containerfile and args."
+          description: "A registry repository (no tag), e.g. registry.example.com/team/lux-cache, shared by hosts: a host pulls <cache>:<build key> instead of building, and pushes what it builds there. The key covers the tenant, egress rules, pinned Containerfile, args, context and platform. Best effort: a failed pull builds, a failed push is a warning."
           type: string
         containerfile:
           type: string
         context:
           type: string
+        contextFiles:
+          additionalProperties:
+            type: string
+          description: "The default build context, as relative path to UTF-8 text: what COPY and ADD read. At most 64 files and 1 MiB in all; each path relative and clean (components of A-Z a-z 0-9 . _ @ + -, not . or ..), at most 255 bytes and 16 components, and not also a directory of another. Files are written 0644."
+          type: object
+        contexts:
+          additionalProperties:
+            $ref: "#/components/schemas/BuildContext"
+          description: Named build contexts, read by COPY --from=<name> and RUN --mount=from=<name>. At most 4; a name is 1-63 of a-z 0-9 _ -, starting with a letter, and is no stage's. Fetched by the runner, with the Run's credentials, before the build.
+          type: object
+        publish:
+          description: "Publish the built image to luxd's managed registry repository for the tenant ([images] repository), with luxd's own credential. The placement goes on only once the push succeeded and its manifest digest was read back: the Run's image then has publishedRef (repository@sha256:...) and platform, which later Runs can use as image.ref with no registry credentials. Refused (422) by a luxd with no managed registry."
+          type: boolean
+      type: object
+    BuildContext:
+      additionalProperties: false
+      properties:
+        git:
+          $ref: "#/components/schemas/GitContext"
+          description: A git repository's tree at one commit (no .git).
       type: object
     Capacity:
       additionalProperties: false
@@ -741,6 +761,19 @@ components:
         uploaded:
           type: boolean
       type: object
+    GitContext:
+      additionalProperties: false
+      properties:
+        credential:
+          description: "The secret (in secrets) to fetch with, as for git.repositories: the runner's only, never in the build or the container."
+          type: string
+        ref:
+          description: "The commit: its full 40-character lowercase hex sha. Branches, tags and short shas are refused: a build context never moves."
+          type: string
+        url:
+          description: "https (or http: the commit pins the content) URL of the repository, without credentials, query or fragment. Its host must be allowed by network.egress (unless unrestricted), and may not be localhost, a loopback or link-local address."
+          type: string
+      type: object
     History:
       additionalProperties: false
       properties:
@@ -1180,6 +1213,12 @@ components:
         containerfile:
           type: string
         imageId:
+          type: string
+        platform:
+          description: "With image.build.publish: the platform the published image was built for (linux/arm64, linux/amd64)."
+          type: string
+        publishedRef:
+          description: "With image.build.publish: the published image, repository@sha256:<manifest digest>. Usable as image.ref by later Runs of the tenant, without registry credentials."
           type: string
       type: object
     Init:
@@ -4407,6 +4446,9 @@ components:
           type: string
         keyId:
           type: string
+        managedImages:
+          description: "Whether this luxd has a managed image registry ([images] repository and its credential): image.build.publish is accepted, and the Run's image then has publishedRef. Always present on releases supporting managed-images."
+          type: boolean
         name:
           type: string
         operator:

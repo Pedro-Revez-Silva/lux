@@ -207,6 +207,14 @@ assignment before it removes the hold:
 hosts[0].exec("cat", "/tmp/lux-hold.unknown", check=False)  # "run_… 2 sub_…"
 ```
 
+`LUX_TEST_WITHOUT_CAPABILITIES`, also read by `lux-runner` only, leaves
+the named capabilities (comma-separated, e.g. `managed-images-v1`) out of
+the runner's hello, as a runner that predates them would:
+
+```python
+runners.start(hosts[0], environ={"LUX_TEST_WITHOUT_CAPABILITIES": "managed-images-v1"})
+```
+
 ### A lux to develop against
 
 `--serve` brings the same environment up and leaves it running, with a

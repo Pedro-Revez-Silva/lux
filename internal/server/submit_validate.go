@@ -41,6 +41,7 @@ func (s *Server) validateSubmit(ctx context.Context, p Principal, stored spec.Ru
 			return err
 		}
 		r = pendingRun{TenantID: p.TenantID, Spec: stored, PoolID: rp.ID, Shape: sh}
+		s.markManagedAuth(&r)
 		return nil
 	})
 	if err != nil {
@@ -66,6 +67,7 @@ func (s *Server) validateSubmit(ctx context.Context, p Principal, stored spec.Ru
 			if err != nil {
 				return err
 			}
+			s.markManagedAuth(slicePtrs(demand)...)
 			if ok {
 				adm = spotAdmission(r, hs, demand, s.now())
 			} else {

@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -89,6 +90,9 @@ type Config struct {
 	// names exists, each assignment is held before it is taken up and
 	// acked. See holdAssignment and noteUnknownEpoch.
 	AssignHold string
+	// WithoutCapabilities is test-only (LUX_TEST_WITHOUT_CAPABILITIES):
+	// capabilities left out of Hello, as a runner that predates them.
+	WithoutCapabilities []string
 }
 
 type Runner struct {
@@ -358,7 +362,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // reclamation only with a shim that answers it (this runner enforces it),
 // disk scaling only when it is on.
 func (r *Runner) capabilities() []string {
-	caps := []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet}
+	caps := []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapManagedImages}
 	if r.shimSyncModes {
 		caps = append(caps, proto.CapSyncModes)
 	}
@@ -368,7 +372,7 @@ func (r *Runner) capabilities() []string {
 	if r.disk.on {
 		caps = append(caps, proto.CapDiskScale)
 	}
-	return caps
+	return slices.DeleteFunc(caps, func(c string) bool { return slices.Contains(r.cfg.WithoutCapabilities, c) })
 }
 
 // capacity is Hello's: with disk scaling on, Disk is nominal and the

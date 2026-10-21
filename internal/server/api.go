@@ -673,6 +673,9 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 	if err := s.checkMCPNotControlPlane(ctx, sp); err != nil {
 		return nil, err
 	}
+	if err := s.checkManagedImages(p.TenantID, sp); err != nil {
+		return nil, invalidSpec(err)
+	}
 	stored, refs, values := sp.SplitSecrets()
 	if in.ValidateOnly {
 		// Values are never required for a validation: only names and

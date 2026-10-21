@@ -79,7 +79,25 @@ type Build struct {
 	// Context is an optional artifact id whose contents are the build context.
 	Context string            `json:"context,omitempty" yaml:"context,omitempty"`
 	Args    map[string]string `json:"args,omitempty" yaml:"args,omitempty"`
-	Cache   string            `json:"cache,omitempty" yaml:"cache,omitempty" doc:"A registry repository (no tag), e.g. registry.example.com/team/lux-cache, shared by hosts: a host pulls <cache>:<build key> instead of building, and pushes what it builds there. The key covers the tenant, egress rules, pinned Containerfile and args."`
+	Cache   string            `json:"cache,omitempty" yaml:"cache,omitempty" doc:"A registry repository (no tag), e.g. registry.example.com/team/lux-cache, shared by hosts: a host pulls <cache>:<build key> instead of building, and pushes what it builds there. The key covers the tenant, egress rules, pinned Containerfile, args, context and platform. Best effort: a failed pull builds, a failed push is a warning."`
+	// ContextFiles is the default build context: what COPY and ADD read.
+	ContextFiles map[string]string `json:"contextFiles,omitempty" yaml:"contextFiles,omitempty" doc:"The default build context, as relative path to UTF-8 text: what COPY and ADD read. At most 64 files and 1 MiB in all; each path relative and clean (components of A-Z a-z 0-9 . _ @ + -, not . or ..), at most 255 bytes and 16 components, and not also a directory of another. Files are written 0644."`
+	// Contexts are named build contexts (COPY --from=<name>).
+	Contexts map[string]BuildContext `json:"contexts,omitempty" yaml:"contexts,omitempty" doc:"Named build contexts, read by COPY --from=<name> and RUN --mount=from=<name>. At most 4; a name is 1-63 of a-z 0-9 _ -, starting with a letter, and is no stage's. Fetched by the runner, with the Run's credentials, before the build."`
+	// Publish pushes the build to luxd's managed image repository.
+	Publish bool `json:"publish,omitempty" yaml:"publish,omitempty" doc:"Publish the built image to luxd's managed registry repository for the tenant ([images] repository), with luxd's own credential. The placement goes on only once the push succeeded and its manifest digest was read back: the Run's image then has publishedRef (repository@sha256:...) and platform, which later Runs can use as image.ref with no registry credentials. Refused (422) by a luxd with no managed registry."`
+}
+
+// BuildContext is one named build context: exactly one source.
+type BuildContext struct {
+	Git *GitContext `json:"git,omitempty" yaml:"git,omitempty" doc:"A git repository's tree at one commit (no .git)."`
+}
+
+// GitContext is a repository's tree at an immutable commit.
+type GitContext struct {
+	URL        string `json:"url" yaml:"url" doc:"https (or http: the commit pins the content) URL of the repository, without credentials, query or fragment. Its host must be allowed by network.egress (unless unrestricted), and may not be localhost, a loopback or link-local address."`
+	Ref        string `json:"ref" yaml:"ref" doc:"The commit: its full 40-character lowercase hex sha. Branches, tags and short shas are refused: a build context never moves."`
+	Credential string `json:"credential,omitempty" yaml:"credential,omitempty" doc:"The secret (in secrets) to fetch with, as for git.repositories: the runner's only, never in the build or the container."`
 }
 
 type Workload struct {
@@ -605,7 +623,7 @@ func (s *RunSpec) Normalize(d Defaults) error {
 			fail("image.build.containerfile is required")
 		}
 		if b.Context != "" {
-			fail("image.build.context is not supported yet: COPY and ADD have no build context")
+			fail("image.build.context is not supported: use image.build.contextFiles or image.build.contexts")
 		}
 		if b.Cache != "" && !validCacheRepo(b.Cache) {
 			fail("image.build.cache: need a repository with its registry and no tag, e.g. registry.example.com/team/lux-cache")
@@ -693,6 +711,12 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		regs[strings.ToLower(a.Registry)] = true
 		if !seen[a.Secret] {
 			fail("image.registryAuth[%d].secret: no secret named %q", i, a.Secret)
+		}
+	}
+
+	if b := s.Image.Build; b != nil {
+		for _, e := range s.checkBuildContext(seen) {
+			fail("%s", e)
 		}
 	}
 
@@ -1192,7 +1216,18 @@ func (s *RunSpec) onlyCredential(name string) bool {
 }
 
 func (s *RunSpec) isGitCredential(name string) bool {
-	return s.Git != nil && slices.ContainsFunc(s.Git.Repositories, func(r Repository) bool { return r.Credential == name })
+	if s.Git != nil && slices.ContainsFunc(s.Git.Repositories, func(r Repository) bool { return r.Credential == name }) {
+		return true
+	}
+	// A build context's credential is a git credential too: the runner's.
+	if b := s.Image.Build; b != nil && name != "" {
+		for _, c := range b.Contexts {
+			if c.Git != nil && c.Git.Credential == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *RunSpec) isRegistryCredential(name string) bool {

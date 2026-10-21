@@ -235,6 +235,12 @@ func serve(ctx context.Context, c config, plan servePlan) error {
 			ActivityEvery: c.Preview.ActivityEvery.Duration,
 			IdleCheck:     c.Preview.IdleCheck.Duration,
 		},
+		Images: server.ImagesConfig{
+			Repository:     c.Images.Repository,
+			CredentialFile: c.Images.CredentialFile,
+			CredentialEnv:  c.Images.CredentialEnv,
+			Shared:         c.Images.Shared,
+		},
 	}, db, blobs, log)
 	return srv.Run(ctx)
 }

@@ -102,6 +102,8 @@ type Config struct {
 	// Market: candidate instance types' prices and spot placement scores
 	// (market.go).
 	Market MarketConfig
+	// Images: the managed image registry (images.go).
+	Images ImagesConfig
 }
 
 // PreviewConfig is the preview listener's ([preview]).
