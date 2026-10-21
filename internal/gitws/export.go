@@ -21,6 +21,11 @@ import (
 // mirror's refs/lux/commits/. At most limit bytes of file content are
 // written. The tree is untrusted: it is written through an os.Root, so no
 // entry, symlink or not, lands outside dst; symlinks are kept as links.
+//
+// Replacement objects are off throughout (--no-replace-objects, and
+// GIT_NO_REPLACE_OBJECTS): the mirror holds whatever refs/replace/ the
+// remote advertises, and with them a commit's sha would name another
+// tree.
 func (m *Manager) Export(ctx context.Context, r Repo, dst string, limit int64) error {
 	if !shaRe.MatchString(r.Ref) {
 		return fmt.Errorf("context %s: ref %q is not a full commit sha", r.Name, r.Ref)
@@ -32,11 +37,15 @@ func (m *Manager) Export(ctx context.Context, r Repo, dst string, limit int64) e
 		return err
 	}
 	defer m.lock(mirror)()
-	if _, err := git(ctx, mirror, "", "cat-file", "-e", r.Ref+"^{commit}"); err != nil {
+	hasCommit := func() bool {
+		cmd := exportGit(ctx, mirror, "cat-file", "-e", r.Ref+"^{commit}")
+		return cmd.Run() == nil
+	}
+	if !hasCommit() {
 		if _, err := git(ctx, mirror, r.Token, "fetch", "--quiet", "--no-tags", r.URL, "+"+r.Ref+":refs/lux/commits/"+r.Ref); err != nil {
 			return err
 		}
-		if _, err := git(ctx, mirror, "", "cat-file", "-e", r.Ref+"^{commit}"); err != nil {
+		if !hasCommit() {
 			return fmt.Errorf("commit %s not found in %s", r.Ref, Scrub(r.URL))
 		}
 	}
@@ -45,10 +54,7 @@ func (m *Manager) Export(ctx context.Context, r Repo, dst string, limit int64) e
 		return err
 	}
 	defer root.Close()
-	cmd := exec.CommandContext(ctx, "git", "-c", "core.hooksPath=/dev/null", "archive", "--format=tar", "--end-of-options", r.Ref)
-	cmd.Dir = mirror
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "LC_ALL=C",
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	cmd := exportGit(ctx, mirror, "archive", "--format=tar", "--end-of-options", r.Ref)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.StdoutPipe()
@@ -157,4 +163,20 @@ func FixDirModes(root *os.Root) error {
 		}
 		return nil
 	})
+}
+
+// exportGit is git run on the mirror for Export: replacement objects off,
+// hooks off, and no GIT_ variable of the runner's environment (GIT_DIR,
+// GIT_REPLACE_REF_BASE, ...) to point it elsewhere.
+func exportGit(ctx context.Context, mirror string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"--no-replace-objects", "-c", "core.hooksPath=/dev/null"}, args...)...)
+	cmd.Dir = mirror
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GIT_") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "LC_ALL=C",
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_NO_REPLACE_OBJECTS=1")
+	return cmd
 }

@@ -121,3 +121,37 @@ func TestUntarStaysInside(t *testing.T) {
 		}
 	}
 }
+
+// A remote that advertises refs/replace/<sha> can't change what a pinned
+// commit exports: the mirror gets the replacement ref (git clone --mirror
+// takes every ref), but Export reads objects as they are, whatever the
+// runner's environment says.
+func TestExportIgnoresReplacementRefs(t *testing.T) {
+	bare, commit := remote(t)
+	work := filepath.Join(filepath.Dir(bare), "work")
+	gitRun(t, work, "checkout", "-q", "--orphan", "replacement")
+	os.WriteFile(filepath.Join(work, "a.txt"), []byte("replacement payload\n"), 0o644)
+	gitRun(t, work, "add", "-A")
+	gitRun(t, work, "commit", "-qm", "replacement")
+	gitRun(t, work, "replace", commit, gitRun(t, work, "rev-parse", "HEAD"))
+	gitRun(t, work, "push", "-q", bare, "refs/replace/*:refs/replace/*")
+	t.Setenv("GIT_REPLACE_REF_BASE", "refs/replace/")
+
+	m := New(t.TempDir())
+	dst := t.TempDir()
+	if err := m.Export(context.Background(), Repo{Tenant: "t", Name: "ctx", URL: bare, Ref: commit}, dst, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dst, "a.txt")); string(b) != "one\n" {
+		t.Fatalf("exported %q, not the commit's own tree", b)
+	}
+	// The hazard is real: the mirror has the replacement, and git with
+	// replacement objects on would read it.
+	mirror := m.mirrorPath("t", bare)
+	if refs := gitRun(t, mirror, "for-each-ref", "refs/replace/"); refs == "" {
+		t.Fatal("the mirror has no replacement ref: the test proves nothing")
+	}
+	if got := gitRun(t, mirror, "show", commit+":a.txt"); got != "replacement payload" {
+		t.Fatalf("with replacements on, git reads %q", got)
+	}
+}
