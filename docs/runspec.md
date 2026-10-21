@@ -577,9 +577,14 @@ image:
   host without the build pulls that tag before building (`image.cache`
   with `managed: true`). Each placement's publication is an
   `image.published` event (`ref`, `platform`, `reused`).
-- lux never deletes published images. Keep them, or remove old ones, with
-  the registry's own retention; a Run whose published image is gone
-  rebuilds when it moves.
+- lux never deletes published images, and needs them kept: retention
+  must not remove a digest a Run or a later Run's `image.ref` still uses.
+  A placement on a host of the published image's platform never rebuilds
+  it: without a local copy of exactly that image (the host's build of the
+  same id, or the digest pulled before by the tenant), it pulls the
+  digest, and if the registry no longer has it the placement fails
+  (`image`, `published image <ref>: ...`). So does a Run naming a deleted
+  digest as `image.ref`. Only a host of another platform builds.
 - Runs that publish, have a build context, or need luxd's credential (an
   `image.ref` or `FROM` in the managed registry, its tenant's or a shared
   repository's) are placed only on runners that support them
