@@ -599,6 +599,7 @@ func (s *Server) heartbeatVersion(ctx context.Context, hostID string, hb proto.H
 		if hb.Usage != nil {
 			hostNet = hb.Usage.Net
 		}
+		var unclassified bool
 		if err := tx.QueryRow(ctx, `WITH old AS (SELECT id, state, disk_pressure FROM hosts WHERE id = $1 FOR NO KEY UPDATE)
 			UPDATE hosts SET last_heartbeat = now(),
 			state = CASE WHEN hosts.state = 'lost' THEN (CASE WHEN draining THEN 'draining' ELSE 'ready' END) ELSE hosts.state END,
@@ -606,8 +607,18 @@ func (s *Server) heartbeatVersion(ctx context.Context, hostID string, hb proto.H
 			disk_pressure = CASE WHEN $4 THEN $3 ELSE hosts.disk_pressure END,
 			host_net_classes = CASE WHEN $5::jsonb IS NULL OR $5::jsonb = '{}' THEN hosts.host_net_classes ELSE lux_net_max(hosts.host_net_classes, $5::jsonb) END
 			FROM old WHERE hosts.id = old.id
-			RETURNING old.state = 'lost' AND hosts.state = 'ready', old.disk_pressure, coalesce(hosts.net_classes->>'version', '')`, hostID, nonNil(hb.GitMirrors), pressure, pressureKnown, hostNet).Scan(&back, &was, version); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			RETURNING old.state = 'lost' AND hosts.state = 'ready', old.disk_pressure, coalesce(hosts.net_classes->>'version', ''),
+				hosts.net_classes IS NULL`, hostID, nonNil(hb.GitMirrors), pressure, pressureKnown, hostNet).Scan(&back, &was, version, &unclassified); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
+		}
+		// The version hostNetwork serves: provisional classes' while none
+		// are stored.
+		if unclassified {
+			if v, err := provisionalVersion(ctx, tx, hostID); err != nil {
+				return err
+			} else if v != "" {
+				*version = v
+			}
 		}
 		// Back from lost (a network blip longer than the lease).
 		if back {

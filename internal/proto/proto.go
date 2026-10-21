@@ -269,11 +269,13 @@ const (
 
 // NetworkClasses are the address lists a runner classifies traffic by,
 // built by luxd from what the host's provider says about it. CIDRs, IPv4
-// or IPv6. Precedence is NetClasses' order. With no Local and no Zone (an
-// older luxd, a host luxd knows nothing about) the runner's own interface
-// subnets are Local. An address in no list is internet when Catalog() and
-// unknown otherwise: without a catalog "not listed" may well be the
-// provider's, and must not read as internet or as free.
+// or IPv6. Precedence is NetClasses' order. With neither Local nor Zone (an
+// older luxd, a host luxd knows nothing about), or provisional classes, the
+// runner's own interface subnets are Local; a runner without
+// CapProvisionalNet does so only when Zone is empty. An address in no list
+// is internet when Catalog() and unknown otherwise: without a catalog "not
+// listed" may well be the provider's, and must not read as internet or as
+// free.
 type NetworkClasses struct {
 	// Version changes whenever any list does.
 	Version string `json:"version"`
@@ -292,7 +294,17 @@ type NetworkClasses struct {
 	ProviderGlobalFree []string `json:"providerGlobalFree,omitempty"`
 	// Provider: by region, the provider's prefixes in every other region.
 	Provider map[string][]string `json:"provider,omitempty"`
+	// Provisional: a new host's classes before its network was discovered
+	// (sent only to a runner with CapProvisionalNet): the region's lists,
+	// no Local (the runner's interface subnets stand in) and the private
+	// address space as Zone. Discovery replaces them.
+	Provisional bool `json:"provisional,omitempty"`
 }
+
+// CapProvisionalNet is the Hello capability of a runner that fills an empty
+// NetworkClasses.Local from its interface subnets for provisional classes
+// even when Zone is not empty; only such a runner is sent them.
+const CapProvisionalNet = "provisional-net"
 
 // Catalog: nc holds a provider catalog, so unlisted addresses are internet.
 func (nc *NetworkClasses) Catalog() bool {

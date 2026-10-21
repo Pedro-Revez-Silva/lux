@@ -212,6 +212,15 @@ var freeRegionalServices = map[string]bool{"S3": true, "DYNAMODB": true}
 // prefix (Route 53, Global Accelerator, AMAZON) bills as internet out.
 var freeGlobalServices = map[string]bool{"CLOUDFRONT": true}
 
+// prefixMaxAge is how long a fetched catalog is used before a refresh;
+// prefixRetryAfter spaces refreshes after a failed one, which can take the
+// whole 30s HTTP timeout, so callers on the provisioner's tick (the narrow
+// network pass, the region warm-up) are not held up by every call.
+const (
+	prefixMaxAge     = 24 * time.Hour
+	prefixRetryAfter = time.Minute
+)
+
 func (p *Provider) Prefixes(ctx context.Context, template json.RawMessage) (server.ProviderPrefixes, error) {
 	t, err := parse(template)
 	if err != nil {
@@ -219,13 +228,27 @@ func (p *Provider) Prefixes(ctx context.Context, template json.RawMessage) (serv
 	}
 	p.prefixMu.Lock()
 	defer p.prefixMu.Unlock()
-	if p.prefixChecked.IsZero() || p.now().Sub(p.prefixChecked) >= 24*time.Hour {
-		err = p.fetchPrefixes(ctx)
-		if err != nil && !p.prefixGood {
-			return server.ProviderPrefixes{}, err
+	now := p.now()
+	due := p.prefixChecked.IsZero() || now.Sub(p.prefixChecked) >= prefixMaxAge
+	if due && (p.prefixFailedAt.IsZero() || now.Sub(p.prefixFailedAt) >= prefixRetryAfter) {
+		err := p.fetchPrefixes(ctx)
+		switch {
+		case err == nil:
+			p.prefixFailedAt, p.prefixErr = time.Time{}, nil
+		case ctx.Err() != nil:
+			// The caller gave up: not the source's failure, so no backoff.
+			if !p.prefixGood {
+				return server.ProviderPrefixes{}, err
+			}
+		default:
+			// From the failure, not the attempt: a hung fetch can take the full client timeout.
+			p.prefixFailedAt, p.prefixErr = p.now(), err
 		}
 	}
 	if !p.prefixGood {
+		if p.prefixErr != nil {
+			return server.ProviderPrefixes{}, p.prefixErr
+		}
 		return server.ProviderPrefixes{}, fmt.Errorf("AWS IP ranges: no validated catalog available")
 	}
 	out := server.ProviderPrefixes{Source: "ec2-ip-ranges", FetchedAt: p.prefixFetched, Provider: map[string][]string{}}

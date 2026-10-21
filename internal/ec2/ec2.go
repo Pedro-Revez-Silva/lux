@@ -100,7 +100,11 @@ type Provider struct {
 	prefixChecked time.Time
 	prefixFetched time.Time
 	prefixGood    bool
-	endpoint      string
+	// prefixFailedAt, prefixErr: the last failed refresh, retried no sooner
+	// than prefixRetryAfter.
+	prefixFailedAt time.Time
+	prefixErr      error
+	endpoint       string
 	// clientsMu guards clients: Check runs from request handlers while the
 	// provisioner launches, lists and terminates.
 	clientsMu sync.Mutex

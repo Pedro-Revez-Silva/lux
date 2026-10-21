@@ -157,7 +157,8 @@ are its own. Unrestricted Runs are counted the same way.
 **Classification.** luxd builds each provider host's lists on every
 provider check (EC2: `DescribeInstances` and `DescribeSubnets` for the
 host's VPC, and `https://ip-ranges.amazonaws.com/ip-ranges.json`, fetched at
-most once a day with `If-None-Match`, the last good copy kept on failure;
+most once a day with `If-None-Match`, the last good copy kept on failure and
+a failed refresh retried no sooner than a minute later;
 `LUX_IPRANGES_URL` overrides it): `local` is the subnets of the host's zone,
 `zone` the rest of its VPC's; in-region `S3` and `DYNAMODB` prefixes are
 `region-service`, other in-region ones `region-public`, every other
@@ -171,8 +172,51 @@ a static host's operator-supplied catalog (`lux hosts set <host>
 and when the catalog was fetched reach the runner in its Welcome; a heartbeat's ack carries their
 version, and a runner holding another fetches `GET /runner/v1/network`. A
 change of lists only refills nftables sets, in one transaction: no counter
-is reset. With no lists from luxd, the runner's own interface subnets are
-`local` and everything else `unknown`.
+is reset. With no lists from luxd, lists with neither `local` nor `zone`, or
+provisional lists, the runner's own interface subnets are `local`, read
+again on each new version; lists with a `zone` but no `local` that are not
+provisional (a static host's declared catalog) keep `local` empty. With no
+lists, everything else is `unknown`.
+
+**A new host's first seconds.** Discovery is never part of the runner's
+hello or of a launch. A provider host that registers with no catalog is
+discovered on the provisioner's next tick (`LUX_TICK`, 1s) after registering,
+not at the next provider check. Every provider check then refreshes it. If
+discovery fails, or gives no catalog, the host is asked again at most every
+10s for its first 5 minutes. After that only the provider check asks.
+
+Until discovery stores any classes for the host, the Welcome carries
+**provisional** lists (`provisional: true`),
+so a new host classifies its Runs' traffic from its first second. luxd keeps
+each region's published lists in `network_catalog`, per (provider, region),
+written by the provider check and the per-tick pass whenever they change,
+and also fetched on every provider check for the region of each non-retired
+pool, including pools with no host yet. Registration reads that row; it calls
+no provider. The provisional lists are that region's lists, the runner's own
+interface subnets as `local`, and the private address space (`10.0.0.0/8`,
+`100.64.0.0/10`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`) as `zone`:
+before discovery, private traffic off the host's own subnets is most likely
+to its own network, and `zone` prices it between free `local` and `internet`.
+They are never stored as the host's classes. Discovery replaces them: the
+next heartbeat's ack names the discovered lists' version and the runner
+fetches them. Once discovery has stored classes, those are served even
+with source `none` (the prefix fetch failed): their `local` and `zone` are
+the host's own, which provisional lists would replace with guesses. Only
+runners advertising the `provisional-net` capability get
+provisional lists. An older runner treats a `zone` list without `local` as
+complete and would price its own subnet as `zone`, so it keeps today's
+behaviour.
+
+This is provider-agnostic: only where a region's lists come from in the
+first place is provider-specific (EC2: ip-ranges.json); storing them,
+building provisional lists and sending them need nothing from the
+provider. A region with no stored row (no provider check has fetched it
+since its first pool was created) still starts with no lists. In that case
+the runner's interface subnets are `local` and everything else is
+`unknown` until discovery, which picks up the lists after the runner's
+next heartbeat (a third of the lease, 10s by default). Some `unknown`
+traffic in such a host's first seconds is therefore expected. It is bounded
+to about a tick plus a heartbeat.
 
 **Continuity and limits.** A runner restart preserves named kernel counters,
 including removed regions. Host offsets and last observations are atomically

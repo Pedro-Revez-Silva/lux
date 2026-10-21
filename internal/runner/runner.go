@@ -358,7 +358,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // reclamation only with a shim that answers it (this runner enforces it),
 // disk scaling only when it is on.
 func (r *Runner) capabilities() []string {
-	caps := []string{proto.CapDiff, proto.CapGitCredentials}
+	caps := []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet}
 	if r.shimSyncModes {
 		caps = append(caps, proto.CapSyncModes)
 	}

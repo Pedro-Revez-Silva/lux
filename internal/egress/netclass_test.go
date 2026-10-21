@@ -146,6 +146,83 @@ func TestNoCatalogIsUnknownNotInternet(t *testing.T) {
 	}
 }
 
+// Provisional classes (luxd's before discovery) carry the private ranges as
+// Zone and no Local: the host's interface subnets are Local, read again
+// when a new version is loaded.
+func TestProvisionalClassesLocalFromInterfaces(t *testing.T) {
+	k := newKernel()
+	subnets := []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}
+	f, err := k.firewall()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.acct.ifaceSubnets = func() []netip.Prefix { return subnets }
+	provisional := func(version string) *proto.NetworkClasses {
+		return &proto.NetworkClasses{Version: version, Source: proto.NetSourceEC2, Provisional: true,
+			Zone:         []string{"10.0.0.0/8", "100.64.0.0/10", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"},
+			RegionPublic: []string{"52.0.0.0/8"}}
+	}
+	if err := f.SetClasses(provisional("p1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Apply(context.Background(), runIface, netip.MustParseAddr("10.89.0.1"), true, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Remove(runIface) })
+	k.send(out("192.168.1.20", 10), false) // the host's own subnet
+	k.send(out("10.1.2.3", 20), false)     // private, off the host's subnet
+	k.send(out("52.1.1.1", 30), false)
+	k.send(out("8.8.8.8", 40), false)
+	got, _ := f.Counters()
+	want := map[string]proto.NetBytes{"local": {Tx: 10}, "zone": {Tx: 20}, "region-public": {Tx: 30}, "internet": {Tx: 40}}
+	if !maps.Equal(got.Runs[runIface], want) {
+		t.Fatalf("got %v, want %v", got.Runs[runIface], want)
+	}
+	// An address added later: the next version's load reads the interfaces again.
+	subnets = append(subnets, netip.MustParsePrefix("10.1.2.0/24"))
+	if err := f.SetClasses(provisional("p2")); err != nil {
+		t.Fatal(err)
+	}
+	k.send(out("10.1.2.3", 5), false)
+	got, _ = f.Counters()
+	if got.Runs[runIface]["local"].Tx != 15 || got.Runs[runIface]["zone"].Tx != 20 {
+		t.Fatalf("after reload: %v", got.Runs[runIface])
+	}
+}
+
+// Zone-only classes that are not provisional (an operator's declaration for
+// a static host) give no interface subnet Local; the same lists marked
+// provisional do.
+func TestZoneOnlyClassesLocalOnlyWhenProvisional(t *testing.T) {
+	for _, provisional := range []bool{false, true} {
+		t.Run(fmt.Sprint("provisional=", provisional), func(t *testing.T) {
+			k := newKernel()
+			f, err := k.firewall("192.168.1.0/24")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.SetClasses(&proto.NetworkClasses{Version: "z1", Source: proto.NetSourceStatic,
+				Zone: []string{"10.0.0.0/8"}, Provisional: provisional}); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Apply(context.Background(), runIface, netip.MustParseAddr("10.89.0.1"), true, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { f.Remove(runIface) })
+			k.send(out("192.168.1.20", 10), false) // the host's interface subnet
+			k.send(out("10.1.2.3", 20), false)
+			got, _ := f.Counters()
+			want := map[string]proto.NetBytes{"internet": {Tx: 10}, "zone": {Tx: 20}}
+			if provisional {
+				want = map[string]proto.NetBytes{"local": {Tx: 10}, "zone": {Tx: 20}}
+			}
+			if !maps.Equal(got.Runs[runIface], want) {
+				t.Errorf("got %v, want %v", got.Runs[runIface], want)
+			}
+		})
+	}
+}
+
 func TestDroppedAndHostTrafficIsNotCounted(t *testing.T) {
 	k := newKernel()
 	f := setupRun(t, k, catalog("v1"), false, spec.EgressRule{CIDR: "52.1.0.0/16"})

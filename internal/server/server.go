@@ -163,6 +163,9 @@ type Server struct {
 	// launchBackoff: per pool id, its consecutive failed launches and when
 	// it may launch again (launchBackoffFor); provisioner goroutine only.
 	launchBackoff map[string]*poolBackoff
+	// netTried: per host id, when the narrow network pass last asked the
+	// provider for it (recordNetwork); provisioner goroutine only.
+	netTried map[string]time.Time
 	// now is the provisioner's clock for launch backoff (time.Now; tests
 	// replace it).
 	now func() time.Time

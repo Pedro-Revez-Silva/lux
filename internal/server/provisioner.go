@@ -223,7 +223,9 @@ func (s *Server) provision(ctx context.Context) error {
 			return err
 		}
 		s.recordVolumes(ctx)
-		s.recordNetwork(ctx)
+		s.recordNetwork(ctx, false)
+	} else {
+		s.recordNetwork(ctx, true)
 	}
 	return nil
 }
