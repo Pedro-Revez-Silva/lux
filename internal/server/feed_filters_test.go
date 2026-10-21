@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
-	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -346,14 +346,16 @@ func TestFeedFiltersKeepTenants(t *testing.T) {
 	}
 }
 
-// A tenant's filtered last=N finds its own newest old match behind many
-// newer events of another tenant that match the same filter, never theirs,
-// reading about as many pages as without them; an operator's finds the
-// other tenant's, or the narrowed tenant's.
+// A tenant's feed reads about as many pages behind many newer events of
+// another tenant as without them: its filtered last=N, finding its own
+// newest old match among events that match the same filter, never theirs;
+// its window, filtered or not, from before all of them; its unfiltered
+// last=N, and from now (last=0). An operator's finds the other tenant's,
+// or the narrowed tenant's.
 func TestFeedLastSparseTenant(t *testing.T) {
-	s, ctx, key, key2, _ := feedFixture(t)
+	s, ctx, key, key2, start := feedFixture(t)
 	const at = "2026-01-02T03:04:05Z"
-	feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
+	a0 := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
 	a := feedEvent(t, s, ctx, "t1", ptr(feedRunA), nil, "exited", `{}`, at)
 	costed := []feedFilter{
 		{labels: []string{"team=x"}},
@@ -363,35 +365,76 @@ func TestFeedLastSparseTenant(t *testing.T) {
 		{types: []string{"absent"}},
 		{labels: []string{"team=x"}, types: []string{"absent"}},
 	}
-	// lastCost: the buffer pages t1's last=1 watermark query reads for f.
-	lastCost := func(f feedFilter) int {
+	// cost: the buffer pages q reads in p's scope.
+	cost := func(p Principal, q feedStatement) int {
 		t.Helper()
-		args := []any{1}
-		q := feedLastSQL(f, "t1", func(v any) string { args = append(args, v); return "$" + strconv.Itoa(len(args)) })
 		var blocks int
-		if err := s.db.Tx(ctx, store.Tenant("t1"), func(tx pgx.Tx) error {
+		if err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
 			c := &costTx{Tx: tx, t: t}
-			var low int64
-			err := c.QueryRow(ctx, q, args...).Scan(&low)
+			c.measure(ctx, q.sql, q.args...)
 			blocks = c.blocks
-			return err
+			return nil
 		}); err != nil {
 			t.Fatal(err)
 		}
 		return blocks
 	}
-	before := make([]int, len(costed))
-	for i, f := range costed {
-		before[i] = lastCost(f)
+	// t1's key, and an operator narrowed by ?tenant=t1 (Server.narrow sets
+	// TenantID).
+	principals := []struct {
+		name string
+		p    Principal
+	}{
+		{"t1", Principal{TenantID: "t1"}},
+		{"operator tenant=t1", Principal{TenantID: "t1", Operator: true}},
+	}
+	type probe struct {
+		name string
+		cost func() int
+	}
+	probes := []probe{}
+	for _, pr := range principals {
+		// last: the watermark query serveFeed issues for last=n, its first.
+		last := func(f feedFilter, n int) int {
+			qs := feedStatements(t, s, pr.p, feedInputOf(f, n, ""))
+			if len(qs) != 2 {
+				t.Fatalf("%s last=%d %+v: %d reads, want 2", pr.name, n, f, len(qs))
+			}
+			return cost(pr.p, qs[0])
+		}
+		// window: the one window read after id 0, the oldest of all events.
+		window := func(f feedFilter) int {
+			qs := feedStatements(t, s, pr.p, feedInputOf(f, 0, "0"))
+			if len(qs) != 1 {
+				t.Fatalf("%s window %+v: %d reads, want 1", pr.name, f, len(qs))
+			}
+			return cost(pr.p, qs[0])
+		}
+		for _, f := range costed {
+			probes = append(probes, probe{fmt.Sprintf("%s last=1 %+v", pr.name, f), func() int { return last(f, 1) }})
+		}
+		// last=0 is only the fallback max(id): the newest event, from now.
+		for _, n := range []int{0, 1, feedPage} {
+			probes = append(probes, probe{fmt.Sprintf("%s last=%d unfiltered", pr.name, n), func() int { return last(feedFilter{}, n) }})
+		}
+		for _, f := range []feedFilter{{}, {labels: []string{"team=x"}}, {types: []string{"exited"}}} {
+			probes = append(probes, probe{fmt.Sprintf("%s window %+v", pr.name, f), func() int { return window(f) }})
+		}
+	}
+	before := make([]int, len(probes))
+	for i, p := range probes {
+		before[i] = p.cost()
 	}
 	execSQL(t, s, ctx, `INSERT INTO run_events (tenant_id, run_id, epoch, type, data, created_at)
 		SELECT 't2', $1, 1, 'exited', '{}', now() - interval '1 hour' FROM generate_series(1, 50000)`, feedRunO)
 	ownerExec(t, s, `ANALYZE run_events`)
-	// Walking t2's 50,000 events would read hundreds of pages.
+	// Walking t2's 50,000 events would read hundreds of pages (516 to 654
+	// measured without the tenant bind); bound, each probe read 1 to 10,
+	// at most 2 more than before t2's events.
 	const allowance = 64
-	for i, f := range costed {
-		if after := lastCost(f); after > before[i]+allowance {
-			t.Errorf("t1 last=1 %+v: %d buffer pages behind t2's events, %d without", f, after, before[i])
+	for i, p := range probes {
+		if after := p.cost(); after > before[i]+allowance {
+			t.Errorf("%s: %d buffer pages behind t2's events, %d without", p.name, after, before[i])
 		}
 	}
 	var newestO int64
@@ -409,6 +452,79 @@ func TestFeedLastSparseTenant(t *testing.T) {
 	for _, q := range []string{label("team=absent"), "type=absent", label("team=x") + "&type=absent"} {
 		wantIDs(t, "t1 "+q, last(key, q))
 	}
+	wantIDs(t, "t1 last=1", last(key, ""), a)
+	wantIDs(t, "operator tenant=t1 last=1", last(op, "tenant=t1"), a)
+	wantIDs(t, "t2 last=1", last(key2, ""), newestO)
+	wantIDs(t, "operator last=1", last(op, ""), newestO)
+	for _, q := range []string{"", label("team=x"), "type=exited"} {
+		wantIDs(t, "t1 window "+q, feedQuery(t, s, key, start, q), a0, a)
+		wantIDs(t, "operator tenant=t1 window "+q, feedQuery(t, s, op, start, "tenant=t1&"+q), a0, a)
+	}
+	// From now: nothing yet, for t1 as for the narrowed operator.
+	wantIDs(t, "t1 from now", feedIDs(t, feedBody(t, s, key, "/v1/events?follow=false")))
+	wantIDs(t, "operator tenant=t1 from now", feedIDs(t, feedBody(t, s, op, "/v1/events?follow=false&tenant=t1")))
+}
+
+// feedStatement is a statement as sent to PostgreSQL: its SQL and a copy
+// of its arguments.
+type feedStatement struct {
+	sql  string
+	args []any
+}
+
+// feedRecorder is a pgx.QueryTracer keeping every SELECT but the RLS scope
+// settings Store.Tx issues (and not begin or commit).
+type feedRecorder struct {
+	mu  sync.Mutex
+	got []feedStatement
+}
+
+func (r *feedRecorder) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if strings.HasPrefix(d.SQL, "SELECT ") && !strings.HasPrefix(d.SQL, "SELECT set_config(") {
+		r.mu.Lock()
+		r.got = append(r.got, feedStatement{d.SQL, slices.Clone(d.Args)})
+		r.mu.Unlock()
+	}
+	return ctx
+}
+
+func (r *feedRecorder) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// feedInputOf is GET /v1/events?follow=false for f, with last=n, or after
+// when it is not "".
+func feedInputOf(f feedFilter, n int, after string) *feedInput {
+	return &feedInput{Label: f.labels, Type: strings.Join(f.types, ","), Last: n, After: after, Follow: "false"}
+}
+
+// feedStatements is the statements serveFeed runs for p and in, in order,
+// read through a pool that records them; s.db is restored before it
+// returns.
+func feedStatements(t *testing.T, s *Server, p Principal, in *feedInput) []feedStatement {
+	t.Helper()
+	ctx := context.Background()
+	cfg := s.db.Pool.Config()
+	rec := &feedRecorder{}
+	cfg.ConnConfig.Tracer = rec
+	db, err := store.OpenConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	orig := s.db
+	s.db = db
+	defer func() { s.db = orig }()
+	req := httptest.NewRequest(http.MethodGet, "/v1/events", nil).WithContext(context.WithValue(ctx, principalKey, p))
+	w := httptest.NewRecorder()
+	if err := s.serveFeed(w, req, in); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(w.Body.String(), "event: error") {
+		t.Fatalf("feed for %+v: %s", in, w.Body)
+	}
+	if len(rec.got) == 0 {
+		t.Fatalf("feed for %+v ran no statement", in)
+	}
+	return rec.got
 }
 
 // last=N with a filter looks among the 20,000 newest events only (the

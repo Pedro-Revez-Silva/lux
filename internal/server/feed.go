@@ -187,14 +187,29 @@ func (s *Server) serveFeed(w http.ResponseWriter, r *http.Request, in *feedInput
 	}
 }
 
-// feedLastSQL is the watermark below the $1 newest events matching f: just
-// before the oldest of them, or the newest event's id if none. With a
-// filter it looks only among the feedLastScan newest events, of tenant
-// only when it is not "" (the principal's tenant, as for RLS).
+// feedTenant binds run_events to a non-empty principal tenant, else returns
+// no condition. RLS's tenant-or-system predicate is no index condition:
+// without this, a tenant's scan walks every other tenant's events in id
+// order. With it, the scan reads
+// run_events_tenant (tenant_id, id).
+func feedTenant(tenant string, arg func(any) string) string {
+	if tenant == "" {
+		return ""
+	}
+	return "tenant_id = " + arg(tenant)
+}
+
+// feedLastSQL is the watermark just before the $1 newest events matching f,
+// or the newest event's id if none. A non-empty tenant restricts both reads.
+// With a filter it looks only among the feedLastScan newest events.
 func feedLastSQL(f feedFilter, tenant string, arg func(any) string) string {
+	where := ""
+	if c := feedTenant(tenant, arg); c != "" {
+		where = " WHERE " + c
+	}
 	if f.none() {
-		return `SELECT coalesce(min(id) - 1, (SELECT coalesce(max(id), 0) FROM run_events))
-				FROM (SELECT id FROM run_events ORDER BY id DESC LIMIT $1) x`
+		return `SELECT coalesce(min(id) - 1, (SELECT coalesce(max(id), 0) FROM run_events` + where + `))
+				FROM (SELECT id FROM run_events` + where + ` ORDER BY id DESC LIMIT $1) x`
 	}
 	join := ""
 	if len(f.labels) > 0 {
@@ -203,12 +218,6 @@ func feedLastSQL(f feedFilter, tenant string, arg func(any) string) string {
 		// on an unanalyzed run_events, rescans a materialized runs. No Run:
 		// r.labels is NULL, as with a LEFT JOIN.
 		join = " LEFT JOIN LATERAL (SELECT r.labels FROM runs r WHERE r.id = e.run_id OFFSET 0) r ON true"
-	}
-	// RLS's tenant-or-system predicate is no index condition: a tenant's
-	// scan would otherwise walk every other tenant's newer events.
-	where := ""
-	if tenant != "" {
-		where = " WHERE tenant_id = " + arg(tenant)
 	}
 	return `SELECT coalesce(min(id) - 1, (SELECT coalesce(max(id), 0) FROM run_events` + where + `))
 				FROM (SELECT e.id FROM (SELECT e.id, e.run_id, e.type FROM run_events e` + where + ` ORDER BY e.id DESC LIMIT ` + strconv.Itoa(feedLastScan) + `) e` + join + `
@@ -234,7 +243,7 @@ type feedRow struct {
 // feedWindow reads the feedPage events after after, matching f or not.
 func (s *Server) feedWindow(ctx context.Context, p Principal, after int64, f feedFilter) ([]feedRow, error) {
 	args := []any{after, feedPage}
-	q := feedWindowSQL(f, func(v any) string { args = append(args, v); return "$" + strconv.Itoa(len(args)) })
+	q := feedWindowSQL(f, p.TenantID, func(v any) string { args = append(args, v); return "$" + strconv.Itoa(len(args)) })
 	var evs []feedRow
 	err := s.db.Tx(ctx, p.scope(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, q, args...)
@@ -254,9 +263,9 @@ func (s *Server) feedWindow(ctx context.Context, p Principal, after int64, f fee
 	return evs, err
 }
 
-// feedWindowSQL reads the $2 events after $1, each with whether it matches
-// f; without a filter, the feed's read as it always was.
-func feedWindowSQL(f feedFilter, arg func(any) string) string {
+// feedWindowSQL reads the $2 events after $1, each with whether it matches f.
+// A non-empty tenant restricts the window, with or without a filter.
+func feedWindowSQL(f feedFilter, tenant string, arg func(any) string) string {
 	join, data, match := "", "e.data", "true"
 	if !f.none() {
 		if len(f.labels) > 0 {
@@ -267,6 +276,10 @@ func feedWindowSQL(f feedFilter, arg func(any) string) string {
 		join += " CROSS JOIN LATERAL (SELECT " + f.match(arg) + " AS match) m"
 		data, match = "CASE WHEN m.match THEN e.data END", "m.match"
 	}
+	where := "e.id > $1"
+	if c := feedTenant(tenant, arg); c != "" {
+		where = "e." + c + " AND " + where
+	}
 	return `SELECT e.id, coalesce(e.server_id, ''), e.epoch, e.type, ` + data + `, e.created_at, e.run_id, t.name, ` + match + `
-			FROM run_events e JOIN tenants t ON t.id = e.tenant_id` + join + ` WHERE e.id > $1 ORDER BY e.id LIMIT $2`
+			FROM run_events e JOIN tenants t ON t.id = e.tenant_id` + join + ` WHERE ` + where + ` ORDER BY e.id LIMIT $2`
 }
