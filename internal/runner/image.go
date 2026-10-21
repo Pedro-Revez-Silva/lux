@@ -122,14 +122,14 @@ func (p *placement) buildImage(ctx context.Context, sp spec.RunSpec, net podman.
 	must := prev.Containerfile == "" || (b.Publish && prev.PublishedRef == "")
 
 	if b.Publish && prev.PublishedRef != "" && prev.Platform == platform {
-		id, err := p.usePublished(ctx, prev, tag, auth)
+		name, id, err := p.usePublished(ctx, prev, tag, auth)
 		if err != nil {
 			return "", err
 		}
-		p.r.images.used(tag)
-		p.event(ctx, "image.built", map[string]any{"tag": tag, "imageId": id, "cached": true, "containerfile": cf,
+		p.r.images.used(name)
+		p.event(ctx, "image.built", map[string]any{"tag": tag, "image": name, "imageId": id, "cached": true, "containerfile": cf,
 			"fromPublished": true, "publishedRef": prev.PublishedRef, "platform": prev.Platform})
-		return tag, nil
+		return name, nil
 	}
 
 	id, err := p.r.pm.ImageID(ctx, tag)
@@ -141,10 +141,13 @@ func (p *placement) buildImage(ctx context.Context, sp spec.RunSpec, net podman.
 		// has there is the build, even over a local one (which may be an
 		// inconsistent rebuild), and a key it has is never pushed over.
 		ref := managedCacheRef(p.assign.ManagedImages.Repository, key)
-		var hit string
-		if hit, fromManaged = p.pullCached(ctx, ref, tag, auth.managed, true); fromManaged {
-			id = hit
+		if _, fromManaged = p.pullCached(ctx, ref, tag, auth.managed, true); fromManaged {
+			// The image is the digest pulled, not whatever the key's
+			// names say now (another placement may move them).
 			if published, err = p.publishedAs(ctx, ref); err != nil {
+				return "", err
+			}
+			if id, err = p.r.pm.ImageID(ctx, published); err != nil {
 				return "", err
 			}
 		}
@@ -171,13 +174,22 @@ func (p *placement) buildImage(ctx context.Context, sp spec.RunSpec, net podman.
 	if fromCache {
 		built["fromCache"] = true
 	}
+	// What the placement runs: the build key's name, or, published, a
+	// name of that digest's alone. The key's name is shared by every Run
+	// built from the same inputs, and so may move to another Run's
+	// published image (non-reproducible builds of one key on two hosts)
+	// before this placement creates its container.
+	image := tag
 	if b.Publish {
 		if published == "" {
-			if published, err = p.publish(ctx, tag, id, key, auth); err != nil {
+			if published, err = p.publish(ctx, id, key, auth); err != nil {
 				return "", err
 			}
 		}
-		built["publishedRef"], built["platform"] = published, platform
+		if image, err = p.namePublished(ctx, id, published); err != nil {
+			return "", err
+		}
+		built["image"], built["publishedRef"], built["platform"] = image, published, platform
 		p.event(ctx, "image.published", map[string]any{"ref": published, "platform": platform, "reused": fromManaged})
 	}
 	if must {
@@ -193,46 +205,69 @@ func (p *placement) buildImage(ctx context.Context, sp spec.RunSpec, net podman.
 		p.event(ctx, "image.rebuild-differs", map[string]any{"imageId": id, "firstImageId": prev.ImageID,
 			"hint": "the build is not reproducible (RUN steps that fetch or date things); the Run continues on this image"})
 	}
-	return tag, nil
+	return image, nil
 }
 
-// usePublished readies the Run's published image under the local build's
-// tag: the local build if it is that image, else the published image
-// pulled by its digest (with the managed credential).
-func (p *placement) usePublished(ctx context.Context, prev proto.ImageResolution, tag string, auth *imageAuth) (string, error) {
-	if id, err := p.r.pm.ImageID(ctx, tag); err == nil && id == prev.ImageID {
-		return id, nil
+// usePublished readies the Run's published image under a name of its
+// own (publishedName), and returns it and the image's id: the host's own
+// build if it is that image (by id), else the published digest, pulled
+// with the managed credential. Never the build key's name, which another
+// Run's placement may move.
+func (p *placement) usePublished(ctx context.Context, prev proto.ImageResolution, tag string, auth *imageAuth) (name, id string, err error) {
+	name = publishedName(p.tenantID, prev.PublishedRef)
+	if id, err := p.r.pm.ImageID(ctx, name); err == nil {
+		p.r.images.touch(name, p.tenantID)
+		return name, id, nil
 	}
-	if err := p.pullIfMissing(ctx, prev.PublishedRef, auth); err != nil {
-		return "", fmt.Errorf("published image %s: %w", prev.PublishedRef, err)
+	src := prev.PublishedRef
+	if local, err := p.r.pm.ImageID(ctx, tag); err == nil && local == prev.ImageID {
+		src = local
+	} else if err := p.pullIfMissing(ctx, prev.PublishedRef, auth); err != nil {
+		return "", "", fmt.Errorf("published image %s: %w", prev.PublishedRef, err)
 	}
-	return p.adopt(ctx, prev.PublishedRef, tag)
+	if id, err = p.r.pm.ImageID(ctx, src); err != nil {
+		return "", "", err
+	}
+	if _, err := p.r.pm.Run(ctx, "tag", id, name); err != nil {
+		return "", "", err
+	}
+	return name, id, nil
 }
 
-// adopt names ref's image tag, the local build's name, and returns its
-// id. An image tag named before, now unnamed, is removed if nothing else
-// uses or names it: lux never prunes unnamed images.
+// namePublished gives image id, published as ref, its own name
+// (publishedName) and returns it.
+func (p *placement) namePublished(ctx context.Context, id, ref string) (string, error) {
+	name := publishedName(p.tenantID, ref)
+	if _, err := p.r.pm.Run(ctx, "tag", id, name); err != nil {
+		return "", err
+	}
+	p.r.images.used(name)
+	return name, nil
+}
+
+// publishedName is the local name of a tenant's published image: its
+// digest's, which no other image ever gets (unlike the build key's name,
+// shared by every build of the same inputs).
+func publishedName(tenant, ref string) string {
+	_, digest, _ := strings.Cut(ref, "@")
+	return "localhost/lux-published:" + strings.ToLower(tenant) + "-" + strings.TrimPrefix(digest, "sha256:")
+}
+
+// adopt names ref's image tag, the local build's name (what later builds
+// of the same key look for), and returns its id.
 func (p *placement) adopt(ctx context.Context, ref, tag string) (string, error) {
-	old, _ := p.r.pm.ImageID(ctx, tag)
 	if _, err := p.r.pm.Run(ctx, "tag", ref, tag); err != nil {
 		return "", err
 	}
-	id, err := p.r.pm.ImageID(ctx, tag)
-	if err != nil {
-		return "", err
-	}
-	if old != "" && old != id {
-		// Refused while a container uses it or it has another name.
-		_, _ = p.r.pm.Run(ctx, "rmi", old)
-	}
-	return id, nil
+	return p.r.pm.ImageID(ctx, tag)
 }
 
-// publish pushes the build to the tenant's managed repository, as
+// publish pushes image id (by id: the build key's name may have moved to
+// another build since) to the tenant's managed repository, as
 // <repository>:<key>, and reads it back by the manifest digest the push
 // reported: the registry has exactly this image (same id) under that
 // digest. Returns repository@digest.
-func (p *placement) publish(ctx context.Context, tag, id, key string, auth *imageAuth) (string, error) {
+func (p *placement) publish(ctx context.Context, id, key string, auth *imageAuth) (string, error) {
 	m := p.assign.ManagedImages
 	if auth.managed == nil {
 		return "", errNoManagedCredential
@@ -240,7 +275,7 @@ func (p *placement) publish(ctx context.Context, tag, id, key string, auth *imag
 	dest := managedCacheRef(m.Repository, key)
 	pctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	digest, err := p.r.pm.PushDigest(pctx, tag, dest, auth.managed.path(), filepath.Join(p.r.cfg.DataDir, "tmp"))
+	digest, err := p.r.pm.PushDigest(pctx, id, dest, auth.managed.path(), filepath.Join(p.r.cfg.DataDir, "tmp"))
 	if err != nil {
 		return "", fmt.Errorf("publishing to %s: %w", dest, err)
 	}
