@@ -158,6 +158,26 @@ func publicHost(h string) bool {
 	return validRegistry(strings.ToLower(h))
 }
 
+// PublishedRepo is the local repository a runner names its tenants'
+// published images in (localhost/lux-published:<tenant>-<digest>). It is
+// lux's: no spec may name it, however spelled (Podman resolves the short
+// name lux-published:... to it too), since a local name skips the
+// registry's own check of who may pull.
+const PublishedRepo = "lux-published"
+
+// ReservedImage reports whether ref names PublishedRepo: its repository's
+// last path component, under any registry or none.
+func ReservedImage(ref string) bool {
+	name := strings.ToLower(strings.TrimSpace(ref))
+	if i := strings.IndexByte(name, '@'); i >= 0 {
+		name = name[:i]
+	}
+	if i := strings.LastIndexByte(name, ':'); i > strings.LastIndexByte(name, '/') {
+		name = name[:i]
+	}
+	return name[strings.LastIndexByte(name, '/')+1:] == PublishedRepo
+}
+
 // ManagedRepoRoot reports whether root is a valid [images] repository: a
 // repository with its registry and no tag (as image.build.cache).
 func ManagedRepoRoot(root string) bool { return validCacheRepo(root) }

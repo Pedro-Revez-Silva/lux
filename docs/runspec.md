@@ -753,7 +753,9 @@ Hosts remove the images lux put there once they go unused:
   [published image](#published-images) is named for its digest
   (`localhost/lux-published:<tenant>-<digest>`), not the build's key: two
   Runs of the same inputs may have published different images, and each
-  runs its own. After the
+  runs its own. That name is the tenant's alone, and no spec may name
+  `lux-published` (as `image.ref` or `FROM`, however spelled): use the
+  `publishedRef`. After the
   host TTL (`lux-runner --host-ttl`, 24h by default) without use, it
   removes them. A Run's stop counts as a use of its image, so a resume on
   the host within the TTL finds the image there, as it finds the volumes.

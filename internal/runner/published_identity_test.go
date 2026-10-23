@@ -46,6 +46,7 @@ push) shift; df=""; args=()
 	digest="sha256:$(printf %s "$id" | sha256sum | cut -c1-64)"
 	echo "$digest" > "$df"; echo "$digest" > "$S/digest/$id"
 	echo "$id" > "$S/registry/$(enc "${args[1]%:*}@$digest")" ;;
+images) ;;
 *) echo "fake podman: $*" >&2; exit 2 ;;
 esac
 `
@@ -179,5 +180,67 @@ func TestPublishPushesTheBuildNotTheKeysName(t *testing.T) {
 	name, err := p.namePublished(ctx, built, ref)
 	if err != nil || f.resolve(name) != built || name != publishedName("ten_a", ref) {
 		t.Fatalf("named %s: %v", name, err)
+	}
+}
+
+// A published image's local name is its tenant's: recorded as such when
+// it is made or reused (and across a runner restart), never usable by
+// another tenant, and never accepted as a spec's image or base, however
+// spelled, whether or not the assignment has a managed registry. Images
+// the host had before lux are still anyone's.
+func TestPublishedNamesAreTheTenantsOwn(t *testing.T) {
+	f := newFakeImages(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	os.Mkdir(filepath.Join(dir, "tmp"), 0o700)
+	ref := "registry.test/managed/ten_a@sha256:" + strings.Repeat("a", 64)
+	id := f.image("private", "localhost/source:x")
+	pa := f.placement(dir)
+	name, err := pa.namePublished(ctx, id, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := pa.r
+	if !r.images.mayUse(name, "ten_a") || r.images.mayUse(name, "ten_b") {
+		t.Fatal("the published name is not ten_a's alone")
+	}
+	// Reused by a resume (and so recorded even if an older runner made it).
+	r.images.forget(name)
+	if n, got, err := pa.usePublished(ctx, proto.ImageResolution{ImageID: id, PublishedRef: ref}, "localhost/lux-build:k", &imageAuth{}); err != nil || n != name || got != id {
+		t.Fatalf("reuse: %s %s %v", n, got, err)
+	}
+	if r.images.mayUse(name, "ten_b") {
+		t.Fatal("reuse left the name anyone's")
+	}
+	// A runner restart reads the owners back.
+	if newImageUse(dir).mayUse(name, "ten_b") {
+		t.Fatal("ownership lost on restart")
+	}
+	// Tenant B, with no managed registry in its assignment (as for a plain
+	// image.ref), and with one.
+	pb := &placement{r: r, tenantID: "ten_b", stale: true, assign: &proto.Assign{}}
+	short := strings.TrimPrefix(name, "localhost/")
+	for _, auth := range []*imageAuth{{}, nil, {m: &proto.ManagedImages{Root: "registry.test/managed", Repository: "registry.test/managed/ten_b"}, managed: &registryAuth{}}} {
+		for _, n := range []string{name, short, "docker.io/library/" + short, "lux-published@sha256:" + strings.Repeat("c", 64)} {
+			if err := pb.pullIfMissing(ctx, n, auth); err == nil || !strings.Contains(err.Error(), "lux's own name") {
+				t.Fatalf("%s: %v", n, err)
+			}
+		}
+		pinned := "FROM " + name
+		if _, err := pb.pinFroms(ctx, pinned, nil, auth); err == nil || !strings.Contains(err.Error(), "lux's own name") {
+			t.Fatalf("FROM: %v", err)
+		}
+		if _, err := pb.localBases(ctx, "FROM "+short+"@sha256:"+strings.Repeat("d", 64), auth); err == nil || !strings.Contains(err.Error(), "lux's own name") {
+			t.Fatalf("pinned FROM: %v", err)
+		}
+	}
+	// Not even its own tenant names it in a spec: the publishedRef is the name.
+	if err := pa.pullIfMissing(ctx, name, &imageAuth{}); err == nil {
+		t.Fatal("ten_a named its published name")
+	}
+	// An image the host had before lux needed it: still anyone's.
+	f.image("operator", "localhost/operator-base:1")
+	if err := pb.pullIfMissing(ctx, "localhost/operator-base:1", &imageAuth{}); err != nil {
+		t.Fatalf("operator's image: %v", err)
 	}
 }

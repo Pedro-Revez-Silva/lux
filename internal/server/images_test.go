@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -318,5 +319,33 @@ func TestAttachManagedImagesFromASource(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "ecr-password") || strings.Contains(logs.String(), "should-not-leak") || !strings.Contains(logs.String(), "AccessDeniedException") {
 		t.Fatalf("log: %s", logs.String())
+	}
+}
+
+// Through the API: a tenant can name neither another tenant's managed
+// repository nor lux's local name for a published image (full or short),
+// as its image or a base.
+func TestPublishedNamesRefusedAtSubmit(t *testing.T) {
+	s, ctx, _, key2 := wakeFixture(t)
+	s.cfg.Defaults = spec.BuiltinDefaults
+	s.cfg.Images = ImagesConfig{Repository: "registry.test/managed", CredentialEnv: "X"}
+	execSQL(t, s, ctx, `INSERT INTO pools (id, name, provider, is_default) VALUES ('pp', 'plat', 'static', true)`)
+	digest := strings.Repeat("a", 64)
+	for _, sp := range []spec.RunSpec{
+		{Image: spec.Image{Ref: "registry.test/managed/t1@sha256:" + digest}},
+		{Image: spec.Image{Ref: "localhost/lux-published:t1-" + digest}},
+		{Image: spec.Image{Ref: "lux-published:t1-" + digest}},
+		{Image: spec.Image{Build: &spec.Build{Containerfile: "FROM lux-published:t1-" + digest + "\n"}}},
+	} {
+		sp.Workload.Command = []string{"true"}
+		if w := apiCall(t, s, key2, http.MethodPost, "/v1/runs", sp); w.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("%+v: HTTP %d %s", sp.Image, w.Code, w.Body)
+		}
+	}
+	// With [images] off too: the name is lux's regardless.
+	s.cfg.Images = ImagesConfig{}
+	if w := apiCall(t, s, key2, http.MethodPost, "/v1/runs", spec.RunSpec{Image: spec.Image{Ref: "lux-published:t1-" + digest},
+		Workload: spec.Workload{Command: []string{"true"}}}); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("[images] off: HTTP %d", w.Code)
 	}
 }

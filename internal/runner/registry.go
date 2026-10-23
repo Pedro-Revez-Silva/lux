@@ -156,6 +156,12 @@ type imageAuth struct {
 // an image in it (refused for another tenant's repository, or when luxd
 // sent no credential), the spec's for any other.
 func (a *imageAuth) forPull(ref string) (*registryAuth, error) {
+	// Every image a spec names comes through here before any local copy is
+	// reused: lux's own published names never do (a spec stored before the
+	// rule, or a luxd without it, included), whatever luxd sent.
+	if spec.ReservedImage(ref) {
+		return nil, fmt.Errorf("%s is lux's own name for published images: name the publishedRef", ref)
+	}
 	if a == nil {
 		return nil, nil
 	}

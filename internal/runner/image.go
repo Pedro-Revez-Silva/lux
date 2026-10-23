@@ -218,7 +218,9 @@ func (p *placement) buildImage(ctx context.Context, sp spec.RunSpec, net podman.
 func (p *placement) usePublished(ctx context.Context, prev proto.ImageResolution, tag string, auth *imageAuth) (name, id string, err error) {
 	name = publishedName(p.tenantID, prev.PublishedRef)
 	if id, err := p.r.pm.ImageID(ctx, name); err == nil {
-		p.r.images.touch(name, p.tenantID)
+		// The tenant's own (the name is), recorded as such: a name an
+		// older runner made has no owner yet.
+		p.r.images.pulledBy(name, p.tenantID)
 		return name, id, nil
 	}
 	src := prev.PublishedRef
@@ -233,6 +235,7 @@ func (p *placement) usePublished(ctx context.Context, prev proto.ImageResolution
 	if _, err := p.r.pm.Run(ctx, "tag", id, name); err != nil {
 		return "", "", err
 	}
+	p.r.images.pulledBy(name, p.tenantID)
 	return name, id, nil
 }
 
@@ -243,7 +246,9 @@ func (p *placement) namePublished(ctx context.Context, id, ref string) (string, 
 	if _, err := p.r.pm.Run(ctx, "tag", id, name); err != nil {
 		return "", err
 	}
-	p.r.images.used(name)
+	// The tenant's alone: a local name must not make it anyone's (an
+	// image lux has no owner for is taken for the operator's).
+	p.r.images.pulledBy(name, p.tenantID)
 	return name, nil
 }
 

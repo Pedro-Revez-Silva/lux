@@ -626,6 +626,16 @@ func (s *RunSpec) Normalize(d Defaults) error {
 	if (s.Image.Ref == "") == (s.Image.Build == nil) {
 		fail("image: exactly one of ref or build is required")
 	}
+	if ReservedImage(s.Image.Ref) {
+		fail("image.ref: %s is lux's own name for published images: use the publishedRef (repository@sha256:...)", s.Image.Ref)
+	}
+	if b := s.Image.Build; b != nil {
+		for _, img := range FromImages(b.Containerfile) {
+			if ReservedImage(img) {
+				fail("image.build.containerfile: FROM %s is lux's own name for published images: use the publishedRef (repository@sha256:...)", img)
+			}
+		}
+	}
 	if b := s.Image.Build; b != nil {
 		if strings.TrimSpace(b.Containerfile) == "" {
 			fail("image.build.containerfile is required")

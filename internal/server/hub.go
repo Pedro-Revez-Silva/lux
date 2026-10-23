@@ -405,10 +405,24 @@ func (s *Server) refuseUndeliverable(ctx context.Context, hostID string) error {
 		id    int64
 		runID string
 	}
-	var syncs []refused
+	var syncs, assigns []refused
 	var creds []credentialedMsg
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
+		// Assignments to a host whose runner lacks managed images: which of
+		// them need it is settled one by one (refuseUnmanaged).
 		rows, err := tx.Query(ctx, `SELECT id, coalesce(run_id, '') FROM host_messages
+			WHERE host_id = $1 AND acked_at IS NULL AND `+unmanagedAssign+` ORDER BY id`, hostID)
+		if err != nil {
+			return err
+		}
+		assigns, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (refused, error) {
+			var m refused
+			return m, r.Scan(&m.id, &m.runID)
+		})
+		if err != nil {
+			return err
+		}
+		rows, err = tx.Query(ctx, `SELECT id, coalesce(run_id, '') FROM host_messages
 			WHERE host_id = $1 AND acked_at IS NULL AND `+unsupportedSync+` ORDER BY id`, hostID)
 		if err != nil {
 			return err
@@ -442,10 +456,87 @@ func (s *Server) refuseUndeliverable(ctx context.Context, hostID string) error {
 			return err
 		}
 	}
-	if len(syncs) > 0 {
+	requeued := len(syncs) > 0
+	for _, m := range assigns {
+		var did bool
+		if err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) (err error) {
+			did, err = s.refuseUnmanaged(ctx, tx, hostID, m.id, m.runID)
+			return err
+		}); err != nil {
+			return err
+		}
+		requeued = requeued || did
+	}
+	if requeued {
 		s.Kick()
 	}
 	return s.refuseUncredentialed(ctx, hostID, creds)
+}
+
+// unmanagedAssign, for SQL on host_messages: an assignment queued for a
+// host whose latest registration lacks proto.CapManagedImages (a runner
+// replaced by an older one since it was placed there).
+const unmanagedAssign = `host_messages.type = 'assign'
+	AND NOT EXISTS (SELECT 1 FROM hosts h WHERE h.id = host_messages.host_id AND '` + proto.CapManagedImages + `' = ANY(h.capabilities))`
+
+// managedImagesGone is why a placement is given up at delivery.
+const managedImagesGone = "the host's lux-runner no longer supports managed images"
+
+// refuseUnmanaged settles an unmanagedAssign message whose Run needs a
+// runner with managed images (hostFit's test, on the Run's stored spec
+// and resolution and luxd's managed registry now) in place of delivering
+// it, and acks it: an older runner would build without the context, not
+// publish, or pull without the credential. The current, unstarted
+// placement is given up and its Run queued again, so that hostFit waits
+// for a runner that has them; an older epoch's message is only acked, and
+// never ends a later placement. A message whose Run needs nothing new is
+// left to be delivered. requeued: a Run was queued again.
+func (s *Server) refuseUnmanaged(ctx context.Context, tx pgx.Tx, hostID string, id int64, runID string) (requeued bool, err error) {
+	// The Run first, then its message: as a report's transaction locks them.
+	var tenantID string
+	var current int
+	var sp spec.RunSpec
+	var res *proto.ImageResolution
+	if err := tx.QueryRow(ctx, `SELECT tenant_id, current_epoch, spec, image_resolved FROM runs WHERE id = $1 FOR UPDATE`, runID).
+		Scan(&tenantID, &current, &sp, &res); err != nil {
+		return false, err
+	}
+	var epoch int
+	var payload json.RawMessage
+	err = tx.QueryRow(ctx, `SELECT coalesce(epoch, 0), payload FROM host_messages
+		WHERE id = $1 AND acked_at IS NULL AND `+unmanagedAssign+` FOR UPDATE`, id).Scan(&epoch, &payload)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil // acked, or the host has managed images again
+	}
+	if err != nil {
+		return false, err
+	}
+	r := pendingRun{Spec: sp, ImageResolved: res}
+	s.markManagedAuth(&r)
+	if !r.ManagedAuth && !needsManagedImagesRunner(sp) {
+		return false, nil
+	}
+	s.log.Warn("assignment refused at delivery: no managed images", "host", hostID, "run", runID, "epoch", epoch)
+	var later laterEvents
+	var assigned bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM placements WHERE run_id = $1 AND epoch = $2 AND host_id = $3 AND state = 'assigned')`,
+		runID, epoch, hostID).Scan(&assigned); err != nil {
+		return false, err
+	}
+	if assigned && epoch == current {
+		var a proto.Assign
+		if err := json.Unmarshal(payload, &a); err != nil {
+			return false, err
+		}
+		if err := s.requeueUnstartedPlacement(ctx, tx, tenantID, runID, epoch, managedImagesGone, &later, a); err != nil {
+			return false, err
+		}
+		requeued = true
+	}
+	if _, err := tx.Exec(ctx, `UPDATE host_messages SET acked_at = now(), payload = payload - 'promptAttachments' WHERE id = $1`, id); err != nil {
+		return false, err
+	}
+	return requeued, later.write()
 }
 
 // refuseSync settles an unsupportedSync message in place of delivering it,

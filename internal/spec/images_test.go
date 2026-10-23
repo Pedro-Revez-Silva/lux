@@ -161,3 +161,35 @@ func TestImageRepository(t *testing.T) {
 		}
 	}
 }
+
+// lux-published is lux's own repository name for published images: no
+// spec names it, as its image or a base, under any spelling.
+func TestReservedImage(t *testing.T) {
+	alias := "lux-published:ten_a-" + strings.Repeat("a", 64)
+	for ref, want := range map[string]bool{
+		"localhost/" + alias:                      true,
+		alias:                                     true,
+		"docker.io/library/" + alias:              true,
+		"LOCALHOST/LUX-PUBLISHED:x":               true,
+		"lux-published@sha256:" + sha + sha[:24]:  true,
+		"registry.example.com/team/lux-published": true,
+		"lux-published-x:1":                       false,
+		"localhost/lux-publishedx":                false,
+		"lux-published/x:1":                       false,
+		"registry.test/managed/ten_a@sha256:" + strings.Repeat("a", 64): false,
+		"": false,
+	} {
+		if got := ReservedImage(ref); got != want {
+			t.Errorf("%q: %v", ref, got)
+		}
+	}
+	for _, s := range []RunSpec{
+		{Image: Image{Ref: "localhost/" + alias}, Workload: Workload{Command: []string{"true"}}},
+		{Image: Image{Ref: alias}, Workload: Workload{Command: []string{"true"}}},
+		{Image: Image{Build: &Build{Containerfile: "FROM " + alias + " AS a\nFROM a\n"}}, Workload: Workload{Command: []string{"true"}}},
+	} {
+		if err := s.Normalize(BuiltinDefaults); err == nil || !strings.Contains(err.Error(), "lux's own name") {
+			t.Errorf("%+v: %v", s.Image, err)
+		}
+	}
+}
