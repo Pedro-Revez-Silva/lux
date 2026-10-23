@@ -293,14 +293,23 @@ given. An ECR token works until the `expiresAt` ECR returns with it, 12
 hours after issue, and carries its caller's IAM permissions; the AWS
 credentials that asked for it are the SDK's to refresh. luxd keeps one
 token and gives an assignment a token only with at least
-`ecr_min_validity` left (4h by default: a 3h build Run's image and its
-publication, with room), fetching a new one when the one it holds has
-less. A new token with less than that (a misconfigured role) is not given
-out: the placement then fails saying luxd sent no credential, rather than
-losing it mid-build. The assignment also carries the expiry, and a runner
-whose image took longer refuses to start a pull or push with it, saying
-so. One fetch runs at a time, bounded to 10s; after a failure luxd makes no
-new call for 30s. Only the AWS error code is logged.
+`ecr_min_validity` left (4h by default), fetching a new one when the one
+it holds has less. A new token with less than that (a misconfigured role)
+is not given out: the placement then fails saying luxd sent no
+credential, rather than losing it mid-build. The assignment also carries
+the expiry, and a runner whose image took longer refuses to start a
+pull or push with it, saying so, and the placement fails. One fetch runs
+at a time, bounded to 10s; after a failure luxd makes no new call for
+30s. Only the AWS error code is logged.
+
+`ecr_min_validity` is how long the operator expects any Run's image to
+take to ready (base pulls, context fetches, the build, its publication),
+not a deadline lux enforces: nothing bounds image preparation. A Run's
+`timeout` counts only time running, which starts once its image is ready,
+and a build is ended only by a stop or terminate. So a build that runs
+past the token's expiry goes on to its end and then fails at its
+publication; bounding builds, and stopping a runaway one, is the
+submitter's (a deadline on its own records, then terminate).
 
 What the operator sets up, outside lux (lux neither creates nor checks it):
 
