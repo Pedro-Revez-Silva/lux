@@ -1,7 +1,7 @@
 package gitws
 
 import (
-	"archive/tar"
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -10,11 +10,13 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// Export writes the tree of commit r.Ref (a full sha) into dst, an empty
+// Export writes the tree of commit r.Ref (a full sha), exactly as
+// committed, into dst, an empty
 // directory, with no .git: an image build's named context. It is fetched
 // through the tenant's own mirror, as a checkout is; a commit no branch
 // has (a pull request's head, say) is fetched by its sha into the
@@ -32,7 +34,7 @@ func (m *Manager) Export(ctx context.Context, r Repo, dst string, limit int64) e
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	// A reader of the mirror (no repack meanwhile); archive reads objects,
+	// A reader of the mirror (no repack meanwhile); ls-tree and cat-file read objects,
 	// not the files a fetch writes and renames.
 	mirror, release, err := m.mirror(ctx, r, false)
 	if err != nil {
@@ -56,30 +58,19 @@ func (m *Manager) Export(ctx context.Context, r Repo, dst string, limit int64) e
 		return err
 	}
 	defer root.Close()
-	cmd := exportGit(ctx, mirror, "archive", "--format=tar", "--end-of-options", r.Ref)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.StdoutPipe()
+	entries, err := lsTree(ctx, mirror, r.Ref)
 	if err != nil {
 		return err
 	}
-	if err := cmd.Start(); err != nil {
+	blobs, err := newBlobReader(ctx, mirror)
+	if err != nil {
 		return err
 	}
-	uerr := untar(root, out, limit)
-	if uerr != nil {
-		// Stop git rather than wait for it to write the rest.
-		_ = cmd.Process.Kill()
-		_, _ = io.Copy(io.Discard, out)
+	werr := writeTree(root, entries, blobs.read, limit)
+	if cerr := blobs.close(); werr == nil && cerr != nil {
+		werr = fmt.Errorf("git cat-file: %w", cerr)
 	}
-	werr := cmd.Wait()
-	if uerr != nil {
-		return uerr
-	}
-	if werr != nil {
-		return fmt.Errorf("git archive: %w: %s", werr, strings.TrimSpace(stderr.String()))
-	}
-	return nil
+	return werr
 }
 
 // fetchCommit fetches commit r.Ref by its sha into the mirror, as a
@@ -98,72 +89,165 @@ func (m *Manager) fetchCommit(ctx context.Context, r Repo, mirror string) error 
 // ErrContextTooLarge: an exported tree has more than its limit.
 var ErrContextTooLarge = errors.New("the context is larger than the Run's disk")
 
-// untar writes a git archive's entries into root: directories, regular
-// files (0755 when executable, else 0644) and symlinks. Anything else (the
-// pax global header with the commit id) is skipped.
-func untar(root *os.Root, r io.Reader, limit int64) error {
-	tr := tar.NewReader(r)
-	var total int64
-	for {
-		h, err := tr.Next()
-		if err == io.EOF {
-			return FixDirModes(root)
-		}
-		if err != nil {
-			return err
-		}
-		name := path.Clean(strings.TrimSuffix(h.Name, "/"))
-		if name == "." {
+// treeEntry is one entry of a commit's whole tree (git ls-tree -r).
+type treeEntry struct {
+	mode, oid, path string
+}
+
+// lsTree lists every entry of commit's tree, recursively: the tree as
+// committed. Not git archive, which applies the tree's own .gitattributes
+// (export-ignore drops files, export-subst rewrites them with the
+// repository's current branches and tags), so a pinned commit would not
+// always give the same bytes.
+func lsTree(ctx context.Context, mirror, commit string) ([]treeEntry, error) {
+	cmd := exportGit(ctx, mirror, "ls-tree", "-r", "-z", "--full-tree", "--end-of-options", commit+"^{tree}")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git ls-tree: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	var entries []treeEntry
+	for _, rec := range strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00") {
+		if rec == "" {
 			continue
 		}
-		if path.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") {
-			return fmt.Errorf("archive entry %q is outside the context", h.Name)
+		meta, name, ok := strings.Cut(rec, "\t")
+		f := strings.Fields(meta)
+		if !ok || len(f) != 3 {
+			return nil, fmt.Errorf("git ls-tree: unexpected %q", rec)
 		}
-		switch h.Typeflag {
-		case tar.TypeDir:
+		entries = append(entries, treeEntry{mode: f[0], oid: f[2], path: name})
+	}
+	return entries, nil
+}
+
+// blobReader reads blobs, as stored (no filter, no conversion), from one
+// git cat-file --batch.
+type blobReader struct {
+	cmd *exec.Cmd
+	in  io.WriteCloser
+	out *bufio.Reader
+}
+
+func newBlobReader(ctx context.Context, mirror string) (*blobReader, error) {
+	cmd := exportGit(ctx, mirror, "cat-file", "--batch")
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return &blobReader{cmd: cmd, in: in, out: bufio.NewReader(out)}, nil
+}
+
+// read hands fn blob oid's content and size; what fn leaves unread is
+// skipped.
+func (b *blobReader) read(oid string, fn func(io.Reader, int64) error) error {
+	if _, err := io.WriteString(b.in, oid+"\n"); err != nil {
+		return err
+	}
+	header, err := b.out.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	f := strings.Fields(header)
+	if len(f) != 3 || f[0] != oid || f[1] != "blob" {
+		return fmt.Errorf("git cat-file: %s: %q", oid, strings.TrimSpace(header))
+	}
+	size, err := strconv.ParseInt(f[2], 10, 64)
+	if err != nil || size < 0 {
+		return fmt.Errorf("git cat-file: %s: bad size %q", oid, f[2])
+	}
+	lr := io.LimitReader(b.out, size)
+	ferr := fn(lr, size)
+	if _, err := io.Copy(io.Discard, lr); err != nil {
+		return err
+	}
+	if c, err := b.out.ReadByte(); err != nil || c != '\n' {
+		return fmt.Errorf("git cat-file: %s: no end of object", oid)
+	}
+	return ferr
+}
+
+func (b *blobReader) close() error {
+	b.in.Close()
+	_, _ = io.Copy(io.Discard, b.out)
+	return b.cmd.Wait()
+}
+
+// writeTree writes a commit's tree entries into root, byte for byte as
+// committed: regular files (0755 when executable, else 0644), symlinks
+// (as links; os.Root keeps everything, through them or not, inside root),
+// and an empty directory for a submodule. At most limit bytes in all.
+func writeTree(root *os.Root, entries []treeEntry, read func(string, func(io.Reader, int64) error) error, limit int64) error {
+	var total int64
+	for _, e := range entries {
+		name := e.path
+		if name == "" || path.IsAbs(name) || path.Clean(name) != name || name == ".." || strings.HasPrefix(name, "../") {
+			return fmt.Errorf("tree entry %q is outside the context", e.path)
+		}
+		if dir := path.Dir(name); dir != "." {
+			if err := root.MkdirAll(dir, 0o755); err != nil {
+				return err
+			}
+		}
+		switch e.mode {
+		case "100644", "100755":
+			mode := os.FileMode(0o644)
+			if e.mode == "100755" {
+				mode = 0o755
+			}
+			err := read(e.oid, func(r io.Reader, size int64) error {
+				if total += size; total > limit {
+					return ErrContextTooLarge
+				}
+				f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+				if err != nil {
+					return err
+				}
+				_, err = io.CopyN(f, r, size)
+				if cerr := f.Close(); err == nil {
+					err = cerr
+				}
+				if err == nil {
+					// Not the umask's: COPY keeps modes, and a build is the
+					// same on every host.
+					err = root.Chmod(name, mode)
+				}
+				return err
+			})
+			if err != nil {
+				return err
+			}
+		case "120000":
+			err := read(e.oid, func(r io.Reader, size int64) error {
+				if total += size; total > limit {
+					return ErrContextTooLarge
+				}
+				target, err := io.ReadAll(r)
+				if err != nil {
+					return err
+				}
+				return root.Symlink(string(target), name)
+			})
+			if err != nil {
+				return err
+			}
+		case "160000":
 			if err := root.MkdirAll(name, 0o755); err != nil {
 				return err
 			}
-		case tar.TypeReg:
-			if total += h.Size; total > limit {
-				return ErrContextTooLarge
-			}
-			if dir := path.Dir(name); dir != "." {
-				if err := root.MkdirAll(dir, 0o755); err != nil {
-					return err
-				}
-			}
-			mode := os.FileMode(0o644)
-			if h.Mode&0o111 != 0 {
-				mode = 0o755
-			}
-			f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
-			if err != nil {
-				return err
-			}
-			_, err = io.CopyN(f, tr, h.Size)
-			if cerr := f.Close(); err == nil {
-				err = cerr
-			}
-			if err == nil {
-				// Not the umask's: COPY keeps modes, and a build is the
-				// same on every host.
-				err = root.Chmod(name, mode)
-			}
-			if err != nil {
-				return err
-			}
-		case tar.TypeSymlink:
-			if dir := path.Dir(name); dir != "." {
-				if err := root.MkdirAll(dir, 0o755); err != nil {
-					return err
-				}
-			}
-			if err := root.Symlink(h.Linkname, name); err != nil {
-				return err
-			}
+		default:
+			return fmt.Errorf("tree entry %q: unexpected mode %s", e.path, e.mode)
 		}
 	}
+	return FixDirModes(root)
 }
 
 // FixDirModes makes every directory under root 0755, whatever the umask

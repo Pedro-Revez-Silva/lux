@@ -1,12 +1,12 @@
 package gitws
 
 import (
-	"archive/tar"
-	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -79,39 +79,27 @@ func TestExportWritesTheCommitsTree(t *testing.T) {
 	}
 }
 
-// A hostile archive cannot write outside the context: not by .., not by
-// an absolute name, not through a symlink it made.
-func TestUntarStaysInside(t *testing.T) {
+// A hostile tree cannot write outside the context: not by .., not by an
+// absolute name, not through a symlink it made.
+func TestTreeStaysInside(t *testing.T) {
 	outside := t.TempDir()
-	for name, entries := range map[string][]tar.Header{
-		"dotdot":   {{Name: "../escape", Typeflag: tar.TypeReg, Size: 1, Mode: 0o644}},
-		"absolute": {{Name: filepath.Join(outside, "escape"), Typeflag: tar.TypeReg, Size: 1, Mode: 0o644}},
-		"symlink dir": {
-			{Name: "d", Typeflag: tar.TypeSymlink, Linkname: outside},
-			{Name: "d/escape", Typeflag: tar.TypeReg, Size: 1, Mode: 0o644},
-		},
-		"symlink file": {
-			{Name: "f", Typeflag: tar.TypeSymlink, Linkname: filepath.Join(outside, "escape")},
-			{Name: "f", Typeflag: tar.TypeReg, Size: 1, Mode: 0o644},
-		},
+	blobs := map[string]string{"x": "x", "dir": outside, "file": filepath.Join(outside, "escape")}
+	read := func(oid string, fn func(io.Reader, int64) error) error {
+		return fn(strings.NewReader(blobs[oid]), int64(len(blobs[oid])))
+	}
+	for name, entries := range map[string][]treeEntry{
+		"dotdot":       {{"100644", "x", "../escape"}},
+		"absolute":     {{"100644", "x", filepath.Join(outside, "escape")}},
+		"unclean":      {{"100644", "x", "a/../../escape"}},
+		"symlink dir":  {{"120000", "dir", "d"}, {"100644", "x", "d/escape"}},
+		"symlink file": {{"120000", "file", "f"}, {"100644", "x", "f"}},
 	} {
-		var buf bytes.Buffer
-		tw := tar.NewWriter(&buf)
-		for _, h := range entries {
-			if err := tw.WriteHeader(&h); err != nil {
-				t.Fatal(err)
-			}
-			if h.Size > 0 {
-				tw.Write([]byte("x"))
-			}
-		}
-		tw.Close()
 		dst := t.TempDir()
 		root, err := os.OpenRoot(dst)
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = untar(root, &buf, 1<<20)
+		err = writeTree(root, entries, read, 1<<20)
 		root.Close()
 		if err == nil {
 			t.Errorf("%s: no error", name)
@@ -120,6 +108,43 @@ func TestUntarStaysInside(t *testing.T) {
 			t.Fatalf("%s: wrote outside the context", name)
 		}
 	}
+}
+
+// The export is the commit's tree byte for byte: its .gitattributes do
+// not apply (export-subst would expand $Format:...$ with whatever tags and
+// branches the repository has now; export-ignore would drop committed
+// files), so a tag pushed later changes nothing.
+func TestExportIsTheLiteralTree(t *testing.T) {
+	bare, _ := remote(t)
+	work := filepath.Join(filepath.Dir(bare), "work")
+	files := map[string]string{
+		".gitattributes": "decoration.txt export-subst\nneeded.conf export-ignore\n* text=auto eol=crlf\n",
+		"decoration.txt": "$Format:%D %H$\n",
+		"needed.conf":    "required by COPY --from=repo\n",
+	}
+	for name, text := range files {
+		os.WriteFile(filepath.Join(work, name), []byte(text), 0o644)
+	}
+	gitRun(t, work, "add", "-A")
+	gitRun(t, work, "commit", "-qm", "pinned inputs")
+	sha := gitRun(t, work, "rev-parse", "HEAD")
+	gitRun(t, work, "push", "-q", bare, "HEAD:refs/heads/main")
+	export := func() string {
+		dst := t.TempDir()
+		if err := New(t.TempDir()).Export(context.Background(), Repo{Tenant: "t", Name: "repo", URL: bare, Ref: sha}, dst, 1<<20); err != nil {
+			t.Fatal(err)
+		}
+		for name, want := range files {
+			if b, err := os.ReadFile(filepath.Join(dst, name)); err != nil || string(b) != want {
+				t.Fatalf("%s: %q %v, want %q", name, b, err, want)
+			}
+		}
+		return dst
+	}
+	export()
+	gitRun(t, work, "-c", "tag.gpgSign=false", "tag", "UNPINNED-DECORATION", sha)
+	gitRun(t, work, "push", "-q", bare, "refs/tags/UNPINNED-DECORATION")
+	export()
 }
 
 // A remote that advertises refs/replace/<sha> can't change what a pinned
