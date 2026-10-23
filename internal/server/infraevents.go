@@ -475,6 +475,11 @@ func PoolSettings(pl Pool) map[string]any {
 		_ = json.Unmarshal(b, &norm)
 		f["transferPrices"] = norm
 	}
+	// Absent from a set that leaves it unchanged (lux pools set without
+	// --preemptible); a stored pool always has it.
+	if pl.Preemptible != nil {
+		f["preemptible"] = *pl.Preemptible
+	}
 	return f
 }
 
@@ -489,10 +494,10 @@ func poolSettings(ctx context.Context, tx pgx.Tx, tenantID *string, name string)
 	var shared, retired, isDefault bool
 	err := tx.QueryRow(ctx, `SELECT id, provider, template, min_hosts, max_hosts, warm_hosts, coalesce(scale_down_after_s, 0),
 			warm_while_active, shared, retired, is_default, coalesce(trim_scale(hourly_price)::text, ''), coalesce(price_currency, ''), shape,
-			coalesce(placement, ''), transfer_prices
+			coalesce(placement, ''), transfer_prices, preemptible
 		FROM pools WHERE tenant_id IS NOT DISTINCT FROM $1 AND name = $2 FOR NO KEY UPDATE`, tenantID, name).
 		Scan(&p.id, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts, &sda, &pl.WarmWhileActive,
-			&shared, &retired, &isDefault, &pl.HourlyPrice, &pl.Currency, &pl.Shape, &pl.Placement, &pl.TransferPrices)
+			&shared, &retired, &isDefault, &pl.HourlyPrice, &pl.Currency, &pl.Shape, &pl.Placement, &pl.TransferPrices, &pl.Preemptible)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

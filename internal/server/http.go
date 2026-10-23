@@ -80,7 +80,7 @@ type errorBody struct {
 }
 
 type errorInfo struct {
-	Code    string   `json:"code" doc:"Stable error code, e.g. not_found, invalid_spec, quota_exceeded."`
+	Code    string   `json:"code" doc:"Stable error code, e.g. not_found, invalid_spec, quota_exceeded, pool_required, pool_preemptible, pool_has_non_preemptible_runs."`
 	Details []string `json:"details,omitempty" doc:"Every problem, when there are several (invalid_spec, secrets_required, validation)."`
 	Message string   `json:"message"`
 }

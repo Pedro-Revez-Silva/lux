@@ -123,7 +123,10 @@ supplying them again. `lux get` says which (`secrets: … held by luxd`).
 
 A chosen host (`--to`) must be ready, not draining, and one the Run's tenant
 may use; the Run still needs room there. It may be outside the Run's pool
-or labels: the operator's choice wins over the spec's placement.
+or labels: the operator's choice wins over the spec's placement. For a
+non-preemptible Run (`placement.preemptible: false`) it must not be a spot
+instance and its runner must support non-preemptible Runs; otherwise
+`--to` is refused with 422 `invalid_spec`.
 
 ## History
 

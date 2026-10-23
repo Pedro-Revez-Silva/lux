@@ -39,8 +39,9 @@ func (s *Server) routes(api huma.API) {
 	// Runs.
 	register(s, api, huma.Operation{
 		OperationID: "submitRun", Method: http.MethodPost, Path: "/v1/runs", Tags: []string{"runs"},
-		Summary:       "Submit a Run",
-		Description:   "Validates and normalizes the RunSpec (docs/runspec.md) and queues the Run. Secret values are held in memory until the Run is placed, never stored.",
+		Summary: "Submit a Run",
+		Description: "Validates and normalizes the RunSpec (docs/runspec.md) and queues the Run. Secret values are held in memory until the Run is placed, never stored. " +
+			"A Run with placement.preemptible false must name its pool (422 pool_required) and that pool must have preemptible false (422 pool_preemptible); validateOnly applies the same checks.",
 		DefaultStatus: http.StatusCreated,
 		Responses:     map[string]*huma.Response{"200": {Description: "An earlier submission with the same Idempotency-Key.", Content: jsonContent(schemaRef[Run](api))}},
 		Errors:        []int{http.StatusBadRequest, http.StatusUnprocessableEntity, http.StatusTooManyRequests},
@@ -108,7 +109,7 @@ func (s *Server) routes(api huma.API) {
 			"resources changes what the Run gets from now on, written into its spec: cpus and memory, larger or smaller; disk larger, or smaller " +
 			"only down to the snapshot's measured use plus headroom (otherwise kept, and resize.disk in the answer says why). " +
 			"A Run already resuming refuses other sizes (409).\n\n" +
-			"placement.poolId moves the Run to another pool, checked first (422 unknown_pool, platform_mismatch, pool_unfit; nothing changes). " +
+			"placement.poolId moves the Run to another pool, checked first (422 unknown_pool, platform_mismatch, pool_unfit, and pool_preemptible for a Run with placement.preemptible false into a preemptible pool; nothing changes). " +
 			"validateOnly runs every check and changes nothing: 200 with valid: true, or the error the resume would meet.",
 		DefaultStatus: http.StatusAccepted,
 		Responses:     map[string]*huma.Response{"200": {Description: "validateOnly: the resume would be accepted.", Content: jsonContent(schemaRef[ResumeAnswer](api))}},
@@ -448,7 +449,9 @@ func (s *Server) routes(api huma.API) {
 			"for tenants without one of their own. " +
 			"An `ec2` pool is stored only if EC2 would launch its template (a dry-run RunInstances per subnet and fallback type, within 10s); " +
 			"otherwise 422 `invalid_pool` `template: ec2 cannot launch it: <EC2's code>: <message>`. " +
-			"A pool set again with the same provider and an identical template is not checked. " +
+			"A pool set again with the same provider, preemptible and an identical template is not checked; the check launches with the market `preemptible` gives. " +
+			"`preemptible` omitted on create follows an `ec2` template's `spot` (else true), omitted on update leaves it; a `spot` contradicting it is 422 `invalid_pool`. " +
+			"409 `pool_has_non_preemptible_runs`: the set makes the pool preemptible while a Run with placement.preemptible false is queued, live or resumable in it. " +
 			"409 `pool_changed`: another set created or replaced the pool while its template was being checked; set it again.",
 		Errors: []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity},
 	}, "admin", s.putPool)
@@ -710,7 +713,7 @@ func (s *Server) submitRun(ctx context.Context, in *submitRunInput) (*submitRunO
 		// The Run is bound to its pool's id: every later placement stays
 		// in that pool whatever the default becomes or the pool is called.
 		// The spec keeps the name as resolved now.
-		rp, err := resolvePool(ctx, tx, p.TenantID, stored.Placement.Pool, stored.Placement.PoolID)
+		rp, err := resolveSubmitPool(ctx, tx, p.TenantID, &stored)
 		if err != nil {
 			return err
 		}
@@ -1749,7 +1752,15 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 			if placeOn != nil && placeOnPool.ID != *rp.ID {
 				return errf(http.StatusUnprocessableEntity, "invalid_spec", "the chosen host is in pool %s, not %s", cmp.Or(placeOnPool.Name, "(none)"), rp.Name)
 			}
+			if sp.NonPreemptible() {
+				if err := requireNonPreemptiblePool(ctx, tx, rp); err != nil {
+					return err
+				}
+			}
 			to = &rp
+		}
+		if err := checkChosenHost(ctx, tx, &sp, placeOn); err != nil {
+			return err
 		}
 		switch {
 		case resumable(state):
@@ -3190,14 +3201,15 @@ type listPoolsOutput struct {
 const poolColumns = `p.id, p.name, coalesce(t.name, ''), p.provider, p.template, p.min_hosts, p.max_hosts, p.warm_hosts,
 	coalesce(p.scale_down_after_s, 0), p.warm_while_active,
 	p.shared, p.tenant_id IS NULL, coalesce(trim_scale(p.hourly_price)::text, ''), coalesce(p.price_currency, ''), p.is_default, p.shape,
-	coalesce(p.placement, ''), CASE WHEN $1 = '' OR p.tenant_id = $1 THEN p.transfer_prices END`
+	coalesce(p.placement, ''), CASE WHEN $1 = '' OR p.tenant_id = $1 THEN p.transfer_prices END, p.preemptible`
 
 func scanPool(row pgx.Row) (Pool, error) {
 	var pl Pool
 	var sda int
 	var isDefault bool
 	err := row.Scan(&pl.ID, &pl.Name, &pl.Tenant, &pl.Provider, &pl.Template, &pl.MinHosts, &pl.MaxHosts, &pl.WarmHosts,
-		&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &isDefault, &pl.Shape, &pl.Placement, &pl.TransferPrices)
+		&sda, &pl.WarmWhileActive, &pl.Shared, &pl.Platform, &pl.HourlyPrice, &pl.Currency, &isDefault, &pl.Shape, &pl.Placement, &pl.TransferPrices,
+		&pl.Preemptible)
 	pl.ScaleDownAfter.Duration = time.Duration(sda) * time.Second
 	pl.IsDefault = &isDefault
 	if pl.Shape != nil {
@@ -3513,25 +3525,29 @@ func (s *Server) putPool(ctx context.Context, in *poolBody) (*poolBody, error) {
 	// A pool this set creates gets newID, which its check's lux:pool-id
 	// tag carries; an existing one keeps its own.
 	newID := ids.New(ids.Pool)
-	checkedID, err := CheckPoolTemplate(ctx, s.db, s.cfg.Providers, p.TenantID, pl.Name, newID, pl.Provider, pl.Template)
+	checkedID, err := CheckPoolTemplate(ctx, s.db, s.cfg.Providers, p.TenantID, pl.Name, newID, pl.Provider, pl.Template, pl.Preemptible)
 	if err != nil {
 		return nil, err
 	}
 	var out Pool
 	err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		err := SavePool(ctx, tx, p.TenantID, pl.Name, pl.IsDefault, func() error {
+			preemptible, err := SavePoolPreemptible(ctx, tx, p.TenantID, pl.Name, pl.Provider, pl.Template, pl.Preemptible)
+			if err != nil {
+				return err
+			}
 			var storedID string
-			err := tx.QueryRow(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
-					scale_down_after_s, warm_while_active, hourly_price, price_currency, shape, placement, transfer_prices)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''), $13, nullif($14, ''), $15)
+			err = tx.QueryRow(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts,
+					scale_down_after_s, warm_while_active, hourly_price, price_currency, shape, placement, transfer_prices, preemptible)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, nullif($11, '')::numeric, nullif($12, ''), $13, nullif($14, ''), $15, $16)
 				ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 					min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts,
 					scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
 					hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency, shape = EXCLUDED.shape,
-					placement = EXCLUDED.placement, transfer_prices = EXCLUDED.transfer_prices,
+					placement = EXCLUDED.placement, transfer_prices = EXCLUDED.transfer_prices, preemptible = EXCLUDED.preemptible,
 					`+PoolRevive+` RETURNING id`,
 				newID, p.TenantID, pl.Name, pl.Provider, pl.Template, pl.MinHosts, pl.MaxHosts, pl.WarmHosts,
-				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency, pl.Shape, pl.Placement, pl.TransferPrices).Scan(&storedID)
+				sda, pl.WarmWhileActive, pl.HourlyPrice, pl.Currency, pl.Shape, pl.Placement, pl.TransferPrices, preemptible).Scan(&storedID)
 			if err != nil {
 				return err
 			}

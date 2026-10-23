@@ -123,7 +123,7 @@ func (b blockerSet) classify(blockers []fitBlocker) bool {
 	}
 	for _, f := range blockers {
 		switch f.Kind {
-		case kindSpotReclaim, kindSyncModes:
+		case kindSpotReclaim, kindSyncModes, kindNonPreemptible:
 			b.add(blockCapability, f.Reason, nil)
 			return false
 		case kindDiskPressure:

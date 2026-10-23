@@ -133,6 +133,49 @@ func TestLaunchReturnsInstanceFacts(t *testing.T) {
 	}
 }
 
+// A pool's preemptible decides the market, through the template luxd hands
+// Launch (server.ProviderTemplate): false launches on-demand (no
+// InstanceMarketOptions) even from a stored template with spot; true
+// launches spot from a template without it.
+func TestLaunchMarketFollowsPoolPreemptible(t *testing.T) {
+	awsTestEnv(t)
+	var markets []string
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		markets = append(markets, r.PostForm.Get("InstanceMarketOptions.MarketType"))
+		w.Header().Set("Content-Type", "text/xml")
+		fmt.Fprint(w, `<RunInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><reservationId>r-1</reservationId>`+
+			`<instancesSet><item><instanceId>i-0abc</instanceId><instanceType>m7i.2xlarge</instanceType>`+
+			`<placement><availabilityZone>eu-west-1b</availabilityZone></placement>`+
+			`<instanceState><code>0</code><name>pending</name></instanceState></item></instancesSet></RunInstancesResponse>`)
+	}))
+	defer fake.Close()
+	p := New(fake.URL, discard)
+	for _, c := range []struct {
+		stored      string
+		preemptible bool
+		market      string
+	}{
+		{`{"region": "eu-west-1", "launchTemplate": "lt-1", "userData": "env", "spot": true}`, false, server.MarketOnDemand},
+		{`{"region": "eu-west-1", "launchTemplate": "lt-1", "userData": "env"}`, true, server.MarketSpot},
+	} {
+		tmpl, err := server.ProviderTemplate("ec2", json.RawMessage(c.stored), c.preemptible)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := p.Launch(context.Background(), tmpl, nil, map[string]string{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l.Market != c.market {
+			t.Errorf("preemptible %v: market %q, want %q", c.preemptible, l.Market, c.market)
+		}
+	}
+	if fmt.Sprint(markets) != "[ spot]" {
+		t.Errorf("requested markets %q, want on-demand (none) then spot", markets)
+	}
+}
+
 // The runner env a pool's instances boot with: LUX_NESTED=true only when the
 // template opts in, and a caller's own LUX_NESTED never leaks through a
 // template that does not.

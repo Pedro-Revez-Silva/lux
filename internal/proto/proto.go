@@ -505,6 +505,11 @@ const CapSpotReclaim = "spot-reclaim-v1"
 // runners.
 const CapDiskScale = "disk-scale"
 
+// CapNonPreemptible is the Hello capability of a runner whose disk-pressure
+// guard never stops a placement whose spec has placement.preemptible false.
+// Non-preemptible Runs are placed only on such runners.
+const CapNonPreemptible = "non-preemptible"
+
 // ImageResolution is a built image as its Run's first build made it: the
 // Containerfile with every FROM pinned to a digest, and the image id.
 // Later placements build from this Containerfile.

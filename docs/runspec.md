@@ -84,6 +84,7 @@ placement:
   # poolId: pool_…              # or the pool by id, which a rename keeps; not with pool
   requires: { arch: amd64 }     # host labels that must match
   prefers: { region: eu-west-1 }
+  # preemptible: false          # lux never takes it away on its own; needs a named non-preemptible pool (see Non-preemptible Runs)
 
 network:
   egress:                       # default deny: only these are reachable
@@ -170,6 +171,62 @@ distinguishes a valid spec from one that would start now, with effective resourc
 and pool, an eligible host, or blockers and remaining settling wait. It is advisory,
 not a reservation or a workload-success guarantee: concurrent work can change
 availability immediately. See [CLI](cli.md#runs).
+
+## Non-preemptible Runs
+
+`placement.preemptible: false` opts the Run into a guarantee: lux never takes
+it away on its own initiative. Omitted, it is `true`: every Run is
+preemptible unless it opts out.
+
+```yaml
+image: { ref: alpine }
+workload: { command: [sh, -c, "make release"] }
+placement: { pool: steady, preemptible: false }
+```
+
+At submit, `validateOnly` (`lux run --dry-run`) and on a resume that moves the
+Run to another pool, the same rules apply:
+
+- The pool must be named, by `placement.pool` or `placement.poolId`. Without
+  one the submit is refused with 422 `pool_required`: a tenant's or the
+  platform's default pool is never used.
+- That pool must have `preemptible: false`
+  ([Hosts and pools](concepts.md#hosts-and-pools)); otherwise 422
+  `pool_preemptible`. So must the pool a resume moves it to
+  (`lux resume --pool`, `placement.poolId`). Sizes resolve against it as for
+  any Run.
+- `spot: true` does not go with it: 422 `invalid_spec`.
+
+The Run is placed only on a host that is not a spot instance (`hosts.market`
+is not `spot`; a static host has none) and whose lux-runner exempts it from
+its disk guard. Other hosts are `capability` blockers in a `validateOnly`
+answer, and its wait reason says they cannot take a non-preemptible Run.
+An operator's `lux resume --to` or `lux migrate --to` naming such a host is
+refused with 422 `invalid_spec`, before the Run is stopped or changed.
+
+What the guarantee covers, exactly:
+
+- **Host disk pressure.** The runner's low-free-space guard
+  ([operations](operations.md#disk-pressure)) never stops the Run, whatever
+  its excess. With nothing else to stop, the host reports the pressure as
+  unrelieved and takes no new Run until it recovers.
+- **Spot interruption.** None: the Run is never on a spot instance.
+- **Spot reclamation.** None: only `spot: true` Runs are reclaimed.
+- **Scale-down and outdated-binary drains.** None, as for every Run: they
+  wait for a host's live Runs to end.
+
+What still applies, as to any Run:
+
+- its own `timeout` and `workload.idleTimeout`;
+- a stop or terminate asked for;
+- its own disk limit: over `resources.disk` for longer than `diskGrace`, or
+  at twice it, it is stopped and fails (`disk`);
+- an operator's forced action: `lux hosts drain --force-evict`,
+  `lux pools rm --force-evict`, `lux migrate`.
+
+A host lost to its provider (an AWS maintenance or retirement event of an
+on-demand instance, a hardware failure) is not lux's initiative and is not
+covered.
 
 ## Rules
 

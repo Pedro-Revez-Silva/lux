@@ -357,6 +357,26 @@ func TestPoolsLsOwner(t *testing.T) {
 	}
 }
 
+// pools set sends preemptible only with --preemptible, shows its change,
+// and leaves it out of the comparison otherwise; pools ls shows it.
+func TestPoolsSetPreemptible(t *testing.T) {
+	url, posted := poolsLuxd(t, false, `{"name":"steady","tenant":"t1","provider":"static","preemptible":true}`)
+	code, stdout, stderr := lux(url, "pools", "set", "steady", "--provider", "static", "--preemptible=false")
+	if code != 0 || len(*posted) != 1 || (*posted)[0]["preemptible"] != false || stdout != "preemptible true→false\n" {
+		t.Fatalf("--preemptible=false: exit %d (%s), posted %v, stdout %q", code, stderr, *posted, stdout)
+	}
+	code, stdout, stderr = lux(url, "pools", "set", "steady", "--provider", "static")
+	if _, sent := (*posted)[1]["preemptible"]; code != 0 || sent || stdout != "no changes\n" {
+		t.Fatalf("without --preemptible: exit %d (%s), posted %v, stdout %q", code, stderr, (*posted)[1], stdout)
+	}
+	code, stdout, _ = lux(url, "pools", "ls")
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	header, row := strings.Fields(lines[0]), strings.Fields(lines[1])
+	if code != 0 || header[len(header)-1] != "PREEMPTIBLE" || row[len(row)-1] != "true" {
+		t.Fatalf("pools ls: %q", stdout)
+	}
+}
+
 func TestEventLine(t *testing.T) {
 	last := time.Date(2026, 9, 29, 10, 0, 5, 0, time.Local)
 	for _, c := range []struct {

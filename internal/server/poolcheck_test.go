@@ -17,20 +17,23 @@ import (
 
 // checkingProvider answers Check as EC2's dry run would: an error for a
 // launch template it does not know (or for every template, with down),
-// and counts the checks and keeps the last one's tags. during, when set,
-// runs inside the next Check (once), as another writer racing the set.
+// and counts the checks and keeps the last one's tags and template. during,
+// when set, runs inside the next Check (once), as another writer racing
+// the set.
 type checkingProvider struct {
 	fakeLaunchProvider
-	known    map[string]bool
-	down     bool
-	checks   int
-	lastTags map[string]string
-	during   func()
+	known        map[string]bool
+	down         bool
+	checks       int
+	lastTags     map[string]string
+	lastTemplate json.RawMessage
+	during       func()
 }
 
 func (p *checkingProvider) Check(_ context.Context, template json.RawMessage, tags map[string]string) error {
 	p.checks++
 	p.lastTags = tags
+	p.lastTemplate = template
 	if during := p.during; during != nil {
 		p.during = nil
 		during()
@@ -265,5 +268,43 @@ func TestPutPoolRefusesAPoolChangedDuringItsCheck(t *testing.T) {
 				t.Errorf("checked id %q, the other write's pool's %q: want two ids", checkedID, stored.ID)
 			}
 		})
+	}
+}
+
+// The check sees the template as it launches: spot from the pool's
+// preemptible. Changing only preemptible is checked again; the identical
+// set after it is not.
+func TestPutPoolChecksThePoolsMarket(t *testing.T) {
+	s := testServer(t)
+	prov := &checkingProvider{known: map[string]bool{"lux-runner": true}}
+	s.cfg.Providers = map[string]Provider{"ec2": prov}
+	execSQL(t, s, context.Background(), `INSERT INTO tenants (id, name) VALUES ('t1', 't1')`)
+	ctx := context.WithValue(context.Background(), principalKey, Principal{TenantID: "t1", Scopes: []string{"admin"}})
+	tmpl := map[string]any{"region": "eu-north-1", "launchTemplate": "lux-runner"}
+	put := func(preemptible bool) {
+		t.Helper()
+		if _, err := s.putPool(ctx, poolIn(Pool{Name: "arm64", Provider: "ec2", Template: tmpl, Preemptible: mark(preemptible)})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkedSpot := func() (any, bool) {
+		var sent map[string]any
+		if err := json.Unmarshal(prov.lastTemplate, &sent); err != nil {
+			t.Fatal(err)
+		}
+		spot, ok := sent["spot"]
+		return spot, ok
+	}
+	put(false)
+	if spot, ok := checkedSpot(); prov.checks != 1 || ok {
+		t.Fatalf("create with preemptible false: %d checks, spot %v", prov.checks, spot)
+	}
+	put(true)
+	if spot, _ := checkedSpot(); prov.checks != 2 || spot != true {
+		t.Fatalf("preemptible true: %d checks, spot %v, want 2 checks, spot true", prov.checks, spot)
+	}
+	put(true)
+	if prov.checks != 2 {
+		t.Errorf("an identical set was checked again: %d checks", prov.checks)
 	}
 }

@@ -22,7 +22,7 @@ func (s *Server) validateSubmit(ctx context.Context, p Principal, stored spec.Ru
 		if err := checkRunQuota(ctx, tx, p.TenantID); err != nil {
 			return err
 		}
-		rp, err := resolvePool(ctx, tx, p.TenantID, stored.Placement.Pool, stored.Placement.PoolID)
+		rp, err := resolveSubmitPool(ctx, tx, p.TenantID, &stored)
 		if err != nil {
 			return err
 		}

@@ -105,7 +105,7 @@ def test_template_tags_are_kept_and_lux_tags_are_reserved(lux, ec2):
     bad = {**ec2.template, "tags": {"lux:pool": "burst"}}
     r = lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps(bad), check=False)
     assert r.returncode != 0 and "lux:* tags are set by lux" in r.stderr, r.stderr
-    lux.run("pools", "set", "burst", "--provider", "ec2", "--max", "1",
+    lux.run("pools", "set", "burst", "--provider", "ec2", "--max", "1", "--preemptible=false",
             "--template", json.dumps({**ec2.template, "tags": {"team": "platform"}}))
     run_id = lux.submit(generic(ALPINE_IMAGE, "echo", "tagged", placement={"pool": "burst"}))
     lux.wait_state(run_id, "succeeded", timeout=120)
@@ -218,7 +218,7 @@ def test_warm_while_active_scales_an_idle_pool_to_zero(lux, ec2):
     use: an unused pool has none; after a Run, an idle host is kept for the
     pool's --scale-down-after (the next Run needs no boot); then the pool
     goes down to its minimum, 0."""
-    lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps(ec2.template),
+    lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps(ec2.template), "--preemptible=false",
             "--max", "3", "--warm", "1", "--warm-while-active", "--scale-down-after", "8s")
     pl = next(p for p in lux.json("pools", "ls") if p["name"] == "burst")
     assert pl["warmWhileActive"] and pl["scaleDownAfter"] == "8s", pl

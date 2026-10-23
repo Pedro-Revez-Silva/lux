@@ -56,6 +56,11 @@ export function RunPage({ id }: { id: string }) {
             <StatePill kind="run" state={run.state} activity={run.activity} />
             <Badge outline>{run.spec.workload.adapter}</Badge>
             <Badge outline>epoch {run.epoch}</Badge>
+            {run.spec.placement?.preemptible === false && (
+              <Badge outline title="placement.preemptible false: lux never takes this Run away on its own initiative">
+                non-preemptible
+              </Badge>
+            )}
           </>
         }
         description={

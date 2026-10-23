@@ -20,7 +20,10 @@
 // With "spot", instances are one-time spot instances, terminated on
 // interruption. Every instance's user data sets LUX_EC2_IMDS, so its
 // runner watches for the interruption notice and its Runs move to other
-// hosts before the instance goes.
+// hosts before the instance goes. luxd sets spot from the pool's
+// preemptible before every Launch and Check (server.ProviderTemplate): a
+// pool with preemptible false launches on-demand instances, whatever its
+// stored template says, and takes non-preemptible Runs.
 //
 // userData picks how the runner's environment reaches the instance
 // (hostboot.Render implements all three):

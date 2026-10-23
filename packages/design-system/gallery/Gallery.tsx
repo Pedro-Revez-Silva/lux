@@ -423,6 +423,9 @@ function Layout() {
               <StatePill kind="run" state="running" activity="busy" />
               <Badge outline>generic</Badge>
               <Badge outline>epoch 2</Badge>
+              <Badge outline title="placement.preemptible false: lux never takes this Run away on its own initiative">
+                non-preemptible
+              </Badge>
             </>
           }
           description={

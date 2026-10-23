@@ -29,7 +29,7 @@ type Run = server.Run
 
 func (a *app) runCmd() *cobra.Command {
 	var file, idem, secretsFrom, pool, size string
-	var follow, wait, spot, dryRun bool
+	var follow, wait, spot, dryRun, preemptible bool
 	var labels []string
 	var idleTimeout time.Duration
 	cmd := &cobra.Command{
@@ -49,6 +49,10 @@ or placement.pool, the server picks the pool.
 the Run's cpus, memory and disk; it cannot be combined with resources.cpus,
 memory or disk in the spec. On a shaped pool, those are rounded up to the
 smallest size covering them; on an unshaped pool, --size is refused.
+
+--preemptible=false sets placement.preemptible: false. lux then never takes
+the Run away on its own initiative (docs/runspec.md, Non-preemptible Runs).
+It needs a pool named by --pool or the spec, one with preemptible false.
 
 Secret values in the spec can be read from the environment with
 value: ${NAME}, or from a .env file with --secrets-from.`,
@@ -84,6 +88,9 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 			}
 			if cmd.Flags().Changed("spot") {
 				sp.Spot = spot
+			}
+			if cmd.Flags().Changed("preemptible") {
+				sp.Placement.Preemptible = &preemptible
 			}
 			if size != "" {
 				sp.Resources.Size = size
@@ -138,6 +145,7 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 	cmd.Flags().StringVar(&idem, "idempotency-key", "", "make the submission safe to retry")
 	cmd.Flags().StringVar(&secretsFrom, "secrets-from", "", ".env file supplying secret values")
 	cmd.Flags().BoolVar(&spot, "spot", false, "opt into opportunistic scheduling (requires resumePolicy never)")
+	cmd.Flags().BoolVar(&preemptible, "preemptible", true, "--preemptible=false: lux never preempts the Run; needs a named pool with preemptible false (sets placement.preemptible)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate and check advisory live admission without creating a Run; not a reservation or workload-success guarantee")
 	cmd.Flags().BoolVar(&follow, "follow", false, "stream output until the Run ends; exit with its code")
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait until the Run ends; exit with its code")

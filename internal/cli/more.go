@@ -688,7 +688,7 @@ func counts(m map[string]int) string {
 // poolFields are pools set's flags that replace a pool's settings: without
 // any of them, --default only moves the mark.
 var poolFields = []string{"provider", "min", "max", "warm", "scale-down-after", "warm-while-active", "template", "hourly-price", "currency", "shape", "placement",
-	"price-transfer", "price-public-ip"}
+	"price-transfer", "price-public-ip", "preemptible"}
 
 func (a *app) poolsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "pools", Short: "Host pools"}
@@ -741,12 +741,16 @@ name): a tenant's pool and a platform pool may share a name.`,
 					}
 					row = append(row, owner)
 				}
-				row = append(row, def, p.Provider, fmt.Sprintf("%d-%d", p.MinHosts, p.MaxHosts), fmt.Sprint(p.WarmHosts), fmt.Sprint(p.Shared))
+				preemptible := "-"
+				if p.Preemptible != nil {
+					preemptible = fmt.Sprint(*p.Preemptible)
+				}
+				row = append(row, def, p.Provider, fmt.Sprintf("%d-%d", p.MinHosts, p.MaxHosts), fmt.Sprint(p.WarmHosts), fmt.Sprint(p.Shared), preemptible)
 				rows = append(rows, row)
 			}
-			header := "NAME\tDEFAULT\tPROVIDER\tHOSTS\tWARM\tSHARED"
+			header := "NAME\tDEFAULT\tPROVIDER\tHOSTS\tWARM\tSHARED\tPREEMPTIBLE"
 			if showOwner {
-				header = "NAME\tOWNER\tDEFAULT\tPROVIDER\tHOSTS\tWARM\tSHARED"
+				header = "NAME\tOWNER\tDEFAULT\tPROVIDER\tHOSTS\tWARM\tSHARED\tPREEMPTIBLE"
 			}
 			a.table(header, rows)
 			return nil
@@ -754,7 +758,7 @@ name): a tenant's pool and a platform pool may share a name.`,
 	}
 	var p server.Pool
 	var template, shape, poolTransfer, poolPublicIP string
-	var isDefault, replace, dryRun bool
+	var isDefault, replace, dryRun, preemptible bool
 	set := &cobra.Command{
 		Use:   "set <name>",
 		Short: "Create or update a pool",
@@ -788,6 +792,14 @@ without --replace.
 luxd checks an ec2 pool's template can launch before storing it (a dry-run
 RunInstances; docs/operations.md, EC2 pools), unless it is unchanged.
 
+--preemptible=false makes the pool non-preemptible: an ec2 pool launches
+on-demand instances, and the pool takes Runs submitted with
+placement.preemptible false (lux run --preemptible=false). Omitted, a new
+pool follows its template's spot (else true) and an existing pool keeps
+its own; a template spot contradicting it is refused. luxd refuses
+--preemptible=true (409 pool_has_non_preemptible_runs) while the pool
+holds a non-preemptible Run that is queued, live or resumable.
+
 --default marks the pool as the tenant's default: Runs whose spec names no
 pool go to it from now on (Runs already submitted keep theirs). It moves
 the mark from the previous default. --default=false clears it. Given
@@ -799,6 +811,9 @@ alone, --default changes only the mark of an existing pool.`,
 			if cmd.Flags().Changed("default") {
 				p.IsDefault = &isDefault
 				marker = !slices.ContainsFunc(poolFields, cmd.Flags().Changed)
+			}
+			if cmd.Flags().Changed("preemptible") {
+				p.Preemptible = &preemptible
 			}
 			if template != "" {
 				if err := json.Unmarshal([]byte(template), &p.Template); err != nil {
@@ -848,6 +863,10 @@ alone, --default changes only the mark of an existing pool.`,
 				return a.c.Do(ctxOf(cmd), "POST", "/v1/pools", p, nil)
 			}
 			before, after := server.PoolSettings(*current), server.PoolSettings(p)
+			// Without --preemptible the set leaves it: no change to show.
+			if p.Preemptible == nil {
+				delete(before, "preemptible")
+			}
 			// luxd stores a price without trailing zeros (0.40 lists as 0.4).
 			after["hourlyPrice"] = trimDecimal(p.HourlyPrice)
 			if marker {
@@ -936,6 +955,7 @@ finds this pool. --platform renames the platform's pool of that name
 	set.Flags().StringVar(&p.Currency, "currency", "", "ISO 4217 currency of --hourly-price, --price-transfer and --price-public-ip (e.g. USD)")
 	set.Flags().StringVar(&poolTransfer, "price-transfer", "", "static pools: default per-GB transfer prices of hosts registering into it, class=price[,…] (as lux hosts set)")
 	set.Flags().StringVar(&poolPublicIP, "price-public-ip", "", "static pools: default public IPv4 charge per hour of hosts registering into it")
+	set.Flags().BoolVar(&preemptible, "preemptible", true, "false: lux never preempts the pool's Runs (an ec2 pool launches on-demand); omitted: the template's spot, else true, on create; unchanged on update")
 	set.Flags().BoolVar(&isDefault, "default", false, "mark it the tenant's default pool, for Runs that name none (--default=false clears it; omitted: unchanged)")
 	set.Flags().BoolVar(&replace, "replace", false, "write even when the set removes template keys, a shape, a placement, a scale-down time, warm-while-active or a price the pool has")
 	set.Flags().BoolVar(&dryRun, "dry-run", false, "print what would change and write nothing")

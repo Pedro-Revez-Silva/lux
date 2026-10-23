@@ -356,9 +356,10 @@ func (r *Runner) Run(ctx context.Context) error {
 
 // capabilities are Hello's: sync modes only with a shim that has them, spot
 // reclamation only with a shim that answers it (this runner enforces it),
-// disk scaling only when it is on.
+// disk scaling only when it is on. Its disk guard always exempts
+// non-preemptible placements.
 func (r *Runner) capabilities() []string {
-	caps := []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet}
+	caps := []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapNonPreemptible}
 	if r.shimSyncModes {
 		caps = append(caps, proto.CapSyncModes)
 	}

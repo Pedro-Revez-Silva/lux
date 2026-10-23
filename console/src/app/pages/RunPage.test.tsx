@@ -200,6 +200,23 @@ test("a starting agent Run whose adapter reads input at the turn's end: the comp
   }
 });
 
+test("a non-preemptible Run carries a non-preemptible badge; an ordinary one does not", async () => {
+  const badges = (el: Element) => [...el.querySelectorAll(".badge")].map((b) => b.textContent);
+  const spec = (placement: Record<string, unknown>) => ({ spec: { image: { ref: IMAGE }, resources: {}, workload: { adapter: "generic" }, placement } });
+  let r = await render("generic", "http://localhost/runs/run_1", spec({ pool: "steady", preemptible: false }));
+  try {
+    expect(badges(r.el)).toContain("non-preemptible");
+  } finally {
+    await r.done();
+  }
+  r = await render("generic", "http://localhost/runs/run_1", spec({ pool: "steady", preemptible: true }));
+  try {
+    expect(badges(r.el)).not.toContain("non-preemptible");
+  } finally {
+    await r.done();
+  }
+});
+
 test("a Run built from a Containerfile: the Image row says so", async () => {
   const r = await render("generic", "http://localhost/runs/run_1", { spec: { image: { build: { containerfile: "Containerfile" } }, resources: {}, workload: { adapter: "generic" } } });
   try {

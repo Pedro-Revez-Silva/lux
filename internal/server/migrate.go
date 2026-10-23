@@ -78,9 +78,10 @@ func (s *Server) migrateRun(ctx context.Context, in *migrateRunInput) (*accepted
 	var hostID string
 	err = s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var state, current, stopping, policy string
-		if err := tx.QueryRow(ctx, `SELECT r.state, coalesce(p.host_id, ''), coalesce(p.stop_reason, ''), `+runResumePolicySQL+` FROM runs r
+		var sp spec.RunSpec
+		if err := tx.QueryRow(ctx, `SELECT r.state, r.spec, coalesce(p.host_id, ''), coalesce(p.stop_reason, ''), `+runResumePolicySQL+` FROM runs r
 				LEFT JOIN placements p ON p.run_id = r.id AND p.epoch = r.current_epoch
-				WHERE r.id = $1 AND r.tenant_id = $2 FOR UPDATE OF r`, in.ID, p.TenantID).Scan(&state, &current, &stopping, &policy); err != nil {
+				WHERE r.id = $1 AND r.tenant_id = $2 FOR UPDATE OF r`, in.ID, p.TenantID).Scan(&state, &sp, &current, &stopping, &policy); err != nil {
 			return err
 		}
 		switch {
@@ -99,6 +100,9 @@ func (s *Server) migrateRun(ctx context.Context, in *migrateRunInput) (*accepted
 			return errf(http.StatusConflict, "not_running", "run is %s", state)
 		case placeOn != nil && *placeOn == current:
 			return errf(http.StatusConflict, "same_host", "the Run is already on that host")
+		}
+		if err := checkChosenHost(ctx, tx, &sp, placeOn); err != nil {
+			return err
 		}
 		var input *proto.Input
 		if req.Input != nil && req.Input.Text != "" {

@@ -127,6 +127,31 @@ func TestRunSpotFlag(t *testing.T) {
 	}
 }
 
+func TestRunPreemptibleFlag(t *testing.T) {
+	placement := func(body map[string]any) map[string]any {
+		p, _ := body["placement"].(map[string]any)
+		return p
+	}
+	body := submitted(t, "run", "--preemptible=false", "--pool", "steady", "--image", "alpine", "--", "true")
+	if got, ok := placement(body)["preemptible"]; !ok || got != false {
+		t.Fatalf("--preemptible=false: placement %v", placement(body))
+	}
+	body = submitted(t, "run", "--image", "alpine", "--", "true")
+	if _, ok := placement(body)["preemptible"]; ok {
+		t.Fatalf("no flag: placement.preemptible sent: %v", placement(body))
+	}
+	file := filepath.Join(t.TempDir(), "spec.yaml")
+	if err := os.WriteFile(file, []byte("image: {ref: alpine}\nworkload: {command: [\"true\"]}\nplacement: {pool: steady, preemptible: false}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := placement(submitted(t, "run", "-f", file))["preemptible"]; got != false {
+		t.Fatalf("spec's preemptible false: sent %v", got)
+	}
+	if got := placement(submitted(t, "run", "-f", file, "--preemptible"))["preemptible"]; got != true {
+		t.Fatalf("--preemptible over the spec's false: sent %v", got)
+	}
+}
+
 func TestRunPoolFlag(t *testing.T) {
 	placement := func(body map[string]any) map[string]any {
 		p, _ := body["placement"].(map[string]any)

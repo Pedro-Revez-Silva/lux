@@ -4,7 +4,7 @@ components:
       additionalProperties: false
       properties:
         code:
-          description: "no_hosts: no live connected host in its pool or chosen host; constraint: labels, nesting, tenancy, pool shape, or another chosen host; capability: the host's lux-runner lacks a feature the Run needs; not_enough_spare: not enough unreserved cpus, memory, disk or run slots; space_not_settled (spot): the spare space has not been continuously free for more than 60s; normal_demand_pending (spot): a queued normal Run could use that space; disk_pressure: the host's runner reports low free disk, and the host takes no new Run until it recovers."
+          description: "no_hosts: no live connected host in its pool or chosen host; constraint: labels, nesting, tenancy, pool shape, or another chosen host; capability: the host's lux-runner lacks a feature the Run needs, or (placement.preemptible false) the host is a spot instance; not_enough_spare: not enough unreserved cpus, memory, disk or run slots; space_not_settled (spot): the spare space has not been continuously free for more than 60s; normal_demand_pending (spot): a queued normal Run could use that space; disk_pressure: the host's runner reports low free disk, and the host takes no new Run until it recovers."
           enum:
             - no_hosts
             - constraint
@@ -624,7 +624,7 @@ components:
       additionalProperties: false
       properties:
         code:
-          description: Stable error code, e.g. not_found, invalid_spec, quota_exceeded.
+          description: Stable error code, e.g. not_found, invalid_spec, quota_exceeded, pool_required, pool_preemptible, pool_has_non_preemptible_runs.
           type: string
         details:
           description: Every problem, when there are several (invalid_spec, secrets_required, validation).
@@ -1634,6 +1634,9 @@ components:
         poolId:
           description: "The pool to run in, by its id (pool_…), which a rename keeps: the tenant's pool with that id, else the platform's. An id no such pool has is refused at submit (422 unknown_pool). Not with pool; at submit, pool is set to that pool's name."
           type: string
+        preemptible:
+          description: "false: lux never takes the Run away on its own initiative: it is placed only on hosts that are not spot instances, and its host's disk-pressure guard never stops it (docs/runspec.md, Non-preemptible Runs). Requires a pool named by pool or poolId (422 pool_required), one with preemptible false (422 pool_preemptible); not with spot (422 invalid_spec). Its own timeout, idleTimeout and disk limit, a stop or terminate, and an operator's forced drain, pool removal or migrate still apply. Omitted: true."
+          type: boolean
         prefers:
           additionalProperties:
             type: string
@@ -1712,6 +1715,9 @@ components:
           type:
             - array
             - "null"
+        preemptible:
+          description: "Whether lux may take the pool's Runs away on its own initiative. true (the default): an ec2 pool launches spot instances. false: an ec2 pool launches on-demand instances, and the pool takes Runs submitted with placement.preemptible false (docs/runspec.md, Non-preemptible Runs). Omitted on create: the ec2 template's spot if it has one, else true; omitted on update: unchanged. A template spot that says otherwise is refused (422 invalid_pool). Changing false to true while a non-preemptible Run is queued, live or resumable in the pool is refused (409 pool_has_non_preemptible_runs)."
+          type: boolean
         provider:
           type: string
         scaleDownAfter:
@@ -6042,7 +6048,7 @@ paths:
         - pools
     post:
       description: |-
-        `isDefault: true` makes it the tenant's default pool, where Runs whose spec names no pool go from then on (Runs already submitted keep theirs); the tenant's previous default loses the mark. `false` clears it. A body of exactly `name` and `isDefault` marks an existing pool and changes nothing else; any other field without `provider` is a 422 `invalid_pool`. From an operator key naming no tenant, a marker-only body marks a platform pool as the platform's default, for tenants without one of their own. An `ec2` pool is stored only if EC2 would launch its template (a dry-run RunInstances per subnet and fallback type, within 10s); otherwise 422 `invalid_pool` `template: ec2 cannot launch it: <EC2's code>: <message>`. A pool set again with the same provider and an identical template is not checked. 409 `pool_changed`: another set created or replaced the pool while its template was being checked; set it again.
+        `isDefault: true` makes it the tenant's default pool, where Runs whose spec names no pool go from then on (Runs already submitted keep theirs); the tenant's previous default loses the mark. `false` clears it. A body of exactly `name` and `isDefault` marks an existing pool and changes nothing else; any other field without `provider` is a 422 `invalid_pool`. From an operator key naming no tenant, a marker-only body marks a platform pool as the platform's default, for tenants without one of their own. An `ec2` pool is stored only if EC2 would launch its template (a dry-run RunInstances per subnet and fallback type, within 10s); otherwise 422 `invalid_pool` `template: ec2 cannot launch it: <EC2's code>: <message>`. A pool set again with the same provider, preemptible and an identical template is not checked; the check launches with the market `preemptible` gives. `preemptible` omitted on create follows an `ec2` template's `spot` (else true), omitted on update leaves it; a `spot` contradicting it is 422 `invalid_pool`. 409 `pool_has_non_preemptible_runs`: the set makes the pool preemptible while a Run with placement.preemptible false is queued, live or resumable in it. 409 `pool_changed`: another set created or replaced the pool while its template was being checked; set it again.
 
         Needs the `admin` scope.
       operationId: putPool
@@ -6877,7 +6883,7 @@ paths:
         - runs
     post:
       description: |-
-        Validates and normalizes the RunSpec (docs/runspec.md) and queues the Run. Secret values are held in memory until the Run is placed, never stored.
+        Validates and normalizes the RunSpec (docs/runspec.md) and queues the Run. Secret values are held in memory until the Run is placed, never stored. A Run with placement.preemptible false must name its pool (422 pool_required) and that pool must have preemptible false (422 pool_preemptible); validateOnly applies the same checks.
 
         Needs the `run` scope.
       operationId: submitRun
@@ -8396,7 +8402,7 @@ paths:
 
         resources changes what the Run gets from now on, written into its spec: cpus and memory, larger or smaller; disk larger, or smaller only down to the snapshot's measured use plus headroom (otherwise kept, and resize.disk in the answer says why). A Run already resuming refuses other sizes (409).
 
-        placement.poolId moves the Run to another pool, checked first (422 unknown_pool, platform_mismatch, pool_unfit; nothing changes). validateOnly runs every check and changes nothing: 200 with valid: true, or the error the resume would meet.
+        placement.poolId moves the Run to another pool, checked first (422 unknown_pool, platform_mismatch, pool_unfit, and pool_preemptible for a Run with placement.preemptible false into a preemptible pool; nothing changes). validateOnly runs every check and changes nothing: 200 with valid: true, or the error the resume would meet.
 
         Needs the `run` scope.
       operationId: resumeRun

@@ -301,3 +301,21 @@ test("pool Cost tab when the read fails: the error, not an empty pool", async ()
     await p.done();
   }
 });
+
+test("pool header: a non-preemptible pool carries a non-preemptible badge; a preemptible one does not", async () => {
+  const badges = (el: Element) => [...el.querySelectorAll(".badge")].map((b) => b.textContent);
+  let p = await render("tenant", { ...OWN, preemptible: false }, withHostTime);
+  try {
+    await until(() => badges(p.el).length > 0, "the header's badges");
+    expect(badges(p.el)).toContain("non-preemptible");
+  } finally {
+    await p.done();
+  }
+  p = await render("tenant", { ...OWN, preemptible: true }, withHostTime);
+  try {
+    await until(() => badges(p.el).length > 0, "the header's badges");
+    expect(badges(p.el)).not.toContain("non-preemptible");
+  } finally {
+    await p.done();
+  }
+});
