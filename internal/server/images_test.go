@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -260,5 +262,61 @@ func TestRecordImageResolvedKeepsThePublishedImage(t *testing.T) {
 	record(map[string]any{"imageId": "i3", "containerfile": cf, "publishedRef": "ghcr.io/acme/lux/t1@sha256:" + strings.Repeat("e", 64), "platform": "linux/amd64"})
 	if got := get(); got.PublishedRef != ref || got.Platform != "linux/arm64" || got.ImageID != "i1" {
 		t.Fatalf("the first publication was replaced: %+v", got)
+	}
+}
+
+type fakeSource struct {
+	value   string
+	expires time.Time
+	err     error
+	calls   int
+}
+
+func (f *fakeSource) Credential(context.Context) (string, time.Time, error) {
+	f.calls++
+	return f.value, f.expires, f.err
+}
+
+// With a credential source ([images] auth = "ecr"), each assignment that
+// needs the managed registry gets the source's credential and its expiry
+// as it is sent; one that does not never asks the source; a source that
+// fails gives the runner no credential (it fails, saying so), and luxd's
+// log has nothing of a credential.
+func TestAttachManagedImagesFromASource(t *testing.T) {
+	expires := time.Date(2026, 10, 23, 23, 0, 0, 0, time.UTC)
+	src := &fakeSource{value: "AWS:ecr-password", expires: expires}
+	var logs strings.Builder
+	s := &Server{cfg: Config{Images: ImagesConfig{Repository: "123456789012.dkr.ecr.eu-north-1.amazonaws.com/lux", Source: src}},
+		secrets: newSecretCache(), log: slog.New(slog.NewTextHandler(&logs, nil))}
+	if !s.cfg.Images.configured() {
+		t.Fatal("a source is a configured managed registry")
+	}
+	send := func(sp spec.RunSpec) proto.Assign {
+		var a proto.Assign
+		stored := proto.Marshal(proto.Assign{RunID: "r1", TenantID: "ten_a", Spec: sp})
+		if strings.Contains(string(stored), "ecr-password") {
+			t.Fatal("stored with the credential")
+		}
+		if err := json.Unmarshal(s.attachSecrets("r1", stored), &a); err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	publish := spec.RunSpec{Image: spec.Image{Build: &spec.Build{Containerfile: "FROM alpine", Publish: true}}}
+	a := send(publish)
+	if m := a.ManagedImages; m == nil || m.Credential != "AWS:ecr-password" || m.CredentialExpiresAt != expires.UnixMilli() ||
+		m.Repository != "123456789012.dkr.ecr.eu-north-1.amazonaws.com/lux/ten_a" {
+		t.Fatalf("%+v", a.ManagedImages)
+	}
+	if send(spec.RunSpec{Image: spec.Image{Ref: "alpine"}}).ManagedImages != nil || src.calls != 1 {
+		t.Fatalf("a Run without managed images asked the source (%d calls)", src.calls)
+	}
+	src.err, src.value = errors.New("ecr: GetAuthorizationToken failed: AccessDeniedException"), "AWS:should-not-leak"
+	a = send(publish)
+	if a.ManagedImages == nil || a.ManagedImages.Credential != "" || a.ManagedImages.CredentialExpiresAt != 0 {
+		t.Fatalf("failed source: %+v", a.ManagedImages)
+	}
+	if strings.Contains(logs.String(), "ecr-password") || strings.Contains(logs.String(), "should-not-leak") || !strings.Contains(logs.String(), "AccessDeniedException") {
+		t.Fatalf("log: %s", logs.String())
 	}
 }

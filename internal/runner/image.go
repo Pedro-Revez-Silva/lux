@@ -100,8 +100,10 @@ func (p *placement) buildImage(ctx context.Context, sp spec.RunSpec, net podman.
 	if b.Publish && p.assign.ManagedImages == nil {
 		return "", errors.New("image.build.publish: luxd sent no managed image registry ([images] repository is not configured)")
 	}
-	if b.Publish && auth.managed == nil {
-		return "", errNoManagedCredential
+	if b.Publish {
+		if err := auth.managedUsable(); err != nil {
+			return "", err
+		}
 	}
 	var prev proto.ImageResolution
 	if p.assign.ImageResolved != nil {
@@ -269,8 +271,8 @@ func (p *placement) adopt(ctx context.Context, ref, tag string) (string, error) 
 // digest. Returns repository@digest.
 func (p *placement) publish(ctx context.Context, id, key string, auth *imageAuth) (string, error) {
 	m := p.assign.ManagedImages
-	if auth.managed == nil {
-		return "", errNoManagedCredential
+	if err := auth.managedUsable(); err != nil {
+		return "", err
 	}
 	dest := managedCacheRef(m.Repository, key)
 	pctx, cancel := context.WithTimeout(ctx, 30*time.Minute)

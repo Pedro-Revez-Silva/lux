@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
@@ -164,13 +165,29 @@ func (a *imageAuth) forPull(ref string) (*registryAuth, error) {
 			if spec.ImageRepository(ref) != a.m.Repository && !slices.Contains(a.m.Shared, spec.ImageRepository(ref)) {
 				return nil, fmt.Errorf("%s is another tenant's managed image repository", spec.ImageRepository(ref))
 			}
-			if a.managed == nil {
-				return nil, errNoManagedCredential
+			if err := a.managedUsable(); err != nil {
+				return nil, err
 			}
 			return a.managed, nil
 		}
 	}
 	return a.user, nil
+}
+
+// managedUsable: luxd sent the managed registry's credential, and it has
+// not expired (luxd knows an ECR token's expiry, and hands out only one
+// valid for images.ecr_min_validity; an image taking longer to ready
+// finds it expired, and says so rather than failing with the registry's
+// unauthorized).
+func (a *imageAuth) managedUsable() error {
+	if a.managed == nil {
+		return errNoManagedCredential
+	}
+	if ms := a.m.CredentialExpiresAt; ms != 0 && !time.Now().Before(time.UnixMilli(ms).Add(-time.Minute)) {
+		return fmt.Errorf("managed images: luxd's registry credential expired at %s: this image took longer to ready than [images] ecr_min_validity allows",
+			time.UnixMilli(ms).UTC().Format(time.RFC3339))
+	}
+	return nil
 }
 
 var errNoManagedCredential = errors.New("managed images: luxd sent no credential for its image registry (images.credential_file or credential_env unreadable?)")

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
@@ -170,5 +171,28 @@ func TestPinFromsKnowsContexts(t *testing.T) {
 	}
 	if _, err := p.pinFroms(t.Context(), "FROM scratch AS repo\n", map[string]bool{"repo": true}, nil); err == nil {
 		t.Fatal("a stage named as a context")
+	}
+}
+
+// A credential luxd says has expired is refused before a managed pull or
+// push, naming the expiry; one without an expiry (static) never is.
+func TestManagedCredentialExpiry(t *testing.T) {
+	a := managedAuth(t)
+	defer a.close()
+	ref := "ghcr.io/acme/lux/ten_a@sha256:" + strings.Repeat("a", 64)
+	if _, err := a.forPull(ref); err != nil {
+		t.Fatal(err)
+	}
+	a.m.CredentialExpiresAt = time.Now().Add(3 * time.Hour).UnixMilli()
+	if _, err := a.forPull(ref); err != nil {
+		t.Fatal(err)
+	}
+	a.m.CredentialExpiresAt = time.Now().Add(30 * time.Second).UnixMilli()
+	if _, err := a.forPull(ref); err == nil || !strings.Contains(err.Error(), "ecr_min_validity") {
+		t.Fatalf("expired: %v", err)
+	}
+	// Other registries' pulls are unaffected.
+	if got, err := a.forPull("alpine"); err != nil || got != a.user {
+		t.Fatalf("alpine: %v", err)
 	}
 }

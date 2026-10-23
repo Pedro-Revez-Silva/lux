@@ -248,7 +248,9 @@ under a timeout. `luxd check-config` is an alias of `validate`.
 | `LUX_CF_ACCESS_OPERATORS` | — | Comma-separated explicit operator emails (TOML: `console.cloudflare_access.operators` list). Required in Access mode; matched case-insensitively against verified JWT email only. |
 | `LUX_CF_ACCESS_DEFAULT_TENANT` | — | Existing tenant ID (preferred) or exact tenant name (e.g. `absmartly`) for non-operator Access users. Required in Access mode; missing tenants deny requests. |
 | `LUX_IMAGES_REPOSITORY` | — | The managed image registry ([published images](runspec.md#published-images)): a repository with its registry and no tag, e.g. `ghcr.io/acme/lux-images`. A tenant publishes to `<repository>/<tenant id>`. Empty: off, and `image.build.publish` is refused. |
-| `LUX_IMAGES_CREDENTIAL_FILE`, `LUX_IMAGES_CREDENTIAL_ENV` | — | Where luxd reads the managed registry's credential (`user:token`, or a bare token), one of the two: an absolute file path, or the name of one of luxd's environment variables. Read for each assignment that needs it, so a rotated file takes effect without a restart. |
+| `LUX_IMAGES_AUTH` | `static` | How luxd gets the managed registry's credential: `static` (the file or variable below) or `ecr` (an Amazon ECR token, with the AWS default credential chain: see below). |
+| `LUX_IMAGES_CREDENTIAL_FILE`, `LUX_IMAGES_CREDENTIAL_ENV` | — | With `static`, where luxd reads the managed registry's credential (`user:token`, or a bare token), one of the two: an absolute file path, or the name of one of luxd's environment variables. Read for each assignment that needs it, so a rotated file takes effect without a restart. Refused with `ecr`. |
+| `LUX_IMAGES_ECR_MIN_VALIDITY` | `4h` | With `ecr`, the least lifetime an ECR token has left when an assignment gets it: longer than any Run's image takes to ready (build and publication). 30m to 11h. |
 | `LUX_IMAGES_SHARED` | — | Comma-separated repositories (`images.shared`, a list, in the file) every tenant may pull with the managed credential, never push to: a common base image. Not inside `LUX_IMAGES_REPOSITORY`. Each grants every tenant every image (any tag or digest) in that repository: list only repositories meant for all of them, never one that also holds private content. |
 | `LUX_CONFIG` | `/etc/lux/luxd.toml` | The configuration file. |
 
@@ -279,6 +281,51 @@ repository; it never reaches the shim, a build or the container. A tenant
 can neither name another tenant's repository (refused at submit, and by the
 runner) nor choose where its image is pushed. lux never deletes published
 images: keep them with the registry's own retention.
+
+**Amazon ECR** (`auth = "ecr"`): `repository` is on a private registry,
+`<account>.dkr.ecr.<region>.amazonaws.com/<root path>`, and luxd gets its
+token itself, calling `ecr:GetAuthorizationToken` for that account in that
+region with the AWS SDK's default credential chain (on the control host,
+its instance role). Nothing calls AWS at startup or in `luxd validate`;
+the first assignment that needs a token does. `shared` repositories must
+be on the same registry, and no `credential_file` or `credential_env` is
+given. An ECR token works until the `expiresAt` ECR returns with it, 12
+hours after issue, and carries its caller's IAM permissions; the AWS
+credentials that asked for it are the SDK's to refresh. luxd keeps one
+token and gives an assignment a token only with at least
+`ecr_min_validity` left (4h by default: a 3h build Run's image and its
+publication, with room), fetching a new one when the one it holds has
+less. A new token with less than that (a misconfigured role) is not given
+out: the placement then fails saying luxd sent no credential, rather than
+losing it mid-build. The assignment also carries the expiry, and a runner
+whose image took longer refuses to start a pull or push with it, saying
+so. One fetch runs at a time, bounded to 10s; after a failure luxd makes no
+new call for 30s. Only the AWS error code is logged.
+
+What the operator sets up, outside lux (lux neither creates nor checks it):
+
+- luxd's IAM principal: `ecr:GetAuthorizationToken` (resource `*`); on
+  `repository/<root path>/*`, `ecr:BatchCheckLayerAvailability`,
+  `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`,
+  `ecr:InitiateLayerUpload`, `ecr:UploadLayerPart`,
+  `ecr:CompleteLayerUpload` and `ecr:PutImage`; the three read actions on
+  each `shared` repository; and, to create repositories on push,
+  `ecr:CreateRepository` (and `ecr:TagResource` if the template tags).
+  The token carries all of these, for every repository they cover: lux
+  limits its use (the runner offers it only for the Run's tenant's
+  repository and the shared ones), not its scope.
+- Repositories: a tenant's is `<root path>/<tenant id>`. Create them, or
+  give the root path an ECR repository creation template with
+  `CREATE_ON_PUSH`.
+- Retention: a published image must stay while anything uses it: Runs
+  resume on it and later Runs name it, and they fail (never rebuild) when
+  it is gone. Use no lifecycle expiry on the root path, or only one
+  coordinated with what consumers keep. Tags: `MUTABLE` is recommended
+  (the build key's tag can be re-pushed when two hosts first build the
+  same key at once; images are named by digest); with `IMMUTABLE`, that
+  rare race's second publication fails.
+- Hosts reach the ECR endpoint and its layer storage (S3) directly: the
+  runner pulls and pushes outside Runs' egress rules.
 
 ### Tenants, keys and quotas
 

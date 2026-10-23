@@ -134,7 +134,9 @@ aud = ""                           # LUX_PREVIEW_CF_ACCESS_AUD: the preview Acce
 # there, stays luxd's and the runners': read for each assignment that needs
 # it, never stored or given to a Run. Empty repository: off (publish is
 # refused). No credential value belongs in this file.
-repository = ""                    # LUX_IMAGES_REPOSITORY, e.g. ghcr.io/acme/lux-images
+repository = ""                    # LUX_IMAGES_REPOSITORY, e.g. ghcr.io/acme/lux-images or <account>.dkr.ecr.<region>.amazonaws.com/lux/managed
+auth = "static"                    # LUX_IMAGES_AUTH: static (credential_file or credential_env) or ecr (an ECR token from the AWS default credential chain, e.g. the instance role)
+ecr_min_validity = "4h"            # LUX_IMAGES_ECR_MIN_VALIDITY: with ecr, the least lifetime a token has left when an assignment gets it (30m to 11h)
 credential_file = ""               # LUX_IMAGES_CREDENTIAL_FILE: absolute path to user:token (or a bare token)
 credential_env = ""                # LUX_IMAGES_CREDENTIAL_ENV: or the name of luxd's environment variable holding it
 # Every tenant may pull every image in a shared repository: list only

@@ -597,7 +597,9 @@ network:
 ### Published images
 
 `image.build.publish: true` publishes the build to the operator's
-**managed image registry** ([operations](operations.md#configuration)),
+**managed image registry** ([operations](operations.md#configuration):
+any registry with a static credential, or Amazon ECR with luxd's own AWS
+credentials),
 in the tenant's own repository, `<[images] repository>/<tenant id>`, with
 luxd's credential: the Run needs no `registryAuth` for it.
 

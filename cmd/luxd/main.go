@@ -35,6 +35,7 @@ import (
 
 	"github.com/marcioapm/lux/internal/blob"
 	"github.com/marcioapm/lux/internal/ec2"
+	"github.com/marcioapm/lux/internal/ecrauth"
 	"github.com/marcioapm/lux/internal/ids"
 	"github.com/marcioapm/lux/internal/server"
 	"github.com/marcioapm/lux/internal/store"
@@ -176,6 +177,22 @@ func serve(ctx context.Context, c config, plan servePlan) error {
 	for _, d := range c.Costs.Settle {
 		settle = append(settle, d.Duration)
 	}
+	images := server.ImagesConfig{
+		Repository:     c.Images.Repository,
+		CredentialFile: c.Images.CredentialFile,
+		CredentialEnv:  c.Images.CredentialEnv,
+		Shared:         c.Images.Shared,
+	}
+	if c.Images.Auth == "ecr" {
+		// Validated: an ECR host and a minimum validity in bounds. No AWS
+		// call until an assignment needs a token.
+		host, _, _ := strings.Cut(c.Images.Repository, "/")
+		p, err := ecrauth.New(host, c.Images.ECRMinValidity.Duration)
+		if err != nil {
+			return err
+		}
+		images.Source = p
+	}
 	srv := server.New(server.Config{
 		CheckpointBytes:      int64(c.CheckpointLimit.Bytes),
 		Listen:               c.Listen,
@@ -236,12 +253,7 @@ func serve(ctx context.Context, c config, plan servePlan) error {
 			ActivityEvery: c.Preview.ActivityEvery.Duration,
 			IdleCheck:     c.Preview.IdleCheck.Duration,
 		},
-		Images: server.ImagesConfig{
-			Repository:     c.Images.Repository,
-			CredentialFile: c.Images.CredentialFile,
-			CredentialEnv:  c.Images.CredentialEnv,
-			Shared:         c.Images.Shared,
-		},
+		Images: images,
 	}, db, blobs, log)
 	return srv.Run(ctx)
 }

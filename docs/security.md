@@ -140,6 +140,9 @@ domain ([Operators](operators.md#previews)). What protects that:
   runner offers it to Podman only for the Run's tenant's repository and
   the shared ones; a tenant names neither another tenant's repository nor
   where its build is pushed. A shared repository is every tenant's to
-  pull, whole: share only one meant for all of them.
+  pull, whole: share only one meant for all of them. With `auth = "ecr"`,
+  luxd gets ECR tokens with its own AWS credentials; a token carries
+  every permission of that IAM principal, so give it only the managed
+  root and the shared repositories.
 - **Runners** authenticate with host tokens (`luxd admin
   create-host-token`), scoped to a tenant or the platform and a pool.

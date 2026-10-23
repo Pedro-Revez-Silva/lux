@@ -1,9 +1,11 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
@@ -19,6 +21,10 @@ type ImagesConfig struct {
 	Repository     string
 	CredentialFile string
 	CredentialEnv  string
+	// Source, instead of the file or variable ([images] auth = "ecr"):
+	// gives a credential and when it expires, already valid for as long
+	// as an assignment needs it.
+	Source CredentialSource
 	// Shared: repositories every tenant may pull with the credential
 	// (a common base image), never push to.
 	Shared []string
@@ -26,7 +32,12 @@ type ImagesConfig struct {
 
 // configured: a repository and somewhere to read its credential from.
 func (c ImagesConfig) configured() bool {
-	return c.Repository != "" && (c.CredentialFile != "" || c.CredentialEnv != "")
+	return c.Repository != "" && (c.CredentialFile != "" || c.CredentialEnv != "" || c.Source != nil)
+}
+
+// CredentialSource gets the managed registry's credential (ecrauth.Provider).
+type CredentialSource interface {
+	Credential(ctx context.Context) (value string, expires time.Time, err error)
 }
 
 // managedImages is the managed registry as specs see it; Root "" when
@@ -41,21 +52,29 @@ func (s *Server) managedImages() spec.ManagedImages {
 
 // managedCredential reads the managed registry's credential; "" when it
 // can't (the runner then fails what needs it, saying so).
-func (s *Server) managedCredential() string {
+func (s *Server) managedCredential() (string, time.Time) {
 	c := s.cfg.Images
 	var v string
 	switch {
+	case c.Source != nil:
+		v, expires, err := c.Source.Credential(context.Background())
+		if err != nil {
+			// The source's errors carry no credential (ecrauth: a code).
+			s.log.Warn("managed images: no registry credential for an assignment", "err", err)
+			return "", time.Time{}
+		}
+		return v, expires
 	case c.CredentialFile != "":
 		b, err := os.ReadFile(c.CredentialFile)
 		if err != nil {
 			s.log.Warn("managed images: reading the credential file failed", "file", c.CredentialFile, "err", err)
-			return ""
+			return "", time.Time{}
 		}
 		v = string(b)
 	case c.CredentialEnv != "":
 		v = os.Getenv(c.CredentialEnv)
 	}
-	return strings.TrimSpace(v)
+	return strings.TrimSpace(v), time.Time{}
 }
 
 // checkManagedImages refuses a spec that publishes without a managed
@@ -78,11 +97,15 @@ func (s *Server) attachManagedImages(a *proto.Assign) bool {
 	if m.Root == "" || !m.Uses(a.Spec, cf) {
 		return false
 	}
+	cred, expires := s.managedCredential()
 	a.ManagedImages = &proto.ManagedImages{
 		Root:       m.Root,
 		Repository: spec.TenantRepository(m.Root, a.TenantID),
 		Shared:     m.Shared,
-		Credential: s.managedCredential(),
+		Credential: cred,
+	}
+	if !expires.IsZero() {
+		a.ManagedImages.CredentialExpiresAt = expires.UnixMilli()
 	}
 	return true
 }

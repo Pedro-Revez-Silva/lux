@@ -455,6 +455,9 @@ type ManagedImages struct {
 	// Credential: user:password, or a bare token. "" when luxd could not
 	// read it: the runner then fails what needs it, saying so.
 	Credential string `json:"credential,omitempty"`
+	// CredentialExpiresAt: when Credential stops working (unix ms), when
+	// luxd knows (an ECR token); 0 otherwise.
+	CredentialExpiresAt int64 `json:"credentialExpiresAt,omitempty"`
 }
 
 // CapManagedImages is the Hello capability of a runner that builds with
