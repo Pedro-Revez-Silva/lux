@@ -182,6 +182,7 @@ func serve(ctx context.Context, c config, plan servePlan) error {
 		PublicURL:            c.PublicURL,
 		RunnerURL:            c.RunnerURL,
 		RunnerBinDir:         c.RunnerBinDir,
+		ControlPlanePorts:    c.Runners.ControlPlanePorts,
 		LeaseDuration:        c.Lease.Duration,
 		Tick:                 c.Tick.Duration,
 		ScaleDownAfter:       c.ScaleDownAfter.Duration,

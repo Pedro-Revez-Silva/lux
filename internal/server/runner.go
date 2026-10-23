@@ -76,6 +76,7 @@ func (s *Server) registerHost(ctx context.Context, tok *hostToken, h proto.Hello
 
 	var w proto.Welcome
 	w.LeaseSeconds = s.cfg.LeaseDuration.Seconds()
+	w.ControlPlanePorts = slices.Clone(s.cfg.ControlPlanePorts)
 	var outdatedDrained []string
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		var hostID string

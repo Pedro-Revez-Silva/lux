@@ -301,6 +301,25 @@ func TestProvisionNewHostNetworkRetrySpacing(t *testing.T) {
 	}
 }
 
+// Every Welcome carries runners.control_plane_ports, none when unset.
+func TestWelcomeCarriesControlPlanePorts(t *testing.T) {
+	s, _, _ := networkFixture(t)
+	ctx := context.Background()
+	execSQL(t, s, ctx, `INSERT INTO host_tokens (id, tenant_id, pool_id, token_hash) VALUES ('tok1', 't1', 'pec2', 'hash1')`)
+	execSQL(t, s, ctx, `UPDATE hosts SET token_id = 'tok1' WHERE id = 'h1'`)
+	tok := &hostToken{ID: "tok1", TenantID: new("t1"), PoolID: new("pec2")}
+	hello := proto.Hello{Name: "h1", ProtocolVersion: proto.Version, Arch: "arm64", ProviderID: "i-1"}
+	w, err := s.registerHost(ctx, tok, hello)
+	if err != nil || w.ControlPlanePorts != nil {
+		t.Fatalf("none configured: %v %v", w.ControlPlanePorts, err)
+	}
+	s.cfg.ControlPlanePorts = []int{8090}
+	w, err = s.registerHost(ctx, tok, hello)
+	if err != nil || !slices.Equal(w.ControlPlanePorts, []int{8090}) {
+		t.Fatalf("configured: %v %v", w.ControlPlanePorts, err)
+	}
+}
+
 // Hello never asks the provider; it hands the runner what is stored, and
 // the heartbeat's ack names its version.
 func TestWelcomeAndAckCarryNetwork(t *testing.T) {

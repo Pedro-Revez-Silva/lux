@@ -1352,7 +1352,9 @@ network:
 - **Never the control plane.** Every Run is blocked from luxd's address, so
   a spec whose MCP server is luxd's host (or a name resolving to one of its
   addresses) is refused at submit with a 422: run the MCP server
-  elsewhere.
+  elsewhere. This holds whatever `runners.control_plane_ports` opens: those
+  ports are for other services on the control host, not MCP servers or
+  services.
 - **How each adapter delivers them.** None of them puts a header value in
   the command line, which the `lux.workload` event records.
 
@@ -1467,7 +1469,13 @@ echo $LUX_SERVICE_TRACKER_API   # unix:/.lux/services/tracker-api.sock
 - **Always blocked, whatever the spec says:** link-local and the cloud
   metadata services (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`),
   loopback, the control plane, and other Runs on the same host. An allowed hostname that resolves into a blocked range does
-  not open it.
+  not open it. The one exception: the TCP ports an operator lists in
+  `runners.control_plane_ports` ([operations](operations.md#configuration))
+  on the control plane's own addresses. A restricted Run reaches them only
+  if its own egress allows the address (a `host:` rule for luxd's host, or
+  a `cidr:` covering it); an unrestricted Run reaches them outright. Every
+  other port on the control plane stays blocked, and loopback and
+  link-local never open.
 - `unrestricted: true` switches the filtering off, and the Run resolves
   names through the host's resolvers. The hard blocks above still apply.
 - **A known limitation, by choice:** rules match IP addresses, so allowing

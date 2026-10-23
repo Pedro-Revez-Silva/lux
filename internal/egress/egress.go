@@ -10,10 +10,13 @@
 //     Runs' bridges (whatever either allows), sends each Run's traffic to
 //     its chain, and drops traffic from any lux bridge with no chain: a Run
 //     whose rules are not loaded (a runner restarting) fails closed;
-//   - per Run, a chain: replies, then the hard blocks (sets blocked4 and
-//     blocked6: link-local and the metadata service, loopback, the control
-//     plane), then the Run's allow set, then drop. An unrestricted Run's
-//     chain accepts after the hard blocks instead;
+//   - per Run, a chain: replies, then the control plane's exempt TCP ports
+//     (sets cp_ports4 and cp_ports6 of address . port, shared by every
+//     Run; a restricted Run's exception also needs the address in its
+//     allow set), then the hard blocks (sets blocked4 and blocked6:
+//     link-local and the metadata service, loopback, the control plane),
+//     then the Run's allow set, then drop. An unrestricted Run's chain
+//     accepts after the hard blocks instead;
 //   - input rules so a restricted Run reaches the host only on the DNS
 //     stub's port;
 //   - a DNS redirect: port 53 from any restricted Run goes to its stub.
@@ -76,6 +79,12 @@ table inet lux {
 		type ipv6_addr
 		flags interval
 	}
+	set cp_ports4 {
+		type ipv4_addr . inet_service
+	}
+	set cp_ports6 {
+		type ipv6_addr . inet_service
+	}
 	chain egress {
 		type filter hook forward priority -10; policy accept;
 		iifname "lux*" oifname "lux*" drop
@@ -107,15 +116,20 @@ type Firewall struct {
 	// opMu serializes lifecycle kernel transactions and accounting
 	// publication. Take before mu; never hold across resolution, callbacks
 	// or stub close.
-	opMu     sync.Mutex
-	mu       sync.Mutex
-	lookup   func(ctx context.Context, host string) ([]netip.Addr, error) // IPv4 addresses of host
-	nft      func(script string) error
-	list     func() ([]byte, error) // `nft -j list counters table inet lux`
-	runs     map[string]*run        // by bridge interface
-	blocked  []netip.Prefix         // parsed once: always blocked, plus the control plane
-	resolved map[string]map[netip.Addr]bool
-	acct     accounting
+	opMu    sync.Mutex
+	mu      sync.Mutex
+	lookup  func(ctx context.Context, host string) ([]netip.Addr, error) // IPv4 addresses of host
+	nft     func(script string) error
+	list    func() ([]byte, error) // `nft -j list counters table inet lux`
+	runs    map[string]*run        // by bridge interface
+	blocked []netip.Prefix         // parsed once: always blocked, plus the control plane
+	always  []netip.Prefix         // the always-blocked ranges alone
+	// controlPlane are New's extra prefixes; cpPorts the TCP ports on them
+	// Runs may reach (SetControlPlanePorts), sorted.
+	controlPlane []netip.Prefix
+	cpPorts      []int
+	resolved     map[string]map[netip.Addr]bool
+	acct         accounting
 }
 
 type run struct {
@@ -156,7 +170,8 @@ func New(extra []netip.Prefix) (*Firewall, error) {
 	return f, nil
 }
 
-// setup replaces the table, keeping the counters of the one it replaces.
+// setup replaces the table, keeping the counters of the one it replaces,
+// and re-applies the control-plane ports in force.
 func (f *Firewall) setup() error {
 	if err := f.keepCounters(); err != nil {
 		return err
@@ -174,12 +189,11 @@ func (f *Firewall) setup() error {
 			v6 = append(v6, p.String())
 		}
 	}
-	if len(v4) > 0 {
-		fmt.Fprintf(&b, "add element inet lux blocked4 { %s }\n", strings.Join(v4, ", "))
-	}
-	if len(v6) > 0 {
-		fmt.Fprintf(&b, "add element inet lux blocked6 { %s }\n", strings.Join(v6, ", "))
-	}
+	addElements(&b, "blocked4", v4)
+	addElements(&b, "blocked6", v6)
+	f.mu.Lock()
+	b.WriteString(f.pairsElements())
+	f.mu.Unlock()
 	b.WriteString(f.countingSetup())
 	if err := f.nft(b.String()); err != nil {
 		return fmt.Errorf("nftables: %w", err)
@@ -194,9 +208,10 @@ func newFirewall(extra []netip.Prefix, lookup func(context.Context, string) ([]n
 	f := &Firewall{lookup: lookup, nft: nft, list: list, runs: map[string]*run{}, resolved: map[string]map[netip.Addr]bool{},
 		acct: newAccounting()}
 	for _, p := range alwaysBlocked {
-		f.blocked = append(f.blocked, netip.MustParsePrefix(p))
+		f.always = append(f.always, netip.MustParsePrefix(p))
 	}
-	f.blocked = append(f.blocked, extra...)
+	f.blocked = append(slices.Clone(f.always), extra...)
+	f.controlPlane = slices.Clone(extra)
 	return f
 }
 
@@ -253,18 +268,29 @@ func (f *Firewall) Apply(ctx context.Context, iface string, gateway netip.Addr, 
 }
 
 // egressScript is a Run's filtering: its chain, allow set and map entries.
-// Counting is separate (runCountingScript) and never changes it.
+// Counting is separate (runCountingScript) and never changes it. The
+// control-plane exception comes before the hard blocks, which would
+// otherwise drop it; for a restricted Run it also needs the address in the
+// Run's allow set, so it lifts the block without granting egress. The
+// pairs sets are shared, so SetControlPlanePorts changes every Run's chain
+// at once.
 func egressScript(iface string, unrestricted bool, cidrs []netip.Prefix) string {
 	c, s := chainName(iface), setName(iface)
 	var b strings.Builder
 	fmt.Fprintf(&b, "add chain inet lux %s\n", c)
 	fmt.Fprintf(&b, "add rule inet lux %s ct state established,related accept\n", c)
+	if unrestricted {
+		fmt.Fprintf(&b, "add rule inet lux %s meta l4proto tcp ip daddr . tcp dport @cp_ports4 accept\n", c)
+		fmt.Fprintf(&b, "add rule inet lux %s meta l4proto tcp ip6 daddr . tcp dport @cp_ports6 accept\n", c)
+	} else {
+		fmt.Fprintf(&b, "add set inet lux %s { type ipv4_addr; flags interval; }\n", s)
+		fmt.Fprintf(&b, "add rule inet lux %s meta l4proto tcp ip daddr @%s ip daddr . tcp dport @cp_ports4 accept\n", c, s)
+	}
 	fmt.Fprintf(&b, "add rule inet lux %s ip daddr @blocked4 drop\n", c)
 	fmt.Fprintf(&b, "add rule inet lux %s ip6 daddr @blocked6 drop\n", c)
 	if unrestricted {
 		fmt.Fprintf(&b, "add rule inet lux %s accept\n", c)
 	} else {
-		fmt.Fprintf(&b, "add set inet lux %s { type ipv4_addr; flags interval; }\n", s)
 		fmt.Fprintf(&b, "add rule inet lux %s ip daddr @%s accept\n", c, s)
 		fmt.Fprintf(&b, "add rule inet lux %s counter drop\n", c)
 		if len(cidrs) > 0 {
@@ -459,13 +485,120 @@ func (f *Firewall) listed(host string) bool {
 
 // isBlocked: an allowed hostname that resolves into a hard-blocked range
 // (say the metadata address) must not open it. Call with f.mu held.
+//
+// A control-plane address is let into a restricted Run's set (and so
+// answered by its DNS stub) while some control-plane port is exempt. That
+// opens only the exempt ports: the blocked4 drop precedes the Run's plain
+// allow rule, so every other port on that address stays dropped.
 func (f *Firewall) isBlocked(ip netip.Addr) bool {
+	if len(f.cpPorts) > 0 && f.exemptAddr(ip) {
+		return false
+	}
 	for _, p := range f.blocked {
 		if p.Contains(ip) {
 			return true
 		}
 	}
 	return false
+}
+
+// exemptAddr: ip is one of the control plane's own addresses (a single-IP
+// prefix given to New) outside the always-blocked ranges, which no port
+// exemption ever opens. Only such addresses go into cp_ports4/cp_ports6.
+func (f *Firewall) exemptAddr(ip netip.Addr) bool {
+	for _, p := range f.always {
+		if p.Contains(ip) {
+			return false
+		}
+	}
+	return slices.ContainsFunc(f.controlPlane, func(p netip.Prefix) bool { return p.IsSingleIP() && p.Addr() == ip })
+}
+
+// SetControlPlanePorts replaces the TCP ports on the control plane's
+// addresses that Runs may reach, for every Run at once, in one
+// transaction: the pairs sets are flushed and refilled. Duplicates
+// collapse; a port outside 1-65535 or more than
+// proto.MaxControlPlanePorts refuses the whole list before any nft call.
+// Empty restores the full block. changed reports that the list in force
+// is now a different one. On an nft error the previous list stays.
+func (f *Firewall) SetControlPlanePorts(ports []int) (changed bool, err error) {
+	var clean []int
+	for _, p := range ports {
+		if p < 1 || p > 65535 {
+			return false, fmt.Errorf("control-plane ports: %d is not a TCP port", p)
+		}
+		if !slices.Contains(clean, p) {
+			clean = append(clean, p)
+		}
+	}
+	slices.Sort(clean)
+	if len(clean) > proto.MaxControlPlanePorts {
+		return false, fmt.Errorf("control-plane ports: %d, at most %d", len(clean), proto.MaxControlPlanePorts)
+	}
+	f.opMu.Lock()
+	defer f.opMu.Unlock()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if slices.Equal(clean, f.cpPorts) {
+		return false, nil
+	}
+	old := f.cpPorts
+	f.cpPorts = clean
+	script := "flush set inet lux cp_ports4\nflush set inet lux cp_ports6\n" + f.pairsElements()
+	if err := f.nft(script); err != nil {
+		f.cpPorts = old
+		return false, fmt.Errorf("nftables: control-plane ports: %w", err)
+	}
+	if len(clean) == 0 {
+		// The stub stops answering control-plane addresses. Elements already
+		// in Runs' sets stay: the blocked drops cover them again.
+		for _, known := range f.resolved {
+			for ip := range known {
+				if f.exemptAddr(ip) {
+					delete(known, ip)
+				}
+			}
+		}
+	}
+	return true, nil
+}
+
+// ControlPlanePorts reports the list in force, for tests and diagnostics.
+func (f *Firewall) ControlPlanePorts() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.cpPorts)
+}
+
+// pairsElements adds every (control-plane address, exempt port) pair to
+// cp_ports4/cp_ports6, or is "" with none. Call with f.mu held.
+func (f *Firewall) pairsElements() string {
+	var v4, v6 []string
+	for _, p := range f.controlPlane {
+		ip := p.Addr()
+		if !p.IsSingleIP() || !f.exemptAddr(ip) {
+			continue
+		}
+		for _, port := range f.cpPorts {
+			e := fmt.Sprintf("%s . %d", ip, port)
+			if ip.Is4() {
+				v4 = append(v4, e)
+			} else {
+				v6 = append(v6, e)
+			}
+		}
+	}
+	var b strings.Builder
+	addElements(&b, "cp_ports4", v4)
+	addElements(&b, "cp_ports6", v6)
+	return b.String()
+}
+
+// addElements writes the line adding elems to set, or nothing with none.
+func addElements(b *strings.Builder, set string, elems []string) {
+	if len(elems) > 0 {
+		fmt.Fprintf(b, "add element inet lux %s { %s }\n", set, strings.Join(elems, ", "))
+	}
 }
 
 // answerFor is what the DNS stub answers a Run for name: nothing unless it

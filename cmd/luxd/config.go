@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"math"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -21,6 +23,7 @@ import (
 	"github.com/pelletier/go-toml/v2"
 
 	"github.com/marcioapm/lux/internal/ec2"
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/server"
 	"github.com/marcioapm/lux/internal/spec"
 )
@@ -44,8 +47,13 @@ type config struct {
 	// RunnerBinDir holds runner binaries luxd serves for self-update:
 	// <dir>/linux-{arm64,amd64}/{lux-runner,lux-shim}.
 	RunnerBinDir string `toml:"runner_bin_dir" env:"LUX_RUNNER_BIN_DIR"`
-	Debug        onFlag `toml:"debug" env:"LUX_DEBUG"`
-	S3           struct {
+	Runners      struct {
+		// ControlPlanePorts: TCP ports on the control plane's addresses
+		// that Runs may reach; in the environment, comma-separated.
+		ControlPlanePorts []int `toml:"control_plane_ports" env:"LUX_RUNNER_CONTROL_PLANE_PORTS"`
+	} `toml:"runners"`
+	Debug onFlag `toml:"debug" env:"LUX_DEBUG"`
+	S3    struct {
 		Bucket         string `toml:"bucket" env:"LUX_S3_BUCKET"`
 		Endpoint       string `toml:"endpoint" env:"LUX_S3_ENDPOINT"`
 		PublicEndpoint string `toml:"public_endpoint" env:"LUX_S3_PUBLIC_ENDPOINT"`
@@ -315,7 +323,19 @@ func loadConfigFile(path string) (config, string, error) {
 	if err := applyEnv(reflect.ValueOf(&c).Elem()); err != nil {
 		return c, read, err
 	}
+	c.Runners.ControlPlanePorts = dedupe(c.Runners.ControlPlanePorts)
 	return c, read, c.check()
+}
+
+// dedupe keeps the first of each value, in order.
+func dedupe(ports []int) []int {
+	var out []int
+	for _, p := range ports {
+		if !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // retiredKey is a setting a release removed. It is accepted, ignored and
@@ -426,6 +446,21 @@ func setField(v reflect.Value, s string) error {
 			if v.IsNil() {
 				return errors.New("expected a JSON array, not null")
 			}
+			return nil
+		}
+		if v.Type() == reflect.TypeFor[[]int]() {
+			list := []int{}
+			for _, e := range strings.Split(s, ",") {
+				if e = strings.TrimSpace(e); e == "" {
+					continue
+				}
+				n, err := strconv.Atoi(e)
+				if err != nil {
+					return err
+				}
+				list = append(list, n)
+			}
+			v.Set(reflect.ValueOf(list))
 			return nil
 		}
 		if v.Type().Elem().Kind() != reflect.String {
@@ -646,10 +681,89 @@ func (c config) check() error {
 			problems = append(problems, "preview.activity_every and preview.idle_check must be positive")
 		}
 	}
+	problems = append(problems, c.controlPlanePortProblems()...)
 	if len(problems) > 0 {
 		return errors.New("configuration: " + strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// controlPlanePortProblems refuses a runners.control_plane_ports list that
+// is out of range, longer than proto.MaxControlPlanePorts, or names one of
+// luxd's own ports: those are never opened to Runs. loadConfigFile has
+// collapsed duplicates already.
+func (c config) controlPlanePortProblems() []string {
+	const key = "runners.control_plane_ports (LUX_RUNNER_CONTROL_PLANE_PORTS)"
+	var problems []string
+	ports := c.Runners.ControlPlanePorts
+	for _, p := range ports {
+		if p < 1 || p > 65535 {
+			problems = append(problems, fmt.Sprintf("%s %d: want 1-65535", key, p))
+		}
+	}
+	if len(ports) > proto.MaxControlPlanePorts {
+		problems = append(problems, fmt.Sprintf("%s: %d ports, at most %d", key, len(ports), proto.MaxControlPlanePorts))
+	}
+	if len(ports) == 0 {
+		return problems
+	}
+	own := map[int][]string{}
+	if p, ok := listenPort(c.Listen); ok {
+		own[p] = append(own[p], "listen (LUX_LISTEN)")
+	}
+	// runner_url defaults to public_url (server.New), so both are checked.
+	if p, ok := urlPort(cmp.Or(c.RunnerURL, c.PublicURL)); ok {
+		own[p] = append(own[p], "runner_url (LUX_RUNNER_URL)")
+	}
+	if p, ok := urlPort(c.PublicURL); ok {
+		own[p] = append(own[p], "public_url (LUX_PUBLIC_URL)")
+	}
+	if c.Preview.Domain != "" {
+		if p, ok := listenPort(c.Preview.Listen); ok {
+			own[p] = append(own[p], "preview.listen (LUX_PREVIEW_LISTEN)")
+		}
+		if p := c.Preview.PublicPort; p > 0 {
+			own[p] = append(own[p], "preview.public_port (LUX_PREVIEW_PUBLIC_PORT)")
+		}
+	}
+	for _, p := range ports {
+		if what, ok := own[p]; ok {
+			problems = append(problems, fmt.Sprintf("%s %d: luxd's own port (%s) is never opened to Runs", key, p, strings.Join(what, ", ")))
+		}
+	}
+	return problems
+}
+
+// listenPort is a listen address's port; empty is net/http's ":http".
+func listenPort(addr string) (int, bool) {
+	if addr == "" {
+		return 80, true
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(port)
+	return n, err == nil && n > 0
+}
+
+// urlPort is a URL's explicit port, or its scheme's default.
+func urlPort(raw string) (int, bool) {
+	u, err := url.Parse(raw)
+	if raw == "" || err != nil {
+		return 0, false
+	}
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		return n, err == nil
+	}
+	switch u.Scheme {
+	case "http", "ws":
+		return 80, true
+	case "https", "wss":
+		return 443, true
+	}
+	return 0, false
 }
 
 // tomlError says which key a TOML error is about, where go-toml knows.

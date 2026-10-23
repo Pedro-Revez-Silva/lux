@@ -46,6 +46,10 @@ type Config struct {
 	// startup for self-update: <dir>/linux-{arm64,amd64}/{lux-runner,lux-shim}.
 	// Empty: luxd offers none, and never drains a host for being outdated.
 	RunnerBinDir string
+	// ControlPlanePorts: TCP ports on this host's addresses that Runs may
+	// reach, sent in every Welcome. luxd's own ports are refused at
+	// startup (cmd/luxd).
+	ControlPlanePorts []int
 	// LeaseDuration is how long a host may go without a heartbeat before it
 	// and its live Runs are lost.
 	LeaseDuration time.Duration

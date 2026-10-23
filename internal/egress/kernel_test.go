@@ -44,6 +44,8 @@ type kset struct {
 	v6     bool
 	elems  []netip.Prefix
 	names  map[string]bool
+	// pairs: an address . inet_service set's elements, as "addr . port".
+	pairs map[string]bool
 }
 
 type kcounter struct{ packets, bytes int64 }
@@ -65,7 +67,7 @@ func (s *kstate) clone() *kstate {
 		c.chains[n] = &kchain{hook: ch.hook, prio: ch.prio, rules: rules}
 	}
 	for n, st := range s.sets {
-		c.sets[n] = &kset{ifname: st.ifname, v6: st.v6, elems: slices.Clone(st.elems), names: maps.Clone(st.names)}
+		c.sets[n] = &kset{ifname: st.ifname, v6: st.v6, elems: slices.Clone(st.elems), names: maps.Clone(st.names), pairs: maps.Clone(st.pairs)}
 	}
 	for n, m := range s.vmaps {
 		c.vmaps[n] = maps.Clone(m)
@@ -257,6 +259,10 @@ func (s *kstate) command(line string) error {
 		switch {
 		case strings.Contains(rest, "type ifname"):
 			s.sets[name] = &kset{ifname: true, names: map[string]bool{}}
+		case strings.Contains(rest, "type ipv4_addr . inet_service"):
+			s.sets[name] = &kset{pairs: map[string]bool{}}
+		case strings.Contains(rest, "type ipv6_addr . inet_service"):
+			s.sets[name] = &kset{v6: true, pairs: map[string]bool{}}
 		case strings.Contains(rest, "type ipv4_addr") && strings.Contains(rest, "flags interval"):
 			s.sets[name] = &kset{}
 		case strings.Contains(rest, "type ipv6_addr") && strings.Contains(rest, "flags interval"):
@@ -270,6 +276,9 @@ func (s *kstate) command(line string) error {
 			return fmt.Errorf("no set %s", name)
 		}
 		st.elems, st.names = nil, map[string]bool{}
+		if st.pairs != nil {
+			st.pairs = map[string]bool{}
+		}
 	case "delete set":
 		if _, ok := s.sets[name]; !ok {
 			return fmt.Errorf("no set %s", name)
@@ -312,6 +321,24 @@ func (s *kstate) command(line string) error {
 			return fmt.Errorf("no set %s", name)
 		}
 		for e := range strings.SplitSeq(body, ", ") {
+			if st.pairs != nil {
+				a, port, ok := strings.Cut(e, " . ")
+				ip, err := netip.ParseAddr(a)
+				n, perr := strconv.Atoi(port)
+				if !ok || err != nil || perr != nil || n < 1 || n > 65535 || ip.Is6() != st.v6 {
+					return fmt.Errorf("pair %q in %s", e, name)
+				}
+				k := ip.String() + " . " + strconv.Itoa(n)
+				if del {
+					if !st.pairs[k] {
+						return fmt.Errorf("no element %s", k)
+					}
+					delete(st.pairs, k)
+				} else {
+					st.pairs[k] = true
+				}
+				continue
+			}
 			if st.ifname {
 				k := strings.Trim(e, `"`)
 				if del {
@@ -519,15 +546,24 @@ func (s *kstate) rule(r []string, p packet, depth int) (string, bool) {
 				return "", false
 			}
 		case "ip", "ip6":
-			field, set := r[i+1], strings.TrimPrefix(r[i+2], "@")
-			i += 2
 			a := addr(p.dst)
-			if field == "saddr" {
+			if r[i+1] == "saddr" {
 				a = addr(p.src)
 			}
 			if a.Is6() != (t == "ip6") {
 				return "", false
 			}
+			// <field> . tcp dport @pairs: the address and port together.
+			if i+5 < len(r) && r[i+2] == "." && r[i+3] == "tcp" && r[i+4] == "dport" {
+				set := s.sets[strings.TrimPrefix(r[i+5], "@")]
+				i += 5
+				if p.proto != "tcp" || !set.pairs[a.String()+" . "+strconv.Itoa(p.dport)] {
+					return "", false
+				}
+				continue
+			}
+			set := strings.TrimPrefix(r[i+2], "@")
+			i += 2
 			if !slices.ContainsFunc(s.sets[set].elems, func(q netip.Prefix) bool { return q.Contains(a) }) {
 				return "", false
 			}
