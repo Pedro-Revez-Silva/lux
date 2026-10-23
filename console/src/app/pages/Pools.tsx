@@ -14,10 +14,11 @@ interface PoolRow extends Pool {
   stats?: PoolStats;
 }
 
-/** A pool's settings in a line: its provider, and its size bounds or that it is static. */
+/** A pool's settings in a line: its provider, and its size bounds or that it is static. An ec2 pool's market is its preemptible. */
 function settingsText(p: Pool): string {
-  if (p.provider === "static") return p.hourlyPrice ? `static hosts · ${p.hourlyPrice} ${p.currency ?? ""}/h` : "static hosts";
-  const spot = p.template?.spot ? " · spot" : "";
+  const market = p.preemptible === false ? " · non-preemptible" : "";
+  if (p.provider === "static") return (p.hourlyPrice ? `static hosts · ${p.hourlyPrice} ${p.currency ?? ""}/h` : "static hosts") + market;
+  const spot = p.preemptible === false ? " · on-demand" + market : p.preemptible || p.template?.spot ? " · spot" : "";
   return `${p.provider} · min ${p.minHosts} · warm ${p.warmHosts}${p.warmWhileActive ? " (in use)" : ""} · max ${p.maxHosts || "∞"}${spot}`;
 }
 

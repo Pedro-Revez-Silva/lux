@@ -50,15 +50,20 @@ func TestShimKnowsReclaim(t *testing.T) {
 		modes, reclaim, disk bool
 		want                 []string
 	}{
-		{false, false, false, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapManagedImages}},
-		{false, false, true, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapManagedImages, proto.CapDiskScale}},
-		{false, true, true, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapManagedImages, proto.CapSpotReclaim, proto.CapDiskScale}},
-		{true, true, true, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapManagedImages, proto.CapSyncModes, proto.CapSpotReclaim, proto.CapDiskScale}},
-		{true, false, false, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapManagedImages, proto.CapSyncModes}},
+		{false, false, false, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapNonPreemptible, proto.CapManagedImages}},
+		{false, false, true, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapNonPreemptible, proto.CapManagedImages, proto.CapDiskScale}},
+		{false, true, true, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapNonPreemptible, proto.CapManagedImages, proto.CapSpotReclaim, proto.CapDiskScale}},
+		{true, true, true, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapNonPreemptible, proto.CapManagedImages, proto.CapSyncModes, proto.CapSpotReclaim, proto.CapDiskScale}},
+		{true, false, false, []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapNonPreemptible, proto.CapManagedImages, proto.CapSyncModes}},
 	} {
 		r := &Runner{shimSyncModes: c.modes, shimReclaim: c.reclaim, disk: diskScale{on: c.disk}}
 		if got := r.capabilities(); !slices.Equal(got, c.want) {
 			t.Fatalf("modes %v, reclaim %v, disk scaling %v: %v, want %v", c.modes, c.reclaim, c.disk, got, c.want)
+		}
+		// Every runner of this build exempts non-preemptible placements
+		// from its disk guard, whatever its shim.
+		if got := r.capabilities(); !slices.Contains(got, proto.CapNonPreemptible) {
+			t.Fatalf("modes %v, reclaim %v, disk scaling %v: %v lacks %s", c.modes, c.reclaim, c.disk, got, proto.CapNonPreemptible)
 		}
 	}
 }

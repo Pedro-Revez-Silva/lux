@@ -160,13 +160,15 @@ type diskGuard struct {
 // diskVictim is a live placement with a disk limit: used bytes at its
 // latest sample against limit, rw of them its writable layer. stopping: it
 // is already on its way out (stopping, reported over its grace, or asked
-// to stop by this guard).
+// to stop by this guard). exempt: its Run has placement.preemptible false,
+// so the guard never stops it.
 type diskVictim struct {
 	runID    string
 	epoch    int
 	used, rw int64
 	limit    disklimit.Limit
 	stopping bool
+	exempt   bool
 	p        *placement
 }
 
@@ -348,13 +350,18 @@ func (g *diskGuard) reclaimCopies(ctx context.Context, free int64) (newFree, pen
 
 // stopOverLimit stops over-limit placements, largest excess first, until
 // pending plus what their stops free covers what free lacks of the
-// recovery mark. relieved: a placement is stopping, already or now.
+// recovery mark. relieved: a placement is stopping, already or now. A
+// non-preemptible placement (exempt) is never a candidate: with only those
+// over their limit, the pass finds no relief and admissions stay blocked.
 func (g *diskGuard) stopOverLimit(ctx context.Context, free, pending int64) (newFree int64, relieved bool) {
 	var cands []diskVictim
 	for _, v := range overLimit(g.victims()) {
 		if v.stopping {
 			pending += v.rw
 			relieved = true
+			continue
+		}
+		if v.exempt {
 			continue
 		}
 		cands = append(cands, v)
@@ -463,7 +470,8 @@ func (r *Runner) diskVictims() []diskVictim {
 		}
 		p.mu.Lock()
 		out = append(out, diskVictim{runID: p.runID, epoch: p.epoch, used: p.lastDisk, rw: p.lastRw, limit: l, p: p,
-			stopping: p.phase != "running" || p.stopWhy != "" || p.pressureStop || p.disk.Reported()})
+			stopping: p.phase != "running" || p.stopWhy != "" || p.pressureStop || p.disk.Reported(),
+			exempt:   p.assign != nil && p.assign.Spec.NonPreemptible()})
 		p.mu.Unlock()
 	}
 	return out

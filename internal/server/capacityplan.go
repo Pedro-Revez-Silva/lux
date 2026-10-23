@@ -408,7 +408,11 @@ func (s *Server) planCapacity(ctx context.Context, tx pgx.Tx, pl poolRow, idle m
 	virtual := func(id string) *candidateHost {
 		h := &candidateHost{ID: id, TenantID: pl.TenantID, PoolID: pl.ID, Pool: pl.Name, Shared: pl.Shared && pl.TenantID == nil, Retired: pl.Retired, Connected: true,
 			// A new host runs the binaries this luxd serves.
-			Caps: []string{proto.CapSyncModes, proto.CapManagedImages}}
+			Caps: []string{proto.CapSyncModes, proto.CapNonPreemptible, proto.CapManagedImages}}
+		// Its market is the pool's (ProviderTemplate).
+		if pl.Provider == "ec2" && pl.Preemptible {
+			h.Market = MarketSpot
+		}
 		if plan.Expected != nil {
 			h.Capacity = plan.Expected.Capacity
 			h.Labels = maps.Clone(plan.Expected.Labels)

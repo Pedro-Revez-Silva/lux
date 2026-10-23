@@ -1213,7 +1213,8 @@ def test_pool_cost_tab_and_run_placements_with_block_storage(page, env, lux, pri
     storage apart, each charged to Runs or unallocated, as the API reads
     them, and the Run's cost lists its placement with both."""
     ec2 = priced_ec2
-    lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps({**ec2.template, "region": "eu-north-1"}), "--max", "1", "--min", "1")
+    lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps({**ec2.template, "region": "eu-north-1"}), "--max", "1", "--min", "1",
+            "--preemptible=false")
     host = wait_until(lambda: next((h for h in lux.json("hosts", "ls") if h["pool"] == "burst" and h["state"] == "ready" and h.get("volumes")), None),
                       120, 0.5, "the pool's host never registered with its volumes")
     run_id = lux.submit(generic(ALPINE_IMAGE, "sleep", "3", placement={"pool": "burst"}))

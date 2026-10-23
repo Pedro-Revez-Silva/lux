@@ -28,7 +28,7 @@ was reached; `1` anything else.
 ## Runs
 
 ```bash
-lux run -f spec.yaml [--spot] [--dry-run | --follow | --wait] [--name N] [--idle-timeout D] [-l k=v] [--pool P] [--size NAME] [--idempotency-key K] [--secrets-from .env]
+lux run -f spec.yaml [--spot] [--preemptible=false] [--dry-run | --follow | --wait] [--name N] [--idle-timeout D] [-l k=v] [--pool P] [--size NAME] [--idempotency-key K] [--secrets-from .env]
 lux run --image alpine -- echo hello           # a quick generic Run
 lux run --image alpine --pool arm64 -- uname -m
 lux run --image alpine --pool m --size m-2-arm64 -- make test   # a size of a shaped pool
@@ -69,6 +69,16 @@ is refused (422 `invalid_spec`). A spot Run cannot resume. A normal Run or
 scale-down may reclaim it: SIGTERM immediately, SIGKILL after 15s, then
 terminated with an explicit cause. Its existing output and artifacts are kept;
 state volumes are not exported. `--spot=false` overrides `spot: true` in a file.
+
+`--preemptible=false` sets `placement.preemptible: false`: lux never takes
+the Run away on its own initiative
+([Non-preemptible Runs](runspec.md#non-preemptible-runs)). It needs a pool
+named by `--pool` or the spec (exit 4, `pool_required`: default pools are
+not used) whose `preemptible` is false (exit 4, `pool_preemptible`), and
+does not go with `--spot` (`invalid_spec`). The flag is sent only when
+given; `--preemptible` overrides `preemptible: false` in a file. `--dry-run`
+applies the same checks, and lists hosts that are spot instances or run an
+older lux-runner as `capability` blockers.
 
 `--dry-run` validates the submission and checks current admission without
 creating a Run, caching secrets, reserving space, launching hosts or stopping
@@ -179,7 +189,9 @@ lux refuses, changing nothing, a pool you cannot use (exit 4,
 `unknown_pool`), one whose hosts' platform the image does not offer
 (`platform_mismatch`), or one that can never take the Run (`pool_unfit`:
 nested containers, required labels, or a size beyond every host it has and
-the host it would launch). With `--to`, that host must be in the pool
+the host it would launch). A Run with `placement.preemptible: false` moves
+only to a pool whose `preemptible` is false (exit 4, `pool_preemptible`).
+With `--to`, that host must be in the pool
 `--pool` names (exit 4, `invalid_spec`).
 When lux cannot tell the platform it moves the Run anyway and prints
 `platform unchecked: ...` on stderr.
@@ -294,9 +306,9 @@ lux hosts price <host> --clear           # admin: no price, so its Runs get no c
 lux hosts set <host> --network-local 10.1.0.0/24 --network-zone 10.1.0.0/16 \
   --price-transfer internet=0.0010,zone=0.01 --price-public-ip 0.005 --currency USD
                                 # admin: a static host's network catalog and transfer prices (omitted flags clear)
-lux pools ls                             # DEFAULT: * on the pool Runs naming no pool go to; operators without --tenant: every tenant's, OWNER platform or the tenant
+lux pools ls                             # DEFAULT: * on the pool Runs naming no pool go to; operators without --tenant: every tenant's, OWNER platform or the tenant; PREEMPTIBLE: false for a non-preemptible pool
                                          # -o json: each pool's platforms (os/arch) and capabilities.nestedContainers, as lux resume --pool checks them; absent/null when unknown
-lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON] [--shape SHAPE] [--default] [--replace] [--dry-run]
+lux pools set <name> --provider static|ec2 [--min N] [--max N] [--warm N] [--template JSON] [--shape SHAPE] [--preemptible=BOOL] [--default] [--replace] [--dry-run]
 lux pools set <name> --default           # admin: make it the tenant's default pool (moves the mark); changes nothing else
 lux pools set <name> --default=false     # admin: clear it
 lux pools set <name> --provider static --hourly-price 0.40 --currency USD   # default price of hosts registering into it
@@ -428,6 +440,18 @@ leaves out a placement the pool has would remove it (`placement
 pack→-`), refused without `--replace`. Another value is refused before
 anything is sent. `luxd admin create-pool --placement` takes the same.
 
+`--preemptible=false` makes the pool non-preemptible
+([Hosts and pools](concepts.md#hosts-and-pools)): an `ec2` pool launches
+on-demand instances, and only such a pool takes Runs submitted with
+`--preemptible=false`. Like `--default`, it is not replaced when omitted:
+a new pool then follows its template's `spot` (else `true`), and an
+existing one keeps its own. A template `spot` that contradicts it is
+refused (exit 4, `invalid_pool`). `--preemptible=true` on a pool holding a
+non-preemptible Run that is queued, live or resumable is refused (exit 4,
+409 `pool_has_non_preemptible_runs`): terminate or move those Runs first.
+The change prints as `preemptible false→true`. `luxd admin create-pool
+--preemptible` takes the same.
+
 ## Status and history
 
 ```bash
@@ -436,6 +460,7 @@ lux history [--since 24h]       # the same over time
 lux history <run>               # a Run's resource use, across placements
 lux history --host <host>
 lux events --all                # every Run's events as they happen
+lux events --all -l team=x --type state,exited   # only those Runs' events of those types
 ```
 
 ## Costs

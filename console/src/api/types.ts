@@ -34,7 +34,8 @@ export interface RunSpec {
   image: { ref?: string; build?: { containerfile: string; context?: string; args?: Record<string, string> } };
   workload: { adapter: string; command?: string[]; prompt?: string; workdir?: string; user?: string; tty?: boolean; servers?: SpecServer[] };
   resources: SpecResources;
-  placement: { pool?: string; requires?: Record<string, string>; prefers?: Record<string, string> };
+  /** preemptible false: lux never takes the Run away on its own initiative; absent is true. */
+  placement: { pool?: string; requires?: Record<string, string>; prefers?: Record<string, string>; preemptible?: boolean };
   resumePolicy?: "auto" | "restart" | "manual" | "never";
   [key: string]: unknown;
 }
@@ -681,6 +682,8 @@ export interface Pool {
   sizes?: PoolSize[];
   /** spread: fewest Runs first; pack: most allocated host first. Absent: pack for a shaped pool, spread otherwise. */
   placement?: "spread" | "pack";
+  /** false: an ec2 pool launches on-demand hosts, and the pool takes non-preemptible Runs. */
+  preemptible?: boolean;
 }
 
 export interface PoolShape {

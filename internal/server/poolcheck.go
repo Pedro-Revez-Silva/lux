@@ -16,10 +16,12 @@ import (
 const maxCheckError = 300
 
 // CheckPoolTemplate checks before persistence, outside the write transaction.
-// Providers without Checker and identical live provider/templates skip the check.
+// Providers without Checker and identical live provider/templates/preemptible skip the check.
 // Launch tags use the stored pool id (newID on create) and a representative host.
+// The template is checked as it launches: ProviderTemplate with the
+// preemptible the set resolves to (PoolPreemptible, explicit the request's).
 // The returned checked id, or "" for a skip, must be passed to ConfirmCheckedPool.
-func CheckPoolTemplate(ctx context.Context, db *store.Store, providers map[string]Provider, tenantID, name, newID, provider string, template map[string]any) (string, error) {
+func CheckPoolTemplate(ctx context.Context, db *store.Store, providers map[string]Provider, tenantID, name, newID, provider string, template map[string]any, explicit *bool) (string, error) {
 	checker, ok := providers[provider].(Checker)
 	if !ok {
 		return "", nil
@@ -32,11 +34,22 @@ func CheckPoolTemplate(ctx context.Context, db *store.Store, providers map[strin
 	if err != nil {
 		return "", err
 	}
-	if stored.live && stored.provider == provider {
+	var current *bool
+	if stored.id != "" {
+		current = &stored.preemptible
+	}
+	preemptible, err := PoolPreemptible(provider, template, explicit, current)
+	if err != nil {
+		return "", err
+	}
+	if stored.live && stored.provider == provider && stored.preemptible == preemptible {
 		same, err := sameTemplate(stored.template, raw)
 		if err != nil || same {
 			return "", err
 		}
+	}
+	if raw, err = ProviderTemplate(provider, raw, preemptible); err != nil {
+		return "", err
 	}
 	poolID := newID
 	if stored.id != "" {
@@ -64,7 +77,7 @@ func ConfirmCheckedPool(name, storedID, checkedID string) error {
 // Retired pools are included: reviving one preserves its id.
 type checkedPool struct {
 	deployment, id, provider string
-	live                     bool
+	live, preemptible        bool
 	template                 map[string]any
 }
 
@@ -74,8 +87,8 @@ func readCheckedPool(ctx context.Context, db *store.Store, tenantID, name string
 		if err := tx.QueryRow(ctx, `SELECT value FROM settings WHERE name = 'deployment'`).Scan(&out.deployment); err != nil {
 			return err
 		}
-		err := tx.QueryRow(ctx, `SELECT id, provider, template, NOT retired FROM pools
-			WHERE tenant_id IS NOT DISTINCT FROM nullif($1, '') AND name = $2`, tenantID, name).Scan(&out.id, &out.provider, &out.template, &out.live)
+		err := tx.QueryRow(ctx, `SELECT id, provider, template, NOT retired, preemptible FROM pools
+			WHERE tenant_id IS NOT DISTINCT FROM nullif($1, '') AND name = $2`, tenantID, name).Scan(&out.id, &out.provider, &out.template, &out.live, &out.preemptible)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}

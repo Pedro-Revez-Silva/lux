@@ -376,7 +376,16 @@ type Welcome struct {
 	// whose host counters start from zero (the host rebooted) counts on
 	// from these rather than from zero, which luxd's maximum would hide.
 	HostNet map[string]NetBytes `json:"hostNet,omitempty"`
+	// ControlPlanePorts: TCP ports on the control plane's addresses Runs
+	// may reach (runners.control_plane_ports). The runner replaces its
+	// list with this one on every Welcome; none (an older luxd included)
+	// keeps the control plane fully blocked.
+	ControlPlanePorts []int `json:"controlPlanePorts,omitempty"`
 }
+
+// MaxControlPlanePorts caps Welcome.ControlPlanePorts: luxd refuses more at
+// startup, and a runner applies none of a longer list.
+const MaxControlPlanePorts = 16
 
 type Heartbeat struct {
 	Leases []LivePlacement `json:"leases"`
@@ -529,6 +538,11 @@ const CapSpotReclaim = "spot-reclaim-v1"
 // Capacity.Disk is then nominal. Shaped pools place Runs only on such
 // runners.
 const CapDiskScale = "disk-scale"
+
+// CapNonPreemptible is the Hello capability of a runner whose disk-pressure
+// guard never stops a placement whose spec has placement.preemptible false.
+// Non-preemptible Runs are placed only on such runners.
+const CapNonPreemptible = "non-preemptible"
 
 // ImageResolution is a built image as its Run's first build made it: the
 // Containerfile with every FROM pinned to a digest, and the image id.

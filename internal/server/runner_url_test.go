@@ -18,11 +18,12 @@ import (
 // launched (i-fake when unset); Terminate and Instances are unused here.
 type fakeLaunchProvider struct {
 	env      map[string]string
+	template json.RawMessage
 	launched Launched
 }
 
 func (p *fakeLaunchProvider) Launch(ctx context.Context, template json.RawMessage, tags, env map[string]string) (Launched, error) {
-	p.env = env
+	p.env, p.template = env, template
 	if p.launched.ProviderID == "" {
 		return Launched{ProviderID: "i-fake"}, nil
 	}

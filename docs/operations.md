@@ -204,6 +204,7 @@ under a timeout. `luxd check-config` is an alias of `validate`.
 | `LUX_PUBLIC_URL` | — | The URL clients use. Runners too, unless `LUX_RUNNER_URL` is set. |
 | `LUX_RUNNER_URL` | = public_url | The URL runners dial, if different from `LUX_PUBLIC_URL` (a private IP such as `http://10.0.1.10:7070`, unreachable from outside the VPC). |
 | `LUX_RUNNER_BIN_DIR` | `/usr/local/lib/lux/runner` | Runner binaries luxd serves and hashes (sha256) at startup, for self-update: `<dir>/linux-{arm64,amd64}/{lux-runner,lux-shim}`. A missing arch or file is simply not offered. |
+| `LUX_RUNNER_CONTROL_PLANE_PORTS` | — | TCP ports on the addresses the runner URL's host resolves to that Runs may reach, comma-separated (`runners.control_plane_ports`, a list, in the file): for a companion service on luxd's host, such as a build cache on `8090`. What a Run then reaches is in [Network egress](runspec.md#network-egress). Every runner gets the list on each (re)connect and applies it to its Runs at once, running ones included; an empty list keeps the control plane fully blocked, as does a runner connected to a luxd that predates the setting. Runners older than this release ignore the setting (the control plane stays blocked for their Runs) until they self-update. Integers 1-65535, at most 16; duplicates are collapsed. Refused at startup: luxd's own ports, i.e. the port of `LUX_LISTEN`, of the runner URL and of `LUX_PUBLIC_URL` (explicit, or 80/443 by scheme), and with previews on, `LUX_PREVIEW_LISTEN`'s and `LUX_PREVIEW_PUBLIC_PORT`. **Warning:** every Run on every host, untrusted ones included, can then reach that service: only expose one built for untrusted callers (authenticated, or holding nothing a Run must not read or write). |
 | `LUX_S3_BUCKET` | — | Where snapshots, output and artifacts go. |
 | `LUX_S3_ENDPOINT` | AWS | For MinIO and other S3-compatible stores (path-style). |
 | `LUX_S3_PUBLIC_ENDPOINT` | = endpoint | The endpoint presigned URLs are signed for, if runners and clients reach S3 by another name. |
@@ -579,7 +580,11 @@ lasts, the runner:
    stops no more than it needs. A stopped Run gets a `disk.pressure_stop`
    event and ends `failed`, its reason e.g. `stopped: host disk pressure,
    12.3 GiB over its 37.5 GiB disk limit`. **A Run at or under its limit
-   is never stopped.**
+   is never stopped**, and neither is one with `placement.preemptible:
+   false` ([Non-preemptible Runs](runspec.md#non-preemptible-runs)),
+   however far over: with only such Runs over, the pass finds no relief and
+   admissions stay blocked. Such a Run is still held to its own limit after
+   its grace (`disk.exceeded`).
 
 What a stop gives back, and when: the Run's container goes as soon as its
 end is reported, which frees its writable layer. Its state volumes stay,
@@ -901,12 +906,17 @@ lux pools rm burst --force-evict   # also stops its hosts' live Runs, so they re
 
 ### Spot instances
 
-Add `"spot": true` to the template to launch one-time spot instances:
+A new `ec2` pool is preemptible, so it launches one-time spot instances,
+unless it is set with `--preemptible=false`, which launches on-demand ones
+([Non-preemptible pools](#non-preemptible-pools)):
 
 ```bash
 lux pools set burst --provider ec2 --max 10 \
-  --template '{"region":"eu-west-1","launchTemplate":"lux-runner","spot":true}'
+  --template '{"region":"eu-west-1","launchTemplate":"lux-runner"}'
 ```
+
+The template's `"spot": true` is still accepted for compatibility, but it
+must agree with the pool's `preemptible` (422 `invalid_pool` otherwise).
 
 EC2 gives two minutes' notice before it takes a spot instance back. Each
 instance's runner watches for it (user data sets `LUX_EC2_IMDS`, which the
@@ -928,6 +938,45 @@ A Run whose stop or upload cannot finish in time (a very large state
 volume) is lost when the instance goes. It is resumable from its previous
 snapshot. Keep state volumes small on spot pools, or use on-demand for
 Runs that cannot afford it (`placement.pool`).
+
+### Non-preemptible pools
+
+A pool's `preemptible` decides an `ec2` pool's market: `true` (the default)
+launches spot instances, `false` on-demand ones. luxd sets the template's
+`spot` from it before every launch and template check, so it is the one
+place the market is set; a template `spot` that contradicts it is refused
+(422 `invalid_pool`). Omitted on create, the flag follows the template's
+`spot` (else `true`); omitted on update, it is unchanged. Migration
+`091_pool_preemptible` set every existing `ec2` pool without `"spot": true`
+to `false`: they already launched on-demand. Static pools are `true` until
+set otherwise.
+
+For API and IaC callers this changes what a create means: a pool created
+(`POST /v1/pools`, `lux pools set`, `luxd admin create-pool`) without
+`preemptible` and without a template `spot` is now preemptible and
+launches spot instances; it used to launch on-demand. Pass
+`preemptible: false` to keep on-demand. Existing pools are backfilled as
+they were and keep their market on later updates that omit `preemptible`.
+
+```bash
+lux pools set steady --provider ec2 --max 4 --preemptible=false \
+  --template '{"region":"eu-west-1","launchTemplate":"lux-runner"}'
+lux run --pool steady --preemptible=false -f release.yaml
+```
+
+Only a pool with `preemptible: false` takes Runs submitted with
+`placement.preemptible: false`
+([Non-preemptible Runs](runspec.md#non-preemptible-runs)). After setting a
+pool's flag to `false`, its existing spot hosts keep taking ordinary Runs,
+never non-preemptible ones. They do not necessarily scale down: the pool's
+`min` and `warm` floors may keep them indefinitely, so `lux hosts drain`
+them to have the pool launch on-demand replacements. Runners without the
+`non-preemptible` capability take none of these Runs until they update.
+Setting a pool back to `true` while it holds a non-preemptible Run that is queued, live or
+resumable is refused (409 `pool_has_non_preemptible_runs`): terminate those
+Runs or move them (`lux resume --pool` to another non-preemptible pool)
+first. See the [Run guarantee](runspec.md#non-preemptible-runs) for what
+still stops a non-preemptible Run, including forced operator actions.
 
 What an instance needs:
 

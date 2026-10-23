@@ -53,6 +53,11 @@ func TestRealNft(t *testing.T) {
 	if err := f.Apply(ctx, "luxunrestrict01", netip.Addr{}, true, nil, nil); err != nil {
 		t.Fatalf("unrestricted Apply: %v", err)
 	}
+	for _, ports := range [][]int{{8090, 9000}, {8090}, nil} {
+		if _, err := f.SetControlPlanePorts(ports); err != nil {
+			t.Fatalf("SetControlPlanePorts(%v): %v", ports, err)
+		}
+	}
 	nc := catalog("v2")
 	nc.RegionPublic = append(nc.RegionPublic, "54.0.0.0/8")
 	if err := f.SetClasses(nc); err != nil {

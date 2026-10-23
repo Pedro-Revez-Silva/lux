@@ -301,6 +301,9 @@ A refusal is 422 and changes nothing (pool, spec, state, secrets):
   host, and before any registration is not refused on size. Hosts it no
   longer has (terminated) do not count. A static pool no host has
   registered in is not refused.
+- `pool_preemptible`: the Run has `placement.preemptible: false` and the
+  pool is preemptible
+  ([Non-preemptible Runs](runspec.md#non-preemptible-runs)).
 
 The answer's `placement` is `{pool, poolId, from: {name, id},
 platformUnchecked}`, and the `resume.requested` event carries `pool:
@@ -383,7 +386,12 @@ stores them:
 The tenant's **event feed**, `GET /v1/events` (`lux events --all`), is
 every event of its Runs and servers as server-sent events, each with its
 id: a client resumes after a disconnect with `Last-Event-ID`. Server
-events are listed under [Servers](#servers).
+events are listed under [Servers](#servers). `label=key=value`
+(repeatable, all must match the event's Run; a server's event matches
+through its attached Run, never while it has none) and `type=` (a
+comma-separated list) narrow it to the events a client follows. With a filter, `last=N` is
+the newest N matching events among the most recent 20,000 events; fewer
+if fewer match there, and from now if none do.
 
 A placement's stdout, stderr and structured events are written by the shim
 to a file on the host. Every record has a sequence number and secrets are
@@ -575,6 +583,16 @@ reservation for sizing only; the scheduler still places each Run on its
 own. See [Telemetry](telemetry.md#capacity-planning). `GET /v1/pools`
 says that size as each pool's `hostSize` (with `hostSizeFrom` and the
 latest host's `instanceType`), also for a pool scaled to zero.
+
+A pool is **preemptible** (`preemptible: true`, the default) or not. An
+`ec2` pool's flag is its market: `true` launches spot instances, `false`
+on-demand ones.
+Only a pool with `preemptible: false` takes Runs submitted with
+`placement.preemptible: false`
+([Non-preemptible Runs](runspec.md#non-preemptible-runs)). See
+[Non-preemptible pools](operations.md#non-preemptible-pools) for create and
+update defaults, restrictions on changing the flag, and replacing existing
+spot hosts.
 
 ### Shaped pools
 

@@ -32,17 +32,19 @@ func (m *Manager) Export(ctx context.Context, r Repo, dst string, limit int64) e
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	mirror, err := m.mirror(ctx, r)
+	// A reader of the mirror (no repack meanwhile); archive reads objects,
+	// not the files a fetch writes and renames.
+	mirror, release, err := m.mirror(ctx, r, false)
 	if err != nil {
 		return err
 	}
-	defer m.lock(mirror)()
+	defer release()
 	hasCommit := func() bool {
 		cmd := exportGit(ctx, mirror, "cat-file", "-e", r.Ref+"^{commit}")
 		return cmd.Run() == nil
 	}
 	if !hasCommit() {
-		if _, err := git(ctx, mirror, r.Token, "fetch", "--quiet", "--no-tags", r.URL, "+"+r.Ref+":refs/lux/commits/"+r.Ref); err != nil {
+		if err := m.fetchCommit(ctx, r, mirror); err != nil {
 			return err
 		}
 		if !hasCommit() {
@@ -78,6 +80,19 @@ func (m *Manager) Export(ctx context.Context, r Repo, dst string, limit int64) e
 		return fmt.Errorf("git archive: %w: %s", werr, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// fetchCommit fetches commit r.Ref by its sha into the mirror, as a
+// fetch of the mirror does: serialized with other fetches, and alone with
+// the mirror's files.
+func (m *Manager) fetchCommit(ctx context.Context, r Repo, mirror string) error {
+	l := m.lockFor(mirror)
+	l.fetch.Lock()
+	defer l.fetch.Unlock()
+	l.files.Lock()
+	defer l.files.Unlock()
+	_, err := git(ctx, mirror, r.Token, append(noAutoGC, "fetch", "--quiet", "--no-tags", r.URL, "+"+r.Ref+":refs/lux/commits/"+r.Ref)...)
+	return err
 }
 
 // ErrContextTooLarge: an exported tree has more than its limit.

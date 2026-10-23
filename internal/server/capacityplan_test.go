@@ -9,7 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/marcioapm/lux/internal/proto"
+	"github.com/marcioapm/lux/internal/store"
 )
 
 type planningProvider struct {
@@ -1384,6 +1387,56 @@ func TestCapacityPlanPackStartingHosts(t *testing.T) {
 				if evs := events(t, s, evScaleUp); len(evs) != 1 || evs[0].Data["starting"] != 4.0 {
 					t.Errorf("scale-up %+v, want 4 Runs on starting hosts", evs)
 				}
+			}
+		})
+	}
+}
+
+// planOnce is planCapacity's plan for pl in one system transaction.
+func planOnce(t *testing.T, s *Server, pl poolRow) capacityPlan {
+	t.Helper()
+	var plan capacityPlan
+	if err := s.db.Tx(context.Background(), store.System(), func(tx pgx.Tx) error {
+		var err error
+		plan, err = s.planCapacity(context.Background(), tx, pl, map[string]bool{})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return plan
+}
+
+// A queued non-preemptible Run in an on-demand ec2 pool with a known host
+// size and no live host plans one launch: the pool's new host is not spot
+// and runs a lux-runner with CapNonPreemptible. In a preemptible ec2 pool
+// the new host would be spot, so the same Run plans none.
+func TestCapacityPlanNonPreemptibleRun(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		preemptible bool
+	}{{"on-demand", false}, {"preemptible", true}} {
+		t.Run(c.name, func(t *testing.T) {
+			s, pl, p := planningFixture(t, 0)
+			ctx := context.Background()
+			pl.Preemptible = c.preemptible
+			execSQL(t, s, ctx, `UPDATE pools SET preemptible = $1 WHERE id = 'pool1'`, c.preemptible)
+			execSQL(t, s, ctx, `INSERT INTO runs (id,tenant_id,pool_id,spec,state) VALUES ('np','t1','pool1',
+				'{"resources":{"cpus":1,"memory":10,"disk":10},"placement":{"pool":"burst","preemptible":false}}','provisioning')`)
+			observePlanningHost(t, s, "history", "terminated", proto.Capacity{CPUs: 6, Memory: 60, Disk: 60, Runs: 6}, map[string]string{})
+			plan := planOnce(t, s, pl)
+			if !c.preemptible {
+				if plan.NewHosts != 1 || plan.Unmet != 0 {
+					t.Fatalf("plan %+v, want one new host", plan)
+				}
+				planningTick(t, s, pl, p, false)
+				if p.calls != 1 {
+					t.Fatalf("launched %d, want 1", p.calls)
+				}
+				return
+			}
+			if plan.NewHosts != 0 || plan.Unmet != 1 || len(plan.Deficits) != 1 ||
+				!reflect.DeepEqual(plan.Deficits[0].Blockers, []planBlocker{{Reason: "host is a spot instance"}}) {
+				t.Fatalf("plan %+v, want the Run unmet by a spot new host", plan)
 			}
 		})
 	}

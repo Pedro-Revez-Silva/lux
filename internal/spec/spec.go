@@ -385,6 +385,14 @@ type Placement struct {
 	PoolID   string            `json:"poolId,omitempty" yaml:"poolId,omitempty" doc:"The pool to run in, by its id (pool_…), which a rename keeps: the tenant's pool with that id, else the platform's. An id no such pool has is refused at submit (422 unknown_pool). Not with pool; at submit, pool is set to that pool's name."`
 	Requires map[string]string `json:"requires,omitempty" yaml:"requires,omitempty"`
 	Prefers  map[string]string `json:"prefers,omitempty" yaml:"prefers,omitempty"`
+	// Preemptible: nil is true.
+	Preemptible *bool `json:"preemptible,omitempty" yaml:"preemptible,omitempty" doc:"false: lux never takes the Run away on its own initiative: it is placed only on hosts that are not spot instances, and its host's disk-pressure guard never stops it (docs/runspec.md, Non-preemptible Runs). Requires a pool named by pool or poolId (422 pool_required), one with preemptible false (422 pool_preemptible); not with spot (422 invalid_spec). Its own timeout, idleTimeout and disk limit, a stop or terminate, and an operator's forced drain, pool removal or migrate still apply. Omitted: true."`
+}
+
+// NonPreemptible reports whether the Run opted out of preemption
+// (placement.preemptible false).
+func (s *RunSpec) NonPreemptible() bool {
+	return s.Placement.Preemptible != nil && !*s.Placement.Preemptible
 }
 
 type Network struct {
@@ -856,6 +864,9 @@ func (s *RunSpec) Normalize(d Defaults) error {
 		fail("timeout must not be negative")
 	}
 	if s.Spot {
+		if s.NonPreemptible() {
+			fail("spot: a spot Run is preempted by design: not with placement.preemptible false")
+		}
 		if s.ResumePolicy == "" {
 			s.ResumePolicy = ResumeNever
 		} else if s.ResumePolicy != ResumeNever {

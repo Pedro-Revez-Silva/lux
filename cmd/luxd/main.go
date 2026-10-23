@@ -182,6 +182,7 @@ func serve(ctx context.Context, c config, plan servePlan) error {
 		PublicURL:            c.PublicURL,
 		RunnerURL:            c.RunnerURL,
 		RunnerBinDir:         c.RunnerBinDir,
+		ControlPlanePorts:    c.Runners.ControlPlanePorts,
 		LeaseDuration:        c.Lease.Duration,
 		Tick:                 c.Tick.Duration,
 		ScaleDownAfter:       c.ScaleDownAfter.Duration,
@@ -404,6 +405,8 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		placement := fs.String("placement", "", "spread (fewest Runs first) or pack (most allocated host first); omitted: pack for a shaped pool, spread otherwise; replaces the pool's, like every flag here")
 		var isDefault optBool
 		fs.Var(&isDefault, "default", "mark it its owner's default pool (the platform's, without --tenant); --default=false clears the mark; omitted leaves it")
+		var preemptible optBool
+		fs.Var(&preemptible, "preemptible", "false: lux never preempts its Runs (an ec2 pool launches on-demand instances); omitted: the template's spot if set, else true on create, unchanged on update")
 		fs.Parse(args[1:])
 		var tmpl map[string]any
 		if err := json.Unmarshal([]byte(*template), &tmpl); err != nil {
@@ -430,7 +433,7 @@ func admin(ctx context.Context, cfg config, args []string) error {
 		}
 		log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 		id := ids.New(ids.Pool)
-		checkedID, err := server.CheckPoolTemplate(ctx, db, providers(cfg, log), *tenant, *name, id, *provider, tmpl)
+		checkedID, err := server.CheckPoolTemplate(ctx, db, providers(cfg, log), *tenant, *name, id, *provider, tmpl, preemptible.v)
 		if err != nil {
 			return err
 		}
@@ -440,18 +443,22 @@ func admin(ctx context.Context, cfg config, args []string) error {
 			}
 			// SavePool records the change and any mark it moves as pool events, in this transaction.
 			return server.SavePool(ctx, tx, *tenant, *name, isDefault.v, func() error {
+				pre, err := server.SavePoolPreemptible(ctx, tx, *tenant, *name, *provider, tmpl, preemptible.v)
+				if err != nil {
+					return err
+				}
 				var storedID string
-				err := tx.QueryRow(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
-						scale_down_after_s, warm_while_active, hourly_price, price_currency, shape, placement)
-					VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11, nullif($12, '')::numeric, nullif($13, ''), $14, nullif($15, ''))
+				err = tx.QueryRow(ctx, `INSERT INTO pools (id, tenant_id, name, provider, template, min_hosts, max_hosts, warm_hosts, shared,
+						scale_down_after_s, warm_while_active, hourly_price, price_currency, shape, placement, preemptible)
+					VALUES ($1, nullif($2, ''), $3, $4, $5, $6, $7, $8, $9, nullif($10, 0), $11, nullif($12, '')::numeric, nullif($13, ''), $14, nullif($15, ''), $16)
 					ON CONFLICT (coalesce(tenant_id, ''), name) DO UPDATE SET provider = EXCLUDED.provider, template = EXCLUDED.template,
 						min_hosts = EXCLUDED.min_hosts, max_hosts = EXCLUDED.max_hosts, warm_hosts = EXCLUDED.warm_hosts, shared = EXCLUDED.shared,
 						scale_down_after_s = EXCLUDED.scale_down_after_s, warm_while_active = EXCLUDED.warm_while_active,
 						hourly_price = EXCLUDED.hourly_price, price_currency = EXCLUDED.price_currency, shape = EXCLUDED.shape,
-						placement = EXCLUDED.placement,
+						placement = EXCLUDED.placement, preemptible = EXCLUDED.preemptible,
 						`+server.PoolRevive+` RETURNING id`,
 					id, *tenant, *name, *provider, tmpl, *minH, *maxH, *warm, *shared, int(*scaleDown/time.Second), *warmActive, *price, *currency, shape,
-					*placement).Scan(&storedID)
+					*placement, pre).Scan(&storedID)
 				if err != nil {
 					return err
 				}

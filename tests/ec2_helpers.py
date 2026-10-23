@@ -22,7 +22,9 @@ def _clean(lux, ec2):
 def pool(lux, ec2, name="burst", spot=False, template=None, **kw):
     template = template or ec2.template
     template = {**template, "spot": True} if spot else template
-    args = ["pools", "set", name, "--provider", "ec2", "--template", json.dumps(template)]
+    # Explicit either way: a new ec2 pool without --preemptible is spot.
+    args = ["pools", "set", name, "--provider", "ec2", "--template", json.dumps(template),
+            f"--preemptible={'true' if spot else 'false'}"]
     for k, v in kw.items():
         args += [f"--{k}", str(v)]
     lux.run(*args)

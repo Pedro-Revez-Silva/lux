@@ -44,6 +44,9 @@ const (
 	// kindDiskPressure: the host's runner reports disk pressure; it takes
 	// no new placement, whatever the Run, until the pressure ends.
 	kindDiskPressure
+	// kindNonPreemptible: a non-preemptible Run, a spot host or a runner
+	// without CapNonPreemptible (its disk guard could stop the Run).
+	kindNonPreemptible
 	// kindManagedImages: the Run's image needs proto.CapManagedImages.
 	kindManagedImages
 )
@@ -108,6 +111,15 @@ func hostFit(r pendingRun, h *candidateHost) []fitBlocker {
 	if r.Spec.Spot && !slices.Contains(h.Caps, proto.CapSpotReclaim) {
 		constraint(kindSpotReclaim, "host's lux-runner lacks spot reclamation support")
 	}
+	// A chosen host is held to it too: the guarantee is the Run's.
+	if r.Spec.NonPreemptible() {
+		if h.Market == MarketSpot {
+			constraint(kindNonPreemptible, "host is a spot instance")
+		}
+		if !slices.Contains(h.Caps, proto.CapNonPreemptible) {
+			constraint(kindNonPreemptible, "host's lux-runner lacks non-preemptible support")
+		}
+	}
 	// A shaped pool's sizes are fractions of its nominal host: only a
 	// runner advertising exactly that host, and scaling disk to it, takes
 	// one. A larger host advertises the shape, not its hardware.
@@ -157,7 +169,7 @@ type waitCapacity struct {
 }
 
 // waitKinds is the reason's fixed order: the resource kinds, then constraints.
-var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested", "syncModes", "shape", "diskPressure", "managedImages"}
+var waitKinds = [...]string{"cpus", "memory", "disk", "runs", "labels", "nested", "syncModes", "nonPreemptible", "shape", "diskPressure", "managedImages"}
 
 // add counts h's blockers, unless one of them rules h out for this Run on
 // pool, tenancy or chosen-host grounds, or h is not connected to this luxd
@@ -176,6 +188,8 @@ func (w *waitCapacity) add(blockers []fitBlocker) {
 			kind = "nested"
 		case kindSyncModes:
 			kind = "syncModes"
+		case kindNonPreemptible:
+			kind = "nonPreemptible"
 		case kindShape:
 			kind = "shape"
 		case kindDiskPressure:
@@ -228,6 +242,8 @@ func (w *waitCapacity) reason(r pendingRun) string {
 			what = plural(n, "does", "do") + " not support nested containers"
 		case "syncModes":
 			what = plural(n, "runs a lux-runner", "run lux-runners") + " without sync modes (its sync asks for fast-forward or fetch)"
+		case "nonPreemptible":
+			what = "cannot take a non-preemptible Run (a spot instance, or a lux-runner without its support)"
 		case "shape":
 			sh := r.Shape
 			what = plural(n, "does", "do") + " not advertise its pool's shape (" + shapeText(sh.CPUs, int64(sh.Memory), int64(sh.Disk)) + ") with disk scaling"

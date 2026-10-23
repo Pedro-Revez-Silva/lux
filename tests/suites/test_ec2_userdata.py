@@ -33,7 +33,7 @@ def test_the_env_round_trips_through_every_user_data_format(lux, ec2, user_data)
     template = dict(ec2.template)
     if user_data is not None:
         template["userData"] = user_data
-    lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps(template), "--max", "1")
+    lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps(template), "--max", "1", "--preemptible=false")
     run_id = lux.submit(generic(ALPINE_IMAGE, "echo", "booted", placement={"pool": "burst"}))
     lux.wait_state(run_id, "succeeded", timeout=120)
     assert "booted" in lux.logs(run_id)
@@ -53,7 +53,8 @@ def test_the_script_format_actually_boots_a_runner(env, lux, ec2, hosts):
     real-execution coverage."""
     fake_only(ec2)
     template = {**ec2.template, "userData": "script"}
-    lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps(template), "--min", "1", "--max", "1")
+    lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps(template), "--min", "1", "--max", "1",
+            "--preemptible=false")
     wait_until(lambda: ec2.running(), 60, 1, "no host launched")
     [inst] = ec2.running()
     script = ec2.userdata(inst["id"])

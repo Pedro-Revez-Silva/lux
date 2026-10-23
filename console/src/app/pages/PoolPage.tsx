@@ -77,6 +77,11 @@ export function PoolPage({ name }: { name: string }) {
             {pool.platform && <Badge outline>platform</Badge>}
             {pool.shared && <Badge tone="info">shared</Badge>}
             {pool.isDefault && <Badge tone="accent">Default</Badge>}
+            {pool.preemptible === false && (
+              <Badge outline title="lux never takes this pool's Runs away on its own initiative; an ec2 pool launches on-demand hosts">
+                non-preemptible
+              </Badge>
+            )}
           </>
         }
         description={

@@ -3,6 +3,8 @@ to another host, in time, even when a stop is already under way."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from conftest import fake_only, generic
@@ -120,3 +122,27 @@ def test_a_spot_interruption_shortens_a_stop_already_under_way(lux, ec2):
     run = lux.wait_state(run_id, "stopped", timeout=15)
     assert run["placements"][-1]["exitReason"] != "lost", run
     wait_until(lambda: (s := lux.json("snapshots", run_id)) and s[-1]["uploaded"], 30, 0.5, "snapshot not uploaded in time")
+
+
+def test_a_non_preemptible_pool_launches_on_demand_for_a_non_preemptible_run(lux, ec2):
+    """A pool with preemptible false launches on-demand instances, even from
+    a template that asks for none, and a Run with placement.preemptible
+    false runs there; the same Run naming no pool is refused."""
+    fake_only(ec2)
+    lux.run("pools", "set", "burst", "--provider", "ec2", "--max", "1", "--preemptible=false",
+            "--template", json.dumps(ec2.template))
+    [pl] = [p for p in lux.json("pools", "ls") if p["name"] == "burst"]
+    assert pl["preemptible"] is False, pl
+    spec = generic(ALPINE_IMAGE, "sh", "-c", "echo up; trap 'exit 0' TERM; while :; do sleep 1; done",
+                   placement={"pool": "burst", "preemptible": False})
+    run_id = lux.submit(spec)
+    lux.wait_output(run_id, "up", timeout=120)
+    (inst,) = ec2.running()
+    assert inst["market"] is None, inst
+    r = lux.run("run", "--preemptible=false", "--image", ALPINE_IMAGE, "--", "true", check=False)
+    assert r.returncode == 4 and "needs a pool named by placement.pool or placement.poolId" in r.stderr, (r.returncode, r.stderr)
+    # Making the pool preemptible while the Run lives there is refused.
+    r = lux.run("pools", "set", "burst", "--provider", "ec2", "--max", "1", "--preemptible=true",
+                "--template", json.dumps(ec2.template), check=False)
+    assert r.returncode == 4 and "before making it preemptible" in r.stderr, (r.returncode, r.stderr)
+    lux.run("terminate", run_id, "--wait")

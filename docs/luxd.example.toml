@@ -32,6 +32,10 @@ region = "us-east-1"               # LUX_S3_REGION
 access_key = ""                    # LUX_S3_ACCESS_KEY (empty: the AWS chain)
 secret_key = ""                    # LUX_S3_SECRET_KEY
 
+[runners]
+# TCP ports on the runner URL's addresses that Runs may reach; see docs/operations.md
+control_plane_ports = []           # LUX_RUNNER_CONTROL_PLANE_PORTS (comma-separated)
+
 [defaults]                         # a Run's resources where its spec sets none
 cpus = 2                           # LUX_DEFAULT_CPUS
 memory = "8Gi"                     # LUX_DEFAULT_MEMORY

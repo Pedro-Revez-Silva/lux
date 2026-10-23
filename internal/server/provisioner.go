@@ -176,6 +176,8 @@ type poolRow struct {
 	Shape *PoolShape
 	// Placement: pools.placement; "" for the pool's default.
 	Placement string
+	// Preemptible: pools.preemptible; an ec2 pool's market (ProviderTemplate).
+	Preemptible bool
 }
 
 func (s *Server) provision(ctx context.Context) error {
@@ -188,7 +190,7 @@ func (s *Server) provision(ctx context.Context) error {
 	var pools []poolRow
 	err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, name, provider, tenant_id, template, min_hosts, max_hosts, warm_hosts, retired, shared,
-				scale_down_after_s, warm_while_active, shape, coalesce(placement, '')
+				scale_down_after_s, warm_while_active, shape, coalesce(placement, ''), preemptible
 			FROM pools WHERE provider <> 'static'
 			  AND (NOT retired OR EXISTS (SELECT 1 FROM hosts h WHERE h.pool_id = pools.id AND h.state <> 'terminated'))`)
 		if err != nil {
@@ -886,7 +888,11 @@ func (s *Server) launch(ctx context.Context, prov Provider, pl poolRow, up map[s
 	env := map[string]string{"LUX_URL": s.cfg.RunnerURL, "LUX_HOST_TOKEN": token, "LUX_HOST_NAME": name}
 	maps.Copy(env, shapeRunnerEnv(pl.Shape))
 	tags := LaunchTags(s.deployment, pl.ID, pl.Name, hostID)
-	l, launchErr := prov.Launch(ctx, pl.Template, tags, env)
+	tmpl, launchErr := ProviderTemplate(pl.Provider, pl.Template, pl.Preemptible)
+	var l Launched
+	if launchErr == nil {
+		l, launchErr = prov.Launch(ctx, tmpl, tags, env)
+	}
 	if launchErr != nil {
 		err := s.db.Tx(ctx, store.System(), func(tx pgx.Tx) error {
 			// Operationally terminated, as before (token revoked, no longer

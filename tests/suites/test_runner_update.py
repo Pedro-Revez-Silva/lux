@@ -314,7 +314,8 @@ def test_a_provisioned_outdated_host_is_replaced(lux, ec2):
                        AWS_REGION="us-east-1", **FAKE_EC2_TIMERS,
                        LUX_RUNNER_BIN_DIR=bin_dir)
     try:
-        lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps(ec2.template), "--min", "1", "--max", "1")
+        lux.run("pools", "set", "burst", "--provider", "ec2", "--template", json.dumps(ec2.template), "--min", "1", "--max", "1",
+                "--preemptible=false")
         # By launches, not by what is running at a poll: an outdated host
         # lives only a second or two (registered, drained, idle,
         # terminated), so a poll can miss every one of them on a busy host.
