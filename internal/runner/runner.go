@@ -359,7 +359,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // disk scaling only when it is on. Its disk guard always exempts
 // non-preemptible placements.
 func (r *Runner) capabilities() []string {
-	caps := []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapNonPreemptible}
+	caps := []string{proto.CapDiff, proto.CapGitCredentials, proto.CapProvisionalNet, proto.CapNonPreemptible, proto.CapRegistryMinted}
 	if r.shimSyncModes {
 		caps = append(caps, proto.CapSyncModes)
 	}

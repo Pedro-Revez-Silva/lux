@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -155,6 +156,26 @@ type config struct {
 			AUD string `toml:"aud" env:"LUX_PREVIEW_CF_ACCESS_AUD"`
 		} `toml:"cloudflare_access"`
 	} `toml:"preview"`
+	// Registry: the registry luxd mints pull credentials for, and the
+	// provider that mints them (docs/operations.md#registry-pull-credentials).
+	// No host: off.
+	Registry struct {
+		Provider string `toml:"provider" env:"LUX_REGISTRY_PROVIDER"`
+		Host     string `toml:"host" env:"LUX_REGISTRY_HOST"`
+		// ECR: [registry.ecr], provider "ecr" only.
+		ECR struct {
+			Region      string `toml:"region" env:"LUX_REGISTRY_ECR_REGION"`
+			PullRoleARN string `toml:"pull_role_arn" env:"LUX_REGISTRY_ECR_PULL_ROLE_ARN"`
+		} `toml:"ecr"`
+		// Grants: in the environment, a JSON array of {owner, tenants}.
+		Grants []registryGrant `toml:"grants" env:"LUX_REGISTRY_GRANTS"`
+	} `toml:"registry"`
+}
+
+// registryGrant is one [[registry.grants]]; nil tenants is every tenant.
+type registryGrant struct {
+	Owner   string   `toml:"owner" json:"owner"`
+	Tenants []string `toml:"tenants" json:"tenants"`
 }
 
 // Nil timeout and max_batch use the transport defaults; explicit zero is invalid.
@@ -320,6 +341,11 @@ func loadConfigFile(path string) (config, string, error) {
 			warn("retired: %s; remove it", r.env)
 		}
 	}
+	for _, m := range movedKeys {
+		if os.Getenv(m.env) != "" {
+			return c, read, fmt.Errorf("%s is not read: set %s instead", m.env, m.to)
+		}
+	}
 	if err := applyEnv(reflect.ValueOf(&c).Elem()); err != nil {
 		return c, read, err
 	}
@@ -349,9 +375,22 @@ type retiredKey struct {
 
 var retiredKeys = []retiredKey{}
 
+// movedKey is a setting no release ever read under its old name: unlike a
+// retired key it is refused, naming its new place, so a configuration
+// written for it fails at startup instead of being silently ignored.
+type movedKey struct {
+	toml, env string
+	to        string // the new TOML key and variable
+}
+
+var movedKeys = []movedKey{
+	{"registry.region", "LUX_REGISTRY_REGION", "registry.ecr.region (LUX_REGISTRY_ECR_REGION)"},
+	{"registry.pull_role_arn", "LUX_REGISTRY_PULL_ROLE_ARN", "registry.ecr.pull_role_arn (LUX_REGISTRY_ECR_PULL_ROLE_ARN)"},
+}
+
 // decodeConfig decodes b strictly, except for retired keys: when they are
 // the only unknown keys, it warns about each and decodes again without
-// them counting.
+// them counting. A moved key is refused with its new place.
 func decodeConfig(b []byte, c *config) error {
 	fresh := *c
 	dec := toml.NewDecoder(bytes.NewReader(b))
@@ -362,14 +401,22 @@ func decodeConfig(b []byte, c *config) error {
 		return err
 	}
 	var unknown []toml.DecodeError
-	var retired []string
+	var retired, moved []string
 	for _, e := range strict.Errors {
 		key := strings.Join(e.Key(), ".")
-		if slices.ContainsFunc(retiredKeys, func(r retiredKey) bool { return r.toml == key }) {
+		if i := slices.IndexFunc(movedKeys, func(m movedKey) bool { return m.toml == key }); i >= 0 {
+			moved = append(moved, fmt.Sprintf("%s is not read: set %s instead", key, movedKeys[i].to))
+		} else if slices.ContainsFunc(retiredKeys, func(r retiredKey) bool { return r.toml == key }) {
 			retired = append(retired, key)
 		} else {
 			unknown = append(unknown, e)
 		}
+	}
+	if len(moved) > 0 {
+		if len(unknown) > 0 {
+			moved = append(moved, tomlError(&toml.StrictMissingError{Errors: unknown}))
+		}
+		return errors.New(strings.Join(moved, "; "))
 	}
 	if len(unknown) > 0 {
 		return &toml.StrictMissingError{Errors: unknown}
@@ -433,7 +480,7 @@ func setField(v reflect.Value, s string) error {
 		}
 		v.SetInt(int64(n))
 	case reflect.Slice:
-		if v.Type() == reflect.TypeFor[[]duration]() || v.Type() == reflect.TypeFor[[]costPluginConfig]() {
+		if v.Type() == reflect.TypeFor[[]duration]() || v.Type() == reflect.TypeFor[[]costPluginConfig]() || v.Type() == reflect.TypeFor[[]registryGrant]() {
 			dec := json.NewDecoder(strings.NewReader(s))
 			dec.DisallowUnknownFields()
 			if err := dec.Decode(v.Addr().Interface()); err != nil {
@@ -682,6 +729,7 @@ func (c config) check() error {
 		}
 	}
 	problems = append(problems, c.controlPlanePortProblems()...)
+	problems = append(problems, c.registryProblems()...)
 	if len(problems) > 0 {
 		return errors.New("configuration: " + strings.Join(problems, "; "))
 	}
@@ -814,4 +862,92 @@ func validInstanceType(s string) bool {
 		}
 	}
 	return true
+}
+
+// registryOwnerRe: an owner is one lowercase repository path segment, the
+// <owner> of <host>/<owner>/... and of its auth.json key.
+var registryOwnerRe = regexp.MustCompile(`^[a-z0-9._-]+$`)
+
+// registryProviders are the [registry] provider values luxd can mint with.
+var registryProviders = []string{"ecr"}
+
+// registryProblems checks [registry]: off when nothing in it is set;
+// otherwise a known provider with its own section (and no other's), a
+// registry host, and usable grants with unique owners. The provider
+// checks what only it needs (ECR: host and region agree).
+func (c config) registryProblems() []string {
+	r := c.Registry
+	ecrSet := r.ECR.Region != "" || r.ECR.PullRoleARN != ""
+	if r.Provider == "" && r.Host == "" && !ecrSet && len(r.Grants) == 0 {
+		return nil
+	}
+	var problems []string
+	switch {
+	case r.Provider == "":
+		problems = append(problems, fmt.Sprintf("registry.provider (LUX_REGISTRY_PROVIDER) is required when any registry setting is set: want one of %s", strings.Join(registryProviders, ", ")))
+	case !slices.Contains(registryProviders, r.Provider):
+		problems = append(problems, fmt.Sprintf("registry.provider (LUX_REGISTRY_PROVIDER) %q: unknown; want one of %s", r.Provider, strings.Join(registryProviders, ", ")))
+	}
+	if r.Host == "" {
+		problems = append(problems, "registry.host (LUX_REGISTRY_HOST) is required when any registry setting is set")
+	} else if !spec.ValidRegistry(r.Host) {
+		problems = append(problems, fmt.Sprintf("registry.host (LUX_REGISTRY_HOST) %q: want a registry host with an optional port, lowercase, no scheme or path", r.Host))
+	}
+	if len(r.Grants) == 0 {
+		problems = append(problems, "registry.grants (LUX_REGISTRY_GRANTS): at least one grant is required")
+	}
+	owners := map[string]bool{}
+	var ownerList []string
+	for i, g := range r.Grants {
+		key := fmt.Sprintf("registry.grants[%d]", i)
+		if !registryOwnerRe.MatchString(g.Owner) {
+			problems = append(problems, fmt.Sprintf("%s.owner %q: want lowercase letters, digits, '.', '_' or '-'", key, g.Owner))
+		}
+		if owners[g.Owner] {
+			problems = append(problems, fmt.Sprintf("%s.owner %q: duplicate", key, g.Owner))
+		}
+		owners[g.Owner] = true
+		ownerList = append(ownerList, g.Owner)
+		if g.Tenants != nil && len(g.Tenants) == 0 {
+			problems = append(problems, key+".tenants: empty; omit it, or [\"*\"], for every tenant")
+		}
+		for _, t := range g.Tenants {
+			if t == "" || strings.TrimSpace(t) != t {
+				problems = append(problems, fmt.Sprintf("%s.tenants %q: want a tenant id or \"*\"", key, t))
+			}
+		}
+	}
+	switch {
+	case r.Provider == "ecr" && !ecrSet:
+		problems = append(problems, "registry.ecr is required for provider ecr: [registry.ecr] region and pull_role_arn (LUX_REGISTRY_ECR_REGION, LUX_REGISTRY_ECR_PULL_ROLE_ARN)")
+	case r.Provider == "ecr":
+		if r.Host != "" {
+			problems = append(problems, server.ECRConfig{Region: r.ECR.Region, PullRoleARN: r.ECR.PullRoleARN}.Problems(r.Host, ownerList)...)
+		}
+	case ecrSet:
+		problems = append(problems, fmt.Sprintf("registry.ecr (LUX_REGISTRY_ECR_*) is set, but registry.provider is %q: [registry.ecr] is only for provider ecr", r.Provider))
+	}
+	return problems
+}
+
+// registryConfig is [registry] as the server takes it, with its provider's
+// token source; tenants default to every tenant. Off: the zero value.
+func (c config) registryConfig() server.RegistryConfig {
+	r := c.Registry
+	if r.Host == "" {
+		return server.RegistryConfig{}
+	}
+	out := server.RegistryConfig{Host: r.Host}
+	switch r.Provider {
+	case "ecr":
+		out.Source = server.NewECRSource(server.ECRConfig{Region: r.ECR.Region, PullRoleARN: r.ECR.PullRoleARN})
+	}
+	for _, g := range r.Grants {
+		tenants := g.Tenants
+		if tenants == nil {
+			tenants = []string{"*"}
+		}
+		out.Grants = append(out.Grants, server.RegistryGrant{Owner: g.Owner, Tenants: slices.Clone(tenants)})
+	}
+	return out
 }

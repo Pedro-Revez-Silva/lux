@@ -692,7 +692,7 @@ func (s *RunSpec) Normalize(d Defaults) error {
 
 	regs := map[string]bool{}
 	for i, a := range s.Image.RegistryAuth {
-		if !validRegistry(a.Registry) {
+		if !ValidRegistry(a.Registry) {
 			fail("image.registryAuth[%d].registry: need a host with an optional port (ghcr.io, 10.0.0.5:5000), no scheme or path", i)
 		}
 		if regs[strings.ToLower(a.Registry)] {
@@ -1210,10 +1210,10 @@ func (s *RunSpec) isRegistryCredential(name string) bool {
 	return slices.ContainsFunc(s.Image.RegistryAuth, func(a RegistryAuth) bool { return a.Secret == name })
 }
 
-// validRegistry is a registry as auth.json keys it: a lowercase host name
+// ValidRegistry is a registry as auth.json keys it: a lowercase host name
 // or IPv4 address, and an optional port. Not the runner's own host: its
 // pulls and pushes go out from the host, outside the Run's egress rules.
-func validRegistry(r string) bool {
+func ValidRegistry(r string) bool {
 	host, port, hasPort := strings.Cut(r, ":")
 	if hasPort {
 		n, err := strconv.Atoi(port)
@@ -1230,14 +1230,14 @@ func validRegistry(r string) bool {
 	return hostLabelsRe.MatchString(host)
 }
 
-// validCacheRepo is a repository with its registry (see validRegistry)
+// validCacheRepo is a repository with its registry (see ValidRegistry)
 // and a path, and no tag or digest.
 func validCacheRepo(repo string) bool {
 	reg, path, ok := strings.Cut(repo, "/")
 	// The registry must be named as one (a dot or a port), or it would
 	// read as a Docker Hub path.
 	named := strings.ContainsAny(reg, ".:")
-	return ok && named && validRegistry(reg) && repoPathRe.MatchString(path)
+	return ok && named && ValidRegistry(reg) && repoPathRe.MatchString(path)
 }
 
 var (

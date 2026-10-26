@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -20,13 +21,21 @@ type registryAuth struct {
 	secrets []string // what to redact: values, passwords, their base64
 }
 
-// registryLogin writes the auth file for the spec's registryAuth; nil when
-// there is none. Registries not listed get no credentials.
+// registryLogin writes the auth file for the spec's registryAuth and the
+// pull credentials luxd minted for the assignment; nil when there are none.
+// Registries not listed get no credentials.
 func (p *placement) registryLogin(sp spec.RunSpec) (*registryAuth, error) {
-	return writeAuthFile(filepath.Join(p.r.cfg.DataDir, "tmp"), sp.Image.RegistryAuth, p.assign.Secrets)
+	return writeAuthFile(filepath.Join(p.r.cfg.DataDir, "tmp"), sp.Image.RegistryAuth, p.assign.Secrets, p.assign.RegistryCredentials)
 }
 
-func writeAuthFile(dir string, auths []spec.RegistryAuth, secrets map[string]string) (*registryAuth, error) {
+// writeAuthFile writes auths, then the minted entries for registries the
+// spec has no credential for: an explicit registryAuth wins over luxd's.
+// Minted keys are <host>/<owner>; spec keys are bare hosts. Podman matches
+// keys most specific first (containers-auth.json(5)), so a minted entry
+// next to a spec entry for its host would override that entry on the
+// owner's repositories (a push credential replaced by a pull-only one):
+// the minted entry is dropped instead.
+func writeAuthFile(dir string, auths []spec.RegistryAuth, secrets map[string]string, minted []proto.RegistryCredential) (*registryAuth, error) {
 	type entry struct {
 		Auth string `json:"auth"`
 	}
@@ -41,6 +50,15 @@ func writeAuthFile(dir string, auths []spec.RegistryAuth, secrets map[string]str
 		enc := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
 		m[ra.Registry] = entry{Auth: enc}
 		a.secrets = append(a.secrets, v, pass, enc)
+	}
+	for _, c := range minted {
+		host, _, _ := strings.Cut(c.Registry, "/")
+		if _, explicit := m[host]; explicit || c.Registry == "" || c.Password == "" {
+			continue
+		}
+		enc := base64.StdEncoding.EncodeToString([]byte(c.User + ":" + c.Password))
+		m[c.Registry] = entry{Auth: enc}
+		a.secrets = append(a.secrets, c.Password, enc)
 	}
 	if len(m) == 0 {
 		return nil, nil

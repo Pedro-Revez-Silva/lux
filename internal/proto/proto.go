@@ -437,7 +437,24 @@ type Assign struct {
 	SyncBases map[string]string `json:"syncBases,omitempty"`
 	// Sync: repositories whose restored checkout moves to a ref before init.
 	Sync []SyncRef `json:"sync,omitempty"`
+	// RegistryCredentials: pull credentials luxd minted for the operator's
+	// in-region registry, attached at send time like Secrets (never
+	// stored), only to a runner with CapRegistryMinted.
+	RegistryCredentials []RegistryCredential `json:"registryCredentials,omitempty"`
 }
+
+// RegistryCredential is one containers auth.json entry. Registry is the
+// entry's key, host/namespace (<host>/<owner>), so it applies to that
+// owner's repositories only.
+type RegistryCredential struct {
+	Registry string `json:"registry"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+}
+
+// CapRegistryMinted is the Hello capability of a runner that writes
+// Assign.RegistryCredentials into its auth file.
+const CapRegistryMinted = "registry-minted"
 
 // SyncRef asks for a repository's checkout to be moved to ref (a branch,
 // tag or sha), fetched through the host's mirror. Mode says when it may

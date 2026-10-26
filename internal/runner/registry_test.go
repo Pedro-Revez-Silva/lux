@@ -1,14 +1,18 @@
 package runner
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/marcioapm/lux/internal/podman"
+	"github.com/marcioapm/lux/internal/proto"
 	"github.com/marcioapm/lux/internal/spec"
 )
 
@@ -19,7 +23,7 @@ func TestAuthFile(t *testing.T) {
 		{Registry: "10.0.0.5:5000", Secret: "REG"},
 		{Registry: "missing.example.com", Secret: "UNSET"},
 	}
-	a, err := writeAuthFile(dir, auths, map[string]string{"GH": "ghp_tok", "REG": "alice:s3cret:x"})
+	a, err := writeAuthFile(dir, auths, map[string]string{"GH": "ghp_tok", "REG": "alice:s3cret:x"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +60,7 @@ func TestAuthFile(t *testing.T) {
 	}
 
 	// No credentials: no file, and a nil auth is usable.
-	none, err := writeAuthFile(dir, auths[:1], map[string]string{})
+	none, err := writeAuthFile(dir, auths[:1], map[string]string{}, nil)
 	if err != nil || none != nil || none.path() != "" {
 		t.Fatalf("%v %v", none, err)
 	}
@@ -192,5 +196,243 @@ func TestImageUseAccessIsPerTenant(t *testing.T) {
 	}
 	if !newImageUse(dir).mayUse("ghcr.io/a/private:1", "t2") || newImageUse(dir).mayUse("ghcr.io/a/private:1", "t3") {
 		t.Fatal("not persisted")
+	}
+}
+
+const mintedHost = "123456789012.dkr.ecr.eu-west-1.amazonaws.com"
+
+func readAuths(t *testing.T, path string) map[string]string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Auths map[string]struct{ Auth string }
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for k, v := range got.Auths {
+		dec, _ := base64.StdEncoding.DecodeString(v.Auth)
+		out[k] = string(dec)
+	}
+	return out
+}
+
+// requireNoReportHolds fails if any report f sent contains one of secrets.
+func requireNoReportHolds(t *testing.T, f *finishFixture, secrets ...string) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.reports {
+		for _, s := range secrets {
+			if strings.Contains(string(r.Data), s) {
+				t.Fatalf("token in a report: %s", r.Data)
+			}
+		}
+	}
+}
+
+// luxd's minted pull credentials are written under <host>/<owner> keys
+// beside the spec's, redacted like them; a spec entry for the registry's
+// host wins over every minted entry for it.
+func TestAuthFileMinted(t *testing.T) {
+	dir := t.TempDir()
+	minted := []proto.RegistryCredential{
+		{Registry: mintedHost + "/acme", User: "AWS", Password: "ecr-acme-token"},
+		{Registry: mintedHost + "/team", User: "AWS", Password: "ecr-team-token"},
+	}
+	a, err := writeAuthFile(dir, nil, nil, minted)
+	if err != nil || a == nil {
+		t.Fatalf("minted only: %v %v", a, err)
+	}
+	want := map[string]string{mintedHost + "/acme": "AWS:ecr-acme-token", mintedHost + "/team": "AWS:ecr-team-token"}
+	if got := readAuths(t, a.path()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("auths %v, want %v", got, want)
+	}
+	enc := base64.StdEncoding.EncodeToString([]byte("AWS:ecr-acme-token"))
+	e := a.redact(errors.New("pull: denied with ecr-acme-token (" + enc + ") and ecr-team-token"))
+	if strings.Contains(e.Error(), "ecr-acme-token") || strings.Contains(e.Error(), "ecr-team-token") || strings.Contains(e.Error(), enc) {
+		t.Fatalf("minted token not redacted: %v", e)
+	}
+	a.close()
+
+	// Beside the spec's entries for other registries.
+	b, err := writeAuthFile(dir, []spec.RegistryAuth{{Registry: "ghcr.io", Secret: "GH"}}, map[string]string{"GH": "ghp_tok"}, minted[:1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = map[string]string{"ghcr.io": "lux:ghp_tok", mintedHost + "/acme": "AWS:ecr-acme-token"}
+	if got := readAuths(t, b.path()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("auths %v, want %v", got, want)
+	}
+	b.close()
+
+	// An explicit registryAuth for the host wins: the minted entries, more
+	// specific, would otherwise replace it on the owners' repositories.
+	c, err := writeAuthFile(dir, []spec.RegistryAuth{{Registry: mintedHost, Secret: "MINE"}}, map[string]string{"MINE": "AWS:explicit-token"}, minted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = map[string]string{mintedHost: "AWS:explicit-token"}
+	if got := readAuths(t, c.path()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("explicit entry did not win: %v, want %v", got, want)
+	}
+	c.close()
+
+	// An explicit entry whose secret has no value is no entry: minted ones stand.
+	d, err := writeAuthFile(dir, []spec.RegistryAuth{{Registry: mintedHost, Secret: "UNSET"}}, nil, minted[:1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readAuths(t, d.path()); !reflect.DeepEqual(got, map[string]string{mintedHost + "/acme": "AWS:ecr-acme-token"}) {
+		t.Fatalf("auths %v", got)
+	}
+	d.close()
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("left %v", entries)
+	}
+}
+
+// A placement whose assignment carries minted credentials pulls with them
+// from its 0600 auth file, which is gone afterwards; a failed pull's error
+// and events never hold the token, nor does the container's config or
+// command line.
+func TestMintedCredentialsStayInTheAuthFile(t *testing.T) {
+	f := newFinishFixture(t)
+	if err := os.MkdirAll(filepath.Join(f.r.cfg.DataDir, "tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const token = "ecr-minted-secret-token"
+	enc := base64.StdEncoding.EncodeToString([]byte("AWS:" + token))
+	// pull copies its auth file aside, then fails echoing the file, as a
+	// careless registry error might.
+	writeFile(t, f.bin, fakePodman(`"pull -q")
+  [ "$3" = --authfile ] || exit 3
+  stat -c %a "$4" > "$0.authmode" 2>/dev/null || stat -f %Lp "$4" > "$0.authmode"
+  cp "$4" "$0.auth"
+  echo "unauthorized: $(cat "$4") `+token+`" >&2
+  exit 1 ;;`))
+	f.p.assign = &proto.Assign{RunID: "run1", TenantID: "t1", Epoch: 1,
+		RegistryCredentials: []proto.RegistryCredential{{Registry: mintedHost + "/acme", User: "AWS", Password: token}}}
+	sp := spec.RunSpec{Image: spec.Image{Ref: mintedHost + "/acme/app:1"},
+		Secrets: []spec.Secret{{Name: "VISIBLE", Value: "v", As: "env"}}}
+	_, err := f.p.ensureImage(context.Background(), sp, podman.Network{})
+	if err == nil {
+		t.Fatal("the pull did not fail")
+	}
+	if strings.Contains(err.Error(), token) || strings.Contains(err.Error(), enc) || !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Fatalf("error not redacted: %v", err)
+	}
+	if got := readAuths(t, f.bin+".auth"); !reflect.DeepEqual(got, map[string]string{mintedHost + "/acme": "AWS:" + token}) {
+		t.Fatalf("auth file %v", got)
+	}
+	if mode, _ := os.ReadFile(f.bin + ".authmode"); strings.TrimSpace(string(mode)) != "600" {
+		t.Fatalf("auth file mode %q", mode)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(f.r.cfg.DataDir, "tmp")); len(entries) != 0 {
+		t.Fatalf("auth file left behind: %v", entries)
+	}
+	waitFor(t, "image.pull event", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, r := range f.reports {
+			if strings.Contains(string(r.Data), "image.pull") {
+				return true
+			}
+		}
+		return false
+	})
+	requireNoReportHolds(t, f, token, enc)
+
+	// The container: neither its shim config nor its command line.
+	rt := t.TempDir()
+	f.r.mounts.Store(runtimeVolume("run1"), rt)
+	if err := f.p.writeShimConfig(context.Background(), sp, nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := os.ReadFile(filepath.Join(rt, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(f.p.createArgs(sp, "img", podman.Network{}), " ")
+	for where, text := range map[string]string{"shim config": string(cfg), "container args": args} {
+		if strings.Contains(text, token) || strings.Contains(text, enc) {
+			t.Fatalf("token in the %s: %s", where, text)
+		}
+	}
+}
+
+// A build uses the minted credentials for its FROM base and for reading
+// its build cache; a push to the cache, which the pull-only token cannot
+// do, is an image.cache warning without the token, and each auth file is
+// gone afterwards.
+func TestMintedCredentialsInABuild(t *testing.T) {
+	f := newFinishFixture(t)
+	tmp := filepath.Join(f.r.cfg.DataDir, "tmp")
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const token = "ecr-minted-build-token"
+	enc := base64.StdEncoding.EncodeToString([]byte("AWS:" + token))
+	// Each pull or push keeps a copy of its auth file under its ref; the
+	// push is refused, echoing the file.
+	writeFile(t, f.bin, fakePodman(`"image exists") exit 1 ;;
+"image inspect") echo sha256:0123 ;;
+"tag "*) ;;
+"pull -q") cp "$4" "$0.auth.$(echo "$5" | tr '/:@' '___')" ;;
+"push -q")
+  cp "$4" "$0.auth.push"
+  echo "denied: not authorized to push with $(cat "$4") `+token+`" >&2
+  exit 1 ;;`))
+	f.p.assign = &proto.Assign{RunID: "run1", TenantID: "t1", Epoch: 1,
+		RegistryCredentials: []proto.RegistryCredential{{Registry: mintedHost + "/acme", User: "AWS", Password: token}}}
+	base, cache := mintedHost+"/acme/base:1", mintedHost+"/acme/cache"
+	sp := spec.RunSpec{Image: spec.Image{Build: &spec.Build{Containerfile: "FROM " + base + "\nRUN true", Cache: cache}}}
+	auth, err := f.p.registryLogin(sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := f.p.pinFroms(context.Background(), sp.Image.Build.Containerfile, auth)
+	if err != nil || !strings.HasPrefix(pinned, "FROM "+base+"@sha256:0123") {
+		t.Fatalf("pinned %q: %v", pinned, err)
+	}
+	ref := cacheRef(cache, "k1")
+	if _, ok := f.p.pullCached(context.Background(), ref, "localhost/lux-build:k1", auth); !ok {
+		t.Fatal("the cache pull did not hit")
+	}
+	auth.close()
+	want := map[string]string{mintedHost + "/acme": "AWS:" + token}
+	for _, pulled := range []string{base, ref} {
+		if got := readAuths(t, f.bin+".auth."+strings.NewReplacer("/", "_", ":", "_", "@", "_").Replace(pulled)); !reflect.DeepEqual(got, want) {
+			t.Fatalf("auth file for %s: %v", pulled, got)
+		}
+	}
+
+	f.p.pushCached(context.Background(), sp, "localhost/lux-build:k1", ref)
+	if got := readAuths(t, f.bin+".auth.push"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("push auth file: %v", got)
+	}
+	var warning string
+	waitFor(t, "the push's image.cache warning", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, r := range f.reports {
+			var ev proto.RunEvent
+			if json.Unmarshal(r.Data, &ev) == nil && ev.Type == "image.cache" && ev.Data["pushed"] == false {
+				warning, _ = ev.Data["warning"].(string)
+				return true
+			}
+		}
+		return false
+	})
+	if !strings.Contains(warning, "not authorized to push") || strings.Contains(warning, token) || strings.Contains(warning, enc) {
+		t.Fatalf("push warning %q", warning)
+	}
+	requireNoReportHolds(t, f, token, enc)
+	if entries, _ := os.ReadDir(tmp); len(entries) != 0 {
+		t.Fatalf("auth files left behind: %v", entries)
 	}
 }
