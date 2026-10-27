@@ -56,6 +56,8 @@ any state ──(terminate, or expiry of a resting Run)──▶ terminated (fin
 | `terminated` | Ended for good: the only terminal state. Never resumed, and its snapshots and output go after the tenant's retention. A Run becomes terminated by `lux terminate` (`POST /v1/runs/{id}/terminate`), or by lux when it expires. |
 | `lost` | Its host stopped heartbeating while it was live. Resumable from the last snapshot taken *before* the lost placement. Work since then is gone. Never resumed automatically. A Run whose `resumePolicy` is `never` ends `terminated` instead. |
 
+**Without an agent session**, a resume starts a fresh agent with the initial prompt, with or without restored files.
+
 Every Run the API returns carries `resumable`, always present: whether
 `POST /v1/runs/{id}/resume` without `fromSnapshot` would accept it now
 (its state is `stopped`, `lost`, `failed` or `succeeded`, its
@@ -172,8 +174,9 @@ on every start, so it must be idempotent.
   short-lived presigned URL, imports the volumes and starts a new
   container. If the snapshot has not finished uploading from its host, the
   scheduler waits for the upload.
-- The adapter's **resume** path runs with the stored session id. An agent
-  reloads its conversation from its transcript on the restored volume.
+- The adapter's **resume** path runs with the stored session id, when present.
+  An agent reloads its conversation from its transcript on the restored volume.
+  Without a session id, the files are restored but the agent starts fresh with its initial prompt.
 - A resume must supply the Run's **secrets** again, because lux never stores
   secret values. This also means a resume can rotate credentials, add
   secrets and remove them ([Secrets](#secrets)).

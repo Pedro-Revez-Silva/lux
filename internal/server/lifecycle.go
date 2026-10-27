@@ -274,8 +274,8 @@ func setRunState(ctx context.Context, tx pgx.Tx, tenantID, runID, state, reason 
 		}
 	}
 	// prompt_attachments: only a terminated Run is never placed again. A
-	// succeeded or failed one can be resumed, as a first placement when it
-	// has no session and no snapshot, so it keeps them.
+	// succeeded or failed one can be resumed without an agent session: a
+	// fresh agent start, with or without restored files, needs them.
 	// finished_at: when its last placement ended. A Run terminated once it
 	// had ended (succeeded, failed: nothing ran since) keeps it.
 	// terminated_at: retention's clock (reapRetention).

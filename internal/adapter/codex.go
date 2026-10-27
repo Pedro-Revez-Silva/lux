@@ -201,7 +201,7 @@ func (c *Codex) handshake(cfg proto.ShimConfig, sink Sink) error {
 		if err != nil {
 			return err
 		}
-		if !cfg.Resume && (cfg.Prompt != "" || len(cfg.PromptAttachments) > 0) {
+		if !cfg.AgentResume() && (cfg.Prompt != "" || len(cfg.PromptAttachments) > 0) {
 			c.mu.Lock()
 			c.queue = append([]proto.Input{withoutWrittenData(proto.Input{RequestID: "prompt", Text: cfg.Prompt, Attachments: cfg.PromptAttachments})}, c.queue...)
 			c.mu.Unlock()

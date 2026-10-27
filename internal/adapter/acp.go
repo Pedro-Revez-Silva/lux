@@ -394,7 +394,7 @@ func (a *ACP) handshake(cfg proto.ShimConfig) error {
 		return fmt.Errorf("session/new returned no sessionId")
 	}
 	a.setSession(ns.SessionID)
-	if !cfg.Resume && (cfg.Prompt != "" || len(cfg.PromptAttachments) > 0) {
+	if !cfg.AgentResume() && (cfg.Prompt != "" || len(cfg.PromptAttachments) > 0) {
 		a.mu.Lock()
 		a.queue = append([]proto.Input{{RequestID: "prompt", Text: cfg.Prompt, Attachments: cfg.PromptAttachments}}, a.queue...)
 		a.queueBytes += inputSize(a.queue[0])

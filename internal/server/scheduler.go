@@ -614,15 +614,15 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	if err != nil {
 		return err
 	}
-	// A placement with a session or a snapshot resumes, and so does every
-	// later one: the prompt images are read for a first placement only and
-	// dropped once one resumes.
+	// A snapshot restores files; only an existing agent session suppresses
+	// the initial prompt and releases its stored images.
 	resume := r.SnapshotID != nil || r.SessionID != ""
+	agentResume := r.SessionID != ""
 	if _, err := tx.Exec(ctx, `UPDATE runs SET current_epoch = $2, state = 'scheduled', state_reason = '', pending_input = NULL, pending_sync = NULL,
 			place_on = NULL, avoid_host = NULL, needs_host_since = NULL,
 			prompt_attachments = CASE WHEN $3 THEN NULL ELSE prompt_attachments END,
 			first_scheduled_at = coalesce(first_scheduled_at, now()), updated_at = now(), state_changed_at = now()
-		WHERE id = $1`, r.ID, epoch, resume); err != nil {
+		WHERE id = $1`, r.ID, epoch, agentResume); err != nil {
 		return err
 	}
 	// The placement is on the Run, its host and its host's pool alike.
@@ -684,7 +684,8 @@ func (s *Server) assign(ctx context.Context, tx pgx.Tx, r pendingRun, h *candida
 	}
 	if resume {
 		a.Resume = &proto.ResumeInfo{SessionID: r.SessionID, Snapshot: snap}
-	} else {
+	}
+	if !agentResume {
 		// Read here only: no other path that loads a queued Run needs them.
 		if err := tx.QueryRow(ctx, `SELECT prompt_attachments FROM runs WHERE id = $1`, r.ID).Scan(&a.PromptAttachments); err != nil {
 			return err

@@ -91,6 +91,133 @@ const (
 	clImage = `{"source":{"data":"` + "iVBORw0KGgpJTUc=" + `","media_type":"image/png","type":"base64"},"type":"image"}`
 )
 
+// Snapshot restoration alone is not an agent-session resume: every protocol
+// sends the initial prompt, including image-only input, rather than idling.
+func TestSnapshotWithoutSessionSendsPrompt(t *testing.T) {
+	for _, name := range []string{"acp", "opencode", "claude-code", "codex"} {
+		for _, images := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/images=%v", name, images), func(t *testing.T) {
+				cfg := proto.ShimConfig{Adapter: name, Resume: true, Prompt: "original prompt"}
+				if images {
+					cfg.Prompt, cfg.PromptAttachments = "", []spec.Attachment{img}
+				}
+				ad, err := New(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var content string
+				var w *agentWire
+				want := `[{"text":"original prompt","type":"text"}]`
+				switch name {
+				case "claude-code":
+					var sink *inputSink
+					w, sink = startWire(t, ad, cfg)
+					id, got := claudeContent(t, w)
+					if id != claudeUUID("prompt") {
+						t.Fatalf("prompt uuid %s", id)
+					}
+					// Reading a lifecycle frame synchronizes with Run after its
+					// startup idle decision, before the prompt is consumed.
+					w.send(clLifecycle(id, "queued"))
+					sink.wait(t, "accepted prompt")
+					if sink.has("idle") {
+						t.Fatalf("idle before prompt consumed: %q", sink.lines())
+					}
+					content = got
+					if images {
+						want = "[" + clImage + "]"
+					}
+				case "codex":
+					w, _ = startWire(t, ad, cfg)
+					id, _ := w.next("initialize")
+					w.send(`{"id":` + id + `,"result":{"userAgent":"lux/0.155.1"}}`)
+					id, _ = w.next("thread/start")
+					w.send(`{"id":` + id + `,"result":{"thread":{"id":"` + cxThread + `"}}}`)
+					id, p := w.next("turn/start")
+					if str(p, "clientUserMessageId") != "prompt" {
+						t.Fatalf("prompt request id: %s", p)
+					}
+					content = string(p["input"])
+					if images {
+						want = `[{"path":"/home/agent/.lux-inputs/s/1-shot.png","type":"localImage"}]`
+					}
+					w.send(`{"id":` + id + `,"result":{"turn":{"id":"` + cxTurn + `","status":"inProgress"}}}`)
+					w.send(`{"method":"item/started","params":{"item":{"type":"userMessage","id":"u1","clientId":"prompt","content":[]},"threadId":"` + cxThread + `","turnId":"` + cxTurn + `"}}`)
+					w.send(cxCompleted("completed"))
+				default:
+					w, _ = acpStarted(t, ad.(*ACP), true, cfg)
+					id, p := w.next("session/prompt")
+					content = string(p["prompt"])
+					if images {
+						want = `[{"data":"` + imgData + `","mimeType":"image/png","type":"image"}]`
+					}
+					w.resolve(id, ocResult)
+				}
+				if content != want {
+					t.Fatalf("initial prompt %s, want %s", content, want)
+				}
+				w.none()
+			})
+		}
+	}
+}
+
+func TestClaudeSessionResumeWithoutPromptIsIdle(t *testing.T) {
+	w, sink := startWire(t, NewClaude(), proto.ShimConfig{Resume: true, SessionID: "existing"})
+	sink.wait(t, "idle")
+	w.none()
+}
+
+// Existing sessions never replay the initial text/images, even when a missing
+// session forces ACP/Codex to create a new one (the existing fallback policy).
+func TestSessionResumeDoesNotReplayPrompt(t *testing.T) {
+	for _, name := range []string{"acp", "opencode", "claude-code", "codex"} {
+		for _, fallback := range []bool{false, true} {
+			if name == "claude-code" && fallback {
+				continue
+			}
+			t.Run(fmt.Sprintf("%s/fallback=%v", name, fallback), func(t *testing.T) {
+				ad, err := New(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg := proto.ShimConfig{Resume: true, SessionID: "existing", Prompt: "DO NOT REPLAY", PromptAttachments: []spec.Attachment{img}}
+				w, sink := startWire(t, ad, cfg)
+				switch name {
+				case "claude-code":
+					// Idle synchronizes with Run's startup before delivering.
+					sink.wait(t, "idle")
+					ad.Deliver(proto.Input{RequestID: "steer", Text: "next"})
+					if id, _ := claudeContent(t, w); id != claudeUUID("steer") {
+						t.Fatalf("first user line %s, want steer's uuid", id)
+					}
+				case "codex":
+					id, _ := w.next("initialize")
+					w.send(`{"id":` + id + `,"result":{"userAgent":"lux/0.155.1"}}`)
+					id, _ = w.next("thread/resume")
+					if fallback {
+						w.send(`{"id":` + id + `,"error":{"code":-1,"message":"missing"}}`)
+						id, _ = w.next("thread/start")
+					}
+					w.send(`{"id":` + id + `,"result":{"thread":{"id":"` + cxThread + `"}}}`)
+				default:
+					id, _ := w.next("initialize")
+					w.send(`{"id":` + id + `,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true}}}}`)
+					id, _ = w.next("session/load")
+					if fallback {
+						w.send(`{"id":` + id + `,"error":{"code":-1,"message":"missing"}}`)
+						id, _ = w.next("session/new")
+						w.send(`{"id":` + id + `,"result":{"sessionId":"` + ocSession + `"}}`)
+					} else {
+						w.send(`{"id":` + id + `,"result":{}}`)
+					}
+				}
+				w.none()
+			})
+		}
+	}
+}
+
 // Claude Code: the prompt's and a steer's images go in their user line;
 // a steer cancelled by an interrupt is written again with its images.
 func TestClaudeAttachments(t *testing.T) {

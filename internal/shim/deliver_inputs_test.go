@@ -106,9 +106,32 @@ func TestAdapterConfigReleasesPromptImages(t *testing.T) {
 	if len(cfg.PromptAttachments) != 1 || cfg.PromptAttachments[0].Path != filepath.Join(home, ".lux-inputs", "prompt", "1-p.png") || cfg.PromptAttachments[0].Data == "" {
 		t.Fatalf("adapter config %+v", cfg.PromptAttachments)
 	}
-	s.cfg.Resume, s.cfg.PromptAttachments = true, []spec.Attachment{pngAttachment("p.png")}
+	s.cfg.Resume, s.cfg.SessionID, s.cfg.PromptAttachments = true, "sess-1", []spec.Attachment{pngAttachment("p.png")}
 	if cfg := s.adapterConfig(); cfg.PromptAttachments != nil || s.cfg.PromptAttachments != nil {
 		t.Fatalf("resume: adapter %+v, shim %+v", cfg.PromptAttachments, s.cfg.PromptAttachments)
+	}
+}
+
+// A restored placement without an agent session still materializes the first
+// prompt's images. Resume remains true for Command/custom process resume.
+func TestAdapterConfigSnapshotWithoutSession(t *testing.T) {
+	for _, name := range []string{"acp", "opencode", "claude-code", "codex", "generic"} {
+		t.Run(name, func(t *testing.T) {
+			s, _, home, _ := deliverShim(t)
+			s.cfg.Adapter, s.cfg.Resume = name, true
+			s.cfg.ResumeCommand = []string{"custom-resume"}
+			s.cfg.PromptAttachments = []spec.Attachment{pngAttachment("p.png")}
+			cfg := s.adapterConfig()
+			if !cfg.Resume || !slices.Equal(cfg.ResumeCommand, []string{"custom-resume"}) {
+				t.Fatalf("process resume changed: %+v", cfg)
+			}
+			if len(cfg.PromptAttachments) != 1 {
+				t.Fatalf("snapshot-only prompt images lost: %+v", cfg)
+			}
+			if b, err := os.ReadFile(filepath.Join(home, ".lux-inputs", "prompt", "1-p.png")); err != nil || !bytes.Equal(b, testPNG) {
+				t.Fatalf("prompt image not materialized: %q, %v", b, err)
+			}
+		})
 	}
 }
 

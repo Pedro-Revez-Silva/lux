@@ -374,6 +374,43 @@ func TestPromptAttachmentsResentAfterSessionlessFailure(t *testing.T) {
 	}
 }
 
+// A preemption during init has a filesystem snapshot but no agent session.
+// The second assignment must restore it AND carry the original image-only prompt.
+func TestPromptAttachmentsResentAfterSessionlessSnapshot(t *testing.T) {
+	for _, session := range []string{"", "sess-1"} {
+		t.Run("session="+session, func(t *testing.T) {
+			s, id, data := promptRun(t)
+			if err := s.hostEvicting(context.Background(), "h1", proto.Evicting{Reason: "spot"}); err != nil {
+				t.Fatal(err)
+			}
+			sd := proto.SnapshotDone{Manifest: proto.Manifest{SnapshotID: "snap-init", RunID: id, Epoch: 1, SessionID: session}}
+			if got := reportSnapshot(t, s, "h1", id, 1, sd); got.Type != proto.MsgAck || ackRefused(t, got) {
+				t.Fatalf("snapshot report: %s %s", got.Type, got.Data)
+			}
+			code := 143
+			applyRunStatus(t, s, id, 1, proto.Status{State: "exited", ExitCode: &code, Reason: "init-failed"})
+			readyHost(t, s, "h2", "default", "t1", false)
+			execSQL(t, s, context.Background(), `UPDATE snapshots SET uploaded = true WHERE id = 'snap-init'`)
+			schedule(t, s)
+			var a proto.Assign
+			systemScan(t, s, `SELECT payload FROM host_messages WHERE run_id = $1 AND type = $2 AND epoch = 2`, []any{id, proto.MsgAssign}, &a)
+			if a.Resume == nil || a.Resume.Snapshot == nil || a.Resume.Snapshot.SnapshotID != "snap-init" || a.Resume.SessionID != session {
+				t.Fatalf("second placement did not restore snapshot: %+v", a.Resume)
+			}
+			if session == "" {
+				if len(a.PromptAttachments) != 1 || a.PromptAttachments[0].Data != data {
+					t.Fatalf("snapshot-only assignment lost prompt: %+v", a.PromptAttachments)
+				}
+				if got := queryOne[string](t, s, `SELECT prompt_attachments->0->>'data' FROM runs WHERE id = $1`, id); got != data {
+					t.Fatal("snapshot-only placement dropped stored prompt images")
+				}
+			} else if len(a.PromptAttachments) != 0 || queryOne[int](t, s, `SELECT count(*) FROM runs WHERE id = $1 AND prompt_attachments IS NULL`, id) != 1 {
+				t.Fatal("true session resume retained prompt images")
+			}
+		})
+	}
+}
+
 // Once a Run has a session, its next placement resumes it: no images are
 // sent, and the Run drops them.
 func TestPromptAttachmentsDroppedOnResume(t *testing.T) {

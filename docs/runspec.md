@@ -821,14 +821,19 @@ own count; see the attribution caveats in [out of memory](podman.md#out-of-memor
 
 luxd checks them at submit: a bad one is refused with 400
 `invalid_attachment` (its message names each by index and why), and any on
-a `generic` Run with 400 `attachments_unsupported`. They go with the first
-placement only, as the prompt does: a resume does not send them again. The
+a `generic` Run with 400 `attachments_unsupported`. They go with the initial
+prompt: resuming an existing agent session does not send them again. Any
+placement before the agent has a session — a move during init, a resume of a
+Run stopped or failed there, or `--from-snapshot` of a sessionless snapshot —
+restores the saved files and still sends the initial prompt, including
+image-only prompts. With `--input`, the agent gets the initial prompt first,
+then that input. The
 shim also writes each to `$LUX_INPUTS/prompt/<n>-<name>`, on a state
 volume, so they are there after any resume ([adapters](adapters.md#images)
 says where, and how each agent gets them). luxd keeps their bytes apart
-from the stored spec until a placement resumes the Run (it has a session
-or a snapshot) or the Run is terminated; a failed or succeeded Run keeps
-them, since resuming it without a session or snapshot starts it afresh. The
+from the stored spec until a placement resumes an existing agent session
+or the Run is terminated; a failed or succeeded Run without a session keeps
+them for a fresh agent start. The
 spec, and so a Run's views (`GET /v1/runs/{id}`), keep their names and
 types. Steers take
 images the same way (`attachments` on `POST /v1/runs/{id}/input`,

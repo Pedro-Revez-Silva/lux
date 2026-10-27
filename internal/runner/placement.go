@@ -1251,11 +1251,6 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 	if sp.Init != nil {
 		cfg.Init = sp.Init.Script
 	}
-	// luxd sends images with the prompt only on the first placement, as the
-	// prompt goes.
-	if a.Resume == nil {
-		cfg.PromptAttachments = prompt
-	}
 	cfg.InputsDir, cfg.InputsRoot = sp.InputsDir(p.user.Home)
 	cfg.Sync = p.sync
 	cfg.DelegateCgroup = sp.Sandbox.NestedContainers && sp.Sandbox.CgroupDelegation
@@ -1284,6 +1279,10 @@ func (p *placement) writeShimConfig(ctx context.Context, sp spec.RunSpec, prompt
 		if sp.Workload.Resume != nil {
 			cfg.ResumeCommand = sp.Workload.Resume.Command
 		}
+	}
+	// Restoring files before an agent has a session still needs its prompt.
+	if !cfg.AgentResume() {
+		cfg.PromptAttachments = prompt
 	}
 	for _, v := range p.mounts() {
 		cfg.VolumePaths = append(cfg.VolumePaths, v.Path)

@@ -291,7 +291,7 @@ func (s *Shim) run() int {
 func (s *Shim) adapterConfig() proto.ShimConfig {
 	cfg := s.cfg
 	s.cfg.PromptAttachments = nil
-	if cfg.Resume {
+	if cfg.AgentResume() {
 		cfg.PromptAttachments = nil
 	} else if len(cfg.PromptAttachments) > 0 {
 		cfg.PromptAttachments = s.inputAttachments(proto.Input{RequestID: "prompt", Attachments: cfg.PromptAttachments})

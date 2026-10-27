@@ -83,7 +83,8 @@ type ShimConfig struct {
 	// workload is signalled (spec.Workload.BeforeStop).
 	BeforeStop           []string `json:"beforeStop,omitempty"`
 	BeforeStopTimeoutSec float64  `json:"beforeStopTimeoutSec,omitempty"`
-	// Resume is set when this is not the Run's first placement.
+	// Resume selects the process resume path (including ResumeCommand).
+	// Filesystem restoration need not imply an existing agent session; see AgentResume.
 	Resume        bool     `json:"resume,omitempty"`
 	ResumeCommand []string `json:"resumeCommand,omitempty"`
 	SessionID     string   `json:"sessionId,omitempty"`
@@ -116,6 +117,11 @@ type ShimConfig struct {
 	// A shim that cannot falls back to one cgroup and says so once.
 	DelegateCgroup bool `json:"delegateCgroup,omitempty"`
 }
+
+// AgentResume distinguishes continuing an existing agent session from restoring
+// files before the agent ever started (for example, a move during init).
+// Keep Resume itself for process/custom ResumeCommand semantics.
+func (c ShimConfig) AgentResume() bool { return c.Resume && c.SessionID != "" }
 
 // ShimServicesDir holds each service's socket (a tmpfs of its own).
 const ShimServicesDir = "/.lux/services"
