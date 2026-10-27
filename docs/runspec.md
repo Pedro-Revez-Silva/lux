@@ -487,9 +487,12 @@ lux moves a Run when a force-evicting drain (`lux hosts drain --force-evict`,
 
 Except for `never`, the policy covers only what lux does by itself: a resume
 you ask for restores the snapshot as usual. A cordon-only drain does not stop
-the Run. A Run whose host stopped answering ends `lost`, which is never
-resumed automatically, whatever the policy (a `never` Run ends `terminated`
-instead, as above). Any other value is refused with
+the Run. If a host disappears during an already requested drain, preemption or
+migration, `auto` continues the move using the persisted recovery state supported
+by ordinary resume; `restart` starts from scratch. Work not saved may be lost.
+A refused snapshot still blocks automatic restoration, even with an older snapshot.
+An unannounced host loss ends `lost` and is never resumed automatically (a `never`
+Run ends `terminated` instead, as above). Any other value is refused with
 422 `invalid_spec`.
 
 An older luxd ignores `resumePolicy` and treats the Run as `auto`. A client

@@ -621,8 +621,10 @@ func (s *Server) losePlacement(ctx context.Context, tx pgx.Tx, runID string, epo
 	if err := tx.QueryRow(ctx, `SELECT tenant_id, state, current_epoch FROM runs WHERE id = $1 FOR UPDATE`, runID).Scan(&tenantID, &runState, &current); err != nil {
 		return "", err
 	}
-	var hostID string
-	if err := tx.QueryRow(ctx, `SELECT host_id FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID); err != nil {
+	var hostID, stopReason string
+	var stopRequested, snapshotRefused bool
+	if err := tx.QueryRow(ctx, `SELECT host_id, stop_reason, stop_requested_at IS NOT NULL, snapshot_refused
+		FROM placements WHERE run_id = $1 AND epoch = $2`, runID, epoch).Scan(&hostID, &stopReason, &stopRequested, &snapshotRefused); err != nil {
 		return "", err
 	}
 	if err := lockCostHost(ctx, tx, hostID); err != nil {
@@ -637,19 +639,42 @@ func (s *Server) losePlacement(ctx context.Context, tx pgx.Tx, runID string, epo
 	if epoch != current || ended(runState) {
 		return "", nil
 	}
-	if err := stopServersAtEnd(ctx, tx, tenantID, runID, epoch, "host lost"); err != nil {
+	var terminate bool
+	if err := tx.QueryRow(ctx, `SELECT terminate_requested FROM runs WHERE id = $1`, runID).Scan(&terminate); err != nil {
 		return "", err
 	}
-	var terminate bool
-	_ = tx.QueryRow(ctx, `SELECT terminate_requested FROM runs WHERE id = $1`, runID).Scan(&terminate)
+	policy, err := runResumePolicy(ctx, tx, runID)
+	if err != nil {
+		return "", err
+	}
+	// Continue only a move already requested before the host disappeared.
+	// A refused snapshot blocks automatic restoration even with an older copy.
+	moved := !requeued && !terminate && runState == StateStopping && stopRequested &&
+		slices.Contains(movedStops, stopReason) && !spec.FailsOnMove(policy) &&
+		(!snapshotRefused || policy == spec.ResumeRestart)
+	serverStop := "host lost"
+	if moved {
+		serverStop = endReason(stopReason)
+	}
+	if err := stopServersAtEnd(ctx, tx, tenantID, runID, epoch, serverStop); err != nil {
+		return "", err
+	}
+	if moved {
+		why := "auto-resume after " + stopReason
+		if policy == spec.ResumeRestart {
+			if err := forgetRestoredState(ctx, tx, runID); err != nil {
+				return "", err
+			}
+			why = "auto-restart after " + stopReason
+		}
+		return StateResuming, s.requestResume(ctx, tx, tenantID, runID, nil, why)
+	}
 	end := runEnd{tenantID: tenantID, runID: runID, epoch: epoch, state: StateLost, reason: why, requeued: requeued}
 	switch {
 	case terminate:
 		end.state, end.reason, end.requeued = StateTerminated, "terminated; host lost", false
 	case !requeued:
-		if end.policy, err = runResumePolicy(ctx, tx, runID); err != nil {
-			return "", err
-		}
+		end.policy = policy
 	}
 	return s.endRun(ctx, tx, end)
 }
