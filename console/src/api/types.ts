@@ -32,7 +32,8 @@ export interface RunSpec {
   name?: string;
   labels?: Record<string, string>;
   image: { ref?: string; build?: { containerfile: string; context?: string; args?: Record<string, string> } };
-  workload: { adapter: string; command?: string[]; prompt?: string; workdir?: string; user?: string; tty?: boolean; servers?: SpecServer[] };
+  /** steerable false: no one can send the Run input (POST /input, a resume's or migrate's input); absent is true. */
+  workload: { adapter: string; command?: string[]; prompt?: string; workdir?: string; user?: string; tty?: boolean; steerable?: boolean; servers?: SpecServer[] };
   resources: SpecResources;
   /** preemptible false: lux never takes the Run away on its own initiative; absent is true. */
   placement: { pool?: string; requires?: Record<string, string>; prefers?: Record<string, string>; preemptible?: boolean };

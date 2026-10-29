@@ -96,6 +96,8 @@ type Workload struct {
 	TTY         bool     `json:"tty,omitempty" yaml:"tty,omitempty"`
 	Resume      *Resume  `json:"resume,omitempty" yaml:"resume,omitempty"`
 	IdleTimeout Duration `json:"idleTimeout,omitempty" yaml:"idleTimeout,omitempty" doc:"Stop and snapshot an idle agent after this duration with no pending input. Agent adapters only. Zero or unset: never; otherwise 1m to 24h. Each placement starts a fresh clock. The stop reason is idle, not a failure."`
+	// Steerable: nil is true.
+	Steerable *bool `json:"steerable,omitempty" yaml:"steerable,omitempty" doc:"false: no one can steer the Run once it is submitted, its own tenant and operators included: POST /v1/runs/{id}/input (text, raw bytes, images or an interrupt), a resume's input and a migrate's input are refused (409 not_steerable). Its prompt, if any, is still delivered; its output, session and events can still be read, and it can still be stopped, resumed, migrated or terminated. For a workload whose instructions must come only from whoever submitted it, e.g. a reviewer. Fixed at submit. Omitted: true."`
 	// Grace is how long a graceful stop waits before SIGKILL.
 	Grace      Duration    `json:"grace,omitempty" yaml:"grace,omitempty"`
 	BeforeStop *BeforeStop `json:"beforeStop,omitempty" yaml:"beforeStop,omitempty" doc:"A command run in the container on every stop, before the workload is signalled: a stop asked for, a terminate, a timeout, a drain. Its output is the Run's; it can publish files as artifacts (/.lux/bin/lux-shim publish FILE). It cannot run when the container dies or its host is lost."`
@@ -375,6 +377,12 @@ type Placement struct {
 // (placement.preemptible false).
 func (s *RunSpec) NonPreemptible() bool {
 	return s.Placement.Preemptible != nil && !*s.Placement.Preemptible
+}
+
+// Unsteerable reports whether the Run takes no input once submitted
+// (workload.steerable false).
+func (s *RunSpec) Unsteerable() bool {
+	return s.Workload.Steerable != nil && !*s.Workload.Steerable
 }
 
 type Network struct {

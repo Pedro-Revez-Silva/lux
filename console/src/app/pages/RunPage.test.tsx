@@ -189,6 +189,22 @@ test("a stopped, resumable agent Run: the composer is off and points to Resume",
   }
 });
 
+test("a running agent Run whose spec sets steerable false: the composer is off and says why, and the header says not steerable", async () => {
+  const badges = (el: Element) => [...el.querySelectorAll(".badge")].map((b) => b.textContent);
+  const r = await render("opencode", "http://localhost/runs/run_1", { state: "running", spec: { image: { ref: IMAGE }, resources: {}, workload: { adapter: "opencode", steerable: false } } });
+  try {
+    const form = r.el.querySelector<HTMLFormElement>('form[aria-label="Message the agent"]')!;
+    expect(form.querySelector("textarea")!.disabled).toBe(true);
+    expect(form.querySelector("textarea")!.placeholder).toBe("This Run takes no messages");
+    expect(described(form.querySelector("textarea")!)).toEqual(["Not steerable · its spec sets workload.steerable false"]);
+    expect(button(form, "Send")!.disabled).toBe(true);
+    expect(button(form, "Interrupt")!.disabled).toBe(true);
+    expect(badges(r.el)).toContain("not steerable");
+  } finally {
+    await r.done();
+  }
+});
+
 test("a starting agent Run whose adapter reads input at the turn's end: the composer is on and says so", async () => {
   const r = await render("opencode", "http://localhost/runs/run_1", { state: "starting", steer: { lands: "next_turn" } });
   try {

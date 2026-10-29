@@ -53,7 +53,7 @@ func (s *Server) chooseHost(ctx context.Context, p Principal, ref string) (*stri
 
 type migrateRequest struct {
 	To    string       `json:"to,omitempty" doc:"The host to move to (id or name); by default, any other."`
-	Input *resumeInput `json:"input,omitempty" doc:"A message for the workload once it runs again."`
+	Input *resumeInput `json:"input,omitempty" doc:"A message for the workload once it runs again. Refused (409 not_steerable) for a Run whose spec has workload.steerable false."`
 }
 
 type migrateRunInput struct {
@@ -90,6 +90,8 @@ func (s *Server) migrateRun(ctx context.Context, in *migrateRunInput) (*accepted
 		case spec.FailsOnMove(policy):
 			// Moved, it would fail: the operator stops or terminates it instead.
 			return errf(http.StatusConflict, "not_movable", "the Run's resumePolicy is %s: it cannot continue on another host", policy)
+		case sp.Unsteerable() && req.Input != nil && req.Input.Text != "":
+			return errNotSteerable()
 		case state != StateRunning && state != StateStopping:
 			return errf(http.StatusConflict, "not_running", "run is %s: only a running Run can be migrated (a stopped one: resume --to)", state)
 		case stopping != "":

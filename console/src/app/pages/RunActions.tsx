@@ -184,10 +184,12 @@ function ResumeDialog({ run, operator, busy, onConfirm, onCancel }: { run: Run; 
           {blockers.length > 0 && <div className="muted">luxd checks again when you resume, and says why if it refuses.</div>}
         </div>
       )}
-      <label className="field">
-        <span className="field-label">Input text (optional, delivered on start)</span>
-        <textarea className="input textarea" rows={3} value={input} onChange={(e) => setInput(e.target.value)} placeholder="e.g. continue where you left off" />
-      </label>
+      {run.spec.workload.steerable !== false && (
+        <label className="field">
+          <span className="field-label">Input text (optional, delivered on start)</span>
+          <textarea className="input textarea" rows={3} value={input} onChange={(e) => setInput(e.target.value)} placeholder="e.g. continue where you left off" />
+        </label>
+      )}
       {operator && (
         <div className="field">
           <span className="field-label">Target host (optional)</span>
@@ -237,10 +239,12 @@ function MigrateDialog({ run, busy, onConfirm, onCancel }: { run: Run; busy: boo
         <Select value={to} onChange={setTo} searchable options={[{ value: ANY, text: "Any other ready host", label: "Any other ready host" }, ...hosts.options]} />
         {hosts.error && <span className="muted">{hosts.error}</span>}
       </div>
-      <label className="field">
-        <span className="field-label">Input text (optional, delivered after the move)</span>
-        <textarea className="input textarea" rows={3} value={input} onChange={(e) => setInput(e.target.value)} />
-      </label>
+      {run.spec.workload.steerable !== false && (
+        <label className="field">
+          <span className="field-label">Input text (optional, delivered after the move)</span>
+          <textarea className="input textarea" rows={3} value={input} onChange={(e) => setInput(e.target.value)} />
+        </label>
+      )}
     </Dialog>
   );
 }

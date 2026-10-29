@@ -22,6 +22,7 @@ workload:
   user: agent                   # default: the image's USER
   grace: 30s                    # graceful stop before SIGKILL
   idleTimeout: 5m               # agent only; stop when idle; unset or 0: never
+  steerable: false              # no one can send it input once submitted; omitted: true (see Unsteerable Runs)
   beforeStop:                   # run in the container on every stop, first
     command: [sh, -c, "git -C /workspace/repos/api diff > /tmp/final.patch && /.lux/bin/lux-shim publish /tmp/final.patch"]
     timeout: 10s                # default 10s or half of `grace`; at most `grace`
@@ -449,6 +450,36 @@ are snapshotted. The stop and state reasons are `idle`; an `idle` event
 carries `reason: idle` and `idleSeconds`. Resume with `lux resume --input`
 as usual. `timeout` still limits total running time and fails the Run.
 `resumePolicy` is unchanged, including `never`, which forbids resuming any stop.
+
+## Unsteerable Runs
+
+`workload.steerable: false` closes a Run to input once it is submitted.
+It is for a workload whose instructions must come only from whoever
+submitted it, such as an agent reviewing a change: no one reading the
+Run, its own tenant and operators included, can then tell it what to
+conclude.
+
+luxd refuses, with 409 `not_steerable` and nothing queued:
+
+- `POST /v1/runs/{id}/input` (`lux steer`, `lux interrupt`), whatever it
+  carries (text, raw bytes, images or a bare interrupt) and whatever the
+  Run's state;
+- a resume with `input` (`lux resume --input`), validateOnly included;
+- an operator's migrate with `input` (`lux migrate --input`).
+
+Everything else is as for any Run. Its `prompt` is delivered; its output,
+session and events are read as ever; it can be stopped, resumed and
+migrated without input, and terminated. A workload that takes its
+instructions another way (its own server on a named port, say) still
+does: the field closes lux's input, not the container. Commands run in
+it (`lux exec`, `lux shell`) are not input and are not refused.
+
+It is fixed at submit: no request changes it. Omitted, or `true`, the Run
+takes input as ever. An older luxd refuses the field as unknown: a client
+sends it once `GET /v1/whoami` answers `steerable: true` (the release's
+`steerable` feature, [Operations](operations.md#upgrading)). The console shows such a Run as *not steerable*,
+with its composer off and no input field in its resume and migrate
+dialogs.
 
 ## Resume policy
 

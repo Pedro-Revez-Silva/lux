@@ -28,7 +28,7 @@ was reached; `1` anything else.
 ## Runs
 
 ```bash
-lux run -f spec.yaml [--spot] [--preemptible=false] [--dry-run | --follow | --wait] [--name N] [--idle-timeout D] [-l k=v] [--pool P] [--size NAME] [--idempotency-key K] [--secrets-from .env]
+lux run -f spec.yaml [--spot] [--preemptible=false] [--steerable=false] [--dry-run | --follow | --wait] [--name N] [--idle-timeout D] [-l k=v] [--pool P] [--size NAME] [--idempotency-key K] [--secrets-from .env]
 lux run --image alpine -- echo hello           # a quick generic Run
 lux run --image alpine --pool arm64 -- uname -m
 lux run --image alpine --pool m --size m-2-arm64 -- make test   # a size of a shaped pool
@@ -80,6 +80,12 @@ given; `--preemptible` overrides `preemptible: false` in a file. `--dry-run`
 applies the same checks, and lists hosts that are spot instances or run an
 older lux-runner as `capability` blockers.
 
+`--steerable=false` sets `workload.steerable: false`: no one can send the
+Run input once it is submitted ([Unsteerable Runs](runspec.md#unsteerable-runs)).
+`lux steer`, `lux interrupt`, and `lux resume` or `lux migrate` with
+`--input` then exit 4 (`not_steerable`). The flag is sent only when given;
+`--steerable` overrides `steerable: false` in a file.
+
 `--dry-run` validates the submission and checks current admission without
 creating a Run, caching secrets, reserving space, launching hosts or stopping
 anything. Secret **names** are enough: values are neither required nor resolved
@@ -122,7 +128,9 @@ Agents get the text as a message. Generic workloads get it on stdin. See
 [adapters](adapters.md) for when a message is delivered. `--image`
 (repeatable) sends image files with the message, as one message, and the
 message may be left out; each file's type is read from its bytes (PNG,
-JPEG, WebP or GIF). See [images](adapters.md#images).
+JPEG, WebP or GIF). See [images](adapters.md#images). A Run whose spec
+has `workload.steerable: false` takes no input: both exit 4
+(`not_steerable`).
 
 ## Stop, resume, terminate
 

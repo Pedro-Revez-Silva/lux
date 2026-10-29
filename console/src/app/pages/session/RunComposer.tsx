@@ -3,6 +3,7 @@ import { api, errorText, INPUT_RUN_STATES, type Run } from "../../../api/index.t
 
 /** Why a Run cannot take input now, for the composer's placeholder and hint. */
 function closedReason(run: Run): { placeholder: string; hint: string } {
+  if (run.spec.workload.steerable === false) return { placeholder: "This Run takes no messages", hint: "Not steerable · its spec sets workload.steerable false" };
   if (run.resumable) return { placeholder: "Resume this Run to send a message", hint: `Run ${run.state} · Resume is in the page actions` };
   return { placeholder: "Input needs a starting or running Run", hint: `Run ${run.state} · it takes no input` };
 }
@@ -21,7 +22,7 @@ function landsHint(run: Run, stdin: boolean): string {
  */
 export function RunComposer({ run, stdin = false }: { run: Run; stdin?: boolean }) {
   const toast = useToast();
-  const open = INPUT_RUN_STATES.has(run.state);
+  const open = INPUT_RUN_STATES.has(run.state) && run.spec.workload.steerable !== false;
   const closed = open ? undefined : closedReason(run);
   const interrupt = async () => {
     try {

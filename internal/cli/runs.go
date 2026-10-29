@@ -29,7 +29,7 @@ type Run = server.Run
 
 func (a *app) runCmd() *cobra.Command {
 	var file, idem, secretsFrom, pool, size string
-	var follow, wait, spot, dryRun, preemptible bool
+	var follow, wait, spot, dryRun, preemptible, steerable bool
 	var labels []string
 	var idleTimeout time.Duration
 	cmd := &cobra.Command{
@@ -53,6 +53,10 @@ smallest size covering them; on an unshaped pool, --size is refused.
 --preemptible=false sets placement.preemptible: false. lux then never takes
 the Run away on its own initiative (docs/runspec.md, Non-preemptible Runs).
 It needs a pool named by --pool or the spec, one with preemptible false.
+
+--steerable=false sets workload.steerable: false. No one can then steer the
+Run, its submitter included: lux steer, lux interrupt, and a resume or
+migrate with --input are refused (409 not_steerable).
 
 Secret values in the spec can be read from the environment with
 value: ${NAME}, or from a .env file with --secrets-from.`,
@@ -91,6 +95,9 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 			}
 			if cmd.Flags().Changed("preemptible") {
 				sp.Placement.Preemptible = &preemptible
+			}
+			if cmd.Flags().Changed("steerable") {
+				sp.Workload.Steerable = &steerable
 			}
 			if size != "" {
 				sp.Resources.Size = size
@@ -146,6 +153,7 @@ value: ${NAME}, or from a .env file with --secrets-from.`,
 	cmd.Flags().StringVar(&secretsFrom, "secrets-from", "", ".env file supplying secret values")
 	cmd.Flags().BoolVar(&spot, "spot", false, "opt into opportunistic scheduling (requires resumePolicy never)")
 	cmd.Flags().BoolVar(&preemptible, "preemptible", true, "--preemptible=false: lux never preempts the Run; needs a named pool with preemptible false (sets placement.preemptible)")
+	cmd.Flags().BoolVar(&steerable, "steerable", true, "--steerable=false: no one can send the Run input once submitted (sets workload.steerable)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "validate and check advisory live admission without creating a Run; not a reservation or workload-success guarantee")
 	cmd.Flags().BoolVar(&follow, "follow", false, "stream output until the Run ends; exit with its code")
 	cmd.Flags().BoolVar(&wait, "wait", false, "wait until the Run ends; exit with its code")

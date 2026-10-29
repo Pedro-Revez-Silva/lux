@@ -165,6 +165,12 @@ func errNeverResumable() error {
 	return errf(http.StatusConflict, "not_resumable", "%s", neverResumableReason)
 }
 
+// errNotSteerable refuses input, on its own or with a resume or migrate, to
+// a Run whose spec has workload.steerable false.
+func errNotSteerable() error {
+	return errf(http.StatusConflict, "not_steerable", "workload.steerable false: this Run takes no input")
+}
+
 // forgetRestoredState makes a Run's next placement a first one: with no
 // snapshot and no session, assign sends no ResumeInfo, so the runner
 // starts it on empty state volumes through the adapter's start path. Its

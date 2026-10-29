@@ -21,13 +21,15 @@ afterAll(async () => {
   await GlobalRegistrator.unregister();
 });
 
-const run = (state: string, more: { resumable?: boolean; resumePolicy?: string } = {}): Run =>
-  ({ id: "run_1", state, stateReason: "", resumable: more.resumable ?? false, spec: { workload: {}, resumePolicy: more.resumePolicy } }) as unknown as Run;
+type More = { resumable?: boolean; resumePolicy?: string; steerable?: boolean };
+
+const run = (state: string, more: More = {}): Run =>
+  ({ id: "run_1", state, stateReason: "", resumable: more.resumable ?? false, secrets: [], spec: { workload: { steerable: more.steerable }, resources: {}, resumePolicy: more.resumePolicy } }) as unknown as Run;
 
 /** RunActions for a Run in state; returns its buttons by label and a cleanup. */
-async function render(state: string, more: { resumable?: boolean; resumePolicy?: string } = {}) {
+async function render(state: string, more: More = {}) {
   api.signIn("k");
-  const fake = fakeApi(() => ({}));
+  const fake = fakeApi((path) => (path.endsWith("/snapshots") ? [] : {}));
   const el = document.createElement("div");
   document.body.appendChild(el);
   const root = createRoot(el);
@@ -112,5 +114,19 @@ test("a terminated Run can neither be terminated nor resumed", async () => {
     expect(r.button("Stop")!.disabled).toBe(true);
   } finally {
     await r.done();
+  }
+});
+
+test("the resume dialog asks for input text, unless the Run's spec sets steerable false", async () => {
+  for (const steerable of [undefined, false]) {
+    const r = await render("stopped", { resumable: true, steerable });
+    try {
+      await act(async () => r.button("Resume")!.click());
+      const dialog = [...r.el.querySelectorAll("dialog")].find((d) => d.textContent?.includes("Resume run"))!;
+      expect(dialog.open).toBe(true);
+      expect(dialog.textContent?.includes("Input text")).toBe(steerable !== false);
+    } finally {
+      await r.done();
+    }
   }
 });

@@ -61,6 +61,11 @@ export function RunPage({ id }: { id: string }) {
                 non-preemptible
               </Badge>
             )}
+            {run.spec.workload.steerable === false && (
+              <Badge outline title="workload.steerable false: no one can send this Run input">
+                not steerable
+              </Badge>
+            )}
           </>
         }
         description={

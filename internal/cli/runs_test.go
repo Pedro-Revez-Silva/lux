@@ -152,6 +152,31 @@ func TestRunPreemptibleFlag(t *testing.T) {
 	}
 }
 
+func TestRunSteerableFlag(t *testing.T) {
+	workload := func(body map[string]any) map[string]any {
+		w, _ := body["workload"].(map[string]any)
+		return w
+	}
+	body := submitted(t, "run", "--steerable=false", "--image", "alpine", "--", "true")
+	if got, ok := workload(body)["steerable"]; !ok || got != false {
+		t.Fatalf("--steerable=false: workload %v", workload(body))
+	}
+	body = submitted(t, "run", "--image", "alpine", "--", "true")
+	if _, ok := workload(body)["steerable"]; ok {
+		t.Fatalf("no flag: workload.steerable sent: %v", workload(body))
+	}
+	file := filepath.Join(t.TempDir(), "spec.yaml")
+	if err := os.WriteFile(file, []byte("image: {ref: alpine}\nworkload: {command: [\"true\"], steerable: false}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := workload(submitted(t, "run", "-f", file))["steerable"]; got != false {
+		t.Fatalf("spec's steerable false: sent %v", got)
+	}
+	if got := workload(submitted(t, "run", "-f", file, "--steerable"))["steerable"]; got != true {
+		t.Fatalf("--steerable over the spec's false: sent %v", got)
+	}
+}
+
 func TestRunPoolFlag(t *testing.T) {
 	placement := func(body map[string]any) map[string]any {
 		p, _ := body["placement"].(map[string]any)

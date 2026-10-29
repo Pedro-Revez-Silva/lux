@@ -100,7 +100,8 @@ func (s *Server) routes(api huma.API) {
 			"Its secrets must be supplied again. Idempotent while resuming. A terminated Run is not resumable (409 not_resumable). " +
 			"A Run left stopped, lost, failed or succeeded longer than its tenant's expireAfterDays has been terminated. " +
 			"A Run whose spec has resumePolicy never ends terminated whenever it would rest resumable, and a requested resume of one is refused: 409 not_resumable, whatever its state " +
-			"(an assignment no runner started may still be placed again).\n\n" +
+			"(an assignment no runner started may still be placed again). " +
+			"A resume with input of a Run whose spec has workload.steerable false is refused (409 not_steerable); without input it resumes.\n\n" +
 			"git.repositories adds repositories: the runner clones them into the restored workspace before the Run starts, each reported as a git.clone event " +
 			"with the request id (Lux-Request-Id). One whose clone fails is dropped from the spec and the Run goes on without it; " +
 			"its credential leaves the Run's secrets with it when nothing else uses it (another repository, registry auth, a header), so later resumes no longer need its value. " +
@@ -135,7 +136,8 @@ func (s *Server) routes(api huma.API) {
 		Summary: "Move a running Run to another host",
 		Description: "It is stopped (its state snapshotted), then resumed at once on `to`, or on any host but the one it was on. " +
 			"An agent resumes its session; `input`, if given, is delivered once it runs again. " +
-			"A Run whose spec has resumePolicy restart starts again from scratch there; one with manual or never is refused (409 not_movable).",
+			"A Run whose spec has resumePolicy restart starts again from scratch there; one with manual or never is refused (409 not_movable). " +
+			"`input` to a Run whose spec has workload.steerable false is refused (409 not_steerable); without it the Run moves.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusNotFound, http.StatusConflict},
 	}, "operator", s.migrateRun)
@@ -255,7 +257,7 @@ func (s *Server) routes(api huma.API) {
 	register(s, api, huma.Operation{
 		OperationID: "postInput", Method: http.MethodPost, Path: "/v1/runs/{id}/input", Tags: []string{"interactive"},
 		Summary:       "Steer a running Run",
-		Description:   "Agents get text as a message, read at their next model step where the adapter can (the Run's steer says), else when the current turn ends; generic workloads get it on stdin. Its first answer is one lux.input record (phase accepted, or failed) and an input.delivered or input.failed event; after acceptance, lux.input.consumed (where the adapter has a receipt) or lux.input.failed records, and input.consumed or input.failed events. A stopped Run takes its input through resume instead. Images (attachments) are one message with the text, images first; records and events carry their name, contentType, size and sha256, never their bytes. 400 invalid_attachment: a bad image (by index); 400 attachments_unsupported: a generic Run.",
+		Description:   "Agents get text as a message, read at their next model step where the adapter can (the Run's steer says), else when the current turn ends; generic workloads get it on stdin. Its first answer is one lux.input record (phase accepted, or failed) and an input.delivered or input.failed event; after acceptance, lux.input.consumed (where the adapter has a receipt) or lux.input.failed records, and input.consumed or input.failed events. A stopped Run takes its input through resume instead. A Run whose spec has workload.steerable false takes none: 409 not_steerable, whatever its state. Images (attachments) are one message with the text, images first; records and events carry their name, contentType, size and sha256, never their bytes. 400 invalid_attachment: a bad image (by index); 400 attachments_unsupported: a generic Run.",
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict},
 	}, "run", s.postInput)
@@ -1403,8 +1405,13 @@ func (s *Server) postInput(ctx context.Context, req *postInputInput) (*requestID
 	err = s.db.Tx(ctx, store.Tenant(p.TenantID), func(tx pgx.Tx) error {
 		var state, adapter string
 		var epoch int
-		if err := tx.QueryRow(ctx, `SELECT state, current_epoch, coalesce(spec->'workload'->>'adapter', '') FROM runs WHERE id = $1 FOR UPDATE`, id).Scan(&state, &epoch, &adapter); err != nil {
+		var unsteerable bool
+		if err := tx.QueryRow(ctx, `SELECT state, current_epoch, coalesce(spec->'workload'->>'adapter', ''), coalesce(spec->'workload'->'steerable' = 'false', false) FROM runs WHERE id = $1 FOR UPDATE`, id).Scan(&state, &epoch, &adapter, &unsteerable); err != nil {
 			return err
+		}
+		// Before its state: such a Run takes no input in any.
+		if unsteerable {
+			return errNotSteerable()
 		}
 		if len(in.Attachments) > 0 && !takesAttachments(adapter) {
 			return errAttachmentsUnsupported(adapter)
@@ -1543,7 +1550,7 @@ type resumeRequest struct {
 	Secrets       []spec.Secret `json:"secrets,omitempty" doc:"A value for every one of the Run's secrets (a new value rotates it), and for the credentials of repositories it adds: luxd never keeps them. A name the Run does not have, and no added repository's credential, declares a new secret, checked as a submit's (as: env, file or none; env by default): the Run has it from this resume on, and every later resume must supply it. Except a name in the spec's git.droppedCredentials: ignored without as, 422 invalid_spec with as env or file. On a Run already resuming, the first resume's secrets stand."`
 	RemoveSecrets []string      `json:"removeSecrets,omitempty" doc:"Names of the Run's secrets to remove: from this resume on the workload no longer has them and resumes no longer need them. Refused (422 invalid_spec, nothing changed): a name the Run does not have, a git or registry credential, an MCP server's or service's header secret, or a name also in secrets or the credential of a repository this resume adds."`
 	Git           *resumeGit    `json:"git,omitempty" doc:"Repositories to add. The runner clones them before the Run starts again; one whose clone fails is dropped and the Run goes on without it (a git.clone event says so). Its credential is dropped from the Run's secrets with it when nothing else uses it (the event's droppedSecret names it): later resumes need no value for it, and one still sent is ignored, never declared as a secret the workload sees (with as env or file: 422 invalid_spec)."`
-	Input         *resumeInput  `json:"input,omitempty" doc:"A message for the workload once it is back."`
+	Input         *resumeInput  `json:"input,omitempty" doc:"A message for the workload once it is back. Refused (409 not_steerable) for a Run whose spec has workload.steerable false."`
 	// FromSnapshot resumes from an older snapshot (e.g. after lost).
 	FromSnapshot string           `json:"fromSnapshot,omitempty" doc:"Resume from this snapshot instead of the latest (e.g. after lost). Older snapshots are deleted once the latest is uploaded: one deleted is 409 snapshot_unavailable."`
 	To           string           `json:"to,omitempty" doc:"Operators: place it on this host (id or name), and nowhere else."`
@@ -1740,6 +1747,9 @@ func (s *Server) resumeRun(ctx context.Context, in *resumeRunInput) (*resumeOutp
 		// placed again on request.
 		if sp.Spot || spec.RefusesResume(sp.ResumePolicy) {
 			return errNeverResumable()
+		}
+		if sp.Unsteerable() && req.Input != nil && req.Input.Text != "" {
+			return errNotSteerable()
 		}
 		var to *resolvedPool
 		if req.Placement != nil {
